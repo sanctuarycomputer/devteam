@@ -2866,12 +2866,13 @@ function cmdLogSync() {
   // origin/chore-log, dropped here, and the sync starts from main.
   const main = loadSettings().main_branch;
   if (!flags['dry-run'] && git(['fetch', '--quiet', 'origin', `+refs/heads/${LOG_BRANCH}:refs/remotes/origin/${LOG_BRANCH}`], wt) === null) git(['update-ref', '-d', `refs/remotes/origin/${LOG_BRANCH}`], wt);
+  // each checkout, merge and abort with -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
   if (resolveCommit(`origin/${LOG_BRANCH}`)) {
-    gitOrDie(['checkout', '--quiet', '-B', LOG_BRANCH, `origin/${LOG_BRANCH}`], wt);
+    gitOrDie(['-c', 'core.useReplaceRefs=false', 'checkout', '--quiet', '-B', LOG_BRANCH, `origin/${LOG_BRANCH}`], wt);
     const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
-    if (git(['merge', '--quiet', '--no-edit', '-m', `chore-log: merge ${main}`, base], wt) === null) {
-      git(['merge', '--abort'], wt);
-      gitOrDie(['checkout', '--quiet', '-B', LOG_BRANCH, base], wt);
+    if (git(['-c', 'core.useReplaceRefs=false', 'merge', '--quiet', '--no-edit', '-m', `chore-log: merge ${main}`, base], wt) === null) {
+      git(['-c', 'core.useReplaceRefs=false', 'merge', '--abort'], wt);
+      gitOrDie(['-c', 'core.useReplaceRefs=false', 'checkout', '--quiet', '-B', LOG_BRANCH, base], wt);
       warn(`${LOG_BRANCH} could not take in ${main}; rebuilt from ${main}, so this push needs the forge to allow replacing ${LOG_BRANCH}`);
     }
   }
@@ -6761,7 +6762,8 @@ function detachedWorktree(sha, name, R = repo('home'), { seed = true } = {}) {
   const holder = R.name === 'home' ? null : fs.mkdtempSync(path.join(os.tmpdir(), `devteam-${R.name}-`));
   if (!holder) sweepDeadTempWorktrees(R);
   const wt = holder ? path.join(holder, `tmp-${name}`) : path.join(mainRoot, '.worktrees', `tmp-${name}-${process.pid}`);
-  R.gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
+  // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
+  R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
   process.once('exit', () => {
     if (fs.existsSync(wt)) R.git(['worktree', 'remove', '--force', wt], R.root);
     // the empty holder only (rmdir refuses anything with files left in it)
@@ -6817,7 +6819,8 @@ function cmdReviewWorktree() {
   const short = /^(.+?-\d+)(-|$)/.exec(id)?.[1] ?? id;
   const wt = path.join(root, `review-${short}-${sha.slice(0, 8)}${suffix ? `-${suffix}` : ''}`);
   if (fs.existsSync(wt)) die(`${wt} exists; give this reviewer its own --name, or remove it: devteam.mjs review-worktree --remove ${wt}`);
-  R.gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
+  // both checkouts with -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
+  R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
   seedWorktree(wt, { repo: R });
   out(wt);
   // records in home: a detached checkout of home's ticket/<id> beside it, whose full sha the
@@ -6828,7 +6831,7 @@ function cmdReviewWorktree() {
     if (!rsha) warn(`no records for ${id} in home (home's ticket/${id}), so no records checkout was made`);
     else {
       const rwt = `${wt}-records`;
-      gitOrDie(['worktree', 'add', '--quiet', '--detach', rwt, rsha], mainRoot);
+      gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--detach', rwt, rsha], mainRoot);
       out(`records: ${rwt} (${rsha})`);
     }
   }
@@ -15224,8 +15227,9 @@ function choreWorktree(slugName, { reset = false, setup = false } = {}) {
   if (!flags['dry-run']) git(['fetch', '--quiet', 'origin', main]);
   const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
   const existed = fs.existsSync(wt);
-  if (!existed) { gitOrDie(['worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, base], mainRoot); seedWorktree(wt, { setup, session: true }); }
-  else if (reset) gitOrDie(['checkout', '--quiet', '-B', `chore-${slugName}`, base], wt);
+  // add and reset with -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
+  if (!existed) { gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, base], mainRoot); seedWorktree(wt, { setup, session: true }); }
+  else if (reset) gitOrDie(['-c', 'core.useReplaceRefs=false', 'checkout', '--quiet', '-B', `chore-${slugName}`, base], wt);
   // in use again: the tick's tidy leaves a worktree alone until it has been quiet a while
   else { const now = new Date(); try { fs.utimesSync(wt, now, now); } catch {} }
   // one there already whose setup never passed (cut short at the deadline, held for a slot, failed:
@@ -21449,7 +21453,8 @@ async function imageChanges(since, to, { smoke = false } = {}) {
         if (r.error || r.status !== 0) cant(`--smoke: ${what} failed (${r.error ? r.error.code ?? r.error.message : r.signal ?? `exit ${r.status}`})${why ? `: ${why.slice(0, 300)}` : ''}`);
         return r;
       };
-      must(await run('git', ['worktree', 'add', '-q', '--detach', imageDir, since], { cwd: repoRoot }), `git worktree add of ${since}`);
+      // the image and the fixtures' kits with -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
+      must(await run('git', ['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '-q', '--detach', imageDir, since], { cwd: repoRoot }), `git worktree add of ${since}`);
       const kitIn = (root) => path.join(root, 'docs', 'devteam', 'scripts', 'devteam.mjs');
       const sides = [];
       for (const [side, sha] of [['since', since], ['to', to]]) {
@@ -21457,7 +21462,7 @@ async function imageChanges(since, to, { smoke = false } = {}) {
         fs.mkdirSync(root, { recursive: true });
         fs.mkdirSync(home);
         must(await run('git', ['init', '-q', '-b', 'main'], { cwd: root, home }), `git init of the ${side} fixture`);
-        const tar = must(await run('git', ['archive', '--format=tar', sha, 'docs/devteam'], { cwd: repoRoot, binary: true }), `git archive of ${sha}`);
+        const tar = must(await run('git', ['-c', 'core.useReplaceRefs=false', 'archive', '--format=tar', sha, 'docs/devteam'], { cwd: repoRoot, binary: true }), `git archive of ${sha}`);
         must(await run('tar', ['-x', '-C', root], { input: tar.stdout }), `unpacking the ${side} fixture's kit`);
         for (const d of ['project', 'run']) fs.rmSync(path.join(root, 'docs', 'devteam', d), { recursive: true, force: true });
         const own = async (args, what) => must(await run(process.execPath, [kitIn(root), ...args], { cwd: root, home }), `the ${side} fixture's ${what}`);
@@ -24183,9 +24188,10 @@ function ensureRecordsWorktree(id) {
   const mb = loadSettings().main_branch;
   git(['fetch', '--quiet', 'origin', mb]);
   git(['fetch', '--quiet', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
-  if (resolveCommit(`refs/heads/${branch}`)) gitOrDie(['worktree', 'add', '--quiet', rw, branch], mainRoot);
-  else if (resolveCommit(`refs/remotes/origin/${branch}`)) gitOrDie(['worktree', 'add', '--quiet', '--track', '-b', branch, rw, `origin/${branch}`], mainRoot);
-  else gitOrDie(['worktree', 'add', '--quiet', '-b', branch, rw, resolveCommit(`origin/${mb}`) ? `origin/${mb}` : mb], mainRoot);
+  // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
+  if (resolveCommit(`refs/heads/${branch}`)) gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', rw, branch], mainRoot);
+  else if (resolveCommit(`refs/remotes/origin/${branch}`)) gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--track', '-b', branch, rw, `origin/${branch}`], mainRoot);
+  else gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-b', branch, rw, resolveCommit(`origin/${mb}`) ? `origin/${mb}` : mb], mainRoot);
   return rw;
 }
 function removeWorkerWorktree(id) {
@@ -24442,9 +24448,10 @@ function makeSession(role) {
     // a branch pushed from another machine (a moved fleet) continues from origin, never from main
     R.git(['fetch', '--quiet', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
     const base = R.resolveCommit(`origin/${mb}`) ? `origin/${mb}` : mb;
-    if (R.resolveCommit(`refs/heads/${branch}`)) R.gitOrDie(['worktree', 'add', '--quiet', wt, branch], R.root);
-    else if (R.resolveCommit(`refs/remotes/origin/${branch}`)) R.gitOrDie(['worktree', 'add', '--quiet', '--track', '-b', branch, wt, `origin/${branch}`], R.root);
-    else R.gitOrDie(['worktree', 'add', '--quiet', '-b', branch, wt, base], R.root);
+    // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
+    if (R.resolveCommit(`refs/heads/${branch}`)) R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', wt, branch], R.root);
+    else if (R.resolveCommit(`refs/remotes/origin/${branch}`)) R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--track', '-b', branch, wt, `origin/${branch}`], R.root);
+    else R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-b', branch, wt, base], R.root);
     madeWorktree = true;
   }
   // A harness keeps its sessions by directory on its own machine: a worktree made just now has no
@@ -26646,7 +26653,8 @@ const recurringRunDue = Object.freeze({
     const hook = process.env.DEVTEAM_TEST_RECURRING_NO_CHECKOUT === name;
     if (hook) fs.writeFileSync(wt, 'kit-163 test hook\n');
     // no hook runs there: a tracked core.hooksPath (husky) would run a command no entry names (final-2 F3)
-    const add = recurringRegistry.git(['-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '--quiet', '--detach', wt, sha], { cwd: mainRoot });
+    // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
+    const add = recurringRegistry.git(['-c', 'core.useReplaceRefs=false', '-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '--quiet', '--detach', wt, sha], { cwd: mainRoot });
     if (hook) try { fs.unlinkSync(wt); } catch {}
     if (!add.ok) {
       // git's first error line, with the checkout's path made short so the excerpt keeps all of it
@@ -32773,8 +32781,9 @@ function inResponderWorktree() {
   return cwd === wt || cwd.startsWith(`${wt}${path.sep}`);
 }
 // git for the responder's start. What it could have planted never runs or counts: no shared hook
-// (final-1 F6), no fsmonitor (F4), no replaced object (F5).
-const RESPONDER_GIT = ['--no-replace-objects', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
+// (final-1 F6), no fsmonitor (F4), no replaced object (F5; kit-778: core.useReplaceRefs=true in a
+// config beats --no-replace-objects, and the command line's -c beats every config).
+const RESPONDER_GIT = ['--no-replace-objects', '-c', 'core.useReplaceRefs=false', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
 const responderGit = (args, cwd = mainRoot, env = null) => spawnSync('git', [...RESPONDER_GIT, ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: 120000, ...(env ? { env: { ...process.env, ...env } } : {}) });
 // A git call to origin, in its own process group: at the deadline the whole group goes, so a hung
 // transport (ssh) isn't left behind by a refused start (final-2b F4).
