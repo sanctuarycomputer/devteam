@@ -275,6 +275,15 @@ test('canvas pins: a pin whose layer is deleted keeps its thread and shows at th
   await within(() => pinOnCorner(A, id2, 'n-foot'), "the pin on n-foot's corner", () => show(A, id2, 'n-foot'));
   await apply(s, slug, [{ op: 'del', id: 'n-foot' }]);
   await within(() => gone(id2), "n-foot's pin at the top-left once n-foot is deleted", () => why(id2), 5000);
+  // P4c (final-1 F3): a draft whose layer is deleted while its card is open is titled for a deleted layer
+  await A.key('Escape');
+  await within(async () => !(await visible(A, '#pinCard')), 'the card closed');
+  await A.key('c');
+  await A.click('#surface [data-id="n-card"]');
+  const head = () => A.ev("document.querySelector('#pinCard[data-thread=\"new\"] h2')?.textContent ?? null");
+  await within(async () => (await head()) === 'New thread on "Card"', "Ana's draft on n-card", head);
+  await apply(s, slug, [{ op: 'del', id: 'n-card' }]);
+  await within(async () => (await head()) === 'New thread on a deleted layer', "the draft's title once n-card is deleted", head, 5000);
   noExceptions(A, 'Ana');
 });
 
@@ -283,6 +292,11 @@ test('canvas pins: a View person sees pins and their threads, with no Comment to
   const slug = 'pins-view';
   const id = openPin(s, slug, 'n-card', 'Bigger title?');
   s.F.sup(['thread', 'reply', id, 'Done.']);
+  // Ana, Full, on the canvas first (final-1 F2): so Vic's people list holds a Full entry that is not
+  // his own, and only his own entry may set his level
+  const A = await pageFor(t, s, s.ana);
+  await load(A, slug);
+  await within(() => visible(A, '#pinTool'), "Ana's Comment tool on the same canvas");
   const V = await pageFor(t, s, s.vic);
   await load(V, slug);
   // P5a: Vic sees the pin and its thread's turns
@@ -294,15 +308,20 @@ test('canvas pins: a View person sees pins and their threads, with no Comment to
   assert.equal(await visible(V, '#pinTool'), false, 'no Comment tool for a View person');
   assert.equal(await visible(V, '#pinCard #pinText'), false, 'no box to write in');
   assert.equal(await visible(V, '#pinCard #pinSend'), false, 'no Send');
-  // the key does nothing either: C, then a click on a layer opens no new pin
+  // Vic's people list holds Ana's Full entry, and his level is still View (final-1 F2)
+  assert.equal(await V.ev('document.body.dataset.level ?? null'), 'view', "Vic's level, with Ana's Full entry beside his");
+  // the key does nothing either: Vic's card closed first, so the click below reaches n-side (with the
+  // card open it covered n-side and ate the click: final-1 F1), then C, then a click on a layer opens
+  // no new pin, and the stage never turns to the tool
+  await V.key('Escape');
+  await within(async () => !(await visible(V, '#pinCard')), "Vic's card closed");
+  const reaches = () => V.ev(`(() => { const e = document.querySelector('#surface [data-id="n-side"]'); const r = e.getBoundingClientRect(); return !!document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)?.closest('[data-id="n-side"]'); })()`);
+  assert.equal(await reaches(), true, 'a click at n-side reaches n-side');
   await V.key('c');
+  assert.equal(await V.ev("document.getElementById('stage').classList.contains('pinning')"), false, 'C leaves the stage as it was for a View person');
   await V.click('#surface [data-id="n-side"]');
   await sleep(300);
   assert.equal(await V.ev("!!document.querySelector('#pinCard[data-thread=\"new\"]')"), false, 'no new pin from the key');
-  // and Ana, Full, on the same canvas has the tool (the control)
-  const A = await pageFor(t, s, s.ana);
-  await load(A, slug);
-  await within(() => visible(A, '#pinTool'), "Ana's Comment tool on the same canvas");
   // P5c: and for Ana, C then a click on a layer opens a new pin's card with a box to write in
   await A.key('c');
   await A.click('#surface [data-id="n-side"]');

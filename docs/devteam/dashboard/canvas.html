@@ -5264,7 +5264,7 @@
     if (c.id !== 'new' && p === null && Date.now() > c.until) { closeCard(); return; }
     pinCard.dataset.thread = c.id;
     const gone = c.node !== null && nodeOf(c.node) === null;
-    cardHead.textContent = c.id === 'new' ? `New thread on "${nodeName(c.node)}"` : gone || c.node === null ? `Thread ${p?.n ?? ''} on a deleted layer` : `Thread ${p?.n ?? ''} on "${nodeName(c.node)}"`;
+    cardHead.textContent = c.id === 'new' ? (gone ? 'New thread on a deleted layer' : `New thread on "${nodeName(c.node)}"`) : gone || c.node === null ? `Thread ${p?.n ?? ''} on a deleted layer` : `Thread ${p?.n ?? ''} on "${nodeName(c.node)}"`;
     pinCard.setAttribute('aria-label', cardHead.textContent);
     const turns = p ? p.turns : [];
     const key = JSON.stringify([c.id, turns]);
