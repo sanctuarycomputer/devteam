@@ -1890,7 +1890,7 @@ function fold(all) {
     // a reader runs integrity alone) must not have the supervisor resolve its own thread.
     if (body.type === 'thread' && by !== 'owner') {
       // and one not about a question or a goal is no thread of the supervisor's: readers drop it, as log-check refuses it
-      if (!(isObj(body.subject) && body.subject.kind === 'item' && /^(question|goal):/.test(body.subject.ref ?? ''))) { ignored.push({ line: l, why: "a supervisor's thread is about a question or a goal" }); continue; }
+      if (!(isObj(body.subject) && body.subject.kind === 'item' && typeof body.subject.ref === 'string' && /^(question|goal):/.test(body.subject.ref))) { ignored.push({ line: l, why: "a supervisor's thread is about a question or a goal" }); continue; }
       delete body.status; delete body.outcome; delete body.ready;
     }
     const kept = body.type === 'goal' && body.kind === 'upkeep' ? [...objects.values()].find((o) => o.type === 'goal' && o.kind === 'upkeep') : null;
@@ -9509,7 +9509,7 @@ function threadLineProblems(o) {
     if (typeof o.title === 'string' && UNSAFE_TEXT.test(o.title)) errs.push('thread.title is one line of plain text');
     if (o.subject !== undefined) { const p = subjectProblem(o.subject); if (p) errs.push(`thread.subject: ${p}`); }
     // kit-108: a thread the supervisor starts is about a question or a goal, always
-    if (o.op === 'new' && o.by === 'supervisor' && !(isObj(o.subject) && o.subject.kind === 'item' && /^(question|goal):/.test(o.subject.ref ?? ''))) errs.push("supervisor may not create thread lines except about a question or a goal: a supervisor's thread has subject {\"kind\":\"item\",\"ref\":\"question:<id>\"} or goal:<id>");
+    if (o.op === 'new' && o.by === 'supervisor' && !(isObj(o.subject) && o.subject.kind === 'item' && typeof o.subject.ref === 'string' && /^(question|goal):/.test(o.subject.ref))) errs.push("supervisor may not create thread lines except about a question or a goal: a supervisor's thread has subject {\"kind\":\"item\",\"ref\":\"question:<id>\"} or goal:<id>");
     over('outcome', o.outcome, OUTCOME_MAX);
     if (isObj(o.ready)) {
       over('ready.outcome', o.ready.outcome, OUTCOME_MAX);

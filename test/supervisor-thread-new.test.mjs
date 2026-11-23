@@ -156,6 +156,15 @@ test('kit-108 A6: log-check takes a supervisor thread line with a question or go
       assert.notEqual(r.status, 0);
       assert.match(r.said, /supervisor may not set thread\./);
     }
+    // re and off_subject are a reply's, never the owner's turn; off_subject is one line of at most 300 bytes (task-1 F2)
+    const U = F.hand('supervisor', { type: 'turn', thread: T, text: 'Looking', pending: true }, 50000);
+    const good = F.checkWith(['supervisor', { type: 'turn', thread: T, text: 'Done', re: U, off_subject: 'x'.repeat(300) }]);
+    assert.equal(good.status, 0, good.said);
+    for (const [by, more, words] of [['owner', { re: U }, /re and off_subject are on a reply/], ['owner', { off_subject: 'why' }, /re and off_subject are on a reply/], ['supervisor', { off_subject: 'two\nlines' }, /off_subject is one line/], ['supervisor', { off_subject: 'x'.repeat(301) }, /off_subject/]]) {
+      const r = F.checkWith([by, { type: 'turn', thread: T, text: 'Done', ...more }]);
+      assert.notEqual(r.status, 0, `refused: ${by} ${JSON.stringify(more).slice(0, 60)}`);
+      assert.match(r.said, words);
+    }
   } finally { F.done(); }
 });
 
@@ -171,8 +180,9 @@ test('kit-108 A7: a hand-written supervisor thread line that is born resolved (o
     // one not about a question or a goal is dropped by every reader, not only refused by log-check
     const P = F.hand('supervisor', { type: 'thread', title: 'page', subject: { kind: 'page', view: '#goals' } }, 50000);
     const N = F.hand('supervisor', { type: 'thread', title: 'none' }, 40000);
+    const A = F.hand('supervisor', { type: 'thread', title: 'array', subject: { kind: 'item', ref: [`question:${Q}`] } }, 30000);
     const all = JSON.parse(F.owner(['thread', 'list', '--all', '--json'])).map((x) => x.id);
-    assert.ok(all.includes(T) && !all.includes(P) && !all.includes(N), `dropped: ${all.join(', ')}`);
+    assert.ok(all.includes(T) && !all.includes(P) && !all.includes(N) && !all.includes(A), `dropped: ${all.join(', ')}`);
     // and thread list says which are the supervisor's, in the third person as the rest of its line
     assert.match(F.owner(['thread', 'list']), new RegExp(`${T} \\[open, the owner's move, from the supervisor\\]`));
   } finally { F.done(); }
