@@ -28200,13 +28200,19 @@ function askSensorCredentials(missing) {
 // into sensors (a chore ticket for the probes, no owner question); access is asked for only where
 // a source has no way in. Run at boot, and when what it reads changes or a week passes
 // (sensor-discovery-due).
-const DISCOVERY_FILES = ['app.json', 'Procfile', 'fly.toml', 'render.yaml', 'vercel.json', 'netlify.toml', 'railway.json', 'Gemfile', 'package.json', 'requirements.txt', 'pyproject.toml', 'composer.json', 'go.mod'];
+// Where a project pins its language runtime, database and base image: the runtimes sensor checks
+// these versions, which Dependabot's lockfile alerts don't cover (code-style.md L-SEC-9).
+const RUNTIME_PIN_FILES = ['.tool-versions', '.ruby-version', '.node-version', '.nvmrc', '.python-version', 'Dockerfile', 'docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml'];
+// Dockerfiles and compose files at the root or one folder down (cloud/Dockerfile, web/Dockerfile.prod)
+const CONTAINER_FILE = /^([^/]+\/)?(Dockerfile(\.[\w.-]+)?|(docker-)?compose\.ya?ml)$/;
+const DISCOVERY_FILES = ['app.json', 'Procfile', 'fly.toml', 'render.yaml', 'vercel.json', 'netlify.toml', 'railway.json', 'Gemfile', 'package.json', 'requirements.txt', 'pyproject.toml', 'composer.json', 'go.mod', ...RUNTIME_PIN_FILES, '.github/dependabot.yml'];
 // A hash of what discovery reads, so a new host, tracker or deploy workflow says to look again.
 function discoveryKey() {
   const h = crypto.createHash('sha256').update(git(['remote', '-v'], mainRoot) ?? '');
   const wfDir = path.join(mainRoot, '.github/workflows');
   const wfs = fs.existsSync(wfDir) ? fs.readdirSync(wfDir).filter((x) => /\.ya?ml$/.test(x)).sort().map((x) => `.github/workflows/${x}`) : [];
-  for (const f of [...DISCOVERY_FILES, ...wfs]) h.update(`\0${f}\0${readText(path.join(mainRoot, f)) ?? ''}`);
+  const containers = (git(['ls-files'], mainRoot) ?? '').split('\n').filter((f) => CONTAINER_FILE.test(f) && !DISCOVERY_FILES.includes(f)).sort();
+  for (const f of [...DISCOVERY_FILES, ...wfs, ...containers]) h.update(`\0${f}\0${readText(path.join(mainRoot, f)) ?? ''}`);
   return h.digest('hex').slice(0, 16);
 }
 function discoverProduction() {
@@ -28237,7 +28243,23 @@ function discoverProduction() {
   }
   // the CLIs this machine has, and what they can see
   const run = (cmd, args) => { const r = spawnSync(cmd, args, { cwd: mainRoot, encoding: 'utf8', env: ownerProcessEnv(), timeout: 30000, maxBuffer: 8 * 1024 * 1024 }); return r.status === 0 ? r.stdout : null; };
-  const wanted = new Set([...hosts.map((h) => ({ heroku: 'heroku', fly: 'fly', vercel: 'vercel', render: 'render', netlify: 'netlify', railway: 'railway' }[h.host])), ...trackers.filter((t) => t.tracker === 'sentry').map(() => 'sentry-cli')].filter(Boolean));
+  // known vulnerabilities (code-style.md L-SEC-9), for every project: dependabot reads the repo's
+  // open Dependabot alerts where it is on GitHub; runtimes checks the runtime, database and base
+  // image versions pinned here, which lockfile alerts don't cover, against public advisory sources
+  // the repo Dependabot watches: origin's when origin is on GitHub, else the first GitHub remote
+  // (gh api's {owner}/{repo} refuses to guess between remotes, so the probe is given it)
+  const ghRemotes = (git(['remote', '-v'], mainRoot) ?? '').split('\n').map((l) => /^(\S+)\s+\S*github\.com[:/]([\w.-]+\/[\w.-]+?)(\.git)?\s/.exec(l)).filter(Boolean);
+  const ghRepo = (ghRemotes.find((m) => m[1] === 'origin') ?? ghRemotes[0])?.[2] ?? null;
+  if (ghRepo) {
+    if (!fs.existsSync(at('.github/dependabot.yml'))) notes.push('no .github/dependabot.yml: check one in with an entry for each ecosystem the project uses, docker and github-actions included (code-style.md L-SEC-9)');
+    proposals.push({ name: 'dependabot', sensor: { kind: 'probe', probe: 'project/sensors/dependabot.mjs', every_minutes: 30, uses: ['gh'], params: { repo: ghRepo }, triage: { min_level: 'warning', min_count: 1, min_users: 0 } }, reads: `the open Dependabot alerts of ${ghRepo} (gh api repos/${ghRepo}/dependabot/alerts?state=open); its run fails while alerts are off, so it never goes quietly blind`, probe_to_write: true });
+  } else notes.push('no GitHub remote: Dependabot can\'t watch the dependencies here; the forge\'s own scanner covers the lockfiles if it has one (code-style.md L-SEC-9)');
+  const pins = [...new Set([...RUNTIME_PIN_FILES.filter((f) => fs.existsSync(at(f))), ...(git(['ls-files'], mainRoot) ?? '').split('\n').filter((f) => CONTAINER_FILE.test(f))])];
+  if (/^\s*ruby\s+["']/m.test(read('Gemfile'))) pins.push('Gemfile (its ruby line)');
+  if (/"engines"\s*:/.test(read('package.json'))) pins.push('package.json (engines)');
+  if (pins.length) proposals.push({ name: 'runtimes', sensor: { kind: 'probe', probe: 'project/sensors/runtimes.mjs', every_minutes: 360, triage: { min_level: 'warning', min_count: 1, min_users: 0 } }, reads: `the runtime, database and base image versions in ${pins.join(', ')}, against OSV.dev and endoflife.date`, probe_to_write: true });
+  else notes.push('no runtime version is pinned (.tool-versions, a Dockerfile FROM): pin it (code-style.md L-ERG-3) so the runtimes sensor can watch it');
+  const wanted = new Set([...hosts.map((h) => ({ heroku: 'heroku', fly: 'fly', vercel: 'vercel', render: 'render', netlify: 'netlify', railway: 'railway' }[h.host])), ...trackers.filter((t) => t.tracker === 'sentry').map(() => 'sentry-cli'), ...(ghRepo ? ['gh'] : [])].filter(Boolean));
   for (const cli of wanted) clis.push({ cli, ready: cliReady(cli) === null, why: cliReady(cli) });
   if (clis.find((c) => c.cli === 'heroku')?.ready) {
     for (const app of heroku) {

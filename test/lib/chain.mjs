@@ -1063,6 +1063,27 @@ out({ cursor: 'c-' + mode });
         assert.ok(d.trackers.some((x) => x.tracker === 'sentry') && d.health.some((h) => h.path === '/up'));
         assert.ok(d.proposals.some((p) => p.name === 'sentry' && p.probe_to_write));
         assert.ok(d.notes.some((n) => /Procfile/.test(n)));
+        // known vulnerabilities (L-SEC-9): no GitHub remote, so no dependabot sensor, and said so;
+        // nothing pinned yet, so no runtimes sensor either, and said so
+        assert.ok(!d.proposals.some((p) => p.name === 'dependabot') && d.notes.some((n) => /no GitHub remote/.test(n)), JSON.stringify(d.notes));
+        assert.ok(!d.proposals.some((p) => p.name === 'runtimes') && d.notes.some((n) => /no runtime version is pinned/.test(n)), JSON.stringify(d.notes));
+        write(path.join(repo, '.ruby-version'), '3.3.4\n');
+        write(path.join(repo, 'Dockerfile'), 'FROM ruby:3.3.4-slim\n');
+        git(['remote', 'add', 'gh-mirror', 'https://github.com/acme/demo-app.git']);
+        const v = json(must(['sensor', 'discover', '--json']));
+        const dep = v.proposals.find((p) => p.name === 'dependabot');
+        assert.ok(dep && dep.probe_to_write && dep.sensor.kind === 'probe' && dep.sensor.probe === 'project/sensors/dependabot.mjs' && dep.sensor.uses.includes('gh') && !dep.sensor.credentials, JSON.stringify(dep));
+        assert.equal(dep.sensor.triage.min_level, 'warning', 'a medium advisory is observed too');
+        assert.equal(dep.sensor.params.repo, 'acme/demo-app', 'the probe is told the repo: gh refuses to pick between remotes');
+        assert.ok(v.notes.some((n) => /no \.github\/dependabot\.yml/.test(n)), 'the missing dependabot.yml is said');
+        const rt = v.proposals.find((p) => p.name === 'runtimes');
+        assert.ok(rt && rt.probe_to_write && /\.ruby-version/.test(rt.reads) && /Dockerfile/.test(rt.reads) && rt.sensor.probe === 'project/sensors/runtimes.mjs', JSON.stringify(rt));
+        // a Gemfile's ruby line pins the runtime too
+        for (const f of ['.ruby-version', 'Dockerfile']) fs.rmSync(path.join(repo, f));
+        write(path.join(repo, 'Gemfile'), "source 'https://rubygems.org'\nruby '3.3.4'\ngem 'sentry-ruby'\n");
+        assert.match(json(must(['sensor', 'discover', '--json'])).proposals.find((p) => p.name === 'runtimes')?.reads ?? '', /Gemfile \(its ruby line\)/);
+        write(path.join(repo, '.github/dependabot.yml'), 'version: 2\nupdates: []\n');
+        assert.ok(!json(must(['sensor', 'discover', '--json'])).notes.some((n) => /dependabot\.yml/.test(n)), 'checked in: not said again');
         assert.ok(json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'sensor-discovery-due'));
         assert.notEqual(dt(['sensor', 'discover', '--record'], { role: 'worker' }).status, 0, 'only the supervisor records a discovery');
         must(['sensor', 'discover', '--record'], sup);
@@ -1072,7 +1093,9 @@ out({ cursor: 'c-' + mode });
         assert.ok(!json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'sensor-discovery-due'), 'looked over this week');
       } finally {
         git(['remote', 'remove', 'heroku']);
-        for (const f of ['Procfile', 'Gemfile', 'config/routes.rb']) fs.rmSync(path.join(repo, f), { force: true });
+        if ((git(['remote']) ?? '').split('\n').includes('gh-mirror')) git(['remote', 'remove', 'gh-mirror']);
+        for (const f of ['Procfile', 'Gemfile', 'config/routes.rb', '.ruby-version', 'Dockerfile', '.github/dependabot.yml']) fs.rmSync(path.join(repo, f), { force: true });
+        try { fs.rmdirSync(path.join(repo, '.github')); } catch {}
       }
     } finally {
       landSettings(() => settingsBefore);
