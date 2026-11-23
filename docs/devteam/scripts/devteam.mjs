@@ -1885,6 +1885,14 @@ function fold(all) {
       continue;
     }
     const { v, op, __file, __line, at, by, ...body } = l;
+    // kit-108: a thread the supervisor started is born open, with no outcome and no proposal, as
+    // thread new writes it. A hand-written line carrying them (log-check refuses it: x-set-only, but
+    // a reader runs integrity alone) must not have the supervisor resolve its own thread.
+    if (body.type === 'thread' && by !== 'owner') {
+      // and one not about a question or a goal is no thread of the supervisor's: readers drop it, as log-check refuses it
+      if (!(isObj(body.subject) && body.subject.kind === 'item' && /^(question|goal):/.test(body.subject.ref ?? ''))) { ignored.push({ line: l, why: "a supervisor's thread is about a question or a goal" }); continue; }
+      delete body.status; delete body.outcome; delete body.ready;
+    }
     const kept = body.type === 'goal' && body.kind === 'upkeep' ? [...objects.values()].find((o) => o.type === 'goal' && o.kind === 'upkeep') : null;
     if (kept) {
       // two writers made Upkeep at once: the earliest is the one, and the other's holds apply to it
@@ -9498,6 +9506,8 @@ function threadLineProblems(o) {
     if (isObj(o.frame) && !oneLine(o.frame.hash, 0, 200)) errs.push('thread.frame.hash is one line of at most 200 bytes');
     if (typeof o.title === 'string' && UNSAFE_TEXT.test(o.title)) errs.push('thread.title is one line of plain text');
     if (o.subject !== undefined) { const p = subjectProblem(o.subject); if (p) errs.push(`thread.subject: ${p}`); }
+    // kit-108: a thread the supervisor starts is about a question or a goal, always
+    if (o.op === 'new' && o.by === 'supervisor' && !(isObj(o.subject) && o.subject.kind === 'item' && /^(question|goal):/.test(o.subject.ref ?? ''))) errs.push("supervisor may not create thread lines except about a question or a goal: a supervisor's thread has subject {\"kind\":\"item\",\"ref\":\"question:<id>\"} or goal:<id>");
     over('outcome', o.outcome, OUTCOME_MAX);
     if (isObj(o.ready)) {
       over('ready.outcome', o.ready.outcome, OUTCOME_MAX);
@@ -9509,6 +9519,9 @@ function threadLineProblems(o) {
     for (const r of Array.isArray(o.refs) ? o.refs : []) over('refs[]', r, 120);
     if (o.by === 'owner' && (o.refs !== undefined || o.question !== undefined)) errs.push("refs and question are on the supervisor's turns");
     if (o.by !== 'owner' && o.files !== undefined) errs.push("files are on the owner's own turns");
+    if (o.by === 'owner' && (o.re !== undefined || o.off_subject !== undefined)) errs.push("re and off_subject are on a reply, never the owner's turn");
+    if (typeof o.off_subject === 'string' && UNSAFE_TEXT.test(o.off_subject)) errs.push('turn.off_subject is one line of plain text');
+    over('off_subject', o.off_subject, OUTCOME_MAX);
   }
   return errs;
 }
