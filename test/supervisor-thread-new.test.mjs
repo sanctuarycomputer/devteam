@@ -383,6 +383,20 @@ test('kit-108 A15: the responder\'s turns keep the same rules: its --re follow-u
     const again = F.run(F.old, ['thread', 'reply', T, 'Two now.', '--re', P2], RESPONDER);
     assert.notEqual(again.status, 0, 'a second follow-up of the same turn');
     assert.match(again.err, /already followed up/);
+    // --re names the writer's own pending turn: neither follows up the other's promise (final-1 F2)
+    const T3 = F.owner(['thread', 'new', 'Whose turn?', '--title', 'Whose']).split('\n')[0];
+    F.sup(['thread', 'reply', T3, 'Asking the responder.']);
+    F.hand('owner', { type: 'turn', thread: T3, text: 'And the builds?', routed_to: 'responder', delivered: 'typed' }, 0);
+    const rp = F.run(F.old, ['thread', 'reply', T3, 'Checking the builds', '--pending'], RESPONDER);
+    assert.equal(rp.status, 0, rp.err);
+    const RP = rp.out.split('\n')[0];
+    assert.match(F.fails(['thread', 'reply', T3, 'Builds are green.', '--re', RP], F.SUP), new RegExp(`--re ${RP}: not your pending turn in this thread`));
+    F.owner(['thread', 'say', T3, 'And the deploy?']);
+    const SP = F.sup(['thread', 'reply', T3, 'Looking at the deploy', '--pending']).split('\n')[0];
+    const cross = F.run(F.old, ['thread', 'reply', T3, 'Deploy is done.', '--anyway', '--re', SP], RESPONDER);
+    assert.notEqual(cross.status, 0, 'the responder follows up the supervisor\'s pending turn');
+    assert.match(cross.err, new RegExp(`--re ${SP}: not your pending turn in this thread`));
+    assert.match(F.sup(['thread', 'reply', T3, 'Deploy is done.', '--re', SP]).split('\n')[0], /^u-/, 'the supervisor follows up its own');
   } finally { F.done(); }
 });
 
