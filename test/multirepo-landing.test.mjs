@@ -348,7 +348,8 @@ test('merged-without-merge: a merge whose head a merge act names raises nothing,
       assert.notEqual(r.status, 0, `M: ack --owner with ${JSON.stringify(env)} is refused: ${r.out}`);
       ({ raised } = mwm());
       assert.ok(raised.some((x) => x.subject === btn3), `M: nothing was set aside, with ${JSON.stringify(env)}`);
-      assert.match(r.err, /ack --owner is the owner's: it doesn't run in a worker's or planner's session \(DEVTEAM_(TICKET|FEATURE)=/, `M: and says why, with ${JSON.stringify(env)}`);
+      const named = env.DEVTEAM_TICKET ? `DEVTEAM_TICKET=${env.DEVTEAM_TICKET}` : `DEVTEAM_FEATURE=${env.DEVTEAM_FEATURE}`;
+      assert.ok(r.err.includes(`ack --owner is the owner's: it doesn't run in a worker's or planner's session (${named})`), `M: and says why, naming ${named}: ${r.err}`);
     }
     // the session refusal comes before the finding lookup: a finding that doesn't exist gets it too
     assert.match(F.runIn(old, ['ack', 'merged-without-merge', 'companion:000000000000', '--reason', 'x', '--owner'], { DEVTEAM_TICKET: 'console-01-a' }).err, /ack --owner is the owner's/, 'M5: the session refusal comes before the finding lookup');
