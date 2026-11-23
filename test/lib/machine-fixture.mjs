@@ -87,6 +87,10 @@ function repo(name, { tag = null, links, settings, adopt = true, dir = code } = 
     fs.writeFileSync(f, s.replace(m[1], JSON.stringify({ ...JSON.parse(m[1]), ...settings, ...(links ? { links } : {}) }, null, 2)));
   }
   execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init'], { cwd: r });
+  // an origin git can reach: a launch reads the owner's settings from origin (kit-764). The remote
+  // stays the GitHub URL repos are known by (the kit reads it as configured, which insteadOf doesn't
+  // change); insteadOf points git at the repo itself, so origin's main is the local main
+  execFileSync('git', ['config', `url.${r}.insteadOf`, `git@github.com:Acme/${name}.git`], { cwd: r });
   return r;
 }
 const link = (name) => ({ kind: 'repo', remote: `https://github.com/acme/${name}`, title: name });

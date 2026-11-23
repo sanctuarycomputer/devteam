@@ -2418,7 +2418,7 @@ exit 0
       "key": "finding_ack_hours",
       "group": "Questions and findings",
       "name": "A finding set aside for",
-      "description": "hours a set-aside finding stays quiet, unless its subject changes",
+      "description": "hours a set-aside finding stays quiet, unless its subject changes; a merge on a main stays set aside for good",
       "shown": "value",
       "value": 24,
       "set": false,
@@ -2610,7 +2610,37 @@ exit 0
     "reason": null,
     "by": null,
     "fleet": null,
-    "chores": []
+    "chores": [],
+    "recurring": {
+      "entries": [],
+      "builtin": [
+        {
+          "name": "retro",
+          "every": "7d",
+          "note": "A look back at what the team did since the last one.",
+          "setting": "retro_every_days"
+        },
+        {
+          "name": "research",
+          "every": "7d",
+          "note": "A spike on new tools and practice.",
+          "setting": "research_every_days"
+        },
+        {
+          "name": "kit-sync",
+          "every": "24h",
+          "note": "Adopts each new devteam release; you check for one every 24 hours.",
+          "setting": "upstream_check_hours"
+        },
+        {
+          "name": "sensors",
+          "every": "each cycle",
+          "note": "Production signals, read on every wait cycle.",
+          "setting": null
+        }
+      ],
+      "proposals": []
+    }
   },
   "sensors": [],
   "sensor_feed": [],
