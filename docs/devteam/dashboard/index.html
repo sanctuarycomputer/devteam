@@ -8955,7 +8955,7 @@ function tWhere(s) {
   return 'no subject';
 }
 // A spot in a framed page, for its key: its anchor as the lens named it, else the point.
-const tFrameSpot = (s) => (s.anchor ? `${s.anchor.selector ?? ''}|${s.anchor.text ?? ''}` : `${s.point?.x},${s.point?.y}`);
+const tFrameSpot = (s) => (s.anchor?.node !== undefined ? `node:${s.anchor.node}` : s.anchor ? `${s.anchor.selector ?? ''}|${s.anchor.text ?? ''}` : `${s.point?.x},${s.point?.y}`);
 const tKey = (s) => (!s ? null : s.kind === 'item' ? `item:${s.ref}` : s.kind === 'page' ? `page:${s.view}:${s.at?.x}:${s.at?.y}` : s.kind === 'artifact' ? `artifact:${s.slug}:${s.path ?? 'index.html'}:${tFrameSpot(s)}` : s.kind === 'preview' ? `preview:${s.name}:${s.route ?? ''}:${tFrameSpot(s)}` : null);
 // One pin per subject, for open threads: numbered as the dock numbers them (by when each began), with
 // every thread on it, oldest first.
