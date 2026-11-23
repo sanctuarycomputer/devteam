@@ -8324,8 +8324,14 @@ function pinRecords(id) {
     git(['fetch', '--quiet', 'origin', HS.main_branch]);
     return { sha: tip, landed: git(['merge-base', '--is-ancestor', tip, `origin/${HS.main_branch}`]) !== null };
   }
+  // Both gh reads below are killed at 15 s, as merge's other reads are (kit-793; DEVTEAM_GH_TIMEOUT_MS,
+  // a positive whole number of ms, sets it only while DEVTEAM_TEST is set): a killed read is no answer,
+  // so no merged PR is found, and no open one, and merge refuses before its gates
+  const ghMs = process.env.DEVTEAM_TEST ? Math.trunc(Number(process.env.DEVTEAM_GH_TIMEOUT_MS)) : NaN;
+  const ghSet = Number.isSafeInteger(ghMs) && ghMs > 0;
+  const ghRead = { timeout: ghSet ? ghMs : 15000, killSignal: 'SIGKILL' };
   let merged = [];
-  try { merged = JSON.parse(HR.gh(['pr', 'list', '--head', `ticket/${id}`, '--state', 'merged', '--json', 'number,headRefOid,mergedAt']) ?? '[]'); } catch {}
+  try { merged = JSON.parse(HR.gh(['pr', 'list', '--head', `ticket/${id}`, '--state', 'merged', '--json', 'number,headRefOid,mergedAt'], ghRead) ?? '[]'); } catch {}
   merged = (Array.isArray(merged) ? merged : []).sort((a, b) => String(b.mergedAt ?? '').localeCompare(String(a.mergedAt ?? '')));
   const m = tip ? merged.find((p) => p.headRefOid === tip) : merged[0];
   if (m) {
@@ -8334,7 +8340,7 @@ function pinRecords(id) {
     return { sha: m.headRefOid, landed: true, pr: m.number };
   }
   if (!tip) return { problems: none };
-  const j = HR.gh(['pr', 'view', `ticket/${id}`, '--json', 'number,headRefOid,isDraft,mergeStateStatus,state,statusCheckRollup']);
+  const j = HR.gh(['pr', 'view', `ticket/${id}`, '--json', 'number,headRefOid,isDraft,mergeStateStatus,state,statusCheckRollup'], ghRead);
   let p = null;
   try { p = j ? JSON.parse(j) : null; } catch {}
   if (!p || (p.state && p.state !== 'OPEN')) return { problems: [`no open home PR from ticket/${id} (its records): open one in home with the ticket's PR title`] };
@@ -8404,10 +8410,11 @@ function landRecords(id, rec, linkName) {
     // still be the main the checks judged (mainSha(), read before this fetch), as landCode's moved()
     // does for the code (kit-332). The fetch is bounded (recurringRegistry.git); one that fails refuses.
     // Each gh call here is killed at its bound, as landCode's are (kit-787): gh pr merge at 60 s, each
-    // state read at 15 s (DEVTEAM_GH_TIMEOUT_MS, a positive whole number of ms, sets both, for tests),
-    // so the records' gh calls wait at most 60 + 3 x 15 + 2 x 2 = 109 s; a killed call reads as failed.
+    // state read at 15 s (DEVTEAM_GH_TIMEOUT_MS, a positive whole number of ms, sets both, only while
+    // DEVTEAM_TEST is set: kit-793), so the records' gh calls wait at most 60 + 3 x 15 + 2 x 2 = 109 s
+    // here, after pinRecords' two reads (15 s each) before the gates; a killed call reads as failed.
     // Both git fetches are bounded (120 s): the one below, and the one after landing (kit-791).
-    const ghMs = Math.trunc(Number(process.env.DEVTEAM_GH_TIMEOUT_MS));
+    const ghMs = process.env.DEVTEAM_TEST ? Math.trunc(Number(process.env.DEVTEAM_GH_TIMEOUT_MS)) : NaN;
     const ghSet = Number.isSafeInteger(ghMs) && ghMs > 0;
     const ghMerge = { timeout: ghSet ? ghMs : 60000, killSignal: 'SIGKILL' };
     const ghRead = { timeout: ghSet ? ghMs : 15000, killSignal: 'SIGKILL' };
@@ -8463,8 +8470,19 @@ function cmdMerge() {
     }
   }
   if (viaGit && !dry && !(flagStr('title') && flagStr('body-file'))) die(`forge is git: merge needs the PR text, in ${path.relative(mainRoot, path.join(runDir, 'pr', `${branch}.md`))} ('# <title>' then the body) or as --title and --body-file`);
-  const prJson = viaGit ? null : R.gh(['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,state,url,statusCheckRollup']);
-  if (prJson === null && !dry && !viaGit) die(`no open PR from ${branch}${inR} (gh pr view failed; with no forge CLI set forge: "git")`);
+  // Every gh call merge makes is killed at its bound (kit-787, kit-793): gh pr merge at 60 s, each read
+  // at 15 s (DEVTEAM_GH_TIMEOUT_MS, a positive whole number of ms, sets both, only while DEVTEAM_TEST
+  // is set, for tests). Before and in the gates: this PR read, pinRecords' two reads of home's records
+  // PR, and the covered_by read; after them each landing's (landCode below, landRecords). So a ticket's
+  // gh calls wait at most 15 + 15 + 109 = 139 s (the PR read, the covered_by read, the landing), and
+  // 15 + 2 x 15 + 15 + 109 + 109 = 278 s with records in home. A killed call reads as failed: a read as
+  // no answer, gh pr merge as not merged (its state is read, as for any error); refused as before
+  const ghMs = process.env.DEVTEAM_TEST ? Math.trunc(Number(process.env.DEVTEAM_GH_TIMEOUT_MS)) : NaN;
+  const ghSet = Number.isSafeInteger(ghMs) && ghMs > 0;
+  const ghMerge = { timeout: ghSet ? ghMs : 60000, killSignal: 'SIGKILL' };
+  const ghRead = { timeout: ghSet ? ghMs : 15000, killSignal: 'SIGKILL' };
+  const prJson = viaGit ? null : R.gh(['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,state,url,statusCheckRollup'], ghRead);
+  if (prJson === null && !dry && !viaGit) die(`no open PR from ${branch}${inR} (gh pr view failed or did not answer; with no forge CLI set forge: "git")`);
   R.git(['fetch', '--quiet', 'origin', branch]);
   // main as each origin has it now: home's (the settings) and the ticket's repo's (what it lands on)
   fetchMain(R);
@@ -8759,7 +8777,7 @@ function cmdMerge() {
       else if (ci.length) fresh = { why: `the PR changes the forge's CI configuration (${ci.slice(0, 3).join(', ')}${ci.length > 3 ? ', …' : ''})` };
       else {
         let v = null;
-        try { v = JSON.parse(R.gh(['pr', 'view', String(pr.number), '--json', 'headRefOid,statusCheckRollup']) ?? 'null'); } catch { v = null; }
+        try { v = JSON.parse(R.gh(['pr', 'view', String(pr.number), '--json', 'headRefOid,statusCheckRollup'], ghRead) ?? 'null'); } catch { v = null; }
         if (!isObj(v)) fresh = { why: "could not read the PR's checks again" };
         else if (v.headRefOid !== sha) fresh = { why: `the head moved to ${String(v.headRefOid ?? '?').slice(0, 12)}` };
         else fresh = { rollup: v.statusCheckRollup ?? [] };
@@ -8909,18 +8927,11 @@ function cmdMerge() {
       }
       return null;
     }
-    // GitHub has no lease on the base: main is read again just before gh pr merge. Each gh call
-    // after the gates is killed at its bound (kit-787): gh pr merge at 60 s, each state read at 15 s
-    // (DEVTEAM_GH_TIMEOUT_MS, a positive whole number of ms, sets both, for tests), so the code's gh
-    // calls wait at most 60 + 3 x 15 + 2 x 2 = 109 s (with records in home, 218 s for both landings'
-    // gh calls). The git fetches are apart: moved()'s is bounded (recurringRegistry.git, 120 s),
-    // the one after landing is too (kit-791: 120 s, 240 s with records in home). A killed call
-    // reads as failed: gh pr merge as not merged (its state is read, as for any error), a state
-    // read as no answer; refused as before
-    const ghMs = Math.trunc(Number(process.env.DEVTEAM_GH_TIMEOUT_MS));
-    const ghSet = Number.isSafeInteger(ghMs) && ghMs > 0;
-    const ghMerge = { timeout: ghSet ? ghMs : 60000, killSignal: 'SIGKILL' };
-    const ghRead = { timeout: ghSet ? ghMs : 15000, killSignal: 'SIGKILL' };
+    // GitHub has no lease on the base: main is read again just before gh pr merge. Its gh calls use
+    // merge's bounds (ghMerge, ghRead, above: kit-787), so the code's landing waits at most
+    // 60 + 3 x 15 + 2 x 2 = 109 s on gh (with records in home, 218 s for both landings' gh calls).
+    // The git fetches are apart: moved()'s is bounded (recurringRegistry.git, 120 s), the one after
+    // landing is too (kit-791: 120 s, 240 s with records in home)
     const gone = moved();
     if (gone) return gone;
     const merged = R.gh(['pr', 'merge', String(pr.number), `--${S.merge_method}`, ...(S.merge_admin === true ? ['--admin'] : []), '--match-head-commit', sha], ghMerge);

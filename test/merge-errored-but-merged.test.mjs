@@ -6,12 +6,15 @@
 // can really merge into the bare origin (as GitHub would) and then exit 1. Every gh call after the
 // gates has a timeout (kit-787): a gh pr merge or a state read that never answers is killed at its
 // bound and read as failed, so merge refuses as before instead of waiting on it; and a PR GitHub
-// reports CLOSED at the gated head is refused, never adopted. Run with TMUX unset: no fixture here
-// starts or stops a tmux server.
+// reports CLOSED at the gated head is refused, never adopted. So do merge's gh reads before and in
+// its gates (kit-793): the PR read, the records' two reads in pinRecords and the covered_by read are
+// killed at 15 s, and DEVTEAM_GH_TIMEOUT_MS sets the bounds only while DEVTEAM_TEST is set. Run with
+// TMUX unset: no fixture here starts or stops a tmux server.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { multiFixture, write, json, review } from './lib/kit.mjs';
 import { readyInHome, recordsFixture } from './lib/multirepo-home-fixture.mjs';
 
@@ -20,12 +23,13 @@ const VERIF = '| Done-when | Command | Result |\n|---|---|---|\n| s | t | pass |
 const REFUSED = /gh pr merge refused \(did the head move\?\); verify from the start/;
 // A gh that never answers hangs this long, far past the bound merge is given here (GH_BOUND, through
 // DEVTEAM_GH_TIMEOUT_MS); a merge that waits on it can't finish inside WITHIN, so an unbounded call
-// turns the check red at about HANG_MS rather than hanging the suite. Eight such reds (five hung gh
-// calls, three hung fetches) wait ~16 minutes, so on CI a regressed bound shows as the 300 s watchdog stopping this file, not as named not-ok lines:
+// turns the check red at about HANG_MS rather than hanging the suite. Twelve such reds (nine hung gh
+// calls, three hung fetches) wait ~24 minutes, so on CI a regressed bound shows as the 300 s watchdog stopping this file, not as named not-ok lines:
 // run the file here to see which check failed. The same holds for the hung fetches after a landing
-// (C11, R9, R10, kit-791; their bound is DEVTEAM_GIT_TIMEOUT_MS).
+// (C11, R9, R10, kit-791; their bound is DEVTEAM_GIT_TIMEOUT_MS). The knob counts only while
+// DEVTEAM_TEST is set (kit-793), so GH_BOUND sets both.
 const HANG_MS = 120000;
-const GH_BOUND = { DEVTEAM_GH_TIMEOUT_MS: '5000' };
+const GH_BOUND = { DEVTEAM_TEST: '1', DEVTEAM_GH_TIMEOUT_MS: '5000' };
 const WITHIN = 60000;
 const timed = (fn) => { const t0 = Date.now(); const r = fn(); return { ...r, ms: Date.now() - t0 }; };
 
@@ -36,8 +40,10 @@ const timed = (fn) => { const t0 = Date.now(); const r = fn(); return { ...r, ms
 // answered as before, copies after.json over pr.json (what GitHub says once it has finished); with
 // fail-views-after, every pr view after it fails. With hangs-merge, pr merge marks the PR
 // merged-at-gh and then never answers (it exits 1 after HANG_MS, far past the bound merge is given);
-// with hangs-views-after, so does each pr view after it. Each hang is an exec of node, so the kill at
-// merge's timeout reaches the process that hangs; it ignores SIGTERM, so only merge's SIGKILL ends it.
+// with hangs-views-after, so does each pr view after it. With hangs-on, any call whose arguments hold
+// one of its lines never answers, from the start (kit-793: the reads before and in the gates). Each
+// hang is an exec of node, so the kill at merge's timeout reaches the process that hangs; it ignores
+// SIGTERM, so only merge's SIGKILL ends it.
 function ghStandIn(F, pr) {
   const dir = path.join(F.base, 'gh-stand-in');
   const bin = path.join(dir, 'bin');
@@ -52,11 +58,13 @@ function ghStandIn(F, pr) {
   const mergeSh = path.join(dir, 'merge.sh');
   const hangsMerge = path.join(dir, 'hangs-merge');
   const hangsViews = path.join(dir, 'hangs-views-after');
+  const hangsOn = path.join(dir, 'hangs-on');
   const hang = `exec "${process.execPath}" -e "process.on('SIGTERM', () => {}); setTimeout(() => process.exit(1), ${HANG_MS})"`;
   write(prFile, JSON.stringify(pr));
   write(path.join(bin, 'gh'), [
     '#!/bin/sh',
     `echo "$@" >> "${log}"`,
+    `if [ -f "${hangsOn}" ] && echo "$*" | grep -qF -f "${hangsOn}"; then ${hang}; fi`,
     'case "$1 $2" in',
     '  "pr view")',
     `    if [ -f "${mergedAt}" ]; then`,
@@ -96,6 +104,8 @@ function ghStandIn(F, pr) {
     hangsMerge: () => write(hangsMerge, ''),
     // after pr merge, every pr view never answers
     hangsAfter: () => write(hangsViews, ''),
+    // every call whose arguments hold one of these never answers (kit-793)
+    hangsOn: (...parts) => write(hangsOn, `${parts.join('\n')}\n`),
     // pr merge really merges origin's `from` onto origin's `onto`, in a clone of `bare` of its own
     merges: (bare, onto, from) => {
       const clone = path.join(dir, 'github');
@@ -113,9 +123,9 @@ const recordsActs = (F, id) => acts(F).filter((a) => a.class === 'merge-word' &&
 
 // console on forge github: a ticket ready to merge, records with its code, and an open, clean PR #7
 // at its head as the stand-in's pr view answers it.
-function readyOnGithub(F, id, prExtra = {}) {
+function readyOnGithub(F, id, prExtra = {}, gates = { test: 'true' }) {
   const links = json(F.okIn(F.old, ['settings'])).links;
-  F.lines({ ...F.STD, console: { link: 'console' }, companion: { link: 'companion' } }, { links: { ...links, console: { ...links.console, forge: 'github', gates: { test: 'true' } } } });
+  F.lines({ ...F.STD, console: { link: 'console' }, companion: { link: 'companion' } }, { links: { ...links, console: { ...links.console, forge: 'github', gates } } });
   F.ticket(id, { touches: ['src/**'] });
   const w = path.join(F.old, '.worktrees', id);
   F.g(['worktree', 'add', '-q', '-b', `ticket/${id}`, w, 'origin/trunk'], F.console);
@@ -547,4 +557,105 @@ test('R10 records in home, console forge git: the records land, then the code, a
     assert.equal(mergeActs(F, id).length, 1, 'the code act is written');
     assert.equal(landedOn(F, F.console, r0.code, 'trunk'), true, 'the code landed');
   } finally { F.done(); }
+});
+
+// kit-793: merge's gh reads before and in its gates are bounded too, and the bounds are pinned.
+const logCount = (F) => json(F.okIn(F.old, ['log', '--json'])).length;
+
+test('G1 code, forge github: the PR read merge starts with never answers; merge kills it at its bound and refuses in words, nothing logged', { timeout: 300000 }, () => {
+  const F = multiFixture('kit793-pr-read-hangs');
+  const id = 'console-01-a';
+  try {
+    const { gh } = readyOnGithub(F, id);
+    gh.hangsOn(`pr view ticket/${id}`);
+    const before = logCount(F);
+    const r = timed(() => F.runIn(F.old, ['merge', id], SUP, { ...gh.env, ...GH_BOUND }));
+    assert.ok(r.ms < WITHIN, `merge refused inside the bound, not after the hung PR read returned (${r.ms} ms)`);
+    assert.notEqual(r.status, 0, r.out);
+    assert.match(r.err, new RegExp(`no open PR from ticket/${id} in console \\(gh pr view failed or did not answer;`));
+    assert.equal(gh.prMerges().length, 0, 'no gh pr merge');
+    assert.equal(logCount(F), before, 'nothing logged: no gate, no act');
+  } finally { F.done(); }
+});
+
+test('G2 code, forge github: the covered_by read of the PR\'s checks never answers; merge kills it at its bound, the gate covers nothing and runs here (it fails), refused, no act', { timeout: 300000 }, () => {
+  const F = multiFixture('kit793-covered-read-hangs');
+  const id = 'console-01-a';
+  try {
+    const { gh } = readyOnGithub(F, id, { statusCheckRollup: [{ name: 'ci', status: 'COMPLETED', conclusion: 'SUCCESS' }] }, { test: { cmd: 'exit 1', covered_by: 'ci' } });
+    gh.hangsOn('--json headRefOid,statusCheckRollup');
+    const r = timed(() => F.runIn(F.old, ['merge', id], SUP, { ...gh.env, ...GH_BOUND }));
+    assert.ok(r.ms < WITHIN, `merge went on inside the bound, not after the hung covered_by read returned (${r.ms} ms)`);
+    assert.match(r.out, /gate test runs here: could not read the PR's checks again/);
+    assert.notEqual(r.status, 0, r.out);
+    assert.match(r.out, /fail: gate test failed at /);
+    assert.equal(gh.prMerges().length, 0, 'no gh pr merge');
+    assert.deepEqual(mergeActs(F, id), [], 'no merge act');
+  } finally { F.done(); }
+});
+
+test('G3 records in home, home forge github: pinRecords\' two reads of home\'s records PR never answer; merge kills each at its bound and refuses in words, nothing lands, nothing logged', { timeout: 300000 }, () => {
+  const F = recordsFixture('kit793-records-reads-hang');
+  const id = 'console-01-a';
+  try {
+    const { r0, gh } = recordsOnGithub(F, id);
+    gh.hangsOn('pr list --head', `pr view ticket/${id}`);
+    const trunk = tipOf(F, F.console, 'trunk');
+    const before = logCount(F);
+    const r = timed(() => F.runIn(F.old, ['merge', id], SUP, { ...gh.env, ...GH_BOUND }));
+    assert.ok(r.ms < WITHIN, `merge refused inside the bound, not after a hung records read returned (${r.ms} ms)`);
+    assert.notEqual(r.status, 0, r.out);
+    assert.match(r.out, new RegExp(`fail: no open home PR from ticket/${id} \\(its records\\)`));
+    assert.equal(gh.calls().filter((c) => c.startsWith('pr list ') || c.startsWith(`pr view ticket/${id}`)).length, 2, 'both reads were made, each killed at its bound');
+    assert.equal(gh.prMerges().length, 0, 'no gh pr merge');
+    assert.equal(landedOn(F, F.old, r0.head, 'main'), false, 'the records did not land');
+    assert.equal(tipOf(F, F.console, 'trunk'), trunk, 'the code did not land');
+    assert.equal(logCount(F), before, 'nothing logged: no gate, no act');
+  } finally { F.done(); }
+});
+
+test('K1 code, forge github: without DEVTEAM_TEST, DEVTEAM_GH_TIMEOUT_MS is ignored and a hung state read waits its real 15 s, then merge refuses', { timeout: 300000 }, () => {
+  const F = multiFixture('kit793-knob-needs-test');
+  const id = 'console-01-a';
+  try {
+    const { gh } = readyOnGithub(F, id);
+    gh.hangsAfter();
+    const r = timed(() => F.runIn(F.old, ['merge', id], SUP, { ...gh.env, DEVTEAM_GH_TIMEOUT_MS: '5000' }));
+    assert.ok(r.ms >= 15000, `the knob counts only under DEVTEAM_TEST: the state read waited its 15 s default (${r.ms} ms)`);
+    assert.ok(r.ms < WITHIN, `and was killed at it, not after the hung read returned (${r.ms} ms)`);
+    assert.notEqual(r.status, 0, r.out);
+    assert.match(r.err, REFUSED);
+    assert.equal(gh.stateReads().length, 1, 'one read, killed, then refused');
+    assert.deepEqual(mergeActs(F, id), [], 'no merge act');
+  } finally { F.done(); }
+});
+
+// The source of the three functions that call gh in a merge, each up to the next top-level function.
+const KIT = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'docs/devteam/scripts/devteam.mjs'), 'utf8');
+const body = (name) => { const at = KIT.indexOf(`\nfunction ${name}(`); assert.ok(at >= 0, `function ${name} found`); const end = KIT.indexOf('\nfunction ', at + 1); return KIT.slice(at, end < 0 ? undefined : end); };
+const MERGE_FNS = ['pinRecords', 'landRecords', 'cmdMerge'];
+const KNOB = /const ghMs = process\.env\.DEVTEAM_TEST \? Math\.trunc\(Number\(process\.env\.DEVTEAM_GH_TIMEOUT_MS\)\) : NaN;/g;
+
+test('K2 the bounds merge gives gh are pinned: 60 s for gh pr merge, 15 s for a read, and DEVTEAM_GH_TIMEOUT_MS read only under DEVTEAM_TEST, in each function that calls gh', () => {
+  for (const name of MERGE_FNS) {
+    const b = body(name);
+    assert.equal((b.match(KNOB) ?? []).length, 1, `${name}: the knob is read once, only under DEVTEAM_TEST`);
+    assert.equal((b.match(/process\.env\.DEVTEAM_GH_TIMEOUT_MS/g) ?? []).length, 1, `${name}: no other read of DEVTEAM_GH_TIMEOUT_MS`);
+    assert.equal((b.match(/const ghSet = Number\.isSafeInteger\(ghMs\) && ghMs > 0;/g) ?? []).length, 1, `${name}: only a positive whole number of ms counts`);
+    assert.equal((b.match(/const ghRead = \{ timeout: ghSet \? ghMs : 15000, killSignal: 'SIGKILL' \};/g) ?? []).length, 1, `${name}: a read's default is 15 s`);
+    const merges = (b.match(/const ghMerge = \{ timeout: ghSet \? ghMs : 60000, killSignal: 'SIGKILL' \};/g) ?? []).length;
+    assert.equal(merges, name === 'pinRecords' ? 0 : 1, `${name}: gh pr merge's default is 60 s`);
+    // and no other declaration (an inner function's own ghRead would shadow these: spec-1 F2)
+    assert.equal((b.match(/\b(const|let|var)\s+ghRead\b/g) ?? []).length, 1, `${name}: ghRead is declared once`);
+    assert.equal((b.match(/\b(const|let|var)\s+ghMerge\b/g) ?? []).length, merges, `${name}: ghMerge is declared at most once`);
+  }
+});
+
+test('K3 every gh call in pinRecords, landRecords and cmdMerge carries its bound', () => {
+  for (const name of MERGE_FNS) {
+    const calls = body(name).split('\n').filter((l) => /\.gh\(\[/.test(l));
+    assert.ok(calls.length > 0, `${name} calls gh`);
+    // as many bounds as calls on each line, so one bounded call can't cover an unbounded one beside it (spec-1 F2)
+    for (const l of calls) assert.equal((l.match(/\], (ghRead|ghMerge)\)/g) ?? []).length, (l.match(/\.gh\(\[/g) ?? []).length, `${name}: unbounded gh call: ${l.trim().slice(0, 120)}`);
+  }
 });
