@@ -5402,6 +5402,10 @@ function cmdStatus() {
     const shown = r.not_started && !held && !r.waiting ? '  [not started: no window or worktree]' : `  [${r.phase}${r.task ? ` ${r.task}` : ''}, ${r.minutes_silent}m${flag}]`;
     out(`${r.stage.padEnd(18)} ${r.id}${r.phase ? shown : ''}${r.records_landed ? `  [${RECORDS_ONLY_FIX(r.id)}]` : ''}`);
   }
+  // the owner's floor (kit-618): status only looks, so it releases no floor, though ownerLineOpen
+  // still clears both marks from a pane whose agent exited to a shell (spec, Readers that only look)
+  const pane = markedPane(runDir);
+  if (pane && ownerLineOpen(pane, { release: false })) out(`supervisor         ${pane}  [owner's line open]`);
   for (const [stage, v] of Object.entries(reviewStats().by_stage)) out(`review ${stage}: first-pass rejection ${v.rejected}/${v.first_passes}${v.last_7d?.first_passes ? `, last ${RECENT_DAYS} days ${v.last_7d.rejected}/${v.last_7d.first_passes}` : ''}`);
 }
 
