@@ -47,7 +47,7 @@ function plant(cwd, sha) {
   try { own = git(['-c', 'core.useReplaceRefs=false', 'show', `${sha}:marker.txt`], cwd); } catch {}
   assert.notEqual(own, 'planted');
 }
-// what a session can set: replace refs on, which beats --no-replace-objects (spec-1 F1)
+// what a session can set: replace refs on, which beats --no-replace-objects on older git (spec-1 F1)
 function replaceOn(cwd) {
   git(['config', 'core.useReplaceRefs', 'true'], cwd);
   assert.equal(git(['--no-replace-objects', 'config', '--get', 'core.useReplaceRefs'], cwd), 'true');
@@ -59,7 +59,8 @@ test('home: every checkout of a planted main holds the real tree', async (t) => 
   try {
     const real = markMain(old);
     plant(old, real);
-    assert.equal(git(['--no-replace-objects', 'show', `${real}:marker.txt`], old), 'planted', 'the flag alone loses to the config');
+    // whether --no-replace-objects alone loses to the config depends on git's version (it does on
+    // 2.39, not on 2.56); the command line's -c core.useReplaceRefs=false wins on both, so it isn't asserted
     const ticket = (id) => ok(old, ['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'chores', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: [`ch/${id}/**`], done_when: ['the tidy check passes in CI'] })], SUP);
     const wt = (name) => path.join(old, '.worktrees', name);
     for (const id of ['ch-01-a', 'ch-02-b', 'ch-03-c']) ticket(id);

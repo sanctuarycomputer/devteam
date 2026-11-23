@@ -94,7 +94,7 @@ test('box-pins changed --smoke removes a worktree an interrupted add left locked
   // a git on PATH whose worktree add makes the worktree, leaves it locked as an add cut short does,
   // and fails: the smoke dies (2), and its cleanup must still remove that worktree and its record
   const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
-  const shim = fakeBins('locked-git', { git: `if [ "$1" = worktree ] && [ "$2" = add ]; then "${realGit}" "$@" || exit 1; "${realGit}" worktree lock --reason initializing "$5" || exit 1; exit 1; fi\nexec "${realGit}" "$@"` });
+  const shim = fakeBins('locked-git', { git: `w=; if [ "$1" = worktree ] && [ "$2" = add ]; then w=$5; elif [ "$1" = -c ] && [ "$3" = worktree ] && [ "$4" = add ]; then w=$7; fi\nif [ -n "$w" ]; then "${realGit}" "$@" || exit 1; "${realGit}" worktree lock --reason initializing "$w" || exit 1; exit 1; fi\nexec "${realGit}" "$@"` });
   const s = smokeRun(['--since', 'v9.1.0'], { PATH: `${shim}${path.delimiter}${pinsEnv().PATH}` });
   assert.equal(s.r.status, 2, s.r.stderr + s.r.stdout);
   assert.equal(s.r.stdout, '');
