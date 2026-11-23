@@ -29034,7 +29034,16 @@ function cmdWait() {
     else {
       // main's copy of the log as it is now: a wait can outlast many moves of main
       logCache = null;
-      const owner = readLog().lines.filter((l) => l.by === 'owner').map((l) => ({ k: l.id, at: Date.parse(l.at) }));
+      // not the owner's turns routed to the responder, nor the thread line (new, or a reopen) whose
+      // first owner turn at or after it is (kit-104): those are the responder's, and an overdue one
+      // comes back as responder-overdue. A thread line read before its turn is written wakes once.
+      const ls = readLog().lines.filter((l) => l.by === 'owner');
+      const turnsOf = new Map();
+      for (const l of ls) if (l.type === 'turn' && typeof l.thread === 'string') (turnsOf.get(l.thread) ?? turnsOf.set(l.thread, []).get(l.thread)).push(l);
+      for (const us of turnsOf.values()) us.sort((a, b) => String(a.at).localeCompare(String(b.at)));
+      const opens = (l) => l.type === 'thread' && (l.op === 'new' || (l.op === 'set' && l.status === 'open'));
+      const responders = (l) => l.type === 'turn' ? l.routed_to === 'responder' : opens(l) && (turnsOf.get(l.id) ?? []).find((u) => u.at >= l.at)?.routed_to === 'responder';
+      const owner = ls.filter((l) => !responders(l)).map((l) => ({ k: l.id, at: Date.parse(l.at) }));
       const got = sub(['messages', '--open', '--to', 'supervisor', '--json']);
       const msgs = (got ?? []).map((m) => ({ k: `${m.id} [${m.kind}] from ${m.created_by}: ${String(m.text).slice(0, 160)}`, at: Date.parse(m.created_at) }));
       last = got ? { key, owner, msgs } : null;
