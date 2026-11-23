@@ -2428,10 +2428,26 @@ function logLineFor(fields, by, id, at = nowIso()) {
 // real shape (u-00000000-000000000-owner) where the log would mint one.
 const lineFits = (fields, by) => Buffer.byteLength(`${JSON.stringify(logLineFor(fields, by, `${SCHEMA['x-id'].prefix[fields.type]}-00000000-000000000-${by}`))}\n`) <= LINE_MAX;
 
+// A box's claim and invite links carry their token after the fragment (/auth/claim#<token>): one
+// pasted into a turn, an answer or a pane answer would sit in the log, in threads.jsonl and in a
+// pane for anyone on the box to reuse. The token goes, the link's shape stays (/auth/claim#…). The
+// rule covers every form the gateway would still route with the token intact: a query before the
+// fragment, %23 for #, and the whole link percent-encoded. It is cloud/gateway.mjs's CLAIM_LINK
+// byte for byte (test/org-access.invites.test.mjs compares them). A redacted link doesn't match, so
+// it is idempotent. Strings anywhere in an object or array, keys kept.
+function redactClaimLinks(v, depth = 0) {
+  const CLAIM_LINK = /((?:\/|%2F)auth(?:\/|%2F)claim(?:\?[^\s#"'<>`]*)?(?:#|%23))(?!…)[^\s"'<>`)\]}…]+/gi;
+  if (typeof v === 'string') return v.replace(CLAIM_LINK, '$1…');
+  if (!v || typeof v !== 'object' || depth >= 8) return v;
+  if (Array.isArray(v)) return v.map((x) => redactClaimLinks(x, depth + 1));
+  return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, redactClaimLinks(x, depth + 1)]));
+}
+
 // Append one object. Under the file's lock: catch a live file up with the durable copy if that is
 // ahead, drop a half-written last line, stamp a time after the file's last line (ids unique, lines
 // ordered even if the clock steps back), validate exactly what will be read back, write one line.
 function appendLog(fields, by = logWriter()) {
+  fields = redactClaimLinks(fields);
   const type = fields.type;
   // the supervisor's first line on a machine with no owner cursor would move the no-cursor floor past
   // what the owner wrote before it: pin the floor first (seedOwnerCursor)
@@ -10635,6 +10651,7 @@ function cmdThread() {
   // (typed into neither pane); never recorded as undelivered, since responder-overdue reaches the
   // supervisor once it is RESPONDER_OVERDUE_MS old.
   const deliver = (t, u, words, files, route = { to: 'supervisor' }) => {
+    words = redactClaimLinks(words);
     if (route.to === 'responder') {
       if (route.delivered === 'queued') return 'the responder is busy; it takes this next';
       const pane = responderWindow().target;
@@ -21401,9 +21418,22 @@ function operatorThreads(lines = operatorLines()) {
 // One line, whole: the store is shared by the hub's children and the operator's own commands.
 // Several lines (a thread and its first turn) go in one write, so a reader never sees the first
 // without the rest; and a thread with no turn yet is still a thread to every reader.
+// A claim link's token never reaches the store (redactClaimLinks). A box's gateway redacts a press
+// before it signs it, so its proof body is already clean; one from an older gateway isn't, and its
+// body is redacted too, which leaves that turn reading as unsigned: its signed bytes are gone.
 function operatorAppend(...os) {
   const at = nowIso();
-  const lines = os.map((o) => ({ v: 1, at, ...o }));
+  const clean = (o) => {
+    const c = { ...o };
+    for (const k of ['text', 'title', 'subject']) if (k in c) c[k] = redactClaimLinks(c[k]);
+    if (typeof c.proof?.body === 'string') {
+      const d = Buffer.from(c.proof.body, 'base64').toString('utf8');
+      const r = redactClaimLinks(d);
+      if (r !== d) c.proof = { ...c.proof, body: Buffer.from(r).toString('base64') };
+    }
+    return c;
+  };
+  const lines = os.map((o) => ({ v: 1, at, ...clean(o) }));
   fs.mkdirSync(operatorDir(), { recursive: true });
   fs.appendFileSync(operatorThreadsFile(), lines.map((l) => `${JSON.stringify(l)}\n`).join(''));
   return lines.length === 1 ? lines[0] : lines;

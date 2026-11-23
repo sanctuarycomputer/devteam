@@ -299,6 +299,21 @@ export function threadKey(store) {
 }
 // The headers a signed press carries: the route, when, a nonce, and the body's hash, signed. The
 // hub checks each within two minutes and takes each nonce once.
+// A box's claim and invite links carry their token after the fragment: one pasted into an operator
+// thread turn would reach the hub, be signed and kept, and sit in threads.jsonl for anyone on the box
+// to reuse. The token goes before the gateway signs the press; the link's shape stays
+// (/auth/claim#…). devteam.mjs's redactClaimLinks holds the same CLAIM_LINK line, byte for byte
+// (test/org-access.invites.test.mjs compares them), so a press redacted here is kept word for word
+// there and still reads as signed. Strings anywhere in an object or array, keys kept.
+// The preview the hub labels so is the supervisor's browser view: the owner's alone (kit-248).
+const BROWSER_VIEW = "Supervisor's browser";
+export function redactClaimLinks(v, depth = 0) {
+  const CLAIM_LINK = /((?:\/|%2F)auth(?:\/|%2F)claim(?:\?[^\s#"'<>`]*)?(?:#|%23))(?!…)[^\s"'<>`)\]}…]+/gi;
+  if (typeof v === 'string') return v.replace(CLAIM_LINK, '$1…');
+  if (!v || typeof v !== 'object' || depth >= 6) return v;
+  if (Array.isArray(v)) return v.map((x) => redactClaimLinks(x, depth + 1));
+  return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, redactClaimLinks(x, depth + 1)]));
+}
 export function hubSignature(privateKeyPem, route, body, ts = Date.now(), nonce = b64u(crypto.randomBytes(24))) {
   const msg = Buffer.from(`devteam-operator-post-v1\n${route}\n${ts}\n${nonce}\n${crypto.createHash('sha256').update(body).digest('hex')}`);
   return { 'x-devteam-gateway-ts': String(ts), 'x-devteam-gateway-nonce': nonce, 'x-devteam-gateway-sig': b64u(crypto.sign(null, msg, crypto.createPrivateKey(privateKeyPem))) };
@@ -1378,6 +1393,92 @@ export function createGateway(opts = {}) {
     return person && !isOwner(person) ? { inv, person } : null;
   };
 
+  // A method a new link added to someone who already had one: a notice in their row, shown once at
+  // their next sign-in with another method (never the added one's own, so whoever holds a leaked
+  // link can't spend the warning), and always in their own method list. The newest 20 are kept.
+  const NOTICES_KEPT = 20;
+  const withNotice = (row, n) => {
+    const all = [...(row.notices ?? []), n];
+    const added = all.filter((x) => x?.kind === 'method-added');
+    const drop = new Set(added.slice(0, Math.max(0, added.length - NOTICES_KEPT)));
+    return all.filter((x) => !drop.has(x));
+  };
+  const noticeOut = ({ kind, at, type, label }) => ({ kind, at, type, label });
+  const noticesOf = (s, person) => (person.id === null ? [] : ((s.people ?? []).find((p) => p.id === person.id)?.notices ?? []).filter((x) => x?.kind === 'method-added').map(noticeOut));
+
+  // --- the owner's People routes (kit-249's route contract): a refusal is { error, code } --------
+  const refuse = (res, status, code, error) => json(res, status, { error, code });
+  const INVITE_MS = 24 * 3600 * 1000;
+  const MAX_INVITES = 50;
+  const MAX_PEOPLE = 200;
+  const STALE = 'This changed since you opened it; reload';
+  // C0 and C1 controls, line and paragraph separators, bidi controls (as the kit's UNSAFE_TEXT)
+  const NAME_BAD = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
+  const liveInvites = (s) => (s.invites ?? []).filter((x) => x.expires > Date.now());
+  // The link is shown once; only the hash of its token is kept, as startFlow reads it.
+  const newInvite = (personId) => {
+    const token = b64u(crypto.randomBytes(32));
+    return { link: `${PUB}/auth/claim#${token}`, invite: { hash: b64u(sha256(token)), person: personId, expires: Date.now() + INVITE_MS } };
+  };
+  // Who may: the owner, signed in in the last five minutes. Asked before the body is read and again,
+  // of the state as it is, after (stillHeld): a reclaim or a removal meanwhile wins.
+  const ownerGuard = (res, who) => {
+    if (!isOwner(who.person)) return refuse(res, 403, 'not-allowed', 'Only the box\'s owner can do this.'), false;
+    if (!fresh(who.session)) return refuse(res, 403, 'fresh-sign-in', 'Sign in again to change who is on this box (reload this page).'), false;
+    return true;
+  };
+  const peopleBody = async (req, res, session) => {
+    const body = await readJson(req, 4096);
+    const s = store.load();
+    const held = stillHeld(s, session);
+    if (!held) return json(res, 401, { error: 'your session ended; sign in again' }), null;
+    if (!ownerGuard(res, held)) return null;
+    if (!isObject(body)) return refuse(res, 400, 'bad-request', 'bad request'), null;
+    return { s, body };
+  };
+  const inviteRoute = async (req, res, who) => {
+    if (!ownerGuard(res, who)) return;
+    const got = await peopleBody(req, res, who.session);
+    if (!got) return;
+    const { s, body } = got;
+    if (body.level !== undefined && body.level !== 'full') {
+      return body.level === 'view' ? refuse(res, 400, 'view-not-yet', 'View arrives in a later release; invite at Full for now.') : refuse(res, 400, 'bad-request', 'a level is full');
+    }
+    const name = typeof body.name === 'string' ? body.name.normalize('NFC').trim() : null;
+    if (!name || [...name].length > 60 || NAME_BAD.test(name)) return refuse(res, 400, 'bad-name', 'A name is one line of 1 to 60 characters.');
+    // a file from before people gets its owner row here, stamped as start stamps it: a people list
+    // with no stamp reads, at the next start, as an older gateway's change and is reset
+    const base = s.people ? s : stamped(withOwner(s));
+    const key = name.toLowerCase();
+    if (base.people.some((p) => String(p.name).normalize('NFC').toLowerCase() === key)) return refuse(res, 400, 'name-taken', 'Someone on this box already has that name.');
+    const open = liveInvites(base);
+    if (open.length >= MAX_INVITES || base.people.length >= MAX_PEOPLE) return refuse(res, 409, 'too-many', `A box holds ${MAX_PEOPLE} people and ${MAX_INVITES} open invites; remove one first.`);
+    const iso = new Date().toISOString();
+    const row = { id: newId('p-'), name, role: 'member', level: 'full', methods: [], pushSubs: [], added_at: iso, last_seen: null, notices: [], rev: 1 };
+    const { link, invite } = newInvite(row.id);
+    store.save({ ...base, people: [...base.people, row], invites: [...open, invite] });
+    log(`invited "${name}"`);
+    return json(res, 200, { person: { id: row.id, rev: row.rev }, link, expires: invite.expires });
+  };
+  // A new link for someone already here: their earlier one dies (one live link per person); their
+  // row, level and rev are as they were.
+  const relinkRoute = async (req, res, who) => {
+    if (!ownerGuard(res, who)) return;
+    const got = await peopleBody(req, res, who.session);
+    if (!got) return;
+    const { s, body } = got;
+    const row = typeof body.id === 'string' ? (s.people ?? []).find((p) => p.id === body.id) : null;
+    if (!row) return refuse(res, 409, 'stale', STALE);
+    if (isOwner(row)) return refuse(res, 403, 'not-allowed', 'The owner gets back in with devteam-reclaim, in a shell on the box.');
+    if (body.rev !== row.rev) return refuse(res, 409, 'stale', STALE);
+    const others = liveInvites(s).filter((x) => x.person !== row.id);
+    if (others.length >= MAX_INVITES) return refuse(res, 409, 'too-many', `A box holds ${MAX_INVITES} open invites; remove one first.`);
+    const { link, invite } = newInvite(row.id);
+    store.save({ ...s, invites: [...others, invite] });
+    log(`a new link for "${row.name}"`);
+    return json(res, 200, { link, expires: invite.expires });
+  };
+
   // Start, guards in the spec's order. `who`: the request's session (sessionOf), for an add.
   const startFlow = async (req, type, purpose, body, who) => {
     const row = METHODS.get(type);
@@ -1482,13 +1583,15 @@ export function createGateway(opts = {}) {
       // another finish of this state may have landed while this one's finish was awaited
       if (usedSignIns.has(state)) return no(403, START_AGAIN);
       if (!holder) return no(403, 'no one on this box signs in with that');
-      const people = s.people?.map((x) => (x.id !== holder.person.id ? x : { ...x, last_seen: iso, methods: holder.top ? x.methods : x.methods.map((m) => (m.id === holder.method.id ? { ...m, data, last_used: iso } : m)) }));
+      const usedId = holder.top ? key : holder.method.id;
+      const shown = ((s.people ?? []).find((x) => x.id === holder.person.id)?.notices ?? []).filter((n) => n?.kind === 'method-added' && !n.shown_at && n.method !== usedId);
+      const people = s.people?.map((x) => (x.id !== holder.person.id ? x : { ...x, last_seen: iso, methods: holder.top ? x.methods : x.methods.map((m) => (m.id === holder.method.id ? { ...m, data, last_used: iso } : m)), ...(shown.length ? { notices: x.notices.map((n) => (shown.includes(n) ? { ...n, shown_at: iso } : n)) } : {}) }));
       // a top-level passkey takes back only its counter and last use, as today
       const used = { ...s, ...(holder.top ? { passkeys: s.passkeys.map((x) => (x.id === key ? { ...x, signCount: data?.signCount, usedAt: iso } : x)) } : {}), ...(people ? { people } : {}) };
-      const { next, set } = sessionFor(used, holder.person, holder.top ? key : holder.method.id);
+      const { next, set } = sessionFor(used, holder.person, usedId);
       store.save(next);
       spendSignIn(state);
-      return { status: 200, body: { ok: true }, cookies: [set, ...dropped] };
+      return { status: 200, body: { ok: true, ...(shown.length ? { notices: shown.map(noticeOut) } : {}) }, cookies: [set, ...dropped] };
     }
     if (holder) return no(400, type === 'passkey' ? 'that passkey is already registered' : 'that sign-in method is already registered', after);
     const owner = p === 'claim' || isOwner(person);
@@ -1515,7 +1618,10 @@ export function createGateway(opts = {}) {
       return { status: 200, body: { ok: true }, cookies: dropped };
     }
     // an invite: the method to its person, the invite gone in the same write, and a session
-    const { next, set } = sessionFor({ ...addTo(s), invites: (s.invites ?? []).filter((x) => x.hash !== rec.invite) }, person, m.id);
+    const had = (person.methods ?? []).length > 0;
+    const added = addTo(s);
+    const noted = had ? { ...added, people: added.people.map((x) => (x.id !== person.id ? x : { ...x, notices: withNotice(x, { kind: 'method-added', at: iso, type, label, method: m.id, shown_at: null }) })) } : added;
+    const { next, set } = sessionFor({ ...noted, invites: (s.invites ?? []).filter((x) => x.hash !== rec.invite) }, person, m.id);
     store.save(next);
     log(`an invite added a ${type} sign-in method "${label}"`);
     return { status: 200, body: { ok: true }, cookies: [set, ...dropped] };
@@ -1781,7 +1887,7 @@ export function createGateway(opts = {}) {
   // hub, a hub on a kit from before these threads, something else on the port) is a 502.
   const operatorThreads = async (req, res, action) => {
     let body = null;
-    if (action) { body = await readJson(req, 20000); if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'missing or invalid fields' }); }
+    if (action) { body = await readJson(req, 20000); if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'missing or invalid fields' }); body = redactClaimLinks(body); }
     const r = await hubAsk(action ? 'POST' : 'GET', action ? `/operator/${action}` : '/operator/threads', body);
     const answered = r && r.json && typeof r.json === 'object' && !Array.isArray(r.json);
     if (answered && r.status === 200) return json(res, 200, r.json);
@@ -1795,6 +1901,7 @@ export function createGateway(opts = {}) {
   // hub once more, with every waiter sharing one read, so no anonymous request can make it poll.
   const ownPort = opts.port ?? null;
   let previews = new Map();
+  let browserPorts = new Set();
   // Each name the list gives to the ports that hold it (with each one's root and whether its kit has
   // viewers, as the hub's list last said, every poll, PUSH_POLL_MS: the owner wrapper's choice is a
   // lookup in it, so no visit asks anything, spec §8); a port's origin only for a name one port holds;
@@ -1817,6 +1924,7 @@ export function createGateway(opts = {}) {
     projects = names;
     portHost = new Map([...names].filter(([, c]) => c.length === 1).map(([n, c]) => [c[0].port, projectOrigin(n)]));
     previews = previewLinks(ok, BLOCK, ownPort, ttydPort);
+    browserPorts = new Set(ok.flatMap((x) => (Array.isArray(x?.previews) ? x.previews : [])).filter((p) => p?.label === BROWSER_VIEW && Number.isInteger(p.port)).map((p) => p.port));
     // a preview whose generated name is a project's is not served under it
     for (const n of names.keys()) previews.delete(n);
     listRead = Array.isArray(list);
@@ -2735,7 +2843,17 @@ export function createGateway(opts = {}) {
           if (step === 'start') return flowAnswer(res, await startFlow(req, type, body?.purpose, body, claimed ? sessionOf(req) : null));
           return flowAnswer(res, await finishFlow(req, type, body?.purpose, body, 'POST'));
         }
-        if (p === '/auth/claim' && req.method === 'GET') return claimed ? redirect(res, '/auth/login') : page(res, PAGES.claim(PUB));
+        // on a claimed box a claim link is an invite's: its page reads the token from the fragment
+        if (p === '/auth/claim' && req.method === 'GET') return page(res, claimed ? PAGES.invite(PUB) : PAGES.claim(PUB));
+        // What the invite page shows before the passkey: whose invite, at what level, and whether it
+        // adds a method to someone already here. Reads only; every dead token gets the same answer.
+        if (p === '/auth/claim/invite' && req.method === 'POST') {
+          const body = await readJson(req, 4096);
+          const s2 = store.load();
+          const found = s2.passkeys.length && typeof body?.token === 'string' ? inviteOf(s2, b64u(sha256(body.token))) : null;
+          if (!found) return json(res, 403, { error: INVITE_GONE });
+          return json(res, 200, { name: found.person.name, level: found.person.level, again: (found.person.methods ?? []).length > 0, expires: found.inv.expires });
+        }
         // Today's passkey routes are aliases of the passkey row, each naming its purpose (today's
         // pages send none). The claim's keep today's 405 and 409 before reading the body.
         if (p === '/auth/claim/options' || p === '/auth/claim/verify') {
@@ -2781,6 +2899,7 @@ export function createGateway(opts = {}) {
         port = found.port ?? null;
         pv = found.preview ?? null;
       }
+      if (pv && !isOwner(person) && ownerOnlyPreview(pv)) return send(res, 403, 'text/plain; charset=utf-8', 'Only the box\'s owner can open the supervisor\'s browser.');
       // A preview's lens: the gateway's own page, after the session check, never the app's (spec §7).
       // Static, so it asks the hub nothing; any other method or path there is the app's, as before.
       if (pv && req.method === 'GET' && p === '/.devteam/lens') return send(res, 200, 'text/html; charset=utf-8', PREVIEW_LENS, { 'content-security-policy': lensCsp(pv), 'referrer-policy': 'no-referrer' });
@@ -2819,8 +2938,10 @@ export function createGateway(opts = {}) {
           store.save({ ...now, sessions: now.sessions.filter((x) => x.hash !== session.hash), ...(now.peopleSessions ? { peopleSessions: now.peopleSessions.filter((x) => x.hash !== session.hash) } : {}) });
           return json(res, 200, { ok: true }, { 'set-cookie': cookie('', 0) });
         }
+        if (p === '/auth/people/invite' && req.method === 'POST') return await inviteRoute(req, res, who);
+        if (p === '/auth/people/relink' && req.method === 'POST') return await relinkRoute(req, res, who);
         // Each of these acts on the signed-in person's own methods only (ownMethods, removeMethod).
-        if (p === '/auth/method/list' && req.method === 'GET') return json(res, 200, { methods: ownMethods(store.load(), person) });
+        if (p === '/auth/method/list' && req.method === 'GET') { const now = store.load(); return json(res, 200, { methods: ownMethods(now, person), notices: noticesOf(now, person) }); }
         if (p === '/auth/passkeys' && req.method === 'GET') return fresh(session) ? page(res, PAGES.passkeys(ownMethods(store.load(), person).filter((m) => m.type === 'passkey').map((m) => ({ id: m.id, name: m.label, createdAt: m.added_at })), PUB)) : redirect(res, loginAt(`${PUB}/auth/passkeys`));
         if ((p.startsWith('/auth/passkeys/') || p === '/auth/method/remove') && !fresh(session)) return json(res, 403, { error: 'sign in again to change passkeys (reload this page)' });
         // the passkey row's add, after the gate and the fresh rule above (today's place and answers);
@@ -3047,10 +3168,20 @@ export function createGateway(opts = {}) {
   // a miss: the page that opened the socket already made one.
   const PREVIEW_SOCKETS = 32;
   const previewSockets = new Map();
+  // The supervisor's browser view (the preview the hub labels so): whoever opens it drives the
+  // owner's signed-in browser, so it is the owner's alone, under any name its port is listed by.
+  const ownerOnlyPreview = (name) => {
+    const link = previews.get(name);
+    if (!link || link.ambiguous) return false;
+    return browserPorts.has(link.port);
+  };
   const previewUpgrade = async (req, socket, head, name, refuse) => {
     const own = previewOrigin(name);
     if (req.headers.origin !== own) return refuse(403, 'Forbidden');
-    try { if (!store.load().passkeys.length || !sessionOf(req)) return refuse(401, 'Unauthorized'); } catch { return refuse(503, 'Service Unavailable'); }
+    let who = null;
+    try { who = store.load().passkeys.length ? sessionOf(req) : null; } catch { return refuse(503, 'Service Unavailable'); }
+    if (!who) return refuse(401, 'Unauthorized');
+    if (!isOwner(who.person) && ownerOnlyPreview(name)) return refuse(403, 'Forbidden');
     if (!req.url.startsWith('/') || req.url.startsWith('//')) return refuse(400, 'Bad Request');
     const link = previews.get(name);
     if (!link || link.ambiguous) return refuse(503, 'Service Unavailable');
@@ -3223,6 +3354,32 @@ const PAGES = {
   previewAmbiguous: (name, cs) => `${doc('Preview', `${PREVIEW_REFRESH}<h1>Two instances offer a preview named ${esc(name)}</h1><p>${cs.map((c) => `${esc(c.project)} at ${esc(c.root)} (port ${esc(c.port)})`).join(' and ')}. The box serves neither until one stops; run <code>devteam.mjs preview stop ${esc(name)}</code> in the one that shouldn't. This page retries every 5 s.</p>`)}`,
   // A preview command can be a second behind the link: the page retries for a few minutes, not forever.
   previewUnknown: (name, names, originOf) => `${doc('Preview', `${RETRY_UNLISTED}<h1>No preview named ${esc(name)} on this box</h1><p>${names.length ? `Offered now: ${names.map((n) => `<a href="${esc(originOf(n))}/">${esc(n)}</a>`).join(', ')}.` : 'Nothing is offered right now.'} This page retries for a few minutes; a <code>preview</code> command takes a moment to show up.</p>`)}`,
+  // An invite's page: whose it is (POST /auth/claim/invite), then the passkey row's flow, purpose
+  // invite. Every name and level is set as text.
+  invite: (box) => `${doc('Join this box', `<h1 id="h">Join this devteam box</h1><p id="who"></p><p id="how">Make a passkey to join. Your password manager (1Password, iCloud Keychain…) saves it.</p><input id="name" placeholder="Name this passkey (optional)" maxlength="60"><p><button id="go">Create passkey and join</button></p><p id="err"></p><p id="after" hidden><a href="${esc(box)}/">Open the hub</a></p><p id="signin" hidden><a href="/auth/login">Already have a sign-in method? Sign in</a></p>`)}
+<script>
+const token = decodeURIComponent(location.hash.slice(1));
+history.replaceState(null, '', location.pathname);
+const el = (id) => document.getElementById(id);
+const host = ${jsonIn(new URL(box).host)};
+const hide = (...ids) => { for (const id of ids) el(id).hidden = true; };
+const dead = () => { el('h').textContent = 'This invite can\\'t be used'; el('who').textContent = 'It has expired or was already used. Each link works once, for 24 hours. Ask the person who sent it for a new one.'; hide('how', 'name', 'go'); el('signin').hidden = false; };
+let again = false;
+if (!token) location.replace('/auth/login');
+else post('/auth/claim/invite', { token }).then((i) => {
+  again = i.again === true;
+  if (again) { el('h').textContent = 'Add a sign-in method to your account'; el('who').textContent = 'This link adds a sign-in method (a passkey) to ' + i.name + '\\'s account on ' + host + '. Your other sign-in methods keep working.'; el('how').textContent = ''; el('go').textContent = 'Create passkey'; }
+  else el('who').textContent = 'You\\'re invited to ' + host + ', ' + i.name + ', as ' + (i.level === 'full' ? 'Full: you can do everything on the box except manage people.' : String(i.level) + '.');
+}, (e) => (/expired or was used/.test(e.message) ? dead() : err(e.message + ' Reload to try again.')));
+el('go').onclick = run(async () => {
+  try { await create('/auth/method/passkey/start', '/auth/method/passkey/finish', { purpose: 'invite', token, name: el('name').value }); }
+  catch (e) { if (/expired or was used/.test(e.message)) return dead(); throw e; }
+  el('h').textContent = 'You\\'re in';
+  el('who').textContent = again ? 'The passkey is added. Sign in with it from now on.' : 'Your password manager saved the passkey. Use it to sign in here from now on.';
+  hide('how', 'name', 'go');
+  el('after').hidden = false;
+});
+</script></body></html>`,
   claim: (box) => `${doc('Claim this box', `<h1>Claim this devteam box</h1><p>Make a passkey for this box. Your password manager (1Password, iCloud Keychain…) saves it; from then on only a passkey made here opens the box.</p><input id="name" placeholder="Name this passkey (optional)" maxlength="60"><p><button id="go">Create passkey and claim</button></p><p id="err"></p>`)}
 <script>
 const token = decodeURIComponent(location.hash.slice(1));
@@ -3230,8 +3387,27 @@ history.replaceState(null, '', location.pathname);
 if (!token) err('This link has no claim token. Use the full link from the box\\'s logs (it ends in #…).');
 document.getElementById('go').onclick = run(async () => { await create('/auth/claim/options', '/auth/claim/verify', { token, name: document.getElementById('name').value }); location.replace(${jsonIn(`${box}/`)}); });
 </script></body></html>`,
-  login: (next) => `${doc('Sign in', '<h1>devteam</h1><p>Sign in with this box\'s passkey.</p><p><button id="go" autofocus>Sign in with a passkey</button></p><p id="err"></p>')}
-<script>const next = ${jsonIn(next)}; document.getElementById('go').onclick = run(async () => { await signIn(); location.replace(next); });</script></body></html>`,
+  login: (next) => `${doc('Sign in', '<h1>devteam</h1><p>Sign in with this box\'s passkey.</p><p><button id="go" autofocus>Sign in with a passkey</button></p><p id="err"></p><div id="notes" hidden></div>')}
+<script>const next = ${jsonIn(next)};
+// a notice the sign-in hands back is shown, as text, before going on
+const day = (at) => { const d = new Date(at); return Number.isNaN(d.getTime()) ? 'a recent day' : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }); };
+document.getElementById('go').onclick = run(async () => {
+  const j = await signIn();
+  const ns = Array.isArray(j?.notices) ? j.notices.filter((n) => n && n.kind === 'method-added') : [];
+  if (!ns.length) return location.replace(next);
+  const box = document.getElementById('notes');
+  for (const n of ns) {
+    const p = document.createElement('p');
+    p.textContent = 'A sign-in method (a ' + String(n.type) + ') was added to your account on ' + day(n.at) + ', from a new link the box\\'s owner sent. If you didn\\'t ask for one, tell them.' + (n.label ? ' It is named "' + String(n.label) + '".' : '');
+    box.append(p);
+  }
+  const ok = document.createElement('button');
+  ok.textContent = 'OK';
+  ok.onclick = () => location.replace(next);
+  box.append(ok);
+  box.hidden = false;
+  document.getElementById('go').hidden = true;
+});</script></body></html>`,
   unclaimed: () => `${doc('Unclaimed', '<h1>This box is unclaimed</h1><p>Open the claim link from the box\'s logs (it ends in <code>/auth/claim#…</code>). Lost it? In a shell on the box, run <code>devteam-reclaim</code>.</p>')}</body></html>`,
   passkeys: (list, box) => `${doc('Passkeys', `<h1>Passkeys</h1><p>Any of these opens the box. Add one for another device or password manager; keep at least one. Removing one signs out every other session.</p><ul>${list.map((p) => `<li><span>${esc(p.name)} <small style="color:var(--fg2)">${esc(p.createdAt.slice(0, 10))}</small></span>${list.length > 1 ? `<button class="quiet" data-id="${esc(p.id)}">Remove</button>` : ''}</li>`).join('')}</ul><input id="name" placeholder="Name the new passkey" maxlength="60"><p><button id="add">Add a passkey</button> <button class="quiet" id="out">Sign out</button> <a href="${esc(`${box}/`)}">Back to the hub</a></p><p id="err"></p>`)}
 <script>
