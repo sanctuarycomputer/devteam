@@ -7066,20 +7066,23 @@ function worldFileFails(base, sha, approved, act, what = 'merge --approved') {
   const tree = [];
   for (let i = 0; i + 1 < parts.length; i += 2) tree.push({ verb: parts[i] === 'A' ? 'adds' : 'changes', f: parts[i + 1] });
   // A path as a disk that folds names reads it, part by part: Unicode compatibility normalisation
-  // (an NFD spelling is the NFC one, and ſ is s), lower case, and trailing dots and spaces dropped
-  // (as Windows drops them). It folds more than any one disk does; a stray path it catches is only
-  // refused.
-  const fold = (p) => p.split('/').map((s) => s.normalize('NFKC').toLowerCase().normalize('NFKC').replace(/[. ]+$/, '')).join('/');
+  // (an NFD spelling is the NFC one, and ſ is s), upper case then lower case (NTFS upper-cases, so
+  // a dotless ı is i), default-ignorable code points dropped (all of those HFS+ ignores, such as
+  // U+200C, and more, such as a soft hyphen), NFKC again (a mark left beside its letter composes),
+  // and then trailing dots and spaces dropped (as Windows drops them). It folds more than any one
+  // disk does; a stray path it catches is only refused.
+  const fold = (p) => p.split('/').map((s) => s.normalize('NFKC').toUpperCase().toLowerCase().replace(/\p{Default_Ignorable_Code_Point}/gu, '').normalize('NFKC').replace(/[. ]+$/, '')).join('/');
   // f is at, or inside the folder at; twin: such a disk puts f at at, or in it, where git doesn't.
   const under = (f, at) => f === at || f.startsWith(`${at}/`);
   const twin = (f, at) => under(fold(f), fold(at)) && !under(f, at);
   const says = ({ verb, f }, at) => `${verb} ${f}, ${fold(f) === fold(at) ? 'which' : 'in a folder'} a disk that ignores case can't tell from ${at}`;
   // a twin of an owner file is named with that file (below); a twin of a folder on their path (the
-  // project folder, or one above it), at the deepest folder it folds into. Only an added path: one
-  // already on main in such a folder is no owner file, so a PR may still change it.
+  // project folder, or one above it), at the deepest folder it folds into: a path the PR adds, or
+  // one an older kit let onto main that it changes (or the twin itself, repointed). Removing it is
+  // the fix, and isn't listed.
   const owned = worldFileFails.files().map((w) => w.rel);
   const folders = [...new Set(owned.flatMap((r) => r.split('/').slice(0, -1).map((_, i, a) => a.slice(0, i + 1).join('/'))))].sort((a, b) => b.length - a.length);
-  const inFolder = tree.filter((t) => t.verb === 'adds' && !owned.some((r) => twin(t.f, r))).flatMap((t) => { const at = folders.find((d) => under(fold(t.f), fold(d))); return at && twin(t.f, at) ? [says(t, at)] : []; });
+  const inFolder = tree.filter((t) => !owned.some((r) => twin(t.f, r))).flatMap((t) => { const at = folders.find((d) => under(fold(t.f), fold(d))); return at && twin(t.f, at) ? [says(t, at)] : []; });
   if (inFolder.length) fails.push(`${inFolder.join('; ')}: the owner's files are read in ${projectRel}, and a twin of a folder on their path can put other files there; remove it`);
   // A plain file, whatever the owner answered: a symlink's blob is the path it points at, so the
   // text read through it changes with no change here; a submodule or a folder pins no text at all.
@@ -26370,7 +26373,7 @@ const recurringRunDue = Object.freeze({
   results(name) {
     return logObjects('observation')
       .filter((o) => o.kind === 'recurring-run' && o.subject === `recurring:${name}` && o.detector === 'recurring' && o.created_by === 'supervisor' && ['pass', 'fail', 'error'].includes(o.run?.status) && typeof o.run.slot === 'string')
-      .map((o) => ({ slot: o.run.slot, at: new Date(Date.parse(o.created_at) - (Number.isFinite(o.run.seconds) && o.run.seconds > 0 ? o.run.seconds * 1000 : 0)).toISOString() }));
+      .map((o) => ({ slot: o.run.slot, at: new Date(recurringFailures.runStart(o.created_at, o.run.seconds)).toISOString() }));
   },
   // the entry's landings: each merge-chore act citing an answered recurring-edit question that shows
   // this name, oldest first; main's entry when the last of them isn't it, at main's last commit to the file
@@ -26649,6 +26652,15 @@ const recurringRunDue = Object.freeze({
 // gives is ISO to the second, as the dashboard contract has them.
 const recurringFailures = Object.freeze({
   isoSec: (t) => `${new Date(typeof t === 'number' ? t : Date.parse(t)).toISOString().slice(0, 19)}Z`,
+  // a run's start, in ms: its line's time less its seconds (the runner logs at the end); a seconds
+  // that isn't a positive number, or would put the start before 1970 (no date, or one the
+  // contract's times can't show), is ignored as a duration, and the start is the line's time (kit-781)
+  runStart(createdAt, seconds) {
+    const t = Date.parse(createdAt);
+    if (!(Number.isFinite(seconds) && seconds > 0)) return t;
+    const start = t - seconds * 1000;
+    return start >= 0 ? start : t;
+  },
   counts: (o) => o?.created_by === 'supervisor' && o?.detector === 'recurring',
   failAfter: (entry) => (Number.isInteger(entry?.fail_after) ? entry.fail_after : 1),
   // the answered landings that show this name, oldest first (a stop shows it as null)
@@ -26693,7 +26705,7 @@ const recurringFailures = Object.freeze({
       if (o.kind !== 'recurring-run' || o.subject !== `recurring:${name}` || !RF.counts(o)) continue;
       const r = o.run;
       if (!r || !['pass', 'fail', 'error'].includes(r.status) || typeof r.slot !== 'string' || !Number.isFinite(Date.parse(r.slot))) continue;
-      const ms = Date.parse(o.created_at) - (Number.isFinite(r.seconds) && r.seconds > 0 ? r.seconds * 1000 : 0);
+      const ms = RF.runStart(o.created_at, r.seconds);
       if (!(ms >= floor)) continue;
       const cur = first.get(r.slot);
       if (!cur || ms < cur.ms) first.set(r.slot, { ms, id: o.id, status: r.status, slot: r.slot, seconds: Number.isFinite(r.seconds) ? r.seconds : null, excerpt: typeof r.excerpt === 'string' ? r.excerpt : null });
@@ -29217,7 +29229,7 @@ function peekView(kind, id) {
     const STATUSES = ['pass', 'fail', 'error', 'started', 'done', 'nothing', 'abandoned'];
     const runs = logObjects('observation')
       .filter((o) => o.kind === 'recurring-run' && o.subject === `recurring:${id}` && RF.counts(o) && STATUSES.includes(o.run?.status) && typeof o.run.slot === 'string' && Number.isFinite(Date.parse(o.run.slot)) && Number.isFinite(Date.parse(o.created_at)))
-      .map((o) => ({ o, ms: Date.parse(o.created_at) - (Number.isFinite(o.run.seconds) && o.run.seconds > 0 ? o.run.seconds * 1000 : 0) }))
+      .map((o) => ({ o, ms: RF.runStart(o.created_at, o.run.seconds) }))
       .sort((a, b) => b.ms - a.ms)
       .slice(0, 20)
       .map(({ o, ms }) => ({ status: o.run.status, at: RF.isoSec(ms), slot: RF.isoSec(o.run.slot), seconds: Number.isFinite(o.run.seconds) ? o.run.seconds : null, excerpt: typeof o.run.excerpt === 'string' ? o.run.excerpt.slice(-200) : null, ref: typeof o.run.ref === 'string' && o.run.ref ? o.run.ref : null }));
