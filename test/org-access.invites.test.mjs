@@ -197,6 +197,62 @@ async function signIn(gw, key) {
 
 // --- A2: the invite --------------------------------------------------------------------------------
 
+test('org-access A2: the owner makes an invite: a link shown once, only its hash kept, for 24 hours, a Full member row', async () => {
+  const { gw, owner } = await setup('make');
+  try {
+    const before = Date.now();
+    const r = await owner.post('/auth/people/invite', { name: 'Bea', level: 'full' });
+    ok(r, 'invite');
+    assert.match(r.json.link, new RegExp(`^${gw.publicUrl}/auth/claim#[A-Za-z0-9_-]{43}$`), 'the link is the box\'s claim page with a token');
+    const tok = tokenOf(r.json.link);
+    const s = gw.state();
+    const bea = s.people.find((p) => p.name === 'Bea');
+    assert.ok(bea, 'Bea has a row');
+    assert.deepEqual({ role: bea.role, level: bea.level, methods: bea.methods, rev: bea.rev }, { role: 'member', level: 'full', methods: [], rev: 1 });
+    assert.deepEqual(r.json.person, { id: bea.id, rev: 1 });
+    assert.equal(s.invites.length, 1);
+    assert.deepEqual(Object.keys(s.invites[0]).sort(), ['expires', 'hash', 'person']);
+    assert.equal(s.invites[0].hash, u(sha(tok)), 'the hash as kit-254 reads it');
+    assert.equal(s.invites[0].person, bea.id);
+    assert.equal(r.json.expires, s.invites[0].expires);
+    assert.ok(s.invites[0].expires >= before + DAY && s.invites[0].expires <= Date.now() + DAY, 'expires in 24 hours, epoch ms');
+    assert.ok(!fs.readFileSync(gw.file, 'utf8').includes(tok), 'the token is nowhere in the state');
+    assert.ok(!gw.logs.join('\n').includes(tok), 'nor in the gateway\'s log');
+    // a second invite makes a second person and link, never the first's again
+    const r2 = await owner.post('/auth/people/invite', { name: 'Cy' });
+    ok(r2, 'a level left out is Full');
+    assert.notEqual(tokenOf(r2.json.link), tok);
+    assert.equal(rowOf(gw, r2.json.person.id).level, 'full');
+  } finally { await gw.close(); }
+});
+
+test('org-access A2: only the owner, signed in within five minutes, makes an invite, with a name that is theirs alone', async () => {
+  const { gw, owner, ana } = await setup('who');
+  try {
+    const before = JSON.stringify(gw.state());
+    assert.equal((await gw.raw('POST', '/auth/people/invite', { body: { name: 'Bea' } })).status, 401, 'signed out');
+    const anaB = browser(gw, { session: mintSession(gw, ana.id, ana.methods[0].id) });
+    const mid = JSON.stringify(gw.state());
+    refusedAs(await anaB.post('/auth/people/invite', { name: 'Bea' }), 403, 'not-allowed', 'a Full member');
+    for (const [body, code, what] of [
+      [{ name: '' }, 'bad-name', 'an empty name'],
+      [{ name: '   ' }, 'bad-name', 'a blank name'],
+      [{ name: 'x'.repeat(61) }, 'bad-name', 'over 60 characters'],
+      [{ name: 'two\nlines' }, 'bad-name', 'two lines'],
+      [{ name: 'Ana\u202egnp.exe' }, 'bad-name', 'a bidi control'],
+      [{ name: 7 }, 'bad-name', 'not a string'],
+      [{ name: 'ana' }, 'name-taken', 'Ana\'s name, another case'],
+      [{ name: 'OWNER' }, 'name-taken', 'the owner\'s row\'s name'],
+    ]) refusedAs(await owner.post('/auth/people/invite', body), 400, code, what);
+    refusedAs(await owner.post('/auth/people/invite', [1]), 400, 'bad-request', 'a body that isn\'t an object');
+    assert.equal(JSON.stringify(gw.state()), mid, 'none of those wrote anything');
+    ageOwner(gw, owner, 6 * 60 * 1000);
+    refusedAs(await owner.post('/auth/people/invite', { name: 'Bea' }), 403, 'fresh-sign-in', 'the owner, signed in six minutes ago');
+    assert.equal(gw.state().people.some((p) => p.name === 'Bea'), false);
+    assert.ok(before);
+  } finally { await gw.close(); }
+});
+
 test('org-access A2: a claim link in a thread turn, answer or pane answer has its token replaced before the log, threads.jsonl or a pane', { skip: hasTmux ? false : 'no tmux' }, async (t) => {
   const F = threadsFixture('invites-redact');
   t.after(() => F.done());
@@ -251,6 +307,18 @@ test('org-access A2: a claim link in a thread turn, answer or pane answer has it
   });
 });
 
+test('org-access A2: invites and people stop at their caps', async () => {
+  const { gw, owner, ana } = await setup('caps');
+  try {
+    const s = gw.state();
+    const far = Date.now() + DAY;
+    gw.write({ ...s, invites: Array.from({ length: 50 }, () => ({ hash: u(sha(crypto.randomBytes(32))), person: ana.id, expires: far })) });
+    refusedAs(await owner.post('/auth/people/invite', { name: 'Bea' }), 409, 'too-many', '50 outstanding invites');
+    gw.write({ ...s, invites: [], people: [...s.people, ...Array.from({ length: 198 }, (_, i) => ({ id: rid('p-'), name: `P${i}`, role: 'member', level: 'full', methods: [], pushSubs: [], added_at: new Date().toISOString(), last_seen: null, notices: [], rev: 1 }))] });
+    refusedAs(await owner.post('/auth/people/invite', { name: 'Bea' }), 409, 'too-many', '200 people');
+  } finally { await gw.close(); }
+});
+
 test('org-access A2: an older gateway\'s raw press leaves no token in threads.jsonl, proof included', async () => {
   const tok = u(crypto.randomBytes(32));
   const M = machine({ box: true, starts: false });
@@ -263,3 +331,67 @@ test('org-access A2: an older gateway\'s raw press leaves no token in threads.js
   assert.deepEqual(M.list()[0].turns.map((x) => x.signed), [false], 'and that turn reads as unsigned');
 });
 
+// --- A4: a new link ---------------------------------------------------------------------------------
+
+test('org-access A4: a new link adds a sign-in method to someone who joined and keeps the others', async () => {
+  const { gw, owner, ana, anaKey } = await setup('relink');
+  try {
+    const first = await owner.post('/auth/people/relink', { id: ana.id, rev: 1 });
+    ok(first, 'relink');
+    assert.deepEqual(Object.keys(first.json).sort(), ['expires', 'link']);
+    assert.match(first.json.link, new RegExp(`^${gw.publicUrl}/auth/claim#[A-Za-z0-9_-]{43}$`));
+    const r = await owner.post('/auth/people/relink', { id: ana.id, rev: 1 });
+    ok(r, 'a second relink replaces the first link');
+    assert.equal(gw.state().invites.length, 1, 'one live link per person');
+    assert.equal((await gw.raw('POST', '/auth/claim/invite', { body: { token: tokenOf(first.json.link) } })).status, 403, 'the earlier link is dead');
+    const peek = await gw.raw('POST', '/auth/claim/invite', { body: { token: tokenOf(r.json.link) } });
+    assert.deepEqual({ name: peek.json.name, again: peek.json.again }, { name: 'Ana', again: true });
+    const { fin, key: phone } = await join(gw, r.json.link, authenticator(), 'phone');
+    ok(fin, 'the new link adds a passkey');
+    const row = rowOf(gw, ana.id);
+    assert.deepEqual(row.methods.map((m) => m.key), [u(anaKey.id), u(phone.id)], 'the old passkey kept, the new one added');
+    assert.equal(row.level, 'full');
+    ok((await signIn(gw, anaKey)).v, 'the old passkey still signs in');
+  } finally { await gw.close(); }
+});
+
+test('org-access A4: only the owner relinks, never their own row, at the row\'s rev', async () => {
+  const { gw, owner, ana } = await setup('relink-who');
+  try {
+    const ownerId = gw.state().people.find((p) => p.role === 'owner').id;
+    const before = JSON.stringify(gw.state());
+    assert.equal((await gw.raw('POST', '/auth/people/relink', { body: { id: ana.id, rev: 1 } })).status, 401);
+    const anaB = browser(gw, { session: mintSession(gw, ana.id, ana.methods[0].id) });
+    const mid = JSON.stringify(gw.state());
+    refusedAs(await anaB.post('/auth/people/relink', { id: ana.id, rev: 1 }), 403, 'not-allowed', 'Ana for herself');
+    refusedAs(await owner.post('/auth/people/relink', { id: ownerId, rev: 1 }), 403, 'not-allowed', 'the owner\'s own row');
+    const stale = await owner.post('/auth/people/relink', { id: ana.id, rev: 2 });
+    refusedAs(stale, 409, 'stale', 'a stale rev');
+    assert.equal(stale.json.error, T.stale);
+    refusedAs(await owner.post('/auth/people/relink', { id: rid('p-'), rev: 1 }), 409, 'stale', 'nobody by that id');
+    assert.equal(JSON.stringify(gw.state()), mid, 'none of those wrote anything');
+    ageOwner(gw, owner, 6 * 60 * 1000);
+    refusedAs(await owner.post('/auth/people/relink', { id: ana.id, rev: 1 }), 403, 'fresh-sign-in', 'not fresh');
+    assert.deepEqual(gw.state().invites ?? [], []);
+    assert.ok(before);
+  } finally { await gw.close(); }
+});
+
+// --- until kit-250: no View ---------------------------------------------------------------------------
+
+test('kit-248: until kit-250, an invite at View and a move to View are refused', async () => {
+  const { gw, owner, ana } = await setup('no-view');
+  try {
+    const before = JSON.stringify(gw.state());
+    refusedAs(await owner.post('/auth/people/invite', { name: 'Bea', level: 'view' }), 400, 'view-not-yet', 'an invite at View');
+    for (const level of ['admin', 'owner', 7, null]) refusedAs(await owner.post('/auth/people/invite', { name: 'Bea', level }), 400, 'bad-request', `level ${JSON.stringify(level)}`);
+    assert.equal(JSON.stringify(gw.state()), before, 'nothing written');
+    // no route moves anyone to View, and a new link keeps the level it has
+    for (const route of ['/auth/people/level', '/auth/people/move', '/auth/people/change']) {
+      const r = await owner.post(route, { id: ana.id, rev: 1, level: 'view' });
+      assert.notEqual(r.status, 200, route);
+    }
+    ok(await owner.post('/auth/people/relink', { id: ana.id, rev: 1, level: 'view' }), 'a relink');
+    assert.equal(rowOf(gw, ana.id).level, 'full', 'Ana is still Full');
+  } finally { await gw.close(); }
+});

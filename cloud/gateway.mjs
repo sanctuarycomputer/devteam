@@ -1378,6 +1378,77 @@ export function createGateway(opts = {}) {
     return person && !isOwner(person) ? { inv, person } : null;
   };
 
+  // --- the owner's People routes (kit-249's route contract): a refusal is { error, code } --------
+  const refuse = (res, status, code, error) => json(res, status, { error, code });
+  const INVITE_MS = 24 * 3600 * 1000;
+  const MAX_INVITES = 50;
+  const MAX_PEOPLE = 200;
+  const STALE = 'This changed since you opened it; reload';
+  // C0 and C1 controls, line and paragraph separators, bidi controls (as the kit's UNSAFE_TEXT)
+  const NAME_BAD = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
+  const liveInvites = (s) => (s.invites ?? []).filter((x) => x.expires > Date.now());
+  // The link is shown once; only the hash of its token is kept, as startFlow reads it.
+  const newInvite = (personId) => {
+    const token = b64u(crypto.randomBytes(32));
+    return { link: `${PUB}/auth/claim#${token}`, invite: { hash: b64u(sha256(token)), person: personId, expires: Date.now() + INVITE_MS } };
+  };
+  // Who may: the owner, signed in in the last five minutes. Asked before the body is read and again,
+  // of the state as it is, after (stillHeld): a reclaim or a removal meanwhile wins.
+  const ownerGuard = (res, who) => {
+    if (!isOwner(who.person)) return refuse(res, 403, 'not-allowed', 'Only the box\'s owner can do this.'), false;
+    if (!fresh(who.session)) return refuse(res, 403, 'fresh-sign-in', 'Sign in again to change who is on this box (reload this page).'), false;
+    return true;
+  };
+  const peopleBody = async (req, res, session) => {
+    const body = await readJson(req, 4096);
+    const s = store.load();
+    const held = stillHeld(s, session);
+    if (!held) return json(res, 401, { error: 'your session ended; sign in again' }), null;
+    if (!ownerGuard(res, held)) return null;
+    if (!isObject(body)) return refuse(res, 400, 'bad-request', 'bad request'), null;
+    return { s, body };
+  };
+  const inviteRoute = async (req, res, who) => {
+    if (!ownerGuard(res, who)) return;
+    const got = await peopleBody(req, res, who.session);
+    if (!got) return;
+    const { s, body } = got;
+    if (body.level !== undefined && body.level !== 'full') {
+      return body.level === 'view' ? refuse(res, 400, 'view-not-yet', 'View arrives in a later release; invite at Full for now.') : refuse(res, 400, 'bad-request', 'a level is full');
+    }
+    const name = typeof body.name === 'string' ? body.name.normalize('NFC').trim() : null;
+    if (!name || [...name].length > 60 || NAME_BAD.test(name)) return refuse(res, 400, 'bad-name', 'A name is one line of 1 to 60 characters.');
+    const base = withOwner(s);
+    const key = name.toLowerCase();
+    if (base.people.some((p) => String(p.name).normalize('NFC').toLowerCase() === key)) return refuse(res, 400, 'name-taken', 'Someone on this box already has that name.');
+    const open = liveInvites(base);
+    if (open.length >= MAX_INVITES || base.people.length >= MAX_PEOPLE) return refuse(res, 409, 'too-many', `A box holds ${MAX_PEOPLE} people and ${MAX_INVITES} open invites; remove one first.`);
+    const iso = new Date().toISOString();
+    const row = { id: newId('p-'), name, role: 'member', level: 'full', methods: [], pushSubs: [], added_at: iso, last_seen: null, notices: [], rev: 1 };
+    const { link, invite } = newInvite(row.id);
+    store.save({ ...base, people: [...base.people, row], invites: [...open, invite] });
+    log(`invited "${name}"`);
+    return json(res, 200, { person: { id: row.id, rev: row.rev }, link, expires: invite.expires });
+  };
+  // A new link for someone already here: their earlier one dies (one live link per person); their
+  // row, level and rev are as they were.
+  const relinkRoute = async (req, res, who) => {
+    if (!ownerGuard(res, who)) return;
+    const got = await peopleBody(req, res, who.session);
+    if (!got) return;
+    const { s, body } = got;
+    const row = typeof body.id === 'string' ? (s.people ?? []).find((p) => p.id === body.id) : null;
+    if (!row) return refuse(res, 409, 'stale', STALE);
+    if (isOwner(row)) return refuse(res, 403, 'not-allowed', 'The owner gets back in with devteam-reclaim, in a shell on the box.');
+    if (body.rev !== row.rev) return refuse(res, 409, 'stale', STALE);
+    const others = liveInvites(s).filter((x) => x.person !== row.id);
+    if (others.length >= MAX_INVITES) return refuse(res, 409, 'too-many', `A box holds ${MAX_INVITES} open invites; remove one first.`);
+    const { link, invite } = newInvite(row.id);
+    store.save({ ...s, invites: [...others, invite] });
+    log(`a new link for "${row.name}"`);
+    return json(res, 200, { link, expires: invite.expires });
+  };
+
   // Start, guards in the spec's order. `who`: the request's session (sessionOf), for an add.
   const startFlow = async (req, type, purpose, body, who) => {
     const row = METHODS.get(type);
@@ -2819,6 +2890,8 @@ export function createGateway(opts = {}) {
           store.save({ ...now, sessions: now.sessions.filter((x) => x.hash !== session.hash), ...(now.peopleSessions ? { peopleSessions: now.peopleSessions.filter((x) => x.hash !== session.hash) } : {}) });
           return json(res, 200, { ok: true }, { 'set-cookie': cookie('', 0) });
         }
+        if (p === '/auth/people/invite' && req.method === 'POST') return await inviteRoute(req, res, who);
+        if (p === '/auth/people/relink' && req.method === 'POST') return await relinkRoute(req, res, who);
         // Each of these acts on the signed-in person's own methods only (ownMethods, removeMethod).
         if (p === '/auth/method/list' && req.method === 'GET') return json(res, 200, { methods: ownMethods(store.load(), person) });
         if (p === '/auth/passkeys' && req.method === 'GET') return fresh(session) ? page(res, PAGES.passkeys(ownMethods(store.load(), person).filter((m) => m.type === 'passkey').map((m) => ({ id: m.id, name: m.label, createdAt: m.added_at })), PUB)) : redirect(res, loginAt(`${PUB}/auth/passkeys`));
