@@ -7431,20 +7431,27 @@ function landRecords(id, rec, linkName) {
     // GitHub has no lease on the base: home's main is read again just before gh pr merge, and must
     // still be the main the checks judged (mainSha(), read before this fetch), as landCode's moved()
     // does for the code (kit-332). The fetch is bounded (recurringRegistry.git); one that fails refuses.
+    // Each gh call here is killed at its bound, as landCode's are (kit-787): gh pr merge at 60 s, each
+    // state read at 15 s (DEVTEAM_GH_TIMEOUT_MS, a positive whole number of ms, sets both, for tests),
+    // so the records' gh calls wait at most 60 + 3 x 15 + 2 x 2 = 109 s; a killed call reads as failed.
+    // The git fetches are apart: the one below is bounded (120 s), the one after landing is not.
+    const ghMs = Math.trunc(Number(process.env.DEVTEAM_GH_TIMEOUT_MS));
+    const ghMerge = { timeout: ghMs > 0 ? ghMs : 60000, killSignal: 'SIGKILL' };
+    const ghRead = { timeout: ghMs > 0 ? ghMs : 15000, killSignal: 'SIGKILL' };
     const checked = mainSha();
     if (!checked) return `no home ${HS.main_branch} to land on`;
     if (!recurringRegistry.git(['fetch', '--quiet', 'origin', HS.main_branch], { cwd: mainRoot }).ok) return `couldn't fetch home's ${HS.main_branch} to check it hasn't moved since the checks; run merge again`;
     const tip = resolveCommit(`refs/remotes/origin/${HS.main_branch}`);
     if (tip !== checked) return `home's ${HS.main_branch} moved since the checks (${String(checked).slice(0, 12)} to ${String(tip).slice(0, 12)}); run merge again`;
-    if (HR.gh(['pr', 'merge', String(rec.pr), `--${HS.merge_method}`, ...(HS.merge_admin === true ? ['--admin'] : []), '--match-head-commit', rec.sha, '--subject', subject, '--body', body]) === null) {
+    if (HR.gh(['pr', 'merge', String(rec.pr), `--${HS.merge_method}`, ...(HS.merge_admin === true ? ['--admin'] : []), '--match-head-commit', rec.sha, '--subject', subject, '--body', body], ghMerge) === null) {
       // gh can exit non-zero after GitHub merged (an error or a timeout in its answer, a slow GitHub):
-      // GitHub's own state says, read while it still says OPEN, three times at most, 2s apart. The PR
+      // GitHub's own state says, read while it still says OPEN, three times at most, 2 s apart. The PR
       // was open (pinRecords); MERGED at the pinned records now is their landing, as a clean merge's (kit-782)
       let st = null;
       for (let i = 0; i < 3; i++) {
         if (i) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
         st = null;
-        try { st = JSON.parse(HR.gh(['pr', 'view', String(rec.pr), '--json', 'state,headRefOid']) ?? 'null'); } catch {}
+        try { st = JSON.parse(HR.gh(['pr', 'view', String(rec.pr), '--json', 'state,headRefOid'], ghRead) ?? 'null'); } catch {}
         if (st?.state !== 'OPEN') break;
       }
       if (!(st?.state === 'MERGED' && st.headRefOid === rec.sha)) return `gh pr merge of home's records PR #${rec.pr} refused (did its head move?)`;
@@ -7925,20 +7932,29 @@ function cmdMerge() {
       }
       return null;
     }
-    // GitHub has no lease on the base: main is read again just before gh pr merge
+    // GitHub has no lease on the base: main is read again just before gh pr merge. Each gh call
+    // after the gates is killed at its bound (kit-787): gh pr merge at 60 s, each state read at 15 s
+    // (DEVTEAM_GH_TIMEOUT_MS, a positive whole number of ms, sets both, for tests), so the code's gh
+    // calls wait at most 60 + 3 x 15 + 2 x 2 = 109 s (with records in home, 218 s for both landings'
+    // gh calls). The git fetches are apart: moved()'s is bounded (recurringRegistry.git, 120 s),
+    // the one after landing is not. A killed call reads as failed: gh pr merge as not merged (its
+    // state is read, as for any error), a state read as no answer; refused as before
+    const ghMs = Math.trunc(Number(process.env.DEVTEAM_GH_TIMEOUT_MS));
+    const ghMerge = { timeout: ghMs > 0 ? ghMs : 60000, killSignal: 'SIGKILL' };
+    const ghRead = { timeout: ghMs > 0 ? ghMs : 15000, killSignal: 'SIGKILL' };
     const gone = moved();
     if (gone) return gone;
-    const merged = R.gh(['pr', 'merge', String(pr.number), `--${S.merge_method}`, ...(S.merge_admin === true ? ['--admin'] : []), '--match-head-commit', sha]);
+    const merged = R.gh(['pr', 'merge', String(pr.number), `--${S.merge_method}`, ...(S.merge_admin === true ? ['--admin'] : []), '--match-head-commit', sha], ghMerge);
     if (merged !== null) return null;
     // gh can exit non-zero after GitHub merged (an error or a timeout in its answer, a slow GitHub):
-    // GitHub's own state says, read while it still says OPEN, three times at most, 2s apart. A PR that
+    // GitHub's own state says, read while it still says OPEN, three times at most, 2 s apart. A PR that
     // was OPEN when merge began and is MERGED at the gated head now is this merge's landing, and its
     // act is written; one merged before (a squash elsewhere) or anything else is refused (kit-782)
     let st = null;
     if (pr.state === 'OPEN') for (let i = 0; i < 3; i++) {
       if (i) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
       st = null;
-      try { st = JSON.parse(R.gh(['pr', 'view', String(pr.number), '--json', 'state,headRefOid']) ?? 'null'); } catch {}
+      try { st = JSON.parse(R.gh(['pr', 'view', String(pr.number), '--json', 'state,headRefOid'], ghRead) ?? 'null'); } catch {}
       if (st?.state !== 'OPEN') break;
     }
     if (!(st?.state === 'MERGED' && st.headRefOid === sha)) return 'gh pr merge refused (did the head move?)';
