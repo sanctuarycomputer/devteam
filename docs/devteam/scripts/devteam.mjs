@@ -7419,7 +7419,20 @@ function landRecords(id, rec, linkName) {
     if (!recurringRegistry.git(['fetch', '--quiet', 'origin', HS.main_branch], { cwd: mainRoot }).ok) return `couldn't fetch home's ${HS.main_branch} to check it hasn't moved since the checks; run merge again`;
     const tip = resolveCommit(`refs/remotes/origin/${HS.main_branch}`);
     if (tip !== checked) return `home's ${HS.main_branch} moved since the checks (${String(checked).slice(0, 12)} to ${String(tip).slice(0, 12)}); run merge again`;
-    if (HR.gh(['pr', 'merge', String(rec.pr), `--${HS.merge_method}`, ...(HS.merge_admin === true ? ['--admin'] : []), '--match-head-commit', rec.sha, '--subject', subject, '--body', body]) === null) return `gh pr merge of home's records PR #${rec.pr} refused (did its head move?)`;
+    if (HR.gh(['pr', 'merge', String(rec.pr), `--${HS.merge_method}`, ...(HS.merge_admin === true ? ['--admin'] : []), '--match-head-commit', rec.sha, '--subject', subject, '--body', body]) === null) {
+      // gh can exit non-zero after GitHub merged (an error or a timeout in its answer, a slow GitHub):
+      // GitHub's own state says, read while it still says OPEN, three times at most, 2s apart. The PR
+      // was open (pinRecords); MERGED at the pinned records now is their landing, as a clean merge's (kit-782)
+      let st = null;
+      for (let i = 0; i < 3; i++) {
+        if (i) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
+        st = null;
+        try { st = JSON.parse(HR.gh(['pr', 'view', String(rec.pr), '--json', 'state,headRefOid']) ?? 'null'); } catch {}
+        if (st?.state !== 'OPEN') break;
+      }
+      if (!(st?.state === 'MERGED' && st.headRefOid === rec.sha)) return `gh pr merge of home's records PR #${rec.pr} refused (did its head move?)`;
+      out(`gh pr merge of home's records PR #${rec.pr} exited non-zero, but GitHub has #${rec.pr} merged at ${rec.sha.slice(0, 12)}: landed`);
+    }
   }
   git(['fetch', '--quiet', 'origin', HS.main_branch]);
   mainRefCache = undefined; mainLogCache = undefined; mergeShaCache.clear();
@@ -7449,7 +7462,7 @@ function cmdMerge() {
     }
   }
   if (viaGit && !dry && !(flagStr('title') && flagStr('body-file'))) die(`forge is git: merge needs the PR text, in ${path.relative(mainRoot, path.join(runDir, 'pr', `${branch}.md`))} ('# <title>' then the body) or as --title and --body-file`);
-  const prJson = viaGit ? null : R.gh(['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,url,statusCheckRollup']);
+  const prJson = viaGit ? null : R.gh(['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,state,url,statusCheckRollup']);
   if (prJson === null && !dry && !viaGit) die(`no open PR from ${branch}${inR} (gh pr view failed; with no forge CLI set forge: "git")`);
   R.git(['fetch', '--quiet', 'origin', branch]);
   // main as each origin has it now: home's (the settings) and the ticket's repo's (what it lands on)
@@ -7899,7 +7912,21 @@ function cmdMerge() {
     const gone = moved();
     if (gone) return gone;
     const merged = R.gh(['pr', 'merge', String(pr.number), `--${S.merge_method}`, ...(S.merge_admin === true ? ['--admin'] : []), '--match-head-commit', sha]);
-    return merged === null ? 'gh pr merge refused (did the head move?)' : null;
+    if (merged !== null) return null;
+    // gh can exit non-zero after GitHub merged (an error or a timeout in its answer, a slow GitHub):
+    // GitHub's own state says, read while it still says OPEN, three times at most, 2s apart. A PR that
+    // was OPEN when merge began and is MERGED at the gated head now is this merge's landing, and its
+    // act is written; one merged before (a squash elsewhere) or anything else is refused (kit-782)
+    let st = null;
+    if (pr.state === 'OPEN') for (let i = 0; i < 3; i++) {
+      if (i) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
+      st = null;
+      try { st = JSON.parse(R.gh(['pr', 'view', String(pr.number), '--json', 'state,headRefOid']) ?? 'null'); } catch {}
+      if (st?.state !== 'OPEN') break;
+    }
+    if (!(st?.state === 'MERGED' && st.headRefOid === sha)) return 'gh pr merge refused (did the head move?)';
+    out(`gh pr merge of #${pr.number} exited non-zero, but GitHub has #${pr.number} merged at ${sha.slice(0, 12)}: landed`);
+    return null;
   };
   let pushTimedOut = false;
   const codeFail = relanded ? null : landCode();
