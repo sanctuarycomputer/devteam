@@ -792,3 +792,80 @@ test('A10d: a job whose registered is null opens its peek with no error, and no 
   assert.deepEqual(await p.ev('window.__errors'), []);
   assert.equal(await p.ev("document.querySelectorAll('#drawer-body a[href*=\"q-\"]').length"), 0, 'no question link');
 });
+
+// ===== A11: a run line whose seconds would put its start before 1970 (kit-781) =====
+
+// kit-168 final-2b: a counted line's start is its time less its seconds, and a seconds of 1e20 is no
+// date, so formatting it threw RangeError in recurring due, the peek, dashboard-data and metrics. Such a
+// seconds is ignored as a duration: the run counts, starting at its line's time.
+const A11 = group(() => {
+  const F = setup('a11', { ch: check({ every: '1d' }), cy: check({ every: '1d' }), cz: check({ every: '1d' }) });
+  const sec = (ms) => Math.floor(ms / 1000) * 1000;
+  const T = sec(Date.now() - 10 * 60000);
+  const T2 = sec(Date.now() - 8 * 60000);
+  const T3 = sec(Date.now() - 6 * 60000);
+  // every slot read before the first line, so the fixture itself never meets the throw
+  const slot = Object.fromEntries(F.due().checks.map((c) => [c.name, c.slot]));
+  F.addRun('ch', { slot: slot.ch, at: T, status: 'pass', seconds: 1e20 });
+  F.addRun('cy', { slot: slot.cy, at: T2, status: 'pass', seconds: 1e11 });
+  F.addRun('cz', { slot: slot.cz, at: T3, status: 'pass', seconds: 2 });
+  const at = (ms) => `${iso(ms).slice(0, 19)}Z`;
+  const peek = (name) => F.dt(['peek', 'recurring', name, '--json']);
+  return Object.assign(F, { T, T2, T3, at, peek });
+});
+
+test('A11a: recurring due answers with a seconds of 1e20 in the log (recurringRunDue)', () => {
+  const F = A11();
+  const r = F.dt(['recurring', 'due', '--json']);
+  assert.equal(r.status, 0, `recurring due answers: ${r.text}`);
+  assert.ok(JSON.parse(r.out).checks.some((c) => c.name === 'ch'), 'ch is listed');
+});
+
+test("A11b: the peek answers, and the run's start is its line's time (peekView)", () => {
+  const F = A11();
+  const p = F.peek('ch');
+  assert.equal(p.status, 0, `the peek answers: ${p.text}`);
+  assert.deepEqual(JSON.parse(p.out).runs.map((r) => [r.status, r.at]), [['pass', F.at(F.T)]]);
+});
+
+test("A11c: dashboard-data answers, and the entry's last run starts at its line's time (recurringFailures)", () => {
+  const F = A11();
+  const r = F.dt(['dashboard-data']);
+  assert.equal(r.status, 0, `dashboard-data answers: ${r.text.slice(-400)}`);
+  const e = JSON.parse(r.out).upkeep.recurring.entries.find((x) => x.name === 'ch');
+  assert.deepEqual([e.last?.status, e.last?.at], ['pass', F.at(F.T)]);
+});
+
+test('A11d: metrics answers', () => {
+  const r = A11().dt(['metrics', '--json']);
+  assert.equal(r.status, 0, `metrics answers: ${r.text.slice(-400)}`);
+});
+
+test("A11e: a seconds of 1e11 (a start before year 0) is ignored too, so the peek's times keep the contract's shape", () => {
+  const F = A11();
+  const p = JSON.parse(F.ok(['peek', 'recurring', 'cy', '--json']));
+  assert.deepEqual(p.runs.map((r) => r.at), [F.at(F.T2)]);
+  assert.deepEqual(schemaErrors(PEEK_SHAPE, p, 'peek'), []);
+});
+
+test('A11f: a run of 2 seconds still starts 2 seconds before its line', () => {
+  const F = A11();
+  const p = JSON.parse(F.ok(['peek', 'recurring', 'cz', '--json']));
+  assert.deepEqual(p.runs.map((r) => r.at), [F.at(F.T3 - 2000)]);
+});
+
+// kit-168 final-3 F1, final-3b F1 F2: the recurring-failing bullet's ack sits beside the fix, and the
+// way to take up a held or merged fix ticket names the steps that work
+const failingBullet = () => /\n- \*\*`recurring-failing`\*\*[^\n]*/.exec(fs.readFileSync(path.join(kit, 'process', 'supervisor.md'), 'utf8'))?.[0] ?? '';
+
+test("A11g: supervisor.md's recurring-failing bullet puts the ack right after the recurring ticket fix, before the held fix ticket", () => {
+  const b = failingBullet();
+  const ack = b.indexOf('Or `ack` the finding when the failure is understood');
+  assert.ok(ack > b.indexOf('that act is what clears the finding') && ack < b.indexOf('A fix ticket that is held'), b);
+});
+
+test("A11h: it names both ways to take up a held or merged fix ticket: supersede naming a new id and write it with recurring ticket, or link one with the act line recurring ticket prints", () => {
+  const b = failingBullet();
+  for (const w of ['"superseded_by":"<new>"', '`recurring ticket <name> --id <new>', '`act --class add-ticket']) assert.ok(b.includes(w), `has ${w}: ${b}`);
+  assert.ok(!b.includes('so `recurring ticket` can write the new one'), 'the old wording is gone');
+});
