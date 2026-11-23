@@ -119,6 +119,14 @@ Production is watched by **sensors**, and they are yours: you add, change and st
 - **Where a forge CI runs check-pr.** It sees only the landed log. After `chore pr --names-checked`, land the log (`log-sync`, then `merge --chore log`) and re-run the chore's check before merging it.
 - **One commit or many.** Every self.md the chore's commits carry is checked. A word reworded out at the head still holds the chore, because the earlier commit is pushed and lands with it.
 
+**Drafting exterior.md.**
+- **When.** Draft it after `self.md` is on main, from the strategy and that `self.md`.
+- **What it draws.** What the project relates to, by relation to that Self: serves, depends on, builds on it, alternative, collaborates, governs it, affects, or another word when none fits. Business roles such as client, vendor or competitor are only examples of these. It names organisations, groups and works, never a private person.
+- **Each entity.** Say what matters about it, and the signals that would show it, in words: what you would watch, not a sensor. Weigh each entity and each signal 1 to 4. Give each entity a strategy quote, copied word for word, and record `strategy_blob` and `self_blob`, the blobs you drew from.
+- **The names rule.** An organisation or work must be named in main's strategy (or, for one it depends on, in its dependency files) before it can be named here. Otherwise name it as a group, or have the strategy name it first. On a repo not known to be private, a capitalised word main's strategy doesn't use holds the chore until you check it and name it with `--names-checked`. Every pushed version counts, not only the last.
+- **The steps.** Draft it in `chore start exterior`, run `exterior check` and fix its errors, then `chore pr`, then ask exterior-change (Self and exterior changes, below).
+- **The findings.** `exterior-drift` (a name the rule no longer allows: draft a new version), `exterior-stale` (the strategy or `self.md` moved on: re-read `self.md` first, then draft a new version) and `exterior-missing` (draft it).
+
 The jobs Upkeep runs on a schedule are not sensors: see Recurring jobs, below, for how a job is registered, changed and stopped in `docs/devteam/project/recurring.json`.
 
 ## Recurring jobs
