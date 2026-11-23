@@ -9761,7 +9761,7 @@ function cmdThread() {
       if (by && replyWriter() && ['supervisor', 'responder'].includes(process.env.DEVTEAM_ROLE) && v.status === 'open' && last?.by === 'owner') markThreadWorking(t.id, { by, stage: 'picked-up', turn: last.id }, { pickup: true });
     } catch {}
     if (flags.json) return json(v);
-    out(`${v.id} · ${v.status}${v.status === 'open' ? ` · ${v.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}`);
+    out(`${v.id} · ${v.status}${v.status === 'open' ? ` · ${waitingWords(v)}` : ''}`);
     out(threadDataFrame(v));
     const moved = v.subject?.kind === 'artifact' ? artifactSubjectNow(v.subject) : null;
     if (moved) out(moved);
@@ -9789,12 +9789,28 @@ function cmdThread() {
       for (const x of q) out(`${x.turn} in ${x.thread} (${Math.max(0, Math.round((Date.now() - Date.parse(x.at)) / 60000))} min) "${turnGist(x.text)}"`);
       return;
     }
-    let vs = threadViews(readLog().objects).sort((a, b) => b.activity_at.localeCompare(a.activity_at));
-    if (flags.waiting) vs = vs.filter((x) => x.status === 'open' && x.waiting === 'supervisor');
-    else if (!flags.all) vs = vs.filter((x) => x.status === 'open');
+    const objects = readLog().objects;
+    let vs = threadViews(objects).sort((a, b) => b.activity_at.localeCompare(a.activity_at));
+    const row = (x, words) => `${x.id} [${x.status}${words ? `, ${words}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`;
+    if (flags.waiting) {
+      // the supervisor's: an owed turn routed to it (or with no route) or an open handoff naming the
+      // thread; then the threads the responder has, marked so and never also as the supervisor's
+      // (kit-104). --json lists the supervisor's only, each with its open handoff's id or null.
+      const handoffs = openHandoffs(objects);
+      const late = new Set(responderOverdue(objects).map((o) => o.thread));
+      const open = vs.filter((x) => x.status === 'open');
+      const mine = open.filter((x) => x.waiting === 'supervisor' || handoffs.has(x.id));
+      const theirs = open.filter((x) => x.waiting === 'responder' && !handoffs.has(x.id));
+      if (flags.json) return json(mine.map((x) => ({ ...x, handoff: handoffs.get(x.id) ?? null })));
+      if (!mine.length) out('no thread is waiting on the supervisor');
+      for (const x of mine) out(row(x, `waiting on the supervisor${handoffs.has(x.id) ? ` · handoff ${handoffs.get(x.id)}` : ''}`));
+      for (const x of theirs) out(row(x, waitingWords(x, late.has(x.id))));
+      return;
+    }
+    if (!flags.all) vs = vs.filter((x) => x.status === 'open');
     if (flags.json) return json(vs);
-    if (!vs.length) return out(flags.waiting ? 'no thread is waiting on the supervisor' : flags.all ? 'no threads' : 'no open threads');
-    for (const x of vs) out(`${x.id} [${x.status}${x.status === 'open' ? `, ${x.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`);
+    if (!vs.length) return out(flags.all ? 'no threads' : 'no open threads');
+    for (const x of vs) out(row(x, x.status === 'open' ? waitingWords(x) : ''));
     return;
   }
   die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--anyway]   (the supervisor\'s or the responder\'s; --anyway the responder\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting [--responder] | --open | --all] [--json]   (words may also follow --)');
@@ -33130,6 +33146,18 @@ function responderOverdue(objects, now = Date.now(), byThread = turnsByThread(ob
   }
   return found;
 }
+// The open handoffs to the supervisor, by thread: the newest one per thread not settled by a
+// supervisor turn after it (settledByLanding) and named by no reply's re. Map thread -> message id.
+function openHandoffs(objects = readLog().objects) {
+  const replied = new Set([...objects.values()].filter((o) => o.type === 'message' || o.type === 'question').map((o) => o.re).filter(Boolean));
+  const m = new Map();
+  for (const o of [...objects.values()].filter((x) => x.type === 'message' && x.kind === 'handoff' && x.to === 'supervisor' && typeof x.thread === 'string').sort(byTime)) {
+    if (!replied.has(o.id) && !settledByLanding(o)) m.set(o.thread, o.id);
+  }
+  return m;
+}
+// A thread's state in the supervisor's words (thread list, show): whose reply is owed, or the owner's move.
+const waitingWords = (v, overdue = false) => (v.waiting === 'supervisor' ? 'waiting on the supervisor' : v.waiting === 'responder' ? `the responder has it${overdue ? ' · overdue' : ''}` : "the owner's move");
 // Its help lines, in Setup and roles (HELP_SETUP reads them; this region sits above HELP).
 const RESPONDER_HELP = `  responder [--resume | --stop]   supervisor: the thread responder, a quick session that answers the owner's thread turns (window responder, .worktrees/responder at main, the owner's responder_command); --stop ends it, --resume restarts it in its window
   prompt responder   the responder's prompt: its section of supervisor.md (§13)`;
