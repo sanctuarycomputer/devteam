@@ -59,7 +59,9 @@ test('an open question is answered from its side peek, with the Inbox card', { s
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: `${POLL_FAST};window.__thrown = [];addEventListener('error', (e) => window.__thrown.push(String(e.error?.stack || e.message)));addEventListener('unhandledrejection', (e) => window.__thrown.push(String(e.reason?.stack || e.reason)));` });
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#board` });
   const soon = soonIn(p);
-  await soon(`!!${el(`q-${Q.card}`)}`, 'the Inbox drawn');
+  // and loaded (kit-784): until the load event, Chrome makes a script's hash change with no user gesture (every
+  // p.ev here) replace the entry rather than add one, so a Back or a close after it would land off the page
+  await soon(`document.readyState === 'complete' && !!${el(`q-${Q.card}`)}`, 'the Inbox drawn');
   const open = async (q) => { await p.ev(`location.hash = ${J(`#q/${encodeURIComponent(q)}`)}`); await soon(peekOn(q), `${q}'s peek`); };
   const polls = async (n = 3) => { const at = await p.ev('window.__polls'); await soon(`window.__polls >= ${at + n}`, `${n} polls`); };
   const answers = (q) => fs.readdirSync(path.join(F.old, 'docs/devteam/run/log')).flatMap((f) => fs.readFileSync(path.join(F.old, 'docs/devteam/run/log', f), 'utf8').split('\n')).filter(Boolean).map((l) => JSON.parse(l)).filter((l) => l.id === q && l.answer !== undefined);
