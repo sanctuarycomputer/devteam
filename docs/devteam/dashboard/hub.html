@@ -248,6 +248,7 @@
   .method .r { display: inline-flex; gap: 8px; align-items: center; }
   .method .r .dim { color: var(--muted); }
   .method .r button { flex: none; white-space: nowrap; }
+  @media (max-width: 700px) { .set-row.method .r { display: flex; justify-content: space-between; align-items: center; gap: 8px; } }
   .oa-inp { font: inherit; font-size: 13px; height: 30px; color: var(--fg); background: var(--surface); border: 1px solid var(--line-2); border-radius: 6px; outline: none; padding: 0 10px; width: 100%; max-width: 320px; box-sizing: border-box; }
   .oa-inp:focus { border-color: var(--blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent); }
   .oa-err { color: var(--red-fg); font-size: 12px; margin-top: 6px; }
@@ -1731,7 +1732,7 @@ function paintSettings() {
   // an older one, or a laptop: today's Signing in › Passkeys
   const oa = OA_ROLES.includes(box?.role);
   if (oa) {
-    if (!OA.at || (!oaBusy() && Date.now() - OA.at > 9000)) oaLoad();
+    if (!OA.loading && (!OA.at || (!oaBusy() && Date.now() - OA.at > 9000))) oaLoad();
     if (!SEC.signIn) oaDrawSignIn();
     if (box?.people && OA.list && !SEC.people) oaDrawPeople();
     groups.push(...oaGroups());
@@ -1786,7 +1787,8 @@ const OA = { methods: null, notices: [], freshUntil: 0, list: null, at: 0, loadi
 const SEC = { signIn: null, people: null, fresh: null };
 const oaBusy = () => Boolean(OA.open || OA.panel || OA.menu);
 const oaFresh = () => Date.now() < OA.freshUntil;
-const oaDMon = (iso) => { const t = Date.parse(iso ?? ''); return t > 0 ? new Date(t).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : ''; };
+const OA_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const oaDMon = (iso) => { const t = Date.parse(iso ?? ''); if (!(t > 0)) return ''; const d = new Date(t); return `${d.getDate()} ${OA_MONTHS[d.getMonth()]}`; };
 const oaTypeName = (type) => (type === 'passkey' ? 'Passkey' : String(type));
 let oaToastEl = null;
 let oaToastT = 0;
@@ -1820,20 +1822,33 @@ async function oaPost(path, body) {
   } catch (e) { return { status: 0, json: { error: e.message } }; }
 }
 // The lists: when Settings opens, after each change, and on the 10 s draw while nothing is open.
-async function oaLoad() {
-  if (OA.loading) return;
+// Each call is a fetch of its own, queued after any in flight, so the one after a change is never
+// dropped; it resolves once its own answer is in. A section redraws only when its data changed.
+let oaChain = Promise.resolve();
+function oaLoad() {
   OA.loading = true;
-  try {
-    const m = await oaGet('auth/method/list');
-    if (m && Array.isArray(m.methods)) {
-      OA.methods = m.methods;
-      OA.notices = Array.isArray(m.notices) ? m.notices : [];
-      OA.freshUntil = Date.now() + (Number(m.fresh_ms) > 0 ? Number(m.fresh_ms) : 0);
-    }
-    if (box?.people) { const l = await oaGet(box.people); OA.list = l && l.viewer && Array.isArray(l.people) ? l : null; }
-    OA.at = Date.now();
-  } finally { OA.loading = false; }
-  oaRedraw();
+  const run = oaChain.then(oaFetch).catch(() => {});
+  oaChain = run;
+  run.finally(() => { if (oaChain === run) OA.loading = false; });
+  return run;
+}
+async function oaFetch() {
+  const was = { signIn: JSON.stringify([OA.methods, OA.notices]), list: JSON.stringify(OA.list) };
+  const m = await oaGet('auth/method/list');
+  if (m && Array.isArray(m.methods)) {
+    OA.methods = m.methods;
+    OA.notices = Array.isArray(m.notices) ? m.notices : [];
+    OA.freshUntil = Date.now() + (Number(m.fresh_ms) > 0 ? Number(m.fresh_ms) : 0);
+  }
+  if (box?.people) { const l = await oaGet(box.people); OA.list = l && l.viewer && Array.isArray(l.people) ? l : null; }
+  OA.at = Date.now();
+  const signIn = JSON.stringify([OA.methods, OA.notices]) !== was.signIn;
+  const list = JSON.stringify(OA.list) !== was.list;
+  const fresh = list && OA.list && !SEC.people;
+  if (signIn) oaDrawSignIn();
+  if (list && OA.list) oaDrawPeople();
+  // Settings itself is painted again only when a section appears or goes
+  if (fresh || (list && !OA.list)) paintSettings();
 }
 // Each section's own redraw, unless something in it is open; then Settings is painted again.
 function oaRedraw() {
@@ -2033,7 +2048,7 @@ function oaRefused(r, err, names) {
   if (err && names?.[code]) { err.textContent = names[code]; return; }
   if (code === 'fresh-sign-in') return oaNeedFresh();
   oaToast(r.json?.error || "That didn't work; try again");
-  if (code === 'stale' || code === 'not-allowed' || r.status === 401) { OA.open = null; OA.openNode = null; oaLoad(); }
+  if (code === 'stale' || code === 'not-allowed' || r.status === 401) { OA.open = null; OA.openNode = null; oaDrawPeople(); oaLoad(); }
 }
 const OA_NAME_WORDS = { 'bad-name': 'A name is needed.', 'name-taken': 'Someone here already has that name.' };
 function oaRenameBox(x) {
@@ -2054,6 +2069,7 @@ function oaRenameBox(x) {
     const r = await oaPost(oaPeoplePath('rename'), { id: x.id, rev: x.rev, name: inp.value });
     if (r.status !== 200) return oaRefused(r, err, OA_NAME_WORDS);
     OA.open = null; OA.openNode = null;
+    oaDrawPeople();
     oaToast(`Renamed to ${name.normalize('NFC')}`);
     oaLoad();
   };
@@ -2080,6 +2096,7 @@ function oaConfirmBox(x, kind) {
     if (r.status !== 200) return oaRefused(r);
     OA.open = null; OA.openNode = null;
     if (kind === 'relink') return oaShowLink(`Send this link to ${f} yourself`, `It works once, for 24 hours. Opening it adds a passkey to ${f}'s account.`, r.json.link);
+    oaDrawPeople();
     oaToast(kind === 'remove' ? `${f} was removed and signed out` : relinked ? `${f}'s new link no longer works` : `${f}'s invite link no longer works`);
     oaLoad();
   };
@@ -2092,6 +2109,7 @@ function oaShowLink(head, text, url) {
   OA.panel = 'link';
   OA.panelNode = null;
   OA.link = { head, text, url: String(url ?? '') };
+  oaDrawPeople();
   oaLoad();
 }
 function oaInviteCard() {

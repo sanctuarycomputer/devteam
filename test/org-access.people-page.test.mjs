@@ -657,9 +657,11 @@ test('org-access A3: in Chrome, a member\'s Settings has no People section; the 
 });
 
 // C25, its first half: Your sign-in as the mock words it, on a real gateway
-const dMon = (iso) => new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+const dMon = (iso) => { const d = new Date(iso); return `${d.getDate()} ${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getMonth()]}`; };
 const methodRows = `[...document.querySelectorAll('#hub-settings .set-row.method')].map((r) => r.textContent)`;
 const toast = `(document.querySelector('.oa-toast.on')?.textContent ?? '')`;
+// how many requests this page made to a path (Resource Timing records every fetch)
+const sent = (route) => `performance.getEntriesByType('resource').filter((e) => new URL(e.name).pathname.endsWith(${JSON.stringify(`/${route}`)})).length`;
 const removeOf = (label) => `[...document.querySelectorAll('#hub-settings .set-row.method')].find((r) => r.querySelector('.t').textContent.endsWith(${JSON.stringify(label)}))?.querySelector('button')?.click() ?? 'none'`;
 // a second passkey for the owner, as the claim stores one (top-level `passkeys`)
 function secondOwnerKey(gw, name = 'Phone') {
@@ -689,6 +691,18 @@ test('org-access A3: in Chrome, Your sign-in works as the mock does', CHROME, as
   await a.until('Ana\'s Settings again', `document.querySelectorAll('#hub-settings .set-row.method').length === 1`);
   await sleep(1000);
   assert.equal(await a.ev(`Boolean(document.querySelector('#oa-notice'))`), false, 'OK is kept on this device');
+  // her only method: refused in the hub in the mock's words, nothing sent
+  await a.ev(removeOf(label));
+  await a.until('the last-method words', `${toast} === "Your last sign-in method can't be removed; add another first"`);
+  assert.equal(await a.ev(sent('auth/method/remove')), 0, 'nothing sent');
+  assert.equal(rowOf(B.gw, B.ana.id).methods.length, 1, 'she keeps it');
+  // Add a passkey: the gateway's add ceremony, through this device's (virtual) authenticator
+  await a.send('WebAuthn.enable');
+  await a.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true } });
+  await a.ev(clickText('#hub-settings button', 'Add a passkey'));
+  await a.until('the added toast', `${toast} === 'Passkey added. Your device asked to make one'`);
+  await a.until('two methods', `document.querySelectorAll('#hub-settings .set-row.method').length === 2`);
+  assert.equal(rowOf(B.gw, B.ana.id).methods.length, 2, 'the box holds her new passkey');
 
   // the owner's only passkey: refused in the hub, nothing sent
   const p = await hubAs(t, B, B.owner);
@@ -707,17 +721,29 @@ test('org-access A3: in Chrome, Your sign-in works as the mock does', CHROME, as
   await p.until('the removed toast', `${toast} === 'Removed. Sessions opened with it were signed out'`);
   await p.until('one method again', `document.querySelectorAll('#hub-settings .set-row.method').length === 1`);
   assert.equal(B.gw.state().passkeys.some((k) => k.id === phone.id), false, 'the box no longer holds it');
+  // fresh by the page's count, but the box says otherwise (the session aged meanwhile): the refusal
+  // makes the hub ask again, and the answer brings Confirm it's you
+  const laptop = secondOwnerKey(B.gw, 'Laptop');
+  await p.send('Page.reload');
+  await p.until('two methods again', `document.querySelectorAll('#hub-settings .set-row.method').length === 2`);
+  const aged = B.gw.state();
+  B.gw.write({ ...aged, sessions: aged.sessions.map((x) => ({ ...x, at: STALE_AT() })) });
+  await p.ev(removeOf('Laptop'));
+  await p.until('Confirm it\'s you after the refusal', `Boolean(document.querySelector('#oa-fresh'))`);
+  assert.equal(await p.ev(sent('auth/method/remove')), 1, 'sent once, and refused');
+  assert.equal(B.gw.state().passkeys.some((k) => k.id === laptop.id), true, 'Laptop kept');
 
   // signed in ten minutes ago: Confirm it's you, and nothing sent. Minted now: the removal above
   // ended the owner's other sessions, B.ownerStale with them.
   secondOwnerKey(B.gw, 'Tablet');
   const q = await hubAs(t, B, mint(B.gw, ownerOf(B.gw), { at: STALE_AT() }));
-  await q.until('the stale owner\'s two methods', `document.querySelectorAll('#hub-settings .set-row.method').length === 2`);
+  await q.until('the stale owner\'s methods', `document.querySelectorAll('#hub-settings .set-row.method').length === 3`);
   await q.ev(removeOf('Tablet'));
   await q.until('Confirm it\'s you', `Boolean(document.querySelector('#oa-fresh'))`);
   assert.equal(await q.ev(`document.querySelector('#oa-fresh p').textContent`), "Confirm it's you to change this. You signed in more than five minutes ago; sign in again with your passkey, then make the change again.");
   assert.equal(await q.ev(`document.querySelector('#hub-settings').children[1]?.id`), 'oa-fresh', 'at the top of Settings, under its heading');
-  assert.equal(B.gw.state().passkeys.length, 2, 'nothing removed');
+  assert.equal(B.gw.state().passkeys.length, 3, 'nothing removed');
+  assert.equal(await q.ev(sent('auth/method/remove')), 0, 'nothing sent: the page knew the sign-in was stale');
   await sleep(11000);
   assert.equal(await q.ev(`Boolean(document.querySelector('#oa-fresh'))`), true, 'a repaint keeps the note');
   await q.ev(`document.querySelector('#oa-fresh button').click()`);
@@ -838,6 +864,8 @@ test('org-access A3: in Chrome, the owner\'s People work as the mock does', CHRO
   await p.ev(typeIn('#oa-rename input', 'Sam typed'));
   await sleep(11000);
   assert.equal(await p.ev(`document.querySelector('#oa-rename input')?.value ?? null`), 'Sam typed', 'still open, with what was typed');
+  await p.ev('oaDrawPeople(); paintSettings(); true');
+  assert.equal(await p.ev(`document.querySelector('#oa-rename input')?.value ?? null`), 'Sam typed', 'and across a redraw of the section itself');
   const t2 = B.gw.state();
   B.gw.write({ ...t2, people: t2.people.filter((x) => x.id !== B.sam.id) });
   await p.ev(clickText('#oa-rename button', 'Save'));

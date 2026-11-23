@@ -880,11 +880,11 @@ const peopleList = { viewer: { id: 'p-owner', role: 'owner', invite: true }, peo
   { id: 'p-owner', name: 'Robin Hale', role: 'owner', level: 'full', you: true, methods: 2, added_at: '2026-11-10T09:00:00.000Z', last_seen: '2026-11-20T09:00:00.000Z', rev: 1, link: null, actions: ['rename'] },
   { id: 'p-ana', name: 'Ana Costa', role: 'member', level: 'full', you: false, methods: 1, added_at: '2026-11-15T09:00:00.000Z', last_seen: null, rev: 3, link: null, actions: ['rename', 'relink', 'remove'] },
 ] };
-async function boxSettings(t, role) {
+async function boxSettings(t, role, { peopleAt = null } = {}) {
   let F;
   F = await fixtureHub(t, { kit: 'v0.57.0', image: true, box: () => {
     const at = (h) => `http://${h}.localhost:${F.port}/`;
-    return { box: 2, terminal: at('terminal'), project: `http://{project}.localhost:${F.port}/`, passkeys: `http://hub.localhost:${F.port}/auth/passkeys`, previews: at('previews'), image: { release: 'v0.57.0', tools: { 'claude-code': '2.4.1' } }, role, ...(role === 'member' ? {} : { people: `http://hub.localhost:${F.port}/auth/people/list` }) };
+    return { box: 2, terminal: at('terminal'), project: `http://{project}.localhost:${F.port}/`, passkeys: `http://hub.localhost:${F.port}/auth/passkeys`, previews: at('previews'), image: { release: 'v0.57.0', tools: { 'claude-code': '2.4.1' } }, ...(role ? { role } : {}), ...(role === 'member' ? {} : { people: peopleAt ?? `http://hub.localhost:${F.port}/auth/people/list` }) };
   }, auth: (_, p) => (p === '/auth/method/list' ? [200, { methods: signInMethods, notices: [], fresh_ms: 0 }] : p === '/auth/people/list' && role !== 'member' ? [200, peopleList] : [403, { error: 'no', code: 'not-allowed' }]) });
   F.setList([]);
   const p = await hubPage(t, `http://hub.localhost:${F.port}/#settings`);
@@ -928,6 +928,22 @@ test('Settings on a box: a member gets Your sign-in and no People', CHROME, asyn
   const { p } = got;
   await p.until('the box rows', `document.querySelectorAll('#hub-settings .sec').length === 4 && document.querySelectorAll('#hub-settings .set-row.method').length === 2`);
   assert.deepEqual(await p.ev(setGroups), ['This machine', 'Your sign-in', 'Notifications', 'Serving']);
+});
+
+test('Settings on a box: an older gateway, with no role, keeps Signing in › Passkeys', CHROME, async (t) => {
+  const got = await boxSettings(t, undefined);
+  if (!got) return t.skip("headless Chrome can't load hub.localhost here");
+  await got.p.until('the box rows', `document.querySelectorAll('#hub-settings .sec').length === 4`);
+  assert.deepEqual(await got.p.ev(setGroups), ['This machine', 'Signing in', 'Notifications', 'Serving']);
+  assert.notEqual(await got.p.ev(setRow('Passkeys')), null, 'its Passkeys row');
+});
+test('Settings on a box: People named on another origin is never read (connect-src is the page\'s own)', CHROME, async (t) => {
+  const other = await boxSettings(t, 'owner', { peopleAt: 'http://elsewhere.localhost:9/auth/people/list' });
+  if (!other) return t.skip("headless Chrome can't load hub.localhost here");
+  await other.p.until('the box rows', `document.querySelectorAll('#hub-settings .set-row.method').length === 2`);
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.deepEqual(await other.p.ev(setGroups), ['This machine', 'Your sign-in', 'Notifications', 'Serving'], 'no People from another origin');
+  assert.equal(await other.p.ev(`performance.getEntriesByType('resource').some((e) => e.name.includes('elsewhere'))`), false, 'nothing fetched there');
 });
 
 // The hub can't post an owner action. Its Overview asks the project's dashboard, in its frame, and
