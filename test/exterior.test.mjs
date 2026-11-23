@@ -556,3 +556,76 @@ test('focus 2 focus 5 a deleted exterior.md, and a branch with no merge base', w
     assert.doesNotMatch(k.text, /exterior\.md/, `focus 5 no exterior line\n${k.text}`);
   });
 }));
+
+// an exterior.md on main's strategy and self.md naming two depends_on works
+const twoDeps = (W) => `# Exterior\n\nIt depends on Lodash and Moment.\n\n\`\`\`exterior\n${JSON.stringify({
+  exterior: 1, strategy_blob: W.blob(STRAT), self_blob: W.blob(SELF),
+  entities: ['Lodash', 'Moment'].map((name) => ({ id: name.toLowerCase(), name, relation: 'depends_on', kind: 'work', matters: 'The app runs on it.', weight: 1, strategy: ['Independent researchers who write long notes and want them to last.'], signals: [] })),
+}, null, 2)}\n\`\`\`\n`;
+const exteriorFindings = (W) => json(W.ok(['metrics', '--json'])).findings.filter((f) => f.kind.startsWith('exterior-'));
+
+test('A13 exterior-drift once per name a dependency no longer allows', withProject('exterior-drift', { files: { ...PARTS, 'package.json': JSON.stringify({ dependencies: { lodash: '1', moment: '1' } }) } }, async (W, check) => {
+  W.onMain({ [EXT]: twoDeps(W) }, 'exterior.md on two dependencies');
+  await check('A13 a PR removing the dependencies passes check-pr and validate', () => {
+    const sha = W.branchOf('chore-deps', (w) => writeIn(w, 'package.json', JSON.stringify({ dependencies: {} })));
+    const r = W.checkPr('chore-deps', sha);
+    assert.equal(r.status, 0, `A13 check-pr passes\n${r.text}`);
+    assert.doesNotMatch(r.text, /exterior\.md/, 'A13 check-pr: no exterior.md line');
+    const v = W.runIn(path.join(W.old, '.worktrees', 'chore-deps'), ['validate']);
+    assert.equal(v.status, 0, `A13 validate passes on the branch\n${v.text}`);
+    assert.doesNotMatch(v.out, /exterior\.md/, 'A13 validate: no exterior.md line');
+    W.onMain({ 'package.json': JSON.stringify({ dependencies: {} }) }, 'the dependencies removed');
+  });
+  await check('A13 on main: one drift per name, keyed by the name in lower case', () => {
+    const f = W.findings('exterior-drift');
+    assert.deepEqual(f.map((x) => [x.key, x.severity, x.subject]).sort(), [['lodash', 'low', 'exterior'], ['moment', 'low', 'exterior']], `A13 two drifts\n${JSON.stringify(f)}`);
+    for (const x of f) assert.match(x.suggestion, /draft a new version of exterior\.md/, 'A13 the suggestion says draft a new version');
+  });
+  await check('A13 observe-metrics logs each once', () => {
+    W.ok(['observe-metrics']);
+    const obs = () => logLines(W).filter((o) => o.type === 'observation' && o.kind === 'exterior-drift');
+    const first = obs();
+    assert.equal(first.length, 2, `A13 two observations\n${JSON.stringify(first)}`);
+    assert.equal(new Set(first.map((o) => o.source_key)).size, 2, 'A13 with distinct source_keys');
+    W.ok(['observe-metrics']);
+    assert.equal(obs().length, 2, 'A13 a second run logs none');
+  });
+  await check('A13 a private repo, as last recorded, raises no drift', () => {
+    write(path.join(W.old, 'docs/devteam/run/repo-visibility.json'), JSON.stringify({ visibility: 'private', at: new Date().toISOString() }));
+    assert.equal(W.findings('exterior-drift').length, 0, 'A13 private: no drift');
+  });
+}));
+
+test('A14 A15 exterior-stale and exterior-missing', withProject('exterior-stale', { exterior: EXTERIOR_MD }, async (W, check) => {
+  await check('A14 the fixture as it stands raises nothing', () => {
+    assert.deepEqual(exteriorFindings(W), [], 'A14 no exterior finding');
+  });
+  let first = null;
+  await check('A14 main\'s strategy moved on: exterior-stale', () => {
+    W.onMain({ [STRAT]: `${STRATEGY}- It ships twice a year.\n` }, 'strategy moves on');
+    const f = W.findings('exterior-stale');
+    assert.equal(f.length, 1, `A14 one stale\n${JSON.stringify(f)}`);
+    assert.match(f[0].suggestion, /re-read self\.md first/, 'A14 says re-read self.md first');
+    assert.deepEqual([f[0].severity, f[0].subject, f[0].key], ['low', 'exterior', `${W.blob(STRAT)}-${W.blob(SELF)}`], 'A14 low, keyed by both blobs');
+    first = f[0].key;
+  });
+  await check('A14 self.md moved on instead: exterior-stale with another key', () => {
+    W.onMain({ [STRAT]: STRATEGY, [SELF]: `${SELF_MD}\nIt also keeps a changelog.\n` }, 'self.md moves on');
+    const f = W.findings('exterior-stale');
+    assert.equal(f.length, 1, `A14 one stale\n${JSON.stringify(f)}`);
+    assert.notEqual(f[0].key, first, 'A14 a different key');
+  });
+  await check('A15 self.md and a linking strategy but no exterior.md: exterior-missing', () => {
+    W.onMain({ [EXT]: null }, 'no exterior.md');
+    const f = W.findings('exterior-missing');
+    assert.equal(f.length, 1, `A15 one missing\n${JSON.stringify(f)}`);
+    assert.match(f[0].suggestion, /draft exterior\.md/, 'A15 says draft exterior.md');
+    assert.deepEqual([f[0].severity, f[0].subject, f[0].key], ['low', 'exterior', `${W.blob(STRAT)}-${W.blob(SELF)}`], 'A15 low, keyed by both blobs');
+  });
+  await check('A15 an unlinked strategy, or no self.md: none', () => {
+    W.onMain({ [STRAT]: STRATEGY.replace(/^What Quillmark is.*\n\n/m, '') }, 'strategy unlinks self.md');
+    assert.equal(W.findings('exterior-missing').length, 0, 'A15 unlinked: none');
+    W.onMain({ [STRAT]: STRATEGY, [SELF]: null }, 'no self.md');
+    assert.equal(W.findings('exterior-missing').length, 0, 'A15 no self.md: none');
+  });
+}));

@@ -8110,6 +8110,32 @@ function exteriorShowLines(block, selfWhat) {
   }
   return lines;
 }
+// metrics' exterior findings, read from main with no network call (none with no main), each low and
+// keyed so observeFindings keeps one observation per name or blob pair (spec, Findings):
+// exterior-drift once per organisation or work the names rule no longer allows against main's files,
+// unless the visibility last recorded is private; exterior-stale while main's strategy.md or self.md
+// blob isn't the one exterior.md drew from; exterior-missing while main has self.md, a strategy
+// linking it, and no exterior.md. A main exterior.md breaking the contract raises none (validate
+// errors on it).
+function exteriorFindings(add) {
+  const main = projectInRepo ? mainRef() : null;
+  if (!main) return;
+  const blobAt = (rel) => git(['rev-parse', '--verify', '--quiet', `${main}:${rel}`], mainRoot);
+  const strategyBlob = blobAt(strategyRel);
+  const selfBlob = blobAt(selfRel());
+  const pair = `${strategyBlob}-${selfBlob}`;
+  const m = exteriorOnMain();
+  if (!m) {
+    if (selfBlob && linksSelf(strategyMainText())) add('low', 'exterior-missing', 'exterior', 'main has self.md and a strategy linking it, and no exterior.md', 'draft exterior.md from the strategy and self.md (supervisor.md, Monitoring) in a chore, run exterior check, and ask exterior-change', { key: pair });
+    return;
+  }
+  const { block } = exteriorDoc(m.text);
+  if (!block) return;
+  if (lastRepoVisibility() !== 'private') {
+    for (const r of exteriorNameLines(block, main).refused) add('low', 'exterior-drift', 'exterior', `exterior.md names "${r.name}", which main's strategy.md${block.entities[r.index].relation === 'depends_on' ? ' and dependency files' : ''} no longer name`, 'draft a new version of exterior.md that names it as a group, or have the strategy name it; run exterior check before chore pr', { key: r.name.toLowerCase() });
+  }
+  if (block.strategy_blob !== strategyBlob || block.self_blob !== selfBlob) add('low', 'exterior-stale', 'exterior', `exterior.md drew from ${block.strategy_blob !== strategyBlob ? 'a strategy.md' : 'a self.md'} main has moved on from`, 're-read self.md first and draft a new one if it no longer holds; then draft a new version of exterior.md from the strategy and that self.md', { key: pair });
+}
 // exterior show [--json]: the working tree's exterior.md and self.md. exterior check: the working
 // tree's, the draft.
 function cmdExterior() {
@@ -17710,6 +17736,7 @@ function collectMetrics(since, reviewsSince = 0) {
     const strategyAsked = questions().some((q) => q.status === 'open' && q.class === 'strategy-change');
     if (live.length && sState !== 'written') add(strategyAsked ? 'medium' : 'high', 'strategy-unwritten', strategyRel, sState === 'missing' ? `${plural(live.length, 'goal')} running and no strategy on ${settings.main_branch}` : `${plural(live.length, 'goal')} running and the strategy is still the template`, `draft it next, while work carries on, in a chore from what you can read, then ask the owner to approve it (ask --class strategy-change; supervisor.md §1)${sState === 'missing' ? '; init writes the template' : ''}`);
     selfFindings(add);
+    exteriorFindings(add);
     const all = questions();
     const open = all.filter((q) => q.status === 'open' && q.goal_hold !== 'let-go');
     for (const g of goals.filter((x) => x.status === 'ready' || ((x.status ?? 'draft') === 'draft' && open.some((q) => q.goal === x.id)))) {
