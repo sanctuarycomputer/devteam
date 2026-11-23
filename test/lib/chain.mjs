@@ -2135,11 +2135,11 @@ http.createServer((req, res) => {
     for (const sl of ['ci-fix-node', 'ci-fix-drop', 'ci-fix-gut', 'ci-fix-more', 'tidy-workflow']) git(['worktree', 'remove', '--force', wt(sl)]);
   });
 
-  step("the owner's secret-scan exceptions rule approves a gitleaks chore that only adds allowlist lines", () => {
-    const gl = '.gitleaks.toml';
-    write(path.join(repo, gl), '[extend]\nuseDefault = true\n\n[[allowlists]]\ndescription = "fixtures"\npaths = [\'\'\'^test/fixtures/\'\'\']\n');
-    git(['add', gl]);
-    git(['commit', '-qm', 'the repo gitleaks config']);
+  step("the owner's secret-scan exceptions rule approves a gitleaks chore that only adds one-finding fingerprints", () => {
+    const ig = '.gitleaksignore';
+    write(path.join(repo, ig), '# made-up values the scan misreads\n0123abc:test/old.mjs:generic-api-key:4\n');
+    git(['add', ig]);
+    git(['commit', '-qm', 'the repo gitleaksignore']);
     git(['push', '-q', 'origin', 'HEAD:main']);
     const branch = (slug, edit) => {
       git(['worktree', 'add', '-q', '-B', `chore-${slug}`, wt(slug), 'origin/main']);
@@ -2149,8 +2149,8 @@ http.createServer((req, res) => {
       git(['push', '-q', '-f', 'origin', `chore-${slug}`], wt(slug));
       return ['merge', '--chore', slug, '--dry-run', '--title', `chore-${slug}: allow a made-up value`, '--body-file', body];
     };
-    const add = (w, text) => fs.appendFileSync(path.join(w, gl), text);
-    const allow = branch('gitleaks-fixture', (w) => add(w, '\n[[allowlists]]\ndescription = "a made-up test value"\ncommits = ["0123abcd"]\n'));
+    const add = (w, text) => fs.appendFileSync(path.join(w, ig), text);
+    const allow = branch('gitleaks-fixture', (w) => add(w, '89abcdef:test/fixtures/key.mjs:private-key:12\ntest/smoke.mjs:generic-api-key:3\n'));
     assert.match(dt(allow, { role: 'sup' }).out, /outside project\//, 'no rule yet: the owner answers');
     // a rule at another scope approves nothing
     const Qp = must(['ask', '--question', 'Merge exceptions without me?', '--class', 'gate-change', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
@@ -2159,17 +2159,21 @@ http.createServer((req, res) => {
     const Q = must(['ask', '--question', 'Merge secret-scan exceptions without me?', '--class', 'gate-change', '--reasons', 'owner-only', '--recommendation', 'yes', '--rule-scope', 'chore:gitleaks-allowlist', '--new-because', 'merge reads only a rule scoped chore:gitleaks-allowlist'], { role: 'sup' });
     must(['answer', Q, 'yes', '--rule', 'You may merge exceptions to the secret-scanning rules.']);
     assert.match(must(allow, { role: 'sup' }), /only adds secret-scan exceptions; approved by the owner's standing rule/);
-    const ignore = branch('gitleaks-ignore', (w) => fs.writeFileSync(path.join(w, '.gitleaksignore'), '0123abcd:test/x.mjs:generic-api-key:3\n'));
-    assert.match(must(ignore, { role: 'sup' }), /only adds secret-scan exceptions/, 'a new .gitleaksignore is only additions');
-    const cut = branch('gitleaks-cut', (w) => fs.writeFileSync(path.join(w, gl), fs.readFileSync(path.join(w, gl), 'utf8').replace('useDefault = true\n', '')));
-    assert.match(dt(cut, { role: 'sup' }).out, /covers only adding lines; \.gitleaks\.toml changes or removes "useDefault = true"/, "it can't switch the default rules off");
-    const rules = branch('gitleaks-rules', (w) => add(w, '\n[[rules]]\nid = "mine"\nregex = "x"\n'));
-    assert.match(dt(rules, { role: 'sup' }).out, /doesn't cover adding "\[\[rules\]\]"/, 'nor add a rule');
-    const more = branch('gitleaks-more', (w) => { add(w, '\n# x\n'); fs.appendFileSync(path.join(w, 'README.md'), 'x\n'); });
-    assert.match(dt(more, { role: 'sup' }).out, /covers only \.gitleaks\.toml and \.gitleaksignore; this also changes README\.md/);
-    const other = branch('tidy-scan', (w) => add(w, '\n# x\n'));
-    assert.match(dt(other, { role: 'sup' }).out, /outside project\//, 'only a gitleaks chore');
-    for (const sl of ['gitleaks-fixture', 'gitleaks-ignore', 'gitleaks-cut', 'gitleaks-rules', 'gitleaks-more', 'tidy-scan']) git(['worktree', 'remove', '--force', wt(sl)]);
+    const wide = branch('gitleaks-wide', (w) => add(w, 'test/*:generic-api-key:3\n'));
+    assert.match(dt(wide, { role: 'sup' }).out, /covers only one-finding fingerprints/, 'no wildcard');
+    const loose = branch('gitleaks-loose', (w) => add(w, 'generic-api-key\n'));
+    assert.match(dt(loose, { role: 'sup' }).out, /covers only one-finding fingerprints/, 'nor anything but a fingerprint');
+    const log = branch('gitleaks-log', (w) => add(w, 'docs/devteam/project/log/2026-11.jsonl:generic-api-key:9\n'));
+    assert.match(dt(log, { role: 'sup' }).out, /never covers the project log/);
+    const cut = branch('gitleaks-cut', (w) => fs.writeFileSync(path.join(w, ig), fs.readFileSync(path.join(w, ig), 'utf8').replace('0123abc:test/old.mjs:generic-api-key:4\n', '')));
+    assert.match(dt(cut, { role: 'sup' }).out, /covers only adding fingerprints; \.gitleaksignore changes or removes/);
+    const toml = branch('gitleaks-toml', (w) => fs.writeFileSync(path.join(w, '.gitleaks.toml'), '[[allowlists]]\npaths = ["test/"]\n'));
+    assert.match(dt(toml, { role: 'sup' }).out, /covers only fingerprints added to \.gitleaksignore; this also changes \.gitleaks\.toml/, 'a config allowlist stays the owner\'s');
+    const link = branch('gitleaks-link', (w) => { fs.rmSync(path.join(w, ig)); fs.symlinkSync('README.md', path.join(w, ig)); });
+    assert.match(dt(link, { role: 'sup' }).out, /covers only a plain \.gitleaksignore \(this one is mode 120000\)/);
+    const other = branch('tidy-scan', (w) => add(w, 'test/x.mjs:generic-api-key:1\n'));
+    assert.match(dt(other, { role: 'sup' }).out, /outside project\//, 'only a gitleaks- chore');
+    for (const sl of ['gitleaks-fixture', 'gitleaks-wide', 'gitleaks-loose', 'gitleaks-log', 'gitleaks-cut', 'gitleaks-toml', 'gitleaks-link', 'tidy-scan']) git(['worktree', 'remove', '--force', wt(sl)]);
   });
 
   step('a standing owner rule approves upstream syncs, only when the kit files are upstream\'s verbatim', () => {

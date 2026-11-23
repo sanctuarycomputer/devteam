@@ -6935,29 +6935,35 @@ const compareRelease = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 // on main, so a "fix" can't drop a check. Its CI must still pass (merge waits for the forge's checks).
 const CI_RULE_SCOPES = ['chore:ci-fix', 'chore:devteam-workflow'];
 // A standing approval for secret-scan exceptions: an accepted owner rule scoped chore:gitleaks-allowlist
-// lets the supervisor merge a gitleaks-* chore without asking, when it only adds lines to the repo's
-// .gitleaks.toml or .gitleaksignore: it removes and changes nothing there, and adds no rule, no
-// [extend] and no useDefault, so it can only allow a finding, never switch the scan's rules off.
+// lets the supervisor merge a gitleaks-<what> chore without asking, when it only adds fingerprints to the
+// repo's .gitleaksignore: each line `[<commit>:]<path>:<rule-id>:<line>` exempts exactly one finding, so
+// the rule can neither change what the scan's config means nor allow anything broader than the findings
+// the owner's rule was about. Nothing else may change: .gitleaks.toml stays an owner answer, and a
+// fingerprint in the project log (quality.md, Secrets) or with a wildcard is refused. The file must be a
+// plain file, and the chore's CI must pass as usual.
 const SECRETS_RULE_SCOPES = ['chore:gitleaks-allowlist'];
-const SECRETS_ALLOW_FILES = [GITLEAKS_FILE, '.gitleaksignore'];
+const SECRETS_IGNORE_FILE = '.gitleaksignore';
+const GITLEAKS_FINGERPRINT = /^(?:[0-9a-f]{7,40}:)?([^:\s*?[\]]+):([A-Za-z0-9_.-]+):(\d+)$/;
 function secretsAllowlistApproval(chore, sha, base, changed) {
-  if (!/^gitleaks/.test(chore)) return {};
+  if (!/^gitleaks-/.test(chore)) return {};
   const rule = logObjects('knowledge').filter((k) => k.created_by === 'owner' && SECRETS_RULE_SCOPES.includes(k.scope) && k.status === 'accepted').sort(byTime).pop();
   if (!rule) return {};
-  const off = changed.filter((f) => !SECRETS_ALLOW_FILES.includes(f));
-  if (off.length) return { problem: `the owner's secret-scan exceptions rule covers only ${SECRETS_ALLOW_FILES.join(' and ')}; this also changes ${off.slice(0, 6).join(', ')}. The owner's answer is needed: merge --chore ${chore} --approved <qid>` };
-  for (const f of changed) {
-    const after = git(['show', `${sha}:${f}`]);
-    if (after === null) return { problem: `the owner's secret-scan exceptions rule doesn't cover deleting ${f}` };
-    const before = (git(['show', `${base}:${f}`]) ?? '').split('\n');
-    const now = after.split('\n');
-    // every line main had is still there, in order: the change only adds
-    let i = 0;
-    for (const l of now) if (i < before.length && l === before[i]) i++;
-    if (i < before.length && before.slice(i).some((l) => l.trim())) return { problem: `the owner's secret-scan exceptions rule covers only adding lines; ${f} changes or removes "${before.slice(i).find((l) => l.trim()).trim().slice(0, 80)}"` };
-    const added = now.filter((l) => !before.includes(l));
-    const bad = added.find((l) => /^\s*(\[\[rules\]\]|\[extend\]|useDefault\b)/.test(l));
-    if (bad) return { problem: `the owner's secret-scan exceptions rule doesn't cover adding "${bad.trim()}" to ${f}: only allowlist entries` };
+  const off = changed.filter((f) => f !== SECRETS_IGNORE_FILE);
+  if (off.length) return { problem: `the owner's secret-scan exceptions rule covers only fingerprints added to ${SECRETS_IGNORE_FILE}; this also changes ${off.slice(0, 6).join(', ')}. The owner's answer is needed: merge --chore ${chore} --approved <qid>` };
+  const mode = (git(['ls-tree', sha, '--', SECRETS_IGNORE_FILE]) ?? '').split(/\s/)[0];
+  if (mode !== '100644') return { problem: `the owner's secret-scan exceptions rule covers only a plain ${SECRETS_IGNORE_FILE} (this one is ${mode ? `mode ${mode}` : 'deleted'})` };
+  const before = (git(['show', `${base}:${SECRETS_IGNORE_FILE}`]) ?? '').split('\n');
+  const now = git(['show', `${sha}:${SECRETS_IGNORE_FILE}`]).split('\n');
+  // every line main had is still there, in order: the change only adds
+  let i = 0;
+  for (const l of now) if (i < before.length && l === before[i]) i++;
+  const kept = before.slice(i).find((l) => l.trim());
+  if (kept !== undefined) return { problem: `the owner's secret-scan exceptions rule covers only adding fingerprints; ${SECRETS_IGNORE_FILE} changes or removes "${kept.trim().slice(0, 80)}"` };
+  const log = `${projectRel}/log/`;
+  for (const l of now.filter((x) => !before.includes(x)).map((x) => x.trim()).filter((x) => x && !x.startsWith('#'))) {
+    const m = GITLEAKS_FINGERPRINT.exec(l);
+    if (!m) return { problem: `the owner's secret-scan exceptions rule covers only one-finding fingerprints ([<commit>:]<path>:<rule-id>:<line>); "${l.slice(0, 80)}" isn't one` };
+    if (m[1].startsWith(log)) return { problem: `the owner's secret-scan exceptions rule never covers the project log (${m[1]}): a secret there is a leak to fix, not an exception` };
   }
   return { rule, what: 'secret-scan exception' };
 }
