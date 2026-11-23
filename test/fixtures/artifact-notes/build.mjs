@@ -105,7 +105,11 @@ const add = (n, name, about, s, v, api) => CASES.push({ n, name, about, s, v, ap
 { const s = lines(38).open().hand(1, 'Plan_X'); add(38, 'r6-handed-to-not-a-session', 'a handed whose to is no session address: no hand-over', s, view()); }
 { const s = lines(39).open().ready(1, { noshot: 'other' }); add(39, 'r7-noshot-other', 'a ready whose noshot is no known value: to check, no noshot', s, view({ check: 'ready', ready: readyOf(39, 1) })); }
 { const s = lines(40).open().hand(1, 'plan-pricing').addressed('plan-pricing', 2, { draft: 5 }).set('supervisor', 3, { ready: null, unready: { at: at(40, 3), reason: 7 } }); add(40, 'r8-bad-draft-and-unready', 'a mark whose draft is not text, then a withdrawal whose reason is not text: the mark stands, with no draft', s, view({ handed: handedOf(40, 1, 'plan-pricing'), addressed: mark(40, 'plan-pricing', 2, { draft: null }), check: 'addressed' }), view({ handed: handedOf(40, 1, 'plan-pricing'), waiting: 'session', with: 'plan-pricing' })); }
-const READ_ONLY = ['r1-handed-to-owner', 'r2-addressed-text-not-string', 'r3-handed-without-to', 'r4-bad-handed-after-valid', 'r5-frame-wrong-shape', 'r6-handed-to-not-a-session', 'r7-noshot-other', 'r8-bad-draft-and-unready'];
+// task-3-2 F2-1, F2-2: a hand-over to the responder, and a frame's h and hash each of the wrong type
+{ const s = lines(41).open().hand(1, 'responder'); add(41, 'r9-handed-to-responder', 'a handed whose to is the responder: no hand-over', s, view()); }
+{ const s = lines(42, { frame: { w: 1400, h: 860.5, hash: '' } }).open(); add(42, 'r10-frame-h-not-integer', 'a frame whose h is no integer: no frame', s, view()); }
+{ const s = lines(43, { frame: { w: 1400, h: 860, hash: 7 } }).open(); add(43, 'r11-frame-hash-not-text', 'a frame whose hash is not text: no frame', s, view()); }
+const READ_ONLY = ['r1-handed-to-owner', 'r2-addressed-text-not-string', 'r3-handed-without-to', 'r4-bad-handed-after-valid', 'r5-frame-wrong-shape', 'r6-handed-to-not-a-session', 'r7-noshot-other', 'r8-bad-draft-and-unready', 'r9-handed-to-responder', 'r10-frame-h-not-integer', 'r11-frame-hash-not-text'];
 // contract-1 F1: each handed.at bound on its own. A mark made before the current hand-over counts for
 // nothing (the owner took the note back, then handed it over again); a supervisor turn before a
 // hand-over to the supervisor is not its first turn after it.

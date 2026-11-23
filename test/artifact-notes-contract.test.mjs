@@ -162,7 +162,7 @@ test('artifact-notes-contract A4: /api/threads carries the note fields, with no 
   const F = threadsFixture('artifact-notes-api');
   let dash = null;
   try {
-    const folders = ['c11-ready-with-shot', 'c13-unready-after-addressed', 'c16-frame', 'c17-ready-noshot', 'c18-handed-to-supervisor', 'c02-handed-then-addressed'];
+    const folders = ['c11-ready-with-shot', 'c13-unready-after-addressed', 'c16-frame', 'c17-ready-noshot', 'c18-handed-to-supervisor', 'c02-handed-then-addressed', 'c33-noshot-then-mark', 'r8-bad-draft-and-unready'];
     placeLogs(F, folders);
     const started = await dashboardOnFreePort(F.old, F.env({}));
     dash = started.dash;

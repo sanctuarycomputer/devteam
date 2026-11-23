@@ -2011,6 +2011,9 @@
   "r5-frame-wrong-shape",
   "r6-handed-to-not-a-session",
   "r7-noshot-other",
-  "r8-bad-draft-and-unready"
+  "r8-bad-draft-and-unready",
+  "r9-handed-to-responder",
+  "r10-frame-h-not-integer",
+  "r11-frame-hash-not-text"
  ]
 }
