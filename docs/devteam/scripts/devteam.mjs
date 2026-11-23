@@ -9293,6 +9293,19 @@ function subjectProblem(s) {
 }
 function anchorProblem(a) {
   if (!isObj(a)) return 'anchor is an object';
+  // A canvas layer's pin (canvas-doc@1 §10): { node: "<id>" } alone, 1 to 64 characters of one line
+  // of plain text, well-formed. A node is no page element, so its rule is its own and ANCHOR_CAPS
+  // (and the lens's and the page's copies of it) don't name it.
+  if (Object.hasOwn(a, 'node')) {
+    const extra = Object.keys(a).filter((k) => k !== 'node');
+    if (extra.length) return `an anchor with a node has no ${extra.join(', ')}`;
+    const v = a.node;
+    if (typeof v !== 'string') return 'anchor.node is text';
+    if (!v) return 'anchor.node is at least 1 character';
+    if (UNSAFE_TEXT.test(v) || /\p{Cs}/u.test(v)) return 'anchor.node is one line of plain text (no control or bidi characters)';
+    const n = [...v].length;
+    return n > 64 ? `anchor.node is ${n} characters; at most 64` : null;
+  }
   for (const [k, v] of Object.entries(a)) {
     if (k === 'rect' || k === 'point') {
       const names = k === 'rect' ? ['x', 'y', 'w', 'h'] : ['x', 'y'];
