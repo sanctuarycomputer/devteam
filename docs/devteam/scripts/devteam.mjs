@@ -15295,11 +15295,14 @@ function choreSlug(slugName) {
 }
 // A new chore worktree gets settings.worktree_files (a gitignored key, an .env) so gates can run in
 // it; `chore start` also runs worktree_setup there. log-sync and retro only commit files, so they
-// skip the setup.
-function choreWorktree(slugName, { reset = false, setup = false } = {}) {
+// skip the setup. responder: the responder's draft (responder draft), from its own worktree: honoured
+// only for the responder writer with DEVTEAM_ROLE unset or responder, so the flag alone lets no one
+// else past the main-checkout check (kept inline: test D7 loads this function by itself); it never
+// takes a worktree that appeared since the responder looked, so a rollback only removes its own.
+function choreWorktree(slugName, { reset = false, setup = false, responder = false } = {}) {
   choreSlug(slugName);
   if (!commonDir || !projectInRepo) die('chores need a git checkout with the project folder inside it');
-  if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
+  if (repoRoot !== mainRoot && !(responder && logWriter() === 'responder' && [undefined, '', 'responder'].includes(process.env.DEVTEAM_ROLE))) die(`run this from the main checkout (${mainRoot})`);
   const wt = path.join(mainRoot, '.worktrees', `chore-${slugName}`);
   const main = loadSettings().main_branch;
   if (!flags['dry-run']) git(['fetch', '--quiet', 'origin', main]);
@@ -15308,6 +15311,7 @@ function choreWorktree(slugName, { reset = false, setup = false } = {}) {
   // add and reset with -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
   if (!existed) { gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, base], mainRoot); seedWorktree(wt, { setup, session: true }); }
   else if (reset) gitOrDie(['-c', 'core.useReplaceRefs=false', 'checkout', '--quiet', '-B', `chore-${slugName}`, base], wt);
+  else if (responder) die(`.worktrees/chore-${slugName} appeared meanwhile: responder draft again`);
   // in use again: the tick's tidy leaves a worktree alone until it has been quiet a while
   else { const now = new Date(); try { fs.utimesSync(wt, now, now); } catch {} }
   // one there already whose setup never passed (cut short at the deadline, held for a slot, failed:
@@ -33292,10 +33296,120 @@ function nudgeResponder(now = Date.now()) {
 // A thread's state in the supervisor's words (thread list, show): whose reply is owed, or the owner's move.
 const waitingWords = (v, overdue = false) => (v.waiting === 'supervisor' ? 'waiting on the supervisor' : v.waiting === 'responder' ? `the responder has it${overdue ? ' · overdue' : ''}` : "the owner's move");
 // Its help lines, in Setup and roles (HELP_SETUP reads them; this region sits above HELP).
+// Whether the worktree at dir changed <slug>'s folder since it left main: a tracked change against
+// its merge-base with origin's main (committed or not), or an untracked file there. A copy older than
+// main's but unchanged since the worktree was cut draws nothing. 'unreadable' when git can't say
+// (no merge-base, a folder that isn't its own worktree, an error): the caller fails closed on it.
+function artifactChangedIn(dir, slug, main) {
+  const top = responderGit(['rev-parse', '--show-toplevel'], dir);
+  if (top.status !== 0 || realPath(top.stdout.trim()) !== realPath(dir)) return 'unreadable';
+  const mb = responderGit(['merge-base', 'HEAD', `origin/${main}`], dir);
+  const base = mb.status === 0 ? mb.stdout.trim() : '';
+  if (!base) return 'unreadable';
+  const folder = `${ARTIFACTS_REL}/${slug}`;
+  const diff = responderGit(['diff', '--quiet', base, '--', folder], dir);
+  if (diff.status === 1) return true;
+  if (diff.status !== 0) return 'unreadable';
+  const ls = responderGit(['ls-files', '--others', '--exclude-standard', '--', folder], dir);
+  if (ls.status !== 0) return 'unreadable';
+  return ls.stdout.trim() !== '';
+}
+// responder draft <slug> [--new --title t --summary s [--for '<json>'] [--kind k]]: the responder
+// opens (or reuses) .worktrees/chore-artifact-<slug>, a chore worktree the supervisor lands with
+// chore pr / merge --chore as any other. Refused, naming each one, while a ticket's, planner's or
+// other session's worktree (or another machine's branch) draws the slug: the owner's change is
+// relayed there. Every git call of its own goes through responderGit/responderOrigin, so nothing
+// another session planted (a hook, an fsmonitor, a replace ref) runs as the responder.
+function responderDraft() {
+  const slug = positional[1];
+  const role = process.env.DEVTEAM_ROLE;
+  if (flags.owner || process.env.DEVTEAM_CHANNEL || logWriter() !== 'responder' || ![undefined, '', 'responder'].includes(role)) die("responder draft: the responder's command; the supervisor opens a draft with chore start artifact-<slug>");
+  const usage = 'usage: responder draft <slug> [--new --title "…" --summary "…" [--for \'["goal:g"]\'] [--kind mock|diagram|docs]]';
+  if (!slug || !LINK_ID.test(slug) || positional.length > 2) die(usage);
+  const title = flagStr('title'), summary = flagStr('summary');
+  if (flags.new && (!title || !summary)) die('--new needs --title and --summary');
+  const main = loadSettings().main_branch;
+  const name = `chore-artifact-${slug}`;
+  const wt = path.join(mainRoot, '.worktrees', name);
+  const touch = () => { const now = new Date(); try { fs.utimesSync(wt, now, now); } catch {} };
+  // a draft already there is the responder's own: used, whoever else draws the slug
+  if (fs.existsSync(wt)) {
+    const top = responderGit(['rev-parse', '--show-toplevel'], wt);
+    if (top.status !== 0 || realPath(top.stdout.trim()) !== realPath(wt)) die(`.worktrees/${name} is not a git worktree: move it aside, then responder draft ${slug} again`);
+    if (flags.new) die(`.worktrees/${name} is already there: responder draft ${slug} edits it`);
+    const st = responderGit(['status', '--porcelain'], wt);
+    if (st.status !== 0) die(`.worktrees/${name}: git status failed: ${(st.stderr || '').trim()}`);
+    if (st.stdout.trim()) { touch(); return out(realPath(wt)); }
+    const fetched = responderOrigin(['fetch', '--quiet', 'origin', main]);
+    if (fetched.status !== 0) die(`responder draft: fetching origin's ${main} failed: ${(fetched.stderr || '').trim() || `exit ${fetched.status}`}`);
+    const head = responderGit(['rev-parse', 'HEAD'], wt).stdout?.trim();
+    const onMain = responderGit(['merge-base', '--is-ancestor', 'HEAD', `origin/${main}`], wt).status === 0;
+    // landed (merged, squashed, or never committed to): start again from main as it is now; a
+    // pushed chore commit not yet merged is kept
+    if (onMain || (head && mergedAtSha(name, head))) choreWorktree(`artifact-${slug}`, { responder: true, reset: true });
+    else touch();
+    return out(realPath(wt));
+  }
+  // a session drawing the slug: every worktree that changed its folder since it left main, and every
+  // other machine's branch that did (a local row hides those in remote_branches)
+  const known = tickets();
+  const found = new Map();
+  const relay = (who) => `relay the owner's change with send ${who} "…" (thread <t-id>)`;
+  const handOver = 'hand it over: send supervisor "…" --kind handoff --thread <t-id>';
+  let names = [];
+  try { names = fs.readdirSync(path.join(mainRoot, '.worktrees')); } catch {}
+  for (const w of names) {
+    if (w === name) continue;
+    const dir = draftWorktree(w);
+    if (!dir) continue;
+    const changed = artifactChangedIn(dir, slug, main);
+    if (!changed) continue;
+    const where = `.worktrees/${w}`;
+    if (changed === 'unreadable') { found.set(w, `${where} can't be read, so it may be drawing ${slug} (${w}); ${handOver}`); continue; }
+    const rec = /^records-(.+)$/.exec(w);
+    const session = known.has(w) || /^plan-./.test(w) ? w : rec && known.has(rec[1]) ? rec[1] : null;
+    found.set(w, session ? `${slug} is being drawn in ${where} (${session}); ${relay(session)}` : `${slug} is being drawn in ${where} (${w}); ${handOver}`);
+  }
+  const branches = new Set();
+  for (const a of draftArtifacts().filter((d) => d.slug === slug)) {
+    if (String(a.at).startsWith('origin:')) branches.add(a.branch ?? String(a.at).slice('origin:'.length));
+    for (const b of a.remote_branches ?? []) branches.add(b);
+  }
+  for (const b of branches) {
+    const t = /^ticket\/(.+)$/.exec(b), p = /^plan\/(.+)$/.exec(b);
+    const session = t && known.has(t[1]) ? t[1] : p ? `plan-${p[1]}` : null;
+    const where = `branch ${b} on origin`;
+    found.set(`~${b}`, session ? `${slug} is being drawn in ${where} (${session}); ${relay(session)}` : `${slug} is being drawn in ${where} (${b}); ${handOver}`);
+  }
+  if (found.size) die(`responder draft ${slug}: refused, nothing made:\n${[...found.keys()].sort().map((k) => `  ${found.get(k)}`).join('\n')}`);
+  const landed = landedArtifacts().some((a) => a.slug === slug);
+  if (!flags.new && !landed) die(`no artifact ${slug} on main; to start one: responder draft ${slug} --new --title "…" --summary "…"`);
+  if (flags.new && landed) die(`${slug} is on main; responder draft ${slug} edits it`);
+  // make it; a failed artifact new takes back only what this run made
+  const had = responderGit(['rev-parse', '--verify', '-q', `refs/heads/${name}`]);
+  const was = had.status === 0 ? had.stdout.trim() : null;
+  choreWorktree(`artifact-${slug}`, { responder: true });
+  if (flags.new) {
+    const args = ['artifact', 'new', slug, '--title', title, '--summary', summary];
+    if (flagStr('for') !== undefined) args.push('--for', flagStr('for'));
+    if (flags.kind !== undefined) args.push('--kind', flagStr('kind') ?? '');
+    const r = spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...args], { cwd: wt, env: { ...process.env, DEVTEAM_ROLE: 'responder' }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60000 });
+    if (r.stderr) process.stderr.write(r.stderr);
+    if (r.status !== 0 || r.error) {
+      responderGit(['worktree', 'remove', '--force', wt]);
+      if (was) responderGit(['branch', '-f', name, was]);
+      else responderGit(['branch', '-D', name]);
+      die(`responder draft ${slug}: artifact new failed (${r.error?.message ?? `exit ${r.status}`}); the draft was taken back`);
+    }
+  }
+  out(realPath(wt));
+}
 const RESPONDER_HELP = `  responder [--resume | --stop]   supervisor: the thread responder, a quick session that answers the owner's thread turns (window responder, .worktrees/responder at main, the owner's responder_command); --stop ends it, --resume restarts it in its window
+  responder draft <slug> [--new --title t --summary s]   the responder: open (or reuse) .worktrees/chore-artifact-<slug> to edit a landed artifact, or start one there with --new; refused, naming the session, while a ticket or planner draws it
   prompt responder   the responder's prompt: its section of supervisor.md (§13)`;
 // responder [--resume | --stop]: the supervisor starts, restarts or stops the responder.
 function cmdResponder() {
+  if (positional[0] === 'draft') return responderDraft();
   // every channel is one of the owner's surfaces (the dashboard, the hub, the owner's terminal)
   if (flags.owner || process.env.DEVTEAM_CHANNEL) die('responder: the supervisor starts the responder (settings.responder turns it off)');
   supervisorOnly('responder');
