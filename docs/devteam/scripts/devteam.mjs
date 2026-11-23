@@ -11796,7 +11796,14 @@ function cmdArtifact() {
     const m = publicManifest(args[0] ?? die('usage: artifact manifest <slug> [--json]'));
     if (flags.json) return out(JSON.stringify(m));
     const bytes = Object.values(m.files).reduce((n, f) => n + f.size, 0);
-    return out(`${m.project}/${m.slug} at tree ${m.tree.slice(0, 12)}: ${Object.keys(m.files).length} files, ${bytes} bytes; published, it is https://public.<box>/${m.project}/${m.slug}/`);
+    const said = `${m.project}/${m.slug} at tree ${m.tree.slice(0, 12)}: ${Object.keys(m.files).length} files, ${bytes} bytes; published, `;
+    // A box image whose gateway serves each project at a host of its own (project-hosts@1) sets
+    // DEVTEAM_PROJECT_HOSTS=1; one from before it still serves public.<box>/<project>/<slug>/.
+    if (process.env.DEVTEAM_PROJECT_HOSTS !== '1') return out(`${said}it is https://public.<box>/${m.project}/${m.slug}/`);
+    // project-hosts@1's rules, as the gateway's Publish checks them, slug first
+    if (['api', 'artifact', 'c', 'healthz', 'presence', 'public-manifest', 'review', 'upload', 'view'].includes(m.slug)) return out(`${said}it would have no address: ${m.slug} is a path of the dashboard, so rename the artifact`);
+    if (!/^(?!\d+$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(m.project) || ['term', 'public', 'www'].includes(m.project)) return out(`${said}it would have no address: ${m.project} can't be a host name, so rename the project (settings.md's project)`);
+    return out(`${said}it is https://${m.project}.<box>/${m.slug}/`);
   }
   // artifact publish|unpublish: the owner's record of what the gateway made public. The gateway's
   // confirm page runs them through the dashboard; by hand they record intent only.
