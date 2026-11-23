@@ -1,0 +1,18 @@
+{
+ "about": "a ready whose noshot is no known value: to check, no noshot",
+ "thread": "t-20261120-100039000-owner",
+ "view": {
+  "handed": null,
+  "addressed": null,
+  "check": "ready",
+  "shot": null,
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "owner",
+  "ready": {
+   "outcome": "The trial button reads Start free trial.",
+   "at": "2026-11-20T10:01:39.000Z"
+  }
+ }
+}

@@ -2007,6 +2007,10 @@
   "r1-handed-to-owner",
   "r2-addressed-text-not-string",
   "r3-handed-without-to",
-  "r4-bad-handed-after-valid"
+  "r4-bad-handed-after-valid",
+  "r5-frame-wrong-shape",
+  "r6-handed-to-not-a-session",
+  "r7-noshot-other",
+  "r8-bad-draft-and-unready"
  ]
 }

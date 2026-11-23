@@ -91,7 +91,21 @@ const add = (n, name, about, s, v, api) => CASES.push({ n, name, about, s, v, ap
 { const s = lines(26).open().set('owner', 1, { handed: { at: at(26, 1) } }); add(26, 'r3-handed-without-to', 'a hand-written handed with no to: no hand-over', s, view()); }
 // contract-1 F6: a bad hand-written handed after a valid one is skipped, and the valid one stands
 { const s = lines(30).open().hand(1, 'plan-pricing').hand(2, 'owner'); add(30, 'r4-bad-handed-after-valid', 'a hand-written handed naming the owner after a valid hand-over: the valid one stands', s, view({ handed: handedOf(30, 1, 'plan-pricing'), waiting: 'session', with: 'plan-pricing' })); }
-const READ_ONLY = ['r1-handed-to-owner', 'r2-addressed-text-not-string', 'r3-handed-without-to', 'r4-bad-handed-after-valid'];
+// task-3 F1: noshot shows only while check is 'ready'
+{ const s = lines(31).open().ready(1, { noshot: 'no-change' }).turn('owner', 2); add(31, 'c31-noshot-then-owner-turn', 'a --no-change ready, then an owner turn: nothing to check, no noshot', s, view()); }
+{ const s = lines(32, { subject: { kind: 'item', ref: 'ticket:checkout-04' } }).open().turn('supervisor', 1).ready(2, { noshot: 'no-change' }); add(32, 'c32-noshot-on-non-artifact', 'a --no-change ready on a thread that is not an artifact note: check and noshot stay null', s, view({ ready: readyOf(32, 2) })); }
+{ const s = lines(33).open().hand(1, 'plan-pricing').ready(2, { noshot: 'no-change' }).addressed('plan-pricing', 3); add(33, 'c33-noshot-then-mark', "a --no-change ready, then a session's mark: the mark is to check, and noshot goes", s, view({ handed: handedOf(33, 1, 'plan-pricing'), addressed: mark(33, 'plan-pricing', 3), check: 'addressed', ready: readyOf(33, 2) }), view({ handed: handedOf(33, 1, 'plan-pricing'), check: 'ready', noshot: 'no-change', ready: readyOf(33, 2) })); }
+// task-2 F2 / task-3 F2: the view's own rules, each pinned
+{ const s = lines(34).open().turn('owner', 1).hand(1, 'plan-pricing'); add(34, 'c34-handed-same-time-as-owner-word', "a hand-over at the same time as the owner's last word is not after it: no hand-over", s, view()); }
+{ const s = lines(35, { frame: { w: 1400, h: 860, hash: '' } }).open().set('owner', 1, { status: 'resolved' }).hand(2, 'plan-pricing'); add(35, 'c35-resolved-then-handed', 'a resolved note handed over: no hand-over on a resolved note, and its frame stays', s, view({ frame: { w: 1400, h: 860, hash: '' } })); }
+// task-3 F3: a thread that is not an artifact note keeps kit-104's waiting
+{ const s = lines(36, { subject: { kind: 'item', ref: 'ticket:checkout-04' } }).open(); add(36, 'c36-non-artifact-owed', "a thread that is not an artifact note, its owner turn unanswered: kit-104's waiting, the supervisor's", s, view({ waiting: 'supervisor' })); }
+// read-only: hand-written fields of the wrong shape, each no field and hiding no good one
+{ const s = lines(37, { frame: { w: '1400', h: 860, hash: '' } }).open(); add(37, 'r5-frame-wrong-shape', 'a frame whose w is text: no frame', s, view()); }
+{ const s = lines(38).open().hand(1, 'Plan_X'); add(38, 'r6-handed-to-not-a-session', 'a handed whose to is no session address: no hand-over', s, view()); }
+{ const s = lines(39).open().ready(1, { noshot: 'other' }); add(39, 'r7-noshot-other', 'a ready whose noshot is no known value: to check, no noshot', s, view({ check: 'ready', ready: readyOf(39, 1) })); }
+{ const s = lines(40).open().hand(1, 'plan-pricing').addressed('plan-pricing', 2, { draft: 5 }).set('supervisor', 3, { ready: null, unready: { at: at(40, 3), reason: 7 } }); add(40, 'r8-bad-draft-and-unready', 'a mark whose draft is not text, then a withdrawal whose reason is not text: the mark stands, with no draft', s, view({ handed: handedOf(40, 1, 'plan-pricing'), addressed: mark(40, 'plan-pricing', 2, { draft: null }), check: 'addressed' }), view({ handed: handedOf(40, 1, 'plan-pricing'), waiting: 'session', with: 'plan-pricing' })); }
+const READ_ONLY = ['r1-handed-to-owner', 'r2-addressed-text-not-string', 'r3-handed-without-to', 'r4-bad-handed-after-valid', 'r5-frame-wrong-shape', 'r6-handed-to-not-a-session', 'r7-noshot-other', 'r8-bad-draft-and-unready'];
 // contract-1 F1: each handed.at bound on its own. A mark made before the current hand-over counts for
 // nothing (the owner took the note back, then handed it over again); a supervisor turn before a
 // hand-over to the supervisor is not its first turn after it.
