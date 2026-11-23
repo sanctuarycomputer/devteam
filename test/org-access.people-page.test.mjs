@@ -655,3 +655,71 @@ test('org-access A3: in Chrome, a member\'s Settings has no People section; the 
     assert.equal((await p.ev(groups)).includes('People'), want, `${who}: ${await p.ev(groups)}`);
   }
 });
+
+// C25, its first half: Your sign-in as the mock words it, on a real gateway
+const dMon = (iso) => new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+const methodRows = `[...document.querySelectorAll('#hub-settings .set-row.method')].map((r) => r.textContent)`;
+const toast = `document.querySelector('.oa-toast.on')?.textContent ?? ''`;
+const removeOf = (label) => `[...document.querySelectorAll('#hub-settings .set-row.method')].find((r) => r.querySelector('.t').textContent.endsWith(${JSON.stringify(label)}))?.querySelector('button')?.click() ?? 'none'`;
+// a second passkey for the owner, as the claim stores one (top-level `passkeys`)
+function secondOwnerKey(gw, name = 'Phone') {
+  const s = gw.state();
+  const k = { ...s.passkeys[0], id: u(crypto.randomBytes(16)), name, createdAt: new Date().toISOString() };
+  delete k.usedAt;
+  gw.write({ ...s, passkeys: [...s.passkeys, k] });
+  return k;
+}
+
+test('org-access A3: in Chrome, Your sign-in works as the mock does', CHROME, async (t) => {
+  const B = await box('a3-signin');
+  t.after(() => B.gw.close());
+  // Ana's passkey came by a new link: its notice, and a method added at the same minute
+  const at = new Date(Date.now() - 3 * 864e5).toISOString();
+  const s = B.gw.state();
+  const label = B.ana.methods[0].label;
+  B.gw.write({ ...s, people: s.people.map((p) => (p.id !== B.ana.id ? p : { ...p, methods: p.methods.map((m) => ({ ...m, added_at: at })), notices: [{ kind: 'method-added', at, type: 'passkey', label, method: p.methods[0].id, shown_at: null }] })) });
+  const a = await hubAs(t, B, B.anaC);
+  if (!a) return t.skip('headless Chrome can\'t load box.localhost here');
+  await a.until('Ana\'s Your sign-in', `${groups}.includes('Your sign-in') && document.querySelectorAll('#hub-settings .set-row.method').length === 1`);
+  assert.equal(await a.ev(`document.querySelector('#oa-notice p')?.textContent`), `A sign-in method (a passkey) was added to your account on ${dMon(at)}, from a new link the box's owner sent. If you didn't ask for one, tell them.`);
+  assert.deepEqual(await a.ev(methodRows), [`Passkey · ${label}added ${dMon(at)} by a new link · used neverRemove`], 'her row, added by a new link');
+  await a.ev(`document.querySelector('#oa-notice button').click()`);
+  await a.until('the notice goes', `!document.querySelector('#oa-notice')`);
+  await a.send('Page.reload');
+  await a.until('Ana\'s Settings again', `document.querySelectorAll('#hub-settings .set-row.method').length === 1`);
+  await sleep(1000);
+  assert.equal(await a.ev(`Boolean(document.querySelector('#oa-notice'))`), false, 'OK is kept on this device');
+
+  // the owner's only passkey: refused in the hub, nothing sent
+  const p = await hubAs(t, B, B.owner);
+  await p.until('the owner\'s Your sign-in', `document.querySelectorAll('#hub-settings .set-row.method').length === 1`);
+  const only = B.gw.state().passkeys[0];
+  assert.match((await p.ev(methodRows))[0], new RegExp(`^Passkey · ${only.name}added ${dMon(only.createdAt)} · used `), 'the owner\'s row');
+  await p.ev(removeOf(only.name));
+  await p.until('the last-passkey words', `${toast} === "Your last passkey can't be removed: the box would look unclaimed. Add another first"`);
+  assert.equal(B.gw.state().passkeys.length, 1, 'the box still holds it');
+  // a second, removed
+  const phone = secondOwnerKey(B.gw);
+  await p.send('Page.reload');
+  await p.until('two methods', `document.querySelectorAll('#hub-settings .set-row.method').length === 2`);
+  await p.ev(removeOf('Phone'));
+  await p.until('the removed toast', `${toast} === 'Removed. Sessions opened with it were signed out'`);
+  await p.until('one method again', `document.querySelectorAll('#hub-settings .set-row.method').length === 1`);
+  assert.equal(B.gw.state().passkeys.some((k) => k.id === phone.id), false, 'the box no longer holds it');
+
+  // signed in ten minutes ago: Confirm it's you, and nothing sent. Minted now: the removal above
+  // ended the owner's other sessions, B.ownerStale with them.
+  secondOwnerKey(B.gw, 'Tablet');
+  const q = await hubAs(t, B, mint(B.gw, ownerOf(B.gw), { at: STALE_AT() }));
+  await q.until('the stale owner\'s two methods', `document.querySelectorAll('#hub-settings .set-row.method').length === 2`);
+  await q.ev(removeOf('Tablet'));
+  await q.until('Confirm it\'s you', `Boolean(document.querySelector('#oa-fresh'))`);
+  assert.equal(await q.ev(`document.querySelector('#oa-fresh p').textContent`), "Confirm it's you to change this. You signed in more than five minutes ago; sign in again with your passkey, then make the change again.");
+  assert.equal(await q.ev(`document.querySelector('#hub-settings').children[1]?.id`), 'oa-fresh', 'at the top of Settings, under its heading');
+  assert.equal(B.gw.state().passkeys.length, 2, 'nothing removed');
+  await sleep(11000);
+  assert.equal(await q.ev(`Boolean(document.querySelector('#oa-fresh'))`), true, 'a repaint keeps the note');
+  await q.ev(`document.querySelector('#oa-fresh button').click()`);
+  const want = `${B.gw.publicUrl}/auth/login?next=${encodeURIComponent(`${B.gw.publicUrl}/#settings`)}`;
+  await q.until('the sign-in page', `location.href === ${JSON.stringify(want)}`);
+});
