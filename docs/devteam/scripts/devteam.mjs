@@ -5435,6 +5435,11 @@ function cmdStatus() {
     const shown = r.not_started && !held && !r.waiting ? '  [not started: no window or worktree]' : `  [${r.phase}${r.task ? ` ${r.task}` : ''}, ${r.minutes_silent}m${flag}]`;
     out(`${r.stage.padEnd(18)} ${r.id}${r.phase ? shown : ''}${r.records_landed ? `  [${RECORDS_ONLY_FIX(r.id)}]` : ''}`);
   }
+  // each running goal, with its next move under it (next-move@1; moves lists every move)
+  for (const m of nextMoves().filter((x) => x.subject.startsWith('goal:') && ['run', 'drain'].includes(goalMode(logGet(x.subject.slice('goal:'.length)))))) {
+    out(`${'goal'.padEnd(18)} ${m.subject.slice('goal:'.length)}  ${m.title}`);
+    out(`${''.padEnd(18)}   next: ${moveLine(m)}`);
+  }
   // the owner's floor (kit-618): status only looks, so it releases no floor, though ownerLineOpen
   // still clears both marks from a pane whose agent exited to a shell (spec, Readers that only look)
   const pane = markedPane(runDir);
@@ -18719,6 +18724,8 @@ function leadTicketMove(open) {
     ?? ((prio) => ms.filter((m) => ['start-worker', 'waits-for-slot'].includes(m.move)).map((m) => ({ m, kind: tickets().get(idOf(m))?.kind, severity: 0, priority: prio.get(idOf(m))?.priority })).sort(readyOrder)[0]?.m)(effectivePriorities(tickets()))
     ?? ms[0] ?? null;
 }
+// One move on a line: who holds it, what, how long, and owed, stalled or quiet.
+const moveLine = (m) => `${m.holder}  ${m.words}  ${moveAge(m.since)}${m.flag === 'none' ? '  no move' : m.flag ? `  ${m.flag}` : ''}${m.quiet ? `  (${m.quiet})` : ''}`;
 // The planner rows, P1 to P4.
 function plannerMove(p) {
   const by = `plan-${p.feature}`;
@@ -35263,7 +35270,7 @@ const HELP_GRAPH = `The graph (planning.md)
   ticket hold <id> --reason r --for <cause>… [--until <date>] [--whole "<why>"]   supervisor or planner: hold a ticket, naming what it waits on (q-…, a ticket, chore:<slug>, goal:<g-id>, pr:<link>#<n>, run:<link>:<id>, external:<words>; the last three need --until, at most 30 days ahead)
   ticket release <id> [--reason r]       supervisor or planner: lift a ticket's hold
   validate [--strict] [--plan <feature>]  graph rules D1-D11, reviews, goals, log health (--plan: the feature a detached plan head plans)
-  waves [--feature f] | ready [--plan-ahead] | status [--json] | roadmap [--json]
+  waves [--feature f] | ready [--plan-ahead] | status [--json] | roadmap [--json]   status also prints each running goal with its next move under it
   moves [--json] [--holder owner|supervisor|planner|worker|nobody]   every running goal's, active ticket's, planner's and open chore's next move: what, who holds it, since when, owed or stalled marked (next-move@1)
   components check [--ref r] [--repo <link> [--path <checkout>]] [--count] [--json]   coverage: every tracked path at r (default main) owned by exactly one component line; exit 1 on any gap (--count: the Baseline's number); --repo checks another repo's tree under home's lines`;
 const HELP_CHECKS = `Checks and merging (quality.md)

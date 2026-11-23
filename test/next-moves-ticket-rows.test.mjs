@@ -354,3 +354,64 @@ test('next-moves: a phase\'s since is the first line of its run, through livenes
   phase(P, 'ch-41-since', 'verify');
   assert.equal(ticketMove(P, 'ch-41-since').since, lastAt(P, 'ch-41-since'), 'a new phase starts a new run');
 });
+
+test('next-moves: moves groups by holder, oldest first, and --holder lists only that holder\'s', () => {
+  const P = project('text', { max_active_tickets: 5 });
+  readyGoal(P, 'Text', 'text');
+  addTicket(P, 'ch-51-older', 'text');
+  sleep(1100);
+  addTicket(P, 'ch-52-newer', 'text');
+  addTicket(P, 'ch-53-work', 'text');
+  phase(P, 'ch-53-work', 'build');
+  const text = P.F.ok(P.F.old, ['moves']);
+  const lines = text.split('\n');
+  const head = (h) => lines.indexOf(`${h}:`);
+  assert.ok(head('supervisor') >= 0 && head('worker') >= 0, text);
+  const older = lines.findIndex((l) => l.includes('ticket:ch-51-older'));
+  const newer = lines.findIndex((l) => l.includes('ticket:ch-52-newer'));
+  assert.ok(head('supervisor') < older && older < newer, `oldest first under supervisor:\n${text}`);
+  assert.ok(lines.findIndex((l) => l.includes('ticket:ch-53-work')) > head('worker'), text);
+  const sup = P.F.ok(P.F.old, ['moves', '--holder', 'supervisor']);
+  assert.ok(sup.includes('ticket:ch-51-older') && !sup.includes('ticket:ch-53-work') && !/^worker:/m.test(sup), sup);
+  const js = json(P.F.ok(P.F.old, ['moves', '--holder', 'supervisor', '--json'])).moves;
+  assert.ok(js.length > 0 && js.every((m) => m.holder === 'supervisor'));
+});
+
+test('next-moves: status prints each running goal\'s move under it, and /api/data and goal views carry the table\'s', () => {
+  const P = project('places');
+  const G = readyGoal(P, 'Shown', 'shown');
+  addTicket(P, 'ch-61-shown', 'shown');
+  phase(P, 'ch-61-shown', 'build');
+  const H = readyGoal(P, 'Hidden', 'hidden');
+  addTicket(P, 'ch-62-hidden', 'hidden');
+  P.owner(['goal', 'hold', H, 'park', '--owner']);
+  const status = P.F.ok(P.F.old, ['status']).split('\n');
+  const at = status.findIndex((l) => /^goal\s/.test(l) && l.includes(G) && l.includes('Shown'));
+  assert.ok(at >= 0, status.join('\n'));
+  assert.match(status[at + 1], /^\s+next: worker {2}Building {2}\d+ min/);
+  assert.ok(P.move(`goal:${H}`), 'the parked goal has a move');
+  assert.ok(!status.some((l) => l.includes(H)), `a parked goal isn't running, so status leaves it out:\n${status.join('\n')}`);
+  assert.match(P.F.ok(P.F.old, ['help']), /status \[--json\].*status also prints each running goal with its next move under it/, 'help says so');
+  const moves = P.moves();
+  const d = json(P.F.ok(P.F.old, ['dashboard-data']));
+  const bySubject = (xs) => Object.fromEntries(xs.map((m) => [m.subject, { ...m, since: undefined }]));
+  assert.deepEqual(bySubject(d.next_moves), bySubject(moves));
+  const view = d.ooda.goals.find((g) => g.id === G);
+  assert.ok(view.next_move, 'the dashboard goal view has a move');
+  assert.equal(view.next_move.via, 'ticket:ch-61-shown');
+  assert.ok(P.goal(G).next_move, 'the goal view has a move');
+  assert.equal(P.goal(G).next_move.via, 'ticket:ch-61-shown');
+});
+
+test('next-moves: each check this file names is a real test of its own, and no fixture or comment names one', () => {
+  const name = new RegExp(`next-moves ${'A'}\\d+:`);
+  const own = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8');
+  const named = own.split('\n').filter((l) => name.test(l));
+  assert.equal(named.length, 2, named.join('\n'));
+  for (const l of named) assert.match(l, new RegExp(`^test\\('next-moves ${'A'}\\d+: .+', (async )?\\(t?\\) => \\{$`), `a check is named only as a test's own name, never skipped: ${l}`);
+  const fix = path.join(here, 'fixtures', 'next-moves-ticket-rows');
+  for (const f of fs.existsSync(fix) ? fs.readdirSync(fix, { recursive: true }) : []) {
+    const p = path.join(fix, String(f));
+    if (fs.statSync(p).isFile()) assert.doesNotMatch(fs.readFileSync(p, 'utf8'), name, `${f} names no check`);
+  }
+});
