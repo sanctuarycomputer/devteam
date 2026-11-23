@@ -37,12 +37,15 @@ function proj(name, { strategy = STRATEGY, self = SELF_MD, files = PARTS, visibi
   const { old, g } = F;
   const bin = path.join(F.base, 'bin');
   const visFile = path.join(F.base, 'visibility');
+  // while this file exists gh hangs, as a slow or offline gh does
+  const slowFile = path.join(F.base, 'slow');
   // origin reads as a GitHub repo (as the kit asks gh about it by name), and git still reaches the bare one
   g(['config', `url.${F.org}.insteadOf`, 'https://github.com/acme/quillmark.git'], old);
   g(['remote', 'set-url', 'origin', 'https://github.com/acme/quillmark.git'], old);
-  write(path.join(bin, 'gh'), `#!/bin/sh\ncase "$*" in *acme/quillmark*) ;; *) exit 1 ;; esac\nif [ "$1 $2" = "repo view" ] && [ -s '${visFile}' ]; then cat '${visFile}'; exit 0; fi\nexit 1\n`);
+  write(path.join(bin, 'gh'), `#!/bin/sh\nif [ -e '${slowFile}' ]; then exec sleep 30; fi\ncase "$*" in *acme/quillmark*) ;; *) exit 1 ;; esac\nif [ "$1 $2" = "repo view" ] && [ -s '${visFile}' ]; then cat '${visFile}'; exit 0; fi\nexit 1\n`);
   fs.chmodSync(path.join(bin, 'gh'), 0o755);
   const setVisibility = (v) => fs.writeFileSync(visFile, v === 'unknown' ? '' : `${v.toUpperCase()}\n`);
+  const setSlow = (on) => (on ? fs.writeFileSync(slowFile, '') : fs.rmSync(slowFile, { force: true }));
   setVisibility(visibility);
   const ENV = { ...SUP, PATH: `${bin}${path.delimiter}${process.env.PATH}` };
   const run = (args, env = ENV) => { const r = F.run(old, args, env); return { status: r.status, out: r.out, err: r.err, text: `${r.out}\n${r.err}` }; };
@@ -59,11 +62,11 @@ function proj(name, { strategy = STRATEGY, self = SELF_MD, files = PARTS, visibi
   onMain({ ...(strategy === null ? {} : { [STRAT]: strategy }), ...(self === null ? {} : { [SELF]: self }), ...files }, 'fixture');
   const blob = (rel) => g(['rev-parse', `origin/main:${rel}`], old);
   // a chore whose worktree change(w) edits; its head, or null when chore pr refused
-  const chorePr = (slug, change, more = []) => {
+  const chorePr = (slug, change, more = [], env = ENV) => {
     const w = path.join(old, '.worktrees', `chore-${slug}`);
     if (!fs.existsSync(w)) ok(['chore', 'start', slug]);
     change(w);
-    const r = run(['chore', 'pr', slug, '--title', `${slug} draft`, ...more]);
+    const r = run(['chore', 'pr', slug, '--title', `${slug} draft`, ...more], env);
     return { ...r, w, sha: () => g(['rev-parse', 'HEAD'], w), pushed: () => g(['ls-remote', 'origin', `refs/heads/chore-${slug}`], old) !== '' };
   };
   // any branch (plan/<f>, ticket/<id>, a refactor's chore) carrying changes, pushed, with its PR file
@@ -82,7 +85,7 @@ function proj(name, { strategy = STRATEGY, self = SELF_MD, files = PARTS, visibi
   const checkPr = (headRef, sha) => run(['check-pr', '--head-ref', headRef, '--sha', sha, '--title', `${headRef}: x`, '--body-file', body]);
   const findings = (kind) => json(ok(['metrics', '--json'])).findings.filter((f) => f.kind === kind);
   const rmPath = (w, rel) => fs.rmSync(path.join(w, rel), { recursive: true, force: true });
-  return { ...F, run, ok, onMain, blob, chorePr, branchOf, checkPr, findings, setVisibility, rmPath, ENV };
+  return { ...F, run, ok, onMain, blob, chorePr, branchOf, checkPr, findings, setVisibility, setSlow, rmPath, ENV };
 }
 
 // the live log's lines (none yet: no folder)
@@ -322,6 +325,7 @@ test('the names hold: chore pr refuses a self.md draft on a public or unknown re
     const p = W.chorePr('d', () => write(path.join(w, SELF), withProse('It also keeps a log.')));
     assert.notEqual(p.status, 0, `C31 chore pr refuses: the first commit's self.md names Postwick and Stripe\n${p.text}`);
     assert.match(p.text, /"Postwick" \(prose\)/, 'C31 chore pr lists the word from the earlier commit');
+    assert.match(p.text, /that commit is not pushed yet: drop it from the branch/, 'C31 chore pr says the earlier commit is not pushed yet');
     assert.equal(p.pushed(), false, 'C31 nothing pushed');
     W.g(['push', '-q', 'origin', 'chore-d'], w);
     write(path.join(W.old, 'docs/devteam/run/pr/chore-d.md'), '# chore-d: x\n\n## One-way doors\n\nNone.\n');
@@ -337,6 +341,59 @@ test('the names hold: chore pr refuses a self.md draft on a public or unknown re
     assert.equal(q.status, 0, `C16 chore pr pushes on a private repo\n${q.text}`);
     assert.match(q.text, /"Postwick" \(prose\)/, 'C16 and still prints each warning');
     assert.equal(q.pushed(), true, 'C16 pushed');
+  });
+  await check('C34 a refusal undoes only a commit chore pr made: a draft committed by hand stays the head', () => {
+    W.setVisibility('public');
+    const w = path.join(W.old, '.worktrees', 'chore-f');
+    W.ok(['chore', 'start', 'f']);
+    draft(w);
+    W.g(['add', '-A'], w);
+    W.g(['commit', '-qm', 'the draft, by hand'], w);
+    const hand = W.g(['rev-parse', 'HEAD'], w);
+    const p = W.chorePr('f', () => {});
+    assert.notEqual(p.status, 0, `C34 chore pr refuses the hand-committed draft\n${p.text}`);
+    assert.equal(p.sha(), hand, 'C34 the hand commit is still the head');
+    assert.equal(p.pushed(), false, 'C34 nothing pushed');
+  });
+  await check('C14 a gh that hangs past DEVTEAM_GH_TIMEOUT_MS reads as unknown, and chore pr refuses within 10 s', () => {
+    W.setSlow(true);
+    const at = Date.now();
+    const p = W.chorePr('g', draft, [], { ...W.ENV, DEVTEAM_GH_TIMEOUT_MS: '500' });
+    const took = Date.now() - at;
+    W.setSlow(false);
+    assert.notEqual(p.status, 0, `C14 chore pr refuses when gh hangs\n${p.text}`);
+    assert.match(p.text, /visibility is unknown/, 'C14 a hung gh reads as unknown');
+    assert.ok(took < 10000, `C14 chore pr refused within 10 s (took ${took} ms)`);
+    assert.equal(p.pushed(), false, 'C14 nothing pushed');
+  });
+}));
+
+test('the names hold reads only the self.md blobs a chore introduces: main\'s, merged in, are not the chore\'s (DW4)', withProject('self-merges', { self: null, visibility: 'public' }, async (W, check) => {
+  const w = path.join(W.old, '.worktrees', 'chore-m');
+  W.ok(['chore', 'start', 'm']);
+  write(path.join(w, `${P}/designs/n.md`), 'n\n');
+  W.g(['add', '-A'], w);
+  W.g(['commit', '-qm', 'a note'], w);
+  // main gains a self.md naming Vellum (no word of the strategy), the chore merges it, main changes it, the chore merges again
+  const vellum = SELF_MD.replace('It controls its code', 'It renders through Vellum.\n\nIt controls its code');
+  const merges = [];
+  for (const text of [vellum, vellum.replace('It renders through Vellum.', 'It renders through Vellum, page by page.')]) {
+    W.onMain({ [SELF]: text }, 'self.md');
+    W.g(['fetch', '-q', 'origin', 'main'], w);
+    W.g(['merge', '-q', '--no-edit', 'origin/main'], w);
+    merges.push(W.g(['rev-parse', 'HEAD'], w));
+  }
+  await check('C31 a chore that only merges main\'s self.md changes no self.md: chore pr pushes on a public repo', () => {
+    const p = W.chorePr('m', () => {});
+    assert.equal(p.status, 0, `C31 draftBlobs is empty for main's blobs merged in\n${p.text}`);
+    assert.equal(p.pushed(), true, 'C31 pushed');
+  });
+  await check('C31 once the chore edits self.md, the hold lists the head\'s word and names neither merge commit', () => {
+    const p = W.chorePr('m', (wt) => write(path.join(wt, SELF), fs.readFileSync(path.join(wt, SELF), 'utf8').replace('It controls its code', 'It keeps a log.\n\nIt controls its code')));
+    assert.notEqual(p.status, 0, `C31 chore pr refuses the edited draft\n${p.text}`);
+    assert.match(p.text, /"Vellum" \(prose\)/, 'C31 it lists Vellum at the head');
+    assert.doesNotMatch(p.text, /"Vellum" \(prose\) in /, 'C31 as the head\'s word, not an earlier commit\'s');
+    for (const m of merges) assert.doesNotMatch(p.text, new RegExp(m.slice(0, 12)), `C31 no line names the merge commit ${m.slice(0, 12)}`);
   });
 }));
 
