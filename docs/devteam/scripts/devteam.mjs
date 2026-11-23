@@ -4434,7 +4434,9 @@ const heldClaims = (key) => {
 function supervisorHeld(key) {
   try {
     const names = [heldDir(key), ...heldClaims(key).filter((c) => !c.stale).map((c) => c.dir)].flatMap(heldFiles);
-    const oldest = Math.min(...names.map((n) => Number(n.slice(0, 15))).filter(Number.isFinite));
+    // a loop, not a spread: a backlog of any size never overflows the call's arguments
+    let oldest = Infinity;
+    for (const n of names) { const at = Number(n.slice(0, 15)); if (Number.isFinite(at) && at < oldest) oldest = at; }
     return { count: names.length, oldest_ms: Number.isFinite(oldest) ? Math.max(0, Date.now() - oldest) : 0 };
   } catch { return { count: 0, oldest_ms: 0 }; }
 }
@@ -22247,11 +22249,15 @@ function termRoutes({ port, host, log }) {
         // the marked pane, again: it can have moved while the post waited for the lock
         if (marked() !== s.pane) return { refused: [423, TERM_WORDS.moved, 'the marked pane moved while the post waited for the typing lock'] };
         if (went()) return { gone: true };
+        // the lock's stamp refreshed after each tmux call of the hold (spec, The lock; terminal@1 §11)
         const set = await floor();
+        typeLock.touch();
         if (!set.ok) return { refused: [503, busyWords, `the owner's floor could not be recorded: ${set.timedOut ? 'timed out' : set.err.trim()}`] };
         const got = await keysNow();
+        typeLock.touch();
         // stamped again once the keys reached tmux, so the settle runs from then; the first stands if not
         const again = await floor();
+        typeLock.touch();
         if (!again.ok) log(`/api/term/${which}/keys: tmux failed to record the owner's floor again after the send: ${again.timedOut ? 'timed out' : again.err.trim()}`);
         return { sent: got };
       }, { waitMs: 2000 });
@@ -23704,7 +23710,9 @@ async function cmdDashboard() {
     // Esc only where the menu itself says it cancels: on a menu whose Esc exits (a folder-trust form) it ends the session
     const notCancel = `nothing was answered: Esc here may not cancel (the terminal says: ${String(st.ask.hint ?? '').replace(/\s+/g, ' ').trim() || 'nothing about Esc'}); answer it in the terminal`;
     if (escape && !paneEscCancels(st.ask.hint)) return no(notCancel);
-    const look = async () => { const t = await tmuxAsync(['-u', 'capture-pane', '-p', '-t', st.target]); return t === null ? null : screenLines(t); };
+    // look and keyed run only inside the typing lock's hold below, so each refreshes its stamp after its tmux call
+    const look = async () => { const t = await tmuxAsync(['-u', 'capture-pane', '-p', '-t', st.target]); typeLock.touch(); return t === null ? null : screenLines(t); };
+    const keyed = async (args) => { const r = await tmuxAsync(args); typeLock.touch(); return r; };
     const menuIn = (lines) => { const a = lines ? paneAskingIn(lines) : null; return a?.kind === 'menu' && a.digest === digest ? a : null; };
     // until the question is gone or changed, or its cursor has moved
     const settle = async (was) => { let lines = null; for (let t = 0; t < PANE_SETTLE_MS; t += 100) { await new Promise((w) => setTimeout(w, 100)); lines = await look(); const m = menuIn(lines); if (!lines || !m || m.selected !== was) break; } return lines; };
@@ -23734,12 +23742,12 @@ async function cmdDashboard() {
       // the Escape key, by name, alone: no digit, no Enter. The menu gone is the answer; the same menu
       // still up is reported as a key that may not have landed, as a digit's is, with no second key.
       if (escape) {
-        if ((await tmuxAsync(['send-keys', '-t', st.target, 'Escape'])) === null) return { answer: no(`nothing was answered: the key could not be sent to ${st.target}`, 500) };
+        if ((await keyed(['send-keys', '-t', st.target, 'Escape'])) === null) return { answer: no(`nothing was answered: the key could not be sent to ${st.target}`, 500) };
         const lines = await settle(st.ask.selected);
         const why = menuIn(lines) ? 'the same question still shows after Esc' : !lines ? 'the terminal could not be read after the key' : null;
         return { fields: { escape: true, keys: 'Escape' }, keys: 'Escape', why, after: '' };
       }
-      if ((await tmuxAsync(['send-keys', '-t', st.target, '-l', String(option)])) === null) return { answer: no(`nothing was answered: the key could not be sent to ${st.target}`, 500) };
+      if ((await keyed(['send-keys', '-t', st.target, '-l', String(option)])) === null) return { answer: no(`nothing was answered: the key could not be sent to ${st.target}`, 500) };
       let lines = await settle(st.ask.selected);
       let keys = String(option);
       let still = menuIn(lines);
@@ -23750,7 +23758,7 @@ async function cmdDashboard() {
       if (still && !again) {
         // still up, and the digit moved the cursor onto the option: Enter takes it
         if (still.selected !== option) return { answer: no(`not answered: the terminal did not take the key ${option} (the question is still up, on option ${still.selected}); answer it in the terminal`) };
-        if ((await tmuxAsync(['send-keys', '-t', st.target, 'Enter'])) === null) return { answer: no(`not answered: option ${option} is selected but Enter could not be sent; answer it in the terminal`, 500) };
+        if ((await keyed(['send-keys', '-t', st.target, 'Enter'])) === null) return { answer: no(`not answered: option ${option} is selected but Enter could not be sent; answer it in the terminal`, 500) };
         keys = `${option}, Enter`;
         lines = await settle(option);
         still = menuIn(lines);
