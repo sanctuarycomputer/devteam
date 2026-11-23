@@ -349,6 +349,26 @@ test('kit-108 A15: the responder\'s turns keep the same rules: its --re follow-u
   } finally { F.done(); }
 });
 
+test('kit-108 A15b: the responder\'s open promise asks for the supervisor\'s turn: its take-over is written and says so, and the next one is refused', () => {
+  const F = threadsFixture('sup-thread-a15b');
+  try {
+    // ruling a-20261123-141139876: kit-104's open promise (pendingOpen) is the supervisor's to take over
+    const T = F.owner(['thread', 'new', 'What is open?', '--title', 'Open']).split('\n')[0];
+    F.sup(['thread', 'reply', T, 'Asking the responder.']);
+    F.hand('owner', { type: 'turn', thread: T, text: 'And the tickets?', routed_to: 'responder', delivered: 'typed' }, 0);
+    const r1 = F.run(F.old, ['thread', 'reply', T, 'Looking now', '--pending'], RESPONDER);
+    assert.equal(r1.status, 0, r1.err);
+    const P = r1.out.split('\n')[0];
+    const SUPER = { DEVTEAM_ROLE: 'supervisor' };
+    const s1 = F.run(F.old, ['thread', 'reply', T, 'I have it from here.'], SUPER);
+    assert.equal(s1.status, 0, `the take-over is asked for: ${s1.err}`);
+    assert.match(s1.err, new RegExp(`^taking over ${P}`, 'm'), s1.err);
+    const s2 = F.run(F.old, ['thread', 'reply', T, 'And one more thing.'], SUPER);
+    assert.notEqual(s2.status, 0, 'the promise is settled: nothing asks for a second');
+    assert.match(s2.err, /is waiting on you/);
+  } finally { F.done(); }
+});
+
 test('kit-108 A16: supervisor.md says how to start a thread, follow up a pending reply, and propose resolving its own (§6), and the responder\'s follow-up (§13)', () => {
   const md = fs.readFileSync(path.join(HERE, '../docs/devteam/process/supervisor.md'), 'utf8');
   const section = (h) => { const i = md.indexOf(h); assert.ok(i >= 0, h); const j = md.indexOf('\n## ', i + 1); return md.slice(i, j < 0 ? undefined : j); };
