@@ -1840,15 +1840,16 @@ async function oaFetch() {
     OA.notices = Array.isArray(m.notices) ? m.notices : [];
     OA.freshUntil = Date.now() + (Number(m.fresh_ms) > 0 ? Number(m.fresh_ms) : 0);
   }
-  if (box?.people) { const l = await oaGet(box.people); OA.list = l && l.viewer && Array.isArray(l.people) ? l : null; }
+  // a failed fetch keeps the last good list: People, and any card open in it, stay
+  if (box?.people) { const l = await oaGet(box.people); if (l && l.viewer && Array.isArray(l.people)) OA.list = l; }
   OA.at = Date.now();
   const signIn = JSON.stringify([OA.methods, OA.notices]) !== was.signIn;
   const list = JSON.stringify(OA.list) !== was.list;
-  const fresh = list && OA.list && !SEC.people;
+  const missing = Boolean(OA.list) && !SEC.people?.isConnected;
   if (signIn) oaDrawSignIn();
-  if (list && OA.list) oaDrawPeople();
-  // Settings itself is painted again only when a section appears or goes
-  if (fresh || (list && !OA.list)) paintSettings();
+  if (OA.list && (list || !SEC.people)) oaDrawPeople();
+  // Settings itself is painted again only when People should show and isn't there
+  if (missing) paintSettings();
 }
 // Each section's own redraw, unless something in it is open; then Settings is painted again.
 function oaRedraw() {
@@ -1994,13 +1995,14 @@ function oaOpenMenu(btn, x) {
   const m = el('div', 'menu-pop oa-menu');
   m.dataset.person = x.id;
   m.setAttribute('role', 'menu');
-  for (const a of x.actions) {
+  for (const a of x.actions.filter((a) => OA_WORDS[a])) {
     const b = el('button', a === 'remove' || a === 'revoke' ? 'red' : '', OA_WORDS[a]);
     b.type = 'button';
     b.setAttribute('role', 'menuitem');
     b.onclick = () => { oaCloseMenu(); OA.open = { id: x.id, kind: a }; OA.openNode = null; OA.panel = null; OA.panelNode = null; oaDrawPeople(); SEC.people.querySelector('#oa-rename input, #oa-confirm button')?.focus({ preventScroll: true }); };
     m.append(b);
   }
+  m.addEventListener('focusout', (e) => { if (!m.contains(e.relatedTarget) && e.relatedTarget !== btn) oaCloseMenu(); });
   document.body.append(m);
   OA.menu = m;
   const r = btn.getBoundingClientRect();
@@ -2025,11 +2027,11 @@ function oaPersonRow(x) {
   const who = el('span', 'who');
   const nm = el('span', 'nm');
   nm.append(document.createTextNode(x.name));
-  if (x.you) nm.append(el('span', 'dim', '(you)'));
-  nm.append(oaBadge(x));
+  if (x.you) nm.append(' ', el('span', 'dim', '(you)'));
+  nm.append(' ', oaBadge(x));
   who.append(nm, el('span', 'pmeta', oaMeta(x)));
   r.append(el('span', 'av', oaInitials(x.name)), who);
-  if (x.actions.length) {
+  if (x.actions.some((a) => OA_WORDS[a])) {
     const b = el('button', 'menu-btn');
     b.type = 'button';
     b.dataset.k = `settings:menu:${x.id}`;
@@ -2051,6 +2053,14 @@ function oaRefused(r, err, names) {
   if (code === 'stale' || code === 'not-allowed' || r.status === 401) { OA.open = null; OA.openNode = null; oaDrawPeople(); oaLoad(); }
 }
 const OA_NAME_WORDS = { 'bad-name': 'A name is needed.', 'name-taken': 'Someone here already has that name.' };
+// One request at a time from a box or card: its buttons are disabled until the answer is in.
+async function oaSending(d, fn) {
+  if (d.oaSending) return;
+  d.oaSending = true;
+  const bs = [...d.querySelectorAll('button')];
+  for (const b of bs) b.disabled = true;
+  try { await fn(); } finally { d.oaSending = false; for (const b of bs) b.disabled = false; }
+}
 function oaRenameBox(x) {
   const d = el('div', 'oa-confirm');
   d.id = 'oa-rename';
@@ -2063,7 +2073,7 @@ function oaRenameBox(x) {
   inp.setAttribute('aria-label', 'New name');
   const err = el('div', 'oa-err');
   err.setAttribute('role', 'alert');
-  const save = async () => {
+  const save = () => oaSending(d, async () => {
     err.textContent = '';
     const name = inp.value.trim();
     const r = await oaPost(oaPeoplePath('rename'), { id: x.id, rev: x.rev, name: inp.value });
@@ -2072,7 +2082,7 @@ function oaRenameBox(x) {
     oaDrawPeople();
     oaToast(`Renamed to ${name.normalize('NFC')}`);
     oaLoad();
-  };
+  });
   inp.onkeydown = (e) => { if (e.key === 'Enter') save(); if (e.key === 'Escape') { e.stopPropagation(); oaCancel(); } };
   const acts = el('div', 'acts');
   acts.append(oaButton('Save', 'mini', 'rename-save', save), oaButton('Cancel', 'ghost mini', 'rename-cancel', oaCancel));
@@ -2091,7 +2101,7 @@ function oaConfirmBox(x, kind) {
   const yes = { relink: 'Make the link', remove: 'Remove', revoke: 'Revoke' }[kind];
   const d = el('div', 'oa-confirm');
   d.id = 'oa-confirm';
-  const go = async () => {
+  const go = () => oaSending(d, async () => {
     const r = await oaPost(oaPeoplePath(kind), { id: x.id, rev: x.rev });
     if (r.status !== 200) return oaRefused(r);
     OA.open = null; OA.openNode = null;
@@ -2099,7 +2109,7 @@ function oaConfirmBox(x, kind) {
     oaDrawPeople();
     oaToast(kind === 'remove' ? `${f} was removed and signed out` : relinked ? `${f}'s new link no longer works` : `${f}'s invite link no longer works`);
     oaLoad();
-  };
+  });
   const acts = el('div', 'acts');
   acts.append(oaButton(yes, kind === 'relink' ? 'mini' : 'mini danger', `confirm-${kind}`, go), oaButton('Cancel', 'ghost mini', 'confirm-cancel', oaCancel));
   d.append(el('p', '', words), acts);
@@ -2135,12 +2145,12 @@ function oaInviteCard() {
   pick.append(el('legend', '', 'Level'), opt);
   const err = el('div', 'oa-err');
   err.setAttribute('role', 'alert');
-  const make = async () => {
+  const make = () => oaSending(d, async () => {
     err.textContent = '';
     const r = await oaPost(oaPeoplePath('invite'), { name: inp.value, level: 'full' });
     if (r.status !== 200) return oaRefused(r, err, { 'bad-name': 'Give them a name, so you can tell people apart here.', 'name-taken': 'Someone here already has that name.' });
     oaShowLink(`Send this link to ${oaFirst(inp.value)} yourself`, 'It works once, for 24 hours. Whoever opens it first makes a passkey and joins as full.', r.json.link);
-  };
+  });
   inp.onkeydown = (e) => { if (e.key === 'Enter') make(); };
   const acts = el('div', 'acts');
   acts.append(oaButton('Make the invite link', '', 'invite-make', make), oaButton('Cancel', 'ghost', 'invite-cancel', oaCancel));
