@@ -38,6 +38,9 @@ function fixture(name, { resume = null } = {}) {
   const command = resume ?? `${process.execPath} ${relaunch}`;
   fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"project":', `"resume_command": ${JSON.stringify(command)},\n  "project":`));
   execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init'], { cwd: root });
+  // a launch reads the owner's settings from origin (kit-764): the repo is its own origin, so origin's
+  // main is the local main these tests commit to, as it was when the kit read main with no origin
+  execFileSync('git', ['remote', 'add', 'origin', root], { cwd: root });
   const stub = path.join(base, 'cswap');
   const list = path.join(base, 'list.json');
   write(list, JSON.stringify(ROOM));

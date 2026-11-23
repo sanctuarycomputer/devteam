@@ -1029,7 +1029,74 @@ Object.assign(linkAnswerCovers, {
   any: (c) => questions().filter((q) => q.status === 'answered' && String(q.context ?? '').includes(`links.${c.id}`)).sort((a, b) => String(b.answered_at).localeCompare(String(a.answered_at))).find((q) => linkAnswerCovers(q.id, c))?.id ?? null,
 });
 let settingsCache;
-function loadSettings() {
+// opts.origin (kit-764): the owner's settings as they are at the commit origin names for its default
+// branch, for a process that isn't a launch but types an owner's command into a pane (accounts-tick's
+// supervisor restart): this process's own settings with the owner's keys from origin over them, or
+// { refused: why } when origin can't be read or its settings won't do. Never the local refs.
+function loadSettings({ origin = false } = {}) {
+  // origin's commit for main, read as a launch reads it: what it can't do goes to fail(message)
+  const readOrigin = (fail) => {
+    const no = (why) => fail(`could not read main from origin (${why}), so the owner's settings can't be confirmed and nothing was started; a local ref is any session's to move, so none is trusted to start one. Try again when origin answers`);
+    // origin gets 30 s in all, and a relaunch's child no longer than its DEVTEAM_SETUP_DEADLINE (5 s
+    // before the tick's kill, relaunchChild), so a hung origin refuses with its reason before the kill
+    const deadline = Number(process.env.DEVTEAM_SETUP_DEADLINE);
+    const end = Math.min(Date.now() + (Number(process.env.DEVTEAM_LAUNCH_ORIGIN_MS) || 30000), Number.isFinite(deadline) && deadline > Date.now() ? deadline : Infinity);
+    const toOrigin = (args) => {
+      const ms = Math.floor(end - Date.now());
+      if (ms < 100) return { status: 124, stdout: '', stderr: '' };
+      return spawnSync(process.execPath, ['-e', RESPONDER_GROUP_RUN, '--', String(ms), 'git', ...RESPONDER_GIT, ...args], { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: ms + 10000 });
+    };
+    // git's own words: its first fatal line (a missing remote's last line is only "and the repository exists.")
+    const why = (r) => { const said = String(r.stderr ?? '').split('\n').map((l) => l.trim()).filter(Boolean); return r.status === 124 ? 'it did not answer in time' : (said.find((l) => /^fatal: /.test(l)) ?? said.at(-1) ?? `git exited ${r.status}`).replace(/^fatal: /, '').slice(0, 200); };
+    const ls = toOrigin(['ls-remote', '--symref', 'origin', 'HEAD']);
+    if (ls.status !== 0) no(why(ls));
+    const rows = String(ls.stdout ?? '').split('\n').map((l) => l.split('\t'));
+    const branch = rows.find(([a, b]) => b === 'HEAD' && a.startsWith('ref: refs/heads/'))?.[0].slice('ref: refs/heads/'.length);
+    const sha = rows.find(([a, b]) => b === 'HEAD' && /^[0-9a-f]{40,64}$/.test(a))?.[0];
+    if (!branch || !sha) no('it names no default branch');
+    // always fetched, into the tracking ref by name: a new worktree is based on origin/<main>, so it
+    // is put back where origin has it before anything reads it
+    const f = toOrigin(['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
+    if (f.status !== 0) no(why(f));
+    // read here only, never fetched on the side (a partial clone's lazy fetch would run outside the deadline)
+    const local = (args) => responderGit(args, mainRoot, { GIT_NO_LAZY_FETCH: '1' });
+    if (local(['cat-file', '-e', `${sha}^{commit}`]).status !== 0) no(`${sha.slice(0, 8)} did not arrive`);
+    const ref = `origin's ${branch} (${sha.slice(0, 8)})`;
+    // before settings.md first lands on main (adoption), the working tree is all there is, as below;
+    // only a settings.md git says isn't there, never one git failed to read
+    const listed = local(['ls-tree', '--name-only', sha, '--', `${projectRel}/settings.md`]);
+    if (listed.status !== 0) no(`git could not read ${sha.slice(0, 8)}: ${why(listed)}`);
+    if (listed.stdout.trim()) {
+      const shown = local(['show', `${sha}:${projectRel}/settings.md`]);
+      if (shown.status !== 0) no(`git could not read settings.md at ${sha.slice(0, 8)}: ${why(shown)}`);
+      const block = String(shown.stdout ?? '').match(/```json devteam\s*\n([\s\S]*?)\n```/);
+      let own = null;
+      try { own = JSON.parse(block?.[1]); } catch {}
+      // never the kit's defaults or the working tree in place of the owner's commands: a block that
+      // isn't an object of settings (null, an array, {}, only unknown keys) starts nothing
+      if (!isObj(own) || !Object.keys(own).some((k) => SETTINGS_KEYS.includes(k))) fail(`settings.md at ${ref} has no settings block the kit can read (not an object of settings), so nothing was started`);
+      const onMain = { ...SETTINGS_DEFAULTS, ...own };
+      if (onMain.main_branch !== branch) fail(`origin's default branch is ${branch}, but settings.md there names ${onMain.main_branch} as main, so nothing was started; make them agree`);
+      return { ref, onMain };
+    }
+    return { ref, onMain: null };
+  };
+  if (origin) {
+    if (loadSettings.fromOrigin) return loadSettings.fromOrigin;
+    const mine = loadSettings();
+    if (!projectInRepo) return mine;
+    let read;
+    try { read = readOrigin((why) => { throw { refused: why }; }); } catch (e) { if (e?.refused) return { refused: e.refused }; throw e; }
+    const s = { ...mine };
+    // before adoption (no settings.md at origin's commit) the working tree is all there is, as for a
+    // launch: never what the local refs gave this process
+    let own = read.onMain;
+    if (!own) { const m = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/); let w = {}; try { w = JSON.parse(m?.[1]) ?? {}; } catch {} own = { ...SETTINGS_DEFAULTS, ...(isObj(w) ? w : {}) }; }
+    for (const k of [...Object.keys(OWNER_SETTINGS), ...OWNER_ASKABLE]) s[k] = own[k];
+    s.links = pinOwnedLinks(mine.links, own.links).links;
+    loadSettings.fromOrigin = s;
+    return s;
+  }
   if (settingsCache) return settingsCache;
   const m = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/);
   if (!m) settingsCache = { ...SETTINGS_DEFAULTS };
@@ -1049,9 +1116,23 @@ function loadSettings() {
   // the remote's default branch, so a local main_branch edit can't move it. Before settings.md
   // first lands on main (adoption), the working tree is all there is.
   if (projectInRepo) {
-    const head = git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
-    const ref = [head, `origin/${settingsCache.main_branch}`, settingsCache.main_branch].find((r) => r && git(['cat-file', '-e', `${r}:${projectRel}/settings.md`]) !== null);
-    const onMain = ref ? settingsAt(ref) : null;
+    // A process that starts a session (a worker, a planner, the supervisor's recover, the laptop's
+    // operator) takes the owner's settings from the commit origin itself names for its default
+    // branch: every local ref (origin/main, origin/HEAD, main, a replace ref) is a session's to move
+    // without a push (kit-764). With origin unreadable it starts nothing and says why. Every other
+    // command reads the local refs, offline too.
+    const launch = command === 'planner' || (command === 'worker' && !flags.remove)
+      || (command === 'recover' && !flags['dry-run'] && !flags.machine)
+      // the operator's start, and the words that start it when none is up (deliverToOperator)
+      || (command === 'operator-thread' && ['start', 'new', 'say', 'reopen'].includes(positional[0]));
+    let ref = null;
+    let onMain = null;
+    if (launch) ({ ref, onMain } = readOrigin((why) => die(`${command}: ${why}`)));
+    else {
+      const head = git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+      ref = [head, `origin/${settingsCache.main_branch}`, settingsCache.main_branch].find((r) => r && git(['cat-file', '-e', `${r}:${projectRel}/settings.md`]) !== null);
+      onMain = ref ? settingsAt(ref) : null;
+    }
     if (onMain) {
       const local = Object.keys(OWNER_SETTINGS).filter((k) => canonical(settingsCache[k]) !== canonical(onMain[k]));
       for (const k of local) settingsCache[k] = onMain[k];
@@ -7012,20 +7093,23 @@ function worldFileFails(base, sha, approved, act, what = 'merge --approved') {
   const tree = [];
   for (let i = 0; i + 1 < parts.length; i += 2) tree.push({ verb: parts[i] === 'A' ? 'adds' : 'changes', f: parts[i + 1] });
   // A path as a disk that folds names reads it, part by part: Unicode compatibility normalisation
-  // (an NFD spelling is the NFC one, and ſ is s), lower case, and trailing dots and spaces dropped
-  // (as Windows drops them). It folds more than any one disk does; a stray path it catches is only
-  // refused.
-  const fold = (p) => p.split('/').map((s) => s.normalize('NFKC').toLowerCase().normalize('NFKC').replace(/[. ]+$/, '')).join('/');
+  // (an NFD spelling is the NFC one, and ſ is s), upper case then lower case (NTFS upper-cases, so
+  // a dotless ı is i), default-ignorable code points dropped (all of those HFS+ ignores, such as
+  // U+200C, and more, such as a soft hyphen), NFKC again (a mark left beside its letter composes),
+  // and then trailing dots and spaces dropped (as Windows drops them). It folds more than any one
+  // disk does; a stray path it catches is only refused.
+  const fold = (p) => p.split('/').map((s) => s.normalize('NFKC').toUpperCase().toLowerCase().replace(/\p{Default_Ignorable_Code_Point}/gu, '').normalize('NFKC').replace(/[. ]+$/, '')).join('/');
   // f is at, or inside the folder at; twin: such a disk puts f at at, or in it, where git doesn't.
   const under = (f, at) => f === at || f.startsWith(`${at}/`);
   const twin = (f, at) => under(fold(f), fold(at)) && !under(f, at);
   const says = ({ verb, f }, at) => `${verb} ${f}, ${fold(f) === fold(at) ? 'which' : 'in a folder'} a disk that ignores case can't tell from ${at}`;
   // a twin of an owner file is named with that file (below); a twin of a folder on their path (the
-  // project folder, or one above it), at the deepest folder it folds into. Only an added path: one
-  // already on main in such a folder is no owner file, so a PR may still change it.
+  // project folder, or one above it), at the deepest folder it folds into: a path the PR adds, or
+  // one an older kit let onto main that it changes (or the twin itself, repointed). Removing it is
+  // the fix, and isn't listed.
   const owned = worldFileFails.files().map((w) => w.rel);
   const folders = [...new Set(owned.flatMap((r) => r.split('/').slice(0, -1).map((_, i, a) => a.slice(0, i + 1).join('/'))))].sort((a, b) => b.length - a.length);
-  const inFolder = tree.filter((t) => t.verb === 'adds' && !owned.some((r) => twin(t.f, r))).flatMap((t) => { const at = folders.find((d) => under(fold(t.f), fold(d))); return at && twin(t.f, at) ? [says(t, at)] : []; });
+  const inFolder = tree.filter((t) => !owned.some((r) => twin(t.f, r))).flatMap((t) => { const at = folders.find((d) => under(fold(t.f), fold(d))); return at && twin(t.f, at) ? [says(t, at)] : []; });
   if (inFolder.length) fails.push(`${inFolder.join('; ')}: the owner's files are read in ${projectRel}, and a twin of a folder on their path can put other files there; remove it`);
   // A plain file, whatever the owner answered: a symlink's blob is the path it points at, so the
   // text read through it changes with no change here; a submodule or a folder pins no text at all.
@@ -18386,8 +18470,8 @@ function supervisorSessionId(t = supervisorTranscript()) {
 }
 // The repo's resume_command on this exact conversation (--continue replaced, as the box's boot
 // does), or null when it has no --continue to replace.
-function supervisorResumeCommand(id) {
-  const cmd = loadSettings().resume_command;
+function supervisorResumeCommand(id, s = loadSettings()) {
+  const cmd = s.resume_command;
   return /\s--continue(\s|$)/.test(cmd) ? cmd.replace(/(\s)--continue(?=\s|$)/, `$1--resume ${id}`) : null;
 }
 // A process's arguments and environment, from the OS, or null if they can't be read; a caller that
@@ -18450,9 +18534,16 @@ function supervisorToRestart() {
   const { target, problem } = resolvePane(supervisorTarget());
   if (problem || !target || !paneStoppedAtLimit(target) || !paneStartedIn(target, fs.realpathSync(mainRoot))) return null;
   const id = supervisorLimit()?.session;
-  const cmd = id ? supervisorResumeCommand(id) : null;
-  if (!cmd) return null;
+  if (!id) return null;
+  // a pane whose process is plainly not the supervisor needs no command, so origin isn't asked
   const agent = paneAgentProcess(target);
+  if (agent?.env.length && !isSupervisorProcess(agent)) return null;
+  // the owner's resume_command as origin has it, never a local ref's (kit-764): a refusal skips this
+  // restart and says why
+  const s = loadSettings({ origin: true });
+  if (s.refused) return { refused: s.refused };
+  const cmd = supervisorResumeCommand(id, s);
+  if (!cmd) return null;
   if (!agent?.env.length) return { refused: `could not read the environment of the process in ${target}` };
   if (!isSupervisorProcess(agent)) return null;
   return { target, id, cmd: startedSkippingPermissions(agent.args) ? cmd : withoutSkipPermissions(cmd) };
@@ -18671,7 +18762,6 @@ function recoverOne() {
   // never two: first, under any flag
   if (supervisorRunningNow(rec)) return { say: 'already running' };
   if (recoverStarting(rec)) return { say: 'already running (brought back moments ago)' };
-  const s = loadSettings();
   // A supervisor is never down by accident: a parked or drained fleet's comes back like any other.
   // Under a pause it answers threads and questions and keeps the Inbox and log current; under a move
   // its prompt has it carry the move on and start nothing. It is down only when someone exited it
@@ -18680,6 +18770,9 @@ function recoverOne() {
     const no = recoverRefusal(rec);
     if (no) return { say: no };
   }
+  // after every early return, as cmdRecover's line before the lock: a supervisor left stopped needs
+  // no owner's command, so origin is read only for a start (kit-764)
+  const s = loadSettings();
   const id = supervisorSessionId();
   const exact = /^claude(\s|$)/.test(s.resume_command);
   const missing = (s.worktree_files ?? []).filter((f) => !fs.existsSync(path.join(mainRoot, f)));
@@ -18741,6 +18834,10 @@ function cmdRecover() {
   if (writer !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE)) die(`recover: not from here: ${writer !== 'supervisor' ? `this session or checkout is ${writer}'s (a ticket or plan branch)` : `this session is a ${process.env.DEVTEAM_ROLE}`}. The owner, the operator or the supervisor runs it, from the main checkout (${mainRoot})`);
   if (flags.machine) return recoverMachine();
   if (!flags['dry-run']) fs.mkdirSync(runDir, { recursive: true });
+  // the owner's settings before the lock, unless nothing will start (one is up, or recoverOne's own
+  // refusal leaves it stopped; offline too): a start refused for them (an unreadable origin, kit-764)
+  // exits, and an exit under the lock would leave it held for the next recover to wait out
+  { const rec = supervisorUpRecord(); if (!supervisorRunningNow(rec) && !recoverStarting(rec) && (flags.force || flags['was-up'] || !recoverRefusal(rec))) loadSettings(); }
   // One recover at a time, for longer than the usual lock: on a loaded box tmux alone can take most
   // of 10 s. Still stale in the end, so a crash halfway can't wedge the next one.
   const { say, run } = flags['dry-run'] ? recoverOne() : withLock(path.join(runDir, 'recover'), recoverOne, { staleMs: 90000, waitMs: 100000 });
@@ -26307,7 +26404,7 @@ const recurringRunDue = Object.freeze({
   results(name) {
     return logObjects('observation')
       .filter((o) => o.kind === 'recurring-run' && o.subject === `recurring:${name}` && o.detector === 'recurring' && o.created_by === 'supervisor' && ['pass', 'fail', 'error'].includes(o.run?.status) && typeof o.run.slot === 'string')
-      .map((o) => ({ slot: o.run.slot, at: new Date(Date.parse(o.created_at) - (Number.isFinite(o.run.seconds) && o.run.seconds > 0 ? o.run.seconds * 1000 : 0)).toISOString() }));
+      .map((o) => ({ slot: o.run.slot, at: new Date(recurringFailures.runStart(o.created_at, o.run.seconds)).toISOString() }));
   },
   // the entry's landings: each merge-chore act citing an answered recurring-edit question that shows
   // this name, oldest first; main's entry when the last of them isn't it, at main's last commit to the file
@@ -26586,6 +26683,15 @@ const recurringRunDue = Object.freeze({
 // gives is ISO to the second, as the dashboard contract has them.
 const recurringFailures = Object.freeze({
   isoSec: (t) => `${new Date(typeof t === 'number' ? t : Date.parse(t)).toISOString().slice(0, 19)}Z`,
+  // a run's start, in ms: its line's time less its seconds (the runner logs at the end); a seconds
+  // that isn't a positive number, or would put the start before 1970 (no date, or one the
+  // contract's times can't show), is ignored as a duration, and the start is the line's time (kit-781)
+  runStart(createdAt, seconds) {
+    const t = Date.parse(createdAt);
+    if (!(Number.isFinite(seconds) && seconds > 0)) return t;
+    const start = t - seconds * 1000;
+    return start >= 0 ? start : t;
+  },
   counts: (o) => o?.created_by === 'supervisor' && o?.detector === 'recurring',
   failAfter: (entry) => (Number.isInteger(entry?.fail_after) ? entry.fail_after : 1),
   // the answered landings that show this name, oldest first (a stop shows it as null)
@@ -26630,7 +26736,7 @@ const recurringFailures = Object.freeze({
       if (o.kind !== 'recurring-run' || o.subject !== `recurring:${name}` || !RF.counts(o)) continue;
       const r = o.run;
       if (!r || !['pass', 'fail', 'error'].includes(r.status) || typeof r.slot !== 'string' || !Number.isFinite(Date.parse(r.slot))) continue;
-      const ms = Date.parse(o.created_at) - (Number.isFinite(r.seconds) && r.seconds > 0 ? r.seconds * 1000 : 0);
+      const ms = RF.runStart(o.created_at, r.seconds);
       if (!(ms >= floor)) continue;
       const cur = first.get(r.slot);
       if (!cur || ms < cur.ms) first.set(r.slot, { ms, id: o.id, status: r.status, slot: r.slot, seconds: Number.isFinite(r.seconds) ? r.seconds : null, excerpt: typeof r.excerpt === 'string' ? r.excerpt : null });
@@ -29154,7 +29260,7 @@ function peekView(kind, id) {
     const STATUSES = ['pass', 'fail', 'error', 'started', 'done', 'nothing', 'abandoned'];
     const runs = logObjects('observation')
       .filter((o) => o.kind === 'recurring-run' && o.subject === `recurring:${id}` && RF.counts(o) && STATUSES.includes(o.run?.status) && typeof o.run.slot === 'string' && Number.isFinite(Date.parse(o.run.slot)) && Number.isFinite(Date.parse(o.created_at)))
-      .map((o) => ({ o, ms: Date.parse(o.created_at) - (Number.isFinite(o.run.seconds) && o.run.seconds > 0 ? o.run.seconds * 1000 : 0) }))
+      .map((o) => ({ o, ms: RF.runStart(o.created_at, o.run.seconds) }))
       .sort((a, b) => b.ms - a.ms)
       .slice(0, 20)
       .map(({ o, ms }) => ({ status: o.run.status, at: RF.isoSec(ms), slot: RF.isoSec(o.run.slot), seconds: Number.isFinite(o.run.seconds) ? o.run.seconds : null, excerpt: typeof o.run.excerpt === 'string' ? o.run.excerpt.slice(-200) : null, ref: typeof o.run.ref === 'string' && o.run.ref ? o.run.ref : null }));

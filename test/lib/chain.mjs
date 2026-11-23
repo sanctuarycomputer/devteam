@@ -50,7 +50,7 @@ export const shared = { get: () => ({ G, Q, A, SHA1, H2 }), set: (v) => { ({ G, 
 export const steps = [];
 const step = (name, fn) => { steps.push({ name, fn }); };
   step('init materializes project/, settings, agent config', (t) => {
-    git(['init', '-q', '--bare', origin], tmp);
+    git(['init', '-q', '--bare', '-b', 'main', origin], tmp); // CI's git defaults to master: origin's HEAD names main, as a launch reads it (kit-764)
     fs.mkdirSync(repo);
     git(['init', '-q', '-b', 'main']);
     write(path.join(repo, 'CLAUDE.md'), '# Project\n');
