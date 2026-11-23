@@ -441,7 +441,7 @@ test('C24: a start cut short after writing its ticket (no started line) is taken
 
 // ===== refusals the done-whens imply =====
 const refuse = group(() => {
-  const jobs = { kept: chore({ every: '1d' }), hide: chore({ every: '1d' }), lnk: chore({ every: '1d' }), other: chore({ every: '1d' }), chk: { kind: 'check', title: 'A check', what: 'runs', every: '1d', run: 'true' } };
+  const jobs = { kept: chore({ every: '1d' }), ahead: chore({ every: '1d' }), hide: chore({ every: '1d' }), lnk: chore({ every: '1d' }), other: chore({ every: '1d' }), chk: { kind: 'check', title: 'A check', what: 'runs', every: '1d', run: 'true' } };
   const T = setup('refuse', jobs);
   // a job put on main by a plain commit, with no answer
   const file = path.join(T.old, JOBS);
@@ -480,6 +480,19 @@ test('C25c: recurring done --nothing refuses a chore worktree that holds work, l
   assert.match(r.err, /holds work \(uncommitted changes\)/);
   assert.equal(T.runLines('kept').length, n, 'no line');
   assert.ok(fs.existsSync(path.join(T.old, '.worktrees', ref, PROJ, 'notes', 'work.md')), 'the work is kept');
+  // a clean worktree whose branch holds a commit main lacks (committed, never pushed) is work too (kit-785)
+  T.ok(['recurring', 'start', 'ahead']);
+  const aref = `chore-recurring-ahead-${ymd(Date.now())}`;
+  const awt = path.join(T.old, '.worktrees', aref);
+  write(path.join(awt, PROJ, 'notes', 'done.md'), 'work\n');
+  T.g(['add', '-A'], awt);
+  T.g(['commit', '-qm', 'the chore, committed and not pushed'], awt);
+  const an = T.runLines('ahead').length;
+  const ra = T.dt(['recurring', 'done', 'ahead', '--nothing', 'nothing']);
+  assert.match(ra.err, /holds work \(1 commit\(s\) main lacks\)/, ra.text);
+  assert.equal(ra.status, 1);
+  assert.equal(T.runLines('ahead').length, an, 'no line for the unpushed commit');
+  assert.ok(fs.existsSync(path.join(awt, PROJ, 'notes', 'done.md')), 'the worktree with the commit is kept');
 });
 
 test('C25d: recurring done --nothing sees an untracked file even when git config hides untracked files, and keeps it', () => {
@@ -604,6 +617,86 @@ test('C21: peek recurring <name> --json for a supervisor chore and a worker chor
   assert.deepEqual([w.entry.by, w.entry.prompt, w.runs[0].status, w.runs[0].ref], ['worker', 'Bump the pins in ops/.', 'started', 'ops-01-recurring-wk']);
 });
 
+// ===== kit-785: a start dated in the future, and a ref that names another job =====
+const skew = group(() => {
+  const jobs = { fmerge: chore({ every: '1d' }), fpast: chore({ every: '1d' }), fstuck: chore({ every: '1d' }), fsoon: chore({ every: '1d' }), f11: chore({ every: '1d' }), fdrop: chore({ every: '1d' }), xa: chore({ every: '1d' }), xb: chore({ every: '1d' }), xc: chore({ every: '1d' }) };
+  const T = setup('skew', jobs);
+  // started lines dated two days ahead (a clock that ran fast), and fsoon's a minute ahead
+  for (const n of ['fmerge', 'fstuck', 'fdrop']) T.addLine(n, { slot: iso(NOW - DAY), ref: `chore-recurring-${n}-${ymd(NOW + 2 * DAY)}`, at: NOW + 2 * DAY });
+  T.addLine('fsoon', { slot: iso(NOW - DAY), ref: `chore-recurring-fsoon-${ymd(NOW + 60000)}`, at: NOW + 60000 });
+  // fmerge's chore branch merged an hour ago, by the right clock: the newest line in its file, so a
+  // later write isn't stamped after the future lines
+  // fpast: the clock was an hour fast when it started and has since passed that date; its merge, by the
+  // right clock, is dated before its start
+  T.addLine('fpast', { slot: iso(NOW - DAY), ref: `chore-recurring-fpast-${ymd(NOW - HOUR)}`, at: NOW - HOUR });
+  T.mergeChore(`chore-recurring-fpast-${ymd(NOW - HOUR)}`, NOW - 2 * HOUR);
+  T.mergeChore(`chore-recurring-fmerge-${ymd(NOW + 2 * DAY)}`, NOW - HOUR);
+  return T;
+});
+
+test('C26a: a started line dated in the future still finishes on its chore\'s merge', () => {
+  const T = skew();
+  assert.equal(T.peek('fmerge').runs[0].status, 'done');
+  assert.notEqual(T.entryOf('fmerge').state, 'started');
+});
+
+test('C26d: a run whose start the clock has since passed still reads done by a merge dated before that start', () => {
+  const T = skew();
+  assert.equal(T.peek('fpast').runs[0].status, 'done');
+  assert.equal(T.finding('recurring-stuck', 'fpast').length, 0);
+});
+
+test('C26b: a started line dated more than ten minutes ahead is recurring-stuck now; one a minute ahead is not', () => {
+  const T = skew();
+  const f = T.finding('recurring-stuck', 'fstuck');
+  assert.equal(f.length, 1, 'recurring-stuck for fstuck');
+  assert.match(f[0].detail, new RegExp(`chore-recurring-fstuck-${ymd(NOW + 2 * DAY)}`));
+  assert.equal(T.finding('recurring-stuck', 'fsoon').length, 0, 'a minute of skew is not stuck');
+  // eleven minutes ahead, written just before metrics reads it: past the ten-minute allowance, so stuck now
+  T.addLine('f11', { slot: iso(NOW - DAY), ref: `chore-recurring-f11-${ymd(Date.now() + 11 * 60000)}`, at: Date.now() + 11 * 60000 });
+  assert.equal(T.finding('recurring-stuck', 'f11').length, 1, 'eleven minutes of skew is stuck');
+  // a right-clock line after it, so the file's newest line isn't in the future: a later write in this
+  // file would otherwise be stamped after it (appendLog keeps a file's lines in order)
+  T.mergeChore('chore-recurring-none-00000000', Date.now());
+});
+
+test('C26e: a run that finished before its own start takes its next slot from when it finished, not from the start', () => {
+  const T = skew();
+  // fmerge: started two days ahead, merged an hour ago, every 1d: next slot a day after the merge
+  const next = Date.parse(T.entryOf('fmerge').next_at);
+  assert.ok(next < NOW + 2 * DAY, `next_at ${T.entryOf('fmerge').next_at} is a day after the merge, before the future start`);
+});
+
+test('C26c: recurring done --abandoned ends a run whose started line is dated in the future', () => {
+  const T = skew();
+  T.ok(['recurring', 'done', 'fdrop', '--abandoned', 'the clock ran fast']);
+  assert.equal(T.peek('fdrop').runs[0].status, 'abandoned');
+  // peek prints a run's start as its at; dashboard-data's last.at is when it finished
+  const e = T.entryOf('fdrop');
+  assert.ok(Date.parse(e.last.at) <= Date.now(), `finished when the line was written, not at the future start (${e.last.at})`);
+  assert.notEqual(e.state, 'started');
+  assert.equal(T.finding('recurring-stuck', 'fdrop').length, 0, 'not stuck once ended');
+});
+
+test('C27a: a supervisor line for xa whose ref is xb\'s chore branch is ignored: recurring done xa --nothing is refused and xb\'s worktree stays', () => {
+  const T = skew();
+  T.ok(['recurring', 'start', 'xb']);
+  const ref = `chore-recurring-xb-${ymd(Date.now())}`;
+  T.addLine('xa', { slot: iso(NOW - DAY), ref, at: Date.now() });
+  const r = T.dt(['recurring', 'done', 'xa', '--nothing', 'nothing']);
+  assert.match(r.err, /xa has no started run to finish/, r.text);
+  assert.equal(r.status, 1);
+  assert.ok(fs.existsSync(path.join(T.old, '.worktrees', ref, '.git')), "xb's worktree is kept");
+  assert.deepEqual(T.peek('xa').runs, [], 'xa has no run');
+  assert.equal(T.peek('xb').runs[0].status, 'started', "xb's run is untouched");
+});
+
+test('C27b: a supervisor line for xc whose ref is another job\'s chores ticket is ignored', () => {
+  const T = skew();
+  T.addLine('xc', { slot: iso(NOW - DAY), ref: 'ops-01-recurring-xd', at: NOW - HOUR });
+  assert.deepEqual(T.peek('xc').runs, [], 'xc has no run');
+});
+
 // ===== DW14: supervisor.md =====
 
 test('C22: supervisor.md documents chores: when they come due, recurring start, done with --nothing and --abandoned, and holds', () => {
@@ -611,4 +704,14 @@ test('C22: supervisor.md documents chores: when they come due, recurring start, 
   const chores = /\n### Chores\n[\s\S]*?(?=\n### |\n## )/.exec(sec)?.[0] ?? '';
   assert.ok(chores, 'a Chores part under Recurring jobs');
   for (const w of ['recurring-due', 'recurring-overdue', 'recurring-stuck', 'grace_days', 'recurring start', 'chore-recurring-<name>-<yyyymmdd>', '<component>-<NN>-recurring-<name>', 'recurring done <name> --nothing', '--abandoned', 'superseded', 'drained or parked']) assert.ok(chores.includes(w), `names ${w}`);
+});
+
+test('C22b: supervisor.md says --nothing removes ignored files with the worktree, and that the owner superseding a worker chore\'s ticket ends it as abandoned', () => {
+  const sec = /\n## Recurring jobs\n[\s\S]*?\n## /.exec(SUPERVISOR_MD)?.[0] ?? '';
+  const chores = /\n### Chores\n[\s\S]*?(?=\n### |\n## )/.exec(sec)?.[0] ?? '';
+  const finishing = /\n- \*\*Finishing\.\*\*[^\n]*/.exec(chores)?.[0] ?? '';
+  assert.match(finishing, /ignored files[^.]*go with it/i, 'Finishing: ignored files go with the worktree');
+  assert.match(finishing, /only uncommitted changes or a commit main lacks/, 'Finishing: only uncommitted or unpushed work is refused');
+  const counts = /\n- \*\*Only what you record counts\.\*\*[^\n]*/.exec(chores)?.[0] ?? '';
+  assert.match(counts, /owner[^.]*supersed[^.]*abandoned/, 'Only what you record counts: the owner superseding the ticket ends the run as abandoned');
 });
