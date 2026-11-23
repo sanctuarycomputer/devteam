@@ -1,0 +1,18 @@
+{
+ "about": "handed to a planner",
+ "thread": "t-20261120-100001000-owner",
+ "view": {
+  "handed": {
+   "to": "plan-pricing",
+   "at": "2026-11-20T10:01:01.000Z"
+  },
+  "addressed": null,
+  "check": null,
+  "shot": null,
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "session",
+  "with": "plan-pricing"
+ }
+}

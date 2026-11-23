@@ -1591,6 +1591,7 @@ const CLASS_WORDS = Object.freeze({
   'goal-change': 'Changing a goal',
   'strategy-change': 'Changing the strategy',
   'self-change': 'Changing what the project is',
+  'names-checked': 'Checking the names in a draft before it is public',
   'exterior-change': 'Changing what the project relates to',
   'goal-met': 'Saying a goal is met',
   'registry-attest': 'Confirming the registry is complete',
@@ -1718,6 +1719,12 @@ function integrity(o, file) {
     // responder-1, from anyone: the fields that decide who owes a reply, so no reader keeps a line that breaks them
     if (o.type === 'message' && o.kind === 'handoff' && typeof o.thread !== 'string') return 'a handoff names its thread';
     if (o.type === 'message' && o.kind === 'handoff' && o.to !== 'supervisor') return 'a handoff goes to the supervisor';
+    // artifact-notes-1, from anyone: a session's mark on an artifact note goes to the owner and names
+    // the note, and only a session marks (the owner hands over, the responder hands off); its draft and
+    // picture are on it and nothing else; a frame is the size the owner saw an artifact at
+    if (o.type === 'message' && o.kind === 'addressed' && (typeof o.thread !== 'string' || o.to !== 'owner' || !['supervisor', 'planner', 'ticket'].includes(cls))) return "an addressed message goes to the owner, names its thread, and is a session's";
+    if (o.type === 'message' && o.kind !== 'addressed' && (o.draft !== undefined || o.shot !== undefined)) return 'draft and shot are on an addressed message';
+    if (o.type === 'thread' && o.frame !== undefined && !(isObj(o.subject) && o.subject.kind === 'artifact')) return "frame is on an artifact note's first line";
     if (o.type === 'turn' && (o.routed_to !== undefined || o.delivered !== undefined) && cls !== 'owner') return "routed_to and delivered are on the owner's turns";
     if (o.type === 'turn' && o.delivered !== undefined && o.routed_to !== 'responder') return 'delivered goes with routed_to responder';
     if (o.type === 'turn' && o.pending !== undefined && cls === 'owner') return "pending is on a reply, never the owner's turn";
@@ -1739,6 +1746,11 @@ function integrity(o, file) {
     if (f && o.type === 'ticket' && o.feature !== f) return `${o.by} may only create tickets of the feature "${f}"`;
     return null;
   }
+  // artifact-notes-1: a picture (or why there is none) goes with the proposal it shows, and a
+  // withdrawal with the ready it clears, so no reader keeps one without the other
+  if (o.type === 'thread' && (o.shot !== undefined || o.noshot !== undefined) && !isObj(o.ready)) return 'shot and noshot go on a line that writes ready';
+  if (o.type === 'thread' && o.unready !== undefined && o.ready !== null) return 'unready goes on a line that writes ready: null';
+  if (o.type === 'thread' && o.shot !== undefined && o.noshot !== undefined) return 'shot and noshot never go together';
   const allowed = auth.set[o.type]?.[cls];
   if (!allowed) return `${cls} may not change ${o.type} lines`;
   if (!body.length) return 'a set line changes at least one field';
@@ -1799,7 +1811,7 @@ function checkLine(o, file) {
   const t = SCHEMA.$defs.types[o.type];
   const body = Object.fromEntries(Object.entries(o).filter(([k]) => !ENVELOPE.includes(k)));
   errs.push(...schemaErrors(t, body, o.type));
-  if (o.type === 'thread' || o.type === 'turn') errs.push(...threadLineProblems(o));
+  if (o.type === 'thread' || o.type === 'turn' || o.type === 'message') errs.push(...threadLineProblems(o));
   if (o.op === 'new') {
     for (const k of t['x-required-new'] ?? []) if (!(k in body)) errs.push(`${o.type}.${k} is required`);
     for (const k of t['x-set-only'] ?? []) if (k in body) errs.push(`${o.type}.${k} is set later, not at creation`);
@@ -2121,6 +2133,8 @@ function recordSupervisorPane(run, pane) {
   fs.mkdirSync(run, { recursive: true });
   fs.writeFileSync(supervisorPaneFile(run), pane);
   fs.writeFileSync(supervisorPaneMark(run), pane);
+  // a new agent in it: no line of the owner's, nor a reading of its prompt, carries over (terminal@1 §11)
+  sh('tmux', ['set-option', '-p', '-u', '-t', pane, '@devteam-owner-floor', ';', 'set-option', '-p', '-u', '-t', pane, '@devteam-prompt-readable']);
 }
 // Only a command run as the supervisor (DEVTEAM_ROLE=supervisor, as recover and the README start it)
 // records its pane. A role-less command is the supervisor's too (supervisorOnly), but the owner's own
@@ -2177,6 +2191,121 @@ function tryLock(file, fn, { staleMs = 10000 } = {}) {
   } finally {
     fs.rmSync(lock, { recursive: true, force: true });
   }
+}
+// The typing lock (kit-618, terminal@1 §11): every kit write into a pane holds <run>/type-lock-<pane
+// id> for the whole write, so two writers, or a writer and the owner's key post, never interleave.
+// The file holds its holder's pid and a token of that take's own; its mtime is the stamp, refreshed
+// after each tmux call (touch). It is written whole beside the lock and linked into place, so a lock
+// is never seen empty or half written. A waiter takes it over when the pid is dead, or when the stamp
+// is 60 s old (either way: a clock moved back must not hold it forever), by renaming it to a name of
+// its own and checking it renamed the lock it judged, by its inode and its text (another waiter's
+// fresh lock is linked back). The text, not the inode alone, because a filesystem gives a file made
+// after an unlink the freed inode again (ext4 does, every time). A holder unlinks, or stamps, only a
+// lock whose inode and text are still its own, never the lock of someone who took over.
+// Re-entrant along a call chain: in a CLI process, by the files this process holds (a nested take
+// runs at once, and fn(outer) says whether it is the outermost, the hold that reads the floor). A
+// target that doesn't resolve to a pane takes no lock, and its write goes on as before (tmux would
+// refuse it anyway). Back: { value } (fn's), or { busy: true } when the wait ran out, nothing done.
+const typeLock = {
+  // a stamp this old (or this far ahead: a clock moved back) is a holder gone
+  STALE_MS: 60000,
+  // lock file → its hold ({ ino, text }): the locks this process's synchronous chain holds (its
+  // re-entrance), and those the dashboard's chains hold (typeLockAsync's, for touch only)
+  held: new Map(),
+  heldAsync: new Map(),
+  seq: 0,
+  file: (pane, run = runDir) => path.join(run, `type-lock-${pane}`),
+  // the lock as it is now, or null: its inode and its text, read from one open file
+  read(file) {
+    let fd;
+    try { fd = fs.openSync(file, 'r'); } catch { return null; }
+    try { return { ino: fs.fstatSync(fd).ino, mtimeMs: fs.fstatSync(fd).mtimeMs, text: fs.readFileSync(fd, 'utf8') }; } catch { return null; } finally { fs.closeSync(fd); }
+  },
+  // still this hold's: the same inode and the same text (its token)
+  ours: (file, hold) => { const now = typeLock.read(file); return !!now && now.ino === hold.ino && now.text === hold.text; },
+  // one try: the hold taken ({ ino, text }), or null (someone else holds it); throws on anything but a held lock
+  take(file) {
+    const create = () => {
+      const token = `${process.pid}-${++typeLock.seq}-${crypto.randomBytes(6).toString('hex')}`;
+      const text = JSON.stringify({ pid: process.pid, at: Date.now(), token });
+      const tmp = `${file}.new-${token}`;
+      try {
+        fs.writeFileSync(tmp, text, { flag: 'wx' });
+        try { fs.linkSync(tmp, file); } catch (e) { if (e.code === 'EEXIST') return null; throw e; }
+        return { ino: fs.statSync(tmp).ino, text };
+      } finally { try { fs.unlinkSync(tmp); } catch {} }
+    };
+    const got = create();
+    if (got !== null) return got;
+    const was = typeLock.read(file);
+    if (!was) return null; // let go meanwhile: the next try takes it
+    let pid = null;
+    try { pid = JSON.parse(was.text)?.pid; } catch {}
+    let dead = false;
+    if (Number.isInteger(pid) && pid > 0) { try { process.kill(pid, 0); } catch (e) { dead = e.code === 'ESRCH'; } }
+    // unreadable, or no pid: dead once it is 60 s old, which the stamp's rule already says
+    if (!dead && Math.abs(Date.now() - was.mtimeMs) < typeLock.STALE_MS) return null;
+    const aside = `${file}.taken-${process.pid}-${++typeLock.seq}`;
+    try { fs.renameSync(file, aside); } catch { return null; }
+    const moved = typeLock.read(aside);
+    if (moved?.ino !== was.ino || moved?.text !== was.text) {
+      // another waiter took it over first, and this renamed its fresh lock: back where it was
+      try { fs.linkSync(aside, file); } catch {}
+      try { fs.unlinkSync(aside); } catch {}
+      return null;
+    }
+    try { fs.unlinkSync(aside); } catch {}
+    return create();
+  },
+  release(file, hold) {
+    try { if (typeLock.ours(file, hold)) fs.unlinkSync(file); } catch {}
+  },
+  // the stamp of every lock this process holds (a holder has one pane's, or, in flushHeld, the same
+  // window's pane's too), after each tmux call of a write
+  touch() {
+    const now = new Date();
+    for (const [file, hold] of [...typeLock.held, ...typeLock.heldAsync]) { try { if (typeLock.ours(file, hold)) fs.utimesSync(file, now, now); } catch {} }
+  },
+  // the pane id a target names, or null
+  pane: (out) => (/^%\d+$/.test(out?.trim() ?? '') ? out.trim() : null),
+  run(target, fn, { run = runDir, waitMs = 10000 } = {}) {
+    const pane = typeLock.pane(sh('tmux', ['display', '-p', '-t', target, '#{pane_id}']));
+    if (!pane) return { value: fn(true) };
+    const file = typeLock.file(pane, run);
+    if (typeLock.held.has(file)) return { value: fn(false) };
+    let hold = null;
+    try {
+      fs.mkdirSync(run, { recursive: true });
+      for (const start = Date.now(); (hold = typeLock.take(file)) === null;) {
+        if (Date.now() - start >= waitMs) return { busy: true };
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+      }
+    } catch { return { value: fn(true) }; } // a run folder that can't hold a lock: written as before
+    typeLock.held.set(file, hold);
+    try { return { value: fn(true) }; } finally { typeLock.held.delete(file); typeLock.release(file, hold); }
+  },
+};
+// The dashboard's typing lock: typeLock's file and rules, never blocking the server. The pane id comes
+// from tmuxAsync, the wait polls with a timer, and the locks a chain holds are in an AsyncLocalStorage
+// (loaded here, once), so one request's hold is never entered by another request's.
+async function typeLockAsync(target, fn, { run = runDir, waitMs = 10000 } = {}) {
+  const { AsyncLocalStorage } = await (typeLockAsync.hooks ??= import('node:async_hooks'));
+  const store = (typeLockAsync.store ??= new AsyncLocalStorage());
+  const pane = typeLock.pane(await tmuxAsync(['display', '-p', '-t', target, '#{pane_id}']));
+  if (!pane) return { value: await fn(true) };
+  const file = typeLock.file(pane, run);
+  const mine = store.getStore();
+  if (mine?.has(file)) return { value: await fn(false) };
+  let hold = null;
+  try {
+    fs.mkdirSync(run, { recursive: true });
+    for (const start = Date.now(); (hold = typeLock.take(file)) === null;) {
+      if (Date.now() - start >= waitMs) return { busy: true };
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  } catch { return { value: await fn(true) }; }
+  typeLock.heldAsync.set(file, hold);
+  try { return { value: await store.run(new Set([...(mine ?? []), file]), () => fn(true)) }; } finally { typeLock.heldAsync.delete(file); typeLock.release(file, hold); }
 }
 
 let mainRefCache;
@@ -4006,17 +4135,24 @@ function resendLostEnter(key, target, lines) {
   // tests only: the pause a loaded machine can put between the first read and the claim
   const pause = Number(process.env.DEVTEAM_LOST_ENTER_CLAIM_DELAY_MS ?? 0);
   if (pause > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pause);
-  const cur = claim();
-  if (!cur) return;
-  const done = Math.max(0, Number(cur.tries) || 0);
-  // after a press, only an untouched pane: a reply, a submission or a line being typed ends the rescue
-  if (done >= LOST_ENTER_TRIES || (done > 0 && cur.bottom !== digest)) return void drop();
-  const pressed = tmux(['send-keys', '-t', target, 'Enter']);
-  const tries = done + 1;
-  const typedAt = cur.typed_at ?? cur.at;
-  // another try later, unless that was the last or the key failed; a newer delivery keeps the slot
-  if (pressed && tries < LOST_ENTER_TRIES) { try { writeJson(claimed, { ...cur, tries, bottom: digest, at: nowIso(), typed_at: typedAt }); putBack(); } catch { drop(); } } else drop();
-  if (!pressed) return;
+  // the claim and the press under the pane's typing lock (kit-618): while the owner's floor holds, or
+  // the lock stays busy, nothing is claimed and the record stays as it was for a later look
+  const held = typeLock.run(target, (outer) => {
+    if (outer && ownerLineOpen(target)) return null;
+    const cur = claim();
+    if (!cur) return null;
+    const done = Math.max(0, Number(cur.tries) || 0);
+    // after a press, only an untouched pane: a reply, a submission or a line being typed ends the rescue
+    if (done >= LOST_ENTER_TRIES || (done > 0 && cur.bottom !== digest)) return void drop();
+    const pressed = tmux(['send-keys', '-t', target, 'Enter']);
+    const tries = done + 1;
+    const typedAt = cur.typed_at ?? cur.at;
+    // another try later, unless that was the last or the key failed; a newer delivery keeps the slot
+    if (pressed && tries < LOST_ENTER_TRIES) { try { writeJson(claimed, { ...cur, tries, bottom: digest, at: nowIso(), typed_at: typedAt }); putBack(); } catch { drop(); } } else drop();
+    return pressed ? { cur, tries, typedAt } : null;
+  });
+  if (!held.value) return;
+  const { cur, tries, typedAt } = held.value;
   const hash = crypto.createHash('sha1').update(cur.text).digest('hex').slice(0, 12);
   appendLog({ type: 'observation', source: 'pane', kind: 'resent-enter', subject: key.slice(key.indexOf(':') + 1), detail: `pressed Enter (try ${tries} of ${LOST_ENTER_TRIES}): text typed ${Math.round((Date.now() - Date.parse(typedAt)) / 1000)}s ago was still unsubmitted in an idle pane ("${cur.text.slice(0, 60)}${cur.text.length > 60 ? '…' : ''}", sha1 ${hash})`, detector: 'pane', source_key: `resent-enter ${key} ${hash} ${typedAt}`, measure: { value: Math.round((Date.now() - Date.parse(cur.at)) / 1000), unit: 's' } });
 }
@@ -4305,6 +4441,18 @@ const heldClaims = (key) => {
     return { dir: path.join(heldRoot(), n), pid, stale: !pidAlive(pid) || Date.now() - touched > HELD_CLAIM_STALE_MS };
   });
 };
+// The supervisor's held lines, for the screen route's held (terminal@1 §6, kit-618): the lines in its
+// window's folder and in the live claim folders a flusher is typing from, and the oldest one's age by
+// its name (0 when none is held). A folder that can't be read counts 0: it never fails the read.
+function supervisorHeld(key) {
+  try {
+    const names = [heldDir(key), ...heldClaims(key).filter((c) => !c.stale).map((c) => c.dir)].flatMap(heldFiles);
+    // a loop, not a spread: a backlog of any size never overflows the call's arguments
+    let oldest = Infinity;
+    for (const n of names) { const at = Number(n.slice(0, 15)); if (Number.isFinite(at) && at < oldest) oldest = at; }
+    return { count: names.length, oldest_ms: Number.isFinite(oldest) ? Math.max(0, Date.now() - oldest) : 0 };
+  } catch { return { count: 0, oldest_ms: 0 }; }
+}
 let heldSeq = 0;
 function holdLine(key, target, line, paste = null) {
   const dir = heldDir(key);
@@ -4395,11 +4543,17 @@ function flushHeld(key) {
       let pane = typeof rec.target === 'string' ? resolvePane(rec.target) : { problem: 'no pane recorded' };
       if (pane.problem || paneKey(pane.target) !== key) pane = resolvePane(key);
       if (pane.problem) { if (heldAge(n) > HELD_GONE_MS && dropHeld(key, f, `its pane is gone: ${pane.problem}`)) continue; stopped = true; break; }
-      const screen = paneScreen(pane.target);
-      const ready = paneReadyIn(screen) || (!paneAskingIn(screen) && heldAge(live[0]) > HELD_NO_INPUT_MS);
       // a paste only as typeNow takes one, paths as text: anything else in the file is typed as a line alone
       const paste = Array.isArray(rec.paste) && rec.paste.length && rec.paste.every((p) => typeof p === 'string') ? rec.paste : null;
-      if (!ready || !typeNow(pane.target, rec.line, paste)) { stopped = true; break; }
+      // under the pane's typing lock (kit-618): the owner's floor first, so it holds the line even past
+      // HELD_NO_INPUT_MS; the floor or a busy lock stops the flush here, this line and those after it held
+      const done = typeLock.run(pane.target, (outer) => {
+        if (outer && ownerLineOpen(pane.target)) return false;
+        const screen = paneScreen(pane.target);
+        const ready = paneReadyIn(screen) || (!paneAskingIn(screen) && heldAge(live[0]) > HELD_NO_INPUT_MS);
+        return ready && typeNow(pane.target, rec.line, paste);
+      });
+      if (done.busy || !done.value) { stopped = true; break; }
       try { fs.unlinkSync(f); } catch {}
       try { const now = new Date(); fs.utimesSync(claimed, now, now); } catch {}
       typed++;
@@ -4857,6 +5011,8 @@ function cmdValidate() {
     for (const [r, at] of rs) { const bad = releaseProblem(r, at); if (bad) (releaseMayBeOnMerge(r) ? errors : warnings).push(releaseMayBeOnMerge(r) ? bad : `${bad}; read as not deploying on merge`); }
   }
   const td = path.join(projectDir, 'tickets');
+  // project/self.md, when there is one, against self@1 (its paths and names are the draft's checks: self check, check-pr)
+  { const t = readText(path.join(projectDir, 'self.md')); if (t !== null) for (const e of selfDoc(t).errors) errors.push(`${projectRel}/self.md: ${e}`); }
   if (fs.existsSync(td)) for (const f of fs.readdirSync(td)) if (!f.startsWith('.') && !ts.has(f)) errors.push(`project/tickets/${f}/ has no ticket; if the supervisor added it since the log last landed, land the log first (log-sync, then merge --chore log) and run the check again`);
   // Checking one ticket, another ticket's own errors (D3 and the rest, written "<id>: …") come
   // from the live graph, not this branch: e.g. a dependency on a plan that reached main after the
@@ -5261,6 +5417,10 @@ function cmdStatus() {
     const shown = r.not_started && !held && !r.waiting ? '  [not started: no window or worktree]' : `  [${r.phase}${r.task ? ` ${r.task}` : ''}, ${r.minutes_silent}m${flag}]`;
     out(`${r.stage.padEnd(18)} ${r.id}${r.phase ? shown : ''}${r.records_landed ? `  [${RECORDS_ONLY_FIX(r.id)}]` : ''}`);
   }
+  // the owner's floor (kit-618): status only looks, so it releases no floor, though ownerLineOpen
+  // still clears both marks from a pane whose agent exited to a shell (spec, Readers that only look)
+  const pane = markedPane(runDir);
+  if (pane && ownerLineOpen(pane, { release: false })) out(`supervisor         ${pane}  [owner's line open]`);
   for (const [stage, v] of Object.entries(reviewStats().by_stage)) out(`review ${stage}: first-pass rejection ${v.rejected}/${v.first_passes}${v.last_7d?.first_passes ? `, last ${RECENT_DAYS} days ${v.last_7d.rejected}/${v.last_7d.first_passes}` : ''}`);
 }
 
@@ -6246,6 +6406,12 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
     const own = settingsAt(sha, { orNull: true });
     if (own && Object.hasOwn(own, 'recurring')) fails.push(recurringRegistry.inSettings());
   }
+  // a PR changing self.md: its contract, its parts' paths and the names hold (selfDraftLines), every kind
+  if (R.name === 'home' && mainRef()) {
+    const held = selfDraftLines(git(['merge-base', mainRef(), sha]), sha, branch);
+    fails.push(...held.fails);
+    for (const w of held.warns) out(`warn: ${w}`);
+  }
   if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge, records, inHome }), ...depsFails(branch.slice('ticket/'.length), R)];
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);
@@ -7061,7 +7227,7 @@ function governanceView() {
     ? (git(['ls-tree', '--full-tree', '--name-only', main, '--', ...kitDirs.map((d) => `${kitRel}/${d}/`)], projectRoot) ?? '').split('\n')
     : kitDirs.flatMap((d) => { try { return fs.readdirSync(path.join(projectRoot, kitRel, d)).map((f) => `${kitRel}/${d}/${f}`); } catch { return []; } });
   const kit = kitDirs.flatMap((d) => listed.filter((p) => p.startsWith(`${kitRel}/${d}/`) && p.endsWith('.md')).sort().map((p) => ({ group: d, path: p })));
-  const project = [['strategy', 'Strategy'], ['exterior', 'Exterior']].map(([f, fallback]) => ({ group: 'project', path: `${projectRel}/${f}.md`, fallback, template: f === 'strategy' }));
+  const project = [['strategy', 'Strategy'], ['self', 'Self'], ['exterior', 'Exterior']].map(([f, fallback]) => ({ group: 'project', path: `${projectRel}/${f}.md`, fallback, template: f === 'strategy' }));
   const settingsRel = `${projectRel}/settings.md`;
   const newest = new Map();
   const syncs = new Set();
@@ -7088,7 +7254,7 @@ function governanceView() {
   const files = [...kit, ...project].map(({ group, path: p, fallback, template }) => {
     const text = at(p);
     // init's untouched strategy template counts as not written, by its marker line, as strategyState
-    // reads it; exterior.md has no template, so it is written once it exists
+    // reads it; self.md and exterior.md have no template, so each is written once it exists
     const written = text !== null && !(template && text.includes(STRATEGY_TEMPLATE_MARK));
     const c = newest.get(p);
     const known = c && !shallow.has(c.sha);
@@ -7206,6 +7372,422 @@ worldFileFails.actOf = (ref) => {
   const b = String(ref).replace(/^refs\/heads\//, '');
   return b.startsWith('plan/') ? `plan-${b.slice(5)}` : b.startsWith('ticket/') && !b.startsWith('ticket/chore-') ? b.slice(7) : b;
 };
+/* self-model start */
+// project/self.md, what the project is (log.schema.json#self@1): a markdown file whose one fenced
+// `self` block holds the contract. The parser and the contract check follow
+// test/fixtures/world/check.mjs rule for rule, so the two refuse the same invalid/ cases; kit-135
+// reuses them for exterior.md.
+//
+// The fenced blocks of a markdown file. A fence is a line at column 0 of three or more backticks;
+// one opens a block when none is open, its info string the rest of the line, its spaces and tabs
+// trimmed (possibly empty). The block closes at the next line of at least as many backticks and
+// nothing else but spaces or tabs. Indented and ~~~ fences are prose. Lines split on \r?\n, so a
+// file saved with CRLF reads alike. Returns the blocks, the text outside every block (prose), and
+// the line of a block that never closes (or null).
+function fencedBlocks(text) {
+  const blocks = [];
+  const prose = [];
+  let open = null;
+  String(text).split(/\r?\n/).forEach((line, i) => {
+    const m = /^(`{3,})(.*)$/.exec(line);
+    if (!open) {
+      if (m) open = { ticks: m[1].length, info: m[2].replace(/^[ \t]+|[ \t]+$/g, ''), line: i + 1, body: [] };
+      else prose.push(line);
+    } else if (m && m[1].length >= open.ticks && /^[ \t]*$/.test(m[2])) {
+      blocks.push({ info: open.info, line: open.line, body: open.body.join('\n') });
+      open = null;
+    } else open.body.push(line);
+  });
+  return { blocks, prose: prose.join('\n'), unclosed: open ? open.line : null };
+}
+// Whether text names name: as whole words (no letter or digit just before or after), ignoring case.
+function namesWhole(text, name) {
+  const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![\\p{L}\\p{N}])${esc}(?![\\p{L}\\p{N}])`, 'iu').test(text);
+}
+// A self.md's or exterior.md's contract errors (doc 'self' or 'exterior'), empty when it holds.
+// The fence, the other doc's block, one block, JSON, an object and the version stop at their first
+// error; the schema ($defs[doc].block) gives every error; self's part ids are unique once the schema
+// holds. Exterior's own rules past the schema are kit-135's.
+function worldDocErrors(text, doc) {
+  const home = { self: 'self.md', exterior: 'exterior.md' };
+  const other = doc === 'self' ? 'exterior' : 'self';
+  const article = (w) => (/^[aeiou]/.test(w) ? 'an' : 'a');
+  const b = fencedBlocks(text);
+  if (b.unclosed) return [`a fenced block opened at line ${b.unclosed} never closes`];
+  if (b.blocks.some((x) => x.info === other)) return [`${article(other)} ${other} block belongs in ${home[other]}, not ${home[doc]}`];
+  const mine = b.blocks.filter((x) => x.info === doc);
+  if (mine.length === 0) return [`no ${doc} block`];
+  if (mine.length > 1) return [`more than one ${doc} block`];
+  let v;
+  try {
+    v = JSON.parse(mine[0].body);
+  } catch (e) {
+    return [`the ${doc} block is not JSON: ${e.message}`];
+  }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return [`the ${doc} block is not a JSON object`];
+  if (Number.isInteger(v[doc]) && v[doc] > 1) return [`${doc}: ${v[doc]} needs a newer kit`];
+  const errs = schemaErrors(SCHEMA.$defs[doc].block, v, doc);
+  if (errs.length) return errs;
+  if (doc === 'self') {
+    const seen = new Set();
+    v.parts.forEach((p, i) => {
+      if (seen.has(p.id)) errs.push(`self.parts[${i}].id "${p.id}" is shared`);
+      seen.add(p.id);
+    });
+  }
+  return errs;
+}
+// A self.md's text in: its parsed self block (null unless it holds) and its contract errors.
+function selfDoc(text) {
+  const errors = worldDocErrors(text, 'self');
+  if (errors.length) return { block: null, errors };
+  return { block: JSON.parse(fencedBlocks(text).blocks.find((x) => x.info === 'self').body), errors };
+}
+// A part's code path as the disk and git checks both read it: split on /, empty and . segments
+// dropped, joined. '' is the repo root. (The schema refuses a leading / and any .. segment.)
+function partPath(p) {
+  return String(p).split('/').filter((s) => s !== '' && s !== '.').join('/');
+}
+// The parts' code paths that has(partPath(p)) doesn't find: [{ part, path }], each path as written,
+// once, in file order.
+function selfPathsMissing(block, has) {
+  const missing = [];
+  const seen = new Set();
+  for (const p of block.parts) for (const c of p.code) {
+    if (seen.has(c)) continue;
+    seen.add(c);
+    if (!has(partPath(c))) missing.push({ part: p.id, path: c });
+  }
+  return missing;
+}
+// Whether a normalised path is on disk under the repo root, each segment matched by its exact case
+// (as git reads it), so App/ is missing beside app/ on a disk that folds case too.
+function hasOnDisk(n) {
+  let dir = projectRoot;
+  for (const seg of n === '' ? [] : n.split('/')) {
+    let names;
+    try { names = fs.readdirSync(dir); } catch { return false; }
+    if (!names.includes(seg)) return false;
+    dir = path.join(dir, seg);
+  }
+  return true;
+}
+// Whether a normalised path is in a commit's tree.
+const hasAt = (commit) => (n) => n === '' || git(['cat-file', '-e', `${commit}:${n}`]) !== null;
+const selfRel = () => `${projectRel}/self.md`;
+// main's self.md, or null when main has none; with no main, or the project outside the repo, the
+// working tree's (as strategyState reads the strategy).
+function selfMainText() {
+  return projectInRepo && mainRef() ? git(['show', `${mainRef()}:${selfRel()}`]) : readText(path.join(projectDir, 'self.md'));
+}
+// dashboard-data's self block (log.schema.json#self@1 dashboard): main's self.md as check.mjs's
+// dashboardSelf gives it, or null when main has none or it breaks the contract.
+function selfDashboard() {
+  const text = selfMainText();
+  const b = text === null ? null : selfDoc(text).block;
+  return b && { what: b.what, makes: b.makes, parts: b.parts.map((p) => ({ id: p.id, name: p.name, what: p.what, code: p.code })), controls: b.controls, not: b.not };
+}
+// The names rule. A draft is pushed, and on a repo not known to be private it is public, so a
+// capitalised word main's strategy and dependency files don't contain is one to check before then:
+// a name of someone the project may not want named in public. A heuristic: a lowercase name is
+// never caught, and a one-word name that starts a sentence is skipped (spec §6).
+//
+// The capitalised words of pieces ([{ where, text, sentences }]): [{ word, where }], each word once,
+// at its first piece. A word is a run of letters, digits, ' ’ and - that starts with a letter, a
+// trailing 's or ’s (and then any trailing ' ’ or -) dropped; capitalised when its first letter is
+// upper case and it is two letters or more. With sentences, a sentence's first word is skipped: at
+// the start of the text, after a blank line, on a line that starts a markdown block (#, -, *, +,
+// >, | or 1.), after a | table cell, and after . ! or ? and a space. A newline inside a paragraph
+// (a wrapped line) starts nothing. Everything else counts, inline code, links and comments too.
+function capitalisedWords(pieces) {
+  const found = [];
+  const seen = new Set();
+  for (const { where, text, sentences } of pieces) {
+    const s = String(text);
+    let prevEnd = null;
+    for (const m of s.matchAll(/[\p{L}][\p{L}\p{N}'’-]*/gu)) {
+      const gap = s.slice(prevEnd ?? 0, m.index);
+      const starts = prevEnd === null || /[.!?]\s/.test(gap) || /\n[ \t]*\r?\n/.test(gap) || /\n[ \t]*(?:[#*+>|-]|\d+\.)/.test(gap) || gap.includes('|');
+      prevEnd = m.index + m[0].length;
+      if (sentences && starts) continue;
+      const word = m[0].replace(/['’]s$/, '').replace(/['’-]+$/, '');
+      if (!/^\p{Lu}/u.test(word) || [...word].length < 2 || seen.has(word)) continue;
+      seen.add(word);
+      found.push({ word, where });
+    }
+  }
+  return found;
+}
+// The text the names rule reads, at ref: the project's strategy.md and the repo root's
+// package.json, Gemfile and requirements.txt, joined; a missing file reads as ''. With no ref, or
+// the project outside the repo, the working tree's.
+function namesAllowedText(ref = mainRef()) {
+  const at = (rel) => (projectInRepo && ref ? git(['show', `${ref}:${rel}`]) : readText(path.join(projectRoot, rel))) ?? '';
+  return [strategyRel, 'package.json', 'Gemfile', 'requirements.txt'].map(at).join('\n');
+}
+// The capitalised words of pieces that allowed doesn't name (as a whole word, ignoring case). The
+// one names function: self check, chore pr and check-pr use it, and kit-135 for exterior.md.
+function unknownNames(pieces, allowed) {
+  return capitalisedWords(pieces).filter((w) => !namesWhole(allowed, w.word));
+}
+// A self.md's pieces for the names rule. The text outside the self block ('prose', with sentences;
+// every other fenced block is in it), then the block's what, makes and each part's what (with
+// sentences), each part's name, controls[i] and not[i] (every word). The ids are left out, and so is
+// each code path has(partPath(p)) finds: it names a file already in the repo. One it doesn't (an
+// earlier blob's) is read like any text. With no parsed block, the whole file is one prose piece.
+function selfPieces(text, block, has) {
+  if (!block) return [{ where: 'prose', text: String(text), sentences: true }];
+  const lines = String(text).split(/\r?\n/);
+  const b = fencedBlocks(text).blocks.find((x) => x.info === 'self');
+  // the block's lines, opening fence to closing, become one blank line
+  lines.splice(b.line - 1, b.body.split('\n').length + 2, '');
+  const pieces = [{ where: 'prose', text: lines.join('\n'), sentences: true }];
+  const add = (where, t, sentences) => pieces.push({ where, text: t, sentences });
+  add('what', block.what, true);
+  add('makes', block.makes, true);
+  block.parts.forEach((p, i) => {
+    add(`parts[${i}].name`, p.name, false);
+    add(`parts[${i}].what`, p.what, true);
+    p.code.forEach((c, j) => { if (!has(partPath(c))) add(`parts[${i}].code[${j}]`, c, false); });
+  });
+  block.controls.forEach((c, i) => add(`controls[${i}]`, c, false));
+  block.not.forEach((c, i) => add(`not[${i}]`, c, false));
+  return pieces;
+}
+// One self.md blob's unknown words: its pieces (the whole text as prose when the contract fails, so
+// a broken draft's words still count), less what allowed names.
+function selfWords(text, has, allowed) {
+  return unknownNames(selfPieces(text, selfDoc(text).block, has), allowed);
+}
+// Whether a strategy links self.md: in its prose (outside every fenced block), an inline link to
+// self.md or ./self.md (an optional #anchor and "title"), or a reference definition naming it.
+function linksSelf(strategyText) {
+  const prose = fencedBlocks(strategyText ?? '').prose;
+  return /\]\(\s*(?:\.\/)?self\.md(?:#[^\s)]*)?(?:\s+"[^"]*")?\s*\)/.test(prose) || /^\s*\[[^\]]+\]:\s*(?:\.\/)?self\.md(?:#\S*)?\s*$/m.test(prose);
+}
+// main's strategy.md, as strategyState reads it, or null when missing.
+const strategyMainText = () => (projectInRepo && mainRef() ? git(['show', `${mainRef()}:${strategyRel}`]) : readText(path.join(projectDir, 'strategy.md')));
+// metrics' self findings, read from main (none with no main, or the project outside the repo), each
+// keyed so observeFindings keeps one observation per path or strategy blob: self-drift once per part
+// path missing at main while main's self.md holds; self-unlinked while main has a self.md its
+// strategy doesn't link; self-missing while the strategy is written and main has no self.md, its
+// next step the strategy-change link first when the strategy doesn't link it. All low.
+function selfFindings(add) {
+  const main = projectInRepo ? mainRef() : null;
+  if (!main) return;
+  const text = selfMainText();
+  const strategy = strategyMainText();
+  const strategyKey = git(['rev-parse', '--verify', '--quiet', `${main}:${strategyRel}`]) ?? undefined;
+  const linked = linksSelf(strategy);
+  if (text !== null) {
+    const { block } = selfDoc(text);
+    if (block) for (const m of selfPathsMissing(block, hasAt(main))) add('low', 'self-drift', 'self', `part ${m.part}'s path ${m.path} is not on main`, 'the code moved: draft a new self.md in a chore (self check, then chore pr and ask self-change; supervisor.md, Monitoring)', { key: m.path });
+    if (!linked) add('low', 'self-unlinked', 'self', 'main has self.md and its strategy.md does not link it', 'propose a strategy-change linking [self.md](./self.md) in place of any lines restating what the project is, in its own PR', { key: strategyKey });
+  } else if (strategyState() === 'written') {
+    const draft = 'draft self.md from the code and the strategy in a chore, run self check, and ask self-change (supervisor.md, Monitoring)';
+    add('low', 'self-missing', 'self', 'the strategy is written and main has no self.md', linked ? draft : `first propose a strategy-change linking [self.md](./self.md), in its own PR; then ${draft}`, { key: strategyKey });
+  }
+}
+// The draft's history. Every self.md blob the branch carries since its merge base is pushed with it
+// and lands with merge --no-ff, so the names rule reads each, not only the head's.
+//
+// Every distinct blob of rel that a commit in base..head introduces, oldest first: [{ commit, blob }].
+// A commit's entry is kept only when it is a plain file (mode 100644 or 100755: a folder, link or
+// submodule is the owner's-files gate's to refuse), and only when its blob is neither base's nor any
+// parent's at rel (a merge bringing main's blob in introduces nothing). A commit with no file is
+// skipped. With no base, head's whole history is read. kit-135 reuses it for exterior.md.
+function draftBlobs(base, head, rel) {
+  const blobAt = (c) => {
+    const m = /^(\d{6}) (\w+) ([0-9a-f]+)\t/.exec(git(['ls-tree', c, '--', rel], mainRoot) ?? '');
+    return m && m[2] === 'blob' && (m[1] === '100644' || m[1] === '100755') ? m[3] : null;
+  };
+  const listed = git(['rev-list', '--reverse', '--full-history', '--parents', head, ...(base ? [`^${base}`] : []), '--', rel], mainRoot);
+  const known = new Set();
+  if (base) known.add(git(['rev-parse', '--verify', '--quiet', `${base}:${rel}`], mainRoot));
+  const found = [];
+  for (const line of (listed ?? '').split('\n').filter(Boolean)) {
+    const [commit, ...parents] = line.split(' ');
+    const blob = blobAt(commit);
+    if (!blob || known.has(blob) || parents.some((p) => git(['rev-parse', '--verify', '--quiet', `${p}:${rel}`], mainRoot) === blob)) continue;
+    known.add(blob);
+    found.push({ commit, blob });
+  }
+  return found;
+}
+// The words of every draft blob of rel in base..head, as wordsOf(text, has) gives them, with has the
+// head's tree (a path the head has names the project's own file; one it lacks is read as text):
+// [{ word, where, commit }]. The head's own blob first, its words carrying commit null; then each
+// earlier blob, oldest first, a word only it holds carrying its commit. Each word once, at its first place.
+function draftWords(base, head, rel, wordsOf) {
+  const has = hasAt(head);
+  const headBlob = git(['rev-parse', '--verify', '--quiet', `${head}:${rel}`], mainRoot);
+  const blobs = draftBlobs(base, head, rel);
+  const order = [...blobs.filter((b) => b.blob === headBlob).map((b) => ({ ...b, commit: null })), ...blobs.filter((b) => b.blob !== headBlob)];
+  const words = [];
+  const seen = new Set();
+  for (const { commit, blob } of order) {
+    for (const w of wordsOf(git(['cat-file', 'blob', blob], mainRoot) ?? '', has)) {
+      if (seen.has(w.word)) continue;
+      seen.add(w.word);
+      words.push({ word: w.word, where: w.where, commit });
+    }
+  }
+  return words;
+}
+// The repo's visibility as GitHub says, for the names hold: origin's repo by name (never gh's own
+// default), PUBLIC public, PRIVATE or INTERNAL private, anything else (no owner/repo for origin, gh
+// missing, logged out, offline, or past its timeout: 15 s, DEVTEAM_GH_TIMEOUT_MS for tests) unknown,
+// which holds like public. Each answer is recorded, whole, in run/repo-visibility.json for metrics
+// (lastRepoVisibility), which makes no network call.
+const REPO_VISIBILITY = runPath('repo-visibility.json');
+function repoVisibility() {
+  const spec = ghSpec(git(['config', '--get', 'remote.origin.url']));
+  const said = spec ? repo('home').gh(['repo', 'view', spec, '--json', 'visibility', '--jq', '.visibility'], { cwd: mainRoot, timeout: Number(process.env.DEVTEAM_GH_TIMEOUT_MS) || 15000, killSignal: 'SIGKILL' }) : null;
+  const visibility = said === 'PUBLIC' ? 'public' : said === 'PRIVATE' || said === 'INTERNAL' ? 'private' : 'unknown';
+  try { writeJson(REPO_VISIBILITY, { visibility, at: new Date().toISOString() }); } catch {}
+  return visibility;
+}
+function lastRepoVisibility() {
+  try {
+    const v = readJson(REPO_VISIBILITY).visibility;
+    return ['public', 'private', 'unknown'].includes(v) ? v : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+// The words the supervisor has checked for act's draft of scope ('self', or kit-135's 'exterior'):
+// those its names-checked acts name (each a name:<word> ref, matched exactly) whose refs include act,
+// logged at or after since (the branch's merge base's committer time, in ms, as Date.parse reads the
+// log's created_at; not a finite number: nothing counts, failing closed). Only a chore's act clears
+// anything: a plan or ticket PR has no chore to name it on.
+function namesChecked(act, scope, since) {
+  const words = new Set();
+  if (!String(act).startsWith('chore-')) return words;
+  const from = Number.isFinite(since) ? since : Infinity;
+  for (const a of logObjects('act')) {
+    if (a.class !== 'names-checked' || a.scope !== scope || writerClass(a.created_by) !== 'supervisor') continue;
+    const refs = Array.isArray(a.refs) ? a.refs : [];
+    if (!refs.includes(act) || !(Date.parse(a.created_at) >= from)) continue;
+    for (const r of refs) if (typeof r === 'string' && r.startsWith('name:')) words.add(r.slice(5));
+  }
+  return words;
+}
+// check-pr's names rule for a draft: each word of words ([{ word, where, commit }]) not in checked
+// is a fail on a public repo and a warning on an unknown one; a private repo holds nothing.
+// visibility is called only when a word is unchecked, so a PR without one makes no gh call.
+function namesHoldLines({ rel, words, act, checked, visibility }) {
+  const open = words.filter((w) => !checked.has(w.word));
+  if (!open.length) return { fails: [], warns: [] };
+  const v = visibility();
+  if (v === 'private') return { fails: [], warns: [] };
+  const chore = String(act).startsWith('chore-');
+  const tail = chore
+    ? `; check it and name it on the chore (chore pr ${String(act).slice(6)} --names-checked …), or reword it; if you named it with chore pr --names-checked and this check runs where the live log isn't (a forge's CI), land the log (log-sync, then merge --chore log) and run the check again`
+    : '; a plan or ticket PR has no chore to name it on, so reword it (a self.md change belongs in a chore)';
+  const lines = open.map((w) => `${rel} names "${w.word}" (${w.where})${w.commit ? ` in ${w.commit.slice(0, 12)}` : ''}, which main's strategy.md and dependency files don't, on a public repo${tail}`);
+  return v === 'public' ? { fails: lines, warns: [] } : { fails: [], warns: lines };
+}
+// The names-checked act chore pr logs once every word is named: the words, the draft's blob, the chore.
+function logNamesChecked(slug, rel, blob, words) {
+  const scope = path.basename(rel, '.md');
+  return appendLog({ type: 'act', class: 'names-checked', scope, what: `checked the names ${words.join(', ')} in ${rel} (blob ${String(blob).slice(0, 12)}) before pushing chore-${slug}`, refs: [`chore-${slug}`, ...words.map((w) => `name:${w}`)], reversible: false }, 'supervisor');
+}
+// chore pr's hold on a self.md draft (spec §3.3), run after its commit and before its push: the
+// contract and each part's path at head, then the names of every draft blob. Returns null to push
+// (any warnings printed), or the refusal. named: the --names-checked words, or null.
+function choreSelfHold(slug, base, head, named) {
+  const rel = selfRel();
+  if (!projectInRepo || !draftBlobs(base, head, rel).length) return named ? 'chore pr: --names-checked is for a chore changing self.md' : null;
+  if (git(['cat-file', '-e', `${head}:${rel}`], mainRoot) !== null) {
+    const { block, errors } = selfDoc(git(['show', `${head}:${rel}`], mainRoot) ?? '');
+    if (errors.length) return `chore pr: self.md breaks self@1: ${errors.join('; ')}; run self check`;
+    const missing = selfPathsMissing(block, hasAt(head));
+    if (missing.length) return missing.map((m) => `chore pr: part ${m.part}'s path ${m.path} is not at ${head.slice(0, 12)}`).join('\n');
+  }
+  const allowed = namesAllowedText();
+  const words = draftWords(base, head, rel, (text, has) => selfWords(text, has, allowed));
+  const shown = (w) => `"${w.word}" (${w.where})${w.commit ? ` in ${w.commit.slice(0, 12)}` : ''}`;
+  const open = words.filter((w) => !named?.has(w.word));
+  if (open.length) {
+    const v = repoVisibility();
+    if (v === 'private') {
+      for (const w of open) warn(`self.md: ${shown(w)} is in neither main's strategy.md nor its package.json, Gemfile or requirements.txt: the repo is private, so it may be pushed`);
+      return null;
+    }
+    const lines = [`chore pr: self.md names words main's strategy.md and dependency files don't, and ${v === 'public' ? 'this repo is public' : 'this repo\'s visibility is unknown'}, so the draft is public once pushed: ${open.map(shown).join(', ')}; reword them, or check each and name it: --names-checked ${words.map((w) => w.word).join(',')}`];
+    const theirs = git(['ls-remote', 'origin', `refs/heads/chore-${slug}`], mainRoot)?.split('\t')[0] || null;
+    for (const c of [...new Set(open.map((w) => w.commit).filter(Boolean))]) {
+      const pushed = theirs && git(['merge-base', '--is-ancestor', c, theirs], mainRoot) !== null;
+      lines.push(`${c.slice(0, 12)}: ${pushed ? `that commit is pushed already, so the word is public on chore-${slug}: name it once checked, or start the chore again from main` : `that commit is not pushed yet: drop it from the branch (git -C .worktrees/chore-${slug} rebase or reset) and run chore pr again, or check and name the word`}`);
+    }
+    return lines.join('\n');
+  }
+  if (named && words.length) logNamesChecked(slug, rel, git(['rev-parse', '--verify', '--quiet', `${head}:${rel}`], mainRoot) ?? draftBlobs(base, head, rel).pop().blob, words.map((w) => w.word));
+  return null;
+}
+// check-pr's hold on a PR changing self.md (spec §3.3), for checkPr in home: when a commit in
+// merge-base..sha changes it, the contract at sha and each part's path there (both only while sha
+// holds the file: a deletion is kit-138's gate), then namesHoldLines over every draft blob, whether
+// or not the contract holds. { fails, warns }.
+function selfDraftLines(base, sha, branch) {
+  const rel = selfRel();
+  if (!projectInRepo || !draftBlobs(base, sha, rel).length) return { fails: [], warns: [] };
+  const fails = [];
+  if (git(['cat-file', '-e', `${sha}:${rel}`], mainRoot) !== null) {
+    const { block, errors } = selfDoc(git(['show', `${sha}:${rel}`], mainRoot) ?? '');
+    fails.push(...errors.map((e) => `${rel} breaks self@1 at ${sha.slice(0, 12)}: ${e}`));
+    if (block) fails.push(...selfPathsMissing(block, hasAt(sha)).map((m) => `${rel}: part ${m.part}'s path ${m.path} is not at ${sha.slice(0, 12)}`));
+  }
+  const allowed = namesAllowedText();
+  const words = draftWords(base, sha, rel, (text, has) => selfWords(text, has, allowed));
+  const act = worldFileFails.actOf(branch);
+  const ct = base ? git(['show', '-s', '--format=%ct', base], mainRoot) : null;
+  const since = ct && /^\d+$/.test(ct) ? Number(ct) * 1000 : NaN;
+  const names = namesHoldLines({ rel, words, act, checked: namesChecked(act, 'self', since), visibility: repoVisibility });
+  return { fails: [...fails, ...names.fails], warns: names.warns };
+}
+const SELF_NOT_DRAFTED = 'self.md is not drafted yet: the supervisor drafts it from the code and the strategy (supervisor.md, Monitoring)';
+// self show [--json]: main's self.md. self check: the working tree's, the draft, against the
+// contract and each part's path on disk (errors, exit 1), then the names rule and whether main's
+// strategy links self.md (warnings, the exit unchanged).
+function cmdSelf() {
+  const sub = positional[0];
+  if (sub === 'show') {
+    gitReadCache = new Map();
+    const text = selfMainText();
+    if (text === null) return flags.json ? json(null) : out(SELF_NOT_DRAFTED);
+    const { block: b, errors } = selfDoc(text);
+    if (errors.length) {
+      for (const e of errors) out(`error: self.md: ${e}`);
+      process.exit(1);
+    }
+    if (flags.json) return json(selfDashboard());
+    const list = (xs) => (xs.length ? xs.join('; ') : 'nothing listed');
+    out(`Self: ${selfRel()} ${projectInRepo && mainRef() ? 'on main' : 'in the working tree'}`);
+    out(`What it is: ${b.what}`);
+    out(`What it makes or does: ${b.makes}`);
+    out('Parts:');
+    for (const p of b.parts) out(`  ${p.id}  ${p.name}: ${p.what} (${p.code.join(', ')})`);
+    out(`Controls: ${list(b.controls)}`);
+    out(`Does not control: ${list(b.not)}`);
+    return;
+  }
+  if (sub === 'check') {
+    const text = readText(path.join(projectDir, 'self.md'));
+    if (text === null) return out(SELF_NOT_DRAFTED);
+    const { block, errors } = selfDoc(text);
+    for (const e of errors) out(`error: self.md: ${e}`);
+    const missing = block ? selfPathsMissing(block, hasOnDisk) : [];
+    for (const m of missing) out(`error: self.md: part ${m.part}'s path ${m.path} is not in the repo`);
+    gitReadCache = new Map();
+    for (const w of selfWords(text, hasOnDisk, namesAllowedText())) out(`warning: self.md: "${w.word}" (${w.where}) is in neither main's strategy.md nor its package.json, Gemfile or requirements.txt: on a repo not known to be private, the draft is public once its branch is pushed`);
+    if (selfMainText() !== null && !linksSelf(strategyMainText())) out('warning: main\'s strategy.md does not link self.md: propose a strategy-change adding [self.md](./self.md), in its own PR');
+    process.exit(errors.length || missing.length ? 1 : 0);
+  }
+  die('usage: self show [--json] | self check');
+}
+/* self-model end */
 function ownerAnswer(qid, what) {
   const q = logGet(qid);
   const v = q?.type === 'question' ? questionView(q) : null;
@@ -7386,8 +7968,8 @@ function landRecords(id, rec, linkName) {
     // (cmdMerge's landCode): no hook runs, directory renames are a conflict, the merge must be
     // exactly the records onto that main with main's jobs, and it is pushed by sha, only while
     // origin's main is still that commit. The merge, its checks, the push and the fetch after a
-    // failed push are bounded (recurringRegistry.git); the worktree's add and remove, and the fetch
-    // after landing, are not (final-12 F5).
+    // failed push are bounded (recurringRegistry.git), and so is the fetch after landing (kit-791); the
+    // worktree's add and remove are not (final-12 F5).
     const checked = mainSha();
     if (!checked) return `no home ${HS.main_branch} to land on`;
     const lg = (args, cwd) => recurringRegistry.git(args, { cwd });
@@ -7431,27 +8013,39 @@ function landRecords(id, rec, linkName) {
     // GitHub has no lease on the base: home's main is read again just before gh pr merge, and must
     // still be the main the checks judged (mainSha(), read before this fetch), as landCode's moved()
     // does for the code (kit-332). The fetch is bounded (recurringRegistry.git); one that fails refuses.
+    // Each gh call here is killed at its bound, as landCode's are (kit-787): gh pr merge at 60 s, each
+    // state read at 15 s (DEVTEAM_GH_TIMEOUT_MS, a positive whole number of ms, sets both, for tests),
+    // so the records' gh calls wait at most 60 + 3 x 15 + 2 x 2 = 109 s; a killed call reads as failed.
+    // Both git fetches are bounded (120 s): the one below, and the one after landing (kit-791).
+    const ghMs = Math.trunc(Number(process.env.DEVTEAM_GH_TIMEOUT_MS));
+    const ghSet = Number.isSafeInteger(ghMs) && ghMs > 0;
+    const ghMerge = { timeout: ghSet ? ghMs : 60000, killSignal: 'SIGKILL' };
+    const ghRead = { timeout: ghSet ? ghMs : 15000, killSignal: 'SIGKILL' };
     const checked = mainSha();
     if (!checked) return `no home ${HS.main_branch} to land on`;
     if (!recurringRegistry.git(['fetch', '--quiet', 'origin', HS.main_branch], { cwd: mainRoot }).ok) return `couldn't fetch home's ${HS.main_branch} to check it hasn't moved since the checks; run merge again`;
     const tip = resolveCommit(`refs/remotes/origin/${HS.main_branch}`);
     if (tip !== checked) return `home's ${HS.main_branch} moved since the checks (${String(checked).slice(0, 12)} to ${String(tip).slice(0, 12)}); run merge again`;
-    if (HR.gh(['pr', 'merge', String(rec.pr), `--${HS.merge_method}`, ...(HS.merge_admin === true ? ['--admin'] : []), '--match-head-commit', rec.sha, '--subject', subject, '--body', body]) === null) {
+    if (HR.gh(['pr', 'merge', String(rec.pr), `--${HS.merge_method}`, ...(HS.merge_admin === true ? ['--admin'] : []), '--match-head-commit', rec.sha, '--subject', subject, '--body', body], ghMerge) === null) {
       // gh can exit non-zero after GitHub merged (an error or a timeout in its answer, a slow GitHub):
-      // GitHub's own state says, read while it still says OPEN, three times at most, 2s apart. The PR
+      // GitHub's own state says, read while it still says OPEN, three times at most, 2 s apart. The PR
       // was open (pinRecords); MERGED at the pinned records now is their landing, as a clean merge's (kit-782)
       let st = null;
       for (let i = 0; i < 3; i++) {
         if (i) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
         st = null;
-        try { st = JSON.parse(HR.gh(['pr', 'view', String(rec.pr), '--json', 'state,headRefOid']) ?? 'null'); } catch {}
+        try { st = JSON.parse(HR.gh(['pr', 'view', String(rec.pr), '--json', 'state,headRefOid'], ghRead) ?? 'null'); } catch {}
         if (st?.state !== 'OPEN') break;
       }
       if (!(st?.state === 'MERGED' && st.headRefOid === rec.sha)) return `gh pr merge of home's records PR #${rec.pr} refused (did its head move?)`;
       out(`gh pr merge of home's records PR #${rec.pr} exited non-zero, but GitHub has #${rec.pr} merged at ${rec.sha.slice(0, 12)}: landed`);
     }
   }
-  git(['fetch', '--quiet', 'origin', HS.main_branch]);
+  // The fetch after the landing only refreshes origin/<main> here: the records have landed. It is
+  // bounded (recurringRegistry.git: 120 s, then SIGKILL; DEVTEAM_GIT_TIMEOUT_MS for tests), and one
+  // that fails or times out is said, never a refusal: their act is written next, and the code lands (kit-791)
+  const fetched = recurringRegistry.git(['fetch', '--quiet', 'origin', HS.main_branch], { cwd: mainRoot });
+  if (!fetched.ok) warn(`the records landed, but the fetch of home's ${HS.main_branch} after them ${recurringRegistry.why(fetched)}; origin/${HS.main_branch} in ${mainRoot} may not show them yet: check with git fetch origin ${HS.main_branch} there`);
   mainRefCache = undefined; mainLogCache = undefined; mergeShaCache.clear();
   return null;
 }
@@ -7925,20 +8519,31 @@ function cmdMerge() {
       }
       return null;
     }
-    // GitHub has no lease on the base: main is read again just before gh pr merge
+    // GitHub has no lease on the base: main is read again just before gh pr merge. Each gh call
+    // after the gates is killed at its bound (kit-787): gh pr merge at 60 s, each state read at 15 s
+    // (DEVTEAM_GH_TIMEOUT_MS, a positive whole number of ms, sets both, for tests), so the code's gh
+    // calls wait at most 60 + 3 x 15 + 2 x 2 = 109 s (with records in home, 218 s for both landings'
+    // gh calls). The git fetches are apart: moved()'s is bounded (recurringRegistry.git, 120 s),
+    // the one after landing is too (kit-791: 120 s, 240 s with records in home). A killed call
+    // reads as failed: gh pr merge as not merged (its state is read, as for any error), a state
+    // read as no answer; refused as before
+    const ghMs = Math.trunc(Number(process.env.DEVTEAM_GH_TIMEOUT_MS));
+    const ghSet = Number.isSafeInteger(ghMs) && ghMs > 0;
+    const ghMerge = { timeout: ghSet ? ghMs : 60000, killSignal: 'SIGKILL' };
+    const ghRead = { timeout: ghSet ? ghMs : 15000, killSignal: 'SIGKILL' };
     const gone = moved();
     if (gone) return gone;
-    const merged = R.gh(['pr', 'merge', String(pr.number), `--${S.merge_method}`, ...(S.merge_admin === true ? ['--admin'] : []), '--match-head-commit', sha]);
+    const merged = R.gh(['pr', 'merge', String(pr.number), `--${S.merge_method}`, ...(S.merge_admin === true ? ['--admin'] : []), '--match-head-commit', sha], ghMerge);
     if (merged !== null) return null;
     // gh can exit non-zero after GitHub merged (an error or a timeout in its answer, a slow GitHub):
-    // GitHub's own state says, read while it still says OPEN, three times at most, 2s apart. A PR that
+    // GitHub's own state says, read while it still says OPEN, three times at most, 2 s apart. A PR that
     // was OPEN when merge began and is MERGED at the gated head now is this merge's landing, and its
     // act is written; one merged before (a squash elsewhere) or anything else is refused (kit-782)
     let st = null;
     if (pr.state === 'OPEN') for (let i = 0; i < 3; i++) {
       if (i) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
       st = null;
-      try { st = JSON.parse(R.gh(['pr', 'view', String(pr.number), '--json', 'state,headRefOid']) ?? 'null'); } catch {}
+      try { st = JSON.parse(R.gh(['pr', 'view', String(pr.number), '--json', 'state,headRefOid'], ghRead) ?? 'null'); } catch {}
       if (st?.state !== 'OPEN') break;
     }
     if (!(st?.state === 'MERGED' && st.headRefOid === sha)) return 'gh pr merge refused (did the head move?)';
@@ -7949,7 +8554,11 @@ function cmdMerge() {
   const codeFail = relanded ? null : landCode();
   if (codeFail && pushTimedOut) die(`${rec ? `the records of ${id} landed in home at ${rec.sha.slice(0, 12)}; ` : ''}the code may have landed${inR} (${codeFail}): run ${rerun} again; it recognises the kit's own landing merge and logs its act, or lands it`);
   if (codeFail) die(rec ? `the records of ${id} landed in home at ${rec.sha.slice(0, 12)}; the code did not land in ${R.name} (${codeFail}): run merge ${id} again` : `${codeFail}; verify from the start`);
-  R.git(['fetch', '--quiet', 'origin', mainBranch]);
+  // The fetch after the landing only refreshes origin/<main> here: the code has landed. It is bounded
+  // (recurringRegistry.git: 120 s, then SIGKILL; DEVTEAM_GIT_TIMEOUT_MS for tests), and one that fails
+  // or times out is said, never a refusal: the act below is still written (kit-791)
+  const fetched = recurringRegistry.git(['fetch', '--quiet', 'origin', mainBranch], { cwd: R.root });
+  if (!fetched.ok) warn(`merged, but the fetch of ${mainBranch}${inR} after the landing ${recurringRegistry.why(fetched)}; origin/${mainBranch} in ${R.root} may not show it yet: check with git fetch origin ${mainBranch} there`);
   // home resets exactly what it reset before (G1); another repo resets all of its own caches
   if (R.name === 'home') { mainLogCache = undefined; mergeShaCache.clear(); } else R.resetCaches();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
@@ -9255,6 +9864,19 @@ function subjectProblem(s) {
 }
 function anchorProblem(a) {
   if (!isObj(a)) return 'anchor is an object';
+  // A canvas layer's pin (canvas-doc@1 §10): { node: "<id>" } alone, 1 to 64 characters of one line
+  // of plain text, well-formed. A node is no page element, so its rule is its own and ANCHOR_CAPS
+  // (and the lens's and the page's copies of it) don't name it.
+  if (Object.hasOwn(a, 'node')) {
+    const extra = Object.keys(a).filter((k) => k !== 'node');
+    if (extra.length) return `an anchor with a node has no ${extra.join(', ')}`;
+    const v = a.node;
+    if (typeof v !== 'string') return 'anchor.node is text';
+    if (!v) return 'anchor.node is at least 1 character';
+    if (UNSAFE_TEXT.test(v) || /\p{Cs}/u.test(v)) return 'anchor.node is one line of plain text (no control or bidi characters)';
+    const n = [...v].length;
+    return n > 64 ? `anchor.node is ${n} characters; at most 64` : null;
+  }
   for (const [k, v] of Object.entries(a)) {
     if (k === 'rect' || k === 'point') {
       const names = k === 'rect' ? ['x', 'y', 'w', 'h'] : ['x', 'y'];
@@ -9273,13 +9895,32 @@ function anchorProblem(a) {
 // A subject's key: one open thread per key (kit-97). An item by its ref, a page spot by its view and point,
 // an artifact's or a preview's spot by its page and the element the lens named, else the point. index.html's
 // tKey (with tFrameSpot) is the same function; test/thread-per-subject.test.mjs holds the two equal.
-const subjectKey = (s) => { const spot = () => (s.anchor ? `${s.anchor.selector ?? ''}|${s.anchor.text ?? ''}` : `${s.point?.x},${s.point?.y}`); return !s ? null : s.kind === 'item' ? `item:${s.ref}` : s.kind === 'page' ? `page:${s.view}:${s.at?.x}:${s.at?.y}` : s.kind === 'artifact' ? `artifact:${s.slug}:${s.path ?? 'index.html'}:${spot()}` : s.kind === 'preview' ? `preview:${s.name}:${s.route ?? ''}:${spot()}` : null; };
-// What a thread or turn line holds beyond what the schema's walk can say: sizes in bytes, a title
-// of one line, a subject with only its kind's keys, and the supervisor's fields on its own turns.
+const subjectKey = (s) => { const spot = () => (s.anchor?.node !== undefined ? `node:${s.anchor.node}` : s.anchor ? `${s.anchor.selector ?? ''}|${s.anchor.text ?? ''}` : `${s.point?.x},${s.point?.y}`); return !s ? null : s.kind === 'item' ? `item:${s.ref}` : s.kind === 'page' ? `page:${s.view}:${s.at?.x}:${s.at?.y}` : s.kind === 'artifact' ? `artifact:${s.slug}:${s.path ?? 'index.html'}:${spot()}` : s.kind === 'preview' ? `preview:${s.name}:${s.route ?? ''}:${spot()}` : null; };
+// What a thread, turn or message line holds beyond what the schema's walk can say: sizes in bytes, a
+// title of one line, a subject with only its kind's keys, the supervisor's fields on its own turns,
+// and (artifact-notes-1) the hand-over's, withdrawal's, frame's, picture's and mark's text and times.
 function threadLineProblems(o) {
   const errs = [];
   const over = (k, v, max) => { if (typeof v === 'string' && Buffer.byteLength(v) > max) errs.push(`${o.type}.${k} is ${Buffer.byteLength(v)} bytes; at most ${max}`); };
+  // artifact-notes-1: one line of text within its bytes; a time as the log stamps it; a picture
+  // that says it has a dark copy exactly when it gives that copy's sum
+  const oneLine = (v, min, max) => typeof v !== 'string' || (!UNSAFE_TEXT.test(v) && Buffer.byteLength(v) >= min && Buffer.byteLength(v) <= max);
+  const iso = (k, v) => { if (typeof v === 'string' && !READY_AT.test(v)) errs.push(`${o.type}.${k} is an ISO timestamp (2026-11-10T10:30:00.000Z)`); };
+  if (isObj(o.shot) && (o.shot.dark === true) !== (isObj(o.shot.sum) && o.shot.sum.dark !== undefined)) errs.push(`${o.type}.shot.dark goes with sum.dark`);
+  if (o.type === 'message') {
+    if (o.kind === 'addressed' && !oneLine(o.text, 0, 300)) errs.push("an addressed message's text is one line of at most 300 bytes");
+    return errs;
+  }
   if (o.type === 'thread') {
+    if (isObj(o.handed)) {
+      if (o.handed.to === 'owner' || o.handed.to === 'responder') errs.push('thread.handed.to is a session (supervisor, plan-<feature> or a ticket)');
+      iso('handed.at', o.handed.at);
+    }
+    if (isObj(o.unready)) {
+      iso('unready.at', o.unready.at);
+      if (!oneLine(o.unready.reason, 12, 300)) errs.push('thread.unready.reason is one line of 12 to 300 bytes');
+    }
+    if (isObj(o.frame) && !oneLine(o.frame.hash, 0, 200)) errs.push('thread.frame.hash is one line of at most 200 bytes');
     if (typeof o.title === 'string' && UNSAFE_TEXT.test(o.title)) errs.push('thread.title is one line of plain text');
     if (o.subject !== undefined) { const p = subjectProblem(o.subject); if (p) errs.push(`thread.subject: ${p}`); }
     over('outcome', o.outcome, OUTCOME_MAX);
@@ -9315,30 +9956,62 @@ function threadQuestion(q) {
 function threadViews(objects) {
   const turns = new Map();
   const asked = new Map();
+  // artifact-notes-1: a session's marks on a note (the dashboard's reader folds no messages, so none there until kit-144)
+  const marks = new Map();
   const push = (m, k, v) => (m.get(k) ?? m.set(k, []).get(k)).push(v);
   for (const o of objects.values()) {
     if (o.type === 'turn' && typeof o.thread === 'string') push(turns, o.thread, o);
     else if (o.type === 'question' && typeof o.thread === 'string') push(asked, o.thread, o);
+    else if (o.type === 'message' && o.kind === 'addressed' && typeof o.thread === 'string') push(marks, o.thread, o);
   }
-  return [...objects.values()].filter((o) => o.type === 'thread').map((t) => threadView(t, (turns.get(t.id) ?? []).sort(byTime), (asked.get(t.id) ?? []).sort(byTime)));
+  return [...objects.values()].filter((o) => o.type === 'thread').map((t) => threadView(t, (turns.get(t.id) ?? []).sort(byTime), (asked.get(t.id) ?? []).sort(byTime), (marks.get(t.id) ?? []).sort(byTime)));
 }
-// waiting: whose move it is (the owner's when the newest turn is the supervisor's or there is none).
+// waiting: whose reply is owed (supervisor, responder), or the owner's move (owedIn).
 // ready: the supervisor's proposal, until the owner says anything after it (a turn, a resolve or a
 // reopen); the owner never writes ready, since the fold's writer ranks would then lock the
 // supervisor out of it for good.
-function threadView(t, ts, qs) {
+function threadView(t, ts, qs, ms = []) {
   // by: the display side (owner or supervisor), as the card and first_reply_ms read it; writer: who wrote it (owner, supervisor, responder)
-  const turns = ts.map((u) => ({ id: u.id, by: u.created_by === 'owner' ? 'owner' : 'supervisor', writer: u.created_by, at: u.created_at, text: String(u.text ?? ''), refs: Array.isArray(u.refs) ? u.refs.filter((r) => typeof r === 'string') : [], question: typeof u.question === 'string' ? u.question : null, files: Array.isArray(u.files) ? u.files.filter(isObj).map((f) => ({ name: String(f.name ?? ''), path: String(f.path ?? ''), bytes: Number.isInteger(f.bytes) ? f.bytes : 0 })) : [] }));
+  const turns = ts.map((u) => ({ id: u.id, by: u.created_by === 'owner' ? 'owner' : 'supervisor', writer: u.created_by, at: u.created_at, text: String(u.text ?? ''), refs: Array.isArray(u.refs) ? u.refs.filter((r) => typeof r === 'string') : [], question: typeof u.question === 'string' ? u.question : null, files: Array.isArray(u.files) ? u.files.filter(isObj).map((f) => ({ name: String(f.name ?? ''), path: String(f.path ?? ''), bytes: Number.isInteger(f.bytes) ? f.bytes : 0 })) : [], ...(u.created_by === 'owner' ? { routed_to: u.routed_to === 'supervisor' || u.routed_to === 'responder' ? u.routed_to : null, delivered: u.delivered === 'typed' || u.delivered === 'queued' ? u.delivered : null } : {}) }));
+  // whose reply is owed (owedIn, kit-104): the supervisor's when a turn routed to it, or with no
+  // route, is owed; else the responder's when one routed to it is; else the owner's move
+  const owed = owedIn(ts, t);
+  let waiting = owed.some((u) => u.routed_to !== 'responder') ? 'supervisor' : owed.length ? 'responder' : 'owner';
   const status = t.status === 'resolved' ? 'resolved' : 'open';
-  const last = turns[turns.length - 1] ?? null;
   const proposed = t.updates.filter((u) => u.ready !== undefined).pop() ?? null;
   const ownerSince = !!proposed && (turns.some((u) => u.by === 'owner' && u.at > proposed.at) || t.updates.some((u) => u.status !== undefined && u.at > proposed.at));
   const ready = status === 'open' && proposed && !ownerSince && isObj(t.ready) && typeof t.ready.outcome === 'string' ? { outcome: t.ready.outcome, at: proposed.at } : null;
+  // artifact-notes-1 (supervisor.md, Artifact notes). Each from its line's own at, never a time the
+  // line carries; a hand-written field of the wrong shape is no field, and hides no older good one.
+  // The owner's last word: their newest turn, resolve or reopen; a hand-over is not one.
+  const open = status === 'open';
+  const art = isObj(t.subject) && t.subject.kind === 'artifact';
+  const lastWord = [...turns.filter((u) => u.by === 'owner').map((u) => u.at), ...t.updates.filter((u) => u.status !== undefined).map((u) => u.at)].sort().pop() ?? '';
+  // handed: the owner's newest hand-over to a session, while no word of theirs came after it
+  const handLine = t.updates.filter((u) => u.by === 'owner' && isObj(u.handed) && typeof u.handed.to === 'string' && /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(u.handed.to) && u.handed.to !== 'owner' && u.handed.to !== 'responder').pop();
+  const handed = open && handLine && handLine.at > lastWord ? { to: handLine.handed.to, at: handLine.at } : null;
+  // the supervisor's newest withdrawal; a mark before it no longer counts
+  const unreadyLine = t.updates.filter((u) => u.by === 'supervisor' && isObj(u.unready) && typeof u.unready.reason === 'string').pop() ?? null;
+  // addressed: the newest mark since the hand-over (and since any withdrawal) by the session it went to or the supervisor
+  const mark = handed ? ms.filter((m) => typeof m.text === 'string' && (m.created_by === handed.to || m.created_by === 'supervisor') && m.created_at > handed.at && m.created_at > (unreadyLine?.at ?? '')).pop() : null;
+  const addressed = mark ? { by: mark.created_by, at: mark.created_at, note: mark.text, sha: typeof mark.sha === 'string' ? mark.sha : null, draft: typeof mark.draft === 'string' ? mark.draft : null } : null;
+  // check: what the owner has to check, the mark or the supervisor's proposal; its picture or why none
+  const check = addressed ? 'addressed' : art && ready ? 'ready' : null;
+  const shot = check === 'addressed' ? (isObj(mark.shot) ? mark.shot : null) : check === 'ready' ? (isObj(proposed.shot) ? proposed.shot : null) : null;
+  const noshot = check === 'ready' && proposed.noshot === 'no-change' ? 'no-change' : null;
+  const unready = open && unreadyLine && unreadyLine.at > lastWord && !check ? { at: unreadyLine.at, reason: unreadyLine.unready.reason } : null;
+  const frame = isObj(t.frame) && Number.isInteger(t.frame.w) && Number.isInteger(t.frame.h) && typeof t.frame.hash === 'string' ? { w: t.frame.w, h: t.frame.h, hash: t.frame.hash } : null;
+  // On an open artifact note whose move it is follows its state alone (resolved; to check; with
+  // <session>; open): to check or open, the owner's; with a session, that session's; with the
+  // supervisor, the supervisor's until its first turn after the hand-over (D5: any non-owner turn).
+  if (open && art) waiting = check || !handed ? 'owner' : handed.to === 'supervisor' && !turns.some((u) => u.by !== 'owner' && u.at > handed.at) ? 'supervisor' : 'session';
+  const withSession = open && art && !check && handed ? handed.to : null;
   const firstOwner = turns.find((u) => u.by === 'owner');
   const firstReply = firstOwner ? turns.find((u) => u.by === 'supervisor' && u.at > firstOwner.at) : null;
   return {
     id: t.id, title: String(t.title ?? ''), subject: isObj(t.subject) ? t.subject : null, status, outcome: status === 'resolved' ? t.outcome ?? null : null, ready,
-    turns, questions: qs.map(threadQuestion), waiting: last?.by === 'owner' ? 'supervisor' : 'owner',
+    turns, questions: qs.map(threadQuestion), waiting, ...(withSession ? { with: withSession } : {}),
+    handed, addressed, check, shot, noshot, unready, frame, source: null,
     created_at: t.created_at, resolved_at: status === 'resolved' ? t.updates.filter((u) => u.status === 'resolved').pop()?.at ?? null : null,
     activity_at: [t.created_at, ...turns.map((u) => u.at), ...t.updates.map((u) => u.at)].sort().pop(),
     first_reply_ms: firstReply ? Date.parse(firstReply.at) - Date.parse(firstOwner.at) : null,
@@ -9357,11 +10030,12 @@ function subjectWords(s) {
 }
 // The bare ids a subject names, as observation refs are elsewhere.
 const subjectIds = (s) => (!isObj(s) ? [] : s.kind === 'item' && SUBJECT_REF.test(s.ref ?? '') ? [s.ref.slice(s.ref.indexOf(':') + 1)] : s.kind === 'artifact' ? [s.slug] : s.kind === 'preview' ? [s.name] : []).filter((x) => typeof x === 'string');
-// An owner turn, typed into the supervisor's pane when it has one (as nudgeSupervisor does), as one
+// An owner turn, typed into the supervisor's pane when it has one (as nudgeSupervisor does), or into
+// the pane given (the responder's, kit-104), as one
 // line: a newline typed with send-keys -l would press Enter mid-message, and a control character
 // would reach the agent's terminal. The first 300 bytes of the words, then …. True once typed.
-function deliverOwnerTurn(t, text, files) {
-  const { target, problem } = resolvePane(supervisorTarget());
+function deliverOwnerTurn(t, text, files, pane = supervisorTarget()) {
+  const { target, problem } = resolvePane(pane);
   if (problem) return false;
   const flat = text.replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim();
   const said = Buffer.byteLength(flat) > 300 ? `${capBytes(flat, 300)}…` : flat;
@@ -9405,7 +10079,8 @@ function undeliveredTurns(now = Date.now(), { entries = false } = {}) {
     if (v.status !== 'open' || v.waiting !== 'supervisor') continue;
     let i = v.turns.length;
     while (i > 0 && v.turns[i - 1].by === 'owner') i--;
-    const mine = v.turns.slice(i);
+    // on an artifact note handed over, only the owner's turns since the hand-over (its own message is the delivery, artifact-notes-1)
+    const mine = v.turns.slice(i).filter((u) => !(v.subject?.kind === 'artifact' && v.handed) || u.at > v.handed.at);
     if (!mine.length || !mine.every((u) => Object.hasOwn(m, u.id))) continue;
     const firstMs = Date.parse(mine[0].at);
     const waited = now - firstMs;
@@ -9440,11 +10115,13 @@ function threadOpen(id, by) {
   return t;
 }
 const openThreadCount = (views = threadViews(readLog().objects)) => views.filter((x) => x.status === 'open').length;
-// Open threads by whose move: ready (the supervisor's proposal awaits the owner), else you (the
-// owner's move), else waiting (on the supervisor).
+// Open threads by whose move: ready (the supervisor's proposal, or a session's mark on an artifact
+// note, awaits the owner's check), else you (the owner's move), else with (an artifact note a session
+// has, artifact-notes-1; the key only when one does), else waiting (on the supervisor).
 function threadCounts() {
-  const r = { you: 0, waiting: 0, ready: 0 };
-  for (const v of threadViews(readLog().objects)) if (v.status === 'open') r[v.ready ? 'ready' : v.waiting === 'owner' ? 'you' : 'waiting']++;
+  const r = { you: 0, waiting: 0, ready: 0, with: 0 };
+  for (const v of threadViews(readLog().objects)) if (v.status === 'open') r[v.ready || v.check ? 'ready' : v.waiting === 'owner' ? 'you' : v.waiting === 'session' ? 'with' : 'waiting']++;
+  if (!r.with) delete r.with;
   return r;
 }
 // A thread's stage set ({ by, stage, turn }) or, given null, dropped, in THREAD_WORKING_FILE under
@@ -9522,7 +10199,18 @@ function cmdThread() {
   // An owner's turn typed into the supervisor's pane, or held for it; one no terminal took is
   // recorded (UNDELIVERED_FILE, under its lock; entries over 7 days dropped) for the card and
   // undeliveredTurns. The words say which.
-  const deliver = (t, u, words, files) => {
+  // A turn routed to the responder (kit-104): typed into its pane when it was idle, else queued
+  // (typed into neither pane); never recorded as undelivered, since responder-overdue reaches the
+  // supervisor once it is RESPONDER_OVERDUE_MS old.
+  const deliver = (t, u, words, files, route = { to: 'supervisor' }) => {
+    if (route.to === 'responder') {
+      if (route.delivered === 'queued') return 'the responder is busy; it takes this next';
+      const pane = responderWindow().target;
+      const typed = deliverOwnerTurn(t, words, files, pane);
+      if (typed === true) return 'sent to the responder';
+      if (typed) return heldWords(typed, "the responder's");
+      return `not delivered to the responder: ${resolvePane(pane).problem ?? 'the typing failed'}; it stays owed, and the supervisor takes it once it is ${RESPONDER_OVERDUE_MS / 60000} minutes old`;
+    }
     const typed = deliverOwnerTurn(t, words, files);
     if (typed === false) withLock(UNDELIVERED_FILE, () => {
       const m = undeliveredTurns(Date.now(), { entries: true });
@@ -9550,6 +10238,8 @@ function cmdThread() {
   // comes in its usual order.
   const alone = (i) => (!wordsFrom(i) && flags.files !== undefined ? filesFlag() : undefined);
   const filled = (i, early) => (early ? `${plural(early.length, 'file')} dropped` : wordsFrom(i));
+  // routed_to (and delivered, the responder's) for an owner's turn line (kit-104)
+  const routedFields = (r) => ({ routed_to: r.to, ...(r.to === 'responder' ? { delivered: r.delivered } : {}) });
   if (sub === 'new') {
     const { by } = threadOwner();
     const early = alone(1);
@@ -9575,12 +10265,14 @@ function cmdThread() {
     if (had) die(`${had.id} is already open on this subject: say it there (thread say ${had.id} "<words>")`);
     const n = openThreadCount(views);
     if (n >= THREAD_OPEN_MAX) die(`${n} threads are open, the most a project keeps: resolve some first (thread list --open)`);
-    // both lines checked before the thread's is written: a refused first turn leaves no thread with none
-    if (files && !(lineFits({ type: 'thread', title, subject }, by) && lineFits({ type: 'turn', thread: `t-00000000-000000000-${by}`, text: words, files }, by))) die(FILES_TOO_LONG);
+    // routed before either line is written (kit-104), and both lines checked with the route on the
+    // turn's: a refused first turn leaves no thread with none
+    const route = responderRoute({ subject });
+    if (files && !(lineFits({ type: 'thread', title, subject }, by) && lineFits({ type: 'turn', thread: `t-00000000-000000000-${by}`, text: words, files, ...routedFields(route) }, by))) die(FILES_TOO_LONG);
     const t = appendLog({ type: 'thread', title, subject }, by);
-    const u = appendLog({ type: 'turn', thread: t.id, text: words, files }, by);
+    const u = appendLog({ type: 'turn', thread: t.id, text: words, files, ...routedFields(route) }, by);
     out(t.id);
-    return out(deliver(t, u, words, files));
+    return out(deliver(t, u, words, files, route));
   }
   // say is the owner's and reply the supervisor's or the responder's, never one falling through to the
   // other: a reply with no DEVTEAM_ROLE is still the supervisor's (as ask is), so it never lands in the
@@ -9605,18 +10297,27 @@ function cmdThread() {
     const files = early ?? filesFlag();
     // words at the encoded cap fit a line alone, not always with eight links or ten files: the line
     // as appendLog will build it, checked here so the refusal says what to do about it
-    const line = { type: 'turn', thread: t.id, text: words, refs: refs.length ? refs : undefined, files, pending: by !== 'owner' && flags.pending ? true : undefined };
+    // the owner's turn is routed before its line is written (kit-104), and the size check sees the route
+    const route = by === 'owner' ? responderRoute(t) : null;
+    const line = { type: 'turn', thread: t.id, text: words, refs: refs.length ? refs : undefined, files, pending: by !== 'owner' && flags.pending ? true : undefined, ...(route ? routedFields(route) : {}) };
     if ((refs.length || line.pending) && !lineFits(line, by)) die('That reply is too long with its links; shorten it.');
     if (files && !lineFits(line, by)) die(FILES_TOO_LONG);
     if (by !== 'owner') {
       const objects = readLog().objects;
       if (by === 'responder' && !flags.anyway && supervisorAnswered(t.id, objects)) die(`the supervisor has answered this (thread show ${t.id}): reply only to add something new, with --anyway`);
       // the owner's turns this reply answers, before it is written: on stderr, so the id stays the first line out
-      for (const o of owedTurns(t.id, objects)) process.stderr.write(`answering ${o.id}: "${turnGist(o.text)}"\n`);
+      for (const o of owedTurns(t.id, objects).filter((o) => answersTurn(o, by))) process.stderr.write(`answering ${o.id}: "${turnGist(o.text)}"\n`);
+      // and the responder's open promise it closes (pendingOpen), so the supervisor sees it takes that
+      // work over: the responder's follow-up is refused after it (final-3 F2, final-3b F1)
+      if (by === 'supervisor') {
+        const ts = logTurns(t.id, objects);
+        const p = pendingOpen(ts, objects.get(t.id));
+        if (p && !pendingOpen([...ts, { created_by: 'supervisor', created_at: nowIso() }], objects.get(t.id))) process.stderr.write(`taking over ${p.id}: "${turnGist(p.text)}"\n`);
+      }
     }
     const u = appendLog(line, by);
     out(u.id);
-    if (by === 'owner') out(deliver(t, u, words, files));
+    if (by === 'owner') out(deliver(t, u, words, files, route));
     else spoke(t);
     return;
   }
@@ -9659,6 +10360,9 @@ function cmdThread() {
     } else for (const k of ['seen-turn', 'at']) if (flags[k] !== undefined) die(`thread ask --${k} goes with --turn <u-id>`);
     if (encodedBytes(capBytes(`${lead}${flagStr('question') ?? ''}`, TURN_MAX)) > TURN_ENCODED_MAX) die('this question has too many quotation marks, backslashes or control characters to keep in one log line; ask it with fewer');
     const q = askLine({ thread: t.id, about });
+    // the question's turn answers every owed owner turn before it, as a reply does (final-1b F1): named
+    // on stderr before it is written, so the supervisor sees each one, the responder's included
+    for (const o of owedTurns(t.id).filter((o) => answersTurn(o, 'supervisor'))) process.stderr.write(`answering ${o.id}: "${turnGist(o.text)}"\n`);
     appendLog({ type: 'turn', thread: t.id, text: capBytes(`${lead}${q.question}`, TURN_MAX), question: q.id }, 'supervisor');
     out(q.id);
     spoke(t);
@@ -9712,10 +10416,12 @@ function cmdThread() {
     if (words) turnText(words);
     const n = openThreadCount();
     if (n >= THREAD_OPEN_MAX) die(`${n} threads are open, the most a project keeps: resolve some first (thread list --open)`);
+    // its words routed before either line is written (kit-104), as the thread will be once open
+    const route = words ? responderRoute(t) : null;
     appendLog({ type: 'thread', op: 'set', id: t.id, status: 'open' }, by);
-    const u = words ? appendLog({ type: 'turn', thread: t.id, text: words }, by) : null;
+    const u = words ? appendLog({ type: 'turn', thread: t.id, text: words, ...routedFields(route) }, by) : null;
     out(`reopened ${t.id}`);
-    if (words) return out(deliver(t, u, words));
+    if (words) return out(deliver(t, u, words, undefined, route));
     return nudgeSupervisor(`[devteam thread ${t.id} reopened by owner] devteam.mjs thread show ${t.id}`);
   }
   // The session holding the owner's turn says it is on it; the card says so until it replies.
@@ -9752,7 +10458,9 @@ function cmdThread() {
       if (by && replyWriter() && ['supervisor', 'responder'].includes(process.env.DEVTEAM_ROLE) && v.status === 'open' && last?.by === 'owner') markThreadWorking(t.id, { by, stage: 'picked-up', turn: last.id }, { pickup: true });
     } catch {}
     if (flags.json) return json(v);
-    out(`${v.id} · ${v.status}${v.status === 'open' ? ` · ${v.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}`);
+    // an overdue turn the responder has is now the supervisor's to take: show says so, as list --waiting does
+    // an artifact note with a session is that session's (artifact-notes-1), in the words the card uses
+    out(`${v.id} · ${v.status}${v.status === 'open' ? ` · ${v.waiting === 'session' ? `with ${v.with}` : waitingWords(v, v.waiting === 'responder' && responderOverdue(readLog().objects).some((o) => o.thread === v.id))}` : ''}`);
     out(threadDataFrame(v));
     const moved = v.subject?.kind === 'artifact' ? artifactSubjectNow(v.subject) : null;
     if (moved) out(moved);
@@ -9760,7 +10468,8 @@ function cmdThread() {
     const lines = readLog().objects;
     for (const u of v.turns) {
       // the responder's turns name it (the view keeps them on the supervisor's side); a pending one says so
-      out(`${u.at} ${u.writer === 'responder' ? 'responder' : u.by} (${u.id})${lines.get(u.id)?.pending === true ? ' (pending)' : ''}${u.question ? `, asking ${u.question}` : ''}:`);
+      // an owner turn names its route (kit-104), so the responder can see which turns are the supervisor's
+      out(`${u.at} ${u.writer === 'responder' ? 'responder' : u.by} (${u.id})${lines.get(u.id)?.pending === true ? ' (pending)' : ''}${u.routed_to ? `, routed to the ${u.routed_to}` : ''}${u.question ? `, asking ${u.question}` : ''}:`);
       // its own line breaks, a tab as the space it stands for, and nothing else a terminal acts on
       // (an escape, a bidi override, a CR)
       out(u.text.replace(/\t/g, ' ').replace(UNSAFE_TEXT_ALL, (c) => (c === '\n' ? c : '')).split('\n').map((l) => `  ${l}`).join('\n'));
@@ -9780,12 +10489,28 @@ function cmdThread() {
       for (const x of q) out(`${x.turn} in ${x.thread} (${Math.max(0, Math.round((Date.now() - Date.parse(x.at)) / 60000))} min) "${turnGist(x.text)}"`);
       return;
     }
-    let vs = threadViews(readLog().objects).sort((a, b) => b.activity_at.localeCompare(a.activity_at));
-    if (flags.waiting) vs = vs.filter((x) => x.status === 'open' && x.waiting === 'supervisor');
-    else if (!flags.all) vs = vs.filter((x) => x.status === 'open');
+    const objects = readLog().objects;
+    let vs = threadViews(objects).sort((a, b) => b.activity_at.localeCompare(a.activity_at));
+    const row = (x, words) => `${x.id} [${x.status}${words ? `, ${words}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`;
+    if (flags.waiting) {
+      // the supervisor's: an owed turn routed to it (or with no route) or an open handoff naming the
+      // thread; then the threads the responder has, marked so and never also as the supervisor's
+      // (kit-104). --json lists the supervisor's only, each with its open handoff's id or null.
+      const handoffs = openHandoffs(objects);
+      const late = new Set(responderOverdue(objects).map((o) => o.thread));
+      const open = vs.filter((x) => x.status === 'open');
+      const mine = open.filter((x) => x.waiting === 'supervisor' || handoffs.has(x.id));
+      const theirs = open.filter((x) => x.waiting === 'responder' && !handoffs.has(x.id));
+      if (flags.json) return json(mine.map((x) => ({ ...x, handoff: handoffs.get(x.id) ?? null })));
+      if (!mine.length) out('no thread is waiting on the supervisor');
+      for (const x of mine) out(row(x, `waiting on the supervisor${handoffs.has(x.id) ? ` · handoff ${handoffs.get(x.id)}` : ''}`));
+      for (const x of theirs) out(row(x, waitingWords(x, late.has(x.id))));
+      return;
+    }
+    if (!flags.all) vs = vs.filter((x) => x.status === 'open');
     if (flags.json) return json(vs);
-    if (!vs.length) return out(flags.waiting ? 'no thread is waiting on the supervisor' : flags.all ? 'no threads' : 'no open threads');
-    for (const x of vs) out(`${x.id} [${x.status}${x.status === 'open' ? `, ${x.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`);
+    if (!vs.length) return out(flags.all ? 'no threads' : 'no open threads');
+    for (const x of vs) out(row(x, x.status === 'open' ? (x.waiting === 'session' ? `with ${x.with}` : waitingWords(x)) : ''));
     return;
   }
   die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--anyway]   (the supervisor\'s or the responder\'s; --anyway the responder\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting [--responder] | --open | --all] [--json]   (words may also follow --)');
@@ -11496,7 +12221,14 @@ function cmdArtifact() {
     const m = publicManifest(args[0] ?? die('usage: artifact manifest <slug> [--json]'));
     if (flags.json) return out(JSON.stringify(m));
     const bytes = Object.values(m.files).reduce((n, f) => n + f.size, 0);
-    return out(`${m.project}/${m.slug} at tree ${m.tree.slice(0, 12)}: ${Object.keys(m.files).length} files, ${bytes} bytes; published, it is https://public.<box>/${m.project}/${m.slug}/`);
+    const said = `${m.project}/${m.slug} at tree ${m.tree.slice(0, 12)}: ${Object.keys(m.files).length} files, ${bytes} bytes; published, `;
+    // A box image whose gateway serves each project at a host of its own (project-hosts@1) sets
+    // DEVTEAM_PROJECT_HOSTS=1; one from before it still serves public.<box>/<project>/<slug>/.
+    if (process.env.DEVTEAM_PROJECT_HOSTS !== '1') return out(`${said}it is https://public.<box>/${m.project}/${m.slug}/`);
+    // project-hosts@1's rules, as the gateway's Publish checks them, slug first
+    if (['api', 'artifact', 'c', 'healthz', 'presence', 'public-manifest', 'review', 'upload', 'view'].includes(m.slug)) return out(`${said}it would have no address: ${m.slug} is a path of the dashboard, so rename the artifact`);
+    if (!/^(?!\d+$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(m.project) || ['term', 'public', 'www'].includes(m.project)) return out(`${said}it would have no address: ${m.project} can't be a host name, so rename the project (settings.md's project)`);
+    return out(`${said}it is https://${m.project}.<box>/${m.slug}/`);
   }
   // artifact publish|unpublish: the owner's record of what the gateway made public. The gateway's
   // confirm page runs them through the dashboard; by hand they record intent only.
@@ -13230,7 +13962,7 @@ function observeFindings(m) {
   for (const o of logObjects('observation')) if (o.source_key && o.created_by === 'supervisor' && o.detector === 'metrics') recent.set(o.source_key, Math.max(recent.get(o.source_key) ?? 0, Date.parse(o.created_at)));
   let n = 0;
   for (const f of m.findings) {
-    const key = `metrics:${f.kind}:${f.subject}`;
+    const key = `metrics:${f.kind}:${f.subject}${f.key ? `:${f.key}` : ''}`;
     if (Date.now() - (recent.get(key) ?? 0) < DAY) continue;
     appendLog({ type: 'observation', source: 'metrics', subject: String(f.subject), kind: f.kind, detector: 'metrics', detail: f.detail, severity: f.sev ?? SEV[f.severity] ?? 1, valence: -1, source_key: key, fix_hint: f.suggestion }, 'supervisor');
     n++;
@@ -13630,7 +14362,7 @@ function mdSections(text) {
 function searchFileDocs() {
   const main = projectInRepo ? mainSha() : null;
   if (!main) return [];
-  const listAt = (sha, dirs) => (git(['ls-tree', '-r', '-z', sha, '--', ...dirs.map((d) => `${projectRel}/${d}`)]) ?? '').split('\0').filter(Boolean).map((l) => { const tab = l.indexOf('\t'); const [, type, oid] = l.slice(0, tab).split(' '); return { type, oid, p: l.slice(tab + 1).slice(projectRel.length + 1) }; }).filter((e) => e.type === 'blob' && SEARCH_FILES.test(e.p) && !UNSAFE_TEXT.test(e.p) && e.p.length <= 300);
+  const listAt = (sha, dirs) => (git(['ls-tree', '-r', '-z', sha, '--', ...dirs.map((d) => `${projectRel}/${d}`)]) ?? '').split('\0').filter(Boolean).map((l) => { const tab = l.indexOf('\t'); const [, type, oid] = l.slice(0, tab).split(' '); return { type, oid, p: l.slice(tab + 1).slice(projectRel.length + 1) }; }).filter((e) => e.type === 'blob' && (SEARCH_FILES.test(e.p) || e.p === 'self.md') && !UNSAFE_TEXT.test(e.p) && e.p.length <= 300);
   const mainFiles = listAt(main, ['']);
   const mainOid = new Map(mainFiles.map((e) => [e.p, e.oid]));
   const reads = mainFiles.map((e) => ({ ...e, sha: main, ref: 'main' }));
@@ -15217,11 +15949,14 @@ function choreSlug(slugName) {
 }
 // A new chore worktree gets settings.worktree_files (a gitignored key, an .env) so gates can run in
 // it; `chore start` also runs worktree_setup there. log-sync and retro only commit files, so they
-// skip the setup.
-function choreWorktree(slugName, { reset = false, setup = false } = {}) {
+// skip the setup. responder: the responder's draft (responder draft), from its own worktree: honoured
+// only for the responder writer with DEVTEAM_ROLE unset or responder, so the flag alone lets no one
+// else past the main-checkout check (kept inline: test D7 loads this function by itself); it never
+// takes a worktree that appeared since the responder looked, so a rollback only removes its own.
+function choreWorktree(slugName, { reset = false, setup = false, responder = false } = {}) {
   choreSlug(slugName);
   if (!commonDir || !projectInRepo) die('chores need a git checkout with the project folder inside it');
-  if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
+  if (repoRoot !== mainRoot && !(responder && logWriter() === 'responder' && [undefined, '', 'responder'].includes(process.env.DEVTEAM_ROLE))) die(`run this from the main checkout (${mainRoot})`);
   const wt = path.join(mainRoot, '.worktrees', `chore-${slugName}`);
   const main = loadSettings().main_branch;
   if (!flags['dry-run']) git(['fetch', '--quiet', 'origin', main]);
@@ -15230,6 +15965,7 @@ function choreWorktree(slugName, { reset = false, setup = false } = {}) {
   // add and reset with -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
   if (!existed) { gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, base], mainRoot); seedWorktree(wt, { setup, session: true }); }
   else if (reset) gitOrDie(['-c', 'core.useReplaceRefs=false', 'checkout', '--quiet', '-B', `chore-${slugName}`, base], wt);
+  else if (responder) die(`.worktrees/chore-${slugName} appeared meanwhile: responder draft again`);
   // in use again: the tick's tidy leaves a worktree alone until it has been quiet a while
   else { const now = new Date(); try { fs.utimesSync(wt, now, now); } catch {} }
   // one there already whose setup never passed (cut short at the deadline, held for a slot, failed:
@@ -15330,15 +16066,29 @@ function cmdChore() {
     if (um !== 'run' && slugName === 'recurring') appendLog({ type: 'act', class: 'goal-hold', what: `started chore-recurring while Upkeep is ${um === 'drain' ? 'drained' : holdWords(um)}, with --force`, refs: holdRefs, reversible: true }, 'supervisor');
     return out(wt);
   }
-  if (sub !== 'pr' || !slugName || !flagStr('title')) die('usage: chore start <slug>   |   chore pr <slug> --title "<summary>"');
+  if (sub !== 'pr' || !slugName || !flagStr('title')) die('usage: chore start <slug>   |   chore pr <slug> --title "<summary>" [--names-checked <word,…>]');
+  // --names-checked a,b: the self.md draft's words the supervisor has checked are fine to name in public
+  const named = flags['names-checked'] === undefined ? null : asList(flags['names-checked']).flatMap((v) => String(v).split(',')).map((x) => x.trim());
+  if (named && (!named.length || named.some((x) => !x))) die('--names-checked needs one or more words, comma-separated');
   supervisorOnly('chore');
   choreSlug(slugName);
   const wt = path.join(mainRoot, '.worktrees', `chore-${slugName}`);
   if (!fs.existsSync(wt)) die(`no worktree .worktrees/chore-${slugName}; devteam.mjs chore start ${slugName}`);
   // a plain folder left where the worktree was would have git add the main checkout's changes
   if (realPath(git(['rev-parse', '--show-toplevel'], wt) ?? '') !== realPath(wt)) die(`.worktrees/chore-${slugName} is not a worktree (was it tidied away?): move what you wrote aside, then devteam.mjs chore start ${slugName}`);
+  // origin's main as it is now: the base and the names the strategy and dependency files allow
+  fetchMain();
   gitOrDie(['add', '-A'], wt);
-  if (gitOrDie(['status', '--porcelain'], wt)) gitOrDie(['commit', '--quiet', '-m', `chore-${slugName}: ${flagStr('title')}`], wt);
+  const committed = Boolean(gitOrDie(['status', '--porcelain'], wt));
+  if (committed) gitOrDie(['commit', '--quiet', '-m', `chore-${slugName}: ${flagStr('title')}`], wt);
+  // the self.md hold (spec §3.3): a refusal undoes this run's commit, and only it, so the draft stays
+  // staged as it was and the refused words never reach a pushed commit
+  const head = gitOrDie(['rev-parse', 'HEAD'], wt);
+  const held = choreSelfHold(slugName, mainRef() ? git(['merge-base', mainRef(), head]) : null, head, named && new Set(named));
+  if (held) {
+    if (committed) gitOrDie(['reset', '--quiet', '--soft', 'HEAD~1'], wt);
+    die(held);
+  }
   gitOrDie(['push', '--quiet', '--force', 'origin', `chore-${slugName}:chore-${slugName}`], wt);
   const pr = openPr(wt, `chore-${slugName}`, `chore-${slugName}: ${flagStr('title')}`, flagStr('body') ?? flagStr('title'));
   out(`pushed chore-${slugName}${pr ? `: ${pr}` : ''}\nmerge it once CI passes, then: git worktree remove .worktrees/chore-${slugName}`);
@@ -16595,6 +17345,7 @@ function collectMetrics(since, reviewsSince = 0) {
     // draft in front of the owner, then medium while the owner reads it.
     const strategyAsked = questions().some((q) => q.status === 'open' && q.class === 'strategy-change');
     if (live.length && sState !== 'written') add(strategyAsked ? 'medium' : 'high', 'strategy-unwritten', strategyRel, sState === 'missing' ? `${plural(live.length, 'goal')} running and no strategy on ${settings.main_branch}` : `${plural(live.length, 'goal')} running and the strategy is still the template`, `draft it next, while work carries on, in a chore from what you can read, then ask the owner to approve it (ask --class strategy-change; supervisor.md §1)${sState === 'missing' ? '; init writes the template' : ''}`);
+    selfFindings(add);
     const all = questions();
     const open = all.filter((q) => q.status === 'open' && q.goal_hold !== 'let-go');
     for (const g of goals.filter((x) => x.status === 'ready' || ((x.status ?? 'draft') === 'draft' && open.some((q) => q.goal === x.id)))) {
@@ -16719,10 +17470,35 @@ function collectMetrics(since, reviewsSince = 0) {
   // A thread answer whose cited turn doesn't bear it out: a record for the owner to look at, never a block.
   for (const x of threadAnswersUnbound()) add('medium', 'thread-answer-unbound', x.id, `recorded from a thread as the owner's words, but it ${x.why}`, 'check it on the dashboard; if the owner never said it, correct the answer');
   // A thread the owner wrote in that has waited over 10 minutes for the supervisor: a reply dropped,
-  // or the supervisor busier than it said. By id only: a subject's title may be page-written.
+  // or the supervisor busier than it said. Timed from its oldest owed turn routed to the supervisor
+  // or with no route (kit-104): a turn the responder has is never the supervisor's to wait on, and
+  // a later turn of the responder's never restarts the clock. By id only: a subject's title may be page-written.
+  const logNow = readLog().objects;
+  const turnsNow = turnsByThread(logNow);
   for (const x of threadsNow.filter((y) => y.status === 'open' && y.waiting === 'supervisor')) {
-    const ago = now - Date.parse(x.turns[x.turns.length - 1].at);
+    // an artifact note the owner handed to the supervisor waits from the hand-over (artifact-notes-1)
+    if (x.subject?.kind === 'artifact' && x.handed?.to === 'supervisor') {
+      const since = now - Date.parse(x.handed.at);
+      if (since > THREAD_WAIT_MS) add('medium', 'thread-waiting', x.id, `the owner handed this note over ${Math.round(since / 60000)} min ago and has no reply`, `thread list --waiting, then thread show ${x.id} and reply with thread reply (first, when the work takes more than a turn)`);
+      continue;
+    }
+    const first = owedIn(turnsNow.get(x.id) ?? [], logNow.get(x.id)).find((u) => u.routed_to !== 'responder');
+    if (!first) continue;
+    const ago = now - Date.parse(first.created_at);
     if (ago > THREAD_WAIT_MS) add('medium', 'thread-waiting', x.id, `the owner wrote in this thread ${Math.round(ago / 60000)} min ago and has no reply`, `thread list --waiting, then thread show ${x.id} and reply with thread reply (first, when the work takes more than a turn)`);
+  }
+  // The responder (kit-104). Overdue: a turn routed to it still owed past RESPONDER_OVERDUE_MS, or its
+  // pending turn not followed up past RESPONDER_PENDING_MS (pendingOpen); high, so wait brings the supervisor,
+  // which takes it (and every turn routes to it until it is answered). From the log alone, so an
+  // answer or a resolve clears it. By id only.
+  for (const o of responderOverdue(logNow, now, turnsNow)) add('high', 'responder-overdue', o.thread, o.why === 'owed' ? `the owner's turn ${o.turn} went to the responder ${o.min} min ago and has no answer` : `the responder's pending reply ${o.turn} has had no follow-up for ${o.min} min`, `answer it in the thread (thread show ${o.thread}, then thread reply ${o.thread}), then look at the responder (responder --resume)`);
+  // Down or stuck: only while settings.responder is on, the fleet's session is up and the fleet is
+  // neither parked nor draining (a park stops it on purpose; a drain refuses its start), so a project
+  // with no fleet session raises none (ruling a-20261123-045530036-supervisor (b)).
+  if (settings.responder !== false && fleetMode() !== 'park' && !draining()) {
+    const h = responderHealth();
+    if (h.session && h.problem) add('medium', 'responder-down', 'responder', `the responder isn't running: ${h.problem}; the owner's turns go to the supervisor meanwhile`, 'devteam.mjs responder --resume (supervisor.md §13)');
+    else if (h.stuck) add('medium', 'responder-stuck', 'responder', `the responder's pane is waiting on a prompt: "${h.stuck}"; the owner's turns go to the supervisor meanwhile`, `look (tmux select-window -t '${tmuxTarget(RESPONDER_NAME)}') and clear it, or responder --stop then responder`);
   }
   // An owner's turn no supervisor terminal took, unseen or unanswered (undeliveredTurns): high, so
   // it reaches past the stalled supervisor (hello's alert: machine status, the hub). By id only.
@@ -17288,6 +18064,7 @@ function dashboardDataRead() {
     // next-move@1: every move the table names (the comment above nextMoves())
     next_moves: nextMoves(),
     ooda: collectOoda(),
+    self: selfDashboard(),
     autonomy,
     autonomy_score: autonomyScore(autonomy, efficiency, awareness),
     threads: threadCounts(),
@@ -18358,9 +19135,17 @@ function loginChangedStop(target, name, budget, ours) {
   if (raw.map((l) => l.trim()).some((l) => PANE_BUSY.test(l) || promptRe.test(l) || PANE_TRUST.test(l) || /Enter to confirm/.test(l) || LIMIT_MENU.test(l))) return false;
   if (clientActiveOn(target) || !ours()) return null;
   const now = Date.now();
-  const verdict = claimRestart(name, budget, now);
-  if (verdict !== 'go') return verdict;
-  const ok = draft ? tmux(['send-keys', '-t', target, 'Enter']) : typeNow(target, prompt);
+  // the claim and the key under the pane's typing lock (kit-618): the owner's floor, or a busy lock,
+  // is not due (null), before any restart is spent on it
+  const held = typeLock.run(target, (outer) => {
+    if (outer && ownerLineOpen(target)) return { verdict: null };
+    const verdict = claimRestart(name, budget, now);
+    if (verdict !== 'go') return { verdict };
+    return { ok: draft ? tmux(['send-keys', '-t', target, 'Enter']) : typeNow(target, prompt) };
+  });
+  if (held.busy) return null;
+  if ('verdict' in held.value) return held.value.verdict;
+  const { ok } = held.value;
   appendLog({ type: 'observation', source: 'pane', kind: 'login-continued', subject: name, detail: !ok ? 'a session stopped by a login change could not be sent its continue prompt' : draft ? "a session stopped by a login change had the kit's continue prompt unsent in its input: Enter was pressed" : 'a session stopped by a login change was sent a continue prompt on the active account, which has room', detector: 'pane', source_key: `login-continued ${name} ${now}` });
   if (!ok) out(`could not continue ${name}: tmux did not take the keys`);
   return ok ? 'continued' : 'failed';
@@ -18660,8 +19445,17 @@ function restartSupervisor(budget) {
   // the same order as --replace-agent: everything is checked once more, right before it is replaced
   const again = supervisorToRestart(until);
   if (again?.target !== target || again.id !== id) { releaseRestart('supervisor', now); return null; }
-  let failed = replacePaneProcess(target, mainRoot);
-  if (!failed && !typeNow(target, `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix()}${cmd} '${SUPERVISOR_RESTART_PROMPT}'`)) failed = `could not type into ${target}; run ${cmd} there`;
+  // the respawn and its typing under the pane's typing lock (kit-618), taken only now, so the owner's
+  // keys never wait on origin's read: while the owner's line is open, or another writer holds the
+  // lock, nothing is replaced and the attempt is given back (the next due tick asks again)
+  const held = typeLock.run(target, (outer) => {
+    if (outer && ownerLineOpen(target)) return null;
+    let why = replacePaneProcess(target, mainRoot);
+    if (!why && !typeNow(target, `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix()}${cmd} '${SUPERVISOR_RESTART_PROMPT}'`)) why = `could not type into ${target}; run ${cmd} there`;
+    return { why };
+  });
+  if (held.busy || !held.value) { releaseRestart('supervisor', now); return null; }
+  const failed = held.value.why;
   appendLog({ type: 'observation', source: 'pane', kind: 'limit-restarted', subject: 'supervisor', detail: failed ? `the supervisor, stopped at a usage limit, could not be restarted: ${failed}` : `the supervisor, stopped at a usage limit, was restarted on conversation ${id}`, detector: 'pane', source_key: `limit-restarted supervisor ${now}` });
   if (failed) out(`could not restart the supervisor: ${failed}`);
   return failed ? 'failed' : 'restarted';
@@ -19156,8 +19950,11 @@ function legacyRecover(root, name, { dry, force, session, window }) {
     // bare, as that kit writes it: a supervisor-pane-role there is a file its kit doesn't know, which
     // its fleet status says holds a move
     fs.writeFileSync(paneFile, pane);
-    // by pane id: a dot in a window name reads as a pane to tmux
-    if (!tmux(['send-keys', '-t', pane, '-l', `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix(session)}${cmd} ${id ? `"$(cat '${promptFile}')"` : shq(promptPointer(promptFile))}`]) || !tmux(['send-keys', '-t', pane, 'Enter'])) return `NOT started (its window opened but could not be typed into: pane ${pane})`;
+    // by pane id: a dot in a window name reads as a pane to tmux; under that pane's typing lock in the
+    // repo's own run folder (kit-618). A pane just opened has no floor of the owner's; a busy lock is
+    // a window that could not be typed into
+    const typed = typeLock.run(pane, (outer) => !(outer && ownerLineOpen(pane)) && tmux(['send-keys', '-t', pane, '-l', `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix(session)}${cmd} ${id ? `"$(cat '${promptFile}')"` : shq(promptPointer(promptFile))}`]) && tmux(['send-keys', '-t', pane, 'Enter']), { run });
+    if (typed.busy || !typed.value) return `NOT started (its window opened but could not be typed into: pane ${pane})`;
     return `${id ? `resumed session ${id}` : 'started fresh'}${missing.length ? ` (asked to get: ${missing.join(' ')})` : ''}`;
   };
   if (dry) return go();
@@ -19203,6 +20000,50 @@ function paneState(pane, cmd = (sh('tmux', ['list-panes', '-a', '-F', '#{pane_id
   if (plainText(dim === -1 ? text : text.slice(0, dim)).trim()) return 'typing';
   return busy ? 'busy' : 'ready';
 }
+// The owner's floor (kit-618, terminal@1 §11): the keys route records `<ms> done|open` on the
+// supervisor's pane as @devteam-owner-floor, and while it holds no kit writer types there or presses
+// Enter. Whether it still holds, read by a writer under the pane's typing lock (or, release: false,
+// by a reader that only looks). With no floor, false, and nothing more is read. A value that doesn't
+// parse is open, from time 0. A pane at a shell or gone took the owner's line with its agent: both
+// marks go, and false, before the settle. Within 3 s of its stamp (or up to 3 s ahead of it) it
+// holds. After: on a prompt read readable, ready or busy release it, and so do a dialog or a limit
+// a done floor; on one never read, a done floor is released and an open one holds. A release unsets
+// it, or the kit's own half-typed line would later read typing and hold its next write.
+function ownerLineOpen(pane, { release = true } = {}) {
+  const SETTLE_MS = 3000;
+  // the pane's command in the same read: a pane this read found is never gone by a second call failing
+  const got = sh('tmux', ['display', '-p', '-t', pane, '#{pane_id}\tC#{pane_current_command}\tR#{@devteam-prompt-readable}\tF#{@devteam-owner-floor}']);
+  const c = got?.indexOf('\tC') ?? -1;
+  const r = c === -1 ? -1 : got.indexOf('\tR', c + 2);
+  const f = r === -1 ? -1 : got.indexOf('\tF', r + 2);
+  if (f === -1) return false;
+  const floor = got.slice(f + 2);
+  if (!floor) return false;
+  const id = got.slice(0, c);
+  const m = /^(\d{13}) (done|open)$/.exec(floor);
+  const at = m ? Number(m[1]) : 0;
+  const kind = m ? m[2] : 'open';
+  const s = paneState(id, got.slice(c + 2, r));
+  if (s === 'shell' || s === 'gone') {
+    sh('tmux', ['set-option', '-p', '-u', '-t', id, '@devteam-owner-floor', ';', 'set-option', '-p', '-u', '-t', id, '@devteam-prompt-readable']);
+    return false;
+  }
+  const readable = promptReadable(id, s, got.slice(r + 2, f));
+  const age = Date.now() - at;
+  if (age < SETTLE_MS && age >= -SETTLE_MS) return true;
+  const released = readable ? s === 'ready' || s === 'busy' || (kind === 'done' && (s === 'dialog' || s === 'limit')) : kind === 'done';
+  if (!released) return true;
+  if (release) sh('tmux', ['set-option', '-p', '-u', '-t', id, '@devteam-owner-floor']);
+  return false;
+}
+// Whether the pane's prompt has ever been read as one (@devteam-prompt-readable, the first time
+// at ready, busy or typing, recorded then): until it has, a floor's release can't trust a reading.
+function promptReadable(pane, s, mark = sh('tmux', ['display', '-p', '-t', pane, '#{@devteam-prompt-readable}'])) {
+  if (mark) return true;
+  if (!['ready', 'busy', 'typing'].includes(s)) return false;
+  sh('tmux', ['set-option', '-p', '-t', pane, '@devteam-prompt-readable', String(Date.now())]);
+  return true;
+}
 const machineUsage = 'usage: machine status [--questions | --knowledge] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text> | machine alert --clear | machine limit-state <pane> | machine pane-state <pane>';
 // tell and alert speak on the machine: the operator's, or the owner's at a terminal; never a session
 // in a fleet, which would be speaking as someone else.
@@ -19241,12 +20082,16 @@ function machineAlert(words) {
 // whatever is typed there next: pressed again, as the kit's lost Enter does, up to TELL_ENTER_TRIES
 // in all, each after a longer wait (a loaded machine redraws slowly). False when it's still there.
 const TELL_ENTER_TRIES = 3;
+// Run under machine tell's typing lock, so no owner post arrives meanwhile; a floor set by a writer
+// that takes no lock (an older kit) is read before each retry, and presses nothing: 'floor'.
 function enterLanded(p) {
   const settle = (n) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.DEVTEAM_TELL_SETTLE_SECONDS ?? 1) * 1000 * n);
   settle(1);
   for (let tries = 1; paneState(p) === 'typing'; tries++) {
     if (tries >= TELL_ENTER_TRIES) return false;
+    if (ownerLineOpen(p)) return 'floor';
     tmux(['send-keys', '-t', p, 'Enter']);
+    typeLock.touch();
     settle(tries + 1);
   }
   return true;
@@ -19269,11 +20114,19 @@ function machineTell(words) {
   try { rec = readJson(path.join(root, 'docs', 'devteam', 'run', 'supervisor-up.json')); } catch {}
   const p = supervisorPaneIn(root, notedPaneOf(root), rec && typeof rec === 'object' ? rec : null, { strict: true });
   if (!p || p === process.env.TMUX_PANE) return say('not told: no supervisor is up in its root', 3);
-  const s = paneState(p);
-  if (!['ready', 'busy'].includes(s)) return say(`not told: its pane is at ${s}`, 3);
-  if (!tmux(['send-keys', '-t', p, '-l', `${TELL_PREFIX}${text}`]) || !tmux(['send-keys', '-t', p, 'Enter'])) return say(`not told: could not type into pane ${p}`, 3);
-  if (!enterLanded(p)) return say(`not delivered: the message is still in its input (pane ${p}) after ${TELL_ENTER_TRIES} presses; clear it before anyone types there`, 3);
-  say(`told (pane ${p})`, 0);
+  // from the look to the last Enter under the pane's typing lock, in that root's run folder (kit-618)
+  const held = typeLock.run(p, (outer) => {
+    if (outer && ownerLineOpen(p)) return say("not told: the owner's line is open", 3);
+    const s = paneState(p);
+    if (!['ready', 'busy'].includes(s)) return say(`not told: its pane is at ${s}`, 3);
+    if (!tmux(['send-keys', '-t', p, '-l', `${TELL_PREFIX}${text}`]) || !tmux(['send-keys', '-t', p, 'Enter'])) return say(`not told: could not type into pane ${p}`, 3);
+    typeLock.touch();
+    const landed = enterLanded(p);
+    if (landed === 'floor') return say(`not delivered: the owner began a line in its terminal (pane ${p}) after the message was typed; look at it before anyone types there`, 3);
+    if (!landed) return say(`not delivered: the message is still in its input (pane ${p}) after ${TELL_ENTER_TRIES} presses; clear it before anyone types there`, 3);
+    say(`told (pane ${p})`, 0);
+  }, { run: path.join(root, 'docs', 'devteam', 'run') });
+  if (held.busy) say('not told: its terminal is busy; try again', 3);
 }
 // ===== operator threads: the owner and the machine's operator, from the hub's Overview =====
 //
@@ -21033,6 +21886,9 @@ function cmdAccountsTick() {
   const session = tmuxSession();
   const supKey = (() => { const { target } = resolvePane(supervisorTarget()); return target ? paneKey(target) : null; })();
   flushAllHeld([...(supervisorRestarted && supKey ? [supKey] : []), ...[...state.resumed.filter((n) => !(n === 'supervisor' && continued.has(n))), ...state.relaunched].map((n) => `${session}:${n}`)]);
+  // an idle responder with turns queued for it is told so, once a minute (kit-104); a failure here
+  // never stops the tick's own record
+  try { nudgeResponder(); } catch (e) { warn(`responder nudge: ${e?.message ?? e}`); }
   fs.mkdirSync(runDir, { recursive: true });
   const tmp = `${ACCOUNTS_FILE}.${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(state));
@@ -21762,7 +22618,9 @@ function termRoutes({ port, host, log }) {
     child.stdin.end(typeof input === 'string' ? input : undefined);
   });
   const root = realPath(mainRoot);
-  const fmt = TERM_FIELDS.map((f) => `#{${f}}`).join('\t');
+  // the display's two lines (S14, S34): TERM_FIELDS, then the supervisor's held key's window and its
+  // prompt-readable mark, kept off TERM_FIELDS; capture's rows follow
+  const fmt = `${TERM_FIELDS.map((f) => `#{${f}}`).join('\t')}\n#{@devteam-prompt-readable}\t#{window_name}`;
   // the display line, by field name (a tab in the start path stays in it)
   const fieldsOf = (line) => { const v = line.split('\t'); const n = TERM_FIELDS.length; if (v.length > n) v.splice(n - 2, v.length - n + 1, v.slice(n - 2, -1).join('\t')); return Object.fromEntries(TERM_FIELDS.map((f, i) => [f, v[i] ?? ''])); };
   // the supervisor's: the marked pane only, as an id (S11)
@@ -21781,8 +22639,13 @@ function termRoutes({ port, host, log }) {
     const ids = got.out.split('\n').map((l) => l.split('\t')).map(([id, dead, ...tag]) => [id, dead, tag.join('\t')]).filter(([id, dead, tag]) => /^%\d+$/.test(id) && dead === '0' && tag === root && id !== m).map(([id]) => id);
     return (shellPane = ids.sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))[0] ?? null);
   }
-  // held is kit-618's; until the floor ships it is this (§6). The etag covers only whether oldest_ms is due.
+  // held (§6): the Shell's, and a screen not read, is this; the supervisor's is read with each screen
+  // (kit-618), from its window's held lines and its pane's prompt-readable mark. The etag covers only
+  // whether oldest_ms is due.
   const held = () => ({ count: 0, oldest_ms: 0, prompt: 'readable' });
+  // the keys route's 503 (§8, kit-618): the typing lock busy for 2 s, or the floor not recorded
+  const busyWords = 'the terminal is busy; try again';
+  const heldOf = (which, f, mark, win) => (which === 'supervisor' ? { ...supervisorHeld(`${f.session_name}:${win}`), prompt: mark ? 'readable' : 'unknown' } : held());
   const withEtag = (s, raw) => {
     const etag = sha256(JSON.stringify({ ...s, held: { ...s.held, oldest_ms: s.held.oldest_ms >= 120000 } })).slice(0, 20);
     // raw, the read's fields, for the keys route's 423s and 409s: never sent
@@ -21807,21 +22670,31 @@ function termRoutes({ port, host, log }) {
     const got = await tmuxCall(['display', '-p', '-t', P, fmt, ';', 'capture-pane', '-e', '-p', '-t', P]);
     if (!got.ok && !got.missing) { log(`/api/term/${which}: tmux failed: ${got.timedOut ? 'timed out' : got.err.trim()}`); return { error: TERM_WORDS.read }; }
     const out = got.ok ? got.out.split('\n') : [];
+    if (out.length > 1 && out.at(-1) === '') out.pop();
     const f = got.ok ? fieldsOf(out[0]) : null;
     // a display line that didn't parse is a failed read, never a screen
     if (f && !(/^%\d+$/.test(f.pane_id) && /^\d+$/.test(f.pane_width) && /^\d+$/.test(f.pane_height))) { log(`/api/term/${which}: tmux's display line didn't parse`); return { error: TERM_WORDS.read }; }
     const why = f ? notOurs(which, f) : 'missing';
     // the Shell's pane moved or went: forget it, and look once more
     if (why && which === 'shell') { shellPane = null; if (again) return readNow(which, false); }
+    const rows = Number(f?.pane_height ?? 0);
+    // the screen is the last rows lines, so a newline in the window's name never shifts a row; the
+    // second line is everything between: the mark, a tab, the window's name
+    const top = Math.max(2, out.length - rows);
+    const [mark = '', ...win] = out.slice(1, top).join('\n').split('\t');
+    // the agent that read the prompt is gone: so is its reading (K3-1); a failed unset is read again next time
+    if (which === 'supervisor' && (why === 'shell' || why === 'dead') && mark) {
+      const unset = await tmuxCall(['set-option', '-p', '-u', '-t', P, '@devteam-prompt-readable']);
+      if (!unset.ok) log(`/api/term/${which}: tmux failed to unset @devteam-prompt-readable: ${unset.timedOut ? 'timed out' : unset.err.trim()}`);
+    }
     if (why) return gone(which, { pane: P, why, fields: f });
-    const rows = Number(f.pane_height);
-    const lines = out.slice(1, 1 + rows).map(termLine);
+    const lines = out.slice(top, top + rows).map(termLine);
     while (lines.length < rows) lines.push('');
     return withEtag({
       v: 1, which, pane: f.pane_id, state: 'live', cols: Number(f.pane_width), rows,
       cursor: { x: Number(f.cursor_x), y: Number(f.cursor_y), visible: f.cursor_flag === '1' },
       modes: { app_cursor: f.keypad_cursor_flag === '1', app_keypad: f.keypad_flag === '1' },
-      history_size: Number(f.history_size), held: held(), lines,
+      history_size: Number(f.history_size), held: heldOf(which, f, mark, win.join('\t')), lines,
     }, { pane: P, why: null, fields: f });
   }
   // Per which: the read in flight, shared, and its result for cacheMs. A send voids it and bumps the
@@ -21900,10 +22773,40 @@ function termRoutes({ port, host, log }) {
     if (went()) return;
     const key = `${b.page}\n${which}`;
     if (b.seq <= (lastSeq.get(key) ?? 0)) return json(res, 200, { ...s, taken: false });
-    // taken the moment the send starts: a send that fails part way is never typed again
-    lastSeq.set(key, b.seq);
-    // kit-618: the typing lock, then the owner's floor, go here (supervisor only)
-    const sent = 'data' in b ? await sendData(s.pane, Buffer.from(b.data, 'hex')) : await sendPaste(s.pane, b.paste);
+    const keysNow = async () => {
+      // taken the moment the send starts: a send that fails part way is never typed again
+      lastSeq.set(key, b.seq);
+      return 'data' in b ? sendData(s.pane, Buffer.from(b.data, 'hex')) : sendPaste(s.pane, b.paste);
+    };
+    let sent;
+    if (which === 'supervisor') {
+      // §3 steps 13 and 14 (kit-618, §11): the pane's typing lock, then the owner's floor, then the
+      // send, all in one hold. An Enter or a Ctrl+C ends the line (done); a paste, Escape or any other
+      // key leaves it open. A refusal here keeps the seq free.
+      const data = 'data' in b ? Buffer.from(b.data, 'hex') : null;
+      const kind = data?.length && [0x0d, 0x03].includes(data[data.length - 1]) ? 'done' : 'open';
+      const floor = () => tmuxCall(['set-option', '-p', '-t', s.pane, '@devteam-owner-floor', `${Date.now()} ${kind}`]);
+      const locked = await typeLockAsync(s.pane, async () => {
+        // the marked pane, again: it can have moved while the post waited for the lock
+        if (marked() !== s.pane) return { refused: [423, TERM_WORDS.moved, 'the marked pane moved while the post waited for the typing lock'] };
+        if (went()) return { gone: true };
+        // the lock's stamp refreshed after each tmux call of the hold (spec, The lock; terminal@1 §11)
+        const set = await floor();
+        typeLock.touch();
+        if (!set.ok) return { refused: [503, busyWords, `the owner's floor could not be recorded: ${set.timedOut ? 'timed out' : set.err.trim()}`] };
+        const got = await keysNow();
+        typeLock.touch();
+        // stamped again once the keys reached tmux, so the settle runs from then; the first stands if not
+        const again = await floor();
+        typeLock.touch();
+        if (!again.ok) log(`/api/term/${which}/keys: tmux failed to record the owner's floor again after the send: ${again.timedOut ? 'timed out' : again.err.trim()}`);
+        return { sent: got };
+      }, { waitMs: 2000 });
+      if (locked.busy) return no(503, busyWords, 'the pane\'s typing lock stayed busy for 2 s');
+      if (locked.value.refused) return no(...locked.value.refused);
+      if (locked.value.gone) return;
+      sent = locked.value.sent;
+    } else sent = await keysNow();
     voidScreen(which);
     if (!sent.ok) { log(`/api/term/${which}/keys: tmux failed on the send: ${sent.timedOut ? 'timed out' : sent.err.trim()}`); return json(res, 500, { error: TERM_WORDS.sent }); }
     // the screen after the change: read until it differs, for up to SETTLE_MS; a failed read keeps the
@@ -23348,19 +24251,12 @@ async function cmdDashboard() {
     // Esc only where the menu itself says it cancels: on a menu whose Esc exits (a folder-trust form) it ends the session
     const notCancel = `nothing was answered: Esc here may not cancel (the terminal says: ${String(st.ask.hint ?? '').replace(/\s+/g, ' ').trim() || 'nothing about Esc'}); answer it in the terminal`;
     if (escape && !paneEscCancels(st.ask.hint)) return no(notCancel);
-    const look = async () => { const t = await tmuxAsync(['-u', 'capture-pane', '-p', '-t', st.target]); return t === null ? null : screenLines(t); };
+    // look and keyed run only inside the typing lock's hold below, so each refreshes its stamp after its tmux call
+    const look = async () => { const t = await tmuxAsync(['-u', 'capture-pane', '-p', '-t', st.target]); typeLock.touch(); return t === null ? null : screenLines(t); };
+    const keyed = async (args) => { const r = await tmuxAsync(args); typeLock.touch(); return r; };
     const menuIn = (lines) => { const a = lines ? paneAskingIn(lines) : null; return a?.kind === 'menu' && a.digest === digest ? a : null; };
-    // once more, right before the key
-    const last = menuIn(await look());
-    if (!last) return no("nothing was answered: the question in the supervisor's terminal changed or went as you clicked; read what it shows now");
-    if (escape && !paneEscCancels(last.hint)) return no(notCancel);
-    // tests only: the moment between that look and the key, in which a question can go
-    const pause = Number(process.env.DEVTEAM_PANE_ANSWER_DELAY_MS ?? 0);
-    if (pause > 0) await new Promise((w) => setTimeout(w, pause));
     // until the question is gone or changed, or its cursor has moved
     const settle = async (was) => { let lines = null; for (let t = 0; t < PANE_SETTLE_MS; t += 100) { await new Promise((w) => setTimeout(w, 100)); lines = await look(); const m = menuIn(lines); if (!lines || !m || m.selected !== was) break; } return lines; };
-    // the Escape key, by name, alone: no digit, no Enter. The menu gone is the answer; the same menu
-    // still up is reported as a key that may not have landed, as a digit's is, with no second key.
     const record = (fields, why) => runAction(['pane', 'answered', '--owner'], { timeout: 30000, input: JSON.stringify({ digest, ...fields, first: String(st.ask.first ?? ''), artifact: st.ask.artifact ?? undefined, taken: !why, ...(why ? { why } : {}), ...(proof ? { proof } : {}) }) });
     const finish = async (rec, keys, why, after) => {
       // the prompt it was is answered: out of the Inbox's count now, not at the next look
@@ -23371,33 +24267,53 @@ async function cmdDashboard() {
       if (why) return no(`The key was sent, but it may not have landed: ${why}. Look at the terminal${after}.`, 409);
       return { status: 200, body: { ok: true, out: said } };
     };
-    if (escape) {
-      if ((await tmuxAsync(['send-keys', '-t', st.target, 'Escape'])) === null) return no(`nothing was answered: the key could not be sent to ${st.target}`, 500);
-      const lines = await settle(st.ask.selected);
-      const why = menuIn(lines) ? 'the same question still shows after Esc' : !lines ? 'the terminal could not be read after the key' : null;
-      return finish(await record({ escape: true, keys: 'Escape' }, why), 'Escape', why, '');
-    }
-    if ((await tmuxAsync(['send-keys', '-t', st.target, '-l', String(option)])) === null) return no(`nothing was answered: the key could not be sent to ${st.target}`, 500);
-    let lines = await settle(st.ask.selected);
-    let keys = String(option);
-    let still = menuIn(lines);
-    // the same question showing with the cursor where it was: a menu that took the digit and was asked
-    // again at once (a retry, two calls in parallel) looks just like one that ignored it, so no Enter,
-    // which would answer a question the owner never saw; the digit is logged as one that may not have landed
-    const again = !!still && still.selected === st.ask.selected && st.ask.selected === option;
-    if (still && !again) {
-      // still up, and the digit moved the cursor onto the option: Enter takes it
-      if (still.selected !== option) return no(`not answered: the terminal did not take the key ${option} (the question is still up, on option ${still.selected}); answer it in the terminal`);
-      if ((await tmuxAsync(['send-keys', '-t', st.target, 'Enter'])) === null) return no(`not answered: option ${option} is selected but Enter could not be sent; answer it in the terminal`, 500);
-      keys = `${option}, Enter`;
-      lines = await settle(option);
-      still = menuIn(lines);
-      if (still) return no(`not answered: the question is still up with option ${option} selected, after ${keys}; answer it in the terminal`);
-    }
-    // what the pane shows after: the menu took the key unless the digit is sitting in the input box
-    const draft = lines ? paneDraftIn(lines) : null;
-    const why = again ? `the same question still shows after the key, with the cursor where it was (it ignored the digit, or took it and was asked again), so no Enter was sent; answer what shows now in the terminal or on the card` : !lines ? 'the terminal could not be read after the key' : draft !== null && draft.endsWith(String(option)) ? `the question went as the key was sent, and "${option}" is now in the terminal's input box` : null;
-    return finish(await record({ option, label: opt.label, keys }, why), keys, why, ', and clear its input box if the digit is there');
+    // From the last look through the last settle under the pane's typing lock (kit-618, terminal@1
+    // §11), so no key post or kit writer lands between the look and the key, or between the digit and
+    // its Enter. The owner's floor isn't read: this is the owner's own press on a card. The lock is let
+    // go before record runs pane answered, whose flush takes it afresh. Back: { answer } (a refusal),
+    // or what was sent, for record.
+    const pressed = await typeLockAsync(st.target, async () => {
+      // once more, right before the key
+      const last = menuIn(await look());
+      if (!last) return { answer: no("nothing was answered: the question in the supervisor's terminal changed or went as you clicked; read what it shows now") };
+      if (escape && !paneEscCancels(last.hint)) return { answer: no(notCancel) };
+      // tests only: the moment between that look and the key, in which a question can go
+      const pause = Number(process.env.DEVTEAM_PANE_ANSWER_DELAY_MS ?? 0);
+      if (pause > 0) await new Promise((w) => setTimeout(w, pause));
+      // the Escape key, by name, alone: no digit, no Enter. The menu gone is the answer; the same menu
+      // still up is reported as a key that may not have landed, as a digit's is, with no second key.
+      if (escape) {
+        if ((await keyed(['send-keys', '-t', st.target, 'Escape'])) === null) return { answer: no(`nothing was answered: the key could not be sent to ${st.target}`, 500) };
+        const lines = await settle(st.ask.selected);
+        const why = menuIn(lines) ? 'the same question still shows after Esc' : !lines ? 'the terminal could not be read after the key' : null;
+        return { fields: { escape: true, keys: 'Escape' }, keys: 'Escape', why, after: '' };
+      }
+      if ((await keyed(['send-keys', '-t', st.target, '-l', String(option)])) === null) return { answer: no(`nothing was answered: the key could not be sent to ${st.target}`, 500) };
+      let lines = await settle(st.ask.selected);
+      let keys = String(option);
+      let still = menuIn(lines);
+      // the same question showing with the cursor where it was: a menu that took the digit and was asked
+      // again at once (a retry, two calls in parallel) looks just like one that ignored it, so no Enter,
+      // which would answer a question the owner never saw; the digit is logged as one that may not have landed
+      const again = !!still && still.selected === st.ask.selected && st.ask.selected === option;
+      if (still && !again) {
+        // still up, and the digit moved the cursor onto the option: Enter takes it
+        if (still.selected !== option) return { answer: no(`not answered: the terminal did not take the key ${option} (the question is still up, on option ${still.selected}); answer it in the terminal`) };
+        if ((await keyed(['send-keys', '-t', st.target, 'Enter'])) === null) return { answer: no(`not answered: option ${option} is selected but Enter could not be sent; answer it in the terminal`, 500) };
+        keys = `${option}, Enter`;
+        lines = await settle(option);
+        still = menuIn(lines);
+        if (still) return { answer: no(`not answered: the question is still up with option ${option} selected, after ${keys}; answer it in the terminal`) };
+      }
+      // what the pane shows after: the menu took the key unless the digit is sitting in the input box
+      const draft = lines ? paneDraftIn(lines) : null;
+      const why = again ? `the same question still shows after the key, with the cursor where it was (it ignored the digit, or took it and was asked again), so no Enter was sent; answer what shows now in the terminal or on the card` : !lines ? 'the terminal could not be read after the key' : draft !== null && draft.endsWith(String(option)) ? `the question went as the key was sent, and "${option}" is now in the terminal's input box` : null;
+      return { fields: { option, label: opt.label, keys }, keys, why, after: ', and clear its input box if the digit is there' };
+    }, { waitMs: 10000 });
+    if (pressed.busy) return no('nothing was answered: the terminal is busy; try again', 503);
+    const p = pressed.value;
+    if (p.answer) return p.answer;
+    return finish(await record(p.fields, p.why), p.keys, p.why, p.after);
   }
   const bodyMs = uploadLimits().bodyMs;
   // set while it hands over to a new kit (kit-288): what it still answers closes its connection
@@ -23764,21 +24680,29 @@ const promptPointer = (file) => `Your prompt for this session is in the file ${p
 // once pasted, and a paste that fails drops it too, so nothing is left on the server. Only the line
 // is recorded: the lost-Enter rescue matches the line's tail, and a pasted image shows as [Image #n].
 let dropSeq = 0;
+// All of it under the pane's typing lock: outermost, it first reads the owner's floor, and types
+// nothing (false) while that holds, or when the lock stays busy; under a caller's hold (typeInto,
+// flushHeld, loginChangedStop, a restart), the caller read it. The stamp is touched after each call.
 function typeNow(target, line, paste = null) {
   const files = Array.isArray(paste) && paste.length ? paste : null;
-  let ok;
-  if (!files) ok = tmux(['send-keys', '-t', target, '-l', line]) && tmux(['send-keys', '-t', target, 'Enter']);
-  else {
-    const buf = `devteam-drop-${process.pid}-${++dropSeq}`;
-    // the paths loaded first, the line typed only then: a load that fails leaves nothing in the input
-    // box, so a held line typed again later isn't typed after a copy of itself
-    ok = sh('tmux', ['load-buffer', '-b', buf, '-'], { input: dropPaste(files), stdio: ['pipe', 'pipe', 'ignore'] }) !== null;
-    if (ok && !tmux(['send-keys', '-t', target, '-l', `${line} `])) { tmux(['delete-buffer', '-b', buf]); ok = false; }
-    if (ok && !tmux(['paste-buffer', '-p', '-d', '-b', buf, '-t', target])) { tmux(['delete-buffer', '-b', buf]); ok = false; }
-    ok = ok && (!dropSpace(files) || tmux(['send-keys', '-t', target, '-l', ' '])) && tmux(['send-keys', '-t', target, 'Enter']);
-  }
-  if (ok) recordSent(target, line);
-  return ok;
+  const t = (args) => { const r = tmux(args); typeLock.touch(); return r; };
+  const held = typeLock.run(target, (outer) => {
+    if (outer && ownerLineOpen(target)) return false;
+    let ok;
+    if (!files) ok = t(['send-keys', '-t', target, '-l', line]) && t(['send-keys', '-t', target, 'Enter']);
+    else {
+      const buf = `devteam-drop-${process.pid}-${++dropSeq}`;
+      // the paths loaded first, the line typed only then: a load that fails leaves nothing in the input
+      // box, so a held line typed again later isn't typed after a copy of itself
+      ok = sh('tmux', ['load-buffer', '-b', buf, '-'], { input: dropPaste(files), stdio: ['pipe', 'pipe', 'ignore'] }) !== null;
+      if (ok && !t(['send-keys', '-t', target, '-l', `${line} `])) { tmux(['delete-buffer', '-b', buf]); ok = false; }
+      if (ok && !t(['paste-buffer', '-p', '-d', '-b', buf, '-t', target])) { tmux(['delete-buffer', '-b', buf]); ok = false; }
+      ok = ok && (!dropSpace(files) || t(['send-keys', '-t', target, '-l', ' '])) && t(['send-keys', '-t', target, 'Enter']);
+    }
+    if (ok) recordSent(target, line);
+    return ok;
+  });
+  return held.busy ? false : held.value;
 }
 // A message for an agent: typed now, or held while its pane asks (flushHeld types it once the pane
 // is ready again) and behind any line already held for it, so they arrive in order. True once
@@ -23786,18 +24710,30 @@ function typeNow(target, line, paste = null) {
 // (a dialog answered in the terminal), 'held-limit' (the usage-limit menu), 'held-queued' (nothing
 // asked now, but lines held earlier go first and the pane is not ready for them); false when it
 // could be neither. A launch command typed into a fresh window is typeNow's: it must not wait.
+// The whole decision under the pane's typing lock (kit-618): the owner's floor first, whatever the
+// pane asks (a writer's look can release a done floor on a dialog), then the asking look, then the
+// hold. While the floor holds the line is held: 'held-floor', or the asking reason when it asks.
+// The lock busy for 10 s: held outside it (a hold types nothing), 'held-busy'.
 function typeInto(target, line, paste = null) {
+  const held = typeLock.run(target, (outer) => {
+    const floor = outer && ownerLineOpen(target);
+    const key = paneKey(target);
+    if (!key) return floor ? false : typeNow(target, line, paste);
+    const asking = paneAsking(target);
+    const waits = floor || asking;
+    // the look and the hold under the window's lock: a put-back can't fall between them. null: type
+    // now; false: it could not be held
+    const file = heldLock(key, () => (!waits && !heldPending(key)) ? null : holdLine(key, target, line, paste) ?? false);
+    if (file === null) return typeNow(target, line, paste);
+    if (!file) return waits ? false : typeNow(target, line, paste);
+    if (!waits) flushHeld(key);
+    if (!fs.existsSync(file)) return true;
+    return asking ? (asking.kind === 'menu' ? 'held-card' : asking.kind === 'limit' ? 'held-limit' : 'held-terminal') : floor ? 'held-floor' : 'held-queued';
+  });
+  if (!held.busy) return held.value;
+  // held under the window's own lock, as every hold is: a flusher's claim can't fall inside it
   const key = paneKey(target);
-  if (!key) return typeNow(target, line, paste);
-  const asking = paneAsking(target);
-  // the look and the hold under the window's lock: a put-back can't fall between them. null: type
-  // now; false: it could not be held
-  const file = heldLock(key, () => (!asking && !heldPending(key)) ? null : holdLine(key, target, line, paste) ?? false);
-  if (file === null) return typeNow(target, line, paste);
-  if (!file) return asking ? false : typeNow(target, line, paste);
-  if (!asking) flushHeld(key);
-  if (!fs.existsSync(file)) return true;
-  return !asking ? 'held-queued' : asking.kind === 'menu' ? 'held-card' : asking.kind === 'limit' ? 'held-limit' : 'held-terminal';
+  return key && heldLock(key, () => holdLine(key, target, line, paste)) ? 'held-busy' : false;
 }
 // Why a line is held, in words: every one begins "recorded and held" (the dashboard reads that).
 const heldWords = (why, whose) => `recorded and held: ${{
@@ -23805,6 +24741,8 @@ const heldWords = (why, whose) => `recorded and held: ${{
   'held-terminal': `${whose} terminal has a dialog up that only the terminal can answer (no card can), and typing now would answer it. It is typed once someone answers it there`,
   'held-limit': `${whose} terminal is stopped at a usage-limit menu, and typing now would answer it. It is typed once the session is running again`,
   'held-queued': `${whose} terminal asks nothing now, but lines held for it earlier go first and it is not showing its input box yet. It is typed, in order, at the next look`,
+  'held-floor': 'the owner is typing a line in that terminal, and typing now would join it. It is typed once they send or clear their line',
+  'held-busy': 'another writer has been typing into that terminal for 10 s. It is typed, in order, at the next look',
 }[why]}`;
 // paste: the paths of files the owner dropped with it, pasted after the line (typeNow)
 function nudgeSupervisor(line, paste = null) {
@@ -28986,7 +29924,16 @@ function cmdWait() {
     else {
       // main's copy of the log as it is now: a wait can outlast many moves of main
       logCache = null;
-      const owner = readLog().lines.filter((l) => l.by === 'owner').map((l) => ({ k: l.id, at: Date.parse(l.at) }));
+      // not the owner's turns routed to the responder, nor the thread line (new, or a reopen) whose
+      // first owner turn at or after it is (kit-104): those are the responder's, and an overdue one
+      // comes back as responder-overdue. A thread line read before its turn is written wakes once.
+      const ls = readLog().lines.filter((l) => l.by === 'owner');
+      const turnsOf = new Map();
+      for (const l of ls) if (l.type === 'turn' && typeof l.thread === 'string') (turnsOf.get(l.thread) ?? turnsOf.set(l.thread, []).get(l.thread)).push(l);
+      for (const us of turnsOf.values()) us.sort((a, b) => String(a.at).localeCompare(String(b.at)));
+      const opens = (l) => l.type === 'thread' && (l.op === 'new' || (l.op === 'set' && l.status === 'open'));
+      const responders = (l) => l.type === 'turn' ? l.routed_to === 'responder' : opens(l) && (turnsOf.get(l.id) ?? []).find((u) => u.at >= l.at)?.routed_to === 'responder';
+      const owner = ls.filter((l) => !responders(l)).map((l) => ({ k: l.id, at: Date.parse(l.at) }));
       const got = sub(['messages', '--open', '--to', 'supervisor', '--json']);
       const msgs = (got ?? []).map((m) => ({ k: `${m.id} [${m.kind}] from ${m.created_by}: ${String(m.text).slice(0, 160)}`, at: Date.parse(m.created_at) }));
       last = got ? { key, owner, msgs } : null;
@@ -30172,12 +31119,16 @@ The whole system as planned now: the sum of every design so far. Written at boot
 `;
 
 // project/strategy.md as init makes it: why the project exists and how it wins, the owner's. The
-// supervisor drafts it at adoption and judges each goal's impact against it; the kit never parses
-// it (it only knows missing, this template, or written).
+// supervisor drafts it at adoption and judges each goal's impact against it; the kit reads it only
+// for whether it links self.md (`linksSelf`), beside missing, this template, or written.
 const STRATEGY_TEMPLATE_MARK = 'devteam:strategy-template';
+// The template links self.md in its opening lines. The kit reads it for one thing, beside missing,
+// template or written: whether it carries the link to self.md (`linksSelf`).
 const STRATEGY_MD = `# Strategy
 
 <!-- ${STRATEGY_TEMPLATE_MARK}: delete this line when you write the strategy -->
+
+What the project is, what it makes and its parts are in [self.md](./self.md); this page says why it exists, who it serves and how it wins.
 
 Why this project exists and how it wins. The supervisor drafts it; only the owner approves a change (class strategy-change).
 Goals are judged against it (planning.md §1). Keep it to one page.
@@ -33027,25 +33978,56 @@ function responderWindowRefusal(w) {
 // A thread's turns from the log's own lines (created_by, created_at), never the view, which names
 // every non-owner turn the supervisor's; oldest first.
 const logTurns = (threadId, objects = readLog().objects) => [...objects.values()].filter((o) => o.type === 'turn' && o.thread === threadId).sort(byTime);
-// The owner's turns in a thread still owed an answer (the spine's single rule, as kit-103's
-// done-when 3 words it): any later non-owner turn answers an owner turn, and a resolve of the
-// thread after it leaves it owed nothing, by time, so a reopen with no words doesn't bring it back.
-// Every "the owner said it" here is a line's writer, never its text. routed_to plays no part yet:
-// kit-104, which writes it, brings it into the answered rule.
-function owedTurns(threadId, objects = readLog().objects) {
-  const ts = logTurns(threadId, objects);
-  const resolvedAt = (objects.get(threadId)?.updates ?? []).filter((u) => u.status === 'resolved').map((u) => String(u.at)).sort().pop() ?? '';
-  const answeredAt = ts.filter((u) => u.created_by !== 'owner').pop()?.created_at ?? '';
-  return ts.filter((u) => u.created_by === 'owner' && u.created_at > answeredAt && u.created_at > resolvedAt);
+// Whether a reply written by `by` answers the owner's turn u (the spine's Answered rule, kit-104):
+// a turn routed to the supervisor only by the supervisor; one routed to the responder by the
+// responder or the supervisor; one with no route (an older kit's) by any non-owner, as before.
+// Every "the owner said it" here is a line's writer (created_by), never its text.
+const answersTurn = (u, by) => by !== 'owner' && (!u.routed_to || by === 'supervisor' || by === u.routed_to);
+// The owner's turns still owed an answer, from a thread's turns (log lines, oldest first) and the
+// thread: an owner turn is answered by a turn in the thread at or after it (a tie answers) whose
+// writer answers it (answersTurn), and a resolve of the thread after it leaves it owed nothing, by
+// time, so a reopen with no words doesn't bring it back. One pure rule for the queue, idleness,
+// threadView.waiting, thread list --waiting, thread-waiting and responder-overdue (kit-104).
+function owedIn(ts, thread) {
+  const resolvedAt = (thread?.updates ?? []).filter((u) => u.status === 'resolved').map((u) => String(u.at)).sort().pop() ?? '';
+  return ts.filter((u) => u.created_by === 'owner' && String(u.created_at) > resolvedAt && !ts.some((w) => w.created_at >= u.created_at && answersTurn(u, w.created_by)));
+}
+// The owner's turns in a thread still owed an answer (owedIn on the log's own lines).
+const owedTurns = (threadId, objects = readLog().objects) => owedIn(logTurns(threadId, objects), objects.get(threadId));
+// The responder's open promise in a thread (final-1 F2, final-1b F2): its newest turn there is
+// pending, no resolve of the thread came after it, and no supervisor turn after it settled it. A
+// supervisor turn settles it unless it is a question, or it was written within RESPONDER_PENDING_MS
+// of the promise and every owed owner turn it answered came after the supervisor's own question asked
+// after the promise (its reply in that exchange answers the owner's answer, not the promise). Once the
+// promise is overdue any reply settles it: the supervisor takes it, as with an owed turn (final-2b
+// F1). A reply answering nothing owed takes it over too (the backstop). The turn, or null. On the
+// log's lines, oldest first.
+function pendingOpen(ts, thread) {
+  const mine = ts.filter((u) => u.created_by === 'responder').pop();
+  if (mine?.pending !== true) return null;
+  const resolvedAt = (thread?.updates ?? []).filter((u) => u.status === 'resolved').map((u) => String(u.at)).sort().pop() ?? '';
+  if (resolvedAt > String(mine.created_at)) return null;
+  const asked = ts.find((u) => u.created_by === 'supervisor' && u.question && u.created_at >= mine.created_at)?.created_at;
+  for (const s of ts) {
+    if (s.created_by !== 'supervisor' || s.created_at < mine.created_at || s.question) continue;
+    if (Date.parse(s.created_at) - Date.parse(mine.created_at) > RESPONDER_PENDING_MS) return null;
+    const answers = owedIn(ts.filter((u) => u.created_at < s.created_at), thread).filter((u) => answersTurn(u, 'supervisor'));
+    if (!asked || !answers.length || answers.some((u) => u.created_at < asked)) return null;
+  }
+  return mine;
 }
 // The responder's guard: since its own last turn in the thread (or ever, with none) the supervisor
 // has written, and the owner has said nothing after that. A reply then would answer what the
-// supervisor already answered (both backstop cases of the spine's Failure modes).
+// supervisor already answered (both backstop cases of the spine's Failure modes). Never while its
+// own promise there is open (pendingOpen): the follow-up it owes is its to write. After the
+// supervisor's own question (thread ask) only owner words routed to the responder lift it: the
+// owner's answer to that question is the supervisor's (final-3b F2).
 function supervisorAnswered(threadId, objects = readLog().objects) {
   const ts = logTurns(threadId, objects);
+  if (pendingOpen(ts, objects.get(threadId))) return false;
   const mine = ts.filter((u) => u.created_by === 'responder').pop()?.created_at ?? '';
   const sup = ts.filter((u) => u.created_by === 'supervisor').pop();
-  return !!sup && sup.created_at > mine && !ts.some((u) => u.created_by === 'owner' && u.created_at > sup.created_at);
+  return !!sup && sup.created_at > mine && !ts.some((u) => u.created_by === 'owner' && u.created_at > sup.created_at && (!sup.question || u.routed_to === 'responder'));
 }
 // A turn's first n characters on one line, for a terminal: control characters and runs of
 // whitespace as one space, … when cut.
@@ -33063,11 +34045,225 @@ function responderQueue(objects = readLog().objects) {
   }
   return q.sort((a, b) => a.at.localeCompare(b.at));
 }
+// kit-104: a turn routed to the responder still owed past this is overdue (the supervisor takes it,
+// and every turn after it until it is answered); so is the responder's pending turn not followed up
+// (pendingOpen) past RESPONDER_PENDING_MS, which is also how long a pending turn keeps it busy.
+const RESPONDER_OVERDUE_MS = 3 * 60000;
+const RESPONDER_PENDING_MS = 10 * 60000;
+// Every thread's turns from a fold's objects, oldest first, in one pass.
+function turnsByThread(objects) {
+  const m = new Map();
+  for (const o of objects.values()) if (o.type === 'turn' && typeof o.thread === 'string') (m.get(o.thread) ?? m.set(o.thread, []).get(o.thread)).push(o);
+  for (const ts of m.values()) ts.sort(byTime);
+  return m;
+}
+// Whether the responder can take a turn now, from tmux alone: { problem } (the fleet's session or
+// its window missing, its pane exited or at a shell; session says whether the fleet's session is
+// up), { stuck: line } (a blocked-prompt pattern, or a menu or dialog the kit reads, which would
+// hold a typed line), or { target } (an agent, asking nothing).
+function responderHealth() {
+  const w = responderWindow();
+  if (!w.has) return { problem: `no tmux session "${w.session}"`, session: false };
+  if (!w.there) return { problem: `no window ${w.shown}`, session: true };
+  const { target, problem } = resolvePane(w.target);
+  if (problem) return { problem, session: true };
+  const waits = paneWaitingIn(RESPONDER_NAME);
+  if (waits) return { stuck: waits.line, target, session: true };
+  const asking = paneAsking(target);
+  if (asking) {
+    const lines = String(asking.kind === 'menu' ? asking.question ?? '' : asking.text ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
+    return { stuck: (lines.find((l) => ENTER_CONFIRMS.test(l)) ?? lines[0] ?? `a ${asking.kind}`).slice(0, 200), target, session: true };
+  }
+  return { target, session: true };
+}
+// Idle: no owner turn routed to it and typed is still owed, and its own newest turn (any thread)
+// is not a pending one under RESPONDER_PENDING_MS old. Turns queued for it never make it busy.
+function responderIdle(objects, now = Date.now(), byThread = turnsByThread(objects)) {
+  for (const [id, ts] of byThread) if (owedIn(ts, objects.get(id)).some((u) => u.routed_to === 'responder' && u.delivered === 'typed')) return false;
+  const mine = [...byThread.values()].flat().filter((u) => u.created_by === 'responder').sort(byTime).pop();
+  return !(mine?.pending === true && now - Date.parse(mine.created_at) < RESPONDER_PENDING_MS);
+}
+// The responder's overdue turns, per open thread: an owner turn routed to it, still owed, older
+// than RESPONDER_OVERDUE_MS; or its open promise (pendingOpen) older than RESPONDER_PENDING_MS.
+// [{ thread, turn, why, min }], from the log alone (owedIn), so an answer or a resolve clears it.
+function responderOverdue(objects, now = Date.now(), byThread = turnsByThread(objects)) {
+  const found = [];
+  for (const [id, ts] of byThread) {
+    const t = objects.get(id);
+    if (t?.type !== 'thread' || t.status === 'resolved') continue;
+    const late = owedIn(ts, t).find((u) => u.routed_to === 'responder' && now - Date.parse(u.created_at) > RESPONDER_OVERDUE_MS);
+    if (late) { found.push({ thread: id, turn: late.id, why: 'owed', min: Math.floor((now - Date.parse(late.created_at)) / 60000) }); continue; }
+    const p = pendingOpen(ts, t);
+    if (p && now - Date.parse(p.created_at) > RESPONDER_PENDING_MS) found.push({ thread: id, turn: p.id, why: 'pending', min: Math.floor((now - Date.parse(p.created_at)) / 60000) });
+  }
+  return found;
+}
+// The open handoffs to the supervisor, by thread: of those not settled by a supervisor turn after
+// it (settledByLanding) and named by no reply's re, the newest per thread (an older one when the
+// newest was answered). Map thread -> message id.
+function openHandoffs(objects = readLog().objects) {
+  const replied = new Set([...objects.values()].filter((o) => o.type === 'message' || o.type === 'question').map((o) => o.re).filter(Boolean));
+  const m = new Map();
+  for (const o of [...objects.values()].filter((x) => x.type === 'message' && x.kind === 'handoff' && x.to === 'supervisor' && typeof x.thread === 'string').sort(byTime)) {
+    if (!replied.has(o.id) && !settledByLanding(o)) m.set(o.thread, o.id);
+  }
+  return m;
+}
+// The idle nudge (kit-104): when the responder's pane has an agent asking nothing, it is idle and its
+// queue isn't empty, the accounts tick types this line into it, at most once a minute
+// (RESPONDER_NUDGE_FILE, { at }, written after the typing: a crash between them costs one extra
+// nudge, never a turn). Never into a busy responder. Named at load, so the loose-file check knows it.
+const RESPONDER_NUDGE_FILE = runPath('responder-nudge.json');
+const RESPONDER_NUDGE = '[devteam responder] a turn is waiting — devteam.mjs thread list --waiting --responder';
+const RESPONDER_NUDGE_MS = 60000;
+function nudgeResponder(now = Date.now()) {
+  if (loadSettings().responder === false) return false;
+  const objects = readLog().objects;
+  if (!responderQueue(objects).length) return false;
+  if (!responderIdle(objects, now)) return false;
+  let at = 0;
+  try { at = Date.parse(JSON.parse(readText(RESPONDER_NUDGE_FILE) ?? 'null')?.at) || 0; } catch {}
+  // a time in the future (the clock stepped back) is no record, so it can't hold the nudge off for long
+  if (at <= now && now - at < RESPONDER_NUDGE_MS) return false;
+  const h = responderHealth();
+  if (!h.target || h.stuck) return false;
+  if (!typeInto(h.target, RESPONDER_NUDGE)) return false;
+  writeJsonAtomic(RESPONDER_NUDGE_FILE, { at: new Date(now).toISOString() });
+  return true;
+}
+// A thread's state in the supervisor's words (thread list, show): whose reply is owed, or the owner's move.
+const waitingWords = (v, overdue = false) => (v.waiting === 'supervisor' ? 'waiting on the supervisor' : v.waiting === 'responder' ? `the responder has it${overdue ? ' · overdue' : ''}` : "the owner's move");
+// Whether the worktree at dir changed <slug>'s folder since it left main: a tracked change against
+// its merge-base with origin's main (committed or not), or an untracked file there. A copy older than
+// main's but unchanged since the worktree was cut draws nothing. 'unreadable' when git can't say
+// (no merge-base, a folder that isn't its own worktree, an error): the caller fails closed on it.
+function artifactChangedIn(dir, slug, main) {
+  const top = responderGit(['rev-parse', '--show-toplevel'], dir);
+  if (top.status !== 0 || realPath(top.stdout.trim()) !== realPath(dir)) {
+    // not its own worktree, so git can't say. A stray plain folder (no .git entry at all) holding no
+    // copy of the slug can't be drawing it, and never blocks every draft (final-1 F2); one with a
+    // .git git can't read may be deleting the slug, so it stays unreadable (final-2 F3)
+    let stray = false;
+    try { fs.lstatSync(path.join(dir, '.git')); } catch { stray = true; }
+    if (stray) try { fs.lstatSync(path.join(dir, ARTIFACTS_REL, slug)); } catch { return false; }
+    return 'unreadable';
+  }
+  const mb = responderGit(['merge-base', 'HEAD', `origin/${main}`], dir);
+  const base = mb.status === 0 ? mb.stdout.trim() : '';
+  if (!base) return 'unreadable';
+  const folder = `${ARTIFACTS_REL}/${slug}`;
+  const diff = responderGit(['diff', '--quiet', base, '--', folder], dir);
+  if (diff.status === 1) return true;
+  if (diff.status !== 0) return 'unreadable';
+  const ls = responderGit(['ls-files', '--others', '--exclude-standard', '--', folder], dir);
+  if (ls.status !== 0) return 'unreadable';
+  return ls.stdout.trim() !== '';
+}
+// responder draft <slug> [--new --title t --summary s [--for '<json>'] [--kind k]]: the responder
+// opens (or reuses) .worktrees/chore-artifact-<slug>, a chore worktree the supervisor lands with
+// chore pr / merge --chore as any other. Refused, naming each one, while a ticket's, planner's or
+// other session's worktree (or another machine's branch) draws the slug: the owner's change is
+// relayed there. Every git call of its own goes through responderGit/responderOrigin, so nothing
+// another session planted (a hook, an fsmonitor, a replace ref) runs as the responder.
+function responderDraft() {
+  const slug = positional[1];
+  const role = process.env.DEVTEAM_ROLE;
+  // DEVTEAM_TICKET or DEVTEAM_FEATURE set at all, blank included, is a worker's or planner's session, as ownerWriter reads it (final-1 F3, final-2 F2)
+  if (flags.owner || process.env.DEVTEAM_CHANNEL || process.env.DEVTEAM_TICKET !== undefined || process.env.DEVTEAM_FEATURE !== undefined || logWriter() !== 'responder' || ![undefined, '', 'responder'].includes(role)) die("responder draft: the responder's command; the supervisor opens a draft with chore start artifact-<slug>");
+  const usage = 'usage: responder draft <slug> [--new --title "…" --summary "…" [--for \'["goal:g"]\'] [--kind mock|diagram|docs]]';
+  if (!slug || !LINK_ID.test(slug) || positional.length > 2) die(usage);
+  const title = flagStr('title'), summary = flagStr('summary');
+  if (flags.new && (!title || !summary)) die('--new needs --title and --summary');
+  const main = loadSettings().main_branch;
+  const name = `chore-artifact-${slug}`;
+  const wt = path.join(mainRoot, '.worktrees', name);
+  const touch = () => { const now = new Date(); try { fs.utimesSync(wt, now, now); } catch {} };
+  // a draft already there is the responder's own: used, whoever else draws the slug
+  let there = null;
+  try { there = fs.lstatSync(wt); } catch {}
+  if (there) {
+    // a link planted at the draft's path (to a ticket's worktree, say) is never taken as the draft,
+    // and no git runs there: only the folder itself, at .worktrees/<name> (final-1 F1)
+    const notHere = () => die(`.worktrees/${name} is not a git worktree: move it aside, then responder draft ${slug} again`);
+    if (there.isSymbolicLink() || realPath(wt) !== path.join(realPath(path.join(mainRoot, '.worktrees')), name)) notHere();
+    const top = responderGit(['rev-parse', '--show-toplevel'], wt);
+    if (top.status !== 0 || realPath(top.stdout.trim()) !== realPath(wt)) notHere();
+    if (flags.new) die(`.worktrees/${name} is already there: responder draft ${slug} edits it`);
+    const st = responderGit(['status', '--porcelain'], wt);
+    if (st.status !== 0) die(`.worktrees/${name}: git status failed: ${(st.stderr || '').trim()}`);
+    if (st.stdout.trim()) { touch(); return out(realPath(wt)); }
+    const fetched = responderOrigin(['fetch', '--quiet', 'origin', main]);
+    if (fetched.status !== 0) die(`responder draft: fetching origin's ${main} failed: ${(fetched.stderr || '').trim() || `exit ${fetched.status}`}`);
+    const head = responderGit(['rev-parse', 'HEAD'], wt).stdout?.trim();
+    const onMain = responderGit(['merge-base', '--is-ancestor', 'HEAD', `origin/${main}`], wt).status === 0;
+    // landed (merged, squashed, or never committed to): start again from main as it is now; a
+    // pushed chore commit not yet merged is kept
+    if (onMain || (head && mergedAtSha(name, head))) choreWorktree(`artifact-${slug}`, { responder: true, reset: true });
+    else touch();
+    return out(realPath(wt));
+  }
+  // a session drawing the slug: every worktree that changed its folder since it left main, and every
+  // other machine's branch that did (a local row hides those in remote_branches)
+  const known = tickets();
+  const found = new Map();
+  const relay = (who) => `relay the owner's change with send ${who} "…" (thread <t-id>)`;
+  const handOver = 'hand it over: send supervisor "…" --kind handoff --thread <t-id>';
+  let names = [];
+  try { names = fs.readdirSync(path.join(mainRoot, '.worktrees')); } catch {}
+  for (const w of names) {
+    if (w === name) continue;
+    const dir = draftWorktree(w);
+    if (!dir) continue;
+    const changed = artifactChangedIn(dir, slug, main);
+    if (!changed) continue;
+    const where = `.worktrees/${w}`;
+    if (changed === 'unreadable') { found.set(w, `${where} can't be read, so it may be drawing ${slug} (${w}); ${handOver}`); continue; }
+    const rec = /^records-(.+)$/.exec(w);
+    const session = known.has(w) || /^plan-./.test(w) ? w : rec && known.has(rec[1]) ? rec[1] : null;
+    found.set(w, session ? `${slug} is being drawn in ${where} (${session}); ${relay(session)}` : `${slug} is being drawn in ${where} (${w}); ${handOver}`);
+  }
+  const branches = new Set();
+  for (const a of draftArtifacts().filter((d) => d.slug === slug)) {
+    if (String(a.at).startsWith('origin:')) branches.add(a.branch ?? String(a.at).slice('origin:'.length));
+    for (const b of a.remote_branches ?? []) branches.add(b);
+  }
+  for (const b of branches) {
+    const t = /^ticket\/(.+)$/.exec(b), p = /^plan\/(.+)$/.exec(b);
+    const session = t && known.has(t[1]) ? t[1] : p ? `plan-${p[1]}` : null;
+    const where = `branch ${b} on origin`;
+    // keyed by the branch's own name, so it sorts among the worktrees by name
+    found.set(`${b}\0branch`, session ? `${slug} is being drawn in ${where} (${session}); ${relay(session)}` : `${slug} is being drawn in ${where} (${b}); ${handOver}`);
+  }
+  if (found.size) die(`responder draft ${slug}: refused, nothing made:\n${[...found.keys()].sort().map((k) => `  ${found.get(k)}`).join('\n')}`);
+  const landed = landedArtifacts().some((a) => a.slug === slug);
+  if (!flags.new && !landed) die(`no artifact ${slug} on main; to start one: responder draft ${slug} --new --title "…" --summary "…"`);
+  if (flags.new && landed) die(`${slug} is on main; responder draft ${slug} edits it`);
+  // make it; a failed artifact new takes back only what this run made
+  const had = responderGit(['rev-parse', '--verify', '-q', `refs/heads/${name}`]);
+  const was = had.status === 0 ? had.stdout.trim() : null;
+  choreWorktree(`artifact-${slug}`, { responder: true });
+  if (flags.new) {
+    const args = ['artifact', 'new', slug, '--title', title, '--summary', summary];
+    if (flagStr('for') !== undefined) args.push('--for', flagStr('for'));
+    if (flags.kind !== undefined) args.push('--kind', flagStr('kind') ?? '');
+    const r = spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...args], { cwd: wt, env: { ...process.env, DEVTEAM_ROLE: 'responder' }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60000 });
+    if (r.stderr) process.stderr.write(r.stderr);
+    if (r.status !== 0 || r.error) {
+      responderGit(['worktree', 'remove', '--force', wt]);
+      if (was) responderGit(['branch', '-f', name, was]);
+      else responderGit(['branch', '-D', name]);
+      die(`responder draft ${slug}: artifact new failed (${r.error?.message ?? `exit ${r.status}`}); the draft was taken back`);
+    }
+  }
+  out(realPath(wt));
+}
 // Its help lines, in Setup and roles (HELP_SETUP reads them; this region sits above HELP).
 const RESPONDER_HELP = `  responder [--resume | --stop]   supervisor: the thread responder, a quick session that answers the owner's thread turns (window responder, .worktrees/responder at main, the owner's responder_command); --stop ends it, --resume restarts it in its window
+  responder draft <slug> [--new --title t --summary s]   the responder: open (or reuse) .worktrees/chore-artifact-<slug> to edit a landed artifact, or start one there with --new; refused, naming the session, while a ticket or planner draws it
   prompt responder   the responder's prompt: its section of supervisor.md (§13)`;
 // responder [--resume | --stop]: the supervisor starts, restarts or stops the responder.
 function cmdResponder() {
+  if (positional[0] === 'draft') return responderDraft();
   // every channel is one of the owner's surfaces (the dashboard, the hub, the owner's terminal)
   if (flags.owner || process.env.DEVTEAM_CHANNEL) die('responder: the supervisor starts the responder (settings.responder turns it off)');
   supervisorOnly('responder');
@@ -33154,6 +34350,39 @@ function cmdResponder() {
   }
 }
 /* responder-session end */
+// Who owes the reply to the owner's next turn in thread t (kit-104; the spine's routing rules 1, 3
+// and 4), worked out once, before the turn is written, and stored on it (routed_to, and delivered
+// for the responder); nothing recomputes it. t may be a thread not yet written ({ subject }).
+// { to: 'supervisor' } or { to: 'responder', delivered: 'typed' | 'queued', target }; why says why
+// the supervisor's. A subject naming a record not in the log takes the ordinary rules. Every "the
+// owner said it" here is a line's writer, never its text.
+function responderRoute(t, objects = readLog().objects, s = loadSettings(), now = Date.now()) {
+  const ownerCorrected = (r) => (r.updates ?? []).some((u) => u.corrected !== undefined && writerClass(u.by) === 'owner');
+  // 1: its own open question asked in the thread, or a subject still the supervisor's
+  if (t.id && [...objects.values()].some((o) => o.type === 'question' && o.thread === t.id && threadQuestion(o).status === 'open')) return { to: 'supervisor', why: 'its open question' };
+  const ref = isObj(t.subject) && t.subject.kind === 'item' && typeof t.subject.ref === 'string' ? t.subject.ref : '';
+  const rec = ref.includes(':') ? objects.get(ref.slice(ref.indexOf(':') + 1)) : null;
+  const kind = ref.slice(0, ref.indexOf(':'));
+  if (rec && rec.type === kind) {
+    if (kind === 'question' && threadQuestion(rec).status === 'open') return { to: 'supervisor', why: 'an open question' };
+    if (kind === 'decision' && !ownerCorrected(rec)) return { to: 'supervisor', why: 'an uncorrected decision' };
+    // the owner's own acts can't be corrected, so their threads take the ordinary rules; an act that
+    // carried out a decision follows that decision (F8-4)
+    if (kind === 'act' && rec.created_by !== 'owner') {
+      const d = typeof rec.decision === 'string' ? objects.get(rec.decision) : null;
+      if (!ownerCorrected(d?.type === 'decision' ? d : rec)) return { to: 'supervisor', why: 'an uncorrected act' };
+    }
+  }
+  // 2: the responder can't take it
+  if (s.responder === false) return { to: 'supervisor', why: 'the responder is off' };
+  const h = responderHealth();
+  if (h.problem) return { to: 'supervisor', why: h.problem };
+  if (h.stuck) return { to: 'supervisor', why: `the responder is stuck: ${h.stuck}` };
+  const byThread = turnsByThread(objects);
+  if (responderOverdue(objects, now, byThread).length) return { to: 'supervisor', why: 'a responder turn is overdue' };
+  // 3: the responder's, typed when idle
+  return { to: 'responder', delivered: responderIdle(objects, now, byThread) ? 'typed' : 'queued', target: h.target };
+}
 
 /* HELP start */
 /* helpSections start */
@@ -33254,7 +34483,9 @@ const HELP_OBSERVE = `Observe and orient
   observe-metrics | observe-spend | orient [--json] | metrics [--since date] [--json]   (observe-metrics records spend lines too, and each ended week's learning record)
   ack <finding-kind> <subject> --reason r [--owner]   set a finding aside for finding_ack_hours (a merge commit: for good)
   timeline <ticket-id> [--json]   the ticket and every log line, review and file that bears on it
-  governance [--json]   the kit's governance and process files and the project's strategy and exterior: title, last change, changed here
+  governance [--json]   the kit's governance and process files and the project's strategy, Self and exterior: title, last change, changed here
+  self show [--json]   main's project/self.md, what the project is: what it is, makes, its parts with their paths, what it controls and what not; --json is the dashboard's self block, null when not drafted
+  self check   the working tree's self.md against self@1, each part's path on disk, and the names rule; errors exit 1, warnings don't
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
   search "<words>" [--type <log type>|doc]… [--since <date>] [--limit n] [--json]   what the project already wrote about it, best first, quoted as data (supervisor.md §6)
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …`;
@@ -33266,7 +34497,7 @@ const HELP_GOALS = `Goals and retros
   goal order [<g-id> …] --approved <qid>   supervisor: apply an answered goal-change --order question, exactly the order it proposed
   goal reading <g-id> --run | --approved <qid> | --value n   a reading by the measure's source: --run runs a repo check on main or a prod check; --approved records an owner goal's yes from its answered goal-met question; --value only for a goal with no source, or the owner's own (--owner)
   retro [--due | --print | close <date> --summary s --refs ids]
-  chore start <slug> | chore pr <slug> --title t    a supervisor-written file (design, retro, architecture) and its PR`;
+  chore start <slug> | chore pr <slug> --title t [--names-checked <word,…>]    a supervisor-written file (design, retro, architecture) and its PR; on a public or unknown repo it holds a self.md draft's unchecked names (capitalised words main's strategy.md and dependency files don't contain) until --names-checked names each`;
 const HELP_RECURRING = `Jobs under Upkeep (supervisor.md, Recurring jobs)
   recurring list [--json]   main's jobs (project/recurring.json at main) in name order: kind, every, title, who registered each through an answered recurring-edit question (or not), the runs a day against the cap of 100, and the pending questions; a file on main that doesn't read prints its problem and exits 1. --json: { entries: [{ name, entry, runs_a_day, registered: { qid, at, by, act } | null, problems?: ["…"] }], runs_a_day, cap, pending: [{ qid, name, change, status }] }; problems is there only when an entry breaks the shape (validate says the same)
   recurring show <name> [--json]   one job on main in full, who registered it, its problems if it breaks the shape, and its pending questions
@@ -33325,7 +34556,7 @@ const COMMANDS_DECIDE = {
   ask: cmdAsk, answer: cmdAnswer, unread: cmdUnread, thread: cmdThread, pane: cmdPane, 'owner-setting': cmdOwnerSetting, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
 };
 const COMMANDS_OBSERVE = {
-  observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, governance: cmdGovernance, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
+  observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, governance: cmdGovernance, self: cmdSelf, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
 };
 const COMMANDS_GOALS = {
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,

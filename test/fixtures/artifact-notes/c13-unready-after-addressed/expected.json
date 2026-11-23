@@ -1,0 +1,21 @@
+{
+ "about": "the supervisor withdraws the mark: back with the session",
+ "thread": "t-20261120-100013000-owner",
+ "view": {
+  "handed": {
+   "to": "plan-pricing",
+   "at": "2026-11-20T10:01:13.000Z"
+  },
+  "addressed": null,
+  "check": null,
+  "shot": null,
+  "noshot": null,
+  "unready": {
+   "at": "2026-11-20T10:03:13.000Z",
+   "reason": "The mark no longer matches the page."
+  },
+  "frame": null,
+  "waiting": "session",
+  "with": "plan-pricing"
+ }
+}
