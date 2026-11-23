@@ -950,7 +950,34 @@ exit 0
     ]
   },
   "planners": [],
-  "next_moves": [],
+  "next_moves": [
+    {
+      "subject": "ticket:g1-01-a",
+      "move": "answer-question",
+      "words": "Answer: Ship g1 behind a flag?",
+      "holder": "owner",
+      "ref": {
+        "kind": "q",
+        "id": "q-<sha>-<sha>-supervisor"
+      },
+      "title": "g1-01-a",
+      "command": null,
+      "covered_by": [
+        {
+          "kind": "blocked-on-owner",
+          "subject": "g1-01-a"
+        },
+        {
+          "kind": "owner-question-waiting",
+          "subject": "q-<sha>-<sha>-supervisor"
+        }
+      ],
+      "quiet": null,
+      "via": null,
+      "flag": null,
+      "rung": 0
+    }
+  ],
   "ooda": {
     "goals": [],
     "roadmap": {
