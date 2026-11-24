@@ -2008,7 +2008,9 @@ function fold(all) {
     const rank = RANK[cls];
     const changed = holdLine ? holdWith(holdLine) : {};
     for (const [k, val] of Object.entries(l)) {
-      if (ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold' || (obj.type === 'goal' && holdKey(k)) || (notOwnTag && k === 'kit_lesson')) continue;
+      // person (kit-252) says who gave this one line: it goes on its update, below, never on the
+      // object, so an answered question's hash (questionHash) is the one the answer was given to
+      if (ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold' || k === 'person' || (obj.type === 'goal' && holdKey(k)) || (notOwnTag && k === 'kit_lesson')) continue;
       // an order line's priority is the owner's answer, at the owner's rank; its approved stays the
       // supervisor's, so a later answer's approved still lands and is seen as used
       const r = byOrder && k === 'priority' ? RANK.owner : rank;
@@ -2019,7 +2021,7 @@ function fold(all) {
       obj.__rank[k] = r;
       changed[k] = val;
     }
-    if (Object.keys(changed).length) obj.updates.push({ at: l.at, by: l.by, ...(l.channel ? { channel: l.channel } : {}), ...changed });
+    if (Object.keys(changed).length) obj.updates.push({ at: l.at, by: l.by, ...(l.channel ? { channel: l.channel } : {}), ...changed, ...(l.person !== undefined ? { person: l.person } : {}) });
     else ignored.push({ line: l, why: 'overridden by a higher-ranked writer' });
     if (obj.type === 'goal' && changed.approved) goalApprovals.add(changed.approved);
   }
@@ -2425,6 +2427,10 @@ function logLineFor(fields, by, id, at = nowIso()) {
   }
   const line = { v: 1, id: fields.id ?? id, type, op: fields.op ?? 'new', at, by, ...(by === 'owner' ? { channel: fields.channel ?? ownerChannel() } : {}) };
   for (const [k, val] of Object.entries(fields)) if (!ENVELOPE.includes(k) && val !== undefined) line[k] = val;
+  // which of the box's people gave it (kit-252, personHeader): the owner's lines alone, of a type
+  // that has person, and here so that lineFits counts it as appendLog writes it
+  const person = by === 'owner' && SCHEMA.$defs.types[type]?.properties?.person ? envPerson() : null;
+  if (person) line.person = person;
   return line;
 }
 // Whether these fields' line fits LINE_MAX, built as appendLog will, with a placeholder id of the
@@ -10822,7 +10828,8 @@ function cmdThread() {
     // routed before either line is written (kit-104), and both lines checked with the route on the
     // turn's: a refused first turn leaves no thread with none
     const route = responderRoute({ subject });
-    if (files && !(lineFits({ type: 'thread', title, subject }, by) && lineFits({ type: 'turn', thread: `t-00000000-000000000-${by}`, text: words, files, ...routedFields(route) }, by))) die(FILES_TOO_LONG);
+    // with the owner's name on both (kit-252) too, which only files made too long before
+    if ((files || (by === 'owner' && envPerson())) && !(lineFits({ type: 'thread', title, subject }, by) && lineFits({ type: 'turn', thread: `t-00000000-000000000-${by}`, text: words, files, ...routedFields(route) }, by))) die(files ? FILES_TOO_LONG : PERSON_TOO_LONG);
     const t = appendLog({ type: 'thread', title, subject }, by);
     const u = appendLog({ type: 'turn', thread: t.id, text: words, files, ...routedFields(route) }, by);
     out(t.id);
@@ -10860,6 +10867,9 @@ function cmdThread() {
     const line = { type: 'turn', thread: t.id, text: words, refs: refs.length ? refs : undefined, files, pending: by !== 'owner' && flags.pending ? true : undefined, ...(route ? routedFields(route) : {}), re, off_subject: off };
     if ((refs.length || line.pending || re || off) && !lineFits(line, by)) die('That reply is too long with its links; shorten it.');
     if (files && !lineFits(line, by)) die(FILES_TOO_LONG);
+    // the owner's turn carries their name from a server (kit-252): a turn at the page's cap with a
+    // long name is refused here, saying so, rather than at the log's line limit
+    if (!files && by === 'owner' && envPerson() && !lineFits(line, by)) die(PERSON_TOO_LONG);
     if (by !== 'owner') {
       const objects = readLog().objects;
       if (by === 'responder' && !flags.anyway && supervisorAnswered(t.id, objects)) die(`the supervisor has answered this (thread show ${t.id}): reply only to add something new, with --anyway`);
@@ -19153,6 +19163,67 @@ async function pickDashboardPort({ skip = [] } = {}) {
   die(`every dashboard port in ${span} is taken: stop an instance, or pin one with "dashboard_port" in settings.md (the hub won't list a port outside ${span})`);
 }
 
+/* personHeader start */
+// kit-252: which of the box's people gave an owner action. The box's gateway says so in
+// x-devteam-person (presence@1 §4's form). A dashboard or the hub, once a request has passed every
+// check it makes today, hands that person to the action's own child alone, as DEVTEAM_PERSON (JSON),
+// and the child's owner lines carry it as person (logLineFor, operatorAppend). Attribution, never
+// authority (design P6): nothing reads it to decide who may do what, and with no header nothing
+// changes (a laptop, or a gateway from before people).
+// Read once, as the script loads, and taken out of this process's environment: nothing it starts (a
+// tmux server, an agent, a gate's command, gh) ever inherits a person.
+const ENV_PERSON = process.env.DEVTEAM_PERSON;
+delete process.env.DEVTEAM_PERSON;
+const PERSON_ID = /^[A-Za-z0-9._:@/-]{1,64}$/;
+const PERSON_NAME_ENCODED = /^(?:[A-Za-z0-9\-_.!~*'()]|%[0-9A-Fa-f]{2})+$/;
+const PERSON_NAME_BYTES = 80;
+const PERSON_TOO_LONG = 'That is too long with your name on it; shorten it.';
+const PERSON_MALFORMED = "the request's person (x-devteam-person) is malformed";
+const personNameBytes = (s) => Buffer.byteLength(JSON.stringify(s)) - 2;
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+// The one rule for a person, wherever one is read: { id, name } and nothing else; the id §4's; the
+// name a non-empty, whole string (no lone surrogate) of at most 80 bytes of JSON without its quotes.
+function personOk(p) {
+  return isObj(p) && Object.keys(p).length === 2 && typeof p.id === 'string' && PERSON_ID.test(p.id) && typeof p.name === 'string' && p.name !== '' && !LONE_SURROGATE.test(p.name) && personNameBytes(p.name) <= PERSON_NAME_BYTES;
+}
+// §4's cut: the longest start, by whole characters, of at most 80 bytes of JSON.
+function cutPersonName(name) {
+  let out = '';
+  let n = 0;
+  for (const ch of name) { const b = personNameBytes(ch); if (n + b > PERSON_NAME_BYTES) break; out += ch; n += b; }
+  return out;
+}
+// A request's person: null with no header, { bad: true } for anything §4 refuses (a second header
+// included), else { id, name }, the name decoded and cut.
+function requestPerson(req) {
+  const vs = [];
+  for (let i = 0; i < req.rawHeaders.length; i += 2) if (req.rawHeaders[i].toLowerCase() === 'x-devteam-person') vs.push(req.rawHeaders[i + 1]);
+  if (!vs.length) return null;
+  const m = vs.length === 1 ? /^([^;]*);name=(.*)$/.exec(vs[0]) : null;
+  if (!m || !PERSON_ID.test(m[1]) || !PERSON_NAME_ENCODED.test(m[2])) return { bad: true };
+  const bytes = [];
+  for (let i = 0; i < m[2].length;) { if (m[2][i] === '%') { bytes.push(parseInt(m[2].slice(i + 1, i + 3), 16)); i += 3; } else { bytes.push(m[2].charCodeAt(i)); i += 1; } }
+  let name;
+  try { name = new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(bytes)); } catch { return { bad: true }; }
+  const cut = cutPersonName(name);
+  return cut ? { id: m[1], name: cut } : { bad: true };
+}
+// This command's person, from its server: null unset; set but not a person, it dies before anything
+// is written.
+let envPersonRead;
+function envPerson() {
+  if (ENV_PERSON === undefined) return null;
+  if (envPersonRead === undefined) {
+    let p = null;
+    try { p = JSON.parse(ENV_PERSON); } catch {}
+    if (!personOk(p)) die('DEVTEAM_PERSON is not a person');
+    envPersonRead = { id: p.id, name: p.name };
+  }
+  return envPersonRead;
+}
+// An owner action's env with its request's person, for that child alone.
+const personEnv = (env, person) => (person ? { ...env, DEVTEAM_PERSON: JSON.stringify({ id: person.id, name: person.name }) } : env);
+/* personHeader end */
 // An owner action a server runs (a dashboard's, or the hub's for the operator's threads): replied to
 // as soon as the child says it is done (its reply pipe, fd 3), before it types into a pane; what it
 // says on stderr after that goes to the log. A child that exits without replying (refused, or an
@@ -19192,7 +19263,8 @@ function runOwnerAction(args, { env, timeout = 0, input = null, log = () => {}, 
 // action as the supervisor's (TMUX stays, so the children's tmux finds the same server).
 function ownerActionEnv(channel) {
   const env = { ...process.env, DEVTEAM_CHANNEL: channel };
-  for (const k of ['TMUX_PANE', 'DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) delete env[k];
+  // and never the server's own person (kit-252): a child gets only its request's (personEnv)
+  for (const k of ['TMUX_PANE', 'DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_PERSON']) delete env[k];
   return env;
 }
 // The hub: every dashboard tries to serve 127.0.0.1:HUB_PORT (unless the box's image serves it:
@@ -19649,12 +19721,17 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
         for (const [n, at] of seenNonces) if (now - at > 2 * OPERATOR_PROOF_MS) seenNonces.delete(n);
         seenNonces.set(proof.nonce, now);
       }
+      // who pressed it (kit-252), only now that every check above has passed
+      const person = requestPerson(req);
+      if (person?.bad) return send(400, 'application/json', JSON.stringify({ error: PERSON_MALFORMED }));
       let args = null;
       // a body no check foresaw is a bad request, never a crash: a throw here would end the dashboard
       try { const parsed = JSON.parse(raw.toString('utf8') || '{}'); args = isObj(parsed) ? act(parsed) : null; } catch { args = null; }
       if (args && args.some((a) => typeof a !== 'string' || a.includes('\0'))) args = null;
       if (!args) return send(400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
-      const r = await runOwnerAction(args, { env: proof ? { ...ownerEnv, DEVTEAM_THREAD_PROOF: 'stdin' } : ownerEnv, timeout: 120000, log, input: proof ? JSON.stringify(proof) : null, cwd: actionCwd });
+      // Start writes no line, and the operator's tmux session it opens must carry no person
+      const env = personEnv(ownerEnv, args[1] === 'start' ? null : person);
+      const r = await runOwnerAction(args, { env: proof ? { ...env, DEVTEAM_THREAD_PROOF: 'stdin' } : env, timeout: 120000, log, input: proof ? JSON.stringify(proof) : null, cwd: actionCwd });
       // what the operator is at is asked afresh before the next read answers: a press may have
       // started it, and a read served from before the press would offer Start again
       op.at = 0;
@@ -21495,7 +21572,8 @@ function operatorAppend(...os) {
     }
     return c;
   };
-  const lines = os.map((o) => ({ v: 1, at, ...clean(o) }));
+  // the owner's lines say which of the box's people gave them (kit-252), beside a signed line's proof
+  const lines = os.map((o) => ({ v: 1, at, ...clean(o), ...(o.by === 'owner' && envPerson() ? { person: envPerson() } : {}) }));
   fs.mkdirSync(operatorDir(), { recursive: true });
   fs.appendFileSync(operatorThreadsFile(), lines.map((l) => `${JSON.stringify(l)}\n`).join(''));
   return lines.length === 1 ? lines[0] : lines;
@@ -24608,8 +24686,17 @@ async function dashRoutesOwner(D, req, res, q) {
   // a bad request, never a crash: a throw from an end handler is an uncaught exception, and that
   // ends the dashboard.
   const guarded = (f) => { try { f(); } catch { body = ''; if (!res.headersSent) send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' })); } };
+  // Who gave it (kit-252): read in each branch after its own checks and just before its child, so
+  // a request refused before is refused the same way with any header. A malformed one answers 400
+  // and nothing runs; false then means it was answered.
+  const personOr400 = () => {
+    const p = requestPerson(req);
+    if (!p?.bad) return p;
+    send(res, 400, 'application/json', JSON.stringify({ error: PERSON_MALFORMED }));
+    return false;
+  };
   // The owner's own process, with the body on its stdin (never in argv or the server's output).
-  const ownerChild = (args, input) => runAction(args, { input }).then((r) => send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') || 'failed', out: r.stdout.trim() })));
+  const ownerChild = (args, input, person) => runAction(args, { input, person }).then((r) => send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') || 'failed', out: r.stdout.trim() })));
   // Check now (kit-251): fleet status after a fetch from origin. A POST, as every other request that
   // changes refs is: the body is read to its end (the cap above holds) and nothing in it is used.
   if (isCheck) return req.on('end', async () => {
@@ -24643,9 +24730,12 @@ async function dashRoutesOwner(D, req, res, q) {
         for (const [n, at] of paneNonces) if (now - at > 2 * OPERATOR_PROOF_MS) paneNonces.delete(n);
         paneNonces.set(proof.nonce, now);
       }
+      // before any key is sent: a malformed person types nothing
+      const person = personOr400();
+      if (person === false) return;
       if (D.paneAnswering) return send(res, 409, 'application/json', JSON.stringify({ error: 'another answer is on its way to the terminal; wait for it' }));
       D.paneAnswering = true;
-      paneAnswer({ digest: parsed.digest, option: parsed.option, escape: parsed.escape === true, proof }).then((a) => a, (e) => ({ status: 500, body: { error: `nothing more was done: ${e?.message ?? e}` } })).then((a) => { D.paneAnswering = false; if (!res.headersSent) send(res, a.status, 'application/json', JSON.stringify(a.body)); });
+      paneAnswer({ digest: parsed.digest, option: parsed.option, escape: parsed.escape === true, proof, person }).then((a) => a, (e) => ({ status: 500, body: { error: `nothing more was done: ${e?.message ?? e}` } })).then((a) => { D.paneAnswering = false; if (!res.headersSent) send(res, a.status, 'application/json', JSON.stringify(a.body)); });
     }));
   }
   // The owner's Save on the Settings page: exactly { key, value }, an askable key, and on a box the
@@ -24671,7 +24761,9 @@ async function dashRoutesOwner(D, req, res, q) {
         for (const [n, at] of ownerSettingNonces) if (now - at > 2 * OPERATOR_PROOF_MS) ownerSettingNonces.delete(n);
         ownerSettingNonces.set(proof.nonce, now);
       }
-      ownerChild(['owner-setting', parsed.key, parsed.value === null ? 'none' : String(parsed.value)], proof ? JSON.stringify({ proof }) : null);
+      const person = personOr400();
+      if (person === false) return;
+      ownerChild(['owner-setting', parsed.key, parsed.value === null ? 'none' : String(parsed.value)], proof ? JSON.stringify({ proof }) : null, person);
     }));
   }
   if (isSecret) {
@@ -24682,7 +24774,9 @@ async function dashRoutesOwner(D, req, res, q) {
       try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
       body = '';
       if (!ID.test(parsed.id ?? '') || typeof parsed.values !== 'object' || !parsed.values) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
-      ownerChild(['secret', 'post', parsed.id, '--json'], JSON.stringify(parsed.values));
+      const person = personOr400();
+      if (person === false) { parsed = null; return; }
+      ownerChild(['secret', 'post', parsed.id, '--json'], JSON.stringify(parsed.values), person);
       parsed = null;
     }));
   }
@@ -24696,14 +24790,18 @@ async function dashRoutesOwner(D, req, res, q) {
       if (name === 'review-draft') {
         if (parsed.state === undefined) return send(res, 400, 'application/json', JSON.stringify({ error: 'a draft has a state' }));
         const savedAt = typeof parsed.saved_at === 'string' && !Number.isNaN(Date.parse(parsed.saved_at)) ? parsed.saved_at : nowIso();
-        return ownerChild(['review', 'draft', parsed.id, '-'], JSON.stringify({ state: parsed.state, saved_at: savedAt }));
+        const person = personOr400();
+        if (person === false) return;
+        return ownerChild(['review', 'draft', parsed.id, '-'], JSON.stringify({ state: parsed.state, saved_at: savedAt }), person);
       }
       // The answer is the object the owner's preview rendered: its JSON text is hashed in the page
       // and here, and the owner's process reads exactly those bytes.
       if (!isObj(parsed.result) || !/^[0-9a-f]{64}$/.test(parsed.sha256 ?? '')) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields: { id, result, sha256 }' }));
       const textOut = JSON.stringify(parsed.result);
       if (sha256(Buffer.from(textOut)) !== parsed.sha256) return send(res, 400, 'application/json', JSON.stringify({ error: 'the result is not the one the preview showed (its sha256 differs); nothing was answered' }));
-      ownerChild(['answer', parsed.id, '--review-result', '-', ...autonomyArgs(parsed)], textOut);
+      const person = personOr400();
+      if (person === false) return;
+      ownerChild(['answer', parsed.id, '--review-result', '-', ...autonomyArgs(parsed)], textOut, person);
     }));
   }
   req.on('end', async () => {
@@ -24715,7 +24813,9 @@ async function dashRoutesOwner(D, req, res, q) {
     try { args = action(parsed); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' })); }
     if (args && args.some((a) => typeof a !== 'string' || a.includes('\0'))) args = null;
     if (!args) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
-    const r = await runAction(args, { timeout: ACTION_MS[name] ?? 0 });
+    const person = personOr400();
+    if (person === false) return;
+    const r = await runAction(args, { timeout: ACTION_MS[name] ?? 0, person });
     // what the hub lists (the Inbox count, the fleet's mode) follows an owner action at once
     if (r.ok) refreshHello();
     send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') }));
@@ -24761,7 +24861,8 @@ async function cmdDashboard() {
   const describing = new Map();
   // /api/artifact-versions runs in flight, by slug: one child process however many ask at once
   const versioning = new Map();
-  const runAction = (args, o = {}) => runOwnerAction(args, { ...o, env: ownerEnv, log });
+  // person: the request's (kit-252), on this child's env alone
+  const runAction = (args, { person = null, ...o } = {}) => runOwnerAction(args, { ...o, env: personEnv(ownerEnv, person), log });
   const { ID, text, autonomyArgs, turnOk, lineOk, filesArgs, ACTIONS, ACTION_MS } = dashboardActions();
   const send = (res, code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', ...extra }); res.end(body); };
   // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 30 s
@@ -25186,7 +25287,7 @@ async function cmdDashboard() {
   let paneAnswering = false;
   const tmuxAsync = (args) => new Promise((resolve) => { try { execFile('tmux', args, { encoding: 'utf8', timeout: 10000 }, (err, so) => resolve(err ? null : so)); } catch { resolve(null); } });
   const PANE_SETTLE_MS = 1500;
-  async function paneAnswer({ digest, option, escape = false, proof }) {
+  async function paneAnswer({ digest, option, escape = false, proof, person = null }) {
     const no = (error, status = 400) => ({ status, body: { error } });
     const r = await run(['pane', 'question', '--json', '--pane'], { timeout: 20000 });
     let st = null;
@@ -25206,7 +25307,7 @@ async function cmdDashboard() {
     const menuIn = (lines) => { const a = lines ? paneAskingIn(lines) : null; return a?.kind === 'menu' && a.digest === digest ? a : null; };
     // until the question is gone or changed, or its cursor has moved
     const settle = async (was) => { let lines = null; for (let t = 0; t < PANE_SETTLE_MS; t += 100) { await new Promise((w) => setTimeout(w, 100)); lines = await look(); const m = menuIn(lines); if (!lines || !m || m.selected !== was) break; } return lines; };
-    const record = (fields, why) => runAction(['pane', 'answered', '--owner'], { timeout: 30000, input: JSON.stringify({ digest, ...fields, first: String(st.ask.first ?? ''), artifact: st.ask.artifact ?? undefined, taken: !why, ...(why ? { why } : {}), ...(proof ? { proof } : {}) }) });
+    const record = (fields, why) => runAction(['pane', 'answered', '--owner'], { timeout: 30000, person, input: JSON.stringify({ digest, ...fields, first: String(st.ask.first ?? ''), artifact: st.ask.artifact ?? undefined, taken: !why, ...(why ? { why } : {}), ...(proof ? { proof } : {}) }) });
     const finish = async (rec, keys, why, after) => {
       // the prompt it was is answered: out of the Inbox's count now, not at the next look
       if (hello) { if (hello.supervisor_question && hello.supervisor_question.kind !== 'limit' && hello.prompts > 0 && hello.inbox > 0) { hello.prompts--; hello.inbox--; } hello.supervisor_question = null; }
