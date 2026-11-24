@@ -11224,14 +11224,14 @@ function cmdThread() {
   if (sub === 'unready') {
     supervisorOnly('thread unready');
     const t = threadOpen(id, 'supervisor');
-    const reason = (flagStr('reason') ?? '').trim();
+    const reason = uncapped((flagStr('reason') ?? '').trim());
     if (UNSAFE_TEXT.test(reason)) die('--reason is one line');
     if (Buffer.byteLength(reason) < 12 || Buffer.byteLength(reason) > 300) die('--reason is 12 to 300 bytes');
     const v = threadViewOf(t.id);
-    if (!v.check) die(`${t.id} has nothing to check: no proposal or addressed mark stands`);
+    if (!v.check) die(`${t.id} has nothing to check: ${v.subject?.kind === 'artifact' ? 'no proposal or addressed mark stands' : "only an artifact note's mark is withdrawn"}`);
     appendLog({ type: 'thread', op: 'set', id: t.id, ready: null, unready: { at: nowIso(), reason } }, 'supervisor');
     if (v.check === 'addressed' && v.addressed.by !== 'supervisor') {
-      sendLine({ to: v.addressed.by, kind: 'info', thread: t.id, from: 'supervisor', text: `Your mark on ${t.id} was withdrawn: ${reason}. Fix it and mark it again: devteam.mjs artifact notes ${v.subject?.slug}.` });
+      sendLine({ to: v.addressed.by, kind: 'info', thread: t.id, from: 'supervisor', text: `Your mark on ${t.id} was withdrawn: ${reason}. Fix it and mark it again: devteam.mjs artifact notes ${LINK_ID.test(String(v.subject?.slug)) ? v.subject.slug : '<slug>'}.` });
       out(`withdrew ${v.addressed.by}'s mark on ${t.id}, and told ${v.addressed.by}`);
     } else out(`withdrew your own mark on ${t.id}`);
     spoke(t);
@@ -13160,17 +13160,19 @@ function shotSweep(id, now) {
   logCache = null;
   const { objects } = readLog();
   const views = new Map(threadViews(objects).map((v) => [v.id, v]));
+  // one that can't be removed stops none of the rest
+  const gone = (f, how) => { try { fs.rmSync(f, { force: true, ...how }); } catch (e) { warn(`old picture not removed: ${e.message}`); } };
   const dir = shotFolder(id);
   if (dir) {
     const named = fs.readdirSync(dir).map((f) => [f, SHOT_NAME.exec(f)?.[1]]).filter(([, stamp]) => stamp);
     const kept = new Set([...[...new Set(named.map(([, stamp]) => stamp))].sort().slice(-SHOTS_KEPT), views.get(id)?.shot?.stamp]);
-    for (const [f, stamp] of named) if (!kept.has(stamp)) fs.rmSync(path.join(dir, f), { force: true });
+    for (const [f, stamp] of named) if (!kept.has(stamp)) gone(path.join(dir, f), {});
   }
   for (const other of fs.readdirSync(shotsDir())) {
     const v = other === id ? null : views.get(other);
     if (!v || v.status !== 'resolved' || !shotFolder(other)) continue;
     const closed = Date.parse(objects.get(other).updates.filter((u) => u.status !== undefined).pop()?.at ?? '');
-    if (now - closed > SHOTS_RESOLVED_MS) fs.rmSync(shotFolder(other), { recursive: true, force: true });
+    if (now - closed > SHOTS_RESOLVED_MS) gone(shotFolder(other), { recursive: true });
   }
 }
 /* note-shots end */
@@ -25273,7 +25275,13 @@ function dashFreshSources({ views, body, key }, cache) {
   const ref = mainRef();
   const commit = ref ? git(['rev-parse', ref], mainRoot) : null;
   if (cache.commit !== commit) { cache.commit = commit; cache.held = new Map(); }
-  const holds = shotHolds((slug) => cache.held.get(slug) ?? cache.held.set(slug, !!commit && !!git(['ls-tree', commit, '--', `${ARTIFACTS_REL}/${slug}/`], mainRoot)).get(slug));
+  const holds = shotHolds((slug) => {
+    if (cache.held.has(slug)) return cache.held.get(slug);
+    const listed = commit ? git(['ls-tree', commit, '--', `${ARTIFACTS_REL}/${slug}/`], mainRoot) : null;
+    // a git that failed has said nothing to keep
+    if (listed !== null) cache.held.set(slug, !!listed);
+    return !!listed;
+  });
   const now = new Map(notes.map((v) => [v.id, noteSource(v, holds)]));
   const digest = JSON.stringify([...now]);
   if (cache.digest !== digest || cache.key !== key) Object.assign(cache, { digest, key, body: JSON.stringify(views.map((v) => (now.has(v.id) ? { ...v, source: now.get(v.id) } : v))) });

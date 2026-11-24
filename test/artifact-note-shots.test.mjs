@@ -467,6 +467,15 @@ test('C12 the picture, the source and their freshness on the dashboard', async (
     landing.remove();
     assert.deepEqual((await read({ 'if-none-match': after.tag })).of(lands.id).source, { at: 'main', slug: 'landing' });
     assert.equal(k.logBytes(), was);
+    // main is asked again once it moves: gone's source read null above
+    fs.cpSync(path.join(k.arts, 'landing'), path.join(k.arts, 'gone'), { recursive: true });
+    k.F.g(['add', '-A'], k.F.old);
+    k.F.g(['commit', '-qm', 'gone lands'], k.F.old);
+    k.F.g(['push', '-q', 'origin', 'main'], k.F.old);
+    assert.deepEqual((await read()).of(gone.id).source, { at: 'main', slug: 'gone' });
+    // and a log line with no source changed is in the next read
+    assert.equal((await k.run(['thread', 'say', linked, '--', 'One more word'])).status, 0);
+    assert.ok(JSON.stringify((await read()).of(linked)).includes('One more word'));
   } finally { await dash.stop(); }
 });
 
@@ -476,7 +485,13 @@ test('C13 the newest three and the live mark\'s are kept, and an old resolved th
   const day = 86400000;
   const plant = (id, stamp, ...names) => { for (const n of names.length ? names : [`${stamp}-light.png`]) write(path.join(k.shots, id, n), 'x'); };
   const resolved = async (days) => { const id = await k.note(k.subject()); k.F.hand('owner', { type: 'thread', op: 'set', id, status: 'resolved', outcome: null }, days * day); plant(id, '20261101-000000000'); return id; };
+  const status = (id, to, days) => k.F.hand('owner', { type: 'thread', op: 'set', id, status: to, ...(to === 'resolved' ? { outcome: null } : {}) }, days * day);
   const [old, recent, open] = [await resolved(15), await resolved(13), await k.note(k.subject())];
+  const reopened = await resolved(20);
+  status(reopened, 'open', 19);
+  const twice = await resolved(20);
+  status(twice, 'open', 19);
+  status(twice, 'resolved', 13);
   plant(open, '20250101-000000000');
   // folders and files that aren't the kit's to remove
   const stray = 't-20990101-000000000-nobody';
@@ -485,11 +500,14 @@ test('C13 the newest three and the live mark\'s are kept, and an old resolved th
   write(path.join(k.shots, 'notes.txt'), 'x');
   const id = await k.note(k.subject());
   plant(id, '', 'notes.txt');
+  fs.mkdirSync(path.join(k.shots, id, '20250101-000000000-light.png'));
   const stamps = [];
   for (let i = 0; i < 4; i++) { const r = await k.ready(id); assert.equal(r.status, 0, said(r)); stamps.push(r.line.shot.stamp); }
-  assert.deepEqual(k.files(id), [...stamps.slice(1).map((s) => `${s}-light.png`), 'notes.txt']);
+  assert.deepEqual(k.files(id), ['20250101-000000000-light.png', ...stamps.slice(1).map((s) => `${s}-light.png`), 'notes.txt']);
   assert.ok(!fs.existsSync(path.join(k.shots, old)), 'resolved 15 days ago');
   assert.deepEqual(k.files(recent), ['20261101-000000000-light.png'], 'resolved 13 days ago');
+  assert.deepEqual(k.files(reopened), ['20261101-000000000-light.png'], 'resolved long ago, reopened');
+  assert.deepEqual(k.files(twice), ['20261101-000000000-light.png'], 'resolved again 13 days ago');
   assert.deepEqual(k.files(open), ['20250101-000000000-light.png'], 'an open thread');
   assert.deepEqual(k.files(stray), ['20250101-000000000-light.png'], 'not in the log');
   assert.ok(fs.existsSync(path.join(k.shots, 'notes', 'a.txt')) && fs.existsSync(path.join(k.shots, 'notes.txt')));
