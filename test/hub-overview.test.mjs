@@ -1038,6 +1038,10 @@ test('org-access A14: the hub at View: Terminal tab, badge, line, Settings', CHR
   await p.until('the toast', `${hubToast} === 'View only: no terminal'`);
   assert.equal(await p.ev(`[...document.querySelectorAll('iframe')].some((x) => /terminal/.test(x.src))`), false, 'no terminal frame');
   assert.equal(await p.ev(`term`), null, 'term stays null');
+  assert.equal(await p.ev(`${termTab}.tabIndex`), -1, 'out of the Tab order');
+  await p.ev(`draw()`);
+  await p.until('a redraw', `document.querySelectorAll('#tabs [role=tab]').length >= 3`);
+  assert.equal(await p.ev(`document.querySelector('#tabs [role=tab]').textContent`), 'Terminal', 'the Terminal tab stays first after a redraw');
   // the badge ends the tab bar, after the tabs' strip; the line sits under the bar
   assert.deepEqual(await p.ev(`(() => { const b = document.getElementById('view-only'); return b && [b.textContent, b.previousElementSibling?.id, b.parentElement.tagName, b === b.parentElement.lastElementChild, !b.hidden]; })()`), ['View only', 'tabs', 'HEADER', true, true]);
   assert.equal(await p.ev(`document.querySelector('header').nextElementSibling?.id ?? null`), 'view-line');
@@ -1049,8 +1053,12 @@ test('org-access A14: the hub at View: Terminal tab, badge, line, Settings', CHR
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(await p.ev(textK('machine:park')), 'Park', 'no confirmation');
   assert.equal(await p.ev(hubToast), 'View only: you can look, but not change anything');
-  await p.ev(`${kBtn('machine:run')}.click()`);
-  await new Promise((r) => setTimeout(r, 600));
+  await focusK(p, 'machine:park');
+  await p.key(' ');
+  await p.key('Enter');
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(await p.ev(textK('machine:park')), 'Park', 'no confirmation by the keyboard either');
+  // (a Run press here proves nothing: the projects run already, and their {project} names aren't served)
   assert.deepEqual(F.asks.get(A), [], 'nothing asked');
   // Settings: the line, a disabled Off in the Notifications row, and no Test row even once notifications are on
   await p.send('Page.navigate', { url: `http://hub.localhost:${F.port}/#settings` });
@@ -1059,11 +1067,23 @@ test('org-access A14: the hub at View: Terminal tab, badge, line, Settings', CHR
   const notes = `[...document.querySelectorAll('#hub-settings .set-row')].find((x) => x.querySelector('.t')?.firstChild?.textContent.trim() === 'New Inbox items')`;
   assert.deepEqual(await p.ev(`(() => { const b = ${notes}?.querySelector('.r button'); return b && [b.textContent.trim(), b.getAttribute('aria-disabled'), b.title]; })()`), ['Off', 'true', 'View only: notifications are for Full people']);
   assert.equal(await p.ev(`Boolean(${notes}.querySelector('#notify'))`), false, 'not the Notify control');
+  assert.equal(await p.ev(`Boolean(${notes}.querySelector('.badge.amber'))`), false, 'not marked yours to change');
   await p.ev(`${notes}.querySelector('.r button').click()`);
   await p.until('its toast', `${hubToast} === 'View only: notifications are for Full people'`);
   await p.ev(`box.push = 'push'; pushSub = { endpoint: 'e' }; paintSettings(); true`);
   assert.equal(await p.ev(setRow('Test')), null, 'no Test row');
   assert.equal(await p.ev(`Boolean(document.getElementById('notify'))`), true, 'the Notify control is kept, off the page');
+});
+test('org-access A14: the hub stops and greys exactly spec §3\'s writes (one list, twice)', () => {
+  const src = hubHtml();
+  const js = /^const HUB_WRITES = ("[^\n]*");$/m.exec(src);
+  const css = /^  body\.view-only :is\(([^\n]*)\) \{ opacity: \.45; cursor: not-allowed; \}$/m.exec(src);
+  assert.ok(js && css, 'both lists found');
+  const want = ['.fleet-switch [data-fleet]', '[data-tl-send]', '#tl-c-text', '[data-tl-start]', '[data-tl-end]', '[data-tl-reopen]', '#view-notify'];
+  assert.deepEqual(JSON.parse(js[1]).split(', '), want);
+  assert.deepEqual(css[1].split(', '), want);
+  // and the listener hears the keyboard
+  assert.match(src, /for \(const type of \['click', 'submit', 'keydown'\]\) window\.addEventListener\(type, viewStop, true\);/);
 });
 test('org-access A14: the hub at Full has its Terminal tab, no badge and no line', CHROME, async (t) => {
   const got = await viewHub(t, 'full');

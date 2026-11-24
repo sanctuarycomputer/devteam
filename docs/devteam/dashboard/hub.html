@@ -1760,7 +1760,8 @@ function paintSettings() {
     notifyNode.dataset.k = 'settings:notify-off';
     notifyNode.onclick = () => oaToast('View only: notifications are for Full people');
   }
-  const notes = [setRow('New Inbox items', 'on this device', notifyNode, 'a notification on this device when any project asks you something', true)];
+  // View can't change it, so it isn't marked yours (the mock's own())
+  const notes = [setRow('New Inbox items', 'on this device', notifyNode, 'a notification on this device when any project asks you something', !view)];
   if (notifyOn() && !view) {
     // one button, kept: its answer ("Test sent") and its focus outlive the 10 s repaint
     if (!testBtn) {
@@ -1889,8 +1890,10 @@ async function refreshRole() {
   const b = await oaGet('box.json');
   if (!b || !box) return;
   box.role = OA_ROLES.includes(b.role) ? b.role : null;
-  box.level = b.level === 'full' || b.level === 'view' ? b.level : null;
-  viewOnly();
+  // a level that changed while the hub was open (moved to View or back): the Terminal tab, the frames
+  // and every control follow from the level at load, so the hub loads again
+  const level = b.level === 'full' || b.level === 'view' ? b.level : null;
+  if (level !== box.level) return void location.reload();
   box.people = null;
   if (box.role && box.role !== 'member' && typeof b.people === 'string') { try { const u = new URL(b.people, location.href); if (u.origin === location.origin) box.people = u.href; } catch {} }
   if (!box.people) { oaCloseMenu(); OA.list = null; OA.open = null; OA.openNode = null; OA.panel = null; OA.panelNode = null; OA.link = null; SEC.people = null; }
@@ -3069,6 +3072,7 @@ async function draw() {
   for (const root of [...items.keys()].sort(byRoot)) tabsEl.append(items.get(root).tab);
   if (ovTab) tabsEl.prepend(ovTab);
   if (term) tabsEl.prepend(term.tab);
+  else if (viewTermTab) tabsEl.prepend(viewTermTab);
   for (const it of items.values()) paintTab(it);
   paintOvTab();
   empty.hidden = items.size > 0 || Boolean(term) || selected === OVERVIEW || selected === SETTINGS;
@@ -3121,6 +3125,7 @@ tabsEl.addEventListener('keydown', (e) => {
   window.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'none'; say(); });
   window.addEventListener('drop', (e) => { e.preventDefault(); say(); });
 }
+// The hub on a laptop has no box.json (404); a devteam gateway answers it.
 /* viewOnly start */
 // View only (kit-250), from /box.json's level: <body> gets view-only, a "View only" badge ends the tab
 // bar, after the tabs (the hub shows no person's name), the mock's line sits under it on every tab, and a capturing
@@ -3144,6 +3149,8 @@ function viewStop(e) {
   oaToast('View only: you can look, but not change anything');
 }
 let viewListening = false;
+// the Terminal tab at View: there, disabled, and kept first by draw() as term's is (term stays null)
+let viewTermTab = null;
 function viewOnly() {
   const view = box?.level === 'view';
   document.body.classList.toggle('view-only', view);
@@ -3166,7 +3173,6 @@ function viewOnly() {
   }
 }
 /* viewOnly end */
-// The hub on a laptop has no box.json (404); a devteam gateway answers it.
 async function findBox() {
   try {
     const r = await fetch('box.json', { cache: 'no-store' });
@@ -3195,6 +3201,9 @@ async function findBox() {
     if (box.level === 'view') {
       // there but disabled: term stays null, so #terminal and a remembered Terminal tab fall back as a laptop's do
       tab.setAttribute('aria-disabled', 'true');
+      tab.setAttribute('aria-selected', 'false');
+      tab.tabIndex = -1;
+      viewTermTab = tab;
       tab.title = 'View only: no terminal';
       tab.onclick = () => oaToast('View only: no terminal');
     } else {
