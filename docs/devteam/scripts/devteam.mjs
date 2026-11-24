@@ -34839,7 +34839,10 @@ async function browserLaunchChrome(ctx, { headed }) {
   const ua = ctx.ua;
   const args = [
     ...(headed && !process.env.DEVTEAM_PUBLIC_URL ? [] : ['--headless=new']), `--user-data-dir=${ctx.profile}`, '--remote-debugging-pipe',
-    `--proxy-server=127.0.0.1:${ctx.guard.port}`, '--proxy-bypass-list=<-loopback>', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--disable-quic',
+    `--proxy-server=127.0.0.1:${ctx.guard.port}`, '--proxy-bypass-list=<-loopback>', '--disable-quic',
+    // WebRTC is kept to the proxy (kit-805): its policy under both its names (Chromium 156 reads the first),
+    // every name left to the guard to look up, and no mDNS. The policy leaves no address for mDNS to hide.
+    ...['', 'force-'].map((f) => `--${f}webrtc-ip-handling-policy=disable_non_proxied_udp`), '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1', '--disable-features=WebRtcHideLocalIpsWithMdns',
     '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync',
     ...(process.platform === 'linux' ? ['--password-store=basic'] : []), ...(ua ? [`--user-agent=${ua}`] : []),
   ];
