@@ -12815,7 +12815,7 @@ async function shotLaunch({ noSandbox = false, extraArgs = [], cap }) {
   const child = launch.child = spawn(bin, [
     '--headless=new', '--remote-debugging-pipe', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync', '--hide-scrollbars',
-    // a dump of a page that crashed is kept nowhere, and waited for by no one
+    // no dump of a page that crashed is kept
     '--disable-breakpad', '--disable-crash-reporter',
     '--renderer-process-limit=2', '--js-flags=--max-old-space-size=256', ...['', 'force-'].map((f) => `--${f}webrtc-ip-handling-policy=disable_non_proxied_udp`), '--disable-quic',
     ...extraArgs, ...(noSandbox ? ['--no-sandbox'] : []), 'about:blank',
@@ -12844,7 +12844,7 @@ async function shotLaunch({ noSandbox = false, extraArgs = [], cap }) {
     cdp.on('Target.targetCrashed', (p) => { if (p.targetId === targetId) crashed(); });
   });
   launch.crashed.catch(() => {});
-  // a Chrome that tells one of these and not another says so only to who asked
+  // asked for too, so that a crash is heard by whichever of the three Chrome tells
   await cdp.send('Target.setDiscoverTargets', { discover: true }).catch(() => {});
   await cdp.send('Inspector.enable', {}, sessionId).catch(() => {});
   return launch;
