@@ -13065,11 +13065,10 @@ async function shotOpen(launch, url, { w, h }) {
     const { frameId, isDefault } = p.context.auxData ?? {};
     if (sid === sessionId && isDefault && frameId && frameId === launch.page.frame) { launch.page.context = p.context.id; launch.page.moves++; }
   });
-  // what a move of its own looks like from here: asked for, under way, done
+  // a move is what puts another document in the frame, never a new hash in the same one
   launch.page.moves = 0;
-  for (const event of ['Page.frameRequestedNavigation', 'Page.frameStartedLoading', 'Page.frameStoppedLoading']) {
-    cdp.on(event, (p, sid) => { if (sid === sessionId && p.frameId === launch.page.frame) launch.page.moves++; });
-  }
+  cdp.on('Page.frameStartedNavigating', (p, sid) => { if (sid === sessionId && p.frameId === launch.page.frame && !/sameDocument/i.test(p.navigationType)) launch.page.moves++; });
+  cdp.on('Page.documentOpened', (p, sid) => { if (sid === sessionId && p.frame?.id === launch.page.frame) launch.page.moves++; });
   cdp.on('Page.frameAttached', (p, sid) => { if (sid === sessionId && !launch.page.frame && p.parentFrameId === targetId) launch.page.frame = p.frameId; });
   await send('Page.enable');
   await send('Runtime.enable');

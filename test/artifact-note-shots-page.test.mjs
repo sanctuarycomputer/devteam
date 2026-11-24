@@ -149,6 +149,7 @@ test('C3 the width the owner had, and the clip', async () => {
     ['a smooth scroll', { path: 'smooth.html' }, undefined, (r, p) => assert.ok(ringAt(p, MIDDLE))],
     ...[0, 20, 60].map((ms) => [`a page that moves ${ms} ms after its load`, { path: 'stub.html' }, { w: 1400, h: 860, hash: `#${ms}` }, (r, p) => { assert.equal(r.line.shot.anchor, 'found'); assert.equal(r.line.shot.dark, false); assert.ok(ringAt(p, MIDDLE)); }]),
     ['a page that moves between its light and its dark picture', { path: 'moves-dark.html' }, { w: 1400, h: 860 }, (r, p) => { assert.equal(r.line.shot.anchor, 'found'); assert.equal(r.line.shot.dark, false); assert.ok(ringAt(p, MIDDLE)); }],
+    ...[['a page that changes its hash all the time', 'hashes.html'], ['a page that writes its document anew between its two pictures', 'reopens.html']].map(([what, file]) => [what, { path: file }, { w: 1400, h: 860 }, (r, p) => { assert.equal(r.line.shot.anchor, 'found'); assert.equal(r.line.shot.dark, false); assert.ok(ringAt(p, MIDDLE)); }]),
     ['a page with a default button and no dark styles', { path: 'plain.html' }, undefined, (r) => assert.equal(r.line.shot.dark, false)],
     ['C3h', { point: { x: 40, y: 20 }, path: 'scrolled.html', anchor: undefined }, undefined, (r, p) => { assert.ok(near(p.px(40, 20), [255, 0, 0]), String(p.px(40, 20))); assert.ok(near(p.px(40, 80), [0, 0, 255])); }],
     ['C3x a query string in path', { path: 'found.html?x=1' }, undefined, (r) => assert.equal(r.line.shot.anchor, 'found')],
