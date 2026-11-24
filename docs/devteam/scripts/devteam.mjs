@@ -10642,7 +10642,12 @@ function threadCounts() {
 // its lock; entries not written for a day go on every write. True when the thread had an entry.
 // A pickup (thread show) never waits and never steps a stage back: a held lock skips it (withLock's
 // time-out would die past the show's catch), and so does an entry already naming that turn.
-function markThreadWorking(t, w, { pickup = false } = {}) {
+// kit-797, a reply in parts: part ({ n, words }) adds one to the session's partial ({ taken, bytes },
+// { same } for a repeat, or { refused }); own reads that partial without the lock ({ partial, parts }
+// or null); take ({ partial, parts }, as own read it) deletes it under the lock only if it is still
+// exactly that ({ took } or { refused }); sweep (no t, no w) deletes the words of every partial whose
+// holder died or went stale, under tryLock. Nothing dies inside the lock.
+function markThreadWorking(t, w, { pickup = false, part = null, own = false, take = null, sweep = false } = {}) {
   // The agent's pid, so a session that died mid-turn stops showing: walk up to the tmux pane's root
   // process (the one whose parent is tmux); a shell there ran the agent, which is its child on the
   // chain, else the root is the agent. Chosen by where it sits, not by a list of wrappers to skip,
@@ -10668,27 +10673,83 @@ function markThreadWorking(t, w, { pickup = false } = {}) {
   };
   // found before the lock: up to 12 `ps` calls must not run while it is held (a slow one would outlast its stale time)
   const pid = w ? agentPid() : null;
-  const change = () => {
+  // kit-797: a holder is live while its pid is (or the walk found none) and its beat is under 10
+  // minutes old, as threadWorking shows it; a partial is the holder's alone (by, pid, turn)
+  const alive = (p) => {
+    if (p === null) return true;
+    if (!Number.isInteger(p) || p <= 0) return false;
+    try { process.kill(p, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+  };
+  const live = (v, now) => alive(v.pid) && now - Date.parse(v.beat) <= 10 * 60000;
+  const mine = (v) => isObj(v) && typeof v.partial === 'string' && v.by === w.by && v.pid === pid && v.turn === w.turn;
+  const read = () => {
     let m;
     try { m = JSON.parse(readText(THREAD_WORKING_FILE) ?? '{}'); } catch {}
-    if (!isObj(m)) m = {};
+    return isObj(m) ? m : {};
+  };
+  // this session's own partial for the turn, unwritten (--after-parts): { partial, parts } or null
+  if (own) { const v = read()[t]; return mine(v) && live(v, Date.now()) ? { partial: v.partial, parts: v.parts } : null; }
+  // a partial whose holder died or went stale loses its words; a mark stays, so the card can say a
+  // reply was started and not finished, until a reply clears it, a write replaces it, or the prune
+  const drop = (m, now) => {
+    let n = 0;
+    for (const [k, v] of Object.entries(m)) if (isObj(v) && typeof v.partial === 'string' && !live(v, now)) { m[k] = { by: v.by, stage: 'unfinished', turn: v.turn, at: v.at, beat: new Date(now).toISOString(), pid: null }; n++; }
+    return n;
+  };
+  const change = () => {
+    const m = read();
+    if (sweep) { const now = Date.now(); if (drop(m, now)) writeJsonAtomic(THREAD_WORKING_FILE, m); return true; }
+    // the turn is about to be written from these parts: they go now, or a part that came in since (or a
+    // second --after-parts that took them first) refuses it, so no part is lost or written twice
+    if (take) {
+      const v = m[t];
+      if (!(mine(v) && live(v, Date.now()) && v.parts === take.parts && v.partial === take.partial)) return { refused: `your parts in ${t} changed while this turn was being written (another part came in, or another --after-parts took them): nothing was written; run --after-parts again` };
+      delete m[t];
+      writeJsonAtomic(THREAD_WORKING_FILE, m);
+      return { took: true };
+    }
     const was = isObj(m[t]) ? m[t] : null;
     if (pickup && was?.turn === w.turn) return !!was;
     if (!w && !was) return false;
     const now = Date.now();
+    const iso = new Date(now).toISOString();
     for (const [k, v] of Object.entries(m)) if (!(now - Date.parse(v?.beat) <= 86400000)) delete m[k];
-    if (w) m[t] = { by: w.by, stage: w.stage, turn: w.turn, at: was?.by === w.by && was?.turn === w.turn && typeof was.at === 'string' ? was.at : new Date(now).toISOString(), beat: new Date(now).toISOString(), pid };
-    else delete m[t];
+    drop(m, now);
+    const cur = isObj(m[t]) ? m[t] : null;
+    const at = cur?.by === w?.by && cur?.turn === w?.turn && typeof cur?.at === 'string' ? cur.at : iso;
+    let r = !!was;
+    if (part) {
+      // refusals return, never die: a die here would leave the lock behind (process.exit skips finally)
+      const held = !!cur && typeof cur.partial === 'string' && cur.turn === w.turn;
+      const ours = held && mine(cur);
+      if (held && !ours) return { refused: `${cur.by} is replying in this thread; write yours once its reply is in, or as a whole reply (thread reply ${t} "<words>")` };
+      const had = ours ? cur.parts : 0;
+      if (ours && part.n === had) return cur.last_part === part.words ? { same: had } : { refused: `part ${part.n} is already taken, with other words; send part ${had + 1} next` };
+      if (part.n !== had + 1) return { refused: `part ${part.n}: expected ${had + 1}${had ? '' : ' (a new reply, or the owner wrote since: start again from 1)'}` };
+      const partial = ours ? `${cur.partial}\n\n${part.words}` : part.words;
+      const bytes = Buffer.byteLength(partial);
+      if (bytes > TURN_MAX) return { refused: `a turn is at most ${TURN_MAX} bytes of UTF-8; with this part it would be ${bytes}: say the rest in a reply of its own` };
+      if (encodedBytes(partial) > TURN_ENCODED_MAX) return { refused: 'with this part, the reply has too many quotation marks, backslashes or control characters to keep in one log line; say it with fewer' };
+      m[t] = { by: w.by, stage: 'responding', turn: w.turn, at, beat: iso, pid, partial, parts: had + 1, part_at: iso, last_part: part.words };
+      r = { taken: had + 1, bytes };
+    } else if (w) {
+      // the same holder for the same turn keeps its partial (thread working, the pickup)
+      const keep = mine(cur) ? { partial: cur.partial, parts: cur.parts, part_at: cur.part_at, last_part: cur.last_part } : {};
+      m[t] = { by: w.by, stage: w.stage, turn: w.turn, at, beat: iso, pid, ...keep };
+    } else delete m[t];
     writeJsonAtomic(THREAD_WORKING_FILE, m);
-    return !!was;
+    return r;
   };
   // nothing to clear with no file: no lock taken, no file made
   if (!w && !fs.existsSync(THREAD_WORKING_FILE)) return false;
   fs.mkdirSync(path.dirname(THREAD_WORKING_FILE), { recursive: true });
-  return pickup ? tryLock(THREAD_WORKING_FILE, change) ?? false : withLock(THREAD_WORKING_FILE, change);
+  return pickup || sweep ? tryLock(THREAD_WORKING_FILE, change) ?? false : withLock(THREAD_WORKING_FILE, change);
 }
 // The stages to show: { "<t-id>": { by, stage, turn, at, beat } }, each from a session still alive
-// (or one whose pid the walk couldn't find) that wrote it within 10 minutes.
+// (or one whose pid the walk couldn't find) that wrote it within 10 minutes. kit-797: one with a
+// partial adds { partial, parts, part_at }, the partial cut of a box capability; a partial whose
+// holder is gone is served as { by, stage: 'unfinished', turn, at, beat } from the read that finds it
+// (its words deleted from the file), and that mark is served for a day from its beat.
 function threadWorking(now = Date.now()) {
   let m;
   try { m = JSON.parse(readText(THREAD_WORKING_FILE) ?? '{}'); } catch {}
@@ -10700,10 +10761,21 @@ function threadWorking(now = Date.now()) {
     try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
   };
   const r = {};
+  let dropped = false;
   for (const [k, v] of Object.entries(m)) {
-    if (!isObj(v) || !alive(v.pid) || !(now - Date.parse(v.beat) <= THREAD_WORKING_STALE_MS)) continue;
-    r[k] = { by: v.by, stage: v.stage, turn: v.turn, at: v.at, beat: v.beat };
+    if (!isObj(v)) continue;
+    // kit-797: a reply started and not finished shows so, whatever its pid, until cleared or a day old
+    if (v.stage === 'unfinished') { if (now - Date.parse(v.beat) <= 86400000) r[k] = { by: v.by, stage: v.stage, turn: v.turn, at: v.at, beat: v.beat }; continue; }
+    if (!alive(v.pid) || !(now - Date.parse(v.beat) <= THREAD_WORKING_STALE_MS)) {
+      // a partial whose holder is gone: its words are deleted (markThreadWorking's sweep) and its mark shown
+      if (typeof v.partial === 'string') { dropped = true; r[k] = { by: v.by, stage: 'unfinished', turn: v.turn, at: v.at, beat: v.beat }; }
+      continue;
+    }
+    // the partial cut of a box capability: the record is served outside the log's own path
+    const stream = typeof v.partial === 'string' ? { partial: uncapped(v.partial), parts: v.parts, part_at: v.part_at } : {};
+    r[k] = { by: v.by, stage: v.stage, turn: v.turn, at: v.at, beat: v.beat, ...stream };
   }
+  if (dropped) { try { markThreadWorking(null, null, { sweep: true }); } catch {} }
   return r;
 }
 // The first line new, say and ask print is the id (the dashboard reads it); for an owner turn a
@@ -10895,17 +10967,61 @@ function cmdThread() {
   // say is the owner's and reply the supervisor's or the responder's, never one falling through to the
   // other: a reply with no DEVTEAM_ROLE is still the supervisor's (as ask is), so it never lands in the
   // owner's file. The responder writes its own; anyone else goes through supervisorOnly.
+  // kit-797: a reply handed over a paragraph at a time. thread reply <t> --part <n> "<words>" puts the
+  // words on the thread's working record (markThreadWorking), never in the log; --after-parts writes
+  // the turn, those parts and its own last words joined, as any reply. Both are the replying
+  // session's: the owner's terminal and the dashboard never hold a turn (sessionBy).
+  const streamed = sub === 'reply' && (flags.part !== undefined || flags['after-parts'] !== undefined);
+  if (sub === 'say' && (flags.part !== undefined || flags['after-parts'] !== undefined)) die('--part and --after-parts go with a reply (thread reply), not the owner\'s own turn');
+  if (streamed && !sessionBy()) die('thread reply --part and --after-parts: run by the agent session replying (DEVTEAM_ROLE supervisor or responder), never the owner\'s terminal or the dashboard');
+  if (streamed && flags.part !== undefined && flags['after-parts'] !== undefined) die('--part or --after-parts: a part, or the turn after the parts, never both');
+  // the newest owner turn, by the log's own writers, and whether the caller may respond to it (as thread working)
+  const ownerTurnOf = (t, by) => {
+    const ts = [...readLog().objects.values()].filter((o) => o.type === 'turn' && o.thread === t.id).sort(byTime);
+    const turn = ts.filter((u) => u.created_by === 'owner').pop();
+    if (!turn) die(`${t.id} has no owner turn yet: nothing to respond to`);
+    const last = ts[ts.length - 1];
+    if (last.created_by !== 'owner' && by !== 'supervisor' && last.created_by !== by) die(`nothing to respond to: the last turn is ${last.created_by}'s`);
+    return turn;
+  };
+  if (streamed && flags.part !== undefined) {
+    const by = logWriter() === 'responder' ? 'responder' : (supervisorOnly('thread reply --part'), replyWriter());
+    if (!by) die('thread reply --part: the supervisor or the responder (DEVTEAM_ROLE)');
+    for (const f of ['refs', 'pending', 're', 'off-subject', 'anyway', 'files']) if (flags[f] !== undefined) die(`--${f} goes on --after-parts, with the turn: a part is words only`);
+    const [nv, ...after] = asList(flags.part);
+    if (!/^[1-9]\d{0,2}$/.test(String(nv ?? ''))) die('--part <n> "<words>": the part\'s number, from 1 (at most 999), then its words');
+    const given = [after.join(' ').trim(), wordsFrom(2)].filter(Boolean);
+    if (given.length > 1) die('--part <n> "<words>": the words once, after n or after the thread id, not both');
+    if (!given.length) die('say something: a part\'s words go after its number (--part <n> "<words>")');
+    const t = threadOpen(id, by);
+    const turn = ownerTurnOf(t, by);
+    const r = markThreadWorking(t.id, { by, stage: 'responding', turn: turn.id }, { part: { n: Number(nv), words: given[0] } });
+    if (r.refused) die(r.refused);
+    return out(r.same ? `part ${r.same} already taken: ${t.id}` : `part ${r.taken} taken: ${t.id} (${r.bytes} of ${TURN_MAX} bytes)`);
+  }
   if (sub === 'say' || sub === 'reply') {
     const by = sub === 'say' ? threadOwner().by : sub === 'reply' && logWriter() === 'responder' ? 'responder' : (supervisorOnly('thread reply'), replyWriter());
     // refused before its value is read: a reply's --files is wrong whatever it holds
     if (flags.files !== undefined && by !== 'owner') die("--files go with the owner's own turn");
     const t = threadOpen(id, by);
+    // --after-parts: the session's own parts for the newest owner turn, then its last words, if any
+    let joined;
+    let own = null;
+    let ownTurn = null;
+    if (streamed) {
+      const last = [flagStr('after-parts') ?? '', wordsFrom(2)].map((x) => x.trim()).filter(Boolean);
+      if (last.length > 1) die('--after-parts "<last words>": the words once, after the flag or after the thread id, not both');
+      ownTurn = ownerTurnOf(t, by);
+      own = markThreadWorking(t.id, { by, stage: 'responding', turn: ownTurn.id }, { own: true });
+      if (!own) die(`no parts of yours in ${t.id} for the owner's newest turn (none taken, the owner wrote since, or they went stale): write the whole reply with thread reply ${t.id} "<words>"`);
+      joined = last.length ? `${own.partial}\n\n${last[0]}` : own.partial;
+    }
     // --pending (a reply that says work follows) is a reply's; --anyway is the responder's alone
     if (flags.pending && by === 'owner') die('--pending goes with a reply (thread reply), not the owner\'s own turn');
     if (flags.anyway && by !== 'responder') die("--anyway is the responder's: it replies after the supervisor answered only to add something new");
     if (by === 'owner' && (flags.re !== undefined || flags['off-subject'] !== undefined)) die('--re goes with a reply (thread reply), and so does --off-subject: never the owner\'s own turn');
     const early = by === 'owner' ? alone(2) : undefined;
-    const words = turnText(filled(2, early));
+    const words = turnText(joined ?? filled(2, early));
     const refs = flags.refs !== undefined ? listFlag('refs') : [];
     if (refs.length && by !== 'supervisor' && by !== 'responder') die("--refs are on the supervisor's turns and the responder's: what it did, as <type>:<id>");
     if (refs.length > 8) die('--refs names at most 8 things');
@@ -10944,10 +11060,12 @@ function cmdThread() {
         if (p && !pendingOpen([...ts, { created_by: 'supervisor', created_at: nowIso() }], objects.get(t.id))) process.stderr.write(`taking over ${p.id}: "${turnGist(p.text)}"\n`);
       }
     }
+    // every guard passed: the parts are taken under the lock just before the turn is written (kit-797)
+    if (own) { const r = markThreadWorking(t.id, { by, stage: 'responding', turn: ownTurn.id }, { take: own }); if (r?.refused) die(r.refused); }
     const u = appendLog(line, by);
     out(u.id);
     if (by === 'owner') out(deliver(t, u, words, files, route));
-    else spoke(t);
+    else if (!own) spoke(t);
     return;
   }
   // an Inbox question in every respect (ask's flags, checks and refusals), asked in this thread, and
@@ -11149,7 +11267,7 @@ function cmdThread() {
     for (const x of vs) out(row(x, x.status === 'open' ? (x.waiting === 'session' ? `with ${x.with}` : waitingWords(x)) : ''));
     return;
   }
-  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread new --subject \'{"kind":"item","ref":"question:q-…"}\' [--title "<line>"] -- "<words>"   (the supervisor\'s own, about a question or goal)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--re <u-id>] [--off-subject "<why>"] [--anyway]   (the supervisor\'s or the responder\'s; --anyway the responder\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" [--off-subject "<why>"] <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting [--responder] | --open | --all] [--json]   (words may also follow --)');
+  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread new --subject \'{"kind":"item","ref":"question:q-…"}\' [--title "<line>"] -- "<words>"   (the supervisor\'s own, about a question or goal)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--re <u-id>] [--off-subject "<why>"] [--anyway]   (the supervisor\'s or the responder\'s; --anyway the responder\'s)   |   thread reply <t-id> --part <n> "<words>"   then   thread reply <t-id> --after-parts ["<last words>"] [reply\'s flags]   (a reply a paragraph at a time, from the replying session)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" [--off-subject "<why>"] <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting [--responder] | --open | --all] [--json]   (words may also follow --)');
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
@@ -35574,7 +35692,7 @@ const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   settings set <key> <1..20|none> [--for <act-id>]   (the supervisor sets max_active_tickets or max_active_per_component in its settings chore, .worktrees/chore-settings; none is no limit; --for names the owner's owner-setting act it lands, which must be the latest for the key with this value. It applies once merge --chore settings lands it)
   owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor's own settings, max_active_tickets or max_active_per_component; none is no limit. The dashboard's Settings page runs it on Save; the supervisor lands it with settings set in its settings chore)
   pane question [--json]   (what the supervisor's terminal is asking; the owner answers it on the dashboard's card, which sends that option's digit key and nothing else: no command answers it)
-  thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--re <u-id>] [--off-subject "<why>"] [--anyway] | thread ask <t-id> --question "…" [--off-subject "<why>"] <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor; the responder replies too)   reply, ask an Inbox question in it, propose resolving it; a turn nothing waits on (no owner turn owed, no open handoff) names its --refs on the thread's subject, or follows up your --pending turn with --re <that turn>, or says --off-subject "<why>"
+  thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--re <u-id>] [--off-subject "<why>"] [--anyway] | thread reply <t-id> --part <n> "<words>", then thread reply <t-id> --after-parts ["<last words>"] [reply's flags] | thread ask <t-id> --question "…" [--off-subject "<why>"] <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor; the responder replies too)   reply, ask an Inbox question in it, propose resolving it; a turn nothing waits on (no owner turn owed, no open handoff) names its --refs on the thread's subject, or follows up your --pending turn with --re <that turn>, or says --off-subject "<why>"
   thread working <t-id> [--done]   (the session holding the owner's turn: the card shows it is responding until you reply)
   thread show <t-id> [--json] | thread list [--waiting [--responder] | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply; --waiting --responder: the owner's turns owed and routed to the responder, oldest first
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]   questions print in Inbox order: the most valuable first
