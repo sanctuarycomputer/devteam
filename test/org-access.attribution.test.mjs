@@ -115,7 +115,7 @@ before(async () => {
   gw = { g, port };
   // the supervisor's pane shows a question (a menu); the dashboard, a box's, serves the hub too, and
   // was started with a DEVTEAM_PERSON of its own, which must never reach a line
-  pane = hasTmux ? menuPane(F, 'menu,menu,input') : null;
+  pane = hasTmux ? menuPane(F, 'menu,menu2,input') : null;
   const boxEnv = { DEVTEAM_PUBLIC_URL: `http://box.localhost:${port}`, DEVTEAM_GATEWAY_THREAD_KEY: pub, DEVTEAM_HELLO_MS: '1000', DEVTEAM_PERSON: JSON.stringify({ id: 'p-inherited', name: 'Mallory' }), ...(pane ? { DEVTEAM_SUPERVISOR: pane.target } : {}) };
   dash = startDashboard(F.old, F.env(boxEnv), ['--port', String(P)]);
   await until(async () => { try { const j = await (await fetch(`http://127.0.0.1:${HUB}/instances.json`)).json(); label = j.instances.find((x) => x.port === P)?.name; return !!label; } catch { return false; } }, 'the hub, listing the dashboard');
@@ -317,6 +317,10 @@ const threadLine = ['owner', { type: 'thread', id: 't-20260101-000000000-owner',
 test('log.schema.json: person is $defs.person, { id, name }, on question, turn, act and thread', () => {
   const s = schemaOf();
   assert.deepEqual([s.$defs.person?.required, ...['question', 'turn', 'act', 'thread'].map((t) => JSON.stringify(s.$defs.types[t].properties.person) === JSON.stringify(s.$defs.person))], [['id', 'name'], true, true, true, true]);
+  // the shape itself, as the spec gives it (its words aside)
+  const { description, 'x-tip': tip, ...shape } = s.$defs.person ?? {};
+  assert.deepEqual(shape, { type: 'object', required: ['id', 'name'], additionalProperties: false, properties: { id: { type: 'string', pattern: '^[A-Za-z0-9._:@/-]{1,64}$' }, name: { type: 'string', minLength: 1, maxLength: 80 } } });
+  assert.ok(description && tip, 'it says what it is');
 });
 
 test('log.schema.json: an owner line with person passes log-check, not set aside', () => {
