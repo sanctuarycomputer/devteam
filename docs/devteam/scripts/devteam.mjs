@@ -7767,7 +7767,7 @@ function choreSelfHold(slug, base, head, named, exteriorChanged = false) {
     const theirs = git(['ls-remote', 'origin', `refs/heads/chore-${slug}`], mainRoot)?.split('\t')[0] || null;
     for (const c of [...new Set(open.map((w) => w.commit).filter(Boolean))]) {
       const pushed = theirs && git(['merge-base', '--is-ancestor', c, theirs], mainRoot) !== null;
-      lines.push(`${c.slice(0, 12)}: ${pushed ? `that commit is pushed already, so the word is public on chore-${slug}: name it once checked, or start the chore again from main` : `that commit is not pushed yet: drop it from the branch (git -C .worktrees/chore-${slug} rebase or reset) and run chore pr again, or check and name the word`}`);
+      lines.push(`${c.slice(0, 12)}: ${pushed ? `that commit is pushed already, so the word is public on chore-${slug}: name it once checked, or start the chore again from main (chore drop ${slug} --reason "…", then chore start ${slug} --fresh)` : `that commit is not pushed yet: drop it from the branch (git -C .worktrees/chore-${slug} rebase or reset) and run chore pr again, or check and name the word`}`);
     }
     return lines.join('\n');
   }
@@ -16776,7 +16776,7 @@ function cmdChore() {
     const d = appendLog({ type: 'decision', class: 'chore-drop', what: `dropped chore-${slugName} at ${b.tip}: ${reason}`, rationale: reason, refs: [`chore-${slugName}`], reversible: true, authority: 'constitution' }, 'supervisor');
     return out(`${d.id}\nchore-${slugName} stays on every ref${fs.existsSync(path.join(mainRoot, '.worktrees', `chore-${slugName}`)) ? `, and so does .worktrees/chore-${slugName}` : ''}; chore start ${slugName} --fresh starts it again from main`);
   }
-  if (sub !== 'pr' || !slugName || !flagStr('title')) die('usage: chore start <slug>   |   chore pr <slug> --title "<summary>" [--names-checked <word,…>]');
+  if (sub !== 'pr' || !slugName || !flagStr('title')) die('usage: chore start <slug> [--what "…"] [--for <refs>] [--fresh]   |   chore adopt <slug> [--what "…"] [--for <refs>]   |   chore drop <slug> --reason "<why>"   |   chore pr <slug> --title "<summary>" [--names-checked <word,…>]');
   // --names-checked a,b: the self.md and exterior.md drafts' words the supervisor has checked are fine to name in public
   const named = flags['names-checked'] === undefined ? null : asList(flags['names-checked']).flatMap((v) => String(v).split(',')).map((x) => x.trim());
   if (named && (!named.length || named.some((x) => !x))) die('--names-checked needs one or more words, comma-separated');
@@ -35597,7 +35597,7 @@ const HELP_GOALS = `Goals and retros
   goal order [<g-id> …] --approved <qid>   supervisor: apply an answered goal-change --order question, exactly the order it proposed
   goal reading <g-id> --run | --approved <qid> | --value n   a reading by the measure's source: --run runs a repo check on main or a prod check; --approved records an owner goal's yes from its answered goal-met question; --value only for a goal with no source, or the owner's own (--owner)
   retro [--due | --print | close <date> --summary s --refs ids]
-  chore start <slug> | chore pr <slug> --title t [--names-checked <word,…>]    a supervisor-written file (design, retro, architecture) and its PR; on a public or unknown repo it holds a self.md or exterior.md draft's unchecked names (capitalised words main's strategy.md and dependency files don't contain) until --names-checked names each, and an exterior.md naming an organisation or work main's strategy.md doesn't, which --names-checked never clears`;
+  chore start <slug> [--what "…"] [--for <refs>] [--fresh] | chore adopt <slug> [--what "…"] [--for <refs>] | chore drop <slug> --reason "…" | chore pr <slug> --title t [--names-checked <word,…>]    a supervisor-written file (design, retro, architecture) and its PR; on a public or unknown repo it holds a self.md or exterior.md draft's unchecked names (capitalised words main's strategy.md and dependency files don't contain) until --names-checked names each, and an exterior.md naming an organisation or work main's strategy.md doesn't, which --names-checked never clears; chore start keeps an open branch's commits, refuses a dropped one unless --fresh, and records --what (the chore's title for the owner) and --for (the refs it serves); chore adopt records an existing branch; chore drop ends a chore and keeps its branch`;
 const HELP_RECURRING = `Jobs under Upkeep (supervisor.md, Recurring jobs)
   recurring list [--json]   main's jobs (project/recurring.json at main) in name order: kind, every, title, who registered each through an answered recurring-edit question (or not), the runs a day against the cap of 100, and the pending questions; a file on main that doesn't read prints its problem and exits 1. --json: { entries: [{ name, entry, runs_a_day, registered: { qid, at, by, act } | null, problems?: ["…"] }], runs_a_day, cap, pending: [{ qid, name, change, status }] }; problems is there only when an entry breaks the shape (validate says the same)
   recurring show <name> [--json]   one job on main in full, who registered it, its problems if it breaks the shape, and its pending questions
