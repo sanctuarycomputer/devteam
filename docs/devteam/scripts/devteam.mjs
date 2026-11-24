@@ -27127,21 +27127,39 @@ function makeSession(role) {
       write(['config', '--replace-all', `branch.${branch}.remote`, 'origin'], `set ${branch}'s upstream`);
       write(['config', '--replace-all', `branch.${branch}.merge`, `refs/heads/${at.branch ? branch : mb}`], `set ${branch}'s upstream`);
     }
+    const ref = `refs/heads/${branch}`;
+    // A branch that was read is checked out where it is, so git itself refuses one another worktree has
+    // (mid-rebase too), and only then moved, from what was read: git's own -B drops a commit that
+    // landed since. A new one is made only if it still isn't there.
+    if (!local) {
+      const made = responderGit(['update-ref', '--no-deref', ref, sha, '0'.repeat(sha.length)], R.root);
+      if (made.status !== 0) die(`could not make ${branch}: ${redactUrl(firstLine(made.stderr).replace(/^fatal: /, '')) || `exit ${made.status}`}; nothing was started`);
+    }
     // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
-    // -B only over a branch that was read: -b refuses one a failed read called missing
-    R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', local ? '-B' : '-b', branch, wt, sha], R.root);
-    // The add sets the branch and then checks it out by name, so a session moving it in between would
-    // win: what landed is read back, and undone if it isn't the sha chosen, on the branch (its full
-    // name: a tag of the same name makes git print a longer short one). The branch goes back to where
-    // it was before the add, unless it moves again after this read.
+    const added = gitRun(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--no-guess-remote', wt, branch], R.root);
+    if (added.status !== 0) die(`git worktree add ${branch} failed: ${redactUrl(firstLine(added.err).replace(/^fatal: /, '')) || `exit ${added.status}`}; nothing was started`);
+    // The add checks the branch out by name, so a session moving it meanwhile would win: what landed is
+    // read back, and the worktree undone if it isn't the sha expected, on the branch (its full name: a
+    // tag of the same name makes git print a longer short one). A branch still where this launch put it
+    // goes back; one that moved keeps what landed on it.
     const read = (args, cwd) => { const r = responderGit(args, cwd); return r.status === 0 ? r.stdout.trim() : null; };
-    const seen = read(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], R.root);
-    const head = read(['rev-parse', '--verify', '--quiet', 'HEAD'], wt);
-    if (head !== sha || read(['symbolic-ref', 'HEAD'], wt) !== `refs/heads/${branch}`) {
+    const undo = (why) => {
       R.git(['worktree', 'remove', '--force', wt], R.root);
-      if (local) R.git(['update-ref', '--no-deref', `refs/heads/${branch}`, local, seen ?? '0'.repeat(local.length)], R.root);
-      else if (seen) R.git(['update-ref', '--no-deref', '-d', `refs/heads/${branch}`, seen], R.root);
-      die(`the new worktree ${head === sha ? `isn't on ${branch}` : `holds ${head ? short(head) : 'no commit'}, not ${short(sha)}`}: something moved ${branch} while it was checked out, so nothing was started; try again`);
+      if (local !== sha) responderGit(['update-ref', '--no-deref', ...(local ? [ref, local, sha] : ['-d', ref, sha])], R.root);
+      die(`${why}, so nothing was started; try again`);
+    };
+    const landed = (want) => {
+      const head = read(['rev-parse', '--verify', '--quiet', 'HEAD'], wt);
+      const on = read(['symbolic-ref', 'HEAD'], wt) === ref;
+      if (head !== want || !on) undo(`the new worktree ${head === want ? `isn't on ${branch}` : `holds ${head ? short(head) : 'no commit'}, not ${short(want)}`}: something moved ${branch} while it was checked out`);
+    };
+    landed(local ?? sha);
+    if (local && local !== sha) {
+      const moved = responderGit(['update-ref', '--no-deref', ref, sha, local], R.root);
+      if (moved.status !== 0) undo(`could not move ${branch} to ${short(sha)}: something moved it while it was checked out`);
+      const filled = responderGit(['read-tree', '--reset', '-u', sha], wt);
+      if (filled.status !== 0) undo(`could not check out ${short(sha)}: ${redactUrl(firstLine(filled.stderr).replace(/^(fatal|error): /, '')) || `exit ${filled.status}`}`);
+      landed(sha);
     }
     madeWorktree = true;
   }

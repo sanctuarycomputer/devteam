@@ -125,7 +125,7 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
       assert.ok(fs.existsSync(said), 'H1: origin/main was moved before the checkout');
       assert.equal(marker(wt('ch-07-g')), 'real\n', 'H1: origin\'s main, not the moved ref');
     });
-    await t.test('H2: a local branch at origin\'s commit is checked out by sha, not by its name read again', tmux, () => {
+    await t.test('H2: a local branch moved between the read and the checkout is refused, not used', tmux, () => {
       ticket('ch-10-j');
       git(['push', '-q', 'origin', `${real}:refs/heads/ticket/ch-10-j`], old);
       git(['branch', 'ticket/ch-10-j', real], old);
@@ -135,9 +135,11 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
       const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
       write(path.join(bin, 'git'), `#!/bin/sh\ncase " $* " in *" worktree add "*) [ -e '${said}' ] || { '${realGit}' update-ref refs/heads/ticket/ch-10-j ${moved} && echo moved > '${said}'; } ;; esac\nexec '${realGit}' "$@"\n`);
       fs.chmodSync(path.join(bin, 'git'), 0o755);
-      ok(old, ['worker', 'ch-10-j'], { ...SUP, PATH: `${bin}${path.delimiter}${process.env.PATH}` });
+      const r = run(old, ['worker', 'ch-10-j'], { ...SUP, PATH: `${bin}${path.delimiter}${process.env.PATH}` });
       assert.ok(fs.existsSync(said), 'H2: the branch was moved before the checkout');
-      assert.equal(marker(wt('ch-10-j')), 'real\n', 'H2: origin\'s commit, not the moved branch');
+      assert.notEqual(r.status, 0, `H2: refused, not started: ${r.out}`);
+      assert.match(r.err, /the new worktree holds [0-9a-f]{8}, not [0-9a-f]{8}: .*so nothing was started/, 'H2');
+      assert.ok(!fs.existsSync(wt('ch-10-j')), 'H2: no worktree');
     });
     await t.test('B9: a ticket that ran, its local branch diverged from origin\'s, is refused', tmux, () => {
       ticket('ch-11-k');
@@ -346,6 +348,135 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
       assert.ok(!hasRef(old, 'refs/remotes/origin/ticket/ch-31-b'), 'K2: the tracking ref is gone');
       assert.equal(git(['for-each-ref', 'refs/devteam/kept/ticket/ch-31-b/'], old), '', 'K2: nothing kept');
     });
+    await t.test('M1: a commit that lands on a ran ticket\'s branch before the checkout stays on it', tmux, () => {
+      const head = ranWithWork('ch-32-c');
+      const landed = planted(old, head, 'landed');
+      const b = before('git-lands-1', "*' worktree add '*", (g) => `'${g}' update-ref refs/heads/ticket/ch-32-c ${landed}`);
+      const r = run(old, ['worker', 'ch-32-c', '--resume'], b.env);
+      assert.ok(fs.existsSync(b.said), 'M1: the commit landed');
+      assert.equal(git(['rev-parse', 'refs/heads/ticket/ch-32-c'], old), landed, 'M1: it stays on the branch');
+      assert.notEqual(r.status, 0, `M1: refused, not started: ${r.out}`);
+      assert.ok(!fs.existsSync(wt('ch-32-c')), 'M1: no worktree');
+    });
+    await t.test('M2: a commit that lands on a ran ticket\'s branch behind origin\'s main, after the read, stays on it', tmux, () => {
+      ticket('ch-33-d');
+      ok(old, ['worker', 'ch-33-d'], SUP);
+      ok(old, ['worker', 'ch-33-d', '--remove', '--force'], SUP);
+      const at = git(['rev-parse', 'refs/heads/ticket/ch-33-d'], old);
+      git(['commit', '-q', '--allow-empty', '-m', 'newer main'], old);
+      git(['push', '-q', 'origin', 'main'], old);
+      const landed = planted(old, at, 'landed');
+      const b = before('git-lands-2', "*' merge-base '*", (g) => `'${g}' update-ref refs/heads/ticket/ch-33-d ${landed}`);
+      const r = run(old, ['worker', 'ch-33-d', '--resume'], b.env);
+      assert.ok(fs.existsSync(b.said), 'M2: the commit landed');
+      assert.equal(git(['rev-parse', 'refs/heads/ticket/ch-33-d'], old), landed, 'M2: it stays on the branch');
+      assert.notEqual(r.status, 0, `M2: refused, not started: ${r.out}`);
+      assert.ok(!fs.existsSync(wt('ch-33-d')), 'M2: no worktree');
+    });
+    await t.test('M3: a branch behind origin that another worktree has is refused and not moved', tmux, () => {
+      ticket('ch-34-e');
+      ok(old, ['worker', 'ch-34-e'], SUP);
+      ok(old, ['worker', 'ch-34-e', '--remove', '--force'], SUP);
+      const at = git(['rev-parse', 'refs/heads/ticket/ch-34-e'], old);
+      git(['commit', '-q', '--allow-empty', '-m', 'newer main again'], old);
+      git(['push', '-q', 'origin', 'main'], old);
+      const other = path.join(F.base, 'elsewhere');
+      git(['worktree', 'add', '-q', other, 'ticket/ch-34-e'], old);
+      const r = run(old, ['worker', 'ch-34-e', '--resume'], SUP);
+      assert.notEqual(r.status, 0, `M3: refused, not started: ${r.out}`);
+      assert.equal(git(['rev-parse', 'refs/heads/ticket/ch-34-e'], old), at, 'M3: the branch is unmoved');
+      assert.equal(git(['status', '--porcelain'], other), '', 'M3: the other worktree is clean');
+    });
+    await t.test('M4: a commit that lands on a ran ticket\'s branch during the checkout stays on it', tmux, () => {
+      ticket('ch-43-n');
+      ok(old, ['worker', 'ch-43-n'], SUP);
+      ok(old, ['worker', 'ch-43-n', '--remove', '--force'], SUP);
+      const at = git(['rev-parse', 'refs/heads/ticket/ch-43-n'], old);
+      git(['commit', '-q', '--allow-empty', '-m', 'newest main'], old);
+      git(['push', '-q', 'origin', 'main'], old);
+      const landed = planted(old, at, 'landed');
+      const b = before('git-lands-3', "*' worktree add '*", (g) => `{ '${g}' "$@" && '${g}' update-ref refs/heads/ticket/ch-43-n ${landed} && exit 0; }`);
+      const r = run(old, ['worker', 'ch-43-n', '--resume'], b.env);
+      assert.notEqual(r.status, 0, `M4: refused, not started: ${r.out}`);
+      assert.equal(git(['rev-parse', 'refs/heads/ticket/ch-43-n'], old), landed, 'M4: it stays on the branch');
+      assert.ok(!fs.existsSync(wt('ch-43-n')), 'M4: no worktree');
+    });
+    for (const [tag, id, words, what] of [['M5', 'ch-44-o', `*' update-ref --no-deref refs/heads/ticket/ch-44-o '*`, 'before the move'], ['M6', 'ch-45-p', `*' read-tree '*`, 'after the move']]) {
+      await t.test(`${tag}: a commit that lands on a ran ticket\'s branch ${what} stays on it`, tmux, () => {
+        ticket(id);
+        ok(old, ['worker', id], SUP);
+        ok(old, ['worker', id, '--remove', '--force'], SUP);
+        const at = git(['rev-parse', `refs/heads/ticket/${id}`], old);
+        git(['commit', '-q', '--allow-empty', '-m', `main for ${tag}`], old);
+        git(['push', '-q', 'origin', 'main'], old);
+        const landed = planted(old, at, 'landed');
+        const b = before(`git-lands-${tag}`, words, (g) => `'${g}' update-ref refs/heads/ticket/${id} ${landed}`);
+        const r = run(old, ['worker', id, '--resume'], b.env);
+        assert.ok(fs.existsSync(b.said), `${tag}: the commit landed`);
+        assert.equal(git(['rev-parse', `refs/heads/ticket/${id}`], old), landed, `${tag}: it stays on the branch`);
+        assert.notEqual(r.status, 0, `${tag}: refused, not started: ${r.out}`);
+        assert.ok(!fs.existsSync(wt(id)), `${tag}: no worktree`);
+      });
+    }
+    await t.test('M7: a branch behind origin in mid-rebase in another worktree is refused and not moved', tmux, () => {
+      ticket('ch-46-q');
+      ok(old, ['worker', 'ch-46-q'], SUP);
+      ok(old, ['worker', 'ch-46-q', '--remove', '--force'], SUP);
+      const at = git(['rev-parse', 'refs/heads/ticket/ch-46-q'], old);
+      git(['commit', '-q', '--allow-empty', '-m', 'main for M7'], old);
+      git(['push', '-q', 'origin', 'main'], old);
+      const other = path.join(F.base, 'rebasing');
+      git(['worktree', 'add', '-q', other, 'ticket/ch-46-q'], old);
+      try { execFileSync('git', ['rebase', '-q', '--exec', 'false', '--root'], { cwd: other, stdio: 'ignore' }); } catch {}
+      assert.ok(fs.existsSync(git(['rev-parse', '--path-format=absolute', '--git-path', 'rebase-merge'], other)), 'M7: mid-rebase');
+      const r = run(old, ['worker', 'ch-46-q', '--resume'], SUP);
+      assert.notEqual(r.status, 0, `M7: refused, not started: ${r.out}`);
+      assert.equal(git(['rev-parse', 'refs/heads/ticket/ch-46-q'], old), at, 'M7: the branch is unmoved');
+      assert.ok(!fs.existsSync(wt('ch-46-q')), 'M7: no worktree');
+    });
+    await t.test('M8: a retry after a push tracks the branch, whatever a refused launch wrote', tmux, () => {
+      const head = ranWithWork('ch-47-r');
+      git(['config', '--remove-section', 'branch.ticket/ch-47-r'], old);
+      const other = path.join(F.base, 'elsewhere-2');
+      git(['worktree', 'add', '-q', other, 'ticket/ch-47-r'], old);
+      assert.notEqual(run(old, ['worker', 'ch-47-r', '--resume'], SUP).status, 0, 'M8: refused');
+      git(['worktree', 'remove', '--force', other], old);
+      git(['push', '-q', 'origin', `${head}:refs/heads/ticket/ch-47-r`], old);
+      git(['config', '--add', 'branch.ticket/ch-47-r.merge', 'refs/heads/main'], old); // several values
+      const r = run(old, ['worker', 'ch-47-r', '--resume'], SUP);
+      assert.equal(r.status, 0, `M8: the retry starts: ${r.err}`);
+      assert.equal(upstream(old, 'ticket/ch-47-r'), 'origin/ticket/ch-47-r', 'M8: tracks its own branch');
+    });
+    await t.test('M9: when the files can\'t be checked out at the moved branch, the launch is undone and the branch put back', tmux, () => {
+      ticket('ch-53-x');
+      ok(old, ['worker', 'ch-53-x'], SUP);
+      ok(old, ['worker', 'ch-53-x', '--remove', '--force'], SUP);
+      const at = git(['rev-parse', 'refs/heads/ticket/ch-53-x'], old);
+      git(['commit', '-q', '--allow-empty', '-m', 'main for M9'], old);
+      git(['push', '-q', 'origin', 'main'], old);
+      const r = run(old, ['worker', 'ch-53-x', '--resume'], refusing('git-no-files', `*' read-tree '*`));
+      assert.notEqual(r.status, 0, `M9: refused, not started: ${r.out}`);
+      assert.ok(!fs.existsSync(wt('ch-53-x')), 'M9: no worktree');
+      assert.equal(git(['rev-parse', 'refs/heads/ticket/ch-53-x'], old), at, 'M9: the branch is back');
+      ok(old, ['worker', 'ch-53-x', '--resume'], SUP);
+      assert.equal(git(['rev-parse', 'HEAD'], wt('ch-53-x')), git(['rev-parse', 'origin/main'], old), 'M9: the retry is at origin\'s main');
+      assert.equal(git(['status', '--porcelain'], wt('ch-53-x')), '', 'M9: the retry\'s files are its commit\'s');
+    });
+    // two launches of one ticket: a whole one runs just before the other's call that matches
+    for (const [tag, id, words, prep] of [['T1', 'ch-54-y', "*' worktree add '*", (x) => { ticket(x); closeWindow(F, ok(old, ['worker', x], SUP)); ok(wt(x), ['phase', 'build'], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: x }); git(['commit', '-q', '--allow-empty', '-m', 'unpushed work'], wt(x)); ok(old, ['worker', x, '--remove', '--force'], SUP); git(['config', '--remove-section', `branch.ticket/${x}`], old); }], ['T2', 'ch-55-z', "*' update-ref --no-deref refs/heads/ticket/ch-55-z '*", ticket]]) {
+      await t.test(`${tag}: of two launches of one ticket, the winner keeps its upstream`, tmux, () => {
+        prep(id);
+        const other = path.join(F.base, `other-${tag}.sh`);
+        const b = before(`git-second-${tag}`, words, () => `sh '${other}'`);
+        // the inner launch runs with a plain PATH, so its own git isn't the stand-in
+        write(other, `cd '${old}' && PATH='${process.env.PATH}' '${process.execPath}' docs/devteam/scripts/devteam.mjs worker ${id} >/dev/null 2>&1\n`);
+        const r = run(old, ['worker', id], b.env);
+        assert.notEqual(r.status, 0, `${tag}: the other is refused: ${r.out}`);
+        assert.ok(fs.existsSync(b.said), `${tag}: the other launch finished`);
+        assert.ok(fs.existsSync(wt(id)), `${tag}: it has its worktree`);
+        assert.equal(upstream(old, `ticket/${id}`), 'origin/main', `${tag}: its upstream stays`);
+      });
+    }
     await t.test('K8: a symbolic ref planted at the kept name is not written through', tmux, () => {
       const head = ranWithWork('ch-56-a');
       const lost = planted(old, head, 'lost');
