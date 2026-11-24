@@ -24578,7 +24578,7 @@ async function dashRoutesUpload(D, req, res, q) {
   if ((req.method === 'GET' || req.method === 'HEAD') && req.url.startsWith('/upload/')) return await serveLaptopUpload(req, res, req.url.split('?')[0], send);
   return DASH_NEXT;
 }
-// /api/hello; / and /index.html; /api/data (with viewer: { level } for a box's level header); /api/viewer
+// /api/hello (with level, for a box's level header); / and /index.html; /api/data (with viewer: { level })
 async function dashRoutesPage(D, req, res, q) {
   // The level the box's gateway says this request is (kit-250): exactly one x-devteam-level line,
   // exactly full or view, or null. Only the gateway sets it (it drops the browser's copy); a laptop
@@ -24588,12 +24588,19 @@ async function dashRoutesPage(D, req, res, q) {
     for (let i = 0; i < req.rawHeaders.length; i += 2) if (req.rawHeaders[i].toLowerCase() === 'x-devteam-level') lines.push(req.rawHeaders[i + 1]);
     return lines.length === 1 && (lines[0] === 'full' || lines[0] === 'view') ? lines[0] : null;
   };
+  // the body with the level spliced in as its first key, for a box's level: /api/data's viewer: { level },
+  // hello's level (its viewer: 1 is a kit capability the gateway reads). The string it was given never
+  // changes (a kept one stays as it was), and only an object is spliced.
+  const withViewer = (body, key = 'viewer') => {
+    const level = viewerLevel();
+    const open = body.search(/\S/);
+    if (!level || open < 0 || body[open] !== '{') return body;
+    const rest = body.slice(open + 1);
+    return `{"${key}":${JSON.stringify(key === 'viewer' ? { level } : level)}${rest.trimStart().startsWith('}') ? '' : ','}${rest}`;
+  };
   const { page, pageCsp, send, helloBody, stageFrames, dashboardData, logWatch } = D;
-  // the artifact and preview viewer has no /api/data: it asks for the level alone
-  if (req.method === 'GET' && req.url === '/api/viewer') {
-    return send(res, 200, 'application/json', JSON.stringify({ level: viewerLevel() }), { 'cache-control': 'no-store' });
-  }
-  if (req.method === 'GET' && req.url === '/api/hello') return send(res, 200, 'application/json', helloBody());
+  // hello carries it too, as level: the artifact and preview viewer reads no /api/data, and polls this already
+  if (req.method === 'GET' && req.url === '/api/hello') return send(res, 200, 'application/json', withViewer(helloBody(), 'level'));
   // frame-src 'self': a frame of this page (a review page, an HTML mock) may navigate itself, and
   // this keeps it on the dashboard; a sandbox alone would let it load any URL, query string and all.
   if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
@@ -24618,14 +24625,8 @@ async function dashRoutesPage(D, req, res, q) {
     try { version = sha256(fs.readFileSync(page)).slice(0, 16); } catch {}
     // a run that failed or timed out serves the last good data, marked stale
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-devteam-page': version, ...(r.ok ? {} : { 'x-devteam-stale': 'true' }) });
-    const body = r.ok ? r.stdout : D.lastData;
-    // viewer: { level } spliced in as the first key; the kept string itself never changes
-    const level = viewerLevel();
-    // only an object, as dashboard-data prints: anything else goes as it is
-    const open = body.search(/\S/);
-    if (!level || open < 0 || body[open] !== '{') return res.end(body);
-    const rest = body.slice(open + 1);
-    return res.end(`{"viewer":${JSON.stringify({ level })}${rest.trimStart().startsWith('}') ? '' : ','}${rest}`);
+    // a fresh run's or the kept last good data, with the viewer for a box's level (D.lastData untouched)
+    return res.end(withViewer(r.ok ? r.stdout : D.lastData));
   }
   return DASH_NEXT;
 }

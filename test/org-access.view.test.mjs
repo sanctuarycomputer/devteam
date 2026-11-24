@@ -641,7 +641,7 @@ test('org-access A14: in Chrome, the invite page says view only for a View invit
   } finally { await chrome.close(); await gw.close(); }
 });
 
-// --- the dashboard learns the level: /api/data's viewer and GET /api/viewer (T3) ------------------
+// --- the dashboard learns the level: /api/data's viewer and /api/hello's level (T3) ---------------
 import { bareProject, dashboardOnFreePort } from './lib/kit.mjs';
 // A real dashboard on a bare project (its own HOME; kit.mjs points it at this file's hub port).
 async function realDashboard(name, extra = {}) {
@@ -662,7 +662,7 @@ const getWith = (port, route, lines = []) => new Promise((resolve, reject) => {
   });
   r.on('error', reject);
 });
-test('org-access A14: /api/data\'s viewer echoes the gateway\'s level, and nothing else', { timeout: 120000 }, async () => {
+test('org-access A14: /api/data\'s viewer and /api/hello\'s level echo the gateway\'s level, and nothing else', { timeout: 120000 }, async () => {
   const R = await realDashboard('c16');
   try {
     const data = async (lines) => { const r = await getWith(R.port, '/api/data', lines); assert.equal(r.status, 200, r.body.slice(0, 200)); return JSON.parse(r.body); };
@@ -685,14 +685,19 @@ test('org-access A14: /api/data\'s viewer echoes the gateway\'s level, and nothi
       assert.deepEqual(d.viewer, { level }, level);
       assert.equal(Object.keys(d)[0], 'viewer', `${level}: its first key`);
       assert.deepEqual(Object.keys(d).slice(1), Object.keys(plain), `${level}: and the rest as it was`);
-      const v = await getWith(R.port, '/api/viewer', [['x-devteam-level', level]]);
-      assert.equal(v.status, 200);
-      assert.equal(v.headers['cache-control'], 'no-store');
-      assert.deepEqual(JSON.parse(v.body), { level }, `/api/viewer: ${level}`);
+      const h = await getWith(R.port, '/api/hello', [['x-devteam-level', level]]);
+      assert.equal(h.status, 200);
+      assert.equal(h.headers['cache-control'], 'no-store');
+      const hj = JSON.parse(h.body);
+      assert.equal(hj.level, level, `/api/hello: ${level}`);
+      assert.equal(Object.keys(hj)[0], 'level', `/api/hello: ${level} first`);
+      assert.equal(hj.viewer, 1, `/api/hello: ${level}: its viewer capability kept`);
     }
+    const helloPlain = (await getWith(R.port, '/api/hello', [])).body;
     for (const lines of [[], [['x-devteam-level', 'admin']], [['x-devteam-level', 'view'], ['x-devteam-level', 'full']]]) {
-      assert.deepEqual(JSON.parse((await getWith(R.port, '/api/viewer', lines)).body), { level: null }, `/api/viewer: ${JSON.stringify(lines)}`);
+      assert.equal((await getWith(R.port, '/api/hello', lines)).body, helloPlain, `/api/hello as it was: ${JSON.stringify(lines)}`);
     }
+    assert.equal(JSON.parse(helloPlain).level, undefined, 'a laptop\'s hello has no level');
   } finally { await R.close(); }
 });
 
@@ -806,7 +811,7 @@ test('org-access A14: a dashboard served at View shows View only and sends no wr
     await p.click(`${card2} [data-answer]`);
     await until(p, `window.__posts.length > 0`, 'the press posts once Full');
     p.close();
-    // the viewer tab learns the level from /api/viewer
+    // the viewer tab learns the level from /api/hello
     const v = await at('view', '/view/artifact/view-mock');
     await until(v, `document.body.classList.contains('view-only')`, 'the viewer tab gets the class');
     await until(v, `(() => { const r = document.getElementById('view-only')?.getBoundingClientRect(); return Boolean(r && r.width > 0 && r.height > 0); })()`, 'the viewer tab shows the badge');

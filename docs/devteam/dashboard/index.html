@@ -8620,7 +8620,7 @@ function renderOverview() {
 
 /* viewOnly start */
 // View only (kit-250): served to a view-only person (the box's gateway says so in /api/data's viewer, or
-// /api/viewer for the viewer tab), the page says "View only" beside the kit badge and greys the writes,
+// /api/hello's level for the viewer tab, which reads no /api/data), the page says "View only" beside the kit badge and greys the writes,
 // and a press on one shows why instead of sending it. The gateway refuses those writes anyway; this is
 // so nobody presses and waits. Navigation is left alone: tabs, filters, links, Back, peeks, copy.
 const VIEW_WRITES = "[data-answer], [data-cant], [data-reply], [data-dontuse], [data-post-secrets], [data-overrule-send], [data-correct-send], [data-rv-answer], [data-decline], [data-rv-decline], [data-know], [data-oa-know], [data-oa-goal], [data-hold-id], [data-met-id], [data-goal-move], [data-preview-start], [data-preview-stop], [data-forget], [data-limit-save], [data-limit-none], [data-limit-step], .fleet-switch [data-fleet], [data-checknow], [data-tl-send], [data-tl-accept], [data-tl-notyet], [data-tl-resolve-go], [data-tl-reopen], [data-goal-grip], [data-ask-option], [data-ask-esc], a[href*=\"/public/\"], .dropbox[data-drop] textarea, .dropbox[data-drop] input, #tl-c-text";
@@ -8683,7 +8683,7 @@ function viewOnly(level) {
     for (const type of ['click', 'submit', 'drop', 'pointerdown', 'keydown']) window.addEventListener(type, viewStop, true);
   }
 }
-if (VIEWER) fetch('/api/viewer', { cache: 'no-store' }).then((r) => r.json()).then((j) => viewOnly(j.level)).catch(() => {});
+if (VIEWER) fetch('/api/hello', { cache: 'no-store' }).then((r) => r.json()).then((j) => viewOnly(j.level ?? null)).catch(() => {});
 /* viewOnly end */
 function render(d) {
   DATA = d;
