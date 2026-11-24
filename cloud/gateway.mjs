@@ -331,6 +331,13 @@ export function ownerSettingSignature(privateKeyPem, port, body, ts = Date.now()
   const msg = Buffer.from(`devteam-owner-setting-v1\n${port}\n${ts}\n${nonce}\n${crypto.createHash('sha256').update(body).digest('hex')}`);
   return { 'x-devteam-gateway-ts': String(ts), 'x-devteam-gateway-nonce': nonce, 'x-devteam-gateway-sig': b64u(crypto.sign(null, msg, crypto.createPrivateKey(privateKeyPem))) };
 }
+// The same for the owner's terminal posts on an instance's dashboard (terminal@1 §3): keys under
+// devteam-term-keys-v1 and the shell's open under devteam-term-open-v1, each naming its which, so a
+// signature for one route, or one which, is never good for another, nor for a pane answer or a setting.
+export function termSignature(privateKeyPem, domain, port, which, body, ts = Date.now(), nonce = b64u(crypto.randomBytes(24))) {
+  const msg = Buffer.from(`${domain}\n${port}\n${which}\n${ts}\n${nonce}\n${crypto.createHash('sha256').update(body).digest('hex')}`);
+  return { 'x-devteam-gateway-ts': String(ts), 'x-devteam-gateway-nonce': nonce, 'x-devteam-gateway-sig': b64u(crypto.sign(null, msg, crypto.createPrivateKey(privateKeyPem))) };
+}
 const claimLive = (s) => Boolean(s.claimHash) && (s.claimExpires ?? 0) > Date.now();
 const claimUrl = (pub, token) => `${pub}/auth/claim#${token}`;
 function newClaim(store) {
@@ -1233,7 +1240,9 @@ export function createGateway(opts = {}) {
   // anyone else's in their row. Devices aren't what `rev` counts, so neither bumps it.
   const subsOf = (s, person) => (isOwner(person) ? s.pushSubs ?? [] : (s.people ?? []).find((p) => p.id === person.id)?.pushSubs ?? []);
   const withSubs = (s, person, subs) => (isOwner(person) ? { ...s, pushSubs: subs } : { ...s, people: (s.people ?? []).map((p) => (p.id === person.id ? { ...p, pushSubs: subs } : p)) });
-  const everySub = (s) => [...(s.pushSubs ?? []), ...(s.people ?? []).flatMap((p) => p.pushSubs ?? [])];
+  // Whom news goes to: the owner's devices and every Full person's. A View person gets none (kit-801),
+  // even if their row holds a device (a hand-edited state); removing a dead one still reads every list.
+  const everySub = (s) => [...(s.pushSubs ?? []), ...(s.people ?? []).flatMap((p) => (levelOf(p) === 'view' ? [] : p.pushSubs ?? []))];
   // Every list, everyone's, keeping only what `keep` passes.
   const keepSubs = (s, keep) => ({ ...s, pushSubs: (s.pushSubs ?? []).filter(keep), ...(s.people ? { people: s.people.map((p) => ({ ...p, pushSubs: (p.pushSubs ?? []).filter(keep) })) } : {}) });
   // "Yours" before "last", so nobody learns anything of anyone else's. On success: whoever held it
@@ -1934,22 +1943,46 @@ export function createGateway(opts = {}) {
   // The body is read whole (it is small) so its hash is what is signed; whatever signature headers
   // the browser sent are replaced.
   const SIGNED_POSTS = { '/api/pane-answer': paneSignature, '/api/owner-setting': ownerSettingSignature };
-  const signedPost = (req, res, port, publicOrigin, route, signer, person = null, level = 'full') => {
+  const signedPost = (req, res, port, publicOrigin, route, signer, person = null, level = 'full', { cap = 20000, cut = Infinity, leave = false, over = (extra) => send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }), extra) } = {}) => {
     const chunks = [];
     let size = 0;
-    req.on('data', (c) => { size += c.length; if (size <= 20000) chunks.push(c); else chunks.length = 0; });
+    let answered = false;
+    req.on('data', (c) => {
+      if (answered) return;
+      size += c.length;
+      if (size <= cap) chunks.push(c); else chunks.length = 0;
+      if (size > cut) { answered = true; over({ connection: 'close' }); }
+    });
     req.on('error', () => res.destroy());
     req.on('end', () => {
-      if (size > 20000) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
+      if (answered) return;
+      if (size > cap) return over();
       const data = Buffer.concat(chunks);
       const up = http.request({ host: '127.0.0.1', port, method: 'POST', path: route, headers: { ...upstreamHeaders(req, port, publicOrigin), ...(person ? { 'x-devteam-person': person, 'x-devteam-level': level } : {}), 'content-length': data.length, ...signer(threadKey(store).privateKey, port, data) } }, (ur) => {
         res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, undefined, publicOrigin), 'cache-control': 'no-store' });
         pipeline(ur, res, () => {});
       });
+      // a terminal post: a browser that goes away stops the kit's work for it, as proxy does
+      if (leave) res.on('close', () => { if (!res.writableFinished) up.destroy(); });
       up.on('error', () => { if (res.headersSent) return res.destroy(); send(res, 502, 'text/plain; charset=utf-8', `Nothing answers on instance ${port}.`); });
       up.end(data);
     });
   };
+  // The terminal's two posts (terminal@1 §3): keys, for the supervisor or the shell, and the shell's
+  // open, each signed under its own domain with the path's own which. Matched on the path as the
+  // dashboard routes it (url.pathname: dot segments resolved, %2e among them, nothing else decoded), so what is signed is
+  // what it routes; any other POST under /api/term/ goes on unsigned and the dashboard refuses it,
+  // and its reads (token, screen, history) go on unsigned as any GET does.
+  // Their bodies are capped at 100 KB, as the dashboard caps them: over it is a 413, with nothing
+  // forwarded, and a body more than four times over is cut off once the 413 is sent. A View session
+  // never gets here: viewRefusal's rule 0 answers it first.
+  const TERM_CAP = 102400;
+  const termPost = (p) => {
+    const m = /^\/api\/term\/(supervisor|shell)\/keys$/.exec(p);
+    if (m) return (key, port, body) => termSignature(key, 'devteam-term-keys-v1', port, m[1], body);
+    return p === '/api/term/shell/open' ? (key, port, body) => termSignature(key, 'devteam-term-open-v1', port, 'shell', body) : null;
+  };
+  const termCap = (res) => ({ cap: TERM_CAP, cut: 4 * TERM_CAP, leave: true, over: (extra) => send(res, 413, 'application/json', JSON.stringify({ error: 'that is too large to send' }), extra) });
   // Where a preview's server is listening: a dev server bound to localhost may sit on either family.
   const previewHost = (port) => new Promise((resolve) => {
     const next = (hosts) => {
@@ -3193,6 +3226,8 @@ export function createGateway(opts = {}) {
         const prefix = req.method === 'GET' && ['iframe', 'document'].includes(req.headers['sec-fetch-dest']) && ['same-origin', 'none'].includes(req.headers['sec-fetch-site']) ? ARTIFACT.exec(rawPath)?.[0] : null;
         if (prefix) return redirect(res, `${capFor(port, prefix, session)}${req.url}`);
         if (req.method === 'POST' && Object.hasOwn(SIGNED_POSTS, rawPath)) return signedPost(req, res, port, own, rawPath, SIGNED_POSTS[rawPath], personH, levelOf(person));
+        const termSigner = req.method === 'POST' ? termPost(p) : null;
+        if (termSigner) return signedPost(req, res, port, own, p, termSigner, personH, levelOf(person), termCap(res));
         // the viewer, by its path as the kit resolves it: the box may frame it only under the wrapper's grant
         const viewer = VIEWER.test(p) || VIEWER.test(rawPath) ? { granted: wrapGranted(label, rawPath, url) } : null;
         return proxy(req, res, { port, path: req.url, publicOrigin: own, viewer, person: personH, level: levelOf(person), extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
@@ -3284,6 +3319,8 @@ export function createGateway(opts = {}) {
         const now = store.load();
         const held = stillHeld(now, session);
         if (!held) return json(res, 401, { error: 'your session ended; sign in again' });
+        // moved to View while its body was read (the View rule ran at Full): no device, as the guard answers
+        if (levelOf(held.person) === 'view') return json(res, 403, { error: VIEW_ANY, code: 'view-only' });
         const freed = keepSubs(now, (x) => x.endpoint !== sub.endpoint);
         store.save(withSubs(freed, held.person, [...subsOf(freed, held.person), sub].slice(-PUSH_DEVICES)));
         return json(res, 200, { ok: true });
@@ -3676,7 +3713,7 @@ if (!token) location.replace('/auth/login');
 else post('/auth/claim/invite', { token }).then((i) => {
   again = i.again === true;
   if (again) { el('h').textContent = 'Add a sign-in method to your account'; el('who').textContent = 'This link adds a sign-in method (a passkey) to ' + i.name + '\\'s account on ' + host + '. Your other sign-in methods keep working.'; el('how').textContent = ''; el('go').textContent = 'Create passkey'; }
-  else el('who').textContent = 'You\\'re invited to ' + host + ', ' + i.name + ', as ' + (i.level === 'view' ? 'view only: you can see the hub, dashboards, artifacts, boards and goals, and change nothing. One exception: opening a running preview can set off what that app does when a page opens.' : 'Full: you can do everything on the box except manage people.');
+  else el('who').textContent = 'You\\'re invited to ' + host + ', ' + i.name + ', as ' + (i.level === 'view' ? 'view only: you can see everything here (the hub, dashboards, artifacts, boards and goals) and change only your own sign-in methods. One exception: opening a running preview can set off what that app does when a page opens.' : 'Full: you can do everything on the box except manage people.');
 }, (e) => (/expired or was used/.test(e.message) ? dead() : err(e.message + ' Reload to try again.')));
 el('go').onclick = run(async () => {
   try { await create('/auth/method/passkey/start', '/auth/method/passkey/finish', { purpose: 'invite', token, name: el('name').value }); }
