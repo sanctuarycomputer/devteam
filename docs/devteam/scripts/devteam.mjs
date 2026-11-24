@@ -12815,6 +12815,8 @@ async function shotLaunch({ noSandbox = false, extraArgs = [], cap }) {
   const child = launch.child = spawn(bin, [
     '--headless=new', '--remote-debugging-pipe', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync', '--hide-scrollbars',
+    // a dump of a page that crashed is kept nowhere, and waited for by no one
+    '--disable-breakpad', '--disable-crash-reporter',
     '--renderer-process-limit=2', '--js-flags=--max-old-space-size=256', ...['', 'force-'].map((f) => `--${f}webrtc-ip-handling-policy=disable_non_proxied_udp`), '--disable-quic',
     ...extraArgs, ...(noSandbox ? ['--no-sandbox'] : []), 'about:blank',
   ], { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'], env: { ...process.env, TMPDIR: t.tmpdir } });
@@ -13090,7 +13092,10 @@ async function noteShot(view, src, { now } = {}) {
           return { ...a, png: Buffer.from(r.data, 'base64') };
         };
         const work = async () => {
-          if (browserTestEnv('DEVTEAM_TEST_SHOT_CRASH')) await launch.cdp.send('Page.crash', {}, launch.page.sessionId);
+          if (browserTestEnv('DEVTEAM_TEST_SHOT_CRASH')) {
+            const { processInfo } = await launch.cdp.send('SystemInfo.getProcessInfo');
+            for (const x of processInfo) if (x.type === 'renderer') process.kill(x.id, 'SIGKILL');
+          }
           await shotOpen(launch, url, frame);
           const light = await take();
           await shotScheme(launch, 'dark');
