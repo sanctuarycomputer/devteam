@@ -233,6 +233,64 @@
   .set-desc { font-size: 12px; color: var(--fg-2); margin: -2px 0 8px; max-width: var(--measure); }
   #notify { color: var(--fg-2); }
   @media (max-width: 700px) { .set-row { flex-wrap: wrap; } .set-row .t { flex-basis: 100%; white-space: normal; } .set-row .r { flex-basis: 100%; max-width: none; justify-content: flex-start; text-align: left; margin-top: 2px; } }
+  /* Your sign-in and People (kit-249), as the mock org-access-people draws them */
+  .oa-sec button { font: inherit; font-size: 12.5px; line-height: 18px; color: var(--bg); background: var(--fg); border: 1px solid var(--fg); border-radius: 6px; padding: 4px 10px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+  .oa-sec button.ghost, .oa-note button.ghost { color: var(--fg); background: var(--surface); border-color: var(--line-2); }
+  .oa-sec button.ghost:hover, .oa-note button.ghost:hover { background: var(--hover); }
+  .oa-sec button.mini, .oa-note button.mini { font-size: 12px; padding: 1px 8px; }
+  .oa-sec button.danger { background: var(--red); border-color: var(--red); color: #fff; }
+  .oa-sec button:disabled { opacity: .5; cursor: default; }
+  .oa-note button { font: inherit; font-size: 12px; line-height: 18px; color: var(--bg); background: var(--fg); border: 1px solid var(--fg); border-radius: 6px; padding: 1px 8px; cursor: pointer; }
+  .oa-intro { margin: 0 0 10px; color: var(--fg-2); font-size: 12.5px; max-width: var(--measure); }
+  .oa-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+  .oa-note { border: 1px solid color-mix(in srgb, var(--amber) 40%, var(--line)); background: color-mix(in srgb, var(--amber) 8%, var(--surface)); padding: 10px 12px; border-radius: 8px; display: flex; gap: 10px; align-items: flex-start; margin-bottom: 12px; font-size: 12.5px; }
+  .oa-note p { margin: 0; flex: 1; max-width: var(--measure); }
+  .oa-note button { margin-left: auto; flex: none; }
+  .method .r { display: inline-flex; gap: 8px; align-items: center; }
+  .method .r .dim { color: var(--muted); }
+  .method .r button { flex: none; white-space: nowrap; }
+  @media (max-width: 700px) { .set-row.method .r { display: flex; justify-content: space-between; align-items: center; gap: 8px; } }
+  .oa-inp { font: inherit; font-size: 13px; height: 30px; color: var(--fg); background: var(--surface); border: 1px solid var(--line-2); border-radius: 6px; outline: none; padding: 0 10px; width: 100%; max-width: 320px; box-sizing: border-box; }
+  .oa-inp:focus { border-color: var(--blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent); }
+  .oa-err { color: var(--red-fg); font-size: 12px; margin-top: 6px; }
+  .oa-err:empty { display: none; }
+  .person { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-top: 1px solid var(--line); min-width: 0; }
+  .oa-plist .person:first-child { border-top: 0; padding-top: 2px; }
+  .av { width: 26px; height: 26px; border-radius: 50%; background: var(--well); border: 1px solid var(--line); color: var(--fg-2); display: grid; place-items: center; font-size: 10.5px; font-weight: 600; flex: none; }
+  .person .who { min-width: 0; flex: 1; display: grid; gap: 1px; }
+  .person .nm { font-weight: 500; font-size: 12.5px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; min-width: 0; overflow-wrap: anywhere; }
+  .person .nm .dim { color: var(--muted); font-weight: 400; }
+  .person .pmeta { font-size: 12px; color: var(--muted); }
+  .person .badge { display: inline-flex; align-items: center; font-size: 11px; font-weight: 500; line-height: 18px; padding: 0 7px; border-radius: 999px; white-space: nowrap; color: var(--fg-2); background: var(--well); }
+  .person .badge.green { color: var(--green-fg); background: color-mix(in srgb, var(--green) 14%, transparent); }
+  .person .badge.blue { color: var(--blue-fg); background: color-mix(in srgb, var(--blue) 14%, transparent); }
+  .person .badge.amber { color: var(--amber-fg); background: color-mix(in srgb, var(--amber) 14%, transparent); }
+  .oa-sec .person .menu-btn { flex: none; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--fg-2); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+  .oa-sec .person .menu-btn svg { width: 14px; height: 14px; fill: currentColor; }
+  .oa-sec .person .menu-btn:hover { background: var(--hover); color: var(--fg); }
+  .oa-menu button.red { color: var(--red-fg); }
+  .oa-confirm, .oa-card { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .oa-confirm { margin: 0 0 10px 36px; padding: 10px 12px; }
+  .oa-confirm p { margin: 0 0 10px; font-size: 12.5px; max-width: var(--measure); }
+  .oa-confirm .acts, .oa-card .acts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  .oa-card { margin-top: 10px; padding: 14px 16px; }
+  .oa-card h3 { margin: 0 0 4px; font-size: 14px; font-weight: 600; }
+  .oa-card p { margin: 0 0 8px; font-size: 12.5px; color: var(--fg-2); max-width: var(--measure); }
+  .lvl-pick { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 10px 0 0; border: 0; padding: 0; }
+  .lvl-pick legend { font-size: 12px; color: var(--muted); padding: 0; margin-bottom: 6px; }
+  .lvl-opt { display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--line-2); border-radius: 8px; padding: 10px 12px; cursor: pointer; background: var(--surface); }
+  .lvl-opt:hover { background: var(--hover); }
+  .lvl-opt:has(input:checked) { border-color: var(--fg); box-shadow: 0 0 0 1px var(--fg); }
+  .lvl-opt input { margin: 3px 0 0; accent-color: var(--fg); flex: none; }
+  .lvl-opt b { font-weight: 500; font-size: 12.5px; display: block; margin-bottom: 2px; }
+  .lvl-opt span { font-size: 12px; color: var(--fg-2); display: block; }
+  .linkbox { display: flex; gap: 8px; align-items: center; background: var(--well); border: 1px solid var(--line); border-radius: 6px; padding: 5px 5px 5px 10px; margin: 6px 0 8px; }
+  .linkbox code { flex: 1; min-width: 0; overflow-wrap: anywhere; font: 12px var(--mono); }
+  .oa-warn { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; color: var(--amber-fg); max-width: var(--measure); }
+  @media (max-width: 700px) { .lvl-pick { grid-template-columns: minmax(0, 1fr); } .oa-confirm { margin-left: 0; } }
+  .oa-toast { position: fixed; left: 50%; top: 14px; transform: translate(-50%, -12px); opacity: 0; transition: opacity .15s, transform .15s; z-index: 50; background: var(--fg); color: var(--bg); padding: 6px 12px; border-radius: 8px; font-size: 12px; pointer-events: none; max-width: calc(100vw - 32px); }
+  .oa-toast.on { opacity: 1; transform: translate(-50%, 0); }
+  @media (prefers-reduced-motion: reduce) { .oa-toast { transition: none; } }
   /* the machine switch is a little taller than the heading: it mustn't set the head's height, or the
      heading drops below --page-top */
   #ov-body > .ov-head > .acts { margin-block: -2px; align-items: center; }
@@ -1671,7 +1729,15 @@ function paintSettings() {
     machine.push(setRow('Hub served by kit', 'hub', text(kit), 'the kit whose hub you are reading; each project keeps its own kit'));
   }
   const groups = [sec('This machine', machine)];
-  if (box?.passkeys) groups.push(sec('Signing in', [setRow('Passkeys', 'passkeys', link(box.passkeys, 'Manage'), 'the keys that may open this hub and its dashboards; add one per device, remove a lost one', true)]));
+  // a gateway that names a role: Your sign-in (and People, for the owner and admins), kept nodes;
+  // an older one, or a laptop: today's Signing in › Passkeys
+  const oa = OA_ROLES.includes(box?.role);
+  if (oa) {
+    if (!OA.loading && (!OA.at || (!oaBusy() && Date.now() - OA.at > 9000))) oaLoad();
+    if (!SEC.signIn) oaDrawSignIn();
+    if (box?.people && OA.list && !SEC.people) oaDrawPeople();
+    groups.push(...oaGroups());
+  } else if (box?.passkeys) groups.push(sec('Signing in', [setRow('Passkeys', 'passkeys', link(box.passkeys, 'Manage'), 'the keys that may open this hub and its dashboards; add one per device, remove a lost one', true)]));
   // Notifications: the control itself (one node, kept: notifyControl writes into it), then a test once they're on
   const notes = [setRow('New Inbox items', 'on this device', $('notify'), 'a notification on this device when any project asks you something', true)];
   if (notifyOn()) {
@@ -1707,8 +1773,443 @@ function paintSettings() {
   }
   // whatever had the keyboard keeps it: the same element when it is kept (the Notify control, the
   // Test button), else the new one with its data-k
-  page.replaceChildren(head, ...groups);
+  page.replaceChildren(head, ...(oa && OA.askFresh ? [oaFreshNote()] : []), ...groups);
   if (had && had !== document.activeElement) (had.isConnected ? had : had.dataset.k ? page.querySelector(`[data-k="${CSS.escape(had.dataset.k)}"]`) : null)?.focus({ preventScroll: true });
+}
+// ----- Your sign-in and People (kit-249): the gateway's /auth routes, on a box whose /box.json
+// names a role. Each section is one node, made once and kept across paintSettings' 10 s repaint (as
+// the Notify control is), so an open menu, form, confirmation or link card, and what was typed in
+// it, outlive the repaint; a section redraws only when its own data or state changes.
+const OA_ROLES = ['owner', 'admin', 'member'];
+// methods and notices: the method list's; freshUntil: when this sign-in stops being fresh;
+// list: People's answer; open: { id, kind } of the row's open box; panel: 'invite' | 'link';
+// link: the one-time link card's words and link, held only while it shows; menu: the open ⋯
+const OA = { methods: null, notices: [], freshUntil: 0, list: null, at: 0, loading: false, open: null, panel: null, link: null, menu: null, askFresh: false };
+const SEC = { signIn: null, people: null, fresh: null };
+const oaBusy = () => Boolean(OA.open || OA.panel || OA.menu);
+const oaFresh = () => Date.now() < OA.freshUntil;
+const OA_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const oaDMon = (iso) => { const t = Date.parse(iso ?? ''); if (!(t > 0)) return ''; const d = new Date(t); return `${d.getDate()} ${OA_MONTHS[d.getMonth()]}`; };
+const oaTypeName = (type) => (type === 'passkey' ? 'Passkey' : String(type));
+let oaToastEl = null;
+let oaToastT = 0;
+function oaToast(text) {
+  if (!oaToastEl) { oaToastEl = el('div', 'oa-toast'); oaToastEl.setAttribute('role', 'status'); document.body.append(oaToastEl); }
+  oaToastEl.textContent = text;
+  oaToastEl.classList.add('on');
+  clearTimeout(oaToastT);
+  oaToastT = setTimeout(() => oaToastEl.classList.remove('on'), 2400);
+}
+const oaButton = (words, cls, k, onclick) => { const b = el('button', cls, words); b.type = 'button'; if (k) b.dataset.k = `settings:${k}`; b.onclick = onclick; return b; };
+// A redraw of a section's body: whatever had the keyboard in it keeps it, found again by its data-k.
+function oaReplace(body, parts) {
+  const at = body.contains(document.activeElement) ? document.activeElement.dataset.k : null;
+  body.replaceChildren(...parts);
+  if (at) body.querySelector(`[data-k="${CSS.escape(at)}"]`)?.focus({ preventScroll: true });
+}
+function oaSec(name) {
+  const d = el('div', 'sec oa-sec');
+  d.oaBody = el('div', 'rows');
+  d.append(el('div', 'lbl', name), d.oaBody);
+  return d;
+}
+async function oaGet(url) {
+  try { const r = await fetch(url, { cache: 'no-store' }); return r.ok ? await r.json() : null; } catch { return null; }
+}
+async function oaPost(path, body) {
+  try {
+    const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body ?? {}) });
+    return { status: r.status, json: await r.json().catch(() => ({})) };
+  } catch (e) { return { status: 0, json: { error: e.message } }; }
+}
+// The lists: when Settings opens, after each change, and on the 10 s draw while nothing is open.
+// Each call is a fetch of its own, queued after any in flight, so the one after a change is never
+// dropped; it resolves once its own answer is in. A section redraws only when its data changed.
+let oaChain = Promise.resolve();
+function oaLoad() {
+  OA.loading = true;
+  const run = oaChain.then(oaFetch).catch(() => {});
+  oaChain = run;
+  run.finally(() => { if (oaChain === run) OA.loading = false; });
+  return run;
+}
+async function oaFetch() {
+  const was = { signIn: JSON.stringify([OA.methods, OA.notices]), list: JSON.stringify(OA.list) };
+  const m = await oaGet('auth/method/list');
+  if (m && Array.isArray(m.methods)) {
+    OA.methods = m.methods;
+    OA.notices = Array.isArray(m.notices) ? m.notices : [];
+    OA.freshUntil = Date.now() + (Number(m.fresh_ms) > 0 ? Number(m.fresh_ms) : 0);
+  }
+  // a failed fetch keeps the last good list: People, and any card open in it, stay
+  if (box?.people) { const l = await oaGet(box.people); if (l && l.viewer && Array.isArray(l.people)) OA.list = l; }
+  OA.at = Date.now();
+  const signIn = JSON.stringify([OA.methods, OA.notices]) !== was.signIn;
+  const list = JSON.stringify(OA.list) !== was.list;
+  const missing = Boolean(OA.list) && !SEC.people?.isConnected;
+  if (signIn) oaDrawSignIn();
+  if (OA.list && (list || !SEC.people)) oaDrawPeople();
+  // Settings itself is painted again only when People should show and isn't there
+  if (missing) paintSettings();
+}
+// Each section's own redraw, unless something in it is open; then Settings is painted again.
+function oaRedraw() {
+  oaDrawSignIn();
+  if (box?.people && OA.list) oaDrawPeople();
+  paintSettings();
+}
+// What Settings shows of these, in order (People joins in where the owner and admins have it).
+function oaGroups() {
+  const out = [SEC.signIn];
+  if (box?.people && OA.list && SEC.people) out.push(SEC.people);
+  return out;
+}
+// Confirm it's you: a change that needs a sign-in in the last five minutes, asked before sending.
+function oaNeedFresh() {
+  OA.askFresh = true;
+  OA.open = null; OA.panel = null; OA.link = null;
+  oaCloseMenu();
+  oaRedraw();
+  // Settings scrolls inside its own view, not the window: the note is at its top
+  setEl.scrollTo(0, 0);
+  oaToast("Confirm it's you first");
+}
+function oaFreshNote() {
+  if (!SEC.fresh) {
+    const n = SEC.fresh = el('div', 'oa-note');
+    n.id = 'oa-fresh';
+    const go = el('button', 'mini', 'Sign in again');
+    go.type = 'button';
+    go.dataset.k = 'settings:sign-in-again';
+    go.onclick = () => location.assign(`/auth/login?next=${encodeURIComponent(`${location.origin}/#settings`)}`);
+    n.append(el('p', '', "Confirm it's you to change this. You signed in more than five minutes ago; sign in again with your passkey, then make the change again."), go);
+  }
+  return SEC.fresh;
+}
+
+// Your sign-in: the added-method notice, each method with Remove, and Add a passkey.
+const OA_NOTICE_KEY = 'devteam-oa-notice-ok';
+const oaNoticeOk = () => { try { return localStorage.getItem(OA_NOTICE_KEY) ?? ''; } catch { return ''; } };
+function oaDrawSignIn() {
+  if (!SEC.signIn) SEC.signIn = oaSec('Your sign-in');
+  const owner = box?.role === 'owner';
+  const methods = OA.methods ?? [];
+  const parts = [];
+  // the newest method-added notice this device hasn't said OK to (notices come oldest first)
+  const ok = oaNoticeOk();
+  const n = OA.notices.filter((x) => x?.kind === 'method-added' && typeof x.at === 'string' && x.at > ok).pop();
+  if (n) {
+    const note = el('div', 'oa-note');
+    note.id = 'oa-notice';
+    const type = n.type === 'passkey' ? 'a passkey' : `a ${n.type}`;
+    note.append(el('p', '', `A sign-in method (${type}) was added to your account on ${oaDMon(n.at)}, from a new link the box's owner sent. If you didn't ask for one, tell them.`), oaButton('OK', 'ghost mini', 'notice-ok', () => { try { localStorage.setItem(OA_NOTICE_KEY, n.at); } catch {} oaDrawSignIn(); }));
+    parts.push(note);
+  }
+  parts.push(el('p', 'oa-intro', `Any of these signs you in to this box as you. Today a sign-in method is a passkey; other ways to sign in can be added here later. Keep at least one${owner ? ', and as the owner, at least one passkey' : ''}.`));
+  for (const m of methods) {
+    const row = el('div', 'rowline set-row method');
+    const byLink = OA.notices.some((x) => x?.kind === 'method-added' && x.type === m.type && x.label === m.label && Math.abs(Date.parse(x.at) - Date.parse(m.added_at)) <= 60000);
+    const r = el('span', 'r');
+    r.append(el('span', 'dim', `added ${oaDMon(m.added_at)}${byLink ? ' by a new link' : ''} · used ${m.last_used ? agoText(m.last_used) : 'never'}`), oaButton('Remove', 'ghost mini', `remove-method:${m.id}`, () => oaRemoveMethod(m)));
+    row.append(el('span', 't', `${oaTypeName(m.type)} · ${m.label}`), r);
+    parts.push(row);
+  }
+  const tools = el('div', 'oa-tools');
+  tools.append(oaButton('Add a passkey', 'ghost', 'add-passkey', oaAddPasskey));
+  parts.push(tools);
+  oaReplace(SEC.signIn.oaBody, parts);
+}
+async function oaRemoveMethod(m) {
+  const methods = OA.methods ?? [];
+  const owner = box?.role === 'owner';
+  // the gateway refuses these too; the hub says so in the mock's words before sending anything
+  if (owner && m.type === 'passkey' && methods.filter((x) => x.type === 'passkey').length < 2) return oaToast("Your last passkey can't be removed: the box would look unclaimed. Add another first");
+  if (methods.length < 2) return oaToast("Your last sign-in method can't be removed; add another first");
+  if (!oaFresh()) return oaNeedFresh();
+  const r = await oaPost('auth/method/remove', { id: m.id });
+  if (r.status === 200) { oaToast('Removed. Sessions opened with it were signed out'); return oaLoad(); }
+  await oaLoad();
+  if (!oaFresh()) return oaNeedFresh();
+  oaToast(r.json?.error || "That didn't work; try again");
+}
+const oaB64d = (x) => Uint8Array.from(atob(String(x).replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+const oaB64e = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+// The gateway's add ceremony, in this page: its start, this device's passkey, its finish.
+async function oaAddPasskey() {
+  if (!oaFresh()) return oaNeedFresh();
+  try {
+    const o = await oaPost('auth/method/passkey/start', { purpose: 'add' });
+    if (o.status !== 200) throw new Error(o.json?.error || 'the box refused');
+    const opts = o.json;
+    opts.challenge = oaB64d(opts.challenge);
+    opts.user.id = oaB64d(opts.user.id);
+    opts.excludeCredentials = (opts.excludeCredentials ?? []).map((c) => ({ ...c, id: oaB64d(c.id) }));
+    const c = await navigator.credentials.create({ publicKey: opts });
+    const f = await oaPost('auth/method/passkey/finish', { purpose: 'add', rawId: oaB64e(c.rawId), clientDataJSON: oaB64e(c.response.clientDataJSON), attestationObject: oaB64e(c.response.attestationObject) });
+    if (f.status !== 200) throw new Error(f.json?.error || 'the box refused');
+    oaToast('Passkey added. Your device asked to make one');
+    return oaLoad();
+  } catch (e) {
+    await oaLoad();
+    if (!oaFresh()) return oaNeedFresh();
+    return oaToast(e?.name === 'NotAllowedError' ? 'Cancelled, or the passkey was not allowed.' : e?.message || "That didn't work; try again");
+  }
+}
+// People (the owner and admins): each person with their badge and line, a ⋯ menu from what the
+// list says they may do, the box under the row it opened (rename or a confirmation), Invite someone
+// and the one-time link card. The open box, card and link are nodes kept in OA (`openNode`,
+// `panelNode`) so a redraw re-inserts them, typed text and all; the link lives only in its card.
+const OA_WORDS = { rename: 'Rename', relink: 'Send a new link', revoke: 'Revoke the link', remove: 'Remove' };
+const OA_INTRO = {
+  owner: 'Everyone here sees everything on this box. Full people can also change anything but People. Admins move members between Full and View only, and rename or remove people; only you invite, make admins or hand the box over. For someone who must not see the rest, set up a box of their own.',
+  admin: "You're an admin: you can move members between Full and View only, and rename or remove members and other admins. Only the owner invites, makes admins or hands the box over, and nobody changes the owner's row.",
+};
+const oaFirst = (name) => String(name).trim().split(/\s+/)[0];
+const oaInitials = (name) => String(name).trim().split(/\s+/).map((w) => [...w][0] ?? '').slice(0, 2).join('').toUpperCase();
+const oaPending = (x) => x.role !== 'owner' && x.methods === 0;
+const oaPeoplePath = (action) => box.people.replace(/\/list$/, `/${action}`);
+function oaBadge(x) {
+  if (x.role === 'owner') return el('span', 'badge green', 'Owner');
+  if (x.role === 'admin') return el('span', 'badge blue', 'Admin');
+  if (oaPending(x)) return el('span', 'badge', 'invited');
+  return x.level === 'view' ? el('span', 'badge amber', 'View only') : el('span', 'badge', 'Full');
+}
+function oaMeta(x) {
+  const level = x.level === 'view' ? 'View only' : 'Full';
+  if (oaPending(x)) {
+    if (!x.link || x.link.expired) return `${level} · invite link expired`;
+    return `${level} · invite link not used yet · expires in ${plural(Math.max(1, Math.round((x.link.expires - Date.now()) / 3600e3)), 'hour')}`;
+  }
+  const newLink = x.link?.kind === 'new-link' && !x.link.expired ? ' · a new link not used yet' : '';
+  // your own row: you are signed in, reading it (a claim sets no last_seen), as the mock draws it
+  return `${plural(x.methods, 'sign-in method')} · ${x.you ? 'signed in now' : x.last_seen ? `signed in ${agoText(x.last_seen)}` : 'never signed in'}${newLink}`;
+}
+// the ⋯ menu: one at a time, closed by Escape, a click outside it, or a choice
+// The menu is placed on the body, fixed: Settings scrolling under it closes it, as a click outside does.
+setEl.addEventListener('scroll', () => oaCloseMenu(), { passive: true });
+function oaCloseMenu(back = false) {
+  if (!OA.menu) return;
+  const id = OA.menu.dataset.person;
+  OA.menu.remove();
+  OA.menu = null;
+  if (back) SEC.people?.querySelector(`[data-k="settings:menu:${CSS.escape(id)}"]`)?.focus({ preventScroll: true });
+}
+function oaOpenMenu(btn, x) {
+  const again = OA.menu?.dataset.person === x.id;
+  oaCloseMenu();
+  if (again) return;
+  const m = el('div', 'menu-pop oa-menu');
+  m.dataset.person = x.id;
+  m.setAttribute('role', 'menu');
+  for (const a of x.actions.filter((a) => OA_WORDS[a])) {
+    const b = el('button', a === 'remove' || a === 'revoke' ? 'red' : '', OA_WORDS[a]);
+    b.type = 'button';
+    b.setAttribute('role', 'menuitem');
+    b.onclick = () => { oaCloseMenu(); OA.open = { id: x.id, kind: a }; OA.openNode = null; OA.panel = null; OA.panelNode = null; oaDrawPeople(); SEC.people.querySelector('#oa-rename input, #oa-confirm button')?.focus({ preventScroll: true }); };
+    m.append(b);
+  }
+  // Tab out of it closes it. Only when focus lands somewhere named: a mouse press in Safari or
+  // Firefox focuses nothing (relatedTarget null), and a click outside is the pointerdown's to close.
+  m.addEventListener('focusout', (e) => { if (e.relatedTarget && !m.contains(e.relatedTarget) && e.relatedTarget !== btn) oaCloseMenu(); });
+  // Tab in it: closed, the keyboard back on its ⋯, and the browser's Tab goes on from there (the
+  // menu is the body's last child, so from it Tab would leave the page)
+  m.addEventListener('keydown', (e) => { if (e.key === 'Tab') oaCloseMenu(true); });
+  document.body.append(m);
+  OA.menu = m;
+  const r = btn.getBoundingClientRect();
+  const h = m.offsetHeight;
+  const w = m.offsetWidth;
+  m.style.top = `${Math.round(r.bottom + 4 + h > innerHeight - 8 ? Math.max(8, r.top - h - 4) : r.bottom + 4)}px`;
+  m.style.left = `${Math.round(Math.max(8, Math.min(r.right - w, innerWidth - w - 8)))}px`;
+  m.querySelector('button')?.focus({ preventScroll: true });
+}
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && OA.menu) oaCloseMenu(true); });
+window.addEventListener('pointerdown', (e) => { if (OA.menu && !OA.menu.contains(e.target) && !e.target.closest?.('.person .menu-btn')) oaCloseMenu(); }, true);
+const oaDots = () => {
+  const dots = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  dots.setAttribute('viewBox', '0 0 16 16');
+  dots.setAttribute('aria-hidden', 'true');
+  for (const cx of [3, 8, 13]) { const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle'); c.setAttribute('cx', String(cx)); c.setAttribute('cy', '8'); c.setAttribute('r', '1.5'); dots.append(c); }
+  return dots;
+};
+function oaPersonRow(x) {
+  const r = el('div', 'person');
+  r.dataset.id = x.id;
+  const who = el('span', 'who');
+  const nm = el('span', 'nm');
+  nm.append(document.createTextNode(x.name));
+  if (x.you) nm.append(' ', el('span', 'dim', '(you)'));
+  nm.append(' ', oaBadge(x));
+  who.append(nm, el('span', 'pmeta', oaMeta(x)));
+  r.append(el('span', 'av', oaInitials(x.name)), who);
+  if (x.actions.some((a) => OA_WORDS[a])) {
+    const b = el('button', 'menu-btn');
+    b.type = 'button';
+    b.dataset.k = `settings:menu:${x.id}`;
+    b.setAttribute('aria-label', `Actions for ${x.name}`);
+    b.setAttribute('aria-haspopup', 'menu');
+    b.append(oaDots());
+    b.onclick = () => oaOpenMenu(b, x);
+    r.append(b);
+  }
+  return r;
+}
+// What a refusal does here: a name's words under its field, Confirm it's you, or the gateway's
+// sentence as a toast (a stale change also reloads the list, and closes what was open).
+function oaRefused(r, err, names) {
+  const code = r.json?.code;
+  if (err && names?.[code]) { err.textContent = names[code]; return; }
+  if (code === 'fresh-sign-in') return oaNeedFresh();
+  oaToast(r.json?.error || "That didn't work; try again");
+  if (code === 'stale' || code === 'not-allowed' || r.status === 401) { OA.open = null; OA.openNode = null; oaDrawPeople(); oaLoad(); }
+}
+const OA_NAME_WORDS = { 'bad-name': 'A name is needed.', 'name-taken': 'Someone here already has that name.' };
+// One request at a time from a box or card: its buttons are disabled until the answer is in.
+async function oaSending(d, fn) {
+  if (d.oaSending) return;
+  d.oaSending = true;
+  const bs = [...d.querySelectorAll('button')];
+  for (const b of bs) b.disabled = true;
+  try { await fn(); } finally { d.oaSending = false; for (const b of bs) b.disabled = false; }
+}
+function oaRenameBox(x) {
+  const d = el('div', 'oa-confirm');
+  d.id = 'oa-rename';
+  const inp = el('input', 'oa-inp');
+  inp.type = 'text';
+  inp.maxLength = 60;
+  inp.autocomplete = 'off';
+  inp.value = x.name;
+  inp.dataset.k = 'settings:rename';
+  inp.setAttribute('aria-label', 'New name');
+  const err = el('div', 'oa-err');
+  err.setAttribute('role', 'alert');
+  const save = () => oaSending(d, async () => {
+    err.textContent = '';
+    const name = inp.value.trim();
+    const r = await oaPost(oaPeoplePath('rename'), { id: x.id, rev: x.rev, name: inp.value });
+    if (r.status !== 200) return oaRefused(r, err, OA_NAME_WORDS);
+    OA.open = null; OA.openNode = null;
+    oaDrawPeople();
+    oaToast(`Renamed to ${name.normalize('NFC')}`);
+    oaLoad();
+  });
+  inp.onkeydown = (e) => { if (e.key === 'Enter') save(); if (e.key === 'Escape') { e.stopPropagation(); oaCancel(); } };
+  const acts = el('div', 'acts');
+  acts.append(oaButton('Save', 'mini', 'rename-save', save), oaButton('Cancel', 'ghost mini', 'rename-cancel', oaCancel));
+  d.append(el('p', '', x.you ? 'Your name, as others here see it:' : 'Their name, as everyone here sees it:'), inp, err, acts);
+  return d;
+}
+function oaCancel() { OA.open = null; OA.openNode = null; OA.panel = null; OA.panelNode = null; oaDrawPeople(); }
+function oaConfirmBox(x, kind) {
+  const f = oaFirst(x.name);
+  const relinked = x.link?.kind === 'new-link';
+  const words = {
+    relink: `Make a new link for ${f}? Opening it adds a sign-in method (a passkey) to their account; their others keep working. Use it when they lost theirs. They are told one was added.`,
+    remove: `Remove ${f}? They are signed out everywhere now, and their sign-in methods stop working. What they did with the terminal stays, such as a program left running or a login copied; if that matters, change the box's logins.`,
+    revoke: relinked ? `Revoke ${f}'s new link? It stops working now; their sign-in methods keep working.` : `Revoke ${f}'s invite link? It stops working now.`,
+  }[kind];
+  const yes = { relink: 'Make the link', remove: 'Remove', revoke: 'Revoke' }[kind];
+  const d = el('div', 'oa-confirm');
+  d.id = 'oa-confirm';
+  const go = () => oaSending(d, async () => {
+    const r = await oaPost(oaPeoplePath(kind), { id: x.id, rev: x.rev });
+    if (r.status !== 200) return oaRefused(r);
+    OA.open = null; OA.openNode = null;
+    if (kind === 'relink') return oaShowLink(`Send this link to ${f} yourself`, `It works once, for 24 hours. Opening it adds a passkey to ${f}'s account.`, r.json.link);
+    oaDrawPeople();
+    oaToast(kind === 'remove' ? `${f} was removed and signed out` : relinked ? `${f}'s new link no longer works` : `${f}'s invite link no longer works`);
+    oaLoad();
+  });
+  const acts = el('div', 'acts');
+  acts.append(oaButton(yes, kind === 'relink' ? 'mini' : 'mini danger', `confirm-${kind}`, go), oaButton('Cancel', 'ghost mini', 'confirm-cancel', oaCancel));
+  d.append(el('p', '', words), acts);
+  return d;
+}
+function oaShowLink(head, text, url) {
+  OA.panel = 'link';
+  OA.panelNode = null;
+  OA.link = { head, text, url: String(url ?? '') };
+  oaDrawPeople();
+  oaLoad();
+}
+function oaInviteCard() {
+  const d = el('div', 'oa-card');
+  d.id = 'oa-invite';
+  const inp = el('input', 'oa-inp');
+  inp.type = 'text';
+  inp.maxLength = 60;
+  inp.autocomplete = 'off';
+  inp.placeholder = 'Their name';
+  inp.dataset.k = 'settings:invite-name';
+  inp.setAttribute('aria-label', 'Their name');
+  const pick = el('fieldset', 'lvl-pick');
+  const opt = el('label', 'lvl-opt');
+  const radio = el('input');
+  radio.type = 'radio';
+  radio.name = 'oa-level';
+  radio.value = 'full';
+  radio.checked = true;
+  const words = el('span');
+  words.append(el('b', '', 'Full'), el('span', '', "Everything you can do here except People: answer questions, steer supervisors, open the terminal. The terminal reaches every repo and the box's GitHub and AI logins."));
+  opt.append(radio, words);
+  pick.append(el('legend', '', 'Level'), opt);
+  const err = el('div', 'oa-err');
+  err.setAttribute('role', 'alert');
+  const make = () => oaSending(d, async () => {
+    err.textContent = '';
+    const r = await oaPost(oaPeoplePath('invite'), { name: inp.value, level: 'full' });
+    if (r.status !== 200) return oaRefused(r, err, { 'bad-name': 'Give them a name, so you can tell people apart here.', 'name-taken': 'Someone here already has that name.' });
+    oaShowLink(`Send this link to ${oaFirst(inp.value)} yourself`, 'It works once, for 24 hours. Whoever opens it first makes a passkey and joins as full.', r.json.link);
+  });
+  inp.onkeydown = (e) => { if (e.key === 'Enter') make(); };
+  const acts = el('div', 'acts');
+  acts.append(oaButton('Make the invite link', '', 'invite-make', make), oaButton('Cancel', 'ghost', 'invite-cancel', oaCancel));
+  d.append(el('h3', '', 'Invite someone'), el('p', '', 'They get a link that works once, for 24 hours. You send it to them yourself.'), inp, pick, err, acts);
+  return d;
+}
+function oaLinkCard() {
+  const d = el('div', 'oa-card');
+  d.id = 'oa-link';
+  const box_ = el('div', 'linkbox');
+  const copy = oaButton('Copy', 'ghost mini', 'link-copy', () => { try { navigator.clipboard?.writeText(OA.link.url).catch(() => {}); } catch {} copy.textContent = 'Copied'; });
+  box_.append(el('code', '', OA.link.url), copy);
+  const warn = el('div', 'oa-warn');
+  warn.append(el('span', '', 'Send it privately, in a message to them, not in a thread on this box: whoever opens it first can use it. It is shown only now.'));
+  const acts = el('div', 'acts');
+  // Done drops the link: it was only ever in this card
+  acts.append(oaButton('Done', '', 'link-done', () => { OA.link = null; oaCancel(); SEC.people?.querySelector('[data-k="settings:invite"]')?.focus({ preventScroll: true }); }));
+  d.append(el('h3', '', OA.link.head), el('p', '', OA.link.text), box_, warn, acts);
+  return d;
+}
+function oaDrawPeople() {
+  if (!SEC.people) { SEC.people = oaSec('People'); SEC.people.id = 'oa-people'; }
+  const list = OA.list;
+  if (!list) return;
+  // an open box or card whose row went (removed in another tab, say) goes with it
+  if (OA.open && !list.people.some((x) => x.id === OA.open.id)) { OA.open = null; OA.openNode = null; }
+  const parts = [el('p', 'oa-intro', OA_INTRO[list.viewer.role] ?? OA_INTRO.admin)];
+  const rows = el('div', 'oa-plist');
+  rows.hidden = OA.panel === 'link';
+  for (const x of list.people) {
+    rows.append(oaPersonRow(x));
+    if (OA.open?.id === x.id) {
+      const key = `${x.id}:${OA.open.kind}`;
+      if (OA.openNode?.oaKey !== key) { OA.openNode = OA.open.kind === 'rename' ? oaRenameBox(x) : oaConfirmBox(x, OA.open.kind); OA.openNode.oaKey = key; }
+      rows.append(OA.openNode);
+    }
+  }
+  parts.push(rows);
+  if (OA.panel === 'link' && !OA.link) OA.panel = null;
+  if (OA.panel) {
+    if (OA.panelNode?.oaKey !== OA.panel) { OA.panelNode = OA.panel === 'invite' ? oaInviteCard() : oaLinkCard(); OA.panelNode.oaKey = OA.panel; }
+    parts.push(OA.panelNode);
+  } else if (list.viewer.invite) {
+    const tools = el('div', 'oa-tools');
+    tools.append(oaButton('Invite someone', '', 'invite', () => { OA.open = null; OA.openNode = null; OA.panel = 'invite'; OA.panelNode = null; oaDrawPeople(); SEC.people.querySelector('#oa-invite input')?.focus({ preventScroll: true }); }));
+    parts.push(tools);
+  }
+  oaReplace(SEC.people.oaBody, parts);
 }
 // ----- threads with the operator: the dashboard's thread layer, over the Overview ------------------
 // The dock, the pin and the card of a project's dashboard (index.html, "threads"), ported: here every
@@ -2556,11 +3057,14 @@ async function findBox() {
     const tpl = (k, hole) => typeof b?.[k] === 'string' && b[k].includes(hole) && secure(b[k]);
     const v = b?.box === 1 && tpl('instance', '{port}') ? 1 : b?.box === 2 && tpl('project', '{project}') ? 2 : 0;
     if (!v || typeof b.terminal !== 'string' || !secure(b.terminal)) return;
-    box = { v, terminal: b.terminal, instance: v === 1 ? b.instance : null, project: v === 2 ? b.project : null, push: typeof b.push === 'string' ? b.push : null, image: b.image, previews: null, passkeys: null };
+    box = { v, terminal: b.terminal, instance: v === 1 ? b.instance : null, project: v === 2 ? b.project : null, push: typeof b.push === 'string' ? b.push : null, image: b.image, previews: null, passkeys: null, role: null, people: null };
     // the box's links, shown in Settings (Serving, Signing in)
     if (typeof b.previews === 'string' && secure(b.previews)) box.previews = b.previews;
     // signing in and passkeys are on the gateway's own name, never in the hub's
     if (typeof b.passkeys === 'string' && secure(b.passkeys)) box.passkeys = b.passkeys;
+    // who is signed in, and where People are: the page may fetch only its own origin (connect-src)
+    if (OA_ROLES.includes(b.role)) box.role = b.role;
+    if (box.role && box.role !== 'member' && typeof b.people === 'string') { try { const u = new URL(b.people, location.href); if (u.origin === location.origin) box.people = u.href; } catch {} }
     const tab = document.createElement('button');
     tab.className = 'tab';
     tab.setAttribute('role', 'tab');

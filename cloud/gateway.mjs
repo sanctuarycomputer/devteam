@@ -1134,6 +1134,8 @@ export function createGateway(opts = {}) {
   const mac = (...parts) => crypto.createHmac('sha256', secret).update(parts.join('|')).digest().subarray(0, 16);
 
   const isOwner = (person) => person?.role === 'owner';
+  // 'owner', 'admin' or 'member': any other role in a row reads as a member's, the least it can be
+  const roleOf = (person) => (isOwner(person) ? 'owner' : person?.role === 'admin' ? 'admin' : 'member');
   // A claimed file with no owner row (one restored from before people, read while running): its
   // top-level sessions are still the owner's, until the next start's upgrade writes the row.
   const STAND_IN = { id: null, role: 'owner', level: 'full', name: 'Owner' };
@@ -1420,6 +1422,16 @@ export function createGateway(opts = {}) {
     const token = b64u(crypto.randomBytes(32));
     return { link: `${PUB}/auth/claim#${token}`, invite: { hash: b64u(sha256(token)), person: personId, expires: Date.now() + INVITE_MS } };
   };
+  // The one name rule, for an invite's name and a rename: one line of 1 to 60 characters, kept
+  // trimmed and in NFC, and no other row's in NFC ignoring case. `except`: the row being renamed,
+  // whose own name never clashes. A name, or the refusal's { code, error }.
+  const nameIssue = (s, raw, except = null) => {
+    const name = typeof raw === 'string' ? raw.normalize('NFC').trim() : null;
+    if (!name || [...name].length > 60 || NAME_BAD.test(name)) return { code: 'bad-name', error: 'A name is one line of 1 to 60 characters.' };
+    const key = name.toLowerCase();
+    if ((s.people ?? []).some((p) => p.id !== except && String(p.name).normalize('NFC').toLowerCase() === key)) return { code: 'name-taken', error: 'Someone on this box already has that name.' };
+    return { name };
+  };
   // Who may: the owner, signed in in the last five minutes. Asked before the body is read and again,
   // of the state as it is, after (stillHeld): a reclaim or a removal meanwhile wins.
   const ownerGuard = (res, who) => {
@@ -1444,13 +1456,12 @@ export function createGateway(opts = {}) {
     if (body.level !== undefined && body.level !== 'full') {
       return body.level === 'view' ? refuse(res, 400, 'view-not-yet', 'View arrives in a later release; invite at Full for now.') : refuse(res, 400, 'bad-request', 'a level is full');
     }
-    const name = typeof body.name === 'string' ? body.name.normalize('NFC').trim() : null;
-    if (!name || [...name].length > 60 || NAME_BAD.test(name)) return refuse(res, 400, 'bad-name', 'A name is one line of 1 to 60 characters.');
     // a file from before people gets its owner row here, stamped as start stamps it: a people list
     // with no stamp reads, at the next start, as an older gateway's change and is reset
     const base = s.people ? s : stamped(withOwner(s));
-    const key = name.toLowerCase();
-    if (base.people.some((p) => String(p.name).normalize('NFC').toLowerCase() === key)) return refuse(res, 400, 'name-taken', 'Someone on this box already has that name.');
+    const named = nameIssue(base, body.name);
+    if (named.code) return refuse(res, 400, named.code, named.error);
+    const { name } = named;
     const open = liveInvites(base);
     if (open.length >= MAX_INVITES || base.people.length >= MAX_PEOPLE) return refuse(res, 409, 'too-many', `A box holds ${MAX_PEOPLE} people and ${MAX_INVITES} open invites; remove one first.`);
     const iso = new Date().toISOString();
@@ -1478,6 +1489,103 @@ export function createGateway(opts = {}) {
     log(`a new link for "${row.name}"`);
     return json(res, 200, { link, expires: invite.expires });
   };
+
+  // --- People: the list, and the changes kit-249 owns (rename, revoke, remove) ---------------------
+  // Who sees People: the owner (the stand-in included) and admins. Admins act on nothing yet; kit-253
+  // gives them rename and remove (a-20261123-051441425-supervisor).
+  const seesPeople = (person) => roleOf(person) !== 'member';
+  const FRESH_AGAIN = "Confirm it's you: sign in again, then make the change again";
+  const joined = (s, row) => ownMethods(s, row).length > 0;
+  // The newest invite naming the row: a first invite for someone who never joined, else a new link.
+  const linkOf = (s, row) => {
+    const mine = (s.invites ?? []).filter((x) => x.person === row.id);
+    if (!mine.length) return null;
+    const newest = mine.reduce((a, b) => (b.expires > a.expires ? b : a));
+    return { kind: joined(s, row) ? 'new-link' : 'invite', expires: newest.expires, expired: newest.expires <= Date.now() };
+  };
+  // What this viewer may post for this row, in menu order; the routes refuse the rest. One live link
+  // per person: with one out, Revoke comes first and no second link is offered (relink still takes
+  // one, replacing it). Someone who never joined and whose link is gone (swept as expired by an
+  // invite or relink's save) can only be removed.
+  const peopleActions = (s, viewer, row) => {
+    if (!isOwner(viewer)) return [];
+    if (isOwner(row)) return ['rename'];
+    const link = linkOf(s, row);
+    if (!joined(s, row)) return link ? ['revoke'] : ['remove'];
+    return link && !link.expired ? ['revoke', 'rename', 'remove'] : ['rename', 'relink', 'remove'];
+  };
+  const peopleList = (s, viewer) => {
+    const rows = s.people ?? [];
+    const order = [...rows.filter((r) => isOwner(r)), ...rows.filter((r) => !isOwner(r))];
+    return {
+      viewer: { id: viewer.id, role: roleOf(viewer), invite: isOwner(viewer) },
+      people: order.map((r) => ({
+        id: r.id, name: r.name, role: roleOf(r), level: r.level, you: viewer.id !== null && r.id === viewer.id,
+        methods: ownMethods(s, r).length, added_at: r.added_at, last_seen: r.last_seen ?? null, rev: r.rev,
+        link: linkOf(s, r), actions: peopleActions(s, viewer, r),
+      })),
+    };
+  };
+  // Why this viewer may not do this to this row, or null: the rules peopleActions draws from.
+  const mayNot = (viewer, row, action) => {
+    if (!isOwner(viewer)) return 'Only the box\'s owner can do this, for now.';
+    if (isOwner(row) && action === 'remove') return 'Nobody can remove the box\'s owner.';
+    if (isOwner(row) && action === 'revoke') return 'The box\'s owner has no link to revoke.';
+    return null;
+  };
+  // The guards, in the spec's order: role and fresh (before the body), the body, still held and still
+  // fresh (on the state as it is: no I/O between this load and the route's save, only the one
+  // microtask the route's await of this guard takes; the store is synchronous), the row, its rev, then may.
+  const peopleGuard = async (req, res, who, action) => {
+    if (!seesPeople(who.person)) return refuse(res, 403, 'not-allowed', 'Only the owner and admins can change People.'), null;
+    if (!fresh(who.session)) return refuse(res, 403, 'fresh-sign-in', FRESH_AGAIN), null;
+    const body = await readJson(req, 4096);
+    if (!isObject(body)) return refuse(res, 400, 'bad-request', 'bad request'), null;
+    const s = store.load();
+    const held = stillHeld(s, who.session);
+    if (!held || !seesPeople(held.person)) return json(res, 401, { error: 'your session ended; sign in again' }), null;
+    if (!fresh(held.session)) return refuse(res, 403, 'fresh-sign-in', FRESH_AGAIN), null;
+    const row = typeof body.id === 'string' ? (s.people ?? []).find((x) => x.id === body.id) : null;
+    if (!row || body.rev !== row.rev) return refuse(res, 409, 'stale', STALE), null;
+    const no = mayNot(held.person, row, action);
+    if (no) return refuse(res, 403, 'not-allowed', no), null;
+    return { s, person: held.person, row, body };
+  };
+  const renameRoute = async (req, res, who) => {
+    const g = await peopleGuard(req, res, who, 'rename');
+    if (!g) return;
+    const { s, row, body } = g;
+    const named = nameIssue(s, body.name, row.id);
+    if (named.code) return refuse(res, 400, named.code, named.error);
+    const rev = row.rev + 1;
+    store.save({ ...s, people: s.people.map((x) => (x.id === row.id ? { ...x, name: named.name, rev } : x)) });
+    log('a person on this box was renamed');
+    return json(res, 200, { ok: true, rev });
+  };
+  // Every link naming the person goes; someone who never joined goes with theirs.
+  const revokeRoute = async (req, res, who) => {
+    const g = await peopleGuard(req, res, who, 'revoke');
+    if (!g) return;
+    const { s, row } = g;
+    if (!(s.invites ?? []).some((x) => x.person === row.id)) return refuse(res, 409, 'stale', STALE);
+    const stays = joined(s, row);
+    store.save({ ...s, invites: s.invites.filter((x) => x.person !== row.id), ...(stays ? {} : { people: s.people.filter((x) => x.id !== row.id) }) });
+    log(stays ? 'a new link was revoked' : 'an invite was revoked, with its person who never joined');
+    return json(res, 200, { ok: true });
+  };
+  // One write ends everything the row held (its methods and devices go with it), every session and
+  // invite naming them; then the terminal and preview sockets they hold close. The owner's row is
+  // never removed (mayNot).
+  const removeRoute = async (req, res, who) => {
+    const g = await peopleGuard(req, res, who, 'remove');
+    if (!g) return;
+    const { s, row } = g;
+    store.save({ ...s, people: s.people.filter((x) => x.id !== row.id), peopleSessions: (s.peopleSessions ?? []).filter((x) => x.person !== row.id), invites: (s.invites ?? []).filter((x) => x.person !== row.id) });
+    dropPerson(row.id);
+    log('a person was removed: their sessions, invites and open sockets ended');
+    return json(res, 200, { ok: true });
+  };
+  const PEOPLE_POSTS = { rename: renameRoute, revoke: revokeRoute, remove: removeRoute };
 
   // Start, guards in the spec's order. `who`: the request's session (sessionOf), for an add.
   const startFlow = async (req, type, purpose, body, who) => {
@@ -2940,8 +3048,20 @@ export function createGateway(opts = {}) {
         }
         if (p === '/auth/people/invite' && req.method === 'POST') return await inviteRoute(req, res, who);
         if (p === '/auth/people/relink' && req.method === 'POST') return await relinkRoute(req, res, who);
+        if (p === '/auth/people/list') {
+          if (req.method !== 'GET') return refuse(res, 405, 'bad-request', 'the People list is read with GET');
+          if (!seesPeople(person)) return refuse(res, 403, 'not-allowed', 'only the owner and admins see People');
+          return json(res, 200, peopleList(store.load(), person));
+        }
+        if (p.startsWith('/auth/people/')) {
+          const route = req.method === 'POST' && Object.hasOwn(PEOPLE_POSTS, p.slice(13)) ? PEOPLE_POSTS[p.slice(13)] : null;
+          if (!route) return refuse(res, 404, 'not-found', 'no such People action');
+          return await route(req, res, who);
+        }
         // Each of these acts on the signed-in person's own methods only (ownMethods, removeMethod).
-        if (p === '/auth/method/list' && req.method === 'GET') { const now = store.load(); return json(res, 200, { methods: ownMethods(now, person), notices: noticesOf(now, person) }); }
+        // fresh_ms: how long this sign-in still counts as fresh, so the hub asks to confirm it's you
+        // before trying a change that would be refused
+        if (p === '/auth/method/list' && req.method === 'GET') { const now = store.load(); return json(res, 200, { methods: ownMethods(now, person), notices: noticesOf(now, person), fresh_ms: Math.max(0, (session.at ?? 0) + CHALLENGE_MS - Date.now()) }); }
         if (p === '/auth/passkeys' && req.method === 'GET') return fresh(session) ? page(res, PAGES.passkeys(ownMethods(store.load(), person).filter((m) => m.type === 'passkey').map((m) => ({ id: m.id, name: m.label, createdAt: m.added_at })), PUB)) : redirect(res, loginAt(`${PUB}/auth/passkeys`));
         if ((p.startsWith('/auth/passkeys/') || p === '/auth/method/remove') && !fresh(session)) return json(res, 403, { error: 'sign in again to change passkeys (reload this page)' });
         // the passkey row's add, after the gate and the fresh rule above (today's place and answers);
@@ -2979,7 +3099,9 @@ export function createGateway(opts = {}) {
       // box's image says it is (boxImage, from the image's ENV: its release and its tools' pins):
       // { release: 'vX.Y.Z' | null, tools: { name: version } } in the ENV's order, or null with neither
       // set (a laptop, an older image). Versions only. An additive change keeps box: 2.
-      if (req.method === 'GET' && p === '/box.json') return json(res, 200, { box: 2, terminal: `${TERM}/`, project: `${pubUrl.protocol}//{project}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, previews: `${PUB}/dev/`, push: vapid().publicKey, image: BOX_IMAGE });
+      // role is the signed-in person's ('owner', 'admin' or 'member'); people, where the People list
+      // is, for the owner and admins only, so the hub draws People for them alone.
+      if (req.method === 'GET' && p === '/box.json') return json(res, 200, { box: 2, terminal: `${TERM}/`, project: `${pubUrl.protocol}//{project}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, previews: `${PUB}/dev/`, push: vapid().publicKey, image: BOX_IMAGE, role: roleOf(person), ...(roleOf(person) === 'member' ? {} : { people: `${PUB}/auth/people/list` }) });
       if (req.method === 'GET' && p === '/instances.json') return instances(req, res);
       if (req.method === 'GET' && p === '/memory.json') return memory(req, res, url.searchParams);
       if (req.method === 'GET' && p === '/operator/threads') return operatorThreads(req, res, null);
@@ -3168,6 +3290,15 @@ export function createGateway(opts = {}) {
   // a miss: the page that opened the socket already made one.
   const PREVIEW_SOCKETS = 32;
   const previewSockets = new Map();
+  // Every relayed socket (the terminal's and each preview's) by the person whose session opened it:
+  // their row's id, or null for the stand-in owner. Added the moment the handshake's session check
+  // passes, before anything is awaited, so a removal at any point after closes it.
+  const heldSockets = new Map();
+  const holdSocket = (socket, person) => {
+    heldSockets.set(socket, person?.id ?? null);
+    socket.once('close', () => heldSockets.delete(socket));
+  };
+  const dropPerson = (id) => { for (const [sock, holder] of heldSockets) if (holder === id) sock.destroy(); };
   // The supervisor's browser view (the preview the hub labels so): whoever opens it drives the
   // owner's signed-in browser, so it is the owner's alone, under any name its port is listed by.
   const ownerOnlyPreview = (name) => {
@@ -3182,6 +3313,7 @@ export function createGateway(opts = {}) {
     try { who = store.load().passkeys.length ? sessionOf(req) : null; } catch { return refuse(503, 'Service Unavailable'); }
     if (!who) return refuse(401, 'Unauthorized');
     if (!isOwner(who.person) && ownerOnlyPreview(name)) return refuse(403, 'Forbidden');
+    holdSocket(socket, who.person);
     if (!req.url.startsWith('/') || req.url.startsWith('//')) return refuse(400, 'Bad Request');
     const link = previews.get(name);
     if (!link || link.ambiguous) return refuse(503, 'Service Unavailable');
@@ -3237,7 +3369,10 @@ export function createGateway(opts = {}) {
     if (pv) return previewUpgrade(req, socket, head, pv, refuse).catch(() => socket.destroy());
     if (req.headers.host !== termHost) return refuse(421, 'Misdirected Request');
     if (req.headers.origin !== TERM) return refuse(403, 'Forbidden');
-    try { if (!store.load().passkeys.length || !sessionOf(req)) return refuse(401, 'Unauthorized'); } catch { return refuse(503, 'Service Unavailable'); }
+    let who = null;
+    try { who = store.load().passkeys.length ? sessionOf(req) : null; } catch { return refuse(503, 'Service Unavailable'); }
+    if (!who) return refuse(401, 'Unauthorized');
+    holdSocket(socket, who.person);
     let p;
     try { p = new URL(req.url, PUB); } catch { return refuse(400, 'Bad Request'); }
     if (!req.url.startsWith('/') || p.pathname !== '/ws') return refuse(404, 'Not Found');
