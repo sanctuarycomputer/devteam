@@ -11078,7 +11078,7 @@ function termHint(w) {
   const held = s.screen?.held;
   let html;
   if (s.err) html = `<span class="err">${esc(s.err)}</span>`;
-  else if (w === 'supervisor' && s.own === 'open' && held && held.count > 0 && held.oldest_ms >= 120000) html = `<span data-term-waiting>Messages for the supervisor are waiting until you send or clear your line.${held.prompt === 'unknown' ? ' Press Enter or Ctrl+C here to let them through.' : ''}</span>`;
+  else if (w === 'supervisor' && s.own === 'open' && held && held.count > 0 && held.oldest_ms >= 120000) html = `<span data-term-waiting>Messages for the supervisor are waiting until you send or clear your line.${held.prompt === 'unknown' ? ' Answer it here to let them through.' : ''}</span>`;
   else if (TERM.lib === 'failed') html = "<span>The terminal couldn't load, so typing is off. This is the screen as text.</span>";
   else if (s.screen?.state === 'live') html = '<span>Click the screen to type.</span> <span><kbd>Ctrl</kbd> <kbd>]</kbd> to leave it.</span>';
   else html = '';

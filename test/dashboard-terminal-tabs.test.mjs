@@ -394,7 +394,7 @@ test('terminal A13: held kit messages behind an open owner line show the waiting
   assert.doesNotMatch(await R.p.ev(hint), /waiting until/, 'the count alone never shows the note');
   await R.p.type('half a line');
   await R.soon(`/Messages for the supervisor are waiting until you send or clear your line\\./.test(${hint})`, 'the note, behind the open line');
-  assert.doesNotMatch(await R.p.ev(hint), /Press Enter/, 'a readable prompt: no Enter hint');
+  assert.doesNotMatch(await R.p.ev(hint), /Answer it here/, 'a readable prompt: no answer-it-here sentence');
   await R.p.key('Enter');
   await R.soon(`!/waiting until/.test(${hint})`, 'a line sent: no note');
 });
@@ -482,7 +482,7 @@ test("terminal A14b: the page asks GET /api/term/token once on load, before any 
   }
 });
 
-test('terminal A14b: held over 2 minutes on an unknown prompt adds the Enter hint; app_cursor makes ArrowUp ESC O A', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+test('terminal A14b: held over 2 minutes on an unknown prompt adds the answer-it-here sentence; app_cursor makes ArrowUp ESC O A', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
   const R = await open(t, { hash: '#overview?th=supervisor' });
   const hint = `document.querySelector('.term-box[data-term="supervisor"] .term-hint').textContent`;
   await focusScreen(R);
@@ -491,7 +491,7 @@ test('terminal A14b: held over 2 minutes on an unknown prompt adds the Enter hin
   await sleep(800);
   assert.doesNotMatch(await R.p.ev(hint), /waiting until/, 'under 2 minutes: no note');
   R.fake.set({ held: { count: 1, oldest_ms: 121000, prompt: 'unknown' } });
-  await R.soon(`/waiting until you send or clear your line\\. Press Enter or Ctrl\\+C here to let them through\\./.test(${hint})`, 'the note with the Enter hint');
+  await R.soon(`/waiting until you send or clear your line\\. Answer it here to let them through\\./.test(${hint})`, 'the note with the answer-it-here sentence');
   // cursor keys: as the program asked
   await arrowUp(R.p);
   await sleep(400);
