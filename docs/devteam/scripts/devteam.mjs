@@ -27652,7 +27652,8 @@ function makeSession(role) {
     const tracking = `refs/remotes/origin/${branch}`;
     const keptAt = `refs/devteam/kept/${branch}/`;
     const raw = at.branch ? null : R.git(['rev-parse', '--verify', '--quiet', tracking], R.root); // read once: a tag's own object too
-    const stale = raw && R.resolveCommit(raw);
+    const peeled = raw && responderGit(['rev-parse', '--verify', '--quiet', `${raw}^{commit}`], R.root);
+    const stale = peeled && peeled.status === 0 ? peeled.stdout.trim() : null;
     let keptNow = null;
     if (stale) {
       const symbolic = R.git(['symbolic-ref', '--quiet', tracking], R.root) !== null;
@@ -27660,7 +27661,7 @@ function makeSession(role) {
       if (keep) keptNow = `${keptAt}${stale}`;
       if (keep) write(['update-ref', '--no-deref', `${keptAt}${stale}`, stale], `keep ${stale} under ${keptAt}`);
       warn(`origin has no ${branch}: its tracking ref here (${short(stale)}) is ignored and removed${keep ? `, its commits kept at ${keptAt}${stale}` : ''}${sha === at.main ? `, and the branch starts from origin's ${mb} (${short(at.main)})` : ''}`);
-      write(['update-ref', '--no-deref', '-d', tracking, ...(symbolic ? [] : [raw])], `remove ${tracking}`);
+      write(['update-ref', '--no-deref', '-d', tracking, raw], `remove ${tracking}`);
     }
     // read back, so a retry's act names what a stopped launch kept
     const found = (R.git(['for-each-ref', '--format=%(refname)', keptAt], R.root) ?? '').split('\n').filter((r) => r.startsWith(keptAt) && /^[0-9a-f]{40,64}$/.test(r.slice(keptAt.length)));
@@ -27683,7 +27684,7 @@ function makeSession(role) {
     }
     // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
     const added = gitRun(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--no-guess-remote', wt, branch], R.root);
-    if (added.status !== 0) die(`git worktree add ${branch} failed: ${redactUrl(firstLine(added.err).replace(/^fatal: /, '')) || `exit ${added.status}`}; nothing was started`);
+    if (added.status !== 0) die(`git worktree add ${branch} failed: ${redactUrl(firstLine(added.err.split('\n').find((l) => /^fatal: /.test(l)) ?? added.err).replace(/^fatal: /, '')) || `exit ${added.status}`}; nothing was started`);
     // The add checks the branch out by name, so a session moving it meanwhile would win: what landed is
     // read back, and the worktree undone if it isn't the sha expected, on the branch (its full name: a
     // tag of the same name makes git print a longer short one). A branch still where this launch put it
@@ -27703,8 +27704,9 @@ function makeSession(role) {
     if (local && local !== sha) {
       const moved = responderGit(['update-ref', '--no-deref', ref, sha, local], R.root);
       if (moved.status !== 0) undo(`could not move ${branch} to ${short(sha)}: something moved it while it was checked out`);
-      const filled = responderGit(['read-tree', '--reset', '-u', sha], wt);
-      if (filled.status !== 0) undo(`could not check out ${short(sha)}: ${redactUrl(firstLine(filled.stderr).replace(/^(fatal|error): /, '')) || `exit ${filled.status}`}`);
+      // as worktree add fills one: no time limit (a filter or a lazy fetch can be slow), no submodules
+      const filled = gitRun([...RESPONDER_GIT, 'read-tree', '--reset', '-u', '--no-recurse-submodules', sha], wt);
+      if (filled.status !== 0) undo(`could not check out ${short(sha)}: ${redactUrl(firstLine(filled.err).replace(/^(fatal|error): /, '')) || `exit ${filled.status}`}`);
       landed(sha);
     }
     madeWorktree = true;
