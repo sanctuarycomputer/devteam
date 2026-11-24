@@ -1166,6 +1166,9 @@ try {
   /* a note on an artifact (kit-145): what there is to check, a mark withdrawn, where a step landed */
   .tl-addr { margin: 6px 0; padding: 6px 8px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--surface)); font-size: 12px; }
   .tl-addr .by { color: var(--muted); }
+  .tl-addr [data-tl-accept].waiting { opacity: .55; }
+  #av-held { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 70; max-width: min(90vw, 480px); padding: 8px 14px; border-radius: 8px; background: var(--fg); color: var(--bg); font-size: 13px; pointer-events: none; }
+  #av-held[hidden] { display: none; }
   .tl-addr .tx, .tl-wd .tx { max-width: var(--av-measure); overflow-wrap: anywhere; }
   .tl-nview { max-width: var(--av-measure); }
   button.tl-shot { display: block; width: auto; height: auto; margin: 6px 0 2px; padding: 0; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
@@ -7099,7 +7102,6 @@ avNotes.draw = () => {
   const notes = avNotes();
   // what a step said of its card, the second Resolve waits, and the picture go with the card, the version, the viewer
   if (avStep.off && (avStep.off.av !== AV || TL.open !== avStep.off.id)) avStep.off = null;
-  if (!TL.open) TL.armAt = null;
   if (!AV || AV.preview || TS.kind !== 'artifact') tShot.close(false);
   if (avNotes.av !== AV) { avNotes.av = AV; $('e-avn').textContent = ''; }
   const said = AV?.handed;
@@ -7227,7 +7229,7 @@ avStep.land = (from = '') => {
   // by a step: placed at the stage's top right when the note has no pin there, and (gone) what version this is
   avStep.off = { id: t.id, gone: want.gone, av: AV };
   // opened under the owner's hand, so Resolve waits its second again
-  TL.armAt = null;
+  avStep.forget();
   tlOpen(t.id, false);
 };
 // A step asked by the page's lens: at most one a frame, however many it says
@@ -7251,6 +7253,146 @@ window.addEventListener('keydown', (e) => {
   e.preventDefault();
   avStep(e.key === 'ArrowLeft' ? -1 : 1);
 });
+// --- what a framed page can't do (kit-145): make a press of the owner's count that they didn't aim ---------------
+// A page can open, move, redraw, uncover or close things, through its lens or not. So a pointer press on a control
+// that records the owner's decision (what VIEW_WRITES names, in the card or the viewer's bar) counts only if that
+// control has sat in the same box, uncovered, for ASK_ARM_MS when the pointer goes down, and still does at the click,
+// whatever moved it. Keys count at once: a page can't press one here.
+// seen: each control by its deed, with its box and since when; last: the last sample; down: the deed pressed, settled.
+avStep.press = { seen: new Map(), last: 0, on: false, down: null, closed: -Infinity, closedHidden: false, placed: null };
+avStep.up = () => !$('artifact-view').hidden;
+// The decisions: not a field, a link, or Send of plain words (Send on a resolved thread reopens it)
+avStep.decides = (el) => {
+  const c = el?.closest?.(VIEW_WRITES);
+  if (!c || c.matches('textarea, input, a') || c.closest('.dropbox')) return null;
+  if (c.matches('[data-tl-send]') && TL.threads.find((t) => t.id === TL.open)?.status !== 'resolved') return null;
+  return c;
+};
+// In scope: with a stage up, the card's and the bar's; with none, a to-check block's Resolve (no page to move the rest)
+avStep.held = (el) => {
+  const c = avStep.decides(el);
+  if (!c) return null;
+  if (c.matches('[data-tl-accept]') && c.closest('.tl-addr')) return c;
+  return avStep.up() && c.closest('#tl-card, .av-bar') ? c : null;
+};
+// The deed a control is, whatever its node: what it carries, the thread, the mark, the question, the ask, the stage
+avStep.deed = (c) => {
+  const t = TL.threads.find((x) => x.id === TL.open), q = c.closest('[data-qcard]')?.dataset.qcard;
+  return JSON.stringify([c.id, c.tagName, c.textContent.trim(), { ...c.dataset }, TL.open, t?.status, c.closest('.tl-addr')?.dataset.for ?? t?.ready?.at,
+    q, q && seenHash(q), c.matches('[data-ask-option], [data-ask-esc]') ? ASK.q?.digest : null, TS.kind, TS.slug, TS.at, TS.name]);
+};
+// Whether the middle of the part of it its scrollers show is its own
+avStep.bare = (c, r) => {
+  let { left, top, right, bottom } = r;
+  for (let p = c.parentElement; p && p !== document.documentElement; p = p.parentElement) {
+    const o = getComputedStyle(p);
+    if (o.overflowX === 'visible' && o.overflowY === 'visible') continue;
+    const b = p.getBoundingClientRect();
+    left = Math.max(left, b.left); top = Math.max(top, b.top); right = Math.min(right, b.right); bottom = Math.min(bottom, b.bottom);
+  }
+  left = Math.max(left, 0); top = Math.max(top, 0); right = Math.min(right, innerWidth); bottom = Math.min(bottom, innerHeight);
+  return right > left && bottom > top && c.contains(document.elementFromPoint((left + right) / 2, (top + bottom) / 2));
+};
+avStep.sample = () => {
+  const P = avStep.press, now = performance.now(), was = P.seen, next = new Map(), count = new Map();
+  // frames that stopped: what stood before them says nothing of now
+  if (now - P.last > 250) was.clear();
+  P.last = now;
+  const roots = avStep.up() ? '#tl-card, .av-bar' : '#tl-card .tl-addr';
+  for (const root of document.querySelectorAll(roots)) for (const el of root.querySelectorAll(VIEW_WRITES)) {
+    if (avStep.held(el) !== el) continue;
+    const key = avStep.deed(el), n = count.get(key) ?? 0, k = `${n} ${key}`;
+    count.set(key, n + 1);
+    const r = el.getBoundingClientRect(), bare = r.width > 0 && avStep.bare(el, r), p = was.get(k);
+    // against the box it settled in, so it can't creep
+    const same = p && bare && p.bare && ['left', 'top', 'width', 'height'].every((x) => Math.abs(p.box[x] - r[x]) <= 0.5);
+    const rec = { el, bare, box: same ? p.box : { left: r.left, top: r.top, width: r.width, height: r.height }, since: same ? p.since : now };
+    next.set(k, rec);
+    if (el.matches('[data-tl-accept]') && el.closest('.tl-addr')) {
+      const wait = !avStep.settled(rec);
+      el.classList.toggle('waiting', wait);
+      const title = wait ? 'Read it first' : '';
+      if (el.title !== title) el.title = title;
+    }
+  }
+  P.seen = next;
+  if (document.getElementById('tl-card')?.hidden) P.placed = null;
+};
+avStep.settled = (rec) => !!rec && rec.bare && performance.now() - rec.since >= ASK_ARM_MS;
+// The deed (and its order) of a control that has settled, else null
+avStep.ready = (c) => { avStep.sample(); for (const [k, rec] of avStep.press.seen) if (rec.el === c) return avStep.settled(rec) ? k : null; return null; };
+// Resolve's second begun again
+avStep.forget = () => { for (const [k, rec] of avStep.press.seen) if (rec.el.matches('[data-tl-accept]')) avStep.press.seen.delete(k); };
+avStep.watch = () => {
+  const P = avStep.press;
+  if (P.on) return;
+  P.on = true;
+  const tick = () => {
+    const card = document.getElementById('tl-card');
+    if (!avStep.up() && !(card && !card.hidden && card.querySelector('.tl-addr'))) { P.on = false; P.seen.clear(); return; }
+    avStep.sample();
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+};
+// The card left where it is under the owner's pointer or focus, so a page that never rests can't keep it moving
+avStep.stays = (t, card) => {
+  const P = avStep.press, key = `${t?.id ?? ''} ${innerWidth} ${innerHeight}`, was = P.placed;
+  P.placed = key;
+  if (!t || !avStep.up() || was !== key || !(card.matches(':hover') || card.contains(document.activeElement))) return false;
+  const r = card.getBoundingClientRect();
+  return r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight;
+};
+avStep.say = () => {
+  let e = document.getElementById('av-held');
+  if (!e) { e = document.createElement('div'); e.id = 'av-held'; e.setAttribute('role', 'status'); document.body.append(e); }
+  e.textContent = 'That moved just now. Press again in a second.';
+  e.hidden = false;
+  clearTimeout(e._hide);
+  e._hide = setTimeout(() => { e.hidden = true; }, 4000);
+};
+avStep.stop = (e) => { e.preventDefault(); e.stopImmediatePropagation(); avStep.say(); };
+// just after the viewer closed (a page can say Escape), nothing it bared is taken, by pointer or key
+avStep.bared = () => performance.now() - avStep.press.closed < ASK_ARM_MS;
+new MutationObserver(() => {
+  const P = avStep.press;
+  P.seen.clear();
+  if (avStep.up()) avStep.watch();
+  else { P.closed = performance.now(); P.closedHidden = document.hidden; }
+}).observe($('artifact-view'), { attributes: true, attributeFilter: ['hidden'] });
+document.addEventListener('visibilitychange', () => {
+  const P = avStep.press;
+  P.seen.clear();
+  if (!document.hidden && P.closedHidden) { P.closed = performance.now(); P.closedHidden = false; }
+});
+// (a person who may only look gets viewStop's own words)
+avStep.looks = () => document.body.classList.contains('view-only');
+window.addEventListener('pointerdown', (e) => {
+  const P = avStep.press;
+  P.down = null;
+  if (avStep.looks()) return;
+  if (avStep.bared() && e.target.closest?.('[data-goal-grip]')) return avStep.stop(e);
+  const c = avStep.held(e.target);
+  if (c) P.down = avStep.ready(c);
+}, true);
+window.addEventListener('pointercancel', () => { avStep.press.down = null; }, true);
+window.addEventListener('click', (e) => {
+  if (avStep.looks()) return;
+  if (avStep.bared() && avStep.decides(e.target)) return avStep.stop(e);
+  // no pointer: a key's, a script's or assistive tech's
+  if (e.detail === 0) return;
+  const c = avStep.held(e.target);
+  if (!c) return;
+  const P = avStep.press, down = P.down;
+  P.down = null;
+  if (down === null || avStep.ready(c) !== down) avStep.stop(e);
+}, true);
+window.addEventListener('keydown', (e) => {
+  if (avStep.looks() || !avStep.bared()) return;
+  const grip = /^Arrow(Up|Down)$/.test(e.key) && e.target.closest?.('[data-goal-grip]');
+  const reopen = e.key === 'Enter' && e.shiftKey && e.target.id === 'tl-c-text' && TL.threads.find((t) => t.id === TL.open)?.status === 'resolved';
+  if (grip || reopen) avStep.stop(e);
+}, true);
 /* avStep end */
 // The note Show me is opening ({ id, gone }), for the one open that follows: no head carries it, so a reload or
 // Back opens the artifact on its first page.
@@ -9975,8 +10117,8 @@ function tlCardBody(t) {
   }
   // a note on an artifact (kit-145): what there is to check (a session's mark or the supervisor's proposal, as
   // text), a mark withdrawn, and where the step that opened it landed; redrawn only when it changes. Resolve
-  // sends the mark's time as drawn (TL.drawnAt), and only once this note has been drawn unchanged for a second
-  // (TL.armAt): one that swaps in under the pointer isn't accepted by a click meant for the last one.
+  // sends the mark's time as drawn (TL.drawnAt); a pointer's press counts once it has sat still for a second
+  // (avStep.press): one that swaps in under the pointer isn't accepted by a click meant for the last one.
   let box0 = document.getElementById('tl-c-note');
   if (!box0) {
     box0 = document.createElement('div');
@@ -9995,15 +10137,12 @@ function tlCardBody(t) {
     t?.unready && s?.kind === 'artifact' && t.status === 'open' && `<div class="tl-wd"><div class="tx">The supervisor withdrew a mark: ${esc(t.unready.reason)}</div></div>`,
   ].filter(Boolean).join(''));
   // (named by note and mark: another's block is always a new one, never this one under the pointer)
-  draw(box0.children[1], !check ? '' : `<div class="tl-addr" data-for="${esc(`${t.id} ${check.at}`)}"><div class="by">${t.check === 'addressed' ? `Addressed by ${esc(check.by)}${sha}` : 'Proposed by the supervisor'}</div><div class="tx">${esc(t.check === 'addressed' ? check.note : check.outcome)}</div>${tlOpenWarn(t)}<div class="tl-pic"></div><div class="row-inline">${avShowMe.to(t) ? `<button type="button" class="ghost" data-tl-show="${esc(t.id)}">Show me</button>` : ''}<button type="button" data-tl-accept disabled>Resolve</button></div></div>`);
+  draw(box0.children[1], !check ? '' : `<div class="tl-addr" data-for="${esc(`${t.id} ${check.at}`)}"><div class="by">${t.check === 'addressed' ? `Addressed by ${esc(check.by)}${sha}` : 'Proposed by the supervisor'}</div><div class="tx">${esc(t.check === 'addressed' ? check.note : check.outcome)}</div>${tlOpenWarn(t)}<div class="tl-pic"></div><div class="row-inline">${avShowMe.to(t) ? `<button type="button" class="ghost" data-tl-show="${esc(t.id)}">Show me</button>` : ''}<button type="button" data-tl-accept class="waiting" title="Read it first">Resolve</button></div></div>`);
   if (check) {
     draw(box0.querySelector('.tl-pic'), tShot(t));
     (TL.drawnAt ??= {})[t.id] = check.at;
-    if (TL.armAt?.id !== t.id || TL.armAt.at !== check.at) { TL.armAt = { id: t.id, at: check.at, since: Date.now() }; setTimeout(tlDraw, ASK_ARM_MS + 20); }
-    const go = box0.querySelector('[data-tl-accept]'), wait = Date.now() - TL.armAt.since < ASK_ARM_MS;
-    if (go && go.disabled !== wait) go.disabled = wait;
-    if (go) go.title = wait ? 'Read it first' : '';
-  } else TL.armAt = null;
+    avStep.watch();
+  }
   // seen only when the owner can see it: a reply landing in a hidden tab still gets its dot
   if (t && document.visibilityState === 'visible') tlSeen(t);
   const turns = tlEl('tl-c-turns');
@@ -10044,6 +10183,8 @@ function tlPlaceCard(t) {
   const card = tlEl('tl-card');
   // Not under a press: a card that grows near the bottom moves up, and the release would land elsewhere. The next draw places it.
   if (TL.pressed && card.contains(TL.pressed)) return;
+  // nor under the owner's pointer or focus while a page is up (kit-145): it would never rest on a page that moves
+  if (avStep.stays(t, card)) return;
   // a note a step opened whose element isn't showing on this view (kit-145): the stage's top right corner
   if (innerWidth >= 640 && avStep.unseen(t)) {
     const st = $('av-stage').getBoundingClientRect();
@@ -10440,7 +10581,7 @@ document.addEventListener('click', (e) => {
   if (e.target.closest('[data-tl-resolve-cancel]')) { TL.resolving = false; return void tlDraw(); }
   if (t && e.target.closest('[data-tl-resolve-go]')) return void tlAct('thread-resolve', { id: t.id, outcome: tlEl('tl-outcome')?.value.trim() || undefined });
   const accept = t && e.target.closest('[data-tl-accept]');
-  if (accept && accept.closest('.tl-addr')) return void (TL.armAt?.id === t.id && Date.now() - TL.armAt.since >= ASK_ARM_MS && tlAct(t.check === 'addressed' ? 'thread-accept-addressed' : 'thread-accept', { id: t.id, at: TL.drawnAt[t.id] }));
+  if (accept && accept.closest('.tl-addr')) return void tlAct(t.check === 'addressed' ? 'thread-accept-addressed' : 'thread-accept', { id: t.id, at: TL.drawnAt[t.id] });
   if (accept) return void tlAct('thread-accept', { id: t.id, at: t.ready?.at });
   if (t && e.target.closest('[data-tl-notyet]')) return void tlAct('thread-say', { id: t.id, text: 'Not yet' });
   if (t && e.target.closest('[data-tl-reopen]')) return void tlAct('thread-reopen', { id: t.id });
