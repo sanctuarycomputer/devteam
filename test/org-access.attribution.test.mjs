@@ -223,6 +223,38 @@ test('org-access A10: the hub\'s /operator/threads gives a turn its person', { t
   assert.deepEqual(t.json.threads.flatMap((x) => x.turns).find((x) => x.text === 'Is the box well?').person, HANAKO());
 });
 
+// The views read without the schema: a person a line was handed by hand, malformed, is dropped, and
+// the person on an answer is the answer's, so a question rewritten after it has none (task-4 review F1).
+const BAD_PERSON = { id: 'p bad', name: '' };
+const handTurn = (turn, text) => { const { id, at, by, ...rest } = turn; return F.hand('owner', { ...rest, text, person: BAD_PERSON }, 0); };
+test('org-access A10: the views drop a malformed person a line carries', { timeout: 60000 }, async () => {
+  const snap = F.snapLog();
+  const storeWas = fs.readFileSync(storeFile());
+  try {
+    handTurn(await dashTurn(), 'A malformed person?');
+    const t = await viaGateway('GET', '/api/threads', { on: label, cookie: cookies.hanako });
+    const dashT = t.json.threads.flatMap((x) => x.turns).find((x) => x.text === 'A malformed person?');
+    const { id, at, ...rest } = await hubTurn();
+    fs.appendFileSync(storeFile(), `${JSON.stringify({ ...rest, id: `${id}x`, at: new Date().toISOString(), text: 'A malformed hub person?', person: BAD_PERSON })}\n`);
+    const h = await viaGateway('GET', '/operator/threads', { cookie: cookies.hanako });
+    const hubT = h.json.threads.flatMap((x) => x.turns).find((x) => x.text === 'A malformed hub person?');
+    assert.deepEqual([!!dashT, dashT && 'person' in dashT, !!hubT, hubT && 'person' in hubT], [true, false, true, false]);
+  } finally { F.restoreLog(snap); fs.writeFileSync(storeFile(), storeWas); }
+});
+
+test('org-access A10: an answer to a question as it no longer stands has no answered person', { timeout: 60000 }, async () => {
+  const q = ask('Was this the question you answered?');
+  const view = async () => { const d = await viaGateway('GET', '/api/data', { on: label, cookie: cookies.hanako }); return [...(d.json.ooda?.answered ?? []), ...(d.json.answered ?? []), ...(d.json.questions ?? [])].find((x) => x.id === q); };
+  // the owner's answer, with its person, to the question as it stood under another hash: it counts
+  // for nothing, so it names no one (the person is the answer's, never the last answer line's)
+  const snap = F.snapLog();
+  try {
+    F.hand('owner', { type: 'question', op: 'set', id: q, answer: 'Yes', choice: null, question_hash: '0000000000000000', channel: 'dashboard', person: HANAKO() }, 0);
+    const v = await view();
+    assert.deepEqual([!!v, v?.status === 'answered', v?.answered_person], [true, false, null]);
+  } finally { F.restoreLog(snap); }
+});
+
 test('org-access A10: an x-devteam-level from the browser is dropped', { timeout: 30000 }, async () => {
   // the terminal's routes refuse a View level (kit-251): a full person's browser saying View is not View
   const r = await viaGateway('GET', '/api/term/token', { on: label, cookie: cookies.hanako, headers: { 'x-devteam-level': 'view' } });
@@ -380,7 +412,7 @@ test('org-access A10: the dashboard\'s thread card names the person on their tur
 test('org-access A10: the dashboard\'s Answered card names the person who answered', CHROME, async () => {
   const q = await answered();
   const text = await shows(`http://127.0.0.1:${P}/`, 'the answered card', `(() => { const e = [...document.querySelectorAll('#answered > *')].find((x) => x.textContent.includes('Ship the attribution change?')); return e ? e.textContent : false; })()`);
-  assert.match(text, new RegExp(NAME), q);
+  assert.match(text, new RegExp(`${NAME} answered on the dashboard`), q);
 });
 
 test('org-access A10: the hub\'s operator thread names the person on their turn', CHROME, async () => {
@@ -397,6 +429,17 @@ test('org-access A10: a name with markup is shown as text, never drawn', CHROME,
   assert.equal((await viaGateway('POST', '/api/thread-new', { on: label, cookie: cookies.ada, body: { title: 'Markup', text: 'Markup name?' } })).status, 200);
   const tid = ownerLines((l) => l.type === 'turn' && l.text === 'Markup name?')[0].thread;
   const got = await shows(`http://127.0.0.1:${P}/#talk/${tid}`, 'the markup turn', `(() => { const m = document.querySelector('.tl-turn.owner .meta'); return m ? { text: m.textContent, imgs: m.querySelectorAll('img').length, pwned: !!window.__pwned } : false; })()`);
+  assert.deepEqual([got.text.startsWith(`${MARKUP} · `), got.imgs, got.pwned], [true, 0, false], got.text);
+});
+
+test('org-access A10: a name with markup on the hub\'s operator thread is shown as text, never drawn', CHROME, async () => {
+  assert.equal((await viaGateway('POST', '/operator/thread-new', { cookie: cookies.ada, body: { text: 'A hub markup name?' } })).status, 200);
+  const tid = store().find((l) => l.type === 'turn' && l.text === 'A hub markup name?').thread;
+  const p = await browser();
+  await p.send('Page.navigate', { url: `http://127.0.0.1:${HUB}/` });
+  await until(() => p.ev(`typeof tlOpen === 'function' && document.readyState === 'complete'`).catch(() => false), 'the hub');
+  await p.ev(`tlOpen(${JSON.stringify(tid)})`);
+  const got = await until(() => p.ev(`(() => { const m = document.querySelector('.tl-turn.owner .meta'); return m ? { text: m.textContent, imgs: m.querySelectorAll('img').length, pwned: !!window.__pwned } : false; })()`).catch(() => false), 'the hub\'s markup turn');
   assert.deepEqual([got.text.startsWith(`${MARKUP} · `), got.imgs, got.pwned], [true, 0, false], got.text);
 });
 
