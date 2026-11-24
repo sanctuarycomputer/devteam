@@ -24578,7 +24578,7 @@ async function dashRoutesUpload(D, req, res, q) {
   if ((req.method === 'GET' || req.method === 'HEAD') && req.url.startsWith('/upload/')) return await serveLaptopUpload(req, res, req.url.split('?')[0], send);
   return DASH_NEXT;
 }
-// /api/hello; / and /index.html; /api/data
+// /api/hello; / and /index.html; /api/data (with viewer: { level } for a box's level header); /api/viewer
 async function dashRoutesPage(D, req, res, q) {
   // The level the box's gateway says this request is (kit-250): exactly one x-devteam-level line,
   // exactly full or view, or null. Only the gateway sets it (it drops the browser's copy); a laptop
@@ -24621,8 +24621,9 @@ async function dashRoutesPage(D, req, res, q) {
     const body = r.ok ? r.stdout : D.lastData;
     // viewer: { level } spliced in as the first key; the kept string itself never changes
     const level = viewerLevel();
-    const open = body.indexOf('{');
-    if (!level || open < 0) return res.end(body);
+    // only an object, as dashboard-data prints: anything else goes as it is
+    const open = body.search(/\S/);
+    if (!level || open < 0 || body[open] !== '{') return res.end(body);
     const rest = body.slice(open + 1);
     return res.end(`{"viewer":${JSON.stringify({ level })}${rest.trimStart().startsWith('}') ? '' : ','}${rest}`);
   }

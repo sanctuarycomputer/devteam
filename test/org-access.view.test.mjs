@@ -644,10 +644,10 @@ test('org-access A14: in Chrome, the invite page says view only for a View invit
 // --- the dashboard learns the level: /api/data's viewer and GET /api/viewer (T3) ------------------
 import { bareProject, dashboardOnFreePort } from './lib/kit.mjs';
 // A real dashboard on a bare project (its own HOME; kit.mjs points it at this file's hub port).
-async function realDashboard(name) {
+async function realDashboard(name, extra = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), `kit250-${name}-`));
   const root = bareProject(base, 'alpha');
-  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('DEVTEAM_') || k === 'DEVTEAM_HUB_PORT' || k === 'DEVTEAM_PORT_BASE')), HOME: base };
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('DEVTEAM_') || k === 'DEVTEAM_HUB_PORT' || k === 'DEVTEAM_PORT_BASE')), HOME: base, ...extra };
   const { dash, port } = await dashboardOnFreePort(root, env);
   return { base, root, dash, port, close: async () => { await dash.stop(); fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } };
 }
@@ -673,6 +673,12 @@ test('org-access A14: /api/data\'s viewer echoes the gateway\'s level, and nothi
       const d = await data(lines);
       assert.equal(d.viewer, undefined, `${what}: no viewer`);
       assert.equal(Object.keys(d)[0], first, `${what}: the body as it was`);
+      let same = false;
+      for (let i = 0; i < 2 && !same; i++) {
+        const [a, b] = [await getWith(R.port, '/api/data', []), await getWith(R.port, '/api/data', lines)];
+        same = a.body === b.body;
+      }
+      assert.ok(same, `${what}: byte for byte the plain body`);
     }
     for (const level of ['full', 'view']) {
       const d = await data([['x-devteam-level', level]]);
@@ -687,6 +693,31 @@ test('org-access A14: /api/data\'s viewer echoes the gateway\'s level, and nothi
     for (const lines of [[], [['x-devteam-level', 'admin']], [['x-devteam-level', 'view'], ['x-devteam-level', 'full']]]) {
       assert.deepEqual(JSON.parse((await getWith(R.port, '/api/viewer', lines)).body), { level: null }, `/api/viewer: ${JSON.stringify(lines)}`);
     }
+  } finally { await R.close(); }
+});
+
+// The last good data, answered when a build is slow (spec §3): spliced for a View read like a fresh
+// one, and the kept string itself never changes, so a plain read of it after has no viewer.
+test('org-access A14: the stale answer gets the viewer too, and the kept data stays as it was', { timeout: 120000 }, async () => {
+  const R = await realDashboard('c16b', { DEVTEAM_DATA_WAIT_MS: '0', DEVTEAM_DATA_REUSE_MS: '0' });
+  try {
+    const first = await getWith(R.port, '/api/data', []);
+    assert.equal(first.status, 200, first.body.slice(0, 200));
+    const stale = async (lines) => {
+      for (let i = 0; i < 40; i++) {
+        const r = await getWith(R.port, '/api/data', lines);
+        if (r.headers['x-devteam-stale'] === 'true') return JSON.parse(r.body);
+        await new Promise((res) => setTimeout(res, 50));
+      }
+      assert.fail('no stale answer in 40 reads');
+    };
+    const v = await stale([['x-devteam-level', 'view']]);
+    assert.deepEqual(v.viewer, { level: 'view' }, 'a stale View read has the viewer');
+    assert.equal(Object.keys(v)[0], 'viewer', 'as its first key');
+    const plain = await stale([]);
+    assert.equal(plain.viewer, undefined, 'the kept data has no viewer: the splice never wrote it back');
+    const f = await stale([['x-devteam-level', 'full']]);
+    assert.deepEqual(f.viewer, { level: 'full' }, 'nor did a View splice stick: a Full read says full');
   } finally { await R.close(); }
 });
 
