@@ -300,3 +300,112 @@ test('the supervisor\'s records of the owner\'s words refuse in a session too, a
     assert.ok(added(before, snap()).some((x) => x.by === 'owner'), 'O: observe --owner from a folder that is no checkout, no DEVTEAM_HOME, writes');
   } finally { F.done(); }
 });
+
+// kit-804: the branch is read by its full ref, so a ticket/ or plan/ checkout is a session when
+// another ref has its short name too, or when its branch has no commit yet. These checkouts are
+// outside any .worktrees folder and carry no variable, so only the branch tells.
+test('a ticket/ or plan/ checkout is a session by its full branch ref, and a detached or main checkout is as before', async () => {
+  const F = fleetFixture('owner-fullref');
+  const { old, g } = F;
+  try {
+    const SUP = { DEVTEAM_ROLE: 'supervisor' };
+    const kitDT = path.join(old, 'docs/devteam/scripts/devteam.mjs');
+    // only the variables a run names: none of this machine's own session, checkout or tmux
+    const envOf = (extra) => {
+      const e = F.env({});
+      for (const k of Object.keys(e)) if (/^(DEVTEAM_|GIT_)/.test(k) || ['TMUX', 'TMUX_PANE'].includes(k)) delete e[k];
+      return { ...e, ...extra };
+    };
+    const runAt = (cwd, args, env = {}) => { const r = spawnSync(process.execPath, [kitDT, ...args], { cwd, env: envOf(env), encoding: 'utf8', input: '', timeout: 120000 }); return { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() }; };
+    const okAt = (cwd, args, env) => { const r = runAt(cwd, args, env); assert.equal(r.status, 0, `${args.join(' ')}: ${r.err || r.out}`); return r.out; };
+    const logDir = path.join(old, 'docs/devteam/run/log');
+    const snap = () => Object.fromEntries((fs.existsSync(logDir) ? fs.readdirSync(logDir) : []).sort().map((f) => [f, fs.readFileSync(path.join(logDir, f), 'utf8')]));
+    const added = (before, after) => Object.keys(after).flatMap((f) => after[f].slice((before[f] ?? '').length).split('\n').filter(Boolean).map((l) => JSON.parse(l)));
+    const co = (name, ...how) => { const d = path.join(F.base, name); g(['worktree', 'add', '-q', ...how, d], old); return d; };
+    const ambTicket = co('amb-ticket', '-b', 'ticket/web-1');
+    const ambPlan = co('amb-plan', '-b', 'plan/f');
+    const unbornTicket = co('unborn-ticket', '--detach');
+    const unbornPlan = co('unborn-plan', '--detach');
+    const detached = co('detached', '--detach');
+    const midName = co('mid-name', '-b', 'chore/ticket/web-9');
+    const midPlan = co('mid-plan', '-b', 'chore/plan/h');
+    const tagHead = co('tag-head', '--detach');
+    g(['symbolic-ref', 'HEAD', 'refs/tags/ticket/web-5'], tagHead);
+    const bareRef = co('bare-ref', '--detach');
+    g(['symbolic-ref', 'HEAD', 'refs/plan/k'], bareRef);
+    g(['tag', 'ticket/web-1'], old);
+    g(['tag', 'plan/f'], old);
+    g(['symbolic-ref', 'HEAD', 'refs/heads/ticket/web-3'], unbornTicket);
+    g(['symbolic-ref', 'HEAD', 'refs/heads/plan/g'], unbornPlan);
+    // the fixture is what it says: the short name is not the branch's
+    assert.equal(spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: ambTicket, env: envOf({}), encoding: 'utf8' }).stdout.trim(), 'heads/ticket/web-1');
+    assert.notEqual(spawnSync('git', ['rev-parse', '--verify', '-q', 'HEAD'], { cwd: unbornTicket, env: envOf({}) }).status, 0);
+    const OWN = ['observe', '--owner', '--subject', 'kit', '--kind', 'note', '--detail', 'd'];
+    const CHAT = ['answer', 'q-20260101-000000001-supervisor', 'yes', '--from-chat', '--said', 'yes'];
+    const PROBLEM = ['problem', 'add', '--title', 'p', '--severity', '2'];
+    for (const [name, cwd, branch, writer] of [
+      ['ambTicket', ambTicket, 'ticket/web-1', 'web-1'],
+      ['ambPlan', ambPlan, 'plan/f', 'plan-f'],
+      ['unbornTicket', unbornTicket, 'ticket/web-3', 'web-3'],
+      ['unbornPlan', unbornPlan, 'plan/g', 'plan-g'],
+      // HEAD set by hand on a ref that is no branch: refused before, and still
+      ['tagHead', tagHead, 'ticket/web-5', 'web-5'],
+      ['bareRef', bareRef, 'plan/k', 'plan-k'],
+    ]) {
+      const before = snap();
+      const own = runAt(cwd, OWN);
+      assert.match(own.err, REFUSED, `B: observe --owner in ${name}: refused: ${own.err || own.out}`);
+      assert.ok(own.err.includes(`this checkout is on ${branch})`), `B: ${name} names the branch: ${own.err}`);
+      assert.notEqual(own.status, 0, `B: ${name} exits non-zero`);
+      // logWriter: the session's own name, and the supervisor's commands refuse
+      assert.match(runAt(cwd, ['whoami']).out, new RegExp(`^# writer=${writer} `, 'm'), `W: ${name} writes as ${writer}`);
+      const heard = runAt(cwd, CHAT, SUP);
+      assert.match(heard.err, /the supervisor records what the owner said/, `W: answer --from-chat in ${name}: refused by the supervisor-only gate: ${heard.err || heard.out}`);
+      const p = runAt(cwd, PROBLEM);
+      assert.match(p.err, /problem: the supervisor does this/, `W: problem add in ${name}: refused: ${p.err || p.out}`);
+      assert.deepEqual(added(before, snap()), [], `nothing logged in ${name}`);
+    }
+    // a detached checkout (a ticket/ tag points at its commit), a branch with ticket/ inside its
+    // name, and the main checkout: no session, the owner's and the supervisor's writes go through
+    const tagged = co('tagged', '--detach');
+    for (const [name, cwd] of [['main', old], ['detached', detached], ['tagged', tagged], ['midName', midName], ['midPlan', midPlan]]) {
+      const before = snap();
+      okAt(cwd, OWN);
+      assert.ok(added(before, snap()).some((x) => x.by === 'owner'), `O: observe --owner in ${name} writes an owner line`);
+      assert.match(runAt(cwd, ['whoami']).out, /^# writer=supervisor /m, `O: ${name} writes as the supervisor`);
+    }
+    {
+      const before = snap();
+      okAt(old, PROBLEM, SUP);
+      assert.ok(added(before, snap()).some((x) => x.by === 'supervisor' && x.type === 'problem'), "O: the supervisor's own write from the main checkout");
+      const asked = okAt(old, ['ask', '--question', 'Ship it?', '--recommendation', 'yes'], SUP);
+      const mid = snap();
+      okAt(old, ['answer', asked, 'yes', '--from-chat', '--said', 'yes, ship it'], SUP);
+      assert.ok(added(mid, snap()).some((x) => x.by === 'owner'), "O: the supervisor's record of the owner's words from the main checkout");
+    }
+    // a supervisor in a .worktrees folder is told where to run it, in both modes; the owner's own
+    // refusal still says where the owner runs it
+    const loose = path.join(old, '.worktrees', 'loose');
+    g(['worktree', 'add', '-q', '--detach', loose], old);
+    const THERE = /under a \.worktrees folder.*the supervisor records the owner's words from home's main checkout: run this there, with no DEVTEAM_TICKET/;
+    for (const args of [CHAT, ['answer', 'q-20260101-000000001-supervisor', 'yes', '--from-turn', 'u-20260101-000000001-owner']]) {
+      const r = runAt(loose, args, SUP);
+      assert.match(r.err, THERE, `M: ${args[3]} in .worktrees says where: ${r.err || r.out}`);
+    }
+    const wt = path.join(old, '.worktrees', 'web-4');
+    g(['worktree', 'add', '-q', '-b', 'ticket/web-4', wt], old);
+    // phase, send and gate name the ticket by its branch in an ordinary ticket worktree, and in one
+    // whose name is ambiguous
+    for (const [cwd, id] of [[wt, 'web-4'], [ambTicket, 'web-1']]) {
+      for (const args of [['phase', 'build'], ['send', 'supervisor', 'hi', '--kind', 'info'], ['gate', 'test', '--', 'true']]) {
+        const before = snap();
+        okAt(cwd, args, {});
+        const lines = added(before, snap());
+        assert.ok(lines.length > 0 && lines.every((x) => x.by === id && [undefined, id].includes(x.ticket)) && (args[0] !== 'send' || lines.some((x) => x.ticket === id)), `T: ${args[0]} in ${path.basename(cwd)} names ${id}: ${JSON.stringify(lines)}`);
+      }
+    }
+    const gate = runAt(wt, ['answer', 'q-20260101-000000001-supervisor', 'yes', '--from-turn', 'u-20260101-000000001-owner'], SUP);
+    assert.match(gate.err, /the supervisor runs it from home's main checkout/, `M: the gate says where too: ${gate.err}`);
+    assert.match(runAt(loose, OWN).err, /the owner runs them in their own terminal from home's main checkout/, "M: the owner's refusal is as before");
+  } finally { F.done(); }
+});

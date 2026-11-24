@@ -2090,8 +2090,10 @@ const isPlanFile = (name) => name.startsWith('plan-') && !MONTHLY.test(name.repl
 
 function currentTicketId() {
   if (process.env.DEVTEAM_TICKET) return process.env.DEVTEAM_TICKET;
-  const b = cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']);
-  return b?.startsWith('ticket/') ? b.slice('ticket/'.length) : null;
+  // the full ref: a short name gains a prefix when another ref has it too, and a branch with no
+  // commit yet has none (a HEAD set on refs/ticket/… or refs/tags/ticket/… by hand counts too)
+  const ref = cwdGit(['symbolic-ref', '-q', 'HEAD']);
+  return ref?.match(/^refs\/(?:[^/]+\/)?ticket\/(.+)$/)?.[1] ?? null;
 }
 // Who this process writes the log as: the responder (its role wins over a ticket, a feature or a
 // branch), a ticket id, plan-<feature>, or supervisor. Never the owner.
@@ -2100,8 +2102,9 @@ function logWriter() {
   const t = currentTicketId();
   if (t) return t;
   if (process.env.DEVTEAM_FEATURE) return `plan-${process.env.DEVTEAM_FEATURE}`;
-  const b = cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']);
-  if (b?.startsWith('plan/')) return `plan-${b.slice('plan/'.length)}`;
+  // the full ref, as currentTicketId reads it
+  const f = cwdGit(['symbolic-ref', '-q', 'HEAD'])?.match(/^refs\/(?:[^/]+\/)?plan\/(.+)$/)?.[1];
+  if (f) return `plan-${f}`;
   return 'supervisor';
 }
 // Owner commands run from the owner's terminal or the dashboard, never an agent session. A
@@ -2113,7 +2116,7 @@ function logWriter() {
 // correct with --from-chat or --from-turn): its role is needed there, and the session check below is
 // the same.
 function ownerWriter(hint, { heard = false } = {}) {
-  if (heard && (process.env.DEVTEAM_ROLE !== 'supervisor' || logWriter() !== 'supervisor')) die('the supervisor records what the owner said in a thread or in its session; in your own terminal, run the command without --from-chat or --from-turn');
+  if (heard && (process.env.DEVTEAM_ROLE !== 'supervisor' || logWriter() !== 'supervisor')) die('the supervisor records what the owner said in a thread or in its session; in your own terminal, run the command without --from-chat or --from-turn; the supervisor runs it from home\'s main checkout');
   if (!heard && process.env.DEVTEAM_ROLE) die(`owner commands don't run in an agent session (DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE})`);
   if (inResponderWorktree()) die("owner commands don't run in the responder's worktree");
   // A worker's or planner's session, whatever DEVTEAM_ROLE says: DEVTEAM_TICKET or DEVTEAM_FEATURE
@@ -2131,11 +2134,13 @@ function ownerWriter(hint, { heard = false } = {}) {
     const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_')));
     Object.assign(env, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: os.devNull });
     // safe.directory=* lets git read a checkout another user owns, whose own config could name
-    // programs (core.fsmonitor and the like); rev-parse runs none, and every session runs as the
+    // programs (core.fsmonitor and the like); rev-parse and symbolic-ref run none, and every session runs as the
     // same user as the owner, so this opens nothing new
     const own = (args) => { try { return execFileSync('git', ['-c', 'safe.directory=*', ...args], { cwd: process.cwd(), env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; } };
-    const b = own(['rev-parse', '--abbrev-ref', 'HEAD']);
-    if (b && /^(ticket|plan)\//.test(b)) return `this checkout is on ${b}`;
+    // the full ref: --abbrev-ref's short name gains a prefix when another ref has it too, and it
+    // fails on a branch with no commit yet
+    const b = own(['symbolic-ref', '-q', 'HEAD'])?.match(/^refs\/(?:[^/]+\/)?((?:ticket|plan)\/.+)$/)?.[1];
+    if (b) return `this checkout is on ${b}`;
     const cwd = realPath(process.cwd());
     const homeWt = realPath(path.join(mainRoot, '.worktrees'));
     if (cwd.split(path.sep).includes('.worktrees') || cwd.startsWith(`${homeWt}${path.sep}`)) return `${cwd} is under a .worktrees folder, where sessions work`;
@@ -2143,7 +2148,7 @@ function ownerWriter(hint, { heard = false } = {}) {
     const common = own(['rev-parse', '--path-format=absolute', '--git-common-dir']);
     return common && commonDir && realPath(common) === realPath(commonDir) ? null : `DEVTEAM_HOME is set, and ${cwd} is no checkout of home's; in your own terminal, unset DEVTEAM_HOME or run this from home's main checkout`;
   })();
-  if (session) die(`owner commands don't run in a worker's or planner's session (${session}); the owner runs them in their own terminal from home's main checkout, or on the dashboard, and a session sends the supervisor what it needs`);
+  if (session) die(`owner commands don't run in a worker's or planner's session (${session}); ${heard ? "the supervisor records the owner's words from home's main checkout: run this there, with no DEVTEAM_TICKET or DEVTEAM_FEATURE set" : "the owner runs them in their own terminal from home's main checkout, or on the dashboard"}, and a session sends the supervisor what it needs`);
   if (heard) return { by: 'owner' };
   const pane = process.env.TMUX_PANE;
   if (!pane || !process.env.TMUX) return { by: 'owner' };
