@@ -508,7 +508,8 @@ test('S2 no DevTools port', opts, async () => {
 // The UDP sockets bound to 5353 (mDNS) that Chrome's group holds.
 function mdnsSockets(leader) {
   const held = new Set(groupOf(leader).flatMap((pid) => [...socketsOf(pid).values()]));
-  assert.ok(held.size, "the sockets of Chrome's group can be read");
+  // its own connections to the guard, held by its network process, not its leader
+  assert.ok(['tcp', 'tcp6'].flatMap(procNet).some((c) => held.has(c[9])), "the sockets of Chrome's network process can be read");
   return ['udp', 'udp6'].flatMap(procNet).filter((c) => c[1].endsWith(':14E9') && held.has(c[9])).length;
 }
 // kit-805: what a page's WebRTC sends round the guard, by this machine's Chrome and the daemon's own
