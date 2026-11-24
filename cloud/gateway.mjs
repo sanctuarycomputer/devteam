@@ -1233,7 +1233,9 @@ export function createGateway(opts = {}) {
   // anyone else's in their row. Devices aren't what `rev` counts, so neither bumps it.
   const subsOf = (s, person) => (isOwner(person) ? s.pushSubs ?? [] : (s.people ?? []).find((p) => p.id === person.id)?.pushSubs ?? []);
   const withSubs = (s, person, subs) => (isOwner(person) ? { ...s, pushSubs: subs } : { ...s, people: (s.people ?? []).map((p) => (p.id === person.id ? { ...p, pushSubs: subs } : p)) });
-  const everySub = (s) => [...(s.pushSubs ?? []), ...(s.people ?? []).flatMap((p) => p.pushSubs ?? [])];
+  // Whom news goes to: the owner's devices and every Full person's. A View person gets none (kit-801),
+  // even if their row holds a device (a hand-edited state); removing a dead one still reads every list.
+  const everySub = (s) => [...(s.pushSubs ?? []), ...(s.people ?? []).flatMap((p) => (levelOf(p) === 'view' ? [] : p.pushSubs ?? []))];
   // Every list, everyone's, keeping only what `keep` passes.
   const keepSubs = (s, keep) => ({ ...s, pushSubs: (s.pushSubs ?? []).filter(keep), ...(s.people ? { people: s.people.map((p) => ({ ...p, pushSubs: (p.pushSubs ?? []).filter(keep) })) } : {}) });
   // "Yours" before "last", so nobody learns anything of anyone else's. On success: whoever held it
@@ -3284,6 +3286,8 @@ export function createGateway(opts = {}) {
         const now = store.load();
         const held = stillHeld(now, session);
         if (!held) return json(res, 401, { error: 'your session ended; sign in again' });
+        // moved to View while its body was read (the View rule ran at Full): no device, as the guard answers
+        if (levelOf(held.person) === 'view') return json(res, 403, { error: VIEW_ANY, code: 'view-only' });
         const freed = keepSubs(now, (x) => x.endpoint !== sub.endpoint);
         store.save(withSubs(freed, held.person, [...subsOf(freed, held.person), sub].slice(-PUSH_DEVICES)));
         return json(res, 200, { ok: true });
@@ -3676,7 +3680,7 @@ if (!token) location.replace('/auth/login');
 else post('/auth/claim/invite', { token }).then((i) => {
   again = i.again === true;
   if (again) { el('h').textContent = 'Add a sign-in method to your account'; el('who').textContent = 'This link adds a sign-in method (a passkey) to ' + i.name + '\\'s account on ' + host + '. Your other sign-in methods keep working.'; el('how').textContent = ''; el('go').textContent = 'Create passkey'; }
-  else el('who').textContent = 'You\\'re invited to ' + host + ', ' + i.name + ', as ' + (i.level === 'view' ? 'view only: you can see the hub, dashboards, artifacts, boards and goals, and change nothing. One exception: opening a running preview can set off what that app does when a page opens.' : 'Full: you can do everything on the box except manage people.');
+  else el('who').textContent = 'You\\'re invited to ' + host + ', ' + i.name + ', as ' + (i.level === 'view' ? 'view only: you can see everything here (the hub, dashboards, artifacts, boards and goals) and change only your own sign-in methods. One exception: opening a running preview can set off what that app does when a page opens.' : 'Full: you can do everything on the box except manage people.');
 }, (e) => (/expired or was used/.test(e.message) ? dead() : err(e.message + ' Reload to try again.')));
 el('go').onclick = run(async () => {
   try { await create('/auth/method/passkey/start', '/auth/method/passkey/finish', { purpose: 'invite', token, name: el('name').value }); }
