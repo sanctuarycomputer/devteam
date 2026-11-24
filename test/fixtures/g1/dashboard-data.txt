@@ -90,6 +90,8 @@ exit 0
     "merge-word": "Merging a ticket",
     "approve-feature-plan": "Approving a feature's plan",
     "merge-chore": "Merging a chore",
+    "chore-start": "Starting a chore",
+    "chore-drop": "Dropping a chore",
     "worker-slots": "Starting and stopping workers",
     "replan-within-feature": "Replanning the tickets of a feature",
     "add-ticket": "Adding a ticket",
