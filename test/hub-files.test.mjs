@@ -2,7 +2,7 @@
 // the box's on the hub's name, operator-thread --files, and the paths in the operator's pane.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { freePort, hasTmux, until } from './lib/kit.mjs';
 import { box, cleanup, KIT, machine, OP, prompt, seat, shown, signedPress, tmp } from './lib/operator-threads-fixture.mjs';
-import { newFolderName, R, request } from './lib/attachments-fixture.mjs';
+import { newFolderName, R, request, rulesFromKit } from './lib/attachments-fixture.mjs';
 
 const G = await import('../cloud/gateway.mjs');
 const servedAt = (stored) => `/upload/${path.basename(path.dirname(stored))}/${path.basename(stored)}`;
@@ -159,6 +159,139 @@ test('hub files laptop: on a box the hub\'s own server takes and serves none (th
   }
 });
 
+// Names one pass of the rule leaves at a name the next pass would change (kit-810), and what they settle at.
+const UNSETTLED = { 'x.Z._': 'x.z', 'Za9..e._': 'Za9.e', 'a.b_._': 'a.b', 'ee.a-Z._': 'ee.az', 'ZZ..Z._': 'ZZ.z',
+  // each ._ at the end is a pass of its own
+  'a.B_._._._._': 'a.b', [`a.B${'_.'.repeat(40)}_`]: 'a.b' };
+
+test('hub files: safeUploadName of its own result is that result, in both copies', () => {
+  const K = rulesFromKit();
+  const names = [...Object.keys(UNSETTLED), '', '.', '..', '.part', '-_', 'a.PNG', 'My Shot.JPG', `${'b'.repeat(250)}.-.e._`, undefined, null];
+  // and made-up hostile ones, the same each run
+  let seed = 810;
+  const pick = (n) => { seed = (seed * 1103515245 + 12345) % 2147483648; return Math.floor((seed / 2147483648) * n); };
+  const chars = ['a', 'Z', '9', '.', '.', '_', '-', ' ', '/', 'é', '\u0301', '\u200e'];
+  const ends = ['a', 'Z', '9', '.', '.', '_', '_', '-', '-', '.']; // many passes
+  for (let i = 0; i < 5000; i++) names.push(`a${Array.from({ length: 1 + pick(40) }, () => ends[pick(ends.length)]).join('')}`);
+  for (let i = 0; i < 20000; i++) names.push(`${i % 4 ? '' : 'b'.repeat(175 + pick(40))}${Array.from({ length: 1 + pick(24) }, () => chars[pick(chars.length)]).join('')}`);
+  for (const [copy, rule] of [['the kit\'s', K.safeUploadName], ['the gateway\'s', G.safeUploadName]]) {
+    for (const [raw, want] of Object.entries(UNSETTLED)) assert.equal(rule(raw), want, `${copy}: ${raw}`);
+    for (const raw of names) { const once = rule(raw); assert.equal(rule(once), once, `${copy}: ${JSON.stringify(raw)}`); }
+  }
+  for (const raw of names) assert.equal(K.safeUploadName(raw), G.safeUploadName(raw), JSON.stringify(raw));
+  // the rule as it was, one pass: every name it stored that was served then is stored, and served, the same now
+  const was = (raw) => {
+    const base = String(raw ?? '').split(/[/\\]/).pop().normalize('NFD').replace(/[\p{M}\p{Cc}\p{Cf}]/gu, '');
+    const plain = base.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^\.+|[.-]+$/g, '');
+    const dot = plain.lastIndexOf('.');
+    const ext = dot >= 0 && plain.length - dot <= 17 ? plain.slice(dot).toLowerCase().replace(/[^.a-z0-9]/g, '') : '';
+    const stem = (ext ? plain.slice(0, dot) : plain).replace(/^[._-]+/, '').slice(0, 200).replace(/[.-]+$/, '');
+    return `${stem || 'file'}${ext.length > 1 ? ext : ''}`;
+  };
+  let served = 0;
+  for (const raw of names) {
+    const then = was(raw);
+    if (was(then) !== then) continue;
+    served++;
+    for (const [copy, rule] of [['the kit\'s', K.safeUploadName], ['the gateway\'s', G.safeUploadName]]) assert.deepEqual([rule(raw), rule(then)], [then, then], `${copy}, served before: ${JSON.stringify(raw)}`);
+  }
+  assert.ok(served > 20000 && served < names.length, `${served} of ${names.length}`);
+});
+
+test('hub files laptop: a file whose name one pass left unsettled is served back', T, async (t) => {
+  const H = await laptopHub(t);
+  for (const [raw, want] of Object.entries(UNSETTLED)) {
+    const up = await H.post(raw, Buffer.from('x'));
+    assert.equal(up.status, 200, up.text);
+    assert.equal((await H.get(servedAt(up.json.path))).status, 200, `${raw} is served back`);
+    assert.equal(path.basename(up.json.path), want);
+  }
+});
+
+test('hub files laptop: a file whose name one pass left unsettled goes on a turn', T, async (t) => {
+  const H = await laptopHub(t);
+  for (const raw of Object.keys(UNSETTLED)) {
+    const up = await H.post(raw, Buffer.from('x'));
+    const r = await H.act('thread-new', { text: 'see', files: [{ name: 'x', path: up.json.path, bytes: up.json.size }] });
+    assert.equal(r.status, 200, `${raw} goes on a turn: ${r.text}`);
+  }
+});
+
+// --- the image's list (box-pins changed) -----------------------------------------------------------
+const kitText = fs.readFileSync(KIT, 'utf8');
+const SCRIPT = 'docs/devteam/scripts/devteam.mjs';
+function imageParts() {
+  const at = kitText.indexOf('\nconst IMAGE_RUNS = {');
+  assert.ok(at !== -1, 'IMAGE_RUNS is declared');
+  return new Function(`return ${kitText.slice(at + '\nconst IMAGE_RUNS = '.length, kitText.indexOf('\n};\n', at) + 2)}`)().parts;
+}
+// The upload code: every top-level declaration from the rules to the route that receives a file, each
+// with its source (its comments out).
+function uploadCode() {
+  const from = kitText.indexOf('/* upload rules start */\n'), to = kitText.indexOf('\n}\n', kitText.indexOf('\nasync function receiveLaptopUpload('));
+  assert.ok(from !== -1 && to > from);
+  const decls = new Map();
+  let name = null;
+  for (const l of kitText.slice(from, to + 2).split('\n')) {
+    const m = /^(?:async )?(?:function|const) (\w+)/.exec(l);
+    if (m) { name = m[1]; decls.set(name, ''); }
+    if (name && !/^\s*\/\//.test(l)) decls.set(name, `${decls.get(name)}${l.replace(/ \/\/ .*$/, '')}\n`);
+  }
+  return decls;
+}
+// What the hub and operator-thread reach of it: named in their own parts, or in what those name.
+function reachedUploadCode() {
+  const decls = uploadCode();
+  const body = (n) => { const i = kitText.search(new RegExp(`^(?:async )?(?:function|const) ${n}\\b`, 'm')); assert.ok(i !== -1, n); return kitText.slice(i, kitText.slice(i).search(/\n[}\]]\)?;?\n/) + i).split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n'); };
+  const reached = new Set();
+  const read = (src) => { for (const n of decls.keys()) if (!reached.has(n) && new RegExp(`\\b${n}\\b`).test(src)) { reached.add(n); read(decls.get(n)); } };
+  for (const n of ['HUB_ACTIONS', 'startHub', 'deliverToOperator', 'cmdOperatorThread']) read(body(n));
+  return { decls, reached };
+}
+
+test('hub files: IMAGE_RUNS lists the upload code the box\'s hub and operator-thread run, and no other', () => {
+  const { decls, reached } = reachedUploadCode();
+  for (const n of ['attachedFiles', 'droppedFileProblem', 'safeUploadName', 'shellQuote', 'dropPaste', 'receiveLaptopUpload', 'serveLaptopUpload', 'laptopUploadsDir', 'uploadsRoot', 'uploadLimits', 'sweepLaptopUploads']) assert.ok(reached.has(n), `${n} is reached`);
+  const parts = imageParts();
+  assert.deepEqual([...decls.keys()].filter((n) => parts.includes(n)).sort(), [...reached].sort());
+});
+
+test('hub files: a fix to any one of them is a minor, named', T, (t) => {
+  const later = cleanup(t);
+  const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-hub-files-pins-')));
+  later(() => fs.rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
+  const home = path.join(repo, '.home');
+  fs.mkdirSync(home);
+  const env = { ...process.env, HOME: home, GIT_AUTHOR_NAME: 'a', GIT_AUTHOR_EMAIL: 'a@x', GIT_COMMITTER_NAME: 'a', GIT_COMMITTER_EMAIL: 'a@x' };
+  for (const k of Object.keys(env)) if (/^(DEVTEAM_|GIT_(DIR|WORK_TREE|INDEX_FILE))/.test(k)) delete env[k];
+  const git = (...a) => execFileSync('git', a, { cwd: repo, env, encoding: 'utf8' }).trim();
+  git('init', '-q', '-b', 'main');
+  git('remote', 'add', 'origin', 'git@github.com:sanctuarycomputer/devteam.git');
+  const kit = path.join(repo, SCRIPT);
+  fs.mkdirSync(path.dirname(path.dirname(kit)), { recursive: true });
+  fs.cpSync(path.dirname(path.dirname(KIT)), path.dirname(path.dirname(kit)), { recursive: true });
+  fs.writeFileSync(path.join(repo, '.gitignore'), '.home\n');
+  git('add', '-A');
+  git('commit', '-qm', 'base');
+  git('tag', 'base');
+  const { reached, decls } = reachedUploadCode();
+  const probed = (names) => kitText.split('\n').map((l) => { const m = /^(?:async )?(?:function|const) (\w+)/.exec(l); return m && names.has(m[1]) ? `${l} // kit-810 probe` : l; }).join('\n');
+  const changed = (names) => {
+    fs.writeFileSync(kit, probed(names));
+    git('commit', '-qam', [...names].join(' ').slice(0, 60));
+    const r = spawnSync(process.execPath, [kit, 'box-pins', 'changed', '--since', 'base', '--json'], { cwd: repo, env, encoding: 'utf8', timeout: 60000 });
+    assert.equal(r.stderr, '');
+    return { status: r.status, parts: JSON.parse(r.stdout).changes.map((c) => c.part) };
+  };
+  // each is a leaf of its own, so all at once names each; one alone names it alone
+  assert.deepEqual(changed(reached), { status: 3, parts: [...reached].sort() });
+  assert.deepEqual(changed(new Set(['shellQuote'])), { status: 3, parts: ['shellQuote'] });
+  // and what only a dashboard runs stays a patch
+  const rest = new Set([...decls.keys()].filter((n) => !reached.has(n)));
+  assert.ok(rest.has('filesFlag') && rest.has('dropSpace'), [...rest].join(' '));
+  assert.deepEqual(changed(rest), { status: 0, parts: [] });
+});
+
 // --- the box -------------------------------------------------------------------------------------
 // A claimed gateway on a localhost URL, with the owner's session (a software passkey, as the gateway's tests have it).
 function cbor(v) {
@@ -253,6 +386,16 @@ test('hub files box: GET /upload/<folder>/<name> serves it to the hub\'s own pag
   const before = B.stored().length;
   const dots = await B.get('/x/../upload?name=d.txt', { origin: B.pub, 'content-type': 'application/octet-stream' }, 'POST');
   assert.deepEqual([dots.status, B.stored().length], [404, before], dots.text);
+});
+
+test('hub files box: a file whose name one pass left unsettled is served back', T, async (t) => {
+  const B = await boxGateway(t);
+  for (const [raw, want] of Object.entries(UNSETTLED)) {
+    const r = await B.post(raw, Buffer.from('x'));
+    assert.equal(r.status, 200, r.text);
+    assert.equal((await B.get(servedAt(r.json.path))).status, 200, `${raw} is served back`);
+    assert.equal(path.basename(r.json.path), want);
+  }
 });
 
 test('hub files box: the gateway\'s sweep removes it past keepMs, and at the box\'s total a further one is refused', T, async (t) => {
