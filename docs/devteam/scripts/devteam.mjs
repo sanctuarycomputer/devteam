@@ -1701,6 +1701,9 @@ function integrity(o, file) {
   if (o.type === 'knowledge' && 'owner_note' in o && cls !== 'owner') return "owner_note is the owner's";
   // Sending a lesson to the owner, and its plain line, are the supervisor's: the owner's own knowledge is kept as written.
   if (o.type === 'knowledge' && ('for_owner' in o || 'plain' in o) && cls !== 'supervisor') return "for_owner and plain are the supervisor's, on a lesson it sends the owner";
+  // kit-252: who of the box's people gave it (from the gateway) is said on the owner's lines alone,
+  // new or set: no other writer's line passes itself off as a person's.
+  if ('person' in o && cls !== 'owner') return "person is on the owner's lines only";
   if (o.type === 'knowledge' && o.op === 'new' && cls !== 'owner' && o.for_owner !== true && ownerScoped(o.scope)) return 'a lesson about a kind of call only the owner makes is sent to the owner (for_owner)';
   if (o.op === 'new') {
     if (ids.keyed[o.type]) {

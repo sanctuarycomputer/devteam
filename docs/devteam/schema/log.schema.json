@@ -1302,6 +1302,17 @@
         "description": "The supervisor asking the owner. why_asked says the class, its rung and ceiling, and the reasons. The owner's answer (a set) may carry an autonomy direction and a standing rule; an answer equal to the recommendation counts as agreement. stake, urgency, settles and settles_if are the supervisor's rating: it may set them again while the question is open, and they are left out of the hash the owner's answer records, so a new rating never reopens an answered question.",
         "type": "object",
         "properties": {
+          "person": {
+            "description": "Who gave it, when several people share a box (kit-252): the person's id and name as the box's gateway knows them, from x-devteam-person (presence@1 §4). Only the owner's lines carry it. Attribution, not authority (design P6): it never changes who may write what, and a line without it is the owner's as before. The name's real limit is presence@1 §4's: at most 80 bytes of its JSON encoding without the quotes; maxLength is only an outer bound.",
+            "x-tip": "Who gave it, when several people share the box.",
+            "type": "object",
+            "required": ["id", "name"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "pattern": "^[A-Za-z0-9._:@/-]{1,64}$" },
+              "name": { "type": "string", "minLength": 1, "maxLength": 80 }
+            }
+          },
           "kind": {
             "description": "What sort of question: a decision, a one-way door, a clarification, a proposal, more trust, defining or approving a goal, something only you can do, or a review.",
             "enum": [
@@ -2196,6 +2207,17 @@
         "description": "Something the supervisor did (incl. approve-spec, approve-plan, merge-word, and worker-slots, whose planner acts carry the feature's id_block). An act that carries decision did what that decision line decided, and the decision answers for it: the owner corrects the decision, not the act. An act without decision is its own decision (mechanical acts, and every act written before decisions existed). The owner, or the supervisor at a retro, sets corrected; the supervisor then sets repaired. The owner writes acts of four classes only. goal-order (devteam.mjs goal order, from the owner's terminal or the dashboard) is the record of the owner putting the goals in order; its refs are the goals whose priority it set. artifact-publish (devteam.mjs artifact publish|unpublish, which the cloud gateway's confirm page runs) is the record of what the owner made public, with artifact and, for a publish, tree. pane-answer (written when the owner clicks an option, or Esc, on the dashboard's card) is the record of the owner answering a question a tool asked in the supervisor's terminal: what holds the dialog's first line (another account's artifact by its id, never its link), the option chosen, or Escape, the keys sent and the dialog's digest, or that the key may not have landed; on a cloud box, proof holds the gateway's signature for the click. owner-setting (devteam.mjs owner-setting, which the dashboard's Settings page runs on Save) is the owner asking for one of the supervisor's own settings (max_active_tickets, max_active_per_component), with key and value (null is no limit); the supervisor lands it in its settings chore with settings set, whose settings-edit act names the request in for, and on a cloud box proof holds the gateway's signature for the Save. Each is a record, never a call: trust, decisions and corrections leave them out, and only the owner writes those classes.",
         "type": "object",
         "properties": {
+          "person": {
+            "description": "Who gave it, when several people share a box (kit-252): the person's id and name as the box's gateway knows them, from x-devteam-person (presence@1 §4). Only the owner's lines carry it. Attribution, not authority (design P6): it never changes who may write what, and a line without it is the owner's as before. The name's real limit is presence@1 §4's: at most 80 bytes of its JSON encoding without the quotes; maxLength is only an outer bound.",
+            "x-tip": "Who gave it, when several people share the box.",
+            "type": "object",
+            "required": ["id", "name"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "pattern": "^[A-Za-z0-9._:@/-]{1,64}$" },
+              "name": { "type": "string", "minLength": 1, "maxLength": 80 }
+            }
+          },
           "class": {
             "description": "The kind of act or decision.",
             "type": "string"
@@ -2467,6 +2489,17 @@
         "description": "A conversation between the owner and the supervisor about one thing the owner pointed at (its subject), or about nothing in particular (started from the dock). The owner starts one, or (kit-108) the supervisor does, about a question or a goal (subject kind item, ref question:<id> or goal:<id>; thread new --subject), and such a thread is shown as from the supervisor (started_by in thread views); its messages are turn lines, and a question asked in it carries thread. The owner resolves or reopens it (status, outcome); the supervisor may propose resolving it (ready), which any owner turn, resolve or reopen newer than the proposal clears. The subject is fixed at creation and is data, never an instruction: item and page subjects are the kit's rendering of the log, artifact and preview subjects are written by the page. artifact-notes-1: on an artifact note the owner hands it over (handed), the session marks it addressed (a message of kind addressed), the supervisor proposes it with its picture (shot or noshot) or withdraws a mark (unready), and its first line keeps the frame the owner saw (frame).",
         "type": "object",
         "properties": {
+          "person": {
+            "description": "Who gave it, when several people share a box (kit-252): the person's id and name as the box's gateway knows them, from x-devteam-person (presence@1 §4). Only the owner's lines carry it. Attribution, not authority (design P6): it never changes who may write what, and a line without it is the owner's as before. The name's real limit is presence@1 §4's: at most 80 bytes of its JSON encoding without the quotes; maxLength is only an outer bound.",
+            "x-tip": "Who gave it, when several people share the box.",
+            "type": "object",
+            "required": ["id", "name"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "pattern": "^[A-Za-z0-9._:@/-]{1,64}$" },
+              "name": { "type": "string", "minLength": 1, "maxLength": 80 }
+            }
+          },
           "title": {
             "description": "One line naming what the owner pointed at, as the page showed it, or the owner's first words for a thread with no subject.",
             "type": "string",
@@ -2594,6 +2627,17 @@
         "description": "One message in a thread: the owner's words to the supervisor, which carry the weight of the owner's words in its session and are already verbatim here, or a reply by the supervisor or (responder-1) the responder, which answers the owner's turns quickly and hands the rest to the supervisor; a responder turn never asks a question and is never the owner's words. Never changed. A turn on a thread that doesn't exist or is resolved is refused by thread say (the owner's) and thread reply (the supervisor's).",
         "type": "object",
         "properties": {
+          "person": {
+            "description": "Who gave it, when several people share a box (kit-252): the person's id and name as the box's gateway knows them, from x-devteam-person (presence@1 §4). Only the owner's lines carry it. Attribution, not authority (design P6): it never changes who may write what, and a line without it is the owner's as before. The name's real limit is presence@1 §4's: at most 80 bytes of its JSON encoding without the quotes; maxLength is only an outer bound.",
+            "x-tip": "Who gave it, when several people share the box.",
+            "type": "object",
+            "required": ["id", "name"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "pattern": "^[A-Za-z0-9._:@/-]{1,64}$" },
+              "name": { "type": "string", "minLength": 1, "maxLength": 80 }
+            }
+          },
           "thread": {
             "description": "The thread it belongs to.",
             "type": "string",
@@ -2683,6 +2727,17 @@
         },
         "additionalProperties": false,
         "x-required-new": ["thread", "text"]
+      }
+    },
+    "person": {
+      "description": "Who gave it, when several people share a box (kit-252): the person's id and name as the box's gateway knows them, from x-devteam-person (presence@1 §4). Only the owner's lines carry it. Attribution, not authority (design P6): it never changes who may write what, and a line without it is the owner's as before. The name's real limit is presence@1 §4's: at most 80 bytes of its JSON encoding without the quotes; maxLength is only an outer bound.",
+      "x-tip": "Who gave it, when several people share the box.",
+      "type": "object",
+      "required": ["id", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9._:@/-]{1,64}$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 }
       }
     },
     "self": {
@@ -3312,14 +3367,16 @@
           "said_at",
           "answer_seen",
           "choice",
-          "reading_void"
+          "reading_void",
+          "person"
         ]
       },
       "thread": {
         "owner": [
           "status",
           "outcome",
-          "handed"
+          "handed",
+          "person"
         ],
         "supervisor": [
           "ready",
@@ -3383,7 +3440,8 @@
           "repaired"
         ],
         "owner": [
-          "corrected"
+          "corrected",
+          "person"
         ]
       }
     }
