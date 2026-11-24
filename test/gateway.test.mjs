@@ -391,7 +391,7 @@ test('behind the gateway the kit runs as on a laptop: hub, dashboard, owner acti
     assert.ok(!hcsp.includes('127.0.0.1'), hcsp);
     assert.deepEqual(list.map((x) => [x.name, x.port]).sort(), [['alpha', P], ['echo', P + 5]]);
     const boxJson = (await gw.req('GET', '/box.json')).json;
-    assert.deepEqual(boxJson, { box: 2, terminal: `${gw.term}/`, project: `http://{project}.box.localhost:${gw.port}/`, passkeys: `${gw.auth}/auth/passkeys`, previews: `${gw.auth}/dev/`, push: boxJson.push, image: null, role: 'owner', people: `${gw.auth}/auth/people/list` }, 'the hub learns where projects are, who it is, and where People are');
+    assert.deepEqual(boxJson, { box: 2, terminal: `${gw.term}/`, project: `http://{project}.box.localhost:${gw.port}/`, passkeys: `${gw.auth}/auth/passkeys`, previews: `${gw.auth}/dev/`, push: boxJson.push, image: null, role: 'owner', level: 'full', people: `${gw.auth}/auth/people/list` }, 'the hub learns where projects are, who it is, its level, and where People are');
     assert.equal(Buffer.from(boxJson.push, 'base64url').length, 65, 'and the key that signs its notifications');
 
     // a dashboard on its own subdomain, exactly as the kit serves it, its policy pointed at the box
@@ -3211,7 +3211,7 @@ test('/box.json names the image: release and tools from the env the gateway is g
     assert.equal((await gw.claim(authenticator())).status, 200);
     const b = (await gw.req('GET', '/box.json')).json;
     assert.deepEqual(b.image, { release: 'v9.9.9', tools: { 'claude-code': '2.1.310', gh: '2.83.0' } });
-    assert.deepEqual(Object.keys(b), ['box', 'terminal', 'project', 'passkeys', 'previews', 'push', 'image', 'role', 'people'], 'every field box: 2 has, image, and the owner\'s role and People');
+    assert.deepEqual(Object.keys(b), ['box', 'terminal', 'project', 'passkeys', 'previews', 'push', 'image', 'role', 'level', 'people'], 'every field box: 2 has, image, and the owner\'s role, level and People');
     assert.equal(b.box, 2);
     assert.equal((await gw.req('GET', '/box.json', { cookie: '' })).status, 401, 'signed out: nothing');
   } finally { await gw.close(); }

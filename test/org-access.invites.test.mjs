@@ -784,20 +784,21 @@ test('org-access A5: only a finished sign-in method flow mints a session (the ga
   for (const i of minted) assert.ok(i > sf && i < sf + 800, `a session cookie is set outside sessionFor, at offset ${i}`);
 });
 
-// --- until kit-250: no View ---------------------------------------------------------------------------
+// --- View (kit-250) ----------------------------------------------------------------------------------
 
-test('kit-248: until kit-250, an invite at View and a move to View are refused', async () => {
-  const { gw, owner, ana } = await setup('no-view');
+test('invites: a View invite claims at View; a relink changes no level', async () => {
+  const { gw, owner, ana } = await setup('view');
   try {
     const before = JSON.stringify(gw.state());
-    refusedAs(await owner.post('/auth/people/invite', { name: 'Bea', level: 'view' }), 400, 'view-not-yet', 'an invite at View');
     for (const level of ['admin', 'owner', 7, null]) refusedAs(await owner.post('/auth/people/invite', { name: 'Bea', level }), 400, 'bad-request', `level ${JSON.stringify(level)}`);
     assert.equal(JSON.stringify(gw.state()), before, 'nothing written');
-    // no route moves anyone to View, and a new link keeps the level it has
-    for (const route of ['/auth/people/level', '/auth/people/move', '/auth/people/change']) {
-      const r = await owner.post(route, { id: ana.id, rev: 1, level: 'view' });
-      assert.notEqual(r.status, 200, route);
-    }
+    const r = await owner.post('/auth/people/invite', { name: 'Bea', level: 'view' });
+    ok(r, 'an invite at View');
+    const { b, fin } = await join(gw, r.json.link);
+    ok(fin, 'Bea joins');
+    assert.equal(rowOf(gw, r.json.person.id).level, 'view', 'Bea is View');
+    assert.equal((await b.req('GET', '/box.json')).json.level, 'view', 'and her session says so');
+    // a new link keeps the level the row has, whatever the body says
     ok(await owner.post('/auth/people/relink', { id: ana.id, rev: 1, level: 'view' }), 'a relink');
     assert.equal(rowOf(gw, ana.id).level, 'full', 'Ana is still Full');
   } finally { await gw.close(); }
