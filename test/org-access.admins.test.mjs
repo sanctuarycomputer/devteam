@@ -445,7 +445,7 @@ test('kit-253: a rev sent as a string is refused stale, for every People change'
 
 // --- A16: handing the box over -------------------------------------------------------------------
 test('org-access A16: only the owner transfers, signed in in the last five minutes', async () => {
-  const { gw, C, owner, ana } = await box('a16-who');
+  const { gw, C, owner, ana, lee } = await box('a16-who');
   try {
     await refuses(gw, C.ana, 'transfer', { id: ana.id, rev: rev(gw, ana.id) }, 403, 'not-allowed', 'a member takes the box');
     await refuses(gw, C.sam, 'transfer', { id: ana.id, rev: rev(gw, ana.id) }, 403, 'not-allowed', 'an admin hands it over');
@@ -456,6 +456,7 @@ test('org-access A16: only the owner transfers, signed in in the last five minut
     const s = gw.state();
     gw.write({ ...s, people: s.people.filter((p) => p.role !== 'owner') });
     await refuses(gw, C.owner, 'transfer', { id: ana.id, rev: rev(gw, ana.id) }, 409, 'restart-first', 'the stand-in owner');
+    await refuses(gw, C.owner, 'transfer', { id: lee.id, rev: rev(gw, lee.id) }, 409, 'restart-first', 'the stand-in, to someone never joined with a link out and no passkey: restart-first is asked first');
   } finally { await gw.close(); }
 });
 
@@ -535,7 +536,7 @@ async function handover(name) {
   let s = gw.state();
   const second = authenticator();
   const m = second.method('owner phone');
-  const top = { id: m.key, userId: m.data.userId, jwk: m.data.jwk, alg: -7, signCount: 0, name: 'owner phone', rp: 'box.localhost', createdAt: m.added_at };
+  const top = { id: m.key, userId: m.data.userId, jwk: m.data.jwk, alg: -7, signCount: 7, name: 'owner phone', rp: 'box.localhost', createdAt: m.added_at, usedAt: '2026-11-21T09:00:00.000Z' };
   const stub = { id: rid('m-'), type: 'stub', key: 'vic-stub', label: 'stub', added_at: new Date().toISOString(), last_used: null, data: {} };
   const passkeys = [...s.passkeys, top];
   // two older top-level sessions: one from before sessions named a method, one naming a passkey gone since
@@ -601,6 +602,8 @@ test('org-access A16: afterwards the top-level fields hold only the new owner\'s
     assert.deepEqual(nv.methods.map((m) => m.id), [stub.id], 'Vic\'s row keeps only the stub');
     assert.deepEqual(nv.pushSubs, [], 'and no devices');
     assert.deepEqual(no.methods.filter((m) => m.type === 'passkey').map((m) => m.key).sort(), before.passkeys.map((p) => p.id).sort(), 'the old owner\'s passkeys are in their row');
+    const phone = no.methods.find((m) => m.key === before.passkeys[1].id);
+    assert.deepEqual([phone.data.signCount, phone.last_used, phone.label, phone.data.userId], [7, '2026-11-21T09:00:00.000Z', 'owner phone', before.passkeys[1].userId], 'a moved passkey keeps its counter, its last use, its name and its user');
     assert.deepEqual(no.pushSubs.map((x) => x.endpoint), ['https://push.example.com/o1', 'https://push.example.com/o2'], 'and their devices');
     const mine = s.peopleSessions.filter((x) => x.person === owner.id).map((x) => x.hash).sort();
     assert.deepEqual(mine, before.sessions.map((x) => x.hash).sort(), 'and their sessions');
@@ -648,18 +651,23 @@ test('kit-253: two owner tabs: the second transfer is refused', async () => {
 
 // Review focus 4: a session the new owner opened with a method that isn't a passkey.
 test('kit-253: a session the new owner opened with another method stays theirs, at top level', async () => {
-  const { gw, C, vic, stub } = await handover('k-stub-session');
+  const { gw, C, owner, vic, stub } = await handover('k-stub-session');
   try {
     const tok = crypto.randomBytes(32);
     const hash = u(sha(tok));
     const s = gw.state();
-    gw.write({ ...s, peopleSessions: [...s.peopleSessions, { hash, person: vic.id, method: stub.id, at: Date.now(), expires: Date.now() + 86400e3 }] });
+    // and the old owner's: a top-level session opened with a method in their row that isn't a passkey
+    const own = { id: rid('m-'), type: 'stub', key: 'owner-stub', label: 'stub', added_at: new Date().toISOString(), last_used: null, data: {} };
+    const ownHash = u(sha(crypto.randomBytes(32)));
+    gw.write({ ...s, people: s.people.map((p) => (p.id === owner.id ? { ...p, methods: [...(p.methods ?? []), own] } : p)), sessions: [...s.sessions, { hash: ownHash, method: own.id, at: Date.now(), expires: Date.now() + 86400e3 }],
+      peopleSessions: [...s.peopleSessions, { hash, person: vic.id, method: stub.id, at: Date.now(), expires: Date.now() + 86400e3 }] });
     await accepts(gw, C.owner, 'transfer', { id: vic.id, rev: rev(gw, vic.id) }, 'to Vic');
     const t = gw.state();
     const top = t.sessions.find((x) => x.hash === hash);
     assert.ok(top, 'the stub session is at top level');
     assert.equal(top.method, stub.id, 'naming the stub\'s id, which stays in her row');
     assert.ok(!t.peopleSessions.some((x) => x.hash === hash), 'and not in peopleSessions');
+    assert.equal(t.peopleSessions.find((x) => x.hash === ownHash)?.method, own.id, 'the old owner\'s session opened with their stub keeps naming it');
     const b = await gw.req('GET', '/box.json', { cookie: `devteam_session=${u(tok)}` });
     assert.deepEqual([b.status, b.json?.role], [200, 'owner'], 'it signs her in as the owner');
   } finally { await gw.close(); }
@@ -742,10 +750,14 @@ const toasted = (p, words) => p.until(`the toast "${words}"`, `${toastNow} === $
 const peopleShown = (p, n) => p.until('People', `document.querySelectorAll('#hub-settings .person').length === ${n}`);
 
 test('org-access A16: in Chrome, the owner\'s Make admin, Take Admin away, Make full and Make owner work as the mock does', CHROME, async (t) => {
-  const { gw, C, ana, vic, bea } = await box('a16-hub');
+  const { gw, C, kai, ana, vic, bea } = await box('a16-hub');
   t.after(() => gw.close());
+  invite(gw, kai.id, Date.now() - 1);
   const p = await hubAs(t, gw, C.owner);
   await peopleShown(p, 7);
+  // an expired new link still shows, and offers Revoke, until it is revoked (R3)
+  assert.ok((await p.ev(textOf(`${personSel(kai.id)} .pmeta`))).endsWith(' · a new link expired'), 'Kai\'s line names his expired link');
+  assert.deepEqual(await menuOf(p, kai.id), ['Revoke the link', 'Rename', 'Remove'], 'Kai, an expired link: Revoke first, no Make admin or Make owner');
   assert.deepEqual(await menuOf(p, vic.id), ['Rename', 'Make full', 'Make admin', 'Make owner', 'Send a new link', 'Remove'], 'Vic (View): the mock\'s order');
   await pick(p, 'Make admin');
   await p.until('the confirmation', `Boolean(document.querySelector('#oa-confirm'))`);
@@ -812,7 +824,8 @@ test('org-access A15: in Chrome, an admin\'s Rename, Make full, Remove and Leave
   await p.until('the confirmation', `Boolean(document.querySelector('#oa-confirm'))`);
   assert.ok(await p.ev(`document.querySelector('#oa-confirm .acts button').classList.contains('danger')`), 'Leave is red');
   await confirmed(p, 'Leave this box? You are signed out everywhere now, and your sign-in methods stop working. Only the owner can invite you back.', 'Leave');
-  await p.until('the sign-in page', `location.pathname === '/auth/login'`);
+  // straight there, not by a repaint whose next request finds the session gone (that reload carries ?next=)
+  await p.until('the sign-in page', `location.pathname === '/auth/login' && location.search === ''`, 5000);
   assert.equal(rowOf(gw.state(), sam.id), undefined, 'Sam\'s row is gone');
   // Kai's Settings is open when the owner takes his Admin away: at his next list fetch, People goes
   const k = await hubAs(t, gw, C.kai);

@@ -1841,9 +1841,18 @@ async function oaFetch() {
     OA.notices = Array.isArray(m.notices) ? m.notices : [];
     OA.freshUntil = Date.now() + (Number(m.fresh_ms) > 0 ? Number(m.fresh_ms) : 0);
   }
-  // a failed fetch keeps the last good list: People, and any card open in it, stay
-  if (box?.people) { const l = await oaGet(box.people); if (l && l.viewer && Array.isArray(l.people)) OA.list = l; }
+  // a failed fetch keeps the last good list: People, and any card open in it, stay; a 403 means this
+  // viewer no longer sees People (their Admin was taken away), so the hub reads its role again
+  let lost = false;
+  if (box?.people) {
+    let r = null;
+    try { r = await fetch(box.people, { cache: 'no-store' }); } catch {}
+    const l = r?.ok ? await r.json().catch(() => null) : null;
+    if (l && l.viewer && Array.isArray(l.people)) OA.list = l;
+    else if (r?.status === 403) lost = (await r.json().catch(() => null))?.code === 'not-allowed';
+  }
   OA.at = Date.now();
+  if (lost) return refreshRole();
   const signIn = JSON.stringify([OA.methods, OA.notices]) !== was.signIn;
   const list = JSON.stringify(OA.list) !== was.list;
   const missing = Boolean(OA.list) && !SEC.people?.isConnected;
@@ -1851,6 +1860,18 @@ async function oaFetch() {
   if (OA.list && (list || !SEC.people)) oaDrawPeople();
   // Settings itself is painted again only when People should show and isn't there
   if (missing) paintSettings();
+}
+// The hub's own role, read again from /box.json: after this viewer handed the box over, or when the
+// list refuses them (their Admin taken away in another tab). Only box.role and box.people change;
+// People goes when they no longer see it, and Settings is painted again.
+async function refreshRole() {
+  const b = await oaGet('box.json');
+  if (!b || !box) return;
+  box.role = OA_ROLES.includes(b.role) ? b.role : null;
+  box.people = null;
+  if (box.role && box.role !== 'member' && typeof b.people === 'string') { try { const u = new URL(b.people, location.href); if (u.origin === location.origin) box.people = u.href; } catch {} }
+  if (!box.people) { oaCloseMenu(); OA.list = null; OA.open = null; OA.openNode = null; OA.panel = null; OA.panelNode = null; OA.link = null; SEC.people = null; }
+  oaRedraw();
 }
 // Each section's own redraw, unless something in it is open; then Settings is painted again.
 function oaRedraw() {
@@ -1960,6 +1981,13 @@ async function oaAddPasskey() {
 // and the one-time link card. The open box, card and link are nodes kept in OA (`openNode`,
 // `panelNode`) so a redraw re-inserts them, typed text and all; the link lives only in its card.
 const OA_WORDS = { rename: 'Rename', relink: 'Send a new link', revoke: 'Revoke the link', remove: 'Remove' };
+// A menu item's label, by the row: Make full (a View member; kit-250 adds the move to View), Make
+// admin or Take Admin away by their role, Make owner, and Leave this box on your own row.
+const oaWord = (x, a) => (a === 'level' ? (x.level === 'view' ? 'Make full' : null)
+  : a === 'role' ? (x.role === 'admin' ? 'Take Admin away' : 'Make admin')
+  : a === 'transfer' ? 'Make owner'
+  : a === 'remove' && x.you ? 'Leave this box'
+  : OA_WORDS[a] ?? null);
 const OA_INTRO = {
   owner: 'Everyone here sees everything on this box. Full people can also change anything but People. Admins move members between Full and View only, and rename or remove people; only you invite, make admins or hand the box over. For someone who must not see the rest, set up a box of their own.',
   admin: "You're an admin: you can move members between Full and View only, and rename or remove members and other admins. Only the owner invites, makes admins or hands the box over, and nobody changes the owner's row.",
@@ -1980,7 +2008,8 @@ function oaMeta(x) {
     if (!x.link || x.link.expired) return `${level} · invite link expired`;
     return `${level} · invite link not used yet · expires in ${plural(Math.max(1, Math.round((x.link.expires - Date.now()) / 3600e3)), 'hour')}`;
   }
-  const newLink = x.link?.kind === 'new-link' && !x.link.expired ? ' · a new link not used yet' : '';
+  // an expired new link stays on the row until it is revoked (kit-253 R3): Make admin and Make owner wait for that
+  const newLink = x.link?.kind === 'new-link' ? (x.link.expired ? ' · a new link expired' : ' · a new link not used yet') : '';
   // your own row: you are signed in, reading it (a claim sets no last_seen), as the mock draws it
   return `${plural(x.methods, 'sign-in method')} · ${x.you ? 'signed in now' : x.last_seen ? `signed in ${agoText(x.last_seen)}` : 'never signed in'}${newLink}`;
 }
@@ -2001,8 +2030,8 @@ function oaOpenMenu(btn, x) {
   const m = el('div', 'menu-pop oa-menu');
   m.dataset.person = x.id;
   m.setAttribute('role', 'menu');
-  for (const a of x.actions.filter((a) => OA_WORDS[a])) {
-    const b = el('button', a === 'remove' || a === 'revoke' ? 'red' : '', OA_WORDS[a]);
+  for (const a of x.actions.filter((a) => oaWord(x, a))) {
+    const b = el('button', a === 'remove' || a === 'revoke' ? 'red' : '', oaWord(x, a));
     b.type = 'button';
     b.setAttribute('role', 'menuitem');
     b.onclick = () => { oaCloseMenu(); OA.open = { id: x.id, kind: a }; OA.openNode = null; OA.panel = null; OA.panelNode = null; oaDrawPeople(); SEC.people.querySelector('#oa-rename input, #oa-confirm button')?.focus({ preventScroll: true }); };
@@ -2042,7 +2071,7 @@ function oaPersonRow(x) {
   nm.append(' ', oaBadge(x));
   who.append(nm, el('span', 'pmeta', oaMeta(x)));
   r.append(el('span', 'av', oaInitials(x.name)), who);
-  if (x.actions.some((a) => OA_WORDS[a])) {
+  if (x.actions.some((a) => oaWord(x, a))) {
     const b = el('button', 'menu-btn');
     b.type = 'button';
     b.dataset.k = `settings:menu:${x.id}`;
@@ -2061,7 +2090,7 @@ function oaRefused(r, err, names) {
   if (err && names?.[code]) { err.textContent = names[code]; return; }
   if (code === 'fresh-sign-in') return oaNeedFresh();
   oaToast(r.json?.error || "That didn't work; try again");
-  if (code === 'stale' || code === 'not-allowed' || r.status === 401) { OA.open = null; OA.openNode = null; oaDrawPeople(); oaLoad(); }
+  if (['stale', 'not-allowed', 'not-joined', 'link-outstanding', 'no-passkey', 'restart-first'].includes(code) || r.status === 401) { OA.open = null; OA.openNode = null; oaDrawPeople(); oaLoad(); }
 }
 const OA_NAME_WORDS = { 'bad-name': 'A name is needed.', 'name-taken': 'Someone here already has that name.' };
 // One request at a time from a box or card: its buttons are disabled until the answer is in.
@@ -2104,25 +2133,40 @@ function oaCancel() { OA.open = null; OA.openNode = null; OA.panel = null; OA.pa
 function oaConfirmBox(x, kind) {
   const f = oaFirst(x.name);
   const relinked = x.link?.kind === 'new-link';
+  const leave = kind === 'remove' && x.you;
+  const unmake = kind === 'role' && x.role === 'admin';
   const words = {
+    level: `Make ${f} full? They can then change anything except People, and open the terminal, which reaches every repo and the box's GitHub and AI logins.`,
+    role: unmake ? `Take Admin away from ${f}? They stay Full, and can no longer manage people.` : `Make ${f} an admin? They can then move members between Full and View only, and rename or remove members and other admins. They can't invite, make admins, or touch your row.${x.level === 'view' ? ' They become Full too.' : ''}`,
+    transfer: `Make ${f} the owner of this box? ${f} can then invite, make admins and hand it over again. You become an admin. Only ${f} can undo this.`,
     relink: `Make a new link for ${f}? Opening it adds a sign-in method (a passkey) to their account; their others keep working. Use it when they lost theirs. They are told one was added.`,
-    remove: `Remove ${f}? They are signed out everywhere now, and their sign-in methods stop working. What they did with the terminal stays, such as a program left running or a login copied; if that matters, change the box's logins.`,
+    remove: leave ? 'Leave this box? You are signed out everywhere now, and your sign-in methods stop working. Only the owner can invite you back.' : `Remove ${f}? They are signed out everywhere now, and their sign-in methods stop working. What they did with the terminal stays, such as a program left running or a login copied; if that matters, change the box's logins.`,
     revoke: relinked ? `Revoke ${f}'s new link? It stops working now; their sign-in methods keep working.` : `Revoke ${f}'s invite link? It stops working now.`,
   }[kind];
-  const yes = { relink: 'Make the link', remove: 'Remove', revoke: 'Revoke' }[kind];
+  const yes = { level: 'Make full', role: unmake ? 'Take Admin away' : 'Make admin', transfer: `Make ${f} the owner`, relink: 'Make the link', remove: leave ? 'Leave' : 'Remove', revoke: 'Revoke' }[kind];
+  const extra = { level: { level: 'full' }, role: { role: unmake ? 'member' : 'admin' } }[kind] ?? {};
   const d = el('div', 'oa-confirm');
   d.id = 'oa-confirm';
   const go = () => oaSending(d, async () => {
-    const r = await oaPost(oaPeoplePath(kind), { id: x.id, rev: x.rev });
+    const r = await oaPost(oaPeoplePath(kind), { id: x.id, rev: x.rev, ...extra });
     if (r.status !== 200) return oaRefused(r);
+    // Leave: this session is gone (its cookie cleared), so nothing here is repainted against it
+    if (leave) return location.replace('/auth/login');
     OA.open = null; OA.openNode = null;
     if (kind === 'relink') return oaShowLink(`Send this link to ${f} yourself`, `It works once, for 24 hours. Opening it adds a passkey to ${f}'s account.`, r.json.link);
     oaDrawPeople();
-    oaToast(kind === 'remove' ? `${f} was removed and signed out` : relinked ? `${f}'s new link no longer works` : `${f}'s invite link no longer works`);
+    oaToast({
+      level: `${f} is now full`,
+      role: unmake ? `${f} is no longer an admin` : `${f} is now an admin`,
+      transfer: `${f} is now the owner. You are an admin`,
+      remove: `${f} was removed and signed out`,
+    }[kind] ?? (relinked ? `${f}'s new link no longer works` : `${f}'s invite link no longer works`));
+    // after a hand-over this viewer is an admin: the hub reads its role again, then the list
+    if (kind === 'transfer') await refreshRole();
     oaLoad();
   });
   const acts = el('div', 'acts');
-  acts.append(oaButton(yes, kind === 'relink' ? 'mini' : 'mini danger', `confirm-${kind}`, go), oaButton('Cancel', 'ghost mini', 'confirm-cancel', oaCancel));
+  acts.append(oaButton(yes, kind === 'remove' || kind === 'revoke' ? 'mini danger' : 'mini', `confirm-${kind}`, go), oaButton('Cancel', 'ghost mini', 'confirm-cancel', oaCancel));
   d.append(el('p', '', words), acts);
   return d;
 }

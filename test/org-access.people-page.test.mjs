@@ -860,7 +860,7 @@ test('org-access A3: in Chrome, the owner\'s People work as the mock does', CHRO
   await p.until('the box closed and the list asked again', `!document.querySelector('#oa-rename') && ${sent('auth/people/list')} > ${lists}`);
 
   // Ana's menu; Rename
-  assert.deepEqual(await menuOf(p, B.ana.id), ['Rename', 'Send a new link', 'Remove']);
+  assert.deepEqual(await menuOf(p, B.ana.id), ['Rename', 'Make admin', 'Make owner', 'Send a new link', 'Remove'], 'with kit-253\'s Make admin and Make owner');
   await pick(p, 'Rename');
   await p.until('the rename box', `Boolean(document.querySelector('#oa-rename input'))`);
   assert.equal(await p.ev(textOf('#oa-rename p')), 'Their name, as everyone here sees it:');
@@ -931,7 +931,7 @@ test('org-access A3: in Chrome, the owner\'s People work as the mock does', CHRO
   await p.until('three rows', `document.querySelectorAll('#hub-settings .person').length === 3`);
 
   // Remove Ana
-  assert.deepEqual(await menuOf(p, B.ana.id), ['Rename', 'Send a new link', 'Remove']);
+  assert.deepEqual(await menuOf(p, B.ana.id), ['Rename', 'Make admin', 'Make owner', 'Send a new link', 'Remove'], 'with kit-253\'s Make admin and Make owner');
   await pick(p, 'Remove');
   assert.equal(await p.ev(textOf('#oa-confirm p')), 'Remove Ana? They are signed out everywhere now, and their sign-in methods stop working. What they did with the terminal stays, such as a program left running or a login copied; if that matters, change the box\'s logins.');
   await p.ev(`(() => { const b = [...document.querySelectorAll('#oa-confirm button')].find((x) => x.textContent === 'Remove'); b.click(); b.click(); return true; })()`);

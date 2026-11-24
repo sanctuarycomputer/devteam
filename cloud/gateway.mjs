@@ -1273,7 +1273,8 @@ export function createGateway(opts = {}) {
   // Hand the box from `from` (the owner's row) to `to` (joined, no link out, a passkey): the next
   // state, which the caller saves in one write (kit-253 spec §2). The top-level fields, all an older
   // gateway reads, become `to`'s alone; `from`'s passkeys, sessions and devices move into their row,
-  // each moved session naming the new id of the passkey it named, or none. The stamp follows.
+  // each moved session naming the new id of the passkey it named, the id of another method still in
+  // their row, or none. The stamp follows.
   const transferTo = (s, from, to) => {
     const pk = (to.methods ?? []).filter((m) => m.type === 'passkey');
     const keyOf = new Map(pk.map((m) => [m.id, m.key]));
@@ -1290,7 +1291,7 @@ export function createGateway(opts = {}) {
         if (p.id === from.id) return { ...p, role: 'admin', level: 'full', methods: [...(p.methods ?? []), ...moved], pushSubs: (s.pushSubs ?? []).slice(-PUSH_DEVICES), rev: p.rev + 1 };
         return p;
       }),
-      peopleSessions: [...(s.peopleSessions ?? []).filter((x) => x.person !== to.id), ...s.sessions.map((x) => ({ ...x, person: from.id, method: idOf.get(x.method) ?? null }))],
+      peopleSessions: [...(s.peopleSessions ?? []).filter((x) => x.person !== to.id), ...s.sessions.map((x) => ({ ...x, person: from.id, method: idOf.get(x.method) ?? ((from.methods ?? []).some((m) => m.id === x.method) ? x.method : null) }))],
       invites: (s.invites ?? []).filter((x) => x.person !== from.id && x.person !== to.id),
     });
   };
