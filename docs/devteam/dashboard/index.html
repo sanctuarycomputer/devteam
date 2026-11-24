@@ -7339,7 +7339,7 @@ avStep.watch = () => {
 };
 // The card left where it is under the owner's pointer or focus, so a page that never rests can't keep it moving
 avStep.stays = (t, card) => {
-  const P = avStep.press, key = `${t?.id ?? ''} ${innerWidth} ${innerHeight}`, was = P.placed;
+  const P = avStep.press, key = `${t?.id ?? ''} ${document.documentElement.clientWidth} ${document.documentElement.clientHeight}`, was = P.placed;
   P.placed = key;
   if (!t || !avStep.up() || was !== key || !(card.matches(':hover') || card.contains(document.activeElement))) return false;
   const r = card.getBoundingClientRect();
@@ -7349,7 +7349,8 @@ avStep.stays = (t, card) => {
 avStep.say = () => {
   let e = document.getElementById('av-held');
   if (!e) { e = document.createElement('div'); e.id = 'av-held'; e.setAttribute('role', 'status'); document.body.append(e); }
-  // (put there empty first, so it is announced)
+  // (empty first, so it is announced each time)
+  e.textContent = '';
   requestAnimationFrame(() => { e.textContent = 'That moved just now. Press again in a second.'; });
   e.hidden = false;
   clearTimeout(e._hide);

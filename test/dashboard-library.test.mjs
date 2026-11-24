@@ -1646,6 +1646,14 @@ test('a preview\'s Start and Stop', { ...CHROME, timeout: 300000 }, async (t) =>
   await go(`#preview/${name}`);
   await soon(`document.querySelectorAll('#av-run button').length === 2`, 'Start and Stop');
   // refused: the error beside the buttons, the page's only element with that id, kept through polls
+  // a press within a second of its coming up is refused with its words (kit-145); once it has settled, the same press goes
+  const live = `(() => { const b = document.querySelector('${start}'); return !!b && avStep.ready(b) !== null; })()`;
+  assert.equal(await p.ev('window.__starts ?? 0'), 0, 'nothing sent yet');
+  await p.ev('avStep.press.seen.clear()');
+  await p.click(start);
+  await soon(`document.getElementById('av-held')?.textContent === 'That moved just now. Press again in a second.' && !document.getElementById('av-held').hidden`, 'the press refused, with its words');
+  assert.equal(await p.ev('window.__starts ?? 0'), 0, 'refused: nothing sent');
+  await soon(live, 'Start is live');
   await p.click(start);
   await soon(`document.getElementById('e-preview-${name}')?.textContent === 'Not saved: no'`, 'the refusal in the bar');
   assert.deepEqual(await p.ev(`[document.querySelectorAll('[id="e-preview-${name}"]').length, !!document.getElementById('e-preview-${name}').closest('.av-bar'), !!document.getElementById('e-preview-${name}').closest('#av-run')]`), [1, true, false]);
@@ -1660,6 +1668,7 @@ test('a preview\'s Start and Stop', { ...CHROME, timeout: 300000 }, async (t) =>
   assert.deepEqual(await p.ev(`[document.querySelectorAll('[id="e-preview-${name}"]').length, document.getElementById('e-preview-${name}').textContent]`), [1, ''], 'its error span empty on the new opening');
   // taken: once the preview reads live, Stop alone, within two polls, the viewer still open
   await p.ev('window.__start = 200');
+  await soon(live, 'Start is live again');
   await p.click(start);
   await soon('window.__starts === 2', 'the second Start sent');
   await p.ev(`window.__fx.previews.find((x) => x.name === ${JSON.stringify(name)}).up = true`);
