@@ -315,6 +315,47 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
     };
     // a git on PATH that refuses every call whose words match, doing nothing
     const refusing = (name, words) => before(name, words, () => `{ echo 'error: refused by the test' >&2; exit 4; }`).env;
+    await t.test('K1: a tracking ref that is the last one on a ran ticket\'s commits is kept under a named ref', tmux, () => {
+      ticket('ch-30-a');
+      closeWindow(F, ok(old, ['worker', 'ch-30-a'], SUP));
+      git(['commit', '-q', '--allow-empty', '-m', 'pushed work'], wt('ch-30-a'));
+      const head = git(['rev-parse', 'HEAD'], wt('ch-30-a'));
+      ok(wt('ch-30-a'), ['phase', 'build'], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'ch-30-a' });
+      ok(old, ['worker', 'ch-30-a', '--remove', '--force'], SUP);
+      git(['branch', '-qD', 'ticket/ch-30-a'], old);
+      git(['update-ref', 'refs/remotes/origin/ticket/ch-30-a', head], old);
+      const r = run(old, ['worker', 'ch-30-a', '--resume'], SUP);
+      assert.equal(r.status, 0, r.err);
+      const held = git(['for-each-ref', '--format=%(refname)', '--contains', head], old);
+      assert.notEqual(held, '', 'K1: a ref still holds the commits');
+      assert.match(r.err, new RegExp(`kept at refs/devteam/kept/ticket/ch-30-a/${head}`), 'K1: the words give the full sha');
+      assert.ok(acts(old).some((w) => /^made worker ch-30-a /.test(w) && w.includes(head)), 'K1: in the start\'s act');
+    });
+    await t.test('K7: a symbolic tracking ref is removed and nothing is kept for it', tmux, () => {
+      ticket('ch-52-w');
+      git(['branch', 'bystander-4', planted(old, git(['rev-parse', 'origin/main'], old), 'other')], old);
+      git(['symbolic-ref', 'refs/remotes/origin/ticket/ch-52-w', 'refs/heads/bystander-4'], old);
+      ok(old, ['worker', 'ch-52-w'], SUP);
+      assert.ok(hasRef(old, 'refs/heads/bystander-4'), 'K7: the branch it names stays');
+      assert.equal(git(['for-each-ref', 'refs/devteam/kept/ticket/ch-52-w/'], old), '', 'K7: nothing kept');
+    });
+    await t.test('K2: a stale tracking ref whose commits the start holds is removed and not kept', tmux, () => {
+      const head = ranWithWork('ch-31-b');
+      git(['update-ref', 'refs/remotes/origin/ticket/ch-31-b', head], old);
+      ok(old, ['worker', 'ch-31-b', '--resume'], SUP);
+      assert.ok(!hasRef(old, 'refs/remotes/origin/ticket/ch-31-b'), 'K2: the tracking ref is gone');
+      assert.equal(git(['for-each-ref', 'refs/devteam/kept/ticket/ch-31-b/'], old), '', 'K2: nothing kept');
+    });
+    await t.test('K8: a symbolic ref planted at the kept name is not written through', tmux, () => {
+      const head = ranWithWork('ch-56-a');
+      const lost = planted(old, head, 'lost');
+      git(['update-ref', 'refs/remotes/origin/ticket/ch-56-a', lost], old);
+      git(['branch', 'bystander-5', head], old);
+      git(['symbolic-ref', `refs/devteam/kept/ticket/ch-56-a/${lost}`, 'refs/heads/bystander-5'], old);
+      ok(old, ['worker', 'ch-56-a', '--resume'], SUP);
+      assert.equal(git(['rev-parse', 'refs/heads/bystander-5'], old), head, 'K8: the branch it names is unmoved');
+      assert.equal(git(['rev-parse', `refs/devteam/kept/ticket/ch-56-a/${lost}`], old), lost, 'K8: the commits are kept');
+    });
     await t.test('S3: a configured refspec doesn\'t make the start\'s fetch write another branch', tmux, () => {
       ticket('ch-57-b');
       const main = git(['rev-parse', 'origin/main'], old);
@@ -325,6 +366,96 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
         ok(old, ['worker', 'ch-57-b'], SUP);
         assert.equal(git(['rev-parse', 'refs/heads/bystander-6'], old), main, 'S3: the other branch is unmoved');
       } finally { git(['config', '--unset', 'remote.origin.fetch', 'bystander-6'], old); }
+    });
+    await t.test('K3: when the commits can\'t be kept, the tracking ref stays', tmux, () => {
+      const head = ranWithWork('ch-48-s');
+      const lost = planted(old, head, 'lost');
+      git(['update-ref', 'refs/remotes/origin/ticket/ch-48-s', lost], old);
+      git(['update-ref', 'refs/devteam/kept/ticket/ch-48-s', head], old);
+      const r = run(old, ['worker', 'ch-48-s', '--resume'], SUP);
+      assert.notEqual(r.status, 0, `K3: refused, not started: ${r.out}`);
+      assert.ok(hasRef(old, 'refs/remotes/origin/ticket/ch-48-s'), 'K3: the tracking ref stays');
+      assert.equal(git(['rev-parse', 'refs/remotes/origin/ticket/ch-48-s'], old), lost, 'K3: unmoved');
+      assert.ok(!fs.existsSync(wt('ch-48-s')), 'K3: no worktree');
+    });
+    await t.test('K4: the act names what this start kept first, and only names that are a full sha', tmux, () => {
+      const head = ranWithWork('ch-49-t');
+      const kept = (n) => git(['update-ref', `refs/devteam/kept/ticket/ch-49-t/${n}`, head], old);
+      for (const c of '0123') kept(c.repeat(40));
+      for (let i = 0; i < 3; i += 1) kept(`0/${String(i).repeat(200)}`);
+      const lost = planted(old, head, 'lost');
+      git(['update-ref', 'refs/remotes/origin/ticket/ch-49-t', lost], old);
+      ok(old, ['worker', 'ch-49-t', '--resume'], SUP);
+      const act = acts(old).filter((w) => /^made worker ch-49-t /.test(w)).pop();
+      assert.ok(act?.includes(`kept at refs/devteam/kept/ticket/ch-49-t/${lost},`), `K4: this start's first: ${act}`);
+      assert.match(act, / and 2 more$/, 'K4: the rest counted');
+    });
+    await t.test('K5: a tracking ref on an annotated tag doesn\'t stop the launch', tmux, () => {
+      ticket('ch-50-u');
+      git(['tag', '-a', '-m', 'x', 'annotated', planted(old, git(['rev-parse', 'origin/main'], old))], old);
+      git(['update-ref', 'refs/remotes/origin/ticket/ch-50-u', git(['rev-parse', 'annotated'], old)], old);
+      const r = run(old, ['worker', 'ch-50-u'], SUP);
+      assert.equal(r.status, 0, `K5: started: ${r.err}`);
+      assert.ok(!hasRef(old, 'refs/remotes/origin/ticket/ch-50-u'), 'K5: the tracking ref is gone');
+    });
+    await t.test('K6: a tracking ref moved before its removal is left, and the launch refused', tmux, () => {
+      const head = ranWithWork('ch-51-v');
+      const lost = planted(old, head, 'lost');
+      const newer = planted(old, lost, 'newer');
+      git(['update-ref', 'refs/remotes/origin/ticket/ch-51-v', lost], old);
+      const b = before('git-moves-tracking', "*' -d refs/remotes/origin/ticket/ch-51-v '*", (g) => `'${g}' update-ref refs/remotes/origin/ticket/ch-51-v ${newer}`);
+      const r = run(old, ['worker', 'ch-51-v', '--resume'], b.env);
+      assert.ok(fs.existsSync(b.said), 'K6: it moved');
+      assert.notEqual(r.status, 0, `K6: refused, not started: ${r.out}`);
+      assert.equal(git(['rev-parse', 'refs/remotes/origin/ticket/ch-51-v'], old), newer, 'K6: the tracking ref stays');
+    });
+    // what a retry after a failed write must do: start fresh, upstream set, the kept commits in its act
+    const retried = (id, head, tag) => {
+      assert.ok(!fs.existsSync(wt(id)), `${tag}: no worktree`);
+      const r = run(old, ['worker', id, '--resume'], SUP);
+      assert.equal(r.status, 0, `${tag}: the retry starts: ${r.err}`);
+      assert.match(r.out, new RegExp(`made worker ${id} `), `${tag}: no resume typed where no session exists`);
+      assert.equal(upstream(old, `ticket/${id}`), 'origin/main', `${tag}: the upstream is set`);
+      assert.equal(git(['rev-parse', 'HEAD'], wt(id)), head, `${tag}: on its own commit`);
+      assert.ok(acts(old).some((w) => new RegExp(`^made worker ${id} .*1 commit origin doesn't hold yet`).test(w)), `${tag}: the kept commits in its act`);
+      return r;
+    };
+    for (const [id, key] of [['ch-35-f', 'remote'], ['ch-36-g', 'merge']]) {
+      await t.test(`U1-${key}: an upstream that can't be written leaves no worktree, and a retry completes the launch`, tmux, () => {
+        const head = ranWithWork(id);
+        git(['config', '--remove-section', `branch.ticket/${id}`], old);
+        const r = run(old, ['worker', id, '--resume'], refusing(`git-no-${key}`, `*' config '*'branch.ticket/${id}.${key} '[or]*`));
+        assert.notEqual(r.status, 0, `U1-${key}: refused: ${r.out}`);
+        retried(id, head, `U1-${key}`);
+      });
+    }
+    await t.test('U2: a stale tracking ref that can\'t be removed leaves no worktree, and a retry completes the launch', tmux, () => {
+      const head = ranWithWork('ch-37-h');
+      git(['config', '--remove-section', 'branch.ticket/ch-37-h'], old);
+      const lost = planted(old, git(['rev-parse', 'origin/main'], old), 'lost');
+      git(['update-ref', 'refs/remotes/origin/ticket/ch-37-h', lost], old);
+      const r = run(old, ['worker', 'ch-37-h', '--resume'], refusing('git-no-delete', `*' update-ref '*' -d refs/remotes/origin/ticket/ch-37-h '*`));
+      assert.notEqual(r.status, 0, `U2: refused: ${r.out}`);
+      retried('ch-37-h', head, 'U2');
+      assert.ok(acts(old).some((w) => /^made worker ch-37-h /.test(w) && w.includes(`refs/devteam/kept/ticket/ch-37-h/${lost}`)), 'U2: the ref\'s commits in the act');
+    });
+    await t.test('U3: a retry names what a launch stopped after the removal kept', tmux, () => {
+      const head = ranWithWork('ch-38-i');
+      git(['config', '--remove-section', 'branch.ticket/ch-38-i'], old);
+      const lost = planted(old, git(['rev-parse', 'origin/main'], old), 'lost');
+      git(['update-ref', 'refs/remotes/origin/ticket/ch-38-i', lost], old);
+      const r = run(old, ['worker', 'ch-38-i', '--resume'], refusing('git-no-remote-2', `*' config '*'branch.ticket/ch-38-i.remote '[or]*`));
+      assert.notEqual(r.status, 0, `U3: refused: ${r.out}`);
+      assert.ok(!hasRef(old, 'refs/remotes/origin/ticket/ch-38-i'), 'U3: the tracking ref was removed');
+      retried('ch-38-i', head, 'U3');
+      assert.ok(acts(old).some((w) => /^made worker ch-38-i /.test(w) && w.includes(`refs/devteam/kept/ticket/ch-38-i/${lost}`)), 'U3: the kept ref in the act');
+    });
+    await t.test('U4: a branch.<b>.remote with several values doesn\'t stop the launch', tmux, () => {
+      ticket('ch-39-j');
+      for (const v of ['x', 'y']) git(['config', '--add', 'branch.ticket/ch-39-j.remote', v], old);
+      const r = run(old, ['worker', 'ch-39-j'], SUP);
+      assert.equal(r.status, 0, `U4: started: ${r.err}`);
+      assert.equal(upstream(old, 'ticket/ch-39-j'), 'origin/main', 'U4: the upstream is set');
     });
     await t.test('O2: a home whose origin has two urls is refused', tmux, () => {
       ticket('ch-40-k');
