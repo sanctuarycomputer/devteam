@@ -271,15 +271,20 @@ const request = (method, port, p, headers = {}, out = {}) => new Promise((resolv
   r.setTimeout(120000, () => r.destroy(new Error(`${method} ${p}: no answer in 2 min`)));
   r.end();
 });
-const readCmds = (F) => (fs.existsSync(F.cmds) ? fs.readFileSync(F.cmds, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
+// The recorded commands. A command appends its line while this reads, so only whole lines count: what
+// follows the last newline is still being written (settled waits for its end). A whole line that isn't
+// JSON still throws.
+const cmdsText = (F) => (fs.existsSync(F.cmds) ? fs.readFileSync(F.cmds, 'utf8') : '');
+const readCmds = (F, text = cmdsText(F)) => text.slice(0, text.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map((l) => JSON.parse(l));
 // the instance at rest: nothing of its process groups running but their leaders, and no command
 // recorded, for 300 ms
 const settled = async (F, leaders) => {
   let last = -1, same = 0;
   await until(() => {
     const kids = leaders.flatMap((pid) => spawnSync('pgrep', ['-g', String(pid)], { encoding: 'utf8' }).stdout.split('\n').filter(Boolean).filter((p) => !leaders.includes(Number(p))));
-    const n = readCmds(F).length;
-    same = n === last && !kids.length ? same + 1 : 0;
+    const text = cmdsText(F);
+    const n = readCmds(F, text).length;
+    same = n === last && !kids.length && (!text || text.endsWith('\n')) ? same + 1 : 0;
     last = n;
     return same >= 3;
   }, 'the instance at rest');
