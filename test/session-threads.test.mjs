@@ -565,17 +565,22 @@ test("S7b: in Chrome the card labels a session's turn with its writer", { skip: 
   later(() => p.close());
   await p.send('Page.enable');
   await p.send('Runtime.enable');
-  const label = async (id) => {
+  // a hash change re-renders the card in place, so the previous thread's turns can still be read:
+  // wait for the words wanted, or time out with the last ones seen
+  const label = async (id, want) => {
     await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#talk/${id}` });
+    let s = '';
     for (let i = 0; i < 300; i++) {
-      const s = await p.ev(`[...document.querySelectorAll('#tl-c-turns .tl-turn .meta')].map((e) => e.textContent).join('|')`).catch(() => '');
-      if (s && s.split('|').length >= 2) return s;
+      s = await p.ev(`TL.open === '${id}' ? [...document.querySelectorAll('#tl-c-turns .tl-turn .meta')].map((e) => e.textContent).join('|') : ''`).catch(() => '');
+      if (want.test(s)) return s;
       await new Promise((r) => setTimeout(r, 100));
     }
-    return '';
+    return s;
   };
-  assert.match(await label(T), new RegExp(`\\|The agent on ${W} · `), "the worker's turn names its session in plain words");
-  assert.match(await label(T2), new RegExp(`\\|The planner for ${FEAT} · `), "the planner's turn names it");
+  const agent = new RegExp(`\\|The agent on ${W} · `);
+  const planner = new RegExp(`\\|The planner for ${FEAT} · `);
+  assert.match(await label(T, agent), agent, "the worker's turn names its session in plain words");
+  assert.match(await label(T2, planner), planner, "the planner's turn names it");
 });
 
 test("S7c: in Chrome a turn sent from the card into a live session's thread names that session, typed or held, never the supervisor", { skip: canDrive && !NO_TMUX ? false : 'needs Chrome, a Node with WebSocket, and tmux', timeout: 240000 }, async (t) => {
