@@ -9106,7 +9106,7 @@ function tLensMessage(e, frameWin, minted) {
   // where watched anchors are now: null is "not found there"; a rect that is no box says nothing
   if (m.type === 'rects') return { type: 'rects', rects: (Array.isArray(m.rects) ? m.rects.slice(0, 200) : []).filter((r) => r && typeof r.key === 'string').flatMap((r) => { const rect = r.rect === null ? null : tBox(r.rect, ['x', 'y', 'w', 'h']); return r.rect === null || rect ? [{ key: r.key, rect, changed: r.changed === true }] : []; }) };
   // a keyup's key message is marked up (kit-141 design-change 1); the field is left out for a keydown's
-  if (m.type === 'key') return { type: 'key', key: m.key === 'Escape' ? 'Escape' : 'Shift', shift: m.shift === true, ...(m.up === true ? { up: true } : {}) };
+  if (m.type === 'key') return { type: 'key', key: m.key === 'Escape' || m.key === 'ArrowLeft' || m.key === 'ArrowRight' ? m.key : 'Shift', shift: m.shift === true, ...(m.up === true ? { up: true } : {}) };
   // ready's hash only when the lens sent one (a page with none says what it said before kit-142)
   if (m.type === 'ready') return { type: 'ready', path: str(m.path, T_CAPS.path + 400), route: str(m.route, T_CAPS.route), title: typeof m.title === 'string' ? tLine(tUncap(m.title), 80) : '', viewport: tBox(m.viewport, ['w', 'h']), ...(typeof m.hash === 'string' ? { hash: hash(m.hash) } : {}) };
   // a move inside the page (a #hash, pushState): where it is now
@@ -10806,6 +10806,10 @@ window.addEventListener('message', (e) => {
       else if (AV_FRAME_ESC) {}
       else if (tlFloating()) tlClose();
       else { AV_FRAME_ESC = true; leaveArtifact(); }
+    } else if (m.key === 'ArrowLeft' || m.key === 'ArrowRight') {
+      // the stepper's keys, told by the lens with nothing of the page focused (kit-145); a page that fakes
+      // one can only step its own viewer's card
+      if (!m.up && TS.kind === 'artifact' && typeof avStep === 'function') avStep(m.key === 'ArrowLeft' ? -1 : 1);
     } else if (m.shift) tsRaise(true);
     return;
   }
