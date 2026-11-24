@@ -1564,6 +1564,8 @@ const CLASS_WORDS = Object.freeze({
   'merge-word': 'Merging a ticket',
   'approve-feature-plan': "Approving a feature's plan",
   'merge-chore': 'Merging a chore',
+  'chore-start': 'Starting a chore',
+  'chore-drop': 'Dropping a chore',
   'worker-slots': 'Starting and stopping workers',
   'replan-within-feature': 'Replanning the tickets of a feature',
   'add-ticket': 'Adding a ticket',
@@ -16524,7 +16526,8 @@ function choreSlug(slugName) {
 // only for the responder writer with DEVTEAM_ROLE unset or responder, so the flag alone lets no one
 // else past the main-checkout check (kept inline: test D7 loads this function by itself); it never
 // takes a worktree that appeared since the responder looked, so a rollback only removes its own.
-function choreWorktree(slugName, { reset = false, setup = false, responder = false } = {}) {
+// start: the commit a missing worktree starts at (chore start and chore pr on an open branch, kit-296)
+function choreWorktree(slugName, { reset = false, setup = false, responder = false, start } = {}) {
   choreSlug(slugName);
   if (!commonDir || !projectInRepo) die('chores need a git checkout with the project folder inside it');
   if (repoRoot !== mainRoot && !(responder && logWriter() === 'responder' && [undefined, '', 'responder'].includes(process.env.DEVTEAM_ROLE))) die(`run this from the main checkout (${mainRoot})`);
@@ -16534,7 +16537,7 @@ function choreWorktree(slugName, { reset = false, setup = false, responder = fal
   const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
   const existed = fs.existsSync(wt);
   // add and reset with -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
-  if (!existed) { gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, base], mainRoot); seedWorktree(wt, { setup, session: true }); }
+  if (!existed) { gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, start ?? base], mainRoot); seedWorktree(wt, { setup, session: true }); }
   else if (reset) gitOrDie(['-c', 'core.useReplaceRefs=false', 'checkout', '--quiet', '-B', `chore-${slugName}`, base], wt);
   else if (responder) die(`.worktrees/chore-${slugName} appeared meanwhile: responder draft again`);
   // in use again: the tick's tidy leaves a worktree alone until it has been quiet a while
@@ -16546,6 +16549,101 @@ function choreWorktree(slugName, { reset = false, setup = false, responder = fal
   if (existed && setup && !/^secret-/.test(slugName) && home.settings.worktree_setup && setupMarker.needed(wt, home.settings, home.root)) seedWorktree(wt, { setup, session: true });
   return wt;
 }
+// chore-records start
+// Chore records (kit-296): what a chore is for, and whether its branch is open. A branch with no
+// record is still open chore work (the C rows read git); a record adds its title and refs. Two
+// rules from the next-moves design's "When a chore is open", which kit-293's C rows reuse:
+// choreTipMerged (is this tip landed) and choreDropHolding (which drop ends it). No branch is
+// ever deleted or moved here.
+//
+// The branch's tips: origin's (asked, then fetched into refs/remotes/origin/chore-<slug>) and the
+// local one. The tip is origin's unless origin's is an ancestor of the local one (unpushed work
+// is work), or the other side is merged; diverged when both carry work. No branch anywhere: tip null.
+function choreBranch(slugName) {
+  const ref = `chore-${slugName}`;
+  const remote = `refs/remotes/origin/${ref}`;
+  let gone = false;
+  if (!flags['dry-run'] && git(['config', '--get', 'remote.origin.url']) !== null) {
+    const ls = gitRun(['ls-remote', '--exit-code', 'origin', `refs/heads/${ref}`]);
+    if (ls.status === 0) {
+      const f = gitRun(['fetch', '--quiet', 'origin', `+refs/heads/${ref}:${remote}`]);
+      if (f.status !== 0) warn(`couldn't fetch ${ref} from origin (${firstLine(f.err) || `exit ${f.status}`}); reading the refs as they are`);
+    } else if (ls.status === 2) gone = true; // not on origin: a stale copy of it says nothing (and stays)
+    else warn(`couldn't ask origin for ${ref} (${firstLine(ls.err) || `exit ${ls.status}`}); reading the refs as they are`);
+  }
+  const at = (r) => git(['rev-parse', '--verify', '--quiet', `${r}^{commit}`]) || null;
+  const local = at(`refs/heads/${ref}`);
+  const origin = gone ? null : at(remote);
+  if (!local || !origin || local === origin) return { local, origin, tip: origin ?? local, diverged: false };
+  if (ancestorOf(origin, local) === true) return { local, origin, tip: local, diverged: false };
+  if (ancestorOf(local, origin) === true) return { local, origin, tip: origin, diverged: false };
+  // a side whose tip is merged carries nothing of its own (a --fresh start not yet pushed, or a
+  // pushed tip squashed since): the tip is the other side's
+  if (choreTipMerged(slugName, local)) return { local, origin, tip: origin, diverged: false };
+  if (choreTipMerged(slugName, origin)) return { local, origin, tip: local, diverged: false };
+  return { local, origin, tip: origin, diverged: true };
+}
+// Merged: in main; or git cherry lists no + (each commit's patch is in main); or a merge-chore act
+// names chore-<slug> at the tip or at a commit the tip is an ancestor of (a squash of several).
+function choreTipMerged(slugName, tip) {
+  const main = mainRef();
+  if (!tip || !main) return false;
+  if (ancestorOf(tip, main) === true) return true;
+  const ch = gitRun(['cherry', main, tip]);
+  if (ch.status === 0 && !/^\+/m.test(ch.out)) return true;
+  const at = new RegExp(`^merged chore-${escapeRe(slugName)} at ([0-9a-f]{40})\\b`);
+  return logObjects('act').some((a) => {
+    if (a.class !== 'merge-chore') return false;
+    const s = at.exec(String(a.what ?? ''))?.[1];
+    return !!s && (s === tip || ancestorOf(tip, s) === true);
+  });
+}
+// The newest chore-drop decision that holds on tip, as { id, sha }, or null. A decision names the
+// branch by refs (exactly chore-<slug>) or by the token chore-<slug> in what, with no letter,
+// digit, - or . beside it once one sentence-ending . is set aside. Its sha is the first 7-40 hex
+// token after that token (in all of what when only refs name it). With a sha this clone has, it
+// holds while the tip is that commit or an ancestor of it; else while no commit is newer than it.
+function choreDropHolding(slugName, tip) {
+  if (!tip) return null;
+  const name = `chore-${slugName}`;
+  const tok = new RegExp(`(?<![A-Za-z0-9.-])${escapeRe(name)}(?=\\.?(?:[^A-Za-z0-9.-]|$))`);
+  const tipAt = commitDateOf(tip);
+  let held = null;
+  for (const d of logObjects('decision')) {
+    if (d.class !== 'chore-drop' || correctionOf(d)) continue;
+    const what = String(d.what ?? '');
+    const m = tok.exec(what);
+    if (!m && !(d.refs ?? []).includes(name)) continue;
+    const sha = /(?<![0-9A-Za-z])[0-9a-f]{7,40}(?![0-9A-Za-z])/.exec(m ? what.slice(m.index + name.length) : what)?.[0] ?? null;
+    // resolved here, never taken on its form: a 40-hex sha this clone lacks reads as no sha
+    const full = sha ? git(['rev-parse', '--verify', '--quiet', `${sha}^{commit}`]) || null : null;
+    const holds = full ? ancestorOf(tip, full) === true : !(tipAt > Date.parse(d.created_at));
+    if (holds && (!held || d.created_at >= held.at)) held = { id: d.id, sha, at: d.created_at };
+  }
+  return held && { id: held.id, sha: held.sha };
+}
+const choreDropWords = (slugName, tip, drop, wtThere = false) => `chore-${slugName} at ${tip} is dropped (chore drop ${drop.id}, at ${drop.sha ?? 'no sha'}): ${wtThere ? `remove .worktrees/chore-${slugName} (git worktree remove), then ` : ''}chore start ${slugName} --fresh starts it again from main, or commit to it again to reopen it`;
+// --what: one plain line, the chore's title for the owner; --for: the refs it serves (goal:<id>, a ticket).
+function choreRecordFlags(slugName) {
+  const what = flags.what === undefined ? undefined : (flagStr('what') ?? '').trim();
+  if (what !== undefined && (!what || /[\r\n]/.test(what) || what.length > 200)) die('--what is one plain line of 1 to 200 characters');
+  const given = [...new Set(asList(flags.for).flatMap((v) => String(v).split(/[\s,]+/)).filter(Boolean))];
+  if (flags.for === true || (flags.for !== undefined && !given.length)) die('--for names the refs the chore serves: --for goal:<id>[,<id>…]');
+  const refs = given.filter((r) => r !== `chore-${slugName}`);
+  if (refs.length > 10 || refs.some((r) => r.length > 120)) die('--for takes at most 10 refs, each at most 120 characters');
+  return { what, refs };
+}
+const choreRecord = (slugName, what, refs) => appendLog({ type: 'act', class: 'chore-start', what, refs: [`chore-${slugName}`, ...refs], reversible: true }, 'supervisor');
+// chore start and chore pr make a missing worktree from an existing branch only when it is open:
+// diverged, dropped and (for pr) merged are refused; for start, merged starts from main
+function choreOpenTip(slugName, b, verb) {
+  if (b.diverged) die(`chore-${slugName} differs here (${b.local}) and on origin (${b.origin}): bring them together first; ${verb} changed nothing`);
+  if (choreTipMerged(slugName, b.tip)) return null;
+  const drop = choreDropHolding(slugName, b.tip);
+  if (drop) die(choreDropWords(slugName, b.tip, drop));
+  return b.tip;
+}
+// chore-records end
 function openPr(wt, branch, title, bodyText) {
   const main = loadSettings().main_branch;
   if (loadSettings().forge === 'git') {
@@ -16627,15 +16725,56 @@ function cmdChore() {
   if (sub === 'start') {
     if (!slugName) die('usage: chore start <slug>');
     supervisorOnly('chore');
+    choreSlug(slugName);
     // Upkeep work starts only while Upkeep runs; keeping the record (the log, the fleet handoff,
     // posted secrets) never waits.
     const um = goalMode(upkeepOrVirtual());
-    if (um !== 'run' && !isRecordKeeping(choreSlug(slugName)) && !flags.force) die(`Upkeep is ${holdWords(um)}: no new upkeep chore starts (goal hold upkeep run --owner, or --force, logged)`);
-    const wt = choreWorktree(slugName, { setup: true });
+    if (um !== 'run' && !isRecordKeeping(slugName) && !flags.force) die(`Upkeep is ${holdWords(um)}: no new upkeep chore starts (goal hold upkeep run --owner, or --force, logged)`);
+    const rec = choreRecordFlags(slugName);
+    if (!commonDir || !projectInRepo) die('chores need a git checkout with the project folder inside it');
+    if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
+    // a missing worktree on a branch that exists: an open tip is checked out as it is, a merged one
+    // starts from main, a dropped one only with --fresh (whose act names the old tip first)
+    let start;
+    let recorded = false;
+    const made = !fs.existsSync(path.join(mainRoot, '.worktrees', `chore-${slugName}`));
+    if (!made && flags.fresh) die(`.worktrees/chore-${slugName} is there: --fresh starts a missing worktree only; remove it first (git worktree remove .worktrees/chore-${slugName})`);
+    if (!made) {
+      const head = git(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], path.join(mainRoot, '.worktrees', `chore-${slugName}`));
+      const drop = head && !choreTipMerged(slugName, head) ? choreDropHolding(slugName, head) : null;
+      if (drop) die(choreDropWords(slugName, head, drop, true));
+    }
+    if (made) {
+      const b = choreBranch(slugName);
+      if (b.diverged) die(`chore-${slugName} differs here (${b.local}) and on origin (${b.origin}): bring them together first; chore start changed nothing`);
+      if (flags.fresh) {
+        const drop = choreDropHolding(slugName, b.tip);
+        if (!drop) die(`no chore drop holds chore-${slugName}${b.tip ? ` at ${b.tip}` : ''}: --fresh starts again from main only a dropped branch`);
+        choreRecord(slugName, `${rec.what ?? `started chore-${slugName}`}; fresh from main; old tip ${b.tip}`, rec.refs);
+        recorded = true;
+      } else if (b.tip) start = choreOpenTip(slugName, b, 'chore start') ?? undefined;
+    }
+    const wt = choreWorktree(slugName, { setup: true, start });
+    if (!recorded && (made || rec.what !== undefined || rec.refs.length)) choreRecord(slugName, rec.what ?? `started chore-${slugName}`, rec.refs);
     // the jobs' chore started past Upkeep's hold is the supervisor's call, so it is logged (kit-162)
     const holdRefs = ['upkeep', 'chore-recurring'];
     if (um !== 'run' && slugName === 'recurring') appendLog({ type: 'act', class: 'goal-hold', what: `started chore-recurring while Upkeep is ${um === 'drain' ? 'drained' : holdWords(um)}, with --force`, refs: holdRefs, reversible: true }, 'supervisor');
     return out(wt);
+  }
+  if (sub === 'adopt' || sub === 'drop') {
+    if (!slugName) die(`usage: chore ${sub} <slug> ${sub === 'drop' ? '--reason "<why>"' : '[--what "…"] [--for <refs>]'}`);
+    supervisorOnly('chore');
+    choreSlug(slugName);
+    if (flags.fresh) die("--fresh is chore start's");
+    const reason = sub === 'drop' ? (flagStr('reason') ?? '').trim() : null;
+    if (sub === 'drop' && (!reason || /[\r\n]/.test(reason) || reason.length > 500)) die('chore drop needs --reason "<why>", one line of 1 to 500 characters');
+    const rec = sub === 'adopt' ? choreRecordFlags(slugName) : null;
+    if (!commonDir) die('chores need a git checkout');
+    const b = choreBranch(slugName);
+    if (!b.tip) die(`no branch chore-${slugName} locally or on origin`);
+    if (sub === 'adopt') return out(choreRecord(slugName, rec.what ?? `adopted chore-${slugName} at ${b.tip}`, rec.refs).id);
+    const d = appendLog({ type: 'decision', class: 'chore-drop', what: `dropped chore-${slugName} at ${b.tip}: ${reason}`, rationale: reason, refs: [`chore-${slugName}`], reversible: true, authority: 'constitution' }, 'supervisor');
+    return out(`${d.id}\nchore-${slugName} stays on every ref${fs.existsSync(path.join(mainRoot, '.worktrees', `chore-${slugName}`)) ? `, and so does .worktrees/chore-${slugName}` : ''}; chore start ${slugName} --fresh starts it again from main`);
   }
   if (sub !== 'pr' || !slugName || !flagStr('title')) die('usage: chore start <slug>   |   chore pr <slug> --title "<summary>" [--names-checked <word,…>]');
   // --names-checked a,b: the self.md and exterior.md drafts' words the supervisor has checked are fine to name in public
@@ -16644,7 +16783,14 @@ function cmdChore() {
   supervisorOnly('chore');
   choreSlug(slugName);
   const wt = path.join(mainRoot, '.worktrees', `chore-${slugName}`);
-  if (!fs.existsSync(wt)) die(`no worktree .worktrees/chore-${slugName}; devteam.mjs chore start ${slugName}`);
+  if (flags.fresh) die("--fresh is chore start's");
+  if (!fs.existsSync(wt)) {
+    const b = commonDir ? choreBranch(slugName) : { tip: null };
+    if (!b.tip) die(`no worktree .worktrees/chore-${slugName}; devteam.mjs chore start ${slugName}`);
+    const tip = choreOpenTip(slugName, b, 'chore pr');
+    if (!tip) die(`chore-${slugName} is merged at ${b.tip}: chore start ${slugName} starts it again from main`);
+    choreWorktree(slugName, { setup: true, start: tip });
+  }
   // a plain folder left where the worktree was would have git add the main checkout's changes
   if (realPath(git(['rev-parse', '--show-toplevel'], wt) ?? '') !== realPath(wt)) die(`.worktrees/chore-${slugName} is not a worktree (was it tidied away?): move what you wrote aside, then devteam.mjs chore start ${slugName}`);
   // origin's main as it is now: the base and the names the strategy and dependency files allow
@@ -16660,6 +16806,12 @@ function cmdChore() {
   // the self.md hold (spec §3.3): a refusal undoes this run's commit, and only it, so the draft stays
   // staged as it was and the refused words never reach a pushed commit
   const head = gitOrDie(['rev-parse', 'HEAD'], wt);
+  // a drop that still holds at the head (nothing new committed since it): its commits stay unproposed
+  const dropped = choreTipMerged(slugName, head) ? null : choreDropHolding(slugName, head);
+  if (dropped) {
+    if (committed) gitOrDie(['reset', '--quiet', '--soft', 'HEAD~1'], wt);
+    die(choreDropWords(slugName, head, dropped, true));
+  }
   const base = mainRef() ? git(['merge-base', mainRef(), head]) : null;
   // and again over every version since main, after the commit and before the push (kit-135)
   const exRange = exteriorChoreLines(wt, 'range', { base, checkedWords: named0 });
