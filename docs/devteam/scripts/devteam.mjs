@@ -10974,6 +10974,12 @@ function cmdThread() {
       const p = subjectProblem(subject);
       if (p) die(`--subject: ${p}`);
     }
+    let frame;
+    if (flags.frame !== undefined) {
+      try { frame = uncapped(JSON.parse(flagStr('frame'))); } catch { die('--frame is JSON: {"w":1400,"h":860,"hash":""}'); }
+      const p = frameProblem(frame, subject);
+      if (p) die(`--frame: ${p}`);
+    }
     // a viewer names a thread from its capture (button "Buy now"), so a title is cut of a capability too
     const given = uncapped(flagStr('title'));
     if (given !== undefined && given.length > THREAD_TITLE_MAX) die(`--title is at most ${THREAD_TITLE_MAX} characters`);
@@ -10993,8 +10999,8 @@ function cmdThread() {
     // turn's: a refused first turn leaves no thread with none
     const route = responderRoute({ subject });
     // with the owner's name on both (kit-252) too, which only files made too long before
-    if ((files || (by === 'owner' && envPerson())) && !(lineFits({ type: 'thread', title, subject }, by) && lineFits({ type: 'turn', thread: `t-00000000-000000000-${by}`, text: words, files, ...routedFields(route) }, by))) die(files ? FILES_TOO_LONG : PERSON_TOO_LONG);
-    const t = appendLog({ type: 'thread', title, subject }, by);
+    if ((files || (by === 'owner' && envPerson())) && !(lineFits({ type: 'thread', title, subject, frame }, by) && lineFits({ type: 'turn', thread: `t-00000000-000000000-${by}`, text: words, files, ...routedFields(route) }, by))) die(files ? FILES_TOO_LONG : PERSON_TOO_LONG);
+    const t = appendLog({ type: 'thread', title, subject, frame }, by);
     const u = appendLog({ type: 'turn', thread: t.id, text: words, files, ...routedFields(route) }, by);
     out(t.id);
     return out(deliver(t, u, words, files, route));
@@ -12739,6 +12745,16 @@ function artifactTreeOkSync(id, slug) {
 // The kit's own picture of an artifact note's spot (kit-147): a fresh headless Chrome on its DevTools
 // pipe, a profile of its own, gone with it. The page is untrusted. Every refusal here is a thrown
 // Error, never die, so what was opened is always closed.
+// Why a frame (what the owner's page was laid out at, and the view it was on) can't be recorded on a
+// new thread's line, or null. Its hash has been cut of a box capability (uncapped) by then.
+function frameProblem(frame, subject) {
+  if (!isObj(frame) || Object.keys(frame).sort().join() !== 'h,hash,w') return 'a frame is {"w":…,"h":…,"hash":"…"} and nothing else';
+  if (!Number.isInteger(frame.w) || frame.w < 320 || frame.w > 3840) return 'w is a whole number, 320 to 3840';
+  if (!Number.isInteger(frame.h) || frame.h < 240 || frame.h > 2160) return 'h is a whole number, 240 to 2160';
+  const { hash } = frame;
+  if (typeof hash !== 'string' || (hash && !hash.startsWith('#')) || UNSAFE_TEXT.test(hash) || Buffer.byteLength(hash) > 200) return 'hash is "" or one line that starts with #, at most 200 bytes';
+  return subject?.kind === 'artifact' ? null : '--frame goes with an artifact subject';
+}
 const SHOT_START_MS = 8000;
 const SHOT_LIMIT_MS = 20000;
 const SHOT_LATE = 'the picture took longer than 20 s (a page that never settles, or a script that loops); no mark written';
@@ -24791,8 +24807,8 @@ function dashboardActions() {
     // dashboard, a spot on an artifact or a preview from a viewer), and thread new checks it again.
     // A capability is cut from the title and subject first, so not even the argv holds one.
     'thread-new': (b) => {
-      const [title, subject, files] = [uncapped(b.title), uncapped(b.subject), filesArgs(b)];
-      return files && lineOk(title, THREAD_TITLE_MAX) && (turnOk(b.text) || (hasFiles(b) && (b.text === undefined || (typeof b.text === 'string' && !b.text.trim())))) && (subject == null || !subjectProblem(subject)) ? ['thread', 'new', `--title=${title.trim()}`, ...(subject ? [`--subject=${JSON.stringify(subject)}`] : []), ...files, ...(turnOk(b.text) ? ['--', b.text.trim()] : [])] : null;
+      const [title, subject, frame, files] = [uncapped(b.title), uncapped(b.subject), uncapped(b.frame), filesArgs(b)];
+      return files && (frame == null || !frameProblem(frame, subject)) && lineOk(title, THREAD_TITLE_MAX) && (turnOk(b.text) || (hasFiles(b) && (b.text === undefined || (typeof b.text === 'string' && !b.text.trim())))) && (subject == null || !subjectProblem(subject)) ? ['thread', 'new', `--title=${title.trim()}`, ...(subject ? [`--subject=${JSON.stringify(subject)}`] : []), ...(frame ? [`--frame=${JSON.stringify(frame)}`] : []), ...files, ...(turnOk(b.text) ? ['--', b.text.trim()] : [])] : null;
     },
     'thread-say': (b) => { const files = filesArgs(b); return files && (typeof b.id === 'string' && THREAD_ID.test(b.id)) && (turnOk(b.text) || (hasFiles(b) && (b.text === undefined || (typeof b.text === 'string' && !b.text.trim())))) ? ['thread', 'say', b.id, ...files, ...(turnOk(b.text) ? ['--', b.text.trim()] : [])] : null; },
     'thread-resolve': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.outcome === undefined || b.outcome === '' || lineOk(b.outcome, OUTCOME_MAX, true)) ? ['thread', 'resolve', b.id, ...(b.outcome?.trim() ? [`--outcome=${b.outcome.trim()}`] : [])] : null),

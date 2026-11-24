@@ -337,3 +337,50 @@ test('C8c a page that loops, and nothing to picture: refused, nothing written', 
   assert.match(r2.out, /nothing to picture: nowhere isn't on main or in a draft/);
   assert.deepEqual([k.logBytes(), k.tree()], was);
 });
+
+test('C10a C10c thread new --frame: recorded, and every bound held', async () => {
+  const k = shotKit();
+  const frame = { w: 900, h: 700, hash: '#tab2' };
+  const id = await k.note(k.subject(), { frame });
+  const started = k.last((o) => o.type === 'thread' && o.op === 'new' && o.id === id);
+  assert.deepEqual(started.frame, frame);
+  assert.equal(started.by, 'owner');
+  const was = k.logBytes();
+  const bad = async (what, text, subject, want) => {
+    const r = await k.run(['thread', 'new', '--title', 'A bad frame', `--subject=${JSON.stringify(subject)}`, `--frame=${text}`, '--', 'Words']);
+    assert.equal(r.status, 1, what);
+    assert.match(r.out, want, what);
+    assert.equal(k.logBytes(), was, `${what}: no line`);
+  };
+  for (const [what, f] of [['w 319', { w: 319, h: 700, hash: '' }], ['w 3841', { w: 3841, h: 700, hash: '' }], ['w 900.5', { w: 900.5, h: 700, hash: '' }], ['w text', { w: '900', h: 700, hash: '' }], ['h 239', { w: 900, h: 239, hash: '' }], ['h 2161', { w: 900, h: 2161, hash: '' }], ['hash tab2', { w: 900, h: 700, hash: 'tab2' }], ['hash 201 bytes', { w: 900, h: 700, hash: `#${'x'.repeat(200)}` }], ['hash newline', { w: 900, h: 700, hash: '#a\nb' }], ['no hash', { w: 900, h: 700 }], ['an extra key', { w: 900, h: 700, hash: '', x: 1 }], ['a list', [900, 700, '']], ['null', null]]) await bad(what, JSON.stringify(f), k.subject(), /--frame/);
+  await bad('not JSON', '{w:900}', k.subject(), /--frame/);
+  await bad('an item subject', JSON.stringify(frame), { kind: 'item', ref: `goal:${k.F.goal}` }, /--frame goes with an artifact subject/);
+  for (const f of [{ w: 320, h: 240, hash: '' }, { w: 3840, h: 2160, hash: `#${'x'.repeat(199)}` }]) { const at = await k.note(k.subject(), { frame: f }); assert.deepEqual(k.last((o) => o.type === 'thread' && o.op === 'new' && o.id === at).frame, f); }
+});
+
+test('C5i a capability in frame.hash is cut', async () => {
+  const k = shotKit();
+  const cap = '/c/1763164800000.abcdefghijklmnop.abcdefghijklmnopqrstuv';
+  const id = await k.note(k.subject(), { frame: { w: 900, h: 700, hash: `#${cap}` } });
+  const { hash } = k.last((o) => o.type === 'thread' && o.op === 'new' && o.id === id).frame;
+  assert.ok(hash.includes('[link removed]') && !hash.includes('abcdefghijklmnop'), hash);
+});
+
+test('C10b the thread-new POST carries the frame, and refuses a bad one', async () => {
+  const k = shotKit();
+  const { dash, port } = await dashboardOnFreePort(k.F.old, k.childEnv());
+  try {
+    const post = (b) => fetch(`http://127.0.0.1:${port}/api/thread-new`, { method: 'POST', headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin' }, body: JSON.stringify(b) });
+    const named = (title) => k.last((o) => o.type === 'thread' && o.op === 'new' && o.title === title);
+    const frame = { w: 900, h: 700, hash: '' };
+    const good = await post({ title: 'A framed note', text: 'Words', subject: k.subject(), frame });
+    assert.equal(good.status, 200, await good.text());
+    assert.deepEqual(named('A framed note').frame, frame);
+    const bad = await post({ title: 'A badly framed note', text: 'Words', subject: k.subject(), frame: { w: 100 } });
+    assert.equal(bad.status, 400);
+    assert.equal(named('A badly framed note'), undefined);
+    const none = await post({ title: 'A note with no frame', text: 'Words', subject: k.subject() });
+    assert.equal(none.status, 200);
+    assert.ok(!('frame' in named('A note with no frame')));
+  } finally { await dash.stop(); }
+});
