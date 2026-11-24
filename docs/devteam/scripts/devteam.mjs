@@ -18833,6 +18833,8 @@ function moveFindings(moves, raised, now = Date.now()) {
 const movesReadAt = () => memo('next-moves-at', nowIso);
 const MOVES_CACHE = () => path.join(runPath('cache'), 'next-moves.json');
 function writeMovesCache(moves = nextMoves(), at = movesReadAt()) {
+  // the box's operator only reads (its metrics included), so it leaves the cache as it was
+  if (process.env.DEVTEAM_ROLE === 'operator') return;
   try { writeJson(MOVES_CACHE(), { next_move: 1, at, moves: moves.filter((m) => m.subject.startsWith('goal:')) }); } catch {}
 }
 /* next-moves end */
