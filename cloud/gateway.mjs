@@ -1013,7 +1013,10 @@ export function safeUploadName(raw) {
   const ext = dot >= 0 && plain.length - dot <= 17 ? plain.slice(dot).toLowerCase().replace(/[^.a-z0-9]/g, '') : '';
   // the extension first: a name that's all replaced characters still comes out an image
   const stem = (ext ? plain.slice(0, dot) : plain).replace(/^[._-]+/, '').slice(0, UPLOAD_NAME).replace(/[.-]+$/, '');
-  return `${stem || 'file'}${ext.length > 1 ? ext : ''}`;
+  const name = `${stem || 'file'}${ext.length > 1 ? ext : ''}`;
+  // again until it settles, so a stored name is always the rule's own (x.Z._ gives x.Z, which gives x.z);
+  // each further pass only shortens or lower-cases it
+  return name === raw ? name : safeUploadName(name);
 }
 // These run in the terminal's page too (TERM_DROP has their source), and are tested here.
 // A stored path never needs the quotes; they're for whatever else this is ever handed.
