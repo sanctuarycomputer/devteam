@@ -278,8 +278,9 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await V.p.ev(`(() => { const s = document.getElementById('av-filter'); s.value = 'all'; s.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`);
     for (let i = 0; i < 12; i++) {
       if (await V.p.ev(`TL.open === ${J(id)}`)) return;
+      const was = await V.p.ev('TL.open');
       await V.p.click('#av-next');
-      await V.settle(`TL.open !== null`, 3000);
+      await V.settle(`TL.open !== ${J(was)}`, 6000);
     }
     assert.fail(`setup: never stepped to ${id}`);
   }

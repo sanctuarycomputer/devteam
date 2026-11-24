@@ -7074,7 +7074,7 @@ avNotes.draw = () => {
   if ($('av-handover').textContent !== label) $('av-handover').textContent = label;
   $('av-with').hidden = !words;
   if ($('av-with').textContent !== words) $('av-with').textContent = words;
-  if (typeof avStep === 'function') avStep.draw(notes);
+  avStep.draw(notes);
 };
 // Hand over: the version's open notes to the session the server picks (kit-144). One request at a time (press
 // would queue a second behind the first), and its answer written only while that version is still shown.
@@ -7095,6 +7095,87 @@ async function avHandOver() {
   } finally { av.notesBusy = false; }
 }
 document.addEventListener('click', (e) => { if (e.target.closest?.('#av-handover')) avHandOver(); });
+// The stepper: one note back (-1) or on (1) in the filter's list, from the note a step is on its way to, else
+// the open card's, else from the list's end. want: the step (or Show me) under way: its note, whether the frame
+// was sent there, and whether it came from a version gone (the card says main is shown).
+function avStep(by) {
+  const list = avStep.list();
+  if (!list.length) return;
+  const i = list.findIndex((t) => t.id === (avStep.want?.id ?? TL.open));
+  avStep.to(i < 0 ? (by > 0 ? list[0] : list[list.length - 1]) : list[(i + by + list.length) % list.length]);
+}
+// To check, Open or All: as kept in this browser, else To check once any note is.
+avStep.filter = (notes = avNotes()) => {
+  const kept = lsGet('devteam.notes.filter');
+  return ['check', 'open', 'all'].includes(kept) ? kept : notes.some((t) => tNoteState(t) === 'check') ? 'check' : 'open';
+};
+avStep.list = (notes = avNotes()) => {
+  const f = avStep.filter(notes);
+  return notes.filter((t) => f === 'all' || (tNoteState(t) === 'check') === (f === 'check'));
+};
+avStep.draw = (notes) => {
+  const list = avStep.list(notes), i = list.findIndex((t) => t.id === TL.open), words = `${i < 0 ? '–' : i + 1} / ${list.length}`;
+  if ($('av-stepn').textContent !== words) $('av-stepn').textContent = words;
+  const f = avStep.filter(notes);
+  if ($('av-filter').value !== f && document.activeElement !== $('av-filter')) $('av-filter').value = f;
+  for (const id of ['av-prev', 'av-next']) $(id).disabled = !list.length;
+};
+// Where a note is: its file, and the view it was placed on. A spot with no element keeps its view in its path;
+// an element's note, in the frame the owner saw; one with no frame says nothing of it (null: left as it is).
+avStep.where = (t) => {
+  const p = t.subject.path || 'index.html', i = p.indexOf('#');
+  return { file: (i < 0 ? p : p.slice(0, i)) || 'index.html', vh: !t.subject.anchor?.selector ? (i < 0 ? '' : p.slice(i)) : typeof t.frame?.hash === 'string' ? t.frame.hash : null };
+};
+avStep.to = (t, { gone = false } = {}) => {
+  avStep.off = null;
+  const want = avStep.want = { id: t.id, gone, moved: false, av: AV };
+  // a page whose lens never says it is there (an older one, a page that changes its own hash): the card all the same
+  setTimeout(() => { if (avStep.want === want) avStep.land(true); }, 3000);
+  avStep.land();
+};
+// The step under way carried on, as often as the lens says something: the frame sent where the note is (once,
+// and only if it isn't there: another file loads, another view of this one goes without a load, a page with a
+// view goes back to its plain file by loading it), then, once it is there, scrolled to and its card opened.
+avStep.land = (late = false) => {
+  const want = avStep.want;
+  if (!want) return;
+  const t = TL.threads.find((x) => x.id === want.id);
+  if (!t || want.av !== AV || TS.kind !== 'artifact') { avStep.want = null; return; }
+  if (!TS.ready && !late) return;
+  const { file, vh } = avStep.where(t);
+  const there = TS.ready && TS.path === file && (vh === null || TS.hash === vh);
+  if (!there && TS.ready && !want.moved) {
+    want.moved = true;
+    if (TS.path === file && vh) return tsPost({ type: 'go', hash: vh });
+    const f = tsFrame();
+    f.dataset.opened = f.src = artSrc(AV.slug, AV.at) + file + (vh ?? '');
+    return;
+  }
+  if (!there && !late) return;
+  avStep.want = null;
+  const { selector, tag, text, rect } = t.subject.anchor ?? {};
+  if (selector && there) tsPost({ type: 'scroll-to', anchor: { selector, tag, text, rect } });
+  // by a step: placed at the stage's top right when the note has no pin there, and (gone) what version this is
+  avStep.off = { id: t.id, gone: want.gone };
+  tlOpen(t.id, false);
+};
+// A note a step opened whose element the lens says isn't showing on this view.
+avStep.unseen = (t) => {
+  if (!t || avStep.off?.id !== t.id || !tsOn() || !TS.ready) return false;
+  if (!tFrameOn(t.subject, TS)) return true;
+  return !!t.subject.anchor?.selector && TS.rects.get(TS.keyOf.get(tKey(t.subject)))?.rect === null;
+};
+document.addEventListener('click', (e) => { const b = e.target.closest?.('#av-prev, #av-next'); if (b) avStep(b.id === 'av-prev' ? -1 : 1); });
+$('av-filter').addEventListener('change', () => { lsSet('devteam.notes.filter', $('av-filter').value); avNotes.draw(); });
+// ArrowLeft and ArrowRight on the dashboard's own window, with the viewer up and nothing that takes them focused.
+window.addEventListener('keydown', (e) => {
+  if ((e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.repeat || e.defaultPrevented) return;
+  if (!AV || AV.preview || $('artifact-view').hidden) return;
+  const on = document.activeElement;
+  if (on && on !== document.body && (typingIn(on) || on.tagName === 'SELECT' || !on.closest('#artifact-view'))) return;
+  e.preventDefault();
+  avStep(e.key === 'ArrowLeft' ? -1 : 1);
+});
 function closeArtifact() {
   if (!AV) return false;
   AV = null;
@@ -9755,6 +9836,14 @@ function tlPlaceCard(t) {
   const card = tlEl('tl-card');
   // Not under a press: a card that grows near the bottom moves up, and the release would land elsewhere. The next draw places it.
   if (TL.pressed && card.contains(TL.pressed)) return;
+  // a note a step opened whose element isn't showing on this view (kit-145): the stage's top right corner
+  if (innerWidth >= 640 && avStep.unseen(t)) {
+    const st = $('av-stage').getBoundingClientRect();
+    card.classList.remove('sheet', 'in-dock', 'in-threads');
+    card.style.left = `${st.right - 8 - (card.offsetWidth || 360) + scrollX}px`;
+    card.style.top = `${st.top + 8 + scrollY}px`;
+    return;
+  }
   // in the panel it is the slot's: nothing to place
   if (card.classList.contains('in-panel')) { card.classList.remove('sheet', 'in-dock', 'in-threads'); card.style.left = ''; card.style.top = ''; return; }
   // a thread whose home is the Inbox tab (kit-100 spec §2.6): fixed, in the window's coordinates, shown over the
@@ -10837,7 +10926,7 @@ window.addEventListener('message', (e) => {
   // and once it has, what it watches for the pins is asked of it afresh. Once a load (the frame's
   // load lets it go): a page that says ready again and again would otherwise have every one redraw
   // and ask its lens to watch again, and a loop of them would hold the owner's tab.
-  if (m.type === 'ready') { if (TS.ready) return; TS.ready = true; if (TS.kind === 'artifact') { TS.path = tArtPath(m.path, TS.slug); TS.hash = m.hash ?? ''; } TS.watch = ''; tsDrawSoon(); return; }
+  if (m.type === 'ready') { if (TS.ready) return; TS.ready = true; if (TS.kind === 'artifact') { TS.path = tArtPath(m.path, TS.slug); TS.hash = m.hash ?? ''; } TS.watch = ''; tsDrawSoon(); avStep.land(); return; }
   // a move inside an artifact's page (a #hash, pushState) after its ready (one before it, a redirect
   // while it loads, is dropped: ready gives the page): another view, so another set of pins, asked of
   // the lens afresh. Taken only when it changes something, drawn once a frame, so a page saying moves
@@ -10848,6 +10937,7 @@ window.addEventListener('message', (e) => {
     const path = tArtPath(m.path, TS.slug);
     if (path === TS.path && m.hash === TS.hash) return;
     AV_NAVS++; TS.path = path; TS.hash = m.hash; TS.rects.clear(); TS.watch = ''; tsDrawSoon();
+    avStep.land();
     return;
   }
   // where each watched anchor is now, for only the anchors asked about (a Set: no key a page makes
@@ -10879,7 +10969,7 @@ window.addEventListener('message', (e) => {
     } else if (m.key === 'ArrowLeft' || m.key === 'ArrowRight') {
       // the stepper's keys, told by the lens with nothing of the page focused (kit-145); a page that fakes
       // one can only step its own viewer's card
-      if (!m.up && TS.kind === 'artifact' && typeof avStep === 'function') avStep(m.key === 'ArrowLeft' ? -1 : 1);
+      if (!m.up && TS.kind === 'artifact') avStep(m.key === 'ArrowLeft' ? -1 : 1);
     } else if (m.shift) tsRaise(true);
     return;
   }
