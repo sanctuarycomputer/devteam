@@ -2,19 +2,19 @@
 // the box's on the hub's name, operator-thread --files, and the paths in the operator's pane.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { freePort, hasTmux, until } from './lib/kit.mjs';
-import { box, cleanup, KIT, machine, nowhere, OP, prompt, seat, shown, signedPress, tmp } from './lib/operator-threads-fixture.mjs';
+import { box, cleanup, KIT, machine, OP, prompt, seat, shown, signedPress, tmp } from './lib/operator-threads-fixture.mjs';
 import { newFolderName, R, request } from './lib/attachments-fixture.mjs';
 
 const G = await import('../cloud/gateway.mjs');
 const servedAt = (stored) => `/upload/${path.basename(path.dirname(stored))}/${path.basename(stored)}`;
-// every file under dir, but the hub's own diagnostics
+// every file under dir
 const filesUnder = (dir) => { try { return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? filesUnder(path.join(dir, e.name)) : [path.join(dir, e.name)])); } catch (e) { if (e.code === 'ENOENT') return []; throw e; } };
 const LIMITS = ['DEVTEAM_UPLOAD_MAX', 'DEVTEAM_UPLOAD_TOTAL', 'DEVTEAM_UPLOAD_FREE', 'DEVTEAM_UPLOAD_STALL_MS', 'DEVTEAM_UPLOAD_BODY_MS', 'DEVTEAM_GATEWAY', 'DEVTEAM_UPLOADS_DIR'];
 
@@ -144,11 +144,19 @@ test('hub files laptop: an upload sweeps what is past seven days there, and only
 });
 
 test('hub files laptop: on a box the hub\'s own server takes and serves none (the gateway does)', T, async (t) => {
-  const H = await laptopHub(t, { DEVTEAM_PUBLIC_URL: 'https://box.example.com' });
+  const boxRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-hub-files-box-')));
+  cleanup(t)(() => fs.rmSync(boxRoot, { recursive: true, force: true }));
+  const H = await laptopHub(t, { DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_UPLOADS_DIR: boxRoot });
   const r = await H.post('a.txt', Buffer.from('x'));
   assert.equal(r.status, 404, r.text);
   assert.deepEqual(H.uploads(), []);
-  assert.equal((await H.get(`/upload/${newFolderName()}/a.txt`)).status, 404);
+  // a file that is there, in the box's root and in the folder a laptop's hub has, is not served either
+  for (const root of [boxRoot, H.root]) {
+    const folder = newFolderName();
+    fs.mkdirSync(path.join(root, folder), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(root, folder, 'a.txt'), 'x');
+    assert.equal((await H.get(`/upload/${folder}/a.txt`)).status, 404, root);
+  }
 });
 
 // --- the box -------------------------------------------------------------------------------------
@@ -241,7 +249,10 @@ test('hub files box: GET /upload/<folder>/<name> serves it to the hub\'s own pag
   assert.deepEqual([refused.status, refused.json?.code, B.stored().length], [403, 'view-only', 1], refused.text);
   // a navigation from another site passes crossSiteOk, and is still not the hub's page
   assert.equal((await B.get(at, { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' })).status, 403);
-  for (const bad of ['/upload/', '/upload/not-ours/a.png', `${path.dirname(at)}/.part`, `${path.dirname(at)}/..%2F..%2Fx`, `${path.dirname(at)}/none.png`]) assert.equal((await B.get(bad)).status, 404, bad);
+  for (const bad of ['/upload/', '/upload/not-ours/a.png', `${path.dirname(at)}/.part`, `${path.dirname(at)}/..%2F..%2Fx`, `${path.dirname(at)}/none.png`, `/x/..${at}`]) assert.equal((await B.get(bad)).status, 404, bad);
+  const before = B.stored().length;
+  const dots = await B.get('/x/../upload?name=d.txt', { origin: B.pub, 'content-type': 'application/octet-stream' }, 'POST');
+  assert.deepEqual([dots.status, B.stored().length], [404, before], dots.text);
 });
 
 test('hub files box: the gateway\'s sweep removes it past keepMs, and at the box\'s total a further one is refused', T, async (t) => {

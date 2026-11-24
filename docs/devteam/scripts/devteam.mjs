@@ -20149,12 +20149,18 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
   let current = null;
   let again = null;
   let stopped = false;
+  const hubDir = () => laptopUploadsDir({ hub: true });
+  const bodyMs = uploadLimits().bodyMs;
   // live presence on the hub's own pages (presence@1): its people, never a changed
   const presence = presenceRelay({ hub: true, okHost: ownHost, ownerCwd: actionCwd });
   const handle = { close() { stopped = true; clearTimeout(again); recorder.stop(); presence.closeAll(1001); current?.close(); current?.closeIdleConnections?.(); current = null; } };
   const tryListen = () => {
     if (stopped) return;
     const hub = trackRequests(http.createServer(async (req, res) => {
+      // as a dashboard's: five minutes for a body, for all but an upload (UPLOAD_REQUEST_MS, and its stall timer)
+      const bodyTimer = setTimeout(() => { if (!req.complete) req.destroy(); }, bodyMs);
+      bodyTimer.unref();
+      req.once('close', () => clearTimeout(bodyTimer));
       const send = (code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...extra }); res.end(body); };
       if (!ownHost(req.headers.host)) return send(403, 'text/plain; charset=utf-8', 'the hub answers only on its own address');
       // /presence is a socket: a plain request gets its guard's status (presence@1 §2), before the redirect
@@ -20162,6 +20168,17 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
       // One address: the hub listens on 127.0.0.1 only, and dashboards let only that origin frame
       // them, so localhost (which may mean ::1, held by something else) is sent there.
       if (req.headers.host !== `127.0.0.1:${HUB_PORT}`) { res.writeHead(302, { location: `http://127.0.0.1:${HUB_PORT}${req.url.startsWith('/') ? req.url : '/'}`, 'cache-control': 'no-store' }); return res.end(); }
+      // a file for a thread with the operator (kit-724), stored and served beside no project: on a box the gateway's
+      const sendRes = (_, ...a) => send(...a);
+      if (req.method === 'POST' && (req.url === '/upload' || req.url.startsWith('/upload?'))) {
+        clearTimeout(bodyTimer);
+        try { return await receiveLaptopUpload(req, res, new URL(req.url, 'http://x').searchParams.get('name'), sendRes, { dir: hubDir, hub: true }); } catch (e) {
+          log(`hub: a dropped file could not be stored: ${e.message}`);
+          if (!res.headersSent && !res.destroyed) return send(500, 'application/json', JSON.stringify({ error: 'this machine could not store this file' }), { connection: 'close' });
+          return void req.destroy();
+        }
+      }
+      if (req.method === 'GET' && req.url.startsWith('/upload/')) return await serveLaptopUpload(req, res, req.url.split('?')[0], sendRes, { dir: hubDir, hub: true });
       const act = req.method === 'POST' && req.url.startsWith('/operator/') && Object.hasOwn(HUB_ACTIONS, req.url.slice(10)) ? HUB_ACTIONS[req.url.slice(10)] : null;
       if (act) return ownerPost(req, send, act);
       if (req.method !== 'GET') return send(405, 'text/plain; charset=utf-8', 'the hub only lists, and takes the owner\'s threads with the operator', { allow: 'GET' });
@@ -20210,6 +20227,7 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
       if ((await holder()) !== 'other') { if (!stopped) (again = setTimeout(tryListen, retry)).unref(); }
       else log(`hub: port ${HUB_PORT} is held by something that isn't a devteam hub; this dashboard won't serve the hub`);
     });
+    hub.requestTimeout = UPLOAD_REQUEST_MS;
     keepAlive(hub).listen(HUB_PORT, '127.0.0.1', () => { log(`hub on http://127.0.0.1:${HUB_PORT}`); recorder.start(); });
   };
   tryListen();
@@ -21657,7 +21675,10 @@ function dropSpace(paths) {
 const uploadsOnBox = () => !!process.env.DEVTEAM_GATEWAY || onBox();
 // ~/.devteam/uploads/<slug>-<hash8>, from the main checkout's real path: a worktree's dashboard maps
 // to the same folder, and two checkouts that share a name never share one.
-function laptopUploadsDir() {
+// hub: the hub's own (operator-thread's files), in no project: named for its port when it isn't the
+// usual one, as operatorDir is. A project's always ends in -<hash8>, so neither name is ever the other.
+function laptopUploadsDir({ hub = false } = {}) {
+  if (hub) return path.join(os.homedir(), '.devteam', 'uploads', HUB_PORT === 4320 ? 'hub' : `hub-${HUB_PORT}`);
   const real = fs.realpathSync(mainRoot);
   return path.join(os.homedir(), '.devteam', 'uploads', `${path.basename(real).replace(/[^A-Za-z0-9-]+/g, '-').slice(0, 40)}-${sha256(real).slice(0, 8)}`);
 }
@@ -21714,16 +21735,17 @@ function uploadType(name) {
 // refusal: a dropped file, back to the dashboard's own page (spec §5). Matched on the raw path, so
 // nothing URL parsing folds (.., %2e, %2F) can name another file. A page on another site can't read
 // it: its browser says so in Sec-Fetch-Site. A request with none (curl, the owner's own tools) is served.
-async function serveLaptopUpload(req, res, rawPath, send) {
+// The hub serves its own root (dir), and only to its page: there a request with no Sec-Fetch-Site is refused too.
+async function serveLaptopUpload(req, res, rawPath, send, { dir = uploadsRoot, hub = false } = {}) {
   const none = () => send(res, 404, 'text/plain; charset=utf-8', 'not found');
   if (uploadsOnBox()) return send(res, 404, 'text/plain; charset=utf-8', 'on a box the gateway serves dropped files');
   const site = req.headers['sec-fetch-site'];
-  if (site !== undefined && site !== 'same-origin') return send(res, 403, 'text/plain; charset=utf-8', 'dropped files only to this dashboard\'s own page');
+  if ((hub || site !== undefined) && site !== 'same-origin') return send(res, 403, 'text/plain; charset=utf-8', `dropped files only to ${hub ? 'the hub' : 'this dashboard'}'s own page`);
   const m = /^\/upload\/([^/]+)\/([^/]+)$/.exec(rawPath);
   if (!m || !UPLOAD_FOLDER.test(m[1]) || m[2] === UPLOAD_PART || m[2] !== safeUploadName(m[2])) return none();
   let fh = null;
   try {
-    const root = await fs.promises.realpath(uploadsRoot());
+    const root = await fs.promises.realpath(dir());
     const real = await fs.promises.realpath(path.join(root, m[1], m[2]));
     // the very file named, not one a link inside the folder points at
     if (real !== path.join(root, m[1], m[2]) || droppedFileProblem(real, root)) return none();
@@ -21802,18 +21824,19 @@ const uploadsReceiving = new Map();
 // POST /upload?name= on the laptop's dashboard, after its Host check and relay refusal. Every refusal
 // before the body is answered without reading a byte of it, and closes: what's still coming goes with
 // the socket. `send` is the dashboard's own.
-async function receiveLaptopUpload(req, res, rawName, send) {
+// The hub's, with its own root (dir), is the same, behind the hub's Host check.
+async function receiveLaptopUpload(req, res, rawName, send, { dir = laptopUploadsDir, hub = false } = {}) {
   const refuse = (code, error) => send(res, code, 'application/json', JSON.stringify({ error }), { connection: 'close' });
   if (uploadsOnBox()) return refuse(404, 'on a box the gateway takes dropped files');
   // only the dashboard's own page: a page elsewhere can't send its Origin as ours, nor the browser's Sec-Fetch-Site
-  if (req.headers.origin !== `http://${req.headers.host}` || req.headers['sec-fetch-site'] !== 'same-origin') return refuse(403, 'dropped files only from this dashboard\'s own page');
+  if (req.headers.origin !== `http://${req.headers.host}` || req.headers['sec-fetch-site'] !== 'same-origin') return refuse(403, `dropped files only from ${hub ? 'the hub' : 'this dashboard'}'s own page`);
   const lim = uploadLimits();
   const tooBig = () => refuse(413, `over the ${Math.floor(lim.max / 1048576)} MB limit for a file`);
   const declared = req.headers['content-length'] === undefined ? null : Number(req.headers['content-length']);
   if (declared !== null && !(declared <= lim.max)) return tooBig();
   const want = declared ?? lim.max;
   let root;
-  try { root = laptopUploadsDir(); } catch (e) { return refuse(503, `this machine has no folder for dropped files: ${e.code ?? e.message}`); }
+  try { root = dir(); } catch (e) { return refuse(503, `this machine has no folder for dropped files: ${e.code ?? e.message}`); }
   const why = uploadRootOk(root, { make: true });
   if (why) return refuse(503, `this machine has no folder for dropped files: ${why}`);
   let kept;
