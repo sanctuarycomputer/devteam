@@ -17,6 +17,12 @@
 # more than 20 letters and digits. Every other rule (AWS, GitHub, Stripe, Slack, private keys, ...)
 # still sees source_key's value.
 #
+# And one more shape on the same rule: a run of kit ticket ids (<component>-<number>-<slug>, joined by
+# commas or spaces), as a log record's refs or text lists them. An id with "secret", "key" or "token"
+# in its slug ("app-41-secrets-gate,ops-43-ci-floor-gates") reads to generic-api-key as a name and a
+# value. Only lowercase ids, each slug run at most 20 characters, two or more of them, are allowed: a
+# value with capitals, base64 or a longer run is scanned as before.
+#
 # Tested with gitleaks 8.30.1, which merges a rule's [[rules.allowlists]] into the default rule of
 # the same id; test/gitleaks.test.mjs runs both sides of it through gitleaks itself.
 
@@ -30,4 +36,7 @@ id = "generic-api-key"
 [[rules.allowlists]]
 description = "devteam log: a source_key slug (the key that groups repeats of one signal)"
 regexTarget = "match"
-regexes = ['''^source_key"[ \t]*:[ \t]*"[A-Za-z0-9]{1,20}(?:[._-][A-Za-z0-9]{1,20})*[" \t]$''']
+regexes = [
+  '''^source_key"[ \t]*:[ \t]*"[A-Za-z0-9]{1,20}(?:[._-][A-Za-z0-9]{1,20})*[" \t]$''',
+  '''^[a-z][a-z0-9]{0,30}-[0-9]{1,5}(?:-[a-z0-9]{1,20})*(?:[ ,]{1,2}[a-z][a-z0-9]{0,30}-[0-9]{1,5}(?:-[a-z0-9]{1,20})*)+[" \t]?$''',
+]

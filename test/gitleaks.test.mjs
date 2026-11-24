@@ -31,6 +31,8 @@ const kitLines = [
   obs('o-20261111-170235760-supervisor', { detail: 'p95 over target for 3 checks', source_key: 'incident-2026-11-11-api-p95' }),
   obs('o-20261111-170235761-supervisor', { detail: 'one resend', source_key: 'resent-enter2 pane:w1 3f2a9b8c7d6e' }),
   obs('o-20261111-170235762-supervisor', { detail: 'a slow suite', source_key: 'slow:auth-suite' }),
+  // refs naming ticket ids, one with "secrets" in its slug (a real project log's shape)
+  obs('o-20261111-170235768-supervisor', { detail: 'app-45 now depends on app-41.', refs: ['app-41-secrets-gate,ops-43-ci-floor-gates'] }),
 ];
 // A real secret on a log line: in free text, in a sensor's sample, under a key the kit doesn't
 // write, and as a source_key value that isn't a slug
@@ -42,28 +44,33 @@ const leakLines = {
   pat: obs('o-20261111-170235767-supervisor', { detail: 'x', source_key: githubPat }),
 };
 
-test('the kit config allowlists only generic-api-key, only on the source_key JSON key', () => {
+test('the kit config allowlists only generic-api-key, only on the source_key JSON key and runs of kit ticket ids', () => {
   assert.match(config, /^\[extend\]\nuseDefault = true$/m, "it keeps gitleaks' default rules");
   const body = config.replace(/^#.*\n/gm, '');
   assert.equal(body.match(/^\[\[rules\]\]$/gm)?.length, 1, 'one rule');
   assert.match(body, /^\[\[rules\]\]\nid = "generic-api-key"\n\[\[rules\.allowlists\]\]\n/m, 'an allowlist on the generic rule only: every specific rule still sees the value');
   assert.doesNotMatch(body, /^(regex|path|entropy|keywords) =/m, "the default rule's regex, entropy and keywords stay as they are");
   assert.equal(body.match(/allowlists\]\]$/gm)?.length, 1, 'one allowlist, no global one');
+  assert.equal(allows.length, 2, 'two shapes: a source_key slug, and a run of ticket ids');
   assert.match(body, /^regexTarget = "match"$/m, 'matched on the finding, key name included, never the whole line');
   assert.doesNotMatch(config, /^\s*(paths|stopwords|commits)\s*=/m, 'no path, stopword or commit allowlist: a log file is scanned like any other');
 });
 
 // The allowlist's regex as gitleaks applies it, to a generic-api-key finding's match.
-const allow = new RegExp(/regexes = \['''(.+)'''\]/.exec(config)[1]);
+const allows = [...config.matchAll(/^\s*'''(.+)''',?$/gm)].map((m) => new RegExp(m[1]));
+const allow = { test: (m) => allows.some((r) => r.test(m)) };
 test('the allowlist regex: a source_key slug passes, anything else on the line does not', (t) => {
   if (!hasGitleaks) t.diagnostic('gitleaks is not on PATH: checking the regex only (the next test runs gitleaks itself where it is)');
   // the matches gitleaks reports for the kit's lines (the value up to its terminator)
-  for (const m of ['source_key":"anthropic-spend-spike-nov9-10"', 'source_key":"incident-2026-11-11-api-p95"', 'source_key":"resent-enter2 ', 'source_key": "fix_2026.11.9"']) assert.match(m, allow, m);
+  for (const m of ['source_key":"anthropic-spend-spike-nov9-10"', 'source_key":"incident-2026-11-11-api-p95"', 'source_key":"resent-enter2 ', 'source_key": "fix_2026.11.9"']) assert.ok(allow.test(m), m);
   for (const m of [
     `api_key=${genericKey} `, `auth_token": "${genericKey}"`, `my_source_key":"${genericKey}"`, `source_key":"${genericKey}"`,
     // base64's + / =, a run over 20, a value cut where gitleaks cuts it, another key name
     'source_key":"abc+def/ghi=12345"', `source_key":"spike-${fake(21, 3)}"`, 'source_key":"abc-12345;', 'SOURCE_KEY":"abc-12345"', 'detail":"abc-12345"',
-  ]) assert.doesNotMatch(m, allow, m);
+  ]) assert.ok(!allow.test(m), m);
+  // a run of kit ticket ids, one with "secrets" in its slug: what a refs list of a real log carried
+  for (const m of ['app-41-secrets-gate,ops-43-ci-floor-gates"', 'ops-12-api-keys app-7-token-cache ']) assert.ok(allow.test(m), m);
+  for (const m of [`app-41-secrets-gate,${genericKey}"`, 'app-41-secrets-gate,ops-43-ci-Floor-gates"', `app-41-secrets-gate,ops-43-${fake(21, 5).toLowerCase()}"`, 'app-41-secrets-gate"']) assert.ok(!allow.test(m), m);
 });
 
 const scan = (dir, args = []) => {
