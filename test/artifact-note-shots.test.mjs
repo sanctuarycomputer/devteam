@@ -524,3 +524,83 @@ test('a thread resolved while its picture is taken gets no proposal', async () =
   assert.equal(r.line, undefined);
   assert.deepEqual(k.files(id), []);
 });
+
+// --- which copy is pictured ---------------------------------------------------------------------------
+// a session's worktree with its own copy of an artifact, committed
+function worktree(k, name, slug, label) {
+  const root = path.join(k.F.old, '.worktrees', name);
+  if (!fs.existsSync(root)) k.F.g(['worktree', 'add', '-q', '-b', name, root], k.F.old);
+  const dir = path.join(root, 'docs/devteam/project/artifacts', slug);
+  write(path.join(dir, 'artifact.json'), '{"v":1,"title":"A page","summary":"A page","by":"supervisor"}\n');
+  write(path.join(dir, 'index.html'), `<!doctype html><button id="buy">${label}</button>\n`);
+  k.F.g(['add', '-A'], root);
+  k.F.g(['commit', '-qm', `${slug}: ${label}`], root);
+  return { root, dir, head: () => k.F.g(['rev-parse', 'HEAD'], root), remove: () => { k.F.g(['worktree', 'remove', '--force', root], k.F.old); k.F.g(['branch', '-D', name], k.F.old); } };
+}
+const pageNote = (k, o = {}) => k.subject({ path: 'index.html', ...o });
+// a note the owner handed over and a session marked addressed, as kit-144 will write it
+let marks = 0;
+async function addressed(k, s, by, extra = {}) {
+  const id = await k.note(s);
+  // after the note's own turn, which the hand-over must follow
+  await new Promise((r) => setTimeout(r, 100));
+  k.F.hand('owner', { type: 'thread', op: 'set', id, handed: { to: by, at: new Date(Date.now() - 20).toISOString() } }, 20);
+  const m = `m-20261123-${String(++marks).padStart(9, '0')}-${by}`;
+  k.F.hand(by, { id: m, type: 'message', to: 'owner', kind: 'addressed', thread: id, text: 'The button now says Annual', ...extra }, 0);
+  return id;
+}
+
+test('C4a C4e main first, never a stale checkout', async () => {
+  const k = shotKit();
+  const old = worktree(k, 'kit-1-old', 'pricing', 'Old');
+  const chore = worktree(k, 'chore-artifact-pricing', 'pricing', 'Chore');
+  try {
+    for (const [what, s] of [['C4a', pageNote(k)], ['C4e', pageNote(k, { at: 'chore-artifact-pricing' })]]) {
+      const r = await k.readyOn(s);
+      assert.equal(r.status, 0, said(r));
+      assert.match(r.out, /text "Main"/, what);
+      const { src, sha, dirty } = r.line.shot;
+      assert.deepEqual({ src, sha, dirty }, { src: 'main', sha: k.F.g(['rev-parse', 'origin/main'], k.F.old), dirty: false }, what);
+      assert.deepEqual((await k.show(r.id)).source, { at: 'main', slug: 'pricing' }, what);
+    }
+  } finally { old.remove(); chore.remove(); }
+});
+
+test('C4b C4d a draft alone: pictured from it, then main once it is gone', async () => {
+  const k = shotKit();
+  const wt = worktree(k, 'chore-artifact-drafty', 'drafty', 'Chore');
+  const s = () => pageNote(k, { slug: 'drafty', at: 'chore-artifact-drafty' });
+  const r = await k.readyOn(s());
+  assert.equal(r.status, 0, said(r));
+  assert.match(r.out, /text "Chore"/);
+  const { src, sha, dirty } = r.line.shot;
+  assert.deepEqual({ src, sha, dirty }, { src: 'chore-artifact-drafty', sha: wt.head(), dirty: false });
+  assert.deepEqual((await k.show(r.id)).source, { at: 'chore-artifact-drafty', slug: 'drafty' });
+  fs.writeFileSync(path.join(wt.dir, 'index.html'), '<!doctype html><button id="buy">Chore edited</button>\n');
+  const d = await k.readyOn(s());
+  assert.match(d.out, /text "Chore edited"/);
+  assert.equal(d.line.shot.dirty, true);
+  fs.cpSync(wt.dir, path.join(k.arts, 'drafty'), { recursive: true });
+  k.F.g(['add', '-A'], k.F.old);
+  k.F.g(['commit', '-qm', 'drafty lands'], k.F.old);
+  k.F.g(['push', '-q', 'origin', 'main'], k.F.old);
+  assert.equal((await k.show(r.id)).source.at, 'chore-artifact-drafty', 'landed, the worktree kept');
+  wt.remove();
+  assert.deepEqual((await k.show(r.id)).source, { at: 'main', slug: 'drafty' });
+});
+
+test('C4c C4f an addressed mark\'s draft is what Show me opens, and what a ready over it pictures', async () => {
+  const k = shotKit();
+  const chore = worktree(k, 'chore-artifact-pricing', 'pricing', 'Chore');
+  const id = await addressed(k, pageNote(k), 'supervisor', { draft: 'chore-artifact-pricing' });
+  assert.equal((await k.show(id)).check, 'addressed');
+  assert.deepEqual((await k.show(id)).source, { at: 'chore-artifact-pricing', slug: 'pricing' });
+  const r = await k.ready(id);
+  assert.equal(r.status, 0, said(r));
+  assert.equal(r.line.shot.src, 'chore-artifact-pricing');
+  assert.match(r.out, /text "Chore"/);
+  chore.remove();
+  assert.deepEqual((await k.show(id)).source, { at: 'main', slug: 'pricing' });
+  const plain = await k.show(await k.note(pageNote(k)));
+  assert.equal(plain.source, null, 'nothing to check, no source');
+});

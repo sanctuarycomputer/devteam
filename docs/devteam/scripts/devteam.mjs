@@ -10487,7 +10487,12 @@ function threadViews(objects) {
     else if (o.type === 'question' && typeof o.thread === 'string') push(asked, o.thread, o);
     else if (o.type === 'message' && o.kind === 'addressed' && typeof o.thread === 'string') push(marks, o.thread, o);
   }
-  return [...objects.values()].filter((o) => o.type === 'thread').map((t) => threadView(t, (turns.get(t.id) ?? []).sort(byTime), (asked.get(t.id) ?? []).sort(byTime), (marks.get(t.id) ?? []).sort(byTime)));
+  // source: where a note to check shows now (noteSource), read from git and the worktrees
+  let holds = null;
+  return [...objects.values()].filter((o) => o.type === 'thread').map((t) => {
+    const v = threadView(t, (turns.get(t.id) ?? []).sort(byTime), (asked.get(t.id) ?? []).sort(byTime), (marks.get(t.id) ?? []).sort(byTime));
+    return noteToCheck(v) ? { ...v, source: noteSource(v, (holds ??= shotHoldsOnce())) } : v;
+  });
 }
 // waiting: whose reply is owed (supervisor, responder), or the owner's move (owedIn).
 // ready: the supervisor's proposal, until the owner says anything after it (a turn, a resolve or a
@@ -13058,8 +13063,38 @@ async function noteShot(view, src, { now = Date.now() } = {}) {
     ],
   };
 }
-// The one way a mark gets its picture: of the copy Show me will open once the mark is written.
-const markShot = (view, mark) => noteShot(view, artifactAt('main', view.subject.slug) ? 'main' : null);
+// Does main, or a session's worktree, hold this artifact? As artifactSource finds it, without reading
+// its files. mainHolds answers for main (the dashboard remembers it by commit).
+const shotHolds = (mainHolds = (slug) => !!artifactSource('main', slug)) => (at, slug) => {
+  if (at === 'main') return mainHolds(slug);
+  const root = typeof at === 'string' ? draftWorktree(at) : null;
+  return !!root && draftDirOk(root, slug) && ['artifact.json', 'index.html'].some((f) => fs.existsSync(path.join(root, ARTIFACTS_REL, slug, f)));
+};
+const noteToCheck = (v) => v.status === 'open' && !!v.check && v.subject?.kind === 'artifact';
+// shotHolds with main asked once an artifact.
+const shotHoldsOnce = () => { const held = new Map(); return shotHolds((slug) => held.get(slug) ?? held.set(slug, !!artifactSource('main', slug)).get(slug)); };
+// Where a note shows when no proposal's picture says: the mark's draft, the note's own draft, the
+// supervisor's draft of it, main. Never another session's checkout, however new.
+const shotOrder = ({ subject: { slug, at }, addressed }, holds) => {
+  const found = [addressed?.draft, at !== 'main' && at, `chore-artifact-${slug}`, 'main'].find((x) => x && holds(x, slug));
+  return found ? { at: found, slug } : null;
+};
+// The copy of the artifact Show me opens for a note to check, or null.
+function noteSource(view, holds = shotHolds()) {
+  const { slug } = view.subject;
+  if (!LINK_ID.test(slug ?? '')) return null;
+  if (view.check !== 'ready' || !view.shot) return shotOrder(view, holds);
+  const at = [view.shot.src, 'main'].find((x) => holds(x, slug));
+  return at ? { at, slug } : null;
+}
+// The copy a new proposal's picture is taken from: what Show me opens once it is written. An addressed
+// mark that stands stays the one to check, so its order holds; else main first.
+function readySource(view, holds = shotHolds()) {
+  const { slug } = view.subject;
+  return !view.addressed && holds('main', slug) ? { at: 'main', slug } : shotOrder(view, holds);
+}
+// The one way a mark gets its picture: { kind: 'ready' }, or { kind: 'addressed', by, draft }.
+const markShot = (view, mark) => noteShot(view, (mark.kind === 'ready' ? readySource(view) : noteSource({ ...view, check: 'addressed', shot: null, addressed: { by: mark.by, draft: mark.draft ?? null } }))?.at ?? null);
 // Old pictures removed (task 9).
 function shotSweep(id, now) {}
 /* note-shots end */
