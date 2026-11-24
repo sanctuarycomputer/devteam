@@ -697,7 +697,7 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     assert.deepEqual(await acts(V, 'thread-accept-addressed'), [], 'a press on what just moved posts nothing');
     assert.ok(await V.settle(heldShown, 1000), 'the words say why');
     await V.rows({ [N.trial]: withFrame(ROW.C12(), '') });
-    await V.p.ev(FRAMES);
+    await new Promise((r) => setTimeout(r, 700));
     assert.equal(await V.p.ev(heldShown), true, 'the words still there after a redraw');
     await settled(V);
     await press(V, '#tl-card [data-tl-accept]');
@@ -723,15 +723,50 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await V.p.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 });
     await V.p.ev(FRAMES);
     assert.deepEqual(await posts(), [], 'begun before it settled: nothing');
-    // the second press of a double click lands on what the first one's press moved there
+  });
+
+  await sub('A24: a double click on the page that moves Resolve under its second press, and a thing drawn above it', async () => {
+    const V = await byArrow();
+    const R = '#tl-card .tl-addr [data-tl-accept]';
+    const move = async (rect) => { const was = await V.p.ev(SETTLE(R)); await spot(V, N.trial, rect); await V.soon(`${SETTLE(R)} !== ${J(was)}`, 'setup: the card moved'); };
+    await V.p.move(5, 5);
+    await move({ x: 760, y: 420, w: 60, h: 20 });
+    const p = await at(V, R);
+    await move({ x: 40, y: 120, w: 220, h: 40 });
+    await V.p.move(p.x, p.y);
+    assert.ok(await V.p.ev(`document.elementFromPoint(${p.x}, ${p.y}) === tsFrame()`), 'setup: the page is there');
     await settled(V);
-    await V.p.ev(`(window.addEventListener('mouseup', () => { document.getElementById('tl-card').style.marginLeft = '4px'; }, { capture: true, once: true }), true)`);
-    const p = await at(V, '#tl-card [data-tl-close]');
-    await V.p.move(p.x - 60, p.y + 400);
-    await press(V, '#tl-card .tl-addr .tx');
-    await press(V, '#tl-card [data-tl-accept]');
+    const click = async (n) => { const b = { x: p.x, y: p.y, button: 'left', clickCount: n }; await V.p.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...b, buttons: 1 }); await V.p.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...b, buttons: 0 }); };
+    await click(1);
+    await move({ x: 760, y: 420, w: 60, h: 20 });
+    assert.ok(await V.p.ev(`document.querySelector(${J(R)}).contains(document.elementFromPoint(${p.x}, ${p.y}))`), 'setup: Resolve is under the pointer');
+    await click(2);
     await V.p.ev(FRAMES);
-    assert.deepEqual(await posts(), [], 'the second press of two: nothing');
+    assert.deepEqual(await acts(V, 'thread-accept-addressed'), [], 'the second press of two: nothing');
+    // something over it for its whole second, gone as the press comes
+    await settled(V);
+    await V.p.ev(`(() => { const r = document.querySelector(${J(R)}).getBoundingClientRect(), d = document.createElement('div'); d.id = 'zz-over'; d.style.cssText = 'position:fixed;z-index:999;background:red;left:' + r.left + 'px;top:' + r.top + 'px;width:' + r.width + 'px;height:' + r.height + 'px'; document.body.append(d); return true; })()`);
+    await V.soon(`document.querySelector(${J(R)}).classList.contains('waiting')`, 'setup: under it, it waits');
+    await new Promise((r) => setTimeout(r, ARMED));
+    await V.p.ev(`(document.getElementById('zz-over').remove(), true)`);
+    await press(V, R);
+    await V.p.ev(FRAMES);
+    assert.deepEqual(await acts(V, 'thread-accept-addressed'), [], 'drawn above it until just now: nothing');
+    // and a thing drawn above it in its card, pushing it down
+    await settled(V);
+    await V.p.ev(`(document.querySelector('#tl-card .tl-addr .by').insertAdjacentHTML('afterend', '<div style="height:9px"></div>'), true)`);
+    await press(V, R);
+    await V.p.ev(FRAMES);
+    assert.deepEqual(await acts(V, 'thread-accept-addressed'), [], 'pushed down just now: nothing');
+    // crept, less than half a pixel a frame
+    await settled(V);
+    await V.p.ev(`(window.__cr = 0, window.__ct = setInterval(() => { document.getElementById('tl-card').style.marginLeft = (window.__cr += 0.3) + 'px'; }, 16), true)`);
+    await new Promise((r) => setTimeout(r, ARMED + 300));
+    await press(V, R);
+    await V.p.ev(FRAMES);
+    await V.p.ev('(clearInterval(window.__ct), true)');
+    assert.ok(await V.p.ev('window.__cr > 5'), 'setup: it crept');
+    assert.deepEqual(await acts(V, 'thread-accept-addressed'), [], 'crept there: nothing');
   });
 
   await sub('A24: the picture closed by the page, stopped frames and a hidden tab leave Resolve unsettled', async () => {
@@ -747,8 +782,9 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await V.p.click('#tl-card .tl-shot');
     await V.soon(`!!document.getElementById('av-shot')`, 'setup: the picture up');
     await new Promise((r) => setTimeout(r, ARMED));
-    await V.p.ev(`(tShot.close(false), true)`);
-    await V.p.ev(FRAMES);
+    await V.focusFrame();
+    await forge(V, { type: 'key', key: 'Escape' });
+    await V.soon(`!document.getElementById('av-shot')`, 'setup: the page closed the picture');
     await soonAfter('uncovered just now: nothing');
     await settled(V);
     // frames that stopped for 400 ms, as the sampler sees it
@@ -766,20 +802,21 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
   await sub('A24: Hand over bared by the card closing, and another artifact\'s in the same place', async () => {
     const V = await byArrow();
     const bar = '#av-handover';
-    await V.p.ev(`(() => { const c = document.getElementById('tl-card'), r = document.getElementById('av-handover').getBoundingClientRect(); c.style.cssText += ';position:fixed;z-index:99;left:' + (r.left - 20) + 'px !important;top:' + (r.top - 10) + 'px !important'; return true; })()`);
+    await V.rows({ [N.trial]: withFrame(ROW.C12(), ''), [N.plans]: ROW.C20() });
+    await has(V, bar, 'Hand over');
+    // the card over Hand over, as a short window or a page's spot can put it
+    await V.p.ev(`(() => { const r = document.getElementById('av-handover').getBoundingClientRect(), st = document.createElement('style'); st.id = 'zz-st'; st.textContent = '#tl-card { position: fixed !important; left: ' + (r.left - 100) + 'px !important; top: ' + (r.top - 40) + 'px !important; z-index: 99 !important; }'; document.head.append(st); return true; })()`);
+    const p = await at(V, bar);
+    assert.ok(await V.p.ev(`document.getElementById('tl-card').contains(document.elementFromPoint(${p.x}, ${p.y}))`), 'setup: the card is over Hand over');
     await new Promise((r) => setTimeout(r, ARMED));
     await V.focusFrame();
     await forge(V, { type: 'key', key: 'Escape' });
-    await V.soon(`TL.open === null`, 'setup: the page closed the card');
+    await V.soon(`TL.open === null && document.getElementById('av-handover').contains(document.elementFromPoint(${p.x}, ${p.y}))`, 'setup: the page closed the card');
+    await V.p.clickAt(p.x, p.y);
     await V.p.ev(FRAMES);
-    await V.p.ev(`(document.getElementById('tl-card').style.cssText = '', true)`);
-    if (await V.p.ev(`document.getElementById('av-handover')?.getClientRects().length > 0`)) {
-      await press(V, bar);
-      await V.p.ev(FRAMES);
-      assert.deepEqual(await acts(V, 'artifact-handoff'), [], 'bared just now: nothing');
-    }
+    assert.deepEqual(await acts(V, 'artifact-handoff'), [], 'bared just now: nothing');
+    assert.ok(await V.settle(heldShown, 1000), 'and the words say why');
     await V.rows({ [N.trial]: ROW.C20(), [N.onMain]: ROW.C20() });
-    await openAt(V, AV_WT, 'plan-pricing');
     await has(V, bar, 'Hand over');
     await new Promise((r) => setTimeout(r, ARMED));
     const was = await V.p.ev(SETTLE(bar));
@@ -805,6 +842,7 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await V.soon(CLOSED, 'setup: the page closed the viewer');
     await press(V, '#zz-a'); await press(V, '#zz-k');
     await V.p.ev(`(document.getElementById('zz-a').focus(), true)`); await enter(V);
+    await V.p.ev(`(document.getElementById('zz-k').focus(), true)`); await enter(V);
     await V.p.ev(`(document.getElementById('zz-g').focus(), true)`); await V.p.key('ArrowDown'); await press(V, '#zz-g');
     const late = await V.p.ev('performance.now() - window.__t0');
     assert.ok(late < 950, `setup: all within the second (${late})`);
@@ -814,13 +852,30 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await press(V, '#zz-a'); await press(V, '#zz-k');
     await V.p.ev(`(document.getElementById('zz-a').focus(), true)`); await enter(V);
     assert.deepEqual(await V.p.ev('window.__hits'), ['zz-a', 'zz-k', 'zz-a'], 'the second over: as ever');
-    // plain Send isn't held, Shift+Enter in a resolved thread's composer is
+    await V.p.ev(`(window.__hits = [], document.getElementById('zz-g').focus(), true)`); await V.p.key('ArrowDown'); await press(V, '#zz-g');
+    assert.deepEqual(await V.p.ev('window.__hits'), ['arrow', 'drag', 'zz-g'], 'the grip too');
+    // plain Send isn't held
     await openAt(V, AV_WT, 'plan-pricing');
     await cardOf(V, N.trial);
-    await shut();
     await V.p.ev(`(window.__sent = 0, document.getElementById('tl-card').addEventListener('click', (e) => { if (e.target.closest('[data-tl-send]')) { window.__sent++; e.stopPropagation(); } }), true)`);
-    await V.p.ev(`(() => { document.querySelector('[data-tl-send]').dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })); return true; })()`);
+    await shut();
+    await V.p.ev(`(document.querySelector('[data-tl-send]').dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })), true)`);
     assert.equal(await V.p.ev('window.__sent'), 1, 'plain Send at once');
+    // Shift+Enter in a resolved thread's composer reopens it: held, then not
+    await V.p.ev(`(window.__replies['thread-say'] = window.__replies['thread-reopen'] = { body: { ok: true, out: '' } }, true)`);
+    await V.rows({ [N.trial]: { ...ROW.C20(), status: 'resolved' } });
+    await openAt(V, AV_WT, 'plan-pricing');
+    await cardOf(V, N.trial);
+    const turns = () => V.p.ev(`window.__posts.filter((x) => /^thread-(say|reopen)$/.test(x.action)).length`);
+    const shiftEnter = async () => { await V.p.ev(`(() => { const t = document.getElementById('tl-c-text'); t.focus(); t.value = 'Again'; return true; })()`); const k = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, modifiers: 8 }; await V.p.send('Input.dispatchKeyEvent', { type: 'keyDown', ...k }); await V.p.send('Input.dispatchKeyEvent', { type: 'keyUp', ...k }); };
+    const n = await turns();
+    await shut();
+    await cardOf(V, N.trial);
+    await shiftEnter();
+    assert.equal(await turns(), n, 'Shift+Enter that reopens: nothing within the second');
+    await new Promise((r) => setTimeout(r, ARMED));
+    await shiftEnter();
+    await V.soon(`window.__posts.filter((x) => /^thread-(say|reopen)$/.test(x.action)).length > ${n}`, 'the second over: it posts');
   });
 
   await sub('A24: with no viewer up Resolve settles and posts, and holds a mark swapped in; other presses as today', async () => {
@@ -850,21 +905,50 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await W.soon(`window.__posts.some((x) => x.action === 'thread-reopen')`, 'no viewer: Reopen at once');
   });
 
-  await sub('A24: a tap on what has settled posts; in a /view/ tab the rule holds; a person who may only look gets their words', async () => {
-    const V = await byArrow({ width: 390, height: 844 });
-    const tap = async (sel) => { const { x, y } = await at(V, sel); await V.p.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] }); await V.p.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] }); };
+  const tapOn = async (V, sel) => { const { x, y } = await at(V, sel); await V.p.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] }); await V.p.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] }); };
+  await sub('A24: a tap on what has settled posts (Resolve, Hand over, an answer)', async () => {
+    const V = await byArrow();
+    await V.rows({ [N.trial]: withFrame(ROW.C12(), ''), [N.plans]: ROW.C20() });
+    await has(V, '#av-handover', 'Hand over');
+    await V.p.ev(`(document.querySelector('#tl-card .tl-addr').insertAdjacentHTML('beforebegin', '<button id="zz-q" data-answer="x">Answer</button>'), window.__q = 0, window.addEventListener('click', (e) => { if (e.target.id === 'zz-q') { window.__q++; e.stopImmediatePropagation(); } }, true), true)`);
     await V.p.send('Emulation.setTouchEmulationEnabled', { enabled: true });
     await new Promise((r) => setTimeout(r, ARMED));
-    await tap('#tl-card [data-tl-accept]');
+    await settled(V);
+    await tapOn(V, '#zz-q');
+    await V.soon('window.__q === 1', 'a tap on a settled answer');
+    await tapOn(V, '#av-handover');
+    await V.soon(`window.__posts.some((x) => x.action === 'artifact-handoff')`, 'a tap on a settled Hand over posts');
+    await settled(V);
+    await tapOn(V, '#tl-card [data-tl-accept]');
     await V.soon(`window.__posts.some((x) => x.action === 'thread-accept-addressed')`, 'a tap on the settled Resolve posts');
+  });
+
+  await sub('A24: the rule holds in a /view/ tab; a person who may only look gets their own words', async () => {
+    const V = await tabOf({ [N.trial]: withFrame(ROW.C12(), ''), [N.plans]: ROW.C20() }, '', { path: 'view/artifact/pricing?at=plan-pricing' });
+    await V.p.ev(`(window.__replies['thread-accept-addressed'] = { body: { ok: true, out: '' } }, window.__replies['artifact-handoff'] = { body: { to: 'plan-pricing', typed: true, count: 1 } }, true)`);
+    await V.soon('TS.ready', 'setup: the page is up');
+    await cardOf(V, N.trial);
+    await holdPoll(V);
+    await settled(V);
+    await V.p.ev(`(document.getElementById('tl-card').style.marginLeft = '3px', document.getElementById('av-notes').style.marginRight = '9px', true)`);
+    await press(V, '#tl-card [data-tl-accept]');
+    await press(V, '#av-handover');
+    await V.p.ev(FRAMES);
+    assert.deepEqual([await acts(V, 'thread-accept-addressed'), await acts(V, 'artifact-handoff')], [[], []], 'moved just now: nothing');
+    await new Promise((r) => setTimeout(r, ARMED));
+    await settled(V);
+    await press(V, '#av-handover');
+    await V.soon(`window.__posts.some((x) => x.action === 'artifact-handoff')`, 'settled: Hand over posts');
+    await settled(V);
+    await press(V, '#tl-card [data-tl-accept]');
+    await V.soon(`window.__posts.some((x) => x.action === 'thread-accept-addressed')`, 'settled: Resolve posts');
     const W = await byArrow();
-    await W.p.ev(`(window.__vo = viewOnly, viewOnly = () => window.__vo('view'), viewOnly(), true)`);
+    await W.p.ev(`(window.__vo = viewOnly, viewOnly = () => window.__vo('view'), viewOnly(), avStep.forget(), true)`);
     await press(W, '#tl-card [data-tl-accept]');
     await W.p.ev(FRAMES);
     assert.deepEqual(await acts(W, 'thread-accept-addressed'), [], 'a person who may only look: nothing');
     assert.equal(await W.p.ev(`document.getElementById('view-only-toast')?.textContent`), 'View only: you can look, but not change anything', 'their own words');
     assert.equal(await W.p.ev(heldShown), false, 'not the rule\'s');
-    assert.doesNotMatch(/\/\* avStep start \*\/([\s\S]*?)\/\* avStep end \*\//.exec(HTML)[1], /\bVIEWER\b/, 'the owner\'s own /view/ tab is not let off');
   });
 
   // what VIEW_WRITES names, by whether the card or the viewer's bar draws it
@@ -923,6 +1007,7 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
       await V.p.ev(`(window.__s = 0, document.addEventListener('click', (e) => { if (e.target.closest('[data-tl-send]')) window.__s++; }, true), document.getElementById('tl-card').style.marginLeft = '2px', true)`);
       await press(V, '[data-tl-send]');
       assert.equal(await V.p.ev('window.__s'), want, want ? 'plain words: at once' : 'it would reopen: held');
+      if (!want) { await new Promise((r) => setTimeout(r, ARMED)); await press(V, '[data-tl-send]'); assert.equal(await V.p.ev('window.__s'), 1, 'settled: it goes'); }
     }
   });
 
@@ -931,6 +1016,15 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     const loop = (on) => V.p.ev(on ? `(window.__k = 0, window.__lp = setInterval(() => { const key = TS.keyOf.get(tKey(TL.threads.find((t) => t.id === ${J(N.trial)}).subject)); tsFrame().contentWindow.postMessage({ forge: { type: 'rects', rects: [{ key, rect: { x: 100 + (window.__k++ % 40) * 4, y: 120 + (window.__k % 30) * 3, w: 60, h: 20 } }] } }, '*'); }, 16), true)` : '(clearInterval(window.__lp), true)');
     await loop(true);
     await new Promise((r) => setTimeout(r, 400));
+    // a tap where it is now, and Enter, while it moves
+    await V.p.send('Emulation.setTouchEmulationEnabled', { enabled: true });
+    await tapOn(V, '#tl-card [data-tl-accept]');
+    assert.ok(await V.settle(heldShown, 1500), 'a tap is refused with the words');
+    assert.deepEqual(await acts(V, 'thread-accept-addressed'), [], 'a tap while it moves: nothing');
+    await V.p.send('Emulation.setTouchEmulationEnabled', { enabled: false });
+    await V.p.move(5, 790);
+    await V.p.ev(`(document.activeElement?.blur?.(), true)`);
+    await new Promise((r) => setTimeout(r, 300));
     const moving = await V.p.ev(SETTLE('#tl-card'));
     await new Promise((r) => setTimeout(r, 120));
     assert.notEqual(await V.p.ev(SETTLE('#tl-card')), moving, 'setup: the card moves');
@@ -943,12 +1037,14 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     // the keyboard, on a page that moves it with nothing on the card
     const W = await byArrow();
     await W.p.move(5, 5);
-    await W.p.ev(`(document.getElementById('tl-card').style.marginLeft = '2px', document.querySelector('#tl-card [data-tl-accept]').focus(), true)`);
+    await W.p.ev(`(window.__mg = 0, window.__mt = setInterval(() => { document.getElementById('tl-card').style.marginLeft = (window.__mg++ % 20) + 'px'; }, 16), document.querySelector('#tl-card [data-tl-accept]').focus(), true)`);
     await enter(W);
     await W.soon(`window.__posts.some((x) => x.action === 'thread-accept-addressed')`, 'Enter at once');
+    await W.p.ev('(clearInterval(window.__mt), true)');
     // redrawn in the same place every 100 ms: the same deed, so its second runs out
     const X = await byArrow();
     await X.p.ev(`(avStep.forget(), window.__rd = setInterval(() => { const p = document.querySelector('#tl-card .tl-addr')?.parentElement; if (p) p.innerHTML = p.innerHTML; }, 100), true)`);
+    await X.soon(`document.querySelector('#tl-card .tl-addr [data-tl-accept]').classList.contains('waiting')`, 'setup: its second begun again');
     await settled(X);
     await X.p.ev('(clearInterval(window.__rd), true)');
   });

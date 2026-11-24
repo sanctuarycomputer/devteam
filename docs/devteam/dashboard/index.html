@@ -7100,7 +7100,7 @@ function avNotes() {
 // that session. What was said of a version goes when another is shown.
 avNotes.draw = () => {
   const notes = avNotes();
-  // what a step said of its card, the second Resolve waits, and the picture go with the card, the version, the viewer
+  // what a step said of its card, and the picture go with the card, the version, the viewer
   if (avStep.off && (avStep.off.av !== AV || TL.open !== avStep.off.id)) avStep.off = null;
   if (!AV || AV.preview || TS.kind !== 'artifact') tShot.close(false);
   if (avNotes.av !== AV) { avNotes.av = AV; $('e-avn').textContent = ''; }
@@ -7290,7 +7290,9 @@ avStep.bare = (c, r) => {
     const b = p.getBoundingClientRect();
     left = Math.max(left, b.left); top = Math.max(top, b.top); right = Math.min(right, b.right); bottom = Math.min(bottom, b.bottom);
   }
-  left = Math.max(left, 0); top = Math.max(top, 0); right = Math.min(right, innerWidth); bottom = Math.min(bottom, innerHeight);
+  // (the layout's window: innerWidth is the zoomed part of it on a phone)
+  const { clientWidth: w, clientHeight: h } = document.documentElement;
+  left = Math.max(left, 0); top = Math.max(top, 0); right = Math.min(right, w); bottom = Math.min(bottom, h);
   return right > left && bottom > top && c.contains(document.elementFromPoint((left + right) / 2, (top + bottom) / 2));
 };
 avStep.sample = () => {
@@ -7341,12 +7343,14 @@ avStep.stays = (t, card) => {
   P.placed = key;
   if (!t || !avStep.up() || was !== key || !(card.matches(':hover') || card.contains(document.activeElement))) return false;
   const r = card.getBoundingClientRect();
-  return r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight;
+  const { clientWidth: w, clientHeight: h } = document.documentElement;
+  return r.left >= 0 && r.top >= 0 && r.right <= w && r.bottom <= h;
 };
 avStep.say = () => {
   let e = document.getElementById('av-held');
   if (!e) { e = document.createElement('div'); e.id = 'av-held'; e.setAttribute('role', 'status'); document.body.append(e); }
-  e.textContent = 'That moved just now. Press again in a second.';
+  // (put there empty first, so it is announced)
+  requestAnimationFrame(() => { e.textContent = 'That moved just now. Press again in a second.'; });
   e.hidden = false;
   clearTimeout(e._hide);
   e._hide = setTimeout(() => { e.hidden = true; }, 4000);
