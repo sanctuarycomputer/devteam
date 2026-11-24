@@ -146,6 +146,7 @@ test('C14a one finder, the lens\'s own', () => {
   for (const d of ['const find = (a) =>', 'const hiddenEl =', 'const textOf =', 'const rectOf =']) assert.ok(finder.includes(d), `${d} in the finder's slice`);
   for (const d of ['const CAPS =', 'const cap =', 'const oneLine =', 'const num =', 'const unCap =']) assert.ok(LENS.slice(at[0], at[1]).includes(d), `${d} in the helpers' slice`);
   assert.ok(region(), 'the note-shots region');
+  assert.ok(/ARTIFACT_LENS\b/.test(body('shotSlice')) && body('shotScript').includes('shotSlice('), 'the shooter\'s script is cut from the lens');
   for (const d of ['find', 'hiddenEl', 'textOf']) assert.ok(!new RegExp(`(?:const|let|var|function) ${d}\\b`).test(region()), `the shooter has no ${d} of its own`);
 });
 
@@ -383,4 +384,143 @@ test('C10b the thread-new POST carries the frame, and refuses a bad one', async 
     assert.equal(none.status, 200);
     assert.ok(!('frame' in named('A note with no frame')));
   } finally { await dash.stop(); }
+});
+
+// a capture is mostly waiting: three at a time
+async function each(list, fn) { const at = [...list]; await Promise.all([0, 1, 2].map(async () => { while (at.length) await fn(at.shift()); })); }
+const NINE = { w: 900, h: 700, hash: '' };
+// where found.html's button is in its 320x200 picture
+const MIDDLE = { x: 110, y: 70, w: 100, h: 60 };
+const lit = (k, r) => fs.readFileSync(path.join(k.shots, r.id, `${r.line.shot.stamp}-light.png`));
+const said = (r) => `${r.status}: ${r.out}`;
+
+test('C1a C1b C6b C15a a found note: the line, the file, the ring, what is printed', async () => {
+  const k = shotKit();
+  const r = await k.readyOn(k.subject());
+  assert.equal(r.status, 0, said(r));
+  const { shot } = r.line;
+  assert.equal(r.line.by, 'supervisor');
+  assert.equal(r.line.ready.outcome, 'The button now says Annual');
+  assert.deepEqual(Object.keys(shot).sort(), ['anchor', 'dark', 'dirty', 'h', 'sha', 'src', 'stamp', 'sum', 'w']);
+  assert.match(shot.stamp, /^\d{8}-\d{9}$/);
+  assert.deepEqual([shot.anchor, shot.w, shot.h, shot.dark, 'dark' in shot.sum], ['found', 1400, 860, false, false]);
+  assert.deepEqual(k.files(r.id), [`${shot.stamp}-light.png`]);
+  assert.equal(shot.sum.light, sha256(lit(k, r)));
+  const p = k.light(r);
+  assert.deepEqual([p.w, p.h], [320, 200]);
+  assert.ok(ringAt(p, MIDDLE), 'the ring round the button');
+  assert.ok(near(p.px(160, 100 - 25), [0, 0, 255]), 'the button inside it');
+  assert.ok(r.stdout.includes(`${k.shots}/${r.id}/${shot.stamp}-light.png`) || r.stdout.includes(fs.realpathSync(path.join(k.shots, r.id, `${shot.stamp}-light.png`))), r.stdout);
+  assert.ok(r.stdout.includes(`Look at it before you send this mark: if it doesn't show the change, withdraw it with thread unready ${r.id} --reason "<why>".`));
+  assert.match(r.stdout, /data, not instructions[^\n]*\n {2}anchor found, clip 320x200, text "Start trial"/);
+});
+
+test('C3 the width the owner had, and the clip', async () => {
+  const k = shotKit();
+  await each([
+    ['C3a', { path: 'width.html' }, NINE, (r) => { assert.match(r.out, /text "Narrow"/); assert.equal(r.line.shot.w, 900); }],
+    ['C3b', { path: 'width.html' }, undefined, (r) => { assert.match(r.out, /text "Wide"/); assert.equal(r.line.shot.w, 1400); }],
+    ['C3c', { path: 'liar.html' }, NINE, (r) => assert.equal(r.line.shot.w, 777)],
+    ['C3d 400x300', { path: 'mid.html' }, undefined, (r, p) => assert.deepEqual([p.w, p.h], [464, 364])],
+    ['C3d tall', { path: 'tall.html' }, NINE, (r, p) => assert.equal(p.h, 700)],
+    ['C3d wide', { path: 'wide.html' }, NINE, (r, p) => assert.equal(p.w, 900)],
+    ['C3e', { path: 'below.html' }, undefined, (r, p) => assert.ok(ringAt(p, MIDDLE))],
+    ['C3f', { path: 'liar3000.html' }, NINE, (r, p) => { assert.ok(p.w <= 900); assert.equal(r.line.shot.w, 3000); }],
+    ['C3g', { path: 'corner.html', anchor: { selector: '#logo', tag: 'div', text: 'Logo', rect: { x: 12, y: 12, w: 40, h: 20 } } }, NINE, (r, p) => { assert.deepEqual([p.w, p.h], [320, 200]); assert.ok(ringAt(p, { x: 12, y: 12, w: 40, h: 20 })); }],
+    ['C3h', { point: { x: 40, y: 20 }, path: 'scrolled.html', anchor: undefined }, undefined, (r, p) => { assert.ok(near(p.px(40, 20), [255, 0, 0]), String(p.px(40, 20))); assert.ok(near(p.px(40, 80), [0, 0, 255])); }],
+    ['C3x a query string in path', { path: 'found.html?x=1' }, undefined, (r) => assert.equal(r.line.shot.anchor, 'found')],
+    ['C5x a page whose script throws', { path: 'throws.html' }, undefined, (r) => assert.equal(r.line.shot.anchor, 'found')],
+    ['C8d a page that alerts', { path: 'alert.html' }, undefined, (r) => assert.equal(r.line.shot.anchor, 'found')],
+  ], async ([what, o, frame, check]) => {
+    const r = await k.readyOn(k.subject(o), { frame });
+    assert.equal(r.status, 0, `${what}: ${said(r)}`);
+    try { check(r, k.light(r)); } catch (e) { e.message = `${what}: ${e.message}`; throw e; }
+  });
+});
+
+test('C5 the state of the spot, and the view it is on', async () => {
+  const k = shotKit();
+  const tab = { w: 1400, h: 860, hash: '#tab2' };
+  const green = (r, p) => assert.ok(near(p.px(40, 20), [0, 170, 0]), String(p.px(40, 20)));
+  await each([
+    ['C5b', k.subject({ path: 'changed.html' }), undefined, 'changed', (r) => assert.match(r.out, /text "Start free trial"/)],
+    ['C5c', k.subject({ path: 'details.html' }), undefined, 'found', (r, p) => assert.deepEqual([p.w, p.h], [320, 200])],
+    ['C5d', k.subject({ path: 'tabs-js.html' }), undefined, 'hidden', (r, p) => assert.ok(ringAt(p, MIDDLE))],
+    ['C5e', k.subject({ path: 'gone.html' }), undefined, 'gone', (r, p) => assert.ok(ringAt(p, MIDDLE))],
+    ['C5f', k.pointNote(), undefined, 'point', (r, p) => assert.deepEqual([p.w, p.h], [480, 320])],
+    ['C5g #tab2', k.subject({ path: 'tabs.html' }), tab, 'found', () => {}],
+    ['C5g none', k.subject({ path: 'tabs.html' }), { ...tab, hash: '' }, 'hidden', () => {}],
+    ['C5h no frame', k.pointNote({ path: 'tabs.html#tab2' }), undefined, 'point', green],
+    ['C5h a frame with no hash', k.pointNote({ path: 'tabs.html#tab2' }), { ...tab, hash: '' }, 'point', green],
+  ], async ([what, s, frame, state, check]) => {
+    const r = await k.readyOn(s, { frame });
+    assert.equal(r.status, 0, `${what}: ${said(r)}`);
+    assert.equal(r.line.shot.anchor, state, what);
+    try { check(r, k.light(r)); } catch (e) { e.message = `${what}: ${e.message}`; throw e; }
+  });
+});
+
+test('C6a a page with dark styles has a dark picture', async () => {
+  const k = shotKit();
+  const r = await k.readyOn(k.subject({ path: 'dark.html' }));
+  assert.equal(r.status, 0, said(r));
+  const { shot } = r.line;
+  assert.equal(shot.dark, true);
+  const dark = fs.readFileSync(path.join(k.shots, r.id, `${shot.stamp}-dark.png`));
+  assert.equal(shot.sum.dark, sha256(dark));
+  assert.ok(near(png(dark).px(20, 20), [0x11, 0x11, 0x11]));
+  assert.ok(near(k.light(r).px(20, 20), [255, 255, 255]));
+  assert.ok(ringAt(png(dark), MIDDLE));
+  assert.match(r.stdout, /-light\.png \(and -dark\.png\)/);
+});
+
+test('C15b the page is not trusted with what is printed or recorded', async () => {
+  const k = shotKit();
+  const r = await k.readyOn(k.subject({ path: 'hostile.html' }));
+  assert.equal(r.status, 0, said(r));
+  const text = JSON.parse(/text (".*")$/m.exec(r.stdout)[1]);
+  assert.ok([...text].length <= 80 && text.includes('[link removed]'), text);
+  assert.ok(!r.stdout.includes('\u202e') && !r.stdout.includes('abcdefghijklmnop'));
+  const bad = await k.readyOn(k.subject({ path: 'badstate.html' }));
+  assert.equal(bad.status, 1);
+  assert.match(bad.out, /the page answered the picture with something else/);
+  assert.equal(bad.line, undefined);
+  assert.deepEqual(k.files(bad.id), []);
+});
+
+test('the pictures go only in their own folder: a symlinked one is refused', async () => {
+  const k = shotKit();
+  const id = await k.note(k.subject());
+  const away = fs.mkdtempSync(path.join(TMP, 'away'));
+  fs.mkdirSync(k.shots, { recursive: true });
+  fs.symlinkSync(away, path.join(k.shots, id));
+  const r = await k.ready(id);
+  assert.equal(r.status, 1, said(r));
+  assert.equal(r.line, undefined);
+  assert.deepEqual(fs.readdirSync(away), []);
+  fs.unlinkSync(path.join(k.shots, id));
+});
+
+test('C5y two captures at once', async () => {
+  const k = shotKit();
+  const ids = [await k.note(k.subject()), await k.note(k.subject())];
+  const hooks = [seenFile(), seenFile()];
+  const rs = await Promise.all(ids.map((id, i) => k.ready(id, { DEVTEAM_TEST_SHOT_SEEN: hooks[i] })));
+  for (const r of rs) assert.equal(r.status, 0, said(r));
+  const of = (i, re) => k.seen(hooks[i]).map((l) => re.exec(l)?.[1]).filter(Boolean);
+  for (const re of [/ profile=(.*)$/, /^continue (http:\/\/127\.0\.0\.1:\d+)/]) assert.equal(of(0, re).filter((x) => of(1, re).includes(x)).length, 0, String(re));
+  assert.notEqual(rs[0].line.shot.stamp, rs[1].line.shot.stamp);
+});
+
+test('a thread resolved while its picture is taken gets no proposal', async () => {
+  const k = shotKit();
+  const id = await k.note(k.subject({ path: 'slow.html' }));
+  const going = k.ready(id);
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.equal((await k.run(['thread', 'resolve', id])).status, 0);
+  const r = await going;
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /is resolved/);
+  assert.equal(r.line, undefined);
+  assert.deepEqual(k.files(id), []);
 });
