@@ -1533,9 +1533,9 @@ export function createGateway(opts = {}) {
     const newest = mine.reduce((a, b) => (b.expires > a.expires ? b : a));
     return { kind: joined(s, row) ? 'new-link' : 'invite', expires: newest.expires, expired: newest.expires <= Date.now() };
   };
-  // What this viewer may post for this row, in menu order; the routes refuse the rest. One live link
-  // per person: with one out, Revoke comes first and no second link is offered (relink still takes
-  // one, replacing it). Someone who never joined and whose link is gone (swept as expired by an
+  // What this viewer may post for this row, in menu order; the routes refuse the rest. One link per
+  // person: with one out (expired too, until it is revoked: kit-253 R3), Revoke comes first and no
+  // second link is offered (relink still takes one, replacing it). Someone who never joined and whose link is gone (swept as expired by an
   // invite or relink's save) can only be removed.
   // Make admin and Make owner only where they land: joined, no link out, and for Make owner a passkey,
   // never from the stand-in (it restarts first). The list never offers what mayPeople refuses.
@@ -1546,9 +1546,8 @@ export function createGateway(opts = {}) {
         const link = linkOf(s, row);
         if (!joined(s, row)) return link ? ['revoke'] : ['remove'];
         const lv = raisable(row) ? ['level'] : [];
-        if (link && !link.expired) return ['revoke', 'rename', ...lv, 'remove'];
-        const lands = linkOut(s, row.id) ? [] : ['role', ...(hasPasskey(s, row) && viewer.id !== null ? ['transfer'] : [])];
-        return ['rename', ...lv, ...lands, 'relink', 'remove'];
+        if (link) return ['revoke', 'rename', ...lv, 'remove'];
+        return ['rename', ...lv, 'role', ...(hasPasskey(s, row) && viewer.id !== null ? ['transfer'] : []), 'relink', 'remove'];
       }
       if (!isAdmin(viewer) || isOwner(row) || !joined(s, row)) return [];
       return ['rename', ...(raisable(row) ? ['level'] : []), 'remove'];
@@ -1584,7 +1583,7 @@ export function createGateway(opts = {}) {
     if (isOwner(row)) return no('Nobody but the owner changes the owner\'s row');
     if (action === 'role') return no('Only the owner makes admins');
     if (action === 'transfer') return no('Only the owner hands the box over');
-    if (action !== 'rename' && action !== 'remove' && action !== 'level') return no('Only the box\'s owner can do this, for now.');
+    if (action !== 'rename' && action !== 'remove' && action !== 'level') return no('Only the owner sends or revokes links');
     if (action === 'level' && isAdmin(row)) return no(self ? 'An admin is always Full' : 'An admin is always Full; take Admin away first');
     // R1: an invite not used yet is the owner's to change
     if (!self && !joined(s, row)) return no('They haven\'t joined yet: only the owner changes an invite');
