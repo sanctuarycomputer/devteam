@@ -689,3 +689,93 @@ test('org-access A14: /api/data\'s viewer echoes the gateway\'s level, and nothi
     }
   } finally { await R.close(); }
 });
+
+// --- the dashboard page greys what View can't do (T4), Chrome ------------------------------------------
+import { spawnSync } from 'node:child_process';
+// every non-GET fetch the page makes, for a test to read (COUNT_FETCH's shape, with the method)
+const COUNT_POSTS = "(() => { window.__posts = []; const f = window.fetch; window.fetch = (u, o) => { const m = String(o?.method || 'GET').toUpperCase(); if (m !== 'GET' && m !== 'HEAD') window.__posts.push(m + ' ' + String(u)); return f(u, o); }; })();";
+const VIEW_TOAST = 'View only: you can look, but not change anything';
+const VIEW_LINE = 'View only: you can look at everything on this box. Buttons that would change something are greyed out.';
+test('org-access A14: a dashboard served at View shows View only and sends no write', { ...CHROME_OK, timeout: 240000 }, async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kit250-c22-'));
+  const root = bareProject(base, 'alpha');
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('DEVTEAM_') || k === 'DEVTEAM_HUB_PORT' || k === 'DEVTEAM_PORT_BASE')), HOME: base };
+  const dt = (args) => { const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: root, env: { ...env, DEVTEAM_ROLE: 'supervisor' }, encoding: 'utf8', timeout: 60000 }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
+  const Q = dt(['ask', '--question', 'Ship it?', '--choices', '[{"label":"Yes"},{"label":"No"}]']);
+  // an artifact landed on main, for the viewer tab
+  const art = path.join(root, 'docs/devteam/project/artifacts/view-mock');
+  fs.mkdirSync(art, { recursive: true });
+  fs.writeFileSync(path.join(art, 'artifact.json'), JSON.stringify({ v: 1, title: 'View mock', summary: 'A page to look at', by: 'supervisor', for: [] }));
+  fs.writeFileSync(path.join(art, 'index.html'), '<!doctype html><html><body><p id="art">the mock</p></body></html>');
+  for (const a of [['add', '-A'], ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'artifact: view-mock']]) assert.equal(spawnSync('git', a, { cwd: root, encoding: 'utf8', timeout: 30000 }).status, 0, a.join(' '));
+  const { dash, port } = await dashboardOnFreePort(root, env);
+  const chrome = await openChrome();
+  try {
+    const at = async (level, route) => {
+      const p = await chrome.newPage();
+      await p.send('Page.enable');
+      await p.send('Runtime.enable');
+      await p.send('Network.enable');
+      await p.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+      await p.send('Network.setExtraHTTPHeaders', { headers: { 'x-devteam-level': level } });
+      await p.send('Page.addScriptToEvaluateOnNewDocument', { source: COUNT_POSTS });
+      await p.send('Page.navigate', { url: `http://127.0.0.1:${port}${route}` });
+      return p;
+    };
+    const until = async (p, expr, what, ms = 30000) => {
+      const end = Date.now() + ms;
+      for (;;) {
+        let v = false;
+        try { v = await p.ev(expr); } catch {}
+        if (v) return v;
+        if (Date.now() > end) assert.fail(`timed out: ${what}; the dashboard said: ${dash.out().slice(-400)}`);
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    };
+    const card = `#questions [data-qcard="${Q}"]`;
+    const pickYes = (p) => p.ev(`(() => { const r = document.querySelector(${JSON.stringify(`${card} input[data-pick][value="Yes"]`)}); r.click(); return r.checked; })()`);
+    // served View: the class, the badge, no write, the toast; navigation still works
+    const p = await at('view', '/#questions');
+    await until(p, `/^updated/.test(document.getElementById('when')?.textContent ?? '')`, 'the first render');
+    assert.equal(await p.ev(`document.body.classList.contains('view-only')`), true, 'body.view-only');
+    assert.equal(await p.ev(`document.getElementById('view-only')?.textContent ?? null`), 'View only', 'the badge');
+    assert.equal(await p.ev(`document.getElementById('view-only')?.title ?? null`), VIEW_LINE, "the badge's title");
+    await until(p, `Boolean(document.querySelector(${JSON.stringify(`${card} [data-answer]`)}))`, 'the question card');
+    await new Promise((r) => setTimeout(r, 600));
+    assert.equal(await pickYes(p), true, 'a pick is not a write');
+    assert.equal(await p.ev(`document.querySelector(${JSON.stringify(`${card} [data-answer]`)}).disabled`), false, 'Answer is live, so a click reaches it');
+    await p.click(`${card} [data-answer]`);
+    await until(p, `document.getElementById('view-only-toast')?.textContent === ${JSON.stringify(VIEW_TOAST)}`, 'the toast');
+    // the threads composer: Shift+Enter is its send
+    await p.ev(`tlStart({ subject: { kind: 'page', view: 'overview' }, title: 'Overview', x: 40, y: 40 }); true`);
+    await until(p, `Boolean(document.getElementById('tl-c-text'))`, 'the composer');
+    await p.click('#tl-c-text');
+    await p.type('hello');
+    await p.key('Enter', 8);
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.deepEqual(await p.ev('window.__posts'), [], 'no write was sent');
+    await p.ev(`tlHide?.(); document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); true`);
+    await p.click('.side a[href="#board"]');
+    await until(p, `PAGE_NOW === 'board'`, 'a tab click still changes page');
+    p.close();
+    // the viewer tab learns the level from /api/viewer
+    const v = await at('view', '/view/artifact/view-mock');
+    await until(v, `document.body.classList.contains('view-only')`, 'the viewer tab gets the class');
+    v.close();
+    // served Full: no class, no badge, and the same press posts
+    const f = await at('full', '/#questions');
+    await until(f, `/^updated/.test(document.getElementById('when')?.textContent ?? '')`, 'the first render (full)');
+    assert.equal(await f.ev(`document.body.classList.contains('view-only')`), false, 'no class at Full');
+    assert.equal(await f.ev(`Boolean(document.getElementById('view-only') && !document.getElementById('view-only').hidden)`), false, 'no badge at Full');
+    await until(f, `Boolean(document.querySelector(${JSON.stringify(`${card} [data-answer]`)}))`, 'the question card (full)');
+    await new Promise((r) => setTimeout(r, 600));
+    assert.equal(await pickYes(f), true);
+    await f.click(`${card} [data-answer]`);
+    await until(f, `window.__posts.length > 0`, 'the press posts at Full');
+    f.close();
+  } finally {
+    await chrome.close();
+    await dash.stop();
+    fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});

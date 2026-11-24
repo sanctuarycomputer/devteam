@@ -1244,6 +1244,12 @@ try {
   .card.goal.blk-full, .ov-goal.blk-full { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
   .card.goal.blk-partial, .ov-goal.blk-partial { border-color: color-mix(in srgb, var(--amber) 55%, var(--line)); }
 /* css-overview end */
+/* css-view-only start */
+  /* View only (kit-250): what the gateway refuses a view-only person looks it, and says why when pressed */
+  body.view-only :is([data-answer], [data-cant], [data-reply], [data-dontuse], [data-post-secrets], [data-overrule-send], [data-correct-send], [data-rv-answer], [data-decline], [data-rv-decline], [data-know], [data-oa-know], [data-oa-goal], [data-hold-id], [data-met-id], [data-goal-move], [data-preview-start], [data-preview-stop], [data-forget], [data-limit-save], [data-limit-none], [data-limit-step], .fleet-switch [data-fleet], [data-checknow], [data-tl-send], [data-tl-accept], [data-tl-notyet], [data-tl-resolve-go], [data-tl-reopen], [data-goal-grip], [data-ask-option], [data-ask-esc], a[href*="/public/"], .dropbox[data-drop] textarea, .dropbox[data-drop] input, #tl-c-text) { opacity: .45; cursor: not-allowed; }
+  #view-only { color: var(--amber-fg); background: color-mix(in srgb, var(--amber) 16%, transparent); }
+  #view-only-toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 60; max-width: min(90vw, 480px); padding: 8px 14px; border-radius: 8px; background: var(--fg); color: var(--bg); font-size: 13px; box-shadow: 0 4px 16px rgb(0 0 0 / .18); }
+/* css-view-only end */
 </style>
 </head>
 <body class="shell">
@@ -8611,6 +8617,70 @@ function renderOverview() {
   ovSet($('ov-secs'), ovSec('Status', status) + ovSec('Numbers', numbers) + ovSec('Autonomy', autonomy) + ovSec('Goals', goals) + ovSec('Needs you', needs) + ovSec('Commit history', ovMosaic(HELLO?.pulse?.activity)));
 }
 
+/* viewOnly start */
+// View only (kit-250): served to a view-only person (the box's gateway says so in /api/data's viewer, or
+// /api/viewer for the viewer tab), the page says "View only" beside the kit badge and greys the writes,
+// and a press on one shows why instead of sending it. The gateway refuses those writes anyway; this is
+// so nobody presses and waits. Navigation is left alone: tabs, filters, links, Back, peeks, copy.
+const VIEW_WRITES = "[data-answer], [data-cant], [data-reply], [data-dontuse], [data-post-secrets], [data-overrule-send], [data-correct-send], [data-rv-answer], [data-decline], [data-rv-decline], [data-know], [data-oa-know], [data-oa-goal], [data-hold-id], [data-met-id], [data-goal-move], [data-preview-start], [data-preview-stop], [data-forget], [data-limit-save], [data-limit-none], [data-limit-step], .fleet-switch [data-fleet], [data-checknow], [data-tl-send], [data-tl-accept], [data-tl-notyet], [data-tl-resolve-go], [data-tl-reopen], [data-goal-grip], [data-ask-option], [data-ask-esc], a[href*=\"/public/\"], .dropbox[data-drop] textarea, .dropbox[data-drop] input, #tl-c-text";
+const VIEW_TOAST = 'View only: you can look, but not change anything';
+let viewToastAt = 0;
+function viewToast() {
+  if (Date.now() - viewToastAt < 2000) return;
+  viewToastAt = Date.now();
+  let t = document.getElementById('view-only-toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'view-only-toast';
+    t.setAttribute('role', 'status');
+    document.body.append(t);
+  }
+  t.textContent = VIEW_TOAST;
+  t.hidden = false;
+  clearTimeout(t._hide);
+  t._hide = setTimeout(() => { t.hidden = true; }, 2500);
+}
+function viewStop(e) {
+  if (!document.body.classList.contains('view-only')) return;
+  const el = e.target instanceof Element ? e.target : null;
+  if (!el) return;
+  const write = el.closest(VIEW_WRITES);
+  let stop = false;
+  if (e.type === 'click') stop = Boolean(write);
+  else if (e.type === 'submit') stop = Boolean(e.submitter?.closest(VIEW_WRITES) || el.querySelector(VIEW_WRITES));
+  else if (e.type === 'drop') stop = Boolean(write || el.closest('.dropbox[data-drop]'));
+  else if (e.type === 'pointerdown') stop = Boolean(el.closest('[data-goal-grip]'));
+  else if (e.type === 'keydown') {
+    const typing = write && write.matches('textarea, input:not([type=checkbox], [type=radio], [type=button], [type=submit])');
+    stop = Boolean(write) && (e.key === 'Enter' || (e.key === ' ' && !typing)) || ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && Boolean(el.closest('[data-goal-grip]')));
+  }
+  if (!stop) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  viewToast();
+}
+let viewListening = false;
+function viewOnly(level) {
+  const view = level === 'view';
+  document.body.classList.toggle('view-only', view);
+  let b = document.getElementById('view-only');
+  if (view && !b) {
+    b = document.createElement('span');
+    b.className = 'badge';
+    b.id = 'view-only';
+    b.textContent = 'View only';
+    b.title = 'View only: you can look at everything on this box. Buttons that would change something are greyed out.';
+    const kit = document.getElementById('kit');
+    if (kit) kit.after(b); else document.body.prepend(b);
+  }
+  if (b) b.hidden = !view;
+  if (view && !viewListening) {
+    viewListening = true;
+    for (const type of ['click', 'submit', 'drop', 'pointerdown', 'keydown']) window.addEventListener(type, viewStop, true);
+  }
+}
+if (VIEWER) fetch('/api/viewer', { cache: 'no-store' }).then((r) => r.json()).then((j) => viewOnly(j.level)).catch(() => {});
+/* viewOnly end */
 function render(d) {
   DATA = d;
   const focus = focusMark();
@@ -8708,6 +8778,7 @@ function render(d) {
   for (const [sel, v] of kept) { const el = pageField(sel); if (el) el.value = v; }
   for (const sel of keptChecks) { const el = [...document.querySelectorAll(sel)].find((c) => !layerField(c) && !c.closest('#drawer')); if (el) el.checked = true; }
   restoreSecretDrafts();
+  viewOnly(d.viewer?.level ?? null);
   focusBack(focus);
 }
 
