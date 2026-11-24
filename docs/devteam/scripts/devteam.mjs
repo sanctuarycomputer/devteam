@@ -10905,7 +10905,7 @@ function cmdThread() {
       if (h && objects.get(h)?.created_by !== 'supervisor') return;
     }
     if (off !== undefined) return;
-    const elsewhere = by === 'responder' ? 'hand it to the supervisor (send supervisor "…" --kind handoff --thread <t-id>)' : 'start its own thread (thread new --subject \'{"kind":"item","ref":"question:q-…"}\' -- "<words>")';
+    const elsewhere = by !== 'supervisor' ? 'hand it to the supervisor (send supervisor "…" --kind handoff --thread <t-id>)' : 'start its own thread (thread new --subject \'{"kind":"item","ref":"question:q-…"}\' -- "<words>")';
     const remedies = `name what it is about with --refs <type>:<id>; if it follows up your pending turn, --re <u-id>; if it is about something else, ${elsewhere}; or say why it belongs here with --off-subject "<why>"`;
     const waits = `nothing in ${t.id} is waiting on you (no owner turn owed${by === 'supervisor' ? ', no open handoff' : ''}, no --re)`;
     if (!re && !refs.length && !asks) die(`${waits}: ${remedies}`);
@@ -11021,10 +11021,15 @@ function cmdThread() {
     return out(r.same ? `part ${r.same} already taken: ${t.id}` : `part ${r.taken} taken: ${t.id} (${r.bytes} of ${TURN_MAX} bytes)`);
   }
   if (sub === 'say' || sub === 'reply') {
-    const by = sub === 'say' ? threadOwner().by : sub === 'reply' && logWriter() === 'responder' ? 'responder' : (supervisorOnly('thread reply'), replyWriter());
+    const sessionWriter = sub === 'reply' && ['ticket', 'planner'].includes(writerClass(logWriter())) ? logWriter() : null;
+    const by = sub === 'say' ? threadOwner().by : sub === 'reply' && logWriter() === 'responder' ? 'responder' : sessionWriter ?? (supervisorOnly('thread reply'), replyWriter());
+    const session = by === sessionWriter && !!sessionWriter;
     // refused before its value is read: a reply's --files is wrong whatever it holds
     if (flags.files !== undefined && by !== 'owner') die("--files go with the owner's own turn");
     const t = threadOpen(id, by);
+    // kit-109: a session replies only in a thread its subject binds to it, live or not (a parked
+    // session resumed may still answer)
+    if (session && boundWriter(t.subject) !== by) die('this thread isn\'t about your work; send supervisor instead (send supervisor "…")');
     // --after-parts: the session's own parts for the newest owner turn, then its last words, if any
     let joined;
     let own = null;
@@ -11039,12 +11044,12 @@ function cmdThread() {
     }
     // --pending (a reply that says work follows) is a reply's; --anyway is the responder's alone
     if (flags.pending && by === 'owner') die('--pending goes with a reply (thread reply), not the owner\'s own turn');
-    if (flags.anyway && by !== 'responder') die("--anyway is the responder's: it replies after the supervisor answered only to add something new");
+    if (flags.anyway && by !== 'responder' && !session) die("--anyway is the responder's and a session's in a thread about its work: it replies after the supervisor answered only to add something new");
     if (by === 'owner' && (flags.re !== undefined || flags['off-subject'] !== undefined)) die('--re goes with a reply (thread reply), and so does --off-subject: never the owner\'s own turn');
     const early = by === 'owner' ? alone(2) : undefined;
     const words = turnText(joined ?? filled(2, early));
     const refs = flags.refs !== undefined ? listFlag('refs') : [];
-    if (refs.length && by !== 'supervisor' && by !== 'responder') die("--refs are on the supervisor's turns and the responder's: what it did, as <type>:<id>");
+    if (refs.length && by !== 'supervisor' && by !== 'responder' && !session) die("--refs are on the supervisor's turns, the responder's and a session's in a thread about its work: what it did, as <type>:<id>");
     if (refs.length > 8) die('--refs names at most 8 things');
     for (const r of refs) if (!TURN_REF.test(r) || Buffer.byteLength(r) > 120) die(`--refs ${r}: each is <type>:<id> (goal:g-…, ticket:checkout-04, act:a-…, question:q-…), at most 120 bytes`);
     // a question named must be one in the log: a reply showing a question that isn't there shows
@@ -11066,7 +11071,7 @@ function cmdThread() {
     if (!files && by === 'owner' && envPerson() && !lineFits(line, by)) die(PERSON_TOO_LONG);
     if (by !== 'owner') {
       const objects = readLog().objects;
-      if (by === 'responder' && !flags.anyway && supervisorAnswered(t.id, objects)) die(`the supervisor has answered this (thread show ${t.id}): reply only to add something new, with --anyway`);
+      if ((by === 'responder' || session) && !flags.anyway && supervisorAnswered(t.id, objects, by)) die(`the supervisor has answered this (thread show ${t.id}): reply only to add something new, with --anyway`);
       const implied = {};
       askedFor(t, by, objects, { refs, re, off, implied });
       // written as the follow-up it is, so show marks it and reOf sees the turn followed up (task-3-2 F2-1)
@@ -11086,7 +11091,8 @@ function cmdThread() {
     const u = appendLog(line, by);
     out(u.id);
     if (by === 'owner') out(deliver(t, u, words, files, route));
-    else if (!own) spoke(t);
+    // a session's reply leaves the thread's working mark alone: it is the supervisor's or the responder's
+    else if (!own && !session) spoke(t);
     return;
   }
   // an Inbox question in every respect (ask's flags, checks and refusals), asked in this thread, and
@@ -35272,12 +35278,14 @@ function pendingOpen(ts, thread) {
 // own promise there is open (pendingOpen): the follow-up it owes is its to write. After the
 // supervisor's own question (thread ask) only owner words routed to the responder lift it: the
 // owner's answer to that question is the supervisor's (final-3b F2).
-function supervisorAnswered(threadId, objects = readLog().objects) {
+function supervisorAnswered(threadId, objects = readLog().objects, writer = 'responder') {
   const ts = logTurns(threadId, objects);
-  if (pendingOpen(ts, objects.get(threadId))) return false;
-  const mine = ts.filter((u) => u.created_by === 'responder').pop()?.created_at ?? '';
+  if (writer === 'responder' && pendingOpen(ts, objects.get(threadId))) return false;
+  const mine = ts.filter((u) => u.created_by === writer).pop()?.created_at ?? '';
   const sup = ts.filter((u) => u.created_by === 'supervisor').pop();
-  return !!sup && sup.created_at > mine && !ts.some((u) => u.created_by === 'owner' && u.created_at > sup.created_at && (!sup.question || u.routed_to === 'responder'));
+  // an owner turn since, routed to this writer (kit-109: a session's by routed_session)
+  const toMe = (u) => (writer === 'responder' ? u.routed_to === 'responder' : u.routed_to === 'session' && u.routed_session === writer);
+  return !!sup && sup.created_at > mine && !ts.some((u) => u.created_by === 'owner' && u.created_at > sup.created_at && (!sup.question || toMe(u)));
 }
 // A turn's first n characters on one line, for a terminal: control characters and runs of
 // whitespace as one space, … when cut.

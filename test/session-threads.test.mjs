@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { hasTmux, line, threadsFixture, write } from './lib/kit.mjs';
+import { dashboardOnFreePort, hasTmux, line, threadsFixture, write } from './lib/kit.mjs';
 
 const W = 'web-09-live';
 const X = 'web-08-other';
@@ -21,6 +21,7 @@ const MENU = [RULE, ' Bash command', '', '   npm test', '', ' Do you want to pro
 const FEAT = 'pricing';
 const P = `plan-${FEAT}`;
 const WORKER = (id = W) => ({ DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: id });
+const PLANNER = (f = FEAT) => ({ DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: f });
 const NO_TMUX = !hasTmux && 'no tmux';
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const item = (ref) => JSON.stringify({ kind: 'item', ref });
@@ -250,5 +251,65 @@ test('kit-109 session-bound threads', { skip: NO_TMUX, timeout: 600000 }, async 
   await t.test('S2k: a malformed session_threads ("no") keeps routing on', () => {
     F.setting('session_threads', 'no');
     try { assert.equal(F.lineOf(F.say(tw.T, 'still yours?')).routed_session, W); } finally { F.setting('session_threads', true); }
+  });
+  await t.test("S2i: a chore-* artifact is never bound, even when a ticket of that name is live: its reply there is refused", () => {
+    write(path.join(F.old, '.worktrees', CH, 'docs/devteam/project/artifacts/mock-c/index.html'), '<p>x</p>');
+    const tc = F.newThread(JSON.stringify({ kind: 'artifact', slug: 'mock-c', at: CH }));
+    const r = F.run(F.old, ['thread', 'reply', tc.T, 'mine?'], WORKER(CH));
+    assert.match(`${r.err}${r.out}`, /this thread isn't about your work; send supervisor instead/);
+  });
+
+  // ---- done-when 3: who may reply
+  await t.test("S3a: the bound writer's thread reply writes its turn, in its own file", () => {
+    const r = F.run(F.old, ['thread', 'reply', tw.T, 'On it, the button moves today'], WORKER(W));
+    const u = F.lineOf(r.out.split('\n')[0]);
+    assert.deepEqual([u.by, u.file], [W, `${W}.jsonl`], r.err);
+  });
+  await t.test('S3b: another ticket writer is refused, writing nothing', () => {
+    const before = F.logSizes();
+    const r = F.run(F.old, ['thread', 'reply', tw.T, 'not mine'], WORKER(X));
+    assert.match(`${r.err}${r.out}`, /this thread isn't about your work; send supervisor instead/);
+    assert.equal(F.logSizes(), before);
+  });
+  await t.test('S3c: another planner is refused', () => {
+    const before = F.logSizes();
+    assert.match(Object.values(F.run(F.old, ['thread', 'reply', tp.T, 'not mine'], PLANNER('other'))).join(' '), /this thread isn't about your work/);
+    assert.equal(F.logSizes(), before, 'nothing written');
+  });
+  const tg = F.newThread(item(`goal:${F.goal}`));
+  await t.test('S3d: an unbound thread is refused', () => {
+    const before = F.logSizes();
+    assert.match(Object.values(F.run(F.old, ['thread', 'reply', tg.T, 'hello'], WORKER(W))).join(' '), /this thread isn't about your work/);
+    assert.equal(F.logSizes(), before, 'nothing written');
+  });
+  await t.test("S3e: a planner's thread reply lands in its monthly file", () => {
+    const r = F.run(F.old, ['thread', 'reply', tp.T, 'The plan keeps two tiers'], PLANNER());
+    assert.match(F.lineOf(r.out.split('\n')[0]).file ?? `refused: ${r.err}`, new RegExp(`^${P}-\\d{4}-\\d{2}\\.jsonl$`));
+  });
+  await t.test("S3f: a planner's turn reaches /api/threads", async () => {
+    const snap = F.snapLog();
+    F.hand(P, { type: 'turn', thread: tp.T, text: 'by hand, two tiers' }, 1000, `${P}-${month()}.jsonl`);
+    const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
+    try {
+      const { threads } = await (await fetch(`http://127.0.0.1:${port}/api/threads`)).json();
+      assert.ok(threads.find((x) => x.id === tp.T).turns.some((x) => x.writer === P), 'a turn whose writer is the planner');
+    } finally { dash.stop(); F.restoreLog(snap); }
+  });
+  await t.test("S3h: W may reply in an artifact thread drawn in its worktree (ruling a-20261123-042800922)", () => {
+    write(path.join(F.old, '.worktrees', W, 'docs/devteam/project/artifacts/mock-b/index.html'), '<p>x</p>');
+    const ta = F.newThread(JSON.stringify({ kind: 'artifact', slug: 'mock-b', at: W }));
+    const r = F.run(F.old, ['thread', 'reply', ta.T, 'The mock now shows two tiers'], WORKER(W));
+    assert.equal(F.lineOf(r.out.split('\n')[0]).by, W, r.err);
+  });
+  const tx = F.newThread(item(`ticket:${Y}`), 'y first');
+  await t.test("S6h: after the supervisor answered, the session's reply needs --anyway; with it, it is written", () => {
+    F.sup(['thread', 'reply', tx.T, 'The worker is busy; it ships today']);
+    const before = F.logSizes();
+    const r = F.run(F.old, ['thread', 'reply', tx.T, 'late answer', '--refs', `ticket:${Y}`], WORKER(Y));
+    assert.match(`${r.err}${r.out}`, /the supervisor has answered this/);
+    assert.equal(F.logSizes(), before, 'nothing written');
+    const r2 = F.run(F.old, ['thread', 'reply', tx.T, 'late answer', '--refs', `ticket:${Y}`, '--anyway'], WORKER(Y));
+    const u = F.lineOf(r2.out.split('\n')[0]);
+    assert.deepEqual([u.by, u.refs], [Y, [`ticket:${Y}`]], r2.err);
   });
 });
