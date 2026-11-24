@@ -312,21 +312,24 @@ const upgrade = (gw, host, origin, cookie, route, { keep = false } = {}) => new 
 // (cool-tiger, a fake app that records what reaches it and answers sockets 101), behind a fake hub
 // on PORTS that answers every GET; and, on the gateway's ttydPort, a ttyd stand-in that answers 101.
 async function boxWithInstance(name) {
+  const held = new Set();
+  const track = (srv) => { srv.on('connection', (c) => { held.add(c); c.on('close', () => held.delete(c)); }); return srv; };
   const seen = [];
-  const inst = http.createServer((q, s) => { q.resume(); q.on('end', () => { seen.push({ method: q.method, url: q.url, h: q.headers }); s.writeHead(200, { 'content-type': 'application/json' }); s.end('{"ok":true}'); }); });
+  const inst = track(http.createServer((q, s) => { q.resume(); q.on('end', () => { seen.push({ method: q.method, url: q.url, h: q.headers }); s.writeHead(200, { 'content-type': 'application/json' }); s.end('{"ok":true}'); }); }));
   await new Promise((r) => inst.listen(INSTANCE, '127.0.0.1', r));
   const devSeen = [];
-  const dev = http.createServer((q, s) => { q.resume(); devSeen.push({ method: q.method, url: q.url, h: q.headers }); s.writeHead(200, { 'content-type': 'text/plain' }); s.end('the app'); });
+  const dev = track(http.createServer((q, s) => { q.resume(); devSeen.push({ method: q.method, url: q.url, h: q.headers }); s.writeHead(200, { 'content-type': 'text/plain' }); s.end('the app'); }));
   dev.on('upgrade', (q, sock) => { devSeen.push({ method: 'UPGRADE', url: q.url, h: q.headers }); sock.on('error', () => {}); sock.write('HTTP/1.1 101 Switching Protocols\r\nconnection: Upgrade\r\nupgrade: websocket\r\n\r\n'); });
   await new Promise((r) => dev.listen(0, '127.0.0.1', r));
-  const ttyd = net.createServer((sock) => { sock.on('error', () => {}); sock.once('data', () => sock.write('HTTP/1.1 101 Switching Protocols\r\nconnection: Upgrade\r\nupgrade: websocket\r\n\r\n')); });
+  const ttyd = track(net.createServer((sock) => { sock.on('error', () => {}); sock.once('data', () => sock.write('HTTP/1.1 101 Switching Protocols\r\nconnection: Upgrade\r\nupgrade: websocket\r\n\r\n')); }));
   await new Promise((r) => ttyd.listen(0, '127.0.0.1', r));
   const list = [{ devteam: 1, root: '/srv/alpha', port: INSTANCE, name: 'alpha', previews: [{ name: 'cool-tiger', port: dev.address().port, project: 'alpha', session: 'api-01-x', label: 'admin', at: '2026-11-10', up: true, run: false }] }];
-  const hub = http.createServer((q, s) => { q.resume(); s.writeHead(200, { 'content-type': 'application/json' }); s.end(JSON.stringify(q.url.startsWith('/operator/') ? { threads: [] } : { hub: 1, instances: list })); });
+  const hub = track(http.createServer((q, s) => { q.resume(); s.writeHead(200, { 'content-type': 'application/json' }); s.end(JSON.stringify(q.url.startsWith('/operator/') ? { threads: [] } : { hub: 1, instances: list })); }));
   await new Promise((r) => hub.listen(PORTS, '127.0.0.1', r));
   const V = await viewSetup(name, { ttydPort: ttyd.address().port });
+  track(V.gw.g.server);
   const close0 = V.gw.close;
-  const close = async () => { V.gw.g.server.closeAllConnections?.(); await close0(); for (const x of [inst, dev, hub, ttyd]) { x.closeAllConnections?.(); await new Promise((r) => x.close(r)); } };
+  const close = async () => { for (const c of held) c.destroy(); V.gw.g.server.closeAllConnections?.(); await close0(); for (const x of [inst, dev, hub, ttyd]) { x.closeAllConnections?.(); await new Promise((r) => x.close(r)); } };
   const alpha = `alpha.${V.gw.host}`;
   const pv = `cool-tiger.${V.gw.host}`;
   const at = (b, h, method, route, o = {}) => b.req(method, route, { ...o, headers: { host: h, ...(method !== 'GET' && method !== 'HEAD' ? { origin: `http://${h}` } : {}), ...o.headers } });
@@ -416,11 +419,20 @@ test('org-access A12: a view session signs out', async () => {
 test('org-access A12: a view session manages its own sign-in methods', async () => {
   const { gw, view, ana } = await viewSetup('c11');
   try {
+    // answered before the session gate (spec S2), so it shows only that View doesn't break it; the two below are the exemption's own
     ok(await view.start('passkey', { purpose: 'add' }), 'method passkey start (add)');
     ok(await view.post('/auth/passkeys/options', {}), 'passkeys options');
     ok(await view.post('/auth/method/remove', { id: ana.methods[1].id }), 'remove its own second method');
     assert.ok(!rowOf(gw, ana.id).methods.some((m) => m.id === ana.methods[1].id), 'and it is gone');
   } finally { await gw.close(); }
+});
+onBox('org-access A12: the sign-out and sign-in-method exemptions hold on the box\'s name only', async ({ view, ana, at, alpha, pv, seen, devSeen }) => {
+  for (const h of [alpha, pv]) {
+    isView(await at(view, h, 'POST', '/auth/logout', { body: {} }), `logout on ${h}`);
+    isView(await at(view, h, 'POST', '/auth/method/remove', { body: { id: ana.methods[1].id } }), `method remove on ${h}`);
+    isView(await at(view, h, 'POST', '/auth/passkeys/options', { body: {} }), `passkeys options on ${h}`);
+  }
+  assert.equal(seen.length + devSeen.length, 0, 'nothing reached the dashboard or the app');
 });
 test('org-access A12: another person\'s method id is refused and stays', async () => {
   const { gw, view, jo } = await viewSetup('c12');
@@ -455,7 +467,7 @@ onBox('org-access A14: a dashboard request carries the session\'s level, never t
   assert.equal(devSeen.at(-1)?.h['x-devteam-level'], undefined, 'a preview request carries no level');
 });
 onBox('org-access A12: a view session\'s /api/term/* on a dashboard is 403 {why:view}', async ({ view, at, alpha, seen }) => {
-  for (const [m, r] of [['GET', '/api/term/token'], ['GET', '/api/term/supervisor/screen'], ['POST', '/api/term/shell/keys'], ['GET', '/api//term/token'], ['GET', '/api/%74erm/token']]) {
+  for (const [m, r] of [['GET', '/api/term/token'], ['GET', '/api/term/supervisor/screen'], ['POST', '/api/term/shell/keys'], ['GET', '/api//term/token'], ['GET', '/api/%74erm/token'], ['GET', '/api/x/../term/token'], ['GET', '/api/%2e%2e/api/term/token']]) {
     const x = await at(view, alpha, m, r, { body: m === 'POST' ? {} : undefined });
     assert.equal(x.status, 403, `${m} ${r}: ${x.status}`);
     assert.equal(x.body, '{"why":"view"}', `${m} ${r}`);

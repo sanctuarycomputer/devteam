@@ -2286,8 +2286,14 @@ export function createGateway(opts = {}) {
   // the 403's type and body. project: the name is a dashboard's (not a preview's); p: the pathname.
   const VIEW_ANY = 'View only: you can look at everything here, but not change anything.';
   const VIEW_TERM = 'View only: there is no terminal for view-only people.';
-  // terminal@1 §3's reading of a path: percent-decoded, repeated slashes folded (raw if it won't decode)
-  const termPath = (raw) => { let d = raw; try { d = decodeURIComponent(raw); } catch {} return d.replace(/\/+/g, '/'); };
+  // terminal@1 §3's reading of a path, as the dashboard routes it: parsed as a URL, percent-decoded
+  // (kept as it is if it won't decode), repeated slashes folded, dot segments resolved
+  const termPath = (raw) => {
+    const resolved = (x) => { try { return new URL(x, 'http://x').pathname; } catch { return x; } };
+    let d = resolved(raw.replace(/^\/+/, '/')); // a leading // would be read as a host
+    try { d = decodeURIComponent(d); } catch {}
+    return resolved(d.replace(/\/+/g, '/'));
+  };
   const VIEW_EXEMPT = (p, method) => (method === 'POST' && p === '/auth/logout') || p.startsWith('/auth/method/') || p === '/auth/passkeys' || p.startsWith('/auth/passkeys/');
   const viewRefusal = (req, person, { isBox, isTerm, project, p }) => {
     if (person?.level !== 'view') return null;
