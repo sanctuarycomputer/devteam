@@ -462,6 +462,14 @@
   .tl-n { flex: none; width: 20px; height: 20px; border-radius: 50%; background: var(--blue); color: #fff; font-size: 11px; line-height: 20px; text-align: center; }
   .tl-closed summary { cursor: pointer; font-size: 12px; color: var(--fg-2); padding: 6px; }
   @media (pointer: coarse) { #tl .btn { height: 36px; padding: 0 14px; } #tl .btn.x { width: 36px; padding: 0; } #tl .tl-pill { height: 40px; } }
+/* css-view-only start */
+  /* View only (kit-250): the hub's writes greyed, the disabled Terminal tab, the badge and the line */
+  body.view-only :is(.fleet-switch [data-fleet], [data-tl-send], #tl-c-text, [data-tl-start], [data-tl-end], [data-tl-reopen], #view-notify) { opacity: .45; cursor: not-allowed; }
+  #tabs [role=tab][aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
+  #view-only { align-self: center; margin-bottom: 4px; flex: none; font-size: 11px; font-weight: 600; line-height: 18px; padding: 0 7px; border-radius: 999px; white-space: nowrap; color: var(--amber-fg, #a35200); background: color-mix(in srgb, var(--amber, #f5a623) 16%, transparent); }
+  .view-line { font-size: 12.5px; color: var(--fg-2, inherit); margin: 4px 0 12px; }
+  #view-line { margin: 6px 16px; }
+/* css-view-only end */
 </style>
 </head>
 <body class="shell">
@@ -793,7 +801,7 @@ function keyOf(it) {
 // behind a devteam gateway (cloud/gateway.mjs), box.json says where instead (its own subdomain, so
 // still an origin of its own: the port's on box: 1, the project's name's on box: 2), and adds the
 // box's terminal as the first tab.
-let box = null; // { v, terminal, instance (v 1) or project (v 2), push, image, previews, passkeys } when the gateway answers box.json
+let box = null; // { v, terminal, instance (v 1) or project (v 2), push, image, previews, passkeys, role, people, level ('full' | 'view' | null) } when the gateway answers box.json
 let hubSeen = null; // the last list instances.json gave, or null when it gave none (the box line)
 // A project's address, or null when it has none: on box: 2 a name that can't be a host, or that two
 // listed projects share, gets none (the gateway serves no dashboard there). urlOf.why says which.
@@ -1713,6 +1721,7 @@ function paintSettings() {
   const had = page.contains(document.activeElement) ? document.activeElement : null;
   const head = el('div', 'ov-head');
   head.append(el('h2', '', 'Settings'));
+  const view = box?.level === 'view';
   const sec = (name, rows) => { const d = el('div', 'sec'); const r = el('div', 'rows'); for (const x of rows) r.append(...x); d.append(el('div', 'lbl', name), r); return d; };
   const text = (t, cls = '') => el('span', cls, t);
   const link = (href, words) => { const a = document.createElement('a'); a.href = href; a.textContent = words; a.dataset.k = `settings:${words}`; return a; };
@@ -1739,8 +1748,20 @@ function paintSettings() {
     groups.push(...oaGroups());
   } else if (box?.passkeys) groups.push(sec('Signing in', [setRow('Passkeys', 'passkeys', link(box.passkeys, 'Manage'), 'the keys that may open this hub and its dashboards; add one per device, remove a lost one', true)]));
   // Notifications: the control itself (one node, kept: notifyControl writes into it), then a test once they're on
-  const notes = [setRow('New Inbox items', 'on this device', $('notify'), 'a notification on this device when any project asks you something', true)];
-  if (notifyOn()) {
+  // View: a disabled Off in place of the control (kept off the page, in #hub-later), and no Test row
+  let notifyNode = $('notify');
+  if (view) {
+    $('hub-later').append(notifyNode);
+    notifyNode = el('button', 'ghost mini', 'Off');
+    notifyNode.type = 'button';
+    notifyNode.id = 'view-notify';
+    notifyNode.setAttribute('aria-disabled', 'true');
+    notifyNode.title = 'View only: notifications are for Full people';
+    notifyNode.dataset.k = 'settings:notify-off';
+    notifyNode.onclick = () => oaToast('View only: notifications are for Full people');
+  }
+  const notes = [setRow('New Inbox items', 'on this device', notifyNode, 'a notification on this device when any project asks you something', true)];
+  if (notifyOn() && !view) {
     // one button, kept: its answer ("Test sent") and its focus outlive the 10 s repaint
     if (!testBtn) {
       const b = testBtn = el('button', '', 'Send a test');
@@ -1773,7 +1794,7 @@ function paintSettings() {
   }
   // whatever had the keyboard keeps it: the same element when it is kept (the Notify control, the
   // Test button), else the new one with its data-k
-  page.replaceChildren(head, ...(oa && OA.askFresh ? [oaFreshNote()] : []), ...groups);
+  page.replaceChildren(head, ...(view ? [el('div', 'view-line', 'View only: you can change your own sign-in methods here; the rest is read-only.')] : []), ...(oa && OA.askFresh ? [oaFreshNote()] : []), ...groups);
   if (had && had !== document.activeElement) (had.isConnected ? had : had.dataset.k ? page.querySelector(`[data-k="${CSS.escape(had.dataset.k)}"]`) : null)?.focus({ preventScroll: true });
 }
 // ----- Your sign-in and People (kit-249): the gateway's /auth routes, on a box whose /box.json
@@ -1868,6 +1889,8 @@ async function refreshRole() {
   const b = await oaGet('box.json');
   if (!b || !box) return;
   box.role = OA_ROLES.includes(b.role) ? b.role : null;
+  box.level = b.level === 'full' || b.level === 'view' ? b.level : null;
+  viewOnly();
   box.people = null;
   if (box.role && box.role !== 'member' && typeof b.people === 'string') { try { const u = new URL(b.people, location.href); if (u.origin === location.origin) box.people = u.href; } catch {} }
   if (!box.people) { oaCloseMenu(); OA.list = null; OA.open = null; OA.openNode = null; OA.panel = null; OA.panelNode = null; OA.link = null; SEC.people = null; }
@@ -3098,6 +3121,51 @@ tabsEl.addEventListener('keydown', (e) => {
   window.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'none'; say(); });
   window.addEventListener('drop', (e) => { e.preventDefault(); say(); });
 }
+/* viewOnly start */
+// View only (kit-250), from /box.json's level: <body> gets view-only, a "View only" badge ends the tab
+// bar, after the tabs (the hub shows no person's name), the mock's line sits under it on every tab, and a capturing
+// listener stops a press on the hub's writes with the toast (oaToast's node). The gateway refuses those
+// writes anyway; this is so nobody presses and waits. Anything else is left alone.
+const HUB_WRITES = ".fleet-switch [data-fleet], [data-tl-send], #tl-c-text, [data-tl-start], [data-tl-end], [data-tl-reopen], #view-notify";
+let viewToastAt = 0;
+function viewStop(e) {
+  if (!document.body.classList.contains('view-only')) return;
+  const el = e.target instanceof Element ? e.target : null;
+  const write = el?.closest(HUB_WRITES);
+  if (!write || write.id === 'view-notify') return;
+  if (e.type === 'keydown') {
+    const typing = write.matches('textarea, input');
+    if (!(e.key === 'Enter' || (e.key === ' ' && !typing))) return;
+  }
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  if (Date.now() - viewToastAt < 2000) return;
+  viewToastAt = Date.now();
+  oaToast('View only: you can look, but not change anything');
+}
+let viewListening = false;
+function viewOnly() {
+  const view = box?.level === 'view';
+  document.body.classList.toggle('view-only', view);
+  let badge = $('view-only'), line = $('view-line');
+  if (view && !badge) {
+    badge = el('span', '', 'View only');
+    badge.id = 'view-only';
+    badge.title = 'View only: you can look at everything on this box. Buttons that would change something are greyed out.';
+    line = el('div', 'view-line', 'View only: you can look at everything on this box. Buttons that would change something are greyed out.');
+    line.id = 'view-line';
+    // the badge ends the header's bar, after the tabs' strip (which scrolls); the line sits under the header
+    tabsEl.after(badge);
+    tabsEl.parentElement.after(line);
+  }
+  if (badge) badge.hidden = !view;
+  if (line) line.hidden = !view;
+  if (view && !viewListening) {
+    viewListening = true;
+    for (const type of ['click', 'submit', 'keydown']) window.addEventListener(type, viewStop, true);
+  }
+}
+/* viewOnly end */
 // The hub on a laptop has no box.json (404); a devteam gateway answers it.
 async function findBox() {
   try {
@@ -3116,15 +3184,25 @@ async function findBox() {
     if (typeof b.passkeys === 'string' && secure(b.passkeys)) box.passkeys = b.passkeys;
     // who is signed in, and where People are: the page may fetch only its own origin (connect-src)
     if (OA_ROLES.includes(b.role)) box.role = b.role;
+    // the signed-in person's level (kit-250): View has no terminal and changes nothing
+    box.level = b.level === 'full' || b.level === 'view' ? b.level : null;
     if (box.role && box.role !== 'member' && typeof b.people === 'string') { try { const u = new URL(b.people, location.href); if (u.origin === location.origin) box.people = u.href; } catch {} }
     const tab = document.createElement('button');
     tab.className = 'tab';
     tab.setAttribute('role', 'tab');
     tab.textContent = 'Terminal';
-    tab.title = 'The box\'s tmux sessions: supervisors, workers, logins';
-    tab.onclick = selectTerminal;
     tabsEl.prepend(tab);
-    term = { tab, frame: null };
+    if (box.level === 'view') {
+      // there but disabled: term stays null, so #terminal and a remembered Terminal tab fall back as a laptop's do
+      tab.setAttribute('aria-disabled', 'true');
+      tab.title = 'View only: no terminal';
+      tab.onclick = () => oaToast('View only: no terminal');
+    } else {
+      tab.title = 'The box\'s tmux sessions: supervisors, workers, logins';
+      tab.onclick = selectTerminal;
+      term = { tab, frame: null };
+    }
+    viewOnly();
   } catch {}
 }
 // The Overview's tab: after the box's Terminal, before the projects.
