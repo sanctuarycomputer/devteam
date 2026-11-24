@@ -23,6 +23,7 @@ const REQUESTS = (F) => ({
   'dash /': [[200, '/']],
   'dash /index.html': [[200, '/index.html']],
   'dash /api/data*': [[200, '/api/data']],
+  'dash /api/viewer': [[200, '/api/viewer']],
   'dash re:^\\/view\\/artifact\\/([^/]+)$': [[200, `/view/artifact/${F.slug}`], [200, `/view/artifact/${F.slug}?at=${F.wt}`]],
   'dash re:^\\/view\\/preview\\/([^/]+)$': [[200, `/view/preview/${F.preview}`]],
   'dash /api/artifact-fp': [[200, `/api/artifact-fp?slug=${F.slug}&at=${F.wt}`]],
@@ -64,7 +65,7 @@ const REQUESTS = (F) => ({
 // requests a slice; the box asks each key's first GET, all in one slice. The route-listing test checks
 // the slices cover every key once.
 const LAPTOP_PARTS = [
-  ['dash /upload/*', 'dash /api/hello', 'dash /', 'dash /index.html', 'dash /api/data*', 'dash re:^\\/view\\/artifact\\/([^/]+)$', 'dash re:^\\/view\\/preview\\/([^/]+)$', 'dash /api/artifact-fp', 'dash /api/view', 'dash /api/artifact-versions', 'dash /api/artifact-remote', 'dash /api/threads'],
+  ['dash /upload/*', 'dash /api/hello', 'dash /', 'dash /index.html', 'dash /api/data*', 'dash /api/viewer', 'dash re:^\\/view\\/artifact\\/([^/]+)$', 'dash re:^\\/view\\/preview\\/([^/]+)$', 'dash /api/artifact-fp', 'dash /api/view', 'dash /api/artifact-versions', 'dash /api/artifact-remote', 'dash /api/threads'],
   ['dash /api/fleet', 'dash /api/record', 'dash /api/peek', 'dash /api/sensor', 'dash /api/schema', 'dash /api/timeline', 'dash /api/governance', 'dash /api/file', 'dash /api/review', 'dash /public-manifest/*'],
   ['dash /artifact/*', 'dash re:^\\/review\\/([^/]+)\\/([^/]*)$', 'dash /presence', 'dash /presence?*', 'term /api/term/token', 'term re:^\\/api\\/term\\/(supervisor|shell)\\/(screen|history|keys)$', 'hub /presence', 'hub /presence?*', 'hub /', 'hub /instances.json', 'hub /memory.json', 'hub /memory.json?*', 'hub /operator/threads'],
 ];

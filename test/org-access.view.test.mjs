@@ -640,3 +640,52 @@ test('org-access A14: in Chrome, the invite page says view only for a View invit
     assert.equal(full, `You're invited to ${gw.host}, Fu, as Full: you can do everything on the box except manage people.`);
   } finally { await chrome.close(); await gw.close(); }
 });
+
+// --- the dashboard learns the level: /api/data's viewer and GET /api/viewer (T3) ------------------
+import { bareProject, dashboardOnFreePort } from './lib/kit.mjs';
+// A real dashboard on a bare project (its own HOME; kit.mjs points it at this file's hub port).
+async function realDashboard(name) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), `kit250-${name}-`));
+  const root = bareProject(base, 'alpha');
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('DEVTEAM_') || k === 'DEVTEAM_HUB_PORT' || k === 'DEVTEAM_PORT_BASE')), HOME: base };
+  const { dash, port } = await dashboardOnFreePort(root, env);
+  return { base, root, dash, port, close: async () => { await dash.stop(); fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } };
+}
+// a GET with these raw header lines (a header named twice is sent twice)
+const getWith = (port, route, lines = []) => new Promise((resolve, reject) => {
+  const headers = {};
+  for (const [k, v] of lines) headers[k] = Object.hasOwn(headers, k) ? [].concat(headers[k], v) : v;
+  const r = http.get({ host: '127.0.0.1', port, path: route, headers }, (res) => {
+    let b = '';
+    res.on('data', (c) => { b += c; });
+    res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: b }));
+  });
+  r.on('error', reject);
+});
+test('org-access A14: /api/data\'s viewer echoes the gateway\'s level, and nothing else', { timeout: 120000 }, async () => {
+  const R = await realDashboard('c16');
+  try {
+    const data = async (lines) => { const r = await getWith(R.port, '/api/data', lines); assert.equal(r.status, 200, r.body.slice(0, 200)); return JSON.parse(r.body); };
+    const plain = await data([]);
+    assert.equal(plain.viewer, undefined, 'no header, no viewer');
+    const first = Object.keys(plain)[0];
+    for (const [what, lines] of [['admin', [['x-devteam-level', 'admin']]], ['VIEW', [['x-devteam-level', 'VIEW']]], ['a list', [['x-devteam-level', 'view, full']]], ['sent twice', [['x-devteam-level', 'view'], ['x-devteam-level', 'view']]]]) {
+      const d = await data(lines);
+      assert.equal(d.viewer, undefined, `${what}: no viewer`);
+      assert.equal(Object.keys(d)[0], first, `${what}: the body as it was`);
+    }
+    for (const level of ['full', 'view']) {
+      const d = await data([['x-devteam-level', level]]);
+      assert.deepEqual(d.viewer, { level }, level);
+      assert.equal(Object.keys(d)[0], 'viewer', `${level}: its first key`);
+      assert.deepEqual(Object.keys(d).slice(1), Object.keys(plain), `${level}: and the rest as it was`);
+      const v = await getWith(R.port, '/api/viewer', [['x-devteam-level', level]]);
+      assert.equal(v.status, 200);
+      assert.equal(v.headers['cache-control'], 'no-store');
+      assert.deepEqual(JSON.parse(v.body), { level }, `/api/viewer: ${level}`);
+    }
+    for (const lines of [[], [['x-devteam-level', 'admin']], [['x-devteam-level', 'view'], ['x-devteam-level', 'full']]]) {
+      assert.deepEqual(JSON.parse((await getWith(R.port, '/api/viewer', lines)).body), { level: null }, `/api/viewer: ${JSON.stringify(lines)}`);
+    }
+  } finally { await R.close(); }
+});
