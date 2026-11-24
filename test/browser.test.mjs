@@ -6,8 +6,10 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
+import dgram from 'node:dgram';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { canDrive, chromePath, openChrome } from './lib/chrome.mjs';
@@ -441,7 +443,7 @@ test('B2 Chrome\'s flags', opts, async () => {
   await liveA();
   const s = readState(a);
   const args = cmdline(s.chrome_pid);
-  for (const f of [`--proxy-server=127.0.0.1:${s.guard_port}`, '--proxy-bypass-list=<-loopback>', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--disable-quic', `--user-data-dir=${a.profile}`]) assert.ok(args.includes(f), `${f} in ${args.join(' ')}`);
+  for (const f of [`--proxy-server=127.0.0.1:${s.guard_port}`, '--proxy-bypass-list=<-loopback>', '--webrtc-ip-handling-policy=disable_non_proxied_udp', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1', '--disable-features=WebRtcHideLocalIpsWithMdns', '--disable-quic', `--user-data-dir=${a.profile}`]) assert.ok(args.includes(f), `${f} in ${args.join(' ')}`);
   const ua = args.find((x) => x.startsWith('--user-agent='));
   assert.ok(ua && ua.includes('Chrome/') && !ua.includes('Headless'), ua);
   assert.ok(!args.some((x) => x.startsWith('--remote-allow-origins')));
@@ -501,6 +503,86 @@ test('S2 no DevTools port', opts, async () => {
   const st = readState(a);
   assert.equal('cdp_port' in st, false, 'state.json has no cdp_port');
   assert.deepEqual(validate('state', st), []);
+});
+
+// The UDP sockets bound to 5353 (mDNS) that Chrome's group holds.
+function mdnsSockets(leader) {
+  const held = new Set(groupOf(leader).flatMap((pid) => [...socketsOf(pid).values()]));
+  assert.ok(held.size, "the sockets of Chrome's group can be read");
+  return ['udp', 'udp6'].flatMap(procNet).filter((c) => c[1].endsWith(':14E9') && held.has(c[9])).length;
+}
+// kit-805: what a page's WebRTC sends round the guard, by this machine's Chrome and the daemon's own
+// flags. Only STUN counts (its magic cookie): a port scanner on the machine can reach a new listener.
+// The names a page makes up are read from Chrome's net log: a look-up is a job or task there.
+test('kit-805 a page\'s WebRTC sends nothing round the guard', opts, async () => {
+  const COOKIE = Buffer.from([0x21, 0x12, 0xa4, 0x42]);
+  const out = { udp: 0, tcp: 0 };
+  const udp = dgram.createSocket('udp4'), tcp = net.createServer((c) => { c.on('error', () => {}); c.on('data', (b) => { if (b.includes(COOKIE)) out.tcp++; }); });
+  udp.on('message', (b) => { if (b.includes(COOKIE)) out.udp++; });
+  await new Promise((r) => udp.bind(0, '127.0.0.1', r));
+  await new Promise((r) => tcp.listen(0, '127.0.0.1', r));
+  const up = udp.address().port, tp = tcp.address().port;
+  let done = null;
+  // the page offers to a peer of its own, then adds candidates of the test's; it reports 3 s later, its
+  // packets and look-ups long sent (the first go within a second)
+  const page = `<!doctype html><title>RTC</title><script>(async () => {
+    const turn = (urls) => ({ urls, username: 'u', credential: 'c' });
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:127.0.0.1:${up}' }, { urls: 'stun:rtc-stun.invalid:3478' }, turn('turn:127.0.0.1:${up}'), turn('turn:rtc-turn.invalid:3478'), turn('turn:127.0.0.1:${tp}?transport=tcp'), turn('turn:rtc-turntcp.invalid:3478?transport=tcp'), turn('turns:rtc-turntls.invalid'), turn('turn:rtc-turn.local:3478?transport=tcp')] });
+    pc.createDataChannel('x');
+    await pc.setLocalDescription(await pc.createOffer());
+    const peer = new RTCPeerConnection();
+    await peer.setRemoteDescription(pc.localDescription);
+    await peer.setLocalDescription(await peer.createAnswer());
+    await pc.setRemoteDescription(peer.localDescription);
+    let added = 0;
+    for (const c of ['udp 2122260223 127.0.0.1 ${up} typ host', 'tcp 2122260222 127.0.0.1 ${tp} typ host tcptype passive', 'udp 2122260221 rtc-ice.local 9 typ host', 'udp 2122260220 rtc-ice.invalid 9 typ host']) { await pc.addIceCandidate({ candidate: 'candidate:1 1 ' + c, sdpMid: '0' }); added++; }
+    await new Promise((r) => setTimeout(r, 3000));
+    const shown = [...(await pc.getStats()).values()].filter((x) => x.type === 'local-candidate' && x.address && x.address !== '0.0.0.0' && x.address !== '::').map((x) => x.address);
+    fetch('/done?' + added + ' ' + pc.localDescription.sdp.split('\\n').filter((l) => l.startsWith('a=candidate')).length + ' ' + shown);
+  })().catch((e) => fetch('/done?' + e));</script>`;
+  const server = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://x');
+    if (u.pathname === '/done') done = decodeURIComponent(u.search.slice(1));
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(u.pathname === '/blank' ? 'blank' : page);
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const netLog = path.join(tmp, 'rtc-net.json'), wrap = path.join(tmp, 'rtc-chrome.sh');
+  fs.writeFileSync(wrap, `#!/bin/sh\nexec '${chromePath}' "$@" '--log-net-log=${netLog}'\n`, { mode: 0o755 });
+  const P = project('brw-rtc', newHome());
+  const env = { CHROME_PATH: wrap, DEVTEAM_TEST_BROWSER_ALLOW: String(server.address().port) };
+  try {
+    await started(P, env);
+    // a name still goes to the guard, which answers for it: Chrome needs no look-up of its own
+    const named = await cli(P, ['open', `http://localhost:${server.address().port}/`], env);
+    assert.match(named.out + named.err, /the browser's guard refused localhost:\d+: .*own name/);
+    const o = await cli(P, ['open', `http://127.0.0.1:${server.address().port}/`], env);
+    assert.equal(o.status, 0, o.err || o.out);
+    await until(() => done !== null, 'the page is done with WebRTC');
+    const [added, candidates, shown = ''] = done.split(' '); // a URL drops a space at its end
+    assert.equal(added, '4', `the page offered, and added its four candidates: ${done}`);
+    Object.assign(out, { candidates: Number(candidates), shown }); // the offer's, and the addresses the page was shown
+    const pid = readState(P).chrome_pid;
+    out.mdns = fs.existsSync('/proc/net/udp') ? mdnsSockets(pid) : 0;
+    // the page gone, Chrome ends at once
+    assert.equal((await cli(P, ['open', `http://127.0.0.1:${server.address().port}/blank`], env)).status, 0);
+    assert.equal((await cli(P, ['stop'], env)).status, 0);
+    await until(() => !alive(pid), 'Chrome gone, its net log written');
+    const text = fs.readFileSync(netLog, 'utf8');
+    let log; // one event a line; a Chrome that was killed leaves the list open, its last line cut
+    try { log = JSON.parse(text); } catch { log = JSON.parse(`${text.slice(0, text.lastIndexOf('\n')).replace(/,$/, '')}]}`); }
+    const jobs = new Set(Object.entries(log.constants.logEventTypes).filter(([k]) => /HOST_RESOLVER.*(JOB|TASK)|DNS_TRANSACTION/.test(k)).map(([, v]) => v));
+    assert.ok(jobs.size, 'the net log names look-ups');
+    assert.ok(JSON.stringify(log.events).includes('rtc-turntcp.invalid'), 'the net log saw the page try a name');
+    out.names = [...new Set(log.events.filter((x) => jobs.has(x.type)).flatMap((x) => JSON.stringify(x.params ?? {}).match(/rtc-[a-z]+\.invalid/g) ?? []))];
+    assert.deepEqual(out, { udp: 0, tcp: 0, candidates: 0, shown: '', mdns: 0, names: [] });
+  } finally {
+    await cli(P, ['stop'], env);
+    udp.close();
+    tcp.close();
+    server.closeAllConnections();
+    server.close();
+  }
 });
 
 test('Review Focus 2: the control port answers only its own client', opts, async () => {
