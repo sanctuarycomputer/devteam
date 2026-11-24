@@ -421,13 +421,14 @@ test('C5b PL-S8: signed out, a project host answers 401 to its API, and a made-u
   assert.deepEqual([made.status, made.headers['content-type'], made.body], [real.status, real.headers['content-type'], real.body], 'a made-up name answers as a real one, signed out');
 });
 
-test("C6 PL-S8: the hub and its Passkeys link work on the box's name", CHROME, async () => {
+test("C6 PL-S8: the hub, its Your sign-in and the Passkeys page work on the box's name", CHROME, async () => {
   const r = await rig();
   await onHub(r);
   assert.equal(await r.page.ev('location.host'), `box.localhost:${r.port}`);
   await r.page.ev(`location.hash = '#settings'`);
-  const href = await waitFor(r.page, `[...document.querySelectorAll('a')].find((a) => a.textContent === 'Manage' && a.href.endsWith('/auth/passkeys'))?.href`, "the hub's Passkeys link");
-  assert.equal(href, `${r.box}/auth/passkeys`);
+  // the owner's passkey is listed under Your sign-in (kit-249), which took the Manage link's place
+  await waitFor(r.page, `document.querySelectorAll('#hub-settings .set-row.method').length === 1 && document.querySelector('#hub-settings .set-row.method')?.textContent.startsWith('Passkey')`, "Your sign-in, listing the passkey");
+  const href = `${r.box}/auth/passkeys`;
   await go(r.page, href);
   await waitFor(r.page, `location.href === ${JSON.stringify(href)} && document.querySelector('h1')?.textContent === 'Passkeys' && document.querySelectorAll('li').length === 1`, 'the Passkeys page, listing the passkey');
 });

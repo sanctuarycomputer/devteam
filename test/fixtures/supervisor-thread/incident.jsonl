@@ -1,0 +1,4 @@
+{"by":"owner","line":{"type":"thread","id":"t-20261114-205605352-owner","title":"Annotating an artifact"}}
+{"by":"owner","line":{"type":"turn","id":"u-20261114-205605409-owner","thread":"t-20261114-205605352-owner","text":"A new goal: the annotation pins show on every page inside the artifact."}}
+{"by":"supervisor","line":{"type":"turn","id":"u-20261114-205728278-supervisor","thread":"t-20261114-205605352-owner","text":"On it. This is now its own goal, with a planner starting.","pending":true}}
+{"by":"supervisor","line":{"type":"turn","id":"u-20261114-205805044-supervisor","thread":"t-20261114-205605352-owner","text":"Recorded your answer on sales: everything observed goes into the record, including daily sales totals, and I'll ask you only when a project's repo is public. One thing I'm keeping as it is: sensors already blank out personal details (emails, card numbers and the like) before anything is saved. That stays unless you tell me otherwise."}}

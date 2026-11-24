@@ -73,12 +73,15 @@ async function open(t, F, hash) {
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/${hash}` });
   const soon = soonIn(p, 30000, () => dash.out());
-  await soon('typeof DATA === "object" && DATA !== null && TL.have > 0', 'the page and its threads read');
+  // and loaded (kit-784): until the load event, Chrome makes a script's hash change with no user gesture (every
+  // p.ev here) replace the entry rather than add one, so a Back or a close after it would land off the page
+  await soon('document.readyState === "complete" && typeof DATA === "object" && DATA !== null && TL.have > 0', 'the page and its threads read');
   // a reload: the old document marked, then a new one (without the mark) with its data and threads read
   const reload = async () => {
     await p.ev('window.__old = true; void 0');
     await p.send('Page.reload');
-    await soon('!window.__old && typeof DATA === "object" && DATA !== null && TL.have > 0', 'the page reloaded and read');
+    // and loaded, as the visit (kit-784)
+    await soon('!window.__old && document.readyState === "complete" && typeof DATA === "object" && DATA !== null && TL.have > 0', 'the page reloaded and read');
   };
   return { p, soon, size, reload, chrome, port, dash };
 }
@@ -90,7 +93,7 @@ test('the panel and its button', { skip: SKIP, timeout: 300000 }, async (t) => {
   // A: no subject, the supervisor spoke last and asked a question in it (your move)
   const A = idOf(F.owner(['thread', 'new', 'Where do we start?']));
   F.sup(['thread', 'reply', A, 'Here, I think.']);
-  F.sup(['thread', 'ask', A, '--question', 'Which colour?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+  F.sup(['thread', 'ask', A, '--question', 'Which colour?', '--goal', F.goal, '--stake', '1', '--urgency', '1', '--off-subject', 'a question after the reply']);
   // B: the owner's only (waiting on the supervisor)
   const B = idOf(F.owner(['thread', 'new', 'Is the build green?']));
   // C: proposed resolved (ready to accept)
@@ -246,7 +249,7 @@ test('opening threads', { skip: SKIP, timeout: 600000 }, async (t) => {
   // A: no subject, with a question asked in it (in the panel)
   const A = idOf(F.owner(['thread', 'new', 'Where do we start?']));
   F.sup(['thread', 'reply', A, 'Here, I think.']);
-  const QA = F.sup(['thread', 'ask', A, '--question', 'Which colour?', '--goal', F.goal, '--stake', '1', '--urgency', '1']).split('\n')[0].trim();
+  const QA = F.sup(['thread', 'ask', A, '--question', 'Which colour?', '--goal', F.goal, '--stake', '1', '--urgency', '1', '--off-subject', 'a question after the reply']).split('\n')[0].trim();
   // G: on the first goal (floating, beside its pin on Goals)
   const G = idOf(F.owner(['thread', 'new', 'About this goal', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}` })]));
   F.sup(['thread', 'reply', G, 'On it.']);

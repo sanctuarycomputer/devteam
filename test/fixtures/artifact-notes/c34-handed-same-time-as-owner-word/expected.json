@@ -1,0 +1,14 @@
+{
+ "about": "a hand-over at the same time as the owner's last word is not after it: no hand-over",
+ "thread": "t-20261120-100034000-owner",
+ "view": {
+  "handed": null,
+  "addressed": null,
+  "check": null,
+  "shot": null,
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "owner"
+ }
+}

@@ -555,6 +555,10 @@ const SETTINGS_DEFAULTS = {
   hold_review_days: 14,
   // How long `ack` sets a finding aside; it comes back sooner if its subject changes.
   finding_ack_hours: 24,
+  // A move the supervisor holds is owed past this many minutes, and any move is stalled past this many
+  // hours (the next-move table, its flag); a value that isn't a number of zero or more counts as the default.
+  next_move_owed_minutes: 60,
+  next_move_stall_hours: 24,
   tick_minutes: 15,
   question_default_after_hours: 24,
   // fix tickets that may run past max_active_tickets, so an incident never waits for a slot
@@ -694,6 +698,8 @@ const SETTINGS_WORDS = Object.freeze({
   hold_review_days: ['Merging and checks', 'Parked goal review', 'days a goal stays parked before the owner is asked about it again', 'value'],
   question_default_after_hours: ['Questions and findings', 'A default applies after', 'hours before a question with a default takes it', 'value'],
   finding_ack_hours: ['Questions and findings', 'A finding set aside for', 'hours a set-aside finding stays quiet, unless its subject changes; a merge on a main stays set aside for good', 'value'],
+  next_move_owed_minutes: ['Questions and findings', 'A move owed after', "minutes a next move the supervisor holds may wait before it is owed", 'value'],
+  next_move_stall_hours: ['Questions and findings', 'A move stalled after', 'hours any next move may stay the same before it is stalled, whoever holds it', 'value'],
   upstream_repo: ['Upstream and releases', 'Kit source', 'where new devteam releases come from', 'hidden'],
   upstream_base: ['Upstream and releases', 'Kit release in use', 'the devteam release this project runs', 'value'],
   upstream_sync: ['Upstream and releases', 'Kit updates', 'adopt each release on its own, or ask you first', 'value'],
@@ -716,7 +722,7 @@ const settingNum = (v) => v === null || Number.isFinite(v);
 const settingName = (v) => v === null || (typeof v === 'string' && /^[A-Za-z0-9._/-]{1,100}$/.test(v));
 const settingLines = (v) => Array.isArray(v) && v.every((s) => typeof s === 'string' && s.length <= 100 && !UNSAFE_TEXT.test(s));
 const SETTING_SHAPES = Object.freeze({
-  ...Object.fromEntries(['max_active_tickets', 'max_active_per_component', 'max_active_planners', 'machine_memory_ceiling', 'browser_idle_minutes', 'tick_minutes', 'stale_after_minutes', 'dashboard_port', 'slow_gate_minutes', 'hold_review_days', 'question_default_after_hours', 'finding_ack_hours', 'upstream_check_hours', 'incident_slots', 'retro_every_days', 'research_every_days'].map((k) => [k, settingNum])),
+  ...Object.fromEntries(['max_active_tickets', 'max_active_per_component', 'max_active_planners', 'machine_memory_ceiling', 'browser_idle_minutes', 'tick_minutes', 'stale_after_minutes', 'dashboard_port', 'slow_gate_minutes', 'hold_review_days', 'question_default_after_hours', 'finding_ack_hours', 'next_move_owed_minutes', 'next_move_stall_hours', 'upstream_check_hours', 'incident_slots', 'retro_every_days', 'research_every_days'].map((k) => [k, settingNum])),
   merge_admin: (v) => typeof v === 'boolean',
   responder: (v) => typeof v === 'boolean',
   worktree_setup_always: (v) => typeof v === 'boolean',
@@ -1558,6 +1564,8 @@ const CLASS_WORDS = Object.freeze({
   'merge-word': 'Merging a ticket',
   'approve-feature-plan': "Approving a feature's plan",
   'merge-chore': 'Merging a chore',
+  'chore-start': 'Starting a chore',
+  'chore-drop': 'Dropping a chore',
   'worker-slots': 'Starting and stopping workers',
   'replan-within-feature': 'Replanning the tickets of a feature',
   'add-ticket': 'Adding a ticket',
@@ -1591,6 +1599,7 @@ const CLASS_WORDS = Object.freeze({
   'goal-change': 'Changing a goal',
   'strategy-change': 'Changing the strategy',
   'self-change': 'Changing what the project is',
+  'names-checked': 'Checking the names in a draft before it is public',
   'exterior-change': 'Changing what the project relates to',
   'goal-met': 'Saying a goal is met',
   'registry-attest': 'Confirming the registry is complete',
@@ -1694,6 +1703,9 @@ function integrity(o, file) {
   if (o.type === 'knowledge' && 'owner_note' in o && cls !== 'owner') return "owner_note is the owner's";
   // Sending a lesson to the owner, and its plain line, are the supervisor's: the owner's own knowledge is kept as written.
   if (o.type === 'knowledge' && ('for_owner' in o || 'plain' in o) && cls !== 'supervisor') return "for_owner and plain are the supervisor's, on a lesson it sends the owner";
+  // kit-252: who of the box's people gave it (from the gateway) is said on the owner's lines alone,
+  // new or set: no other writer's line passes itself off as a person's.
+  if ('person' in o && cls !== 'owner') return "person is on the owner's lines only";
   if (o.type === 'knowledge' && o.op === 'new' && cls !== 'owner' && o.for_owner !== true && ownerScoped(o.scope)) return 'a lesson about a kind of call only the owner makes is sent to the owner (for_owner)';
   if (o.op === 'new') {
     if (ids.keyed[o.type]) {
@@ -1718,6 +1730,12 @@ function integrity(o, file) {
     // responder-1, from anyone: the fields that decide who owes a reply, so no reader keeps a line that breaks them
     if (o.type === 'message' && o.kind === 'handoff' && typeof o.thread !== 'string') return 'a handoff names its thread';
     if (o.type === 'message' && o.kind === 'handoff' && o.to !== 'supervisor') return 'a handoff goes to the supervisor';
+    // artifact-notes-1, from anyone: a session's mark on an artifact note goes to the owner and names
+    // the note, and only a session marks (the owner hands over, the responder hands off); its draft and
+    // picture are on it and nothing else; a frame is the size the owner saw an artifact at
+    if (o.type === 'message' && o.kind === 'addressed' && (typeof o.thread !== 'string' || o.to !== 'owner' || !['supervisor', 'planner', 'ticket'].includes(cls))) return "an addressed message goes to the owner, names its thread, and is a session's";
+    if (o.type === 'message' && o.kind !== 'addressed' && (o.draft !== undefined || o.shot !== undefined)) return 'draft and shot are on an addressed message';
+    if (o.type === 'thread' && o.frame !== undefined && !(isObj(o.subject) && o.subject.kind === 'artifact')) return "frame is on an artifact note's first line";
     if (o.type === 'turn' && (o.routed_to !== undefined || o.delivered !== undefined) && cls !== 'owner') return "routed_to and delivered are on the owner's turns";
     if (o.type === 'turn' && o.delivered !== undefined && o.routed_to !== 'responder') return 'delivered goes with routed_to responder';
     if (o.type === 'turn' && o.pending !== undefined && cls === 'owner') return "pending is on a reply, never the owner's turn";
@@ -1739,6 +1757,11 @@ function integrity(o, file) {
     if (f && o.type === 'ticket' && o.feature !== f) return `${o.by} may only create tickets of the feature "${f}"`;
     return null;
   }
+  // artifact-notes-1: a picture (or why there is none) goes with the proposal it shows, and a
+  // withdrawal with the ready it clears, so no reader keeps one without the other
+  if (o.type === 'thread' && (o.shot !== undefined || o.noshot !== undefined) && !isObj(o.ready)) return 'shot and noshot go on a line that writes ready';
+  if (o.type === 'thread' && o.unready !== undefined && o.ready !== null) return 'unready goes on a line that writes ready: null';
+  if (o.type === 'thread' && o.shot !== undefined && o.noshot !== undefined) return 'shot and noshot never go together';
   const allowed = auth.set[o.type]?.[cls];
   if (!allowed) return `${cls} may not change ${o.type} lines`;
   if (!body.length) return 'a set line changes at least one field';
@@ -1799,7 +1822,7 @@ function checkLine(o, file) {
   const t = SCHEMA.$defs.types[o.type];
   const body = Object.fromEntries(Object.entries(o).filter(([k]) => !ENVELOPE.includes(k)));
   errs.push(...schemaErrors(t, body, o.type));
-  if (o.type === 'thread' || o.type === 'turn') errs.push(...threadLineProblems(o));
+  if (o.type === 'thread' || o.type === 'turn' || o.type === 'message') errs.push(...threadLineProblems(o));
   if (o.op === 'new') {
     for (const k of t['x-required-new'] ?? []) if (!(k in body)) errs.push(`${o.type}.${k} is required`);
     for (const k of t['x-set-only'] ?? []) if (k in body) errs.push(`${o.type}.${k} is set later, not at creation`);
@@ -1874,6 +1897,14 @@ function fold(all) {
       continue;
     }
     const { v, op, __file, __line, at, by, ...body } = l;
+    // kit-108: a thread the supervisor started is born open, with no outcome and no proposal, as
+    // thread new writes it. A hand-written line carrying them (log-check refuses it: x-set-only, but
+    // a reader runs integrity alone) must not have the supervisor resolve its own thread.
+    if (body.type === 'thread' && by !== 'owner') {
+      // and one not about a question or a goal is no thread of the supervisor's: readers drop it, as log-check refuses it
+      if (!(isObj(body.subject) && body.subject.kind === 'item' && typeof body.subject.ref === 'string' && /^(question|goal):/.test(body.subject.ref))) { ignored.push({ line: l, why: "a supervisor's thread is about a question or a goal" }); continue; }
+      delete body.status; delete body.outcome; delete body.ready;
+    }
     const kept = body.type === 'goal' && body.kind === 'upkeep' ? [...objects.values()].find((o) => o.type === 'goal' && o.kind === 'upkeep') : null;
     if (kept) {
       // two writers made Upkeep at once: the earliest is the one, and the other's holds apply to it
@@ -1979,7 +2010,9 @@ function fold(all) {
     const rank = RANK[cls];
     const changed = holdLine ? holdWith(holdLine) : {};
     for (const [k, val] of Object.entries(l)) {
-      if (ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold' || (obj.type === 'goal' && holdKey(k)) || (notOwnTag && k === 'kit_lesson')) continue;
+      // person (kit-252) says who gave this one line: it goes on its update, below, never on the
+      // object, so an answered question's hash (questionHash) is the one the answer was given to
+      if (ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold' || k === 'person' || (obj.type === 'goal' && holdKey(k)) || (notOwnTag && k === 'kit_lesson')) continue;
       // an order line's priority is the owner's answer, at the owner's rank; its approved stays the
       // supervisor's, so a later answer's approved still lands and is seen as used
       const r = byOrder && k === 'priority' ? RANK.owner : rank;
@@ -1990,7 +2023,7 @@ function fold(all) {
       obj.__rank[k] = r;
       changed[k] = val;
     }
-    if (Object.keys(changed).length) obj.updates.push({ at: l.at, by: l.by, ...(l.channel ? { channel: l.channel } : {}), ...changed });
+    if (Object.keys(changed).length) obj.updates.push({ at: l.at, by: l.by, ...(l.channel ? { channel: l.channel } : {}), ...changed, ...(l.person !== undefined ? { person: l.person } : {}) });
     else ignored.push({ line: l, why: 'overridden by a higher-ranked writer' });
     if (obj.type === 'goal' && changed.approved) goalApprovals.add(changed.approved);
   }
@@ -2121,6 +2154,8 @@ function recordSupervisorPane(run, pane) {
   fs.mkdirSync(run, { recursive: true });
   fs.writeFileSync(supervisorPaneFile(run), pane);
   fs.writeFileSync(supervisorPaneMark(run), pane);
+  // a new agent in it: no line of the owner's, nor a reading of its prompt, carries over (terminal@1 §11)
+  sh('tmux', ['set-option', '-p', '-u', '-t', pane, '@devteam-owner-floor', ';', 'set-option', '-p', '-u', '-t', pane, '@devteam-prompt-readable']);
 }
 // Only a command run as the supervisor (DEVTEAM_ROLE=supervisor, as recover and the README start it)
 // records its pane. A role-less command is the supervisor's too (supervisorOnly), but the owner's own
@@ -2177,6 +2212,121 @@ function tryLock(file, fn, { staleMs = 10000 } = {}) {
   } finally {
     fs.rmSync(lock, { recursive: true, force: true });
   }
+}
+// The typing lock (kit-618, terminal@1 §11): every kit write into a pane holds <run>/type-lock-<pane
+// id> for the whole write, so two writers, or a writer and the owner's key post, never interleave.
+// The file holds its holder's pid and a token of that take's own; its mtime is the stamp, refreshed
+// after each tmux call (touch). It is written whole beside the lock and linked into place, so a lock
+// is never seen empty or half written. A waiter takes it over when the pid is dead, or when the stamp
+// is 60 s old (either way: a clock moved back must not hold it forever), by renaming it to a name of
+// its own and checking it renamed the lock it judged, by its inode and its text (another waiter's
+// fresh lock is linked back). The text, not the inode alone, because a filesystem gives a file made
+// after an unlink the freed inode again (ext4 does, every time). A holder unlinks, or stamps, only a
+// lock whose inode and text are still its own, never the lock of someone who took over.
+// Re-entrant along a call chain: in a CLI process, by the files this process holds (a nested take
+// runs at once, and fn(outer) says whether it is the outermost, the hold that reads the floor). A
+// target that doesn't resolve to a pane takes no lock, and its write goes on as before (tmux would
+// refuse it anyway). Back: { value } (fn's), or { busy: true } when the wait ran out, nothing done.
+const typeLock = {
+  // a stamp this old (or this far ahead: a clock moved back) is a holder gone
+  STALE_MS: 60000,
+  // lock file → its hold ({ ino, text }): the locks this process's synchronous chain holds (its
+  // re-entrance), and those the dashboard's chains hold (typeLockAsync's, for touch only)
+  held: new Map(),
+  heldAsync: new Map(),
+  seq: 0,
+  file: (pane, run = runDir) => path.join(run, `type-lock-${pane}`),
+  // the lock as it is now, or null: its inode and its text, read from one open file
+  read(file) {
+    let fd;
+    try { fd = fs.openSync(file, 'r'); } catch { return null; }
+    try { return { ino: fs.fstatSync(fd).ino, mtimeMs: fs.fstatSync(fd).mtimeMs, text: fs.readFileSync(fd, 'utf8') }; } catch { return null; } finally { fs.closeSync(fd); }
+  },
+  // still this hold's: the same inode and the same text (its token)
+  ours: (file, hold) => { const now = typeLock.read(file); return !!now && now.ino === hold.ino && now.text === hold.text; },
+  // one try: the hold taken ({ ino, text }), or null (someone else holds it); throws on anything but a held lock
+  take(file) {
+    const create = () => {
+      const token = `${process.pid}-${++typeLock.seq}-${crypto.randomBytes(6).toString('hex')}`;
+      const text = JSON.stringify({ pid: process.pid, at: Date.now(), token });
+      const tmp = `${file}.new-${token}`;
+      try {
+        fs.writeFileSync(tmp, text, { flag: 'wx' });
+        try { fs.linkSync(tmp, file); } catch (e) { if (e.code === 'EEXIST') return null; throw e; }
+        return { ino: fs.statSync(tmp).ino, text };
+      } finally { try { fs.unlinkSync(tmp); } catch {} }
+    };
+    const got = create();
+    if (got !== null) return got;
+    const was = typeLock.read(file);
+    if (!was) return null; // let go meanwhile: the next try takes it
+    let pid = null;
+    try { pid = JSON.parse(was.text)?.pid; } catch {}
+    let dead = false;
+    if (Number.isInteger(pid) && pid > 0) { try { process.kill(pid, 0); } catch (e) { dead = e.code === 'ESRCH'; } }
+    // unreadable, or no pid: dead once it is 60 s old, which the stamp's rule already says
+    if (!dead && Math.abs(Date.now() - was.mtimeMs) < typeLock.STALE_MS) return null;
+    const aside = `${file}.taken-${process.pid}-${++typeLock.seq}`;
+    try { fs.renameSync(file, aside); } catch { return null; }
+    const moved = typeLock.read(aside);
+    if (moved?.ino !== was.ino || moved?.text !== was.text) {
+      // another waiter took it over first, and this renamed its fresh lock: back where it was
+      try { fs.linkSync(aside, file); } catch {}
+      try { fs.unlinkSync(aside); } catch {}
+      return null;
+    }
+    try { fs.unlinkSync(aside); } catch {}
+    return create();
+  },
+  release(file, hold) {
+    try { if (typeLock.ours(file, hold)) fs.unlinkSync(file); } catch {}
+  },
+  // the stamp of every lock this process holds (a holder has one pane's, or, in flushHeld, the same
+  // window's pane's too), after each tmux call of a write
+  touch() {
+    const now = new Date();
+    for (const [file, hold] of [...typeLock.held, ...typeLock.heldAsync]) { try { if (typeLock.ours(file, hold)) fs.utimesSync(file, now, now); } catch {} }
+  },
+  // the pane id a target names, or null
+  pane: (out) => (/^%\d+$/.test(out?.trim() ?? '') ? out.trim() : null),
+  run(target, fn, { run = runDir, waitMs = 10000 } = {}) {
+    const pane = typeLock.pane(sh('tmux', ['display', '-p', '-t', target, '#{pane_id}']));
+    if (!pane) return { value: fn(true) };
+    const file = typeLock.file(pane, run);
+    if (typeLock.held.has(file)) return { value: fn(false) };
+    let hold = null;
+    try {
+      fs.mkdirSync(run, { recursive: true });
+      for (const start = Date.now(); (hold = typeLock.take(file)) === null;) {
+        if (Date.now() - start >= waitMs) return { busy: true };
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+      }
+    } catch { return { value: fn(true) }; } // a run folder that can't hold a lock: written as before
+    typeLock.held.set(file, hold);
+    try { return { value: fn(true) }; } finally { typeLock.held.delete(file); typeLock.release(file, hold); }
+  },
+};
+// The dashboard's typing lock: typeLock's file and rules, never blocking the server. The pane id comes
+// from tmuxAsync, the wait polls with a timer, and the locks a chain holds are in an AsyncLocalStorage
+// (loaded here, once), so one request's hold is never entered by another request's.
+async function typeLockAsync(target, fn, { run = runDir, waitMs = 10000 } = {}) {
+  const { AsyncLocalStorage } = await (typeLockAsync.hooks ??= import('node:async_hooks'));
+  const store = (typeLockAsync.store ??= new AsyncLocalStorage());
+  const pane = typeLock.pane(await tmuxAsync(['display', '-p', '-t', target, '#{pane_id}']));
+  if (!pane) return { value: await fn(true) };
+  const file = typeLock.file(pane, run);
+  const mine = store.getStore();
+  if (mine?.has(file)) return { value: await fn(false) };
+  let hold = null;
+  try {
+    fs.mkdirSync(run, { recursive: true });
+    for (const start = Date.now(); (hold = typeLock.take(file)) === null;) {
+      if (Date.now() - start >= waitMs) return { busy: true };
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  } catch { return { value: await fn(true) }; }
+  typeLock.heldAsync.set(file, hold);
+  try { return { value: await store.run(new Set([...(mine ?? []), file]), () => fn(true)) }; } finally { typeLock.heldAsync.delete(file); typeLock.release(file, hold); }
 }
 
 let mainRefCache;
@@ -2279,16 +2429,36 @@ function logLineFor(fields, by, id, at = nowIso()) {
   }
   const line = { v: 1, id: fields.id ?? id, type, op: fields.op ?? 'new', at, by, ...(by === 'owner' ? { channel: fields.channel ?? ownerChannel() } : {}) };
   for (const [k, val] of Object.entries(fields)) if (!ENVELOPE.includes(k) && val !== undefined) line[k] = val;
+  // which of the box's people gave it (kit-252, personHeader): the owner's lines alone, of a type
+  // that has person, and here so that lineFits counts it as appendLog writes it
+  const person = by === 'owner' && SCHEMA.$defs.types[type]?.properties?.person ? envPerson() : null;
+  if (person) line.person = person;
   return line;
 }
 // Whether these fields' line fits LINE_MAX, built as appendLog will, with a placeholder id of the
 // real shape (u-00000000-000000000-owner) where the log would mint one.
 const lineFits = (fields, by) => Buffer.byteLength(`${JSON.stringify(logLineFor(fields, by, `${SCHEMA['x-id'].prefix[fields.type]}-00000000-000000000-${by}`))}\n`) <= LINE_MAX;
 
+// A box's claim and invite links carry their token after the fragment (/auth/claim#<token>): one
+// pasted into a turn, an answer or a pane answer would sit in the log, in threads.jsonl and in a
+// pane for anyone on the box to reuse. The token goes, the link's shape stays (/auth/claim#…). The
+// rule covers every form the gateway would still route with the token intact: a query before the
+// fragment, %23 for #, and the whole link percent-encoded. It is cloud/gateway.mjs's CLAIM_LINK
+// byte for byte (test/org-access.invites.test.mjs compares them). A redacted link doesn't match, so
+// it is idempotent. Strings anywhere in an object or array, keys kept.
+function redactClaimLinks(v, depth = 0) {
+  const CLAIM_LINK = /((?:\/|%2F)auth(?:\/|%2F)claim(?:\?[^\s#"'<>`]*)?(?:#|%23))(?!…)[^\s"'<>`)\]}…]+/gi;
+  if (typeof v === 'string') return v.replace(CLAIM_LINK, '$1…');
+  if (!v || typeof v !== 'object' || depth >= 8) return v;
+  if (Array.isArray(v)) return v.map((x) => redactClaimLinks(x, depth + 1));
+  return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, redactClaimLinks(x, depth + 1)]));
+}
+
 // Append one object. Under the file's lock: catch a live file up with the durable copy if that is
 // ahead, drop a half-written last line, stamp a time after the file's last line (ids unique, lines
 // ordered even if the clock steps back), validate exactly what will be read back, write one line.
 function appendLog(fields, by = logWriter()) {
+  fields = redactClaimLinks(fields);
   const type = fields.type;
   // the supervisor's first line on a machine with no owner cursor would move the no-cursor floor past
   // what the owner wrote before it: pin the floor first (seedOwnerCursor)
@@ -2513,6 +2683,8 @@ function questionView(q) {
     default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, new_because: q.new_because ?? null, no_default: q.no_default ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched, hash, rewritten,
+    // which of the box's people answered (kit-252): only a well-formed one (personOk), else nobody named
+    answered_person: ans && personOk(ans.person) ? { id: ans.person.id, name: ans.person.name } : null,
     labels, choice, words, in_words: keyed ? choice === null : null, label, reading, read_by: reading ? 'supervisor' : null, agreed_by_owner: agreedByOwner,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, files: ans && Array.isArray(ans.files) ? ans.files.filter(isObj).map((f) => ({ name: String(f.name ?? ''), path: String(f.path ?? ''), bytes: Number.isInteger(f.bytes) ? f.bytes : 0 })) : [], said: ans?.said ?? null, turn: ans?.turn ?? null, said_at: ans?.said_at ?? null, answer_seen: ans?.answer_seen ?? null,
     about_turn: q.about_turn ?? null, seen: q.seen ?? null, owner_said_turn: q.owner_said_turn ?? null, owner_said_at: q.owner_said_at ?? null,
@@ -3811,6 +3983,51 @@ function partsAtMain(repoName, file) {
 const isSplitFile = (file, s = loadSettings()) => Array.isArray(s.split_files) && s.split_files.some((g) => typeof g === 'string' && pathMatches(g, file));
 // A file this long at main is big: a whole-file claim on it that orders two tickets warns (validate).
 const BIG_FILE_LINES = 1500;
+// A test file, by the usual layouts: a test/, tests/, spec/, __tests__/, e2e/ or cypress/ folder, or a
+// name like x.test.js, x.spec.ts, x_test.go, x_spec.rb, test_x.py, XTest.java or XTests.swift.
+const TEST_FILE_RE = /(^|\/)(test|tests|spec|__tests__|e2e|cypress)\/|[._](test|spec)\.[a-z0-9]+$|(^|\/)test_[^/]+\.py$|[a-z0-9]Tests?\.(java|kt|swift|cs|scala)$/;
+// The text a done-when quotes: `code` spans and "strings" (straight or curly). Each quote is taken
+// whole, whatever its length, so a short one can't pair its closing mark with the next one's opening;
+// then those of 4 to 80 characters are kept, less a path or a command line, which name what runs,
+// not what a test asserts. Those exclusions only ever miss a warning (UI text such as "3/4" too).
+function doneWhenQuotes(t) {
+  const out = new Set();
+  for (const d of t.done_when ?? []) {
+    if (typeof d !== 'string') continue;
+    for (const m of d.matchAll(/`([^`\n]*)`|"([^"\n]*)"|\u201c([^\u201d\n]*)\u201d/g)) {
+      const q = (m[1] ?? m[2] ?? m[3]).trim();
+      if (q.length < 4 || q.length > 80 || q.includes('/') || /^(node|npm|npx|git|bin\/|bundle|yarn|pnpm|make|cd|devteam)\b/.test(q)) continue;
+      out.add(q);
+      if (out.size >= 12) return [...out];
+    }
+  }
+  return [...out];
+}
+// [quote, test files at main that hold it and no touches entry of t covers], for each quote that has
+// any. One grep for all of a ticket's quotes, at the repo's root (a ref's grep searches only below the
+// directory it runs in), as fixed strings, text files only. A path#part entry covers its whole file:
+// the test may assert the text anywhere in it, and naming the file is what lets the ticket change it.
+function testsOutsideTouches(t) {
+  const rn = repoOfTicketLink(t);
+  if (!repoReadable(rn)) return [];
+  const R = repo(rn);
+  const ref = R.mainRef();
+  const quotes = doneWhenQuotes(t);
+  if (!ref || !quotes.length) return [];
+  const covered = (f) => (t.touches ?? []).some((g) => { const p = trimSlash(touchPath(g)); return pathMatches(p, f) || f.startsWith(`${p}/`); });
+  const out = (R.git(['grep', '-I', '-o', '-F', ...quotes.flatMap((q) => ['-e', q]), ref, '--'], R.root) ?? '').split('\n').filter(Boolean);
+  const by = new Map();
+  for (const line of out) {
+    const rest = line.slice(ref.length + 1);
+    const i = rest.indexOf(':');
+    if (i < 0) continue;
+    const f = rest.slice(0, i), q = rest.slice(i + 1);
+    if (!TEST_FILE_RE.test(f) || covered(f) || !quotes.includes(q)) continue;
+    if (!by.has(q)) by.set(q, new Set());
+    by.get(q).add(f);
+  }
+  return quotes.filter((q) => by.has(q)).map((q) => [q, [...by.get(q)]]);
+}
 // Whether two touches entries of tickets in one repo can collide (D4, ready). Paths that don't
 // overlap never do; a whole file or a glob overlaps as before. Two parts of one file: names that
 // exist at main collide when they cover a common leaf there; a name not there yet (path#+name, or
@@ -3843,6 +4060,8 @@ function workerState(id) {
   return {
     phase: last?.to ?? null, task: last?.task ?? null, note: last?.note ?? null, head_sha: last?.sha ?? null,
     started_at: phases[0]?.at ?? mine[0].at, last_seen: lastSeen,
+    // the first line of the current phase run (liveness pings after it keep it)
+    phase_started_at: phaseRunStart(phases)?.at ?? null,
     minutes_silent: Math.round((Date.now() - Date.parse(lastSeen)) / 60000),
     ...(spendByWho().get(id) ?? { usd: cost?.usd ?? 0, input_tokens: cost?.input_tokens ?? 0, output_tokens: cost?.output_tokens ?? 0 }),
   };
@@ -4006,17 +4225,24 @@ function resendLostEnter(key, target, lines) {
   // tests only: the pause a loaded machine can put between the first read and the claim
   const pause = Number(process.env.DEVTEAM_LOST_ENTER_CLAIM_DELAY_MS ?? 0);
   if (pause > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pause);
-  const cur = claim();
-  if (!cur) return;
-  const done = Math.max(0, Number(cur.tries) || 0);
-  // after a press, only an untouched pane: a reply, a submission or a line being typed ends the rescue
-  if (done >= LOST_ENTER_TRIES || (done > 0 && cur.bottom !== digest)) return void drop();
-  const pressed = tmux(['send-keys', '-t', target, 'Enter']);
-  const tries = done + 1;
-  const typedAt = cur.typed_at ?? cur.at;
-  // another try later, unless that was the last or the key failed; a newer delivery keeps the slot
-  if (pressed && tries < LOST_ENTER_TRIES) { try { writeJson(claimed, { ...cur, tries, bottom: digest, at: nowIso(), typed_at: typedAt }); putBack(); } catch { drop(); } } else drop();
-  if (!pressed) return;
+  // the claim and the press under the pane's typing lock (kit-618): while the owner's floor holds, or
+  // the lock stays busy, nothing is claimed and the record stays as it was for a later look
+  const held = typeLock.run(target, (outer) => {
+    if (outer && ownerLineOpen(target)) return null;
+    const cur = claim();
+    if (!cur) return null;
+    const done = Math.max(0, Number(cur.tries) || 0);
+    // after a press, only an untouched pane: a reply, a submission or a line being typed ends the rescue
+    if (done >= LOST_ENTER_TRIES || (done > 0 && cur.bottom !== digest)) return void drop();
+    const pressed = tmux(['send-keys', '-t', target, 'Enter']);
+    const tries = done + 1;
+    const typedAt = cur.typed_at ?? cur.at;
+    // another try later, unless that was the last or the key failed; a newer delivery keeps the slot
+    if (pressed && tries < LOST_ENTER_TRIES) { try { writeJson(claimed, { ...cur, tries, bottom: digest, at: nowIso(), typed_at: typedAt }); putBack(); } catch { drop(); } } else drop();
+    return pressed ? { cur, tries, typedAt } : null;
+  });
+  if (!held.value) return;
+  const { cur, tries, typedAt } = held.value;
   const hash = crypto.createHash('sha1').update(cur.text).digest('hex').slice(0, 12);
   appendLog({ type: 'observation', source: 'pane', kind: 'resent-enter', subject: key.slice(key.indexOf(':') + 1), detail: `pressed Enter (try ${tries} of ${LOST_ENTER_TRIES}): text typed ${Math.round((Date.now() - Date.parse(typedAt)) / 1000)}s ago was still unsubmitted in an idle pane ("${cur.text.slice(0, 60)}${cur.text.length > 60 ? '…' : ''}", sha1 ${hash})`, detector: 'pane', source_key: `resent-enter ${key} ${hash} ${typedAt}`, measure: { value: Math.round((Date.now() - Date.parse(cur.at)) / 1000), unit: 's' } });
 }
@@ -4305,6 +4531,18 @@ const heldClaims = (key) => {
     return { dir: path.join(heldRoot(), n), pid, stale: !pidAlive(pid) || Date.now() - touched > HELD_CLAIM_STALE_MS };
   });
 };
+// The supervisor's held lines, for the screen route's held (terminal@1 §6, kit-618): the lines in its
+// window's folder and in the live claim folders a flusher is typing from, and the oldest one's age by
+// its name (0 when none is held). A folder that can't be read counts 0: it never fails the read.
+function supervisorHeld(key) {
+  try {
+    const names = [heldDir(key), ...heldClaims(key).filter((c) => !c.stale).map((c) => c.dir)].flatMap(heldFiles);
+    // a loop, not a spread: a backlog of any size never overflows the call's arguments
+    let oldest = Infinity;
+    for (const n of names) { const at = Number(n.slice(0, 15)); if (Number.isFinite(at) && at < oldest) oldest = at; }
+    return { count: names.length, oldest_ms: Number.isFinite(oldest) ? Math.max(0, Date.now() - oldest) : 0 };
+  } catch { return { count: 0, oldest_ms: 0 }; }
+}
 let heldSeq = 0;
 function holdLine(key, target, line, paste = null) {
   const dir = heldDir(key);
@@ -4395,11 +4633,17 @@ function flushHeld(key) {
       let pane = typeof rec.target === 'string' ? resolvePane(rec.target) : { problem: 'no pane recorded' };
       if (pane.problem || paneKey(pane.target) !== key) pane = resolvePane(key);
       if (pane.problem) { if (heldAge(n) > HELD_GONE_MS && dropHeld(key, f, `its pane is gone: ${pane.problem}`)) continue; stopped = true; break; }
-      const screen = paneScreen(pane.target);
-      const ready = paneReadyIn(screen) || (!paneAskingIn(screen) && heldAge(live[0]) > HELD_NO_INPUT_MS);
       // a paste only as typeNow takes one, paths as text: anything else in the file is typed as a line alone
       const paste = Array.isArray(rec.paste) && rec.paste.length && rec.paste.every((p) => typeof p === 'string') ? rec.paste : null;
-      if (!ready || !typeNow(pane.target, rec.line, paste)) { stopped = true; break; }
+      // under the pane's typing lock (kit-618): the owner's floor first, so it holds the line even past
+      // HELD_NO_INPUT_MS; the floor or a busy lock stops the flush here, this line and those after it held
+      const done = typeLock.run(pane.target, (outer) => {
+        if (outer && ownerLineOpen(pane.target)) return false;
+        const screen = paneScreen(pane.target);
+        const ready = paneReadyIn(screen) || (!paneAskingIn(screen) && heldAge(live[0]) > HELD_NO_INPUT_MS);
+        return ready && typeNow(pane.target, rec.line, paste);
+      });
+      if (done.busy || !done.value) { stopped = true; break; }
       try { fs.unlinkSync(f); } catch {}
       try { const now = new Date(); fs.utimesSync(claimed, now, now); } catch {}
       typed++;
@@ -4755,6 +4999,15 @@ function cmdValidate() {
       if (big) ordered.push(`${a.id} depends on ${b.id}, and they share only ${[...big].map(([f, n]) => `${f} (${n} lines)`).join(', ')}, claimed whole`);
     }
     if (ordered.length) warnings.push(`a whole-file claim on a big file orders ${ordered.length} pair(s) of tickets: ${ordered.slice(0, 5).join('; ')}${ordered.length > 5 ? ` (+${ordered.length - 5} more)` : ''}. If a dependency is only there for D4, name the parts each changes (path#name; planning.md D4) so they can run at once`);
+    // D4's commonest miss in graph reviews: a done-when quotes text the ticket changes, and a test
+    // at main asserts that text, but the test isn't in the ticket's touches, so the build breaks a
+    // file it may not change. Checked for the feature being planned (its plan branch, or --plan),
+    // in a repo this machine reads: a warning, since the test may only mention the text.
+    if (planFeature) for (const t of live) {
+      if (t.feature !== planFeature) continue;
+      const missed = testsOutsideTouches(t);
+      if (missed.length) warnings.push(`${t.id}: its done-whens quote text that tests at main assert, in files its touches don't cover: ${missed.slice(0, 4).map(([q, fs_]) => `"${q}" in ${fs_.slice(0, 3).join(', ')}${fs_.length > 3 ? ` (+${fs_.length - 3})` : ''}`).join('; ')}${missed.length > 4 ? ` (+${missed.length - 4} more)` : ''}. If the ticket changes that text, add those tests to its touches (D4)`);
+    }
     const w = serialGraphWarning(live);
     if (w) warnings.push(scope ? `${w}; not ${scope}'s to fix` : w);
   }
@@ -4857,6 +5110,10 @@ function cmdValidate() {
     for (const [r, at] of rs) { const bad = releaseProblem(r, at); if (bad) (releaseMayBeOnMerge(r) ? errors : warnings).push(releaseMayBeOnMerge(r) ? bad : `${bad}; read as not deploying on merge`); }
   }
   const td = path.join(projectDir, 'tickets');
+  // project/self.md, when there is one, against self@1 (its paths and names are the draft's checks: self check, check-pr)
+  { const t = readText(path.join(projectDir, 'self.md')); if (t !== null) for (const e of selfDoc(t).errors) errors.push(`${projectRel}/self.md: ${e}`); }
+  // project/exterior.md against exterior@1 (and its blobs, at the draft only): kit-135
+  { const x = exteriorValidateLines(); errors.push(...x.errors.map((e) => `${EXTERIOR_REL()}: ${e}`)); warnings.push(...x.warnings.map((w) => `${EXTERIOR_REL()}: ${w}`)); }
   if (fs.existsSync(td)) for (const f of fs.readdirSync(td)) if (!f.startsWith('.') && !ts.has(f)) errors.push(`project/tickets/${f}/ has no ticket; if the supervisor added it since the log last landed, land the log first (log-sync, then merge --chore log) and run the check again`);
   // Checking one ticket, another ticket's own errors (D3 and the rest, written "<id>: …") come
   // from the live graph, not this branch: e.g. a dependency on a plan that reached main after the
@@ -5261,6 +5518,15 @@ function cmdStatus() {
     const shown = r.not_started && !held && !r.waiting ? '  [not started: no window or worktree]' : `  [${r.phase}${r.task ? ` ${r.task}` : ''}, ${r.minutes_silent}m${flag}]`;
     out(`${r.stage.padEnd(18)} ${r.id}${r.phase ? shown : ''}${r.records_landed ? `  [${RECORDS_ONLY_FIX(r.id)}]` : ''}`);
   }
+  // each running goal, with its next move under it (next-move@1; moves lists every move)
+  for (const m of nextMoves().filter((x) => x.subject.startsWith('goal:') && ['run', 'drain'].includes(goalMode(logGet(x.subject.slice('goal:'.length)))))) {
+    out(`${'goal'.padEnd(18)} ${m.subject.slice('goal:'.length)}  ${m.title}`);
+    out(`${''.padEnd(18)}   next: ${moveLine(m)}`);
+  }
+  // the owner's floor (kit-618): status only looks, so it releases no floor, though ownerLineOpen
+  // still clears both marks from a pane whose agent exited to a shell (spec, Readers that only look)
+  const pane = markedPane(runDir);
+  if (pane && ownerLineOpen(pane, { release: false })) out(`supervisor         ${pane}  [owner's line open]`);
   for (const [stage, v] of Object.entries(reviewStats().by_stage)) out(`review ${stage}: first-pass rejection ${v.rejected}/${v.first_passes}${v.last_7d?.first_passes ? `, last ${RECENT_DAYS} days ${v.last_7d.rejected}/${v.last_7d.first_passes}` : ''}`);
 }
 
@@ -6246,6 +6512,19 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
     const own = settingsAt(sha, { orNull: true });
     if (own && Object.hasOwn(own, 'recurring')) fails.push(recurringRegistry.inSettings());
   }
+  // a PR changing self.md: its contract, its parts' paths and the names hold (selfDraftLines), every kind
+  if (R.name === 'home' && mainRef()) {
+    const held = selfDraftLines(git(['merge-base', mainRef(), sha]), sha, branch);
+    fails.push(...held.fails);
+    for (const w of held.warns) out(`warn: ${w}`);
+  }
+  // a PR changing exterior.md: steps 1 to 3 at the head, the names rule and its words over every
+  // version (exteriorDraftLines, kit-135); with no main, one warning
+  if (R.name === 'home') {
+    const held = exteriorDraftLines(mainRef() ? git(['merge-base', mainRef(), sha]) : null, sha, branch);
+    fails.push(...held.fails);
+    for (const w of held.warns) out(`warn: ${w}`);
+  }
   if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge, records, inHome }), ...depsFails(branch.slice('ticket/'.length), R)];
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);
@@ -7061,7 +7340,7 @@ function governanceView() {
     ? (git(['ls-tree', '--full-tree', '--name-only', main, '--', ...kitDirs.map((d) => `${kitRel}/${d}/`)], projectRoot) ?? '').split('\n')
     : kitDirs.flatMap((d) => { try { return fs.readdirSync(path.join(projectRoot, kitRel, d)).map((f) => `${kitRel}/${d}/${f}`); } catch { return []; } });
   const kit = kitDirs.flatMap((d) => listed.filter((p) => p.startsWith(`${kitRel}/${d}/`) && p.endsWith('.md')).sort().map((p) => ({ group: d, path: p })));
-  const project = [['strategy', 'Strategy'], ['exterior', 'Exterior']].map(([f, fallback]) => ({ group: 'project', path: `${projectRel}/${f}.md`, fallback, template: f === 'strategy' }));
+  const project = [['strategy', 'Strategy'], ['self', 'Self'], ['exterior', 'Exterior']].map(([f, fallback]) => ({ group: 'project', path: `${projectRel}/${f}.md`, fallback, template: f === 'strategy' }));
   const settingsRel = `${projectRel}/settings.md`;
   const newest = new Map();
   const syncs = new Set();
@@ -7088,7 +7367,7 @@ function governanceView() {
   const files = [...kit, ...project].map(({ group, path: p, fallback, template }) => {
     const text = at(p);
     // init's untouched strategy template counts as not written, by its marker line, as strategyState
-    // reads it; exterior.md has no template, so it is written once it exists
+    // reads it; self.md and exterior.md have no template, so each is written once it exists
     const written = text !== null && !(template && text.includes(STRATEGY_TEMPLATE_MARK));
     const c = newest.get(p);
     const known = c && !shallow.has(c.sha);
@@ -7206,6 +7485,795 @@ worldFileFails.actOf = (ref) => {
   const b = String(ref).replace(/^refs\/heads\//, '');
   return b.startsWith('plan/') ? `plan-${b.slice(5)}` : b.startsWith('ticket/') && !b.startsWith('ticket/chore-') ? b.slice(7) : b;
 };
+/* self-model start */
+// project/self.md, what the project is (log.schema.json#self@1): a markdown file whose one fenced
+// `self` block holds the contract. The parser and the contract check follow
+// test/fixtures/world/check.mjs rule for rule, so the two refuse the same invalid/ cases; kit-135
+// reuses them for exterior.md.
+//
+// The fenced blocks of a markdown file. A fence is a line at column 0 of three or more backticks;
+// one opens a block when none is open, its info string the rest of the line, its spaces and tabs
+// trimmed (possibly empty). The block closes at the next line of at least as many backticks and
+// nothing else but spaces or tabs. Indented and ~~~ fences are prose. Lines split on \r?\n, so a
+// file saved with CRLF reads alike. Returns the blocks, the text outside every block (prose), and
+// the line of a block that never closes (or null).
+function fencedBlocks(text) {
+  const blocks = [];
+  const prose = [];
+  let open = null;
+  String(text).split(/\r?\n/).forEach((line, i) => {
+    const m = /^(`{3,})(.*)$/.exec(line);
+    if (!open) {
+      if (m) open = { ticks: m[1].length, info: m[2].replace(/^[ \t]+|[ \t]+$/g, ''), line: i + 1, body: [] };
+      else prose.push(line);
+    } else if (m && m[1].length >= open.ticks && /^[ \t]*$/.test(m[2])) {
+      blocks.push({ info: open.info, line: open.line, body: open.body.join('\n') });
+      open = null;
+    } else open.body.push(line);
+  });
+  return { blocks, prose: prose.join('\n'), unclosed: open ? open.line : null };
+}
+// Whether text names name: as whole words (no letter or digit just before or after), ignoring case.
+function namesWhole(text, name) {
+  const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![\\p{L}\\p{N}])${esc}(?![\\p{L}\\p{N}])`, 'iu').test(text);
+}
+// A self.md's or exterior.md's contract errors (doc 'self' or 'exterior'), empty when it holds.
+// The fence, the other doc's block, one block, JSON, an object and the version stop at their first
+// error; the schema ($defs[doc].block) gives every error; self's part ids are unique once the schema
+// holds. Exterior's own rules past the schema are kit-135's.
+function worldDocErrors(text, doc) {
+  const home = { self: 'self.md', exterior: 'exterior.md' };
+  const other = doc === 'self' ? 'exterior' : 'self';
+  const article = (w) => (/^[aeiou]/.test(w) ? 'an' : 'a');
+  const b = fencedBlocks(text);
+  if (b.unclosed) return [`a fenced block opened at line ${b.unclosed} never closes`];
+  if (b.blocks.some((x) => x.info === other)) return [`${article(other)} ${other} block belongs in ${home[other]}, not ${home[doc]}`];
+  const mine = b.blocks.filter((x) => x.info === doc);
+  if (mine.length === 0) return [`no ${doc} block`];
+  if (mine.length > 1) return [`more than one ${doc} block`];
+  let v;
+  try {
+    v = JSON.parse(mine[0].body);
+  } catch (e) {
+    return [`the ${doc} block is not JSON: ${e.message}`];
+  }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return [`the ${doc} block is not a JSON object`];
+  if (Number.isInteger(v[doc]) && v[doc] > 1) return [`${doc}: ${v[doc]} needs a newer kit`];
+  const errs = schemaErrors(SCHEMA.$defs[doc].block, v, doc);
+  if (errs.length) return errs;
+  if (doc === 'self') {
+    const seen = new Set();
+    v.parts.forEach((p, i) => {
+      if (seen.has(p.id)) errs.push(`self.parts[${i}].id "${p.id}" is shared`);
+      seen.add(p.id);
+    });
+  }
+  return errs;
+}
+// A self.md's text in: its parsed self block (null unless it holds) and its contract errors.
+function selfDoc(text) {
+  const errors = worldDocErrors(text, 'self');
+  if (errors.length) return { block: null, errors };
+  return { block: JSON.parse(fencedBlocks(text).blocks.find((x) => x.info === 'self').body), errors };
+}
+// A part's code path as the disk and git checks both read it: split on /, empty and . segments
+// dropped, joined. '' is the repo root. (The schema refuses a leading / and any .. segment.)
+function partPath(p) {
+  return String(p).split('/').filter((s) => s !== '' && s !== '.').join('/');
+}
+// The parts' code paths that has(partPath(p)) doesn't find: [{ part, path }], each path as written,
+// once, in file order.
+function selfPathsMissing(block, has) {
+  const missing = [];
+  const seen = new Set();
+  for (const p of block.parts) for (const c of p.code) {
+    if (seen.has(c)) continue;
+    seen.add(c);
+    if (!has(partPath(c))) missing.push({ part: p.id, path: c });
+  }
+  return missing;
+}
+// Whether a normalised path is on disk under the repo root, each segment matched by its exact case
+// (as git reads it), so App/ is missing beside app/ on a disk that folds case too.
+function hasOnDisk(n) {
+  let dir = projectRoot;
+  for (const seg of n === '' ? [] : n.split('/')) {
+    let names;
+    try { names = fs.readdirSync(dir); } catch { return false; }
+    if (!names.includes(seg)) return false;
+    dir = path.join(dir, seg);
+  }
+  return true;
+}
+// Whether a normalised path is in a commit's tree.
+const hasAt = (commit) => (n) => n === '' || git(['cat-file', '-e', `${commit}:${n}`]) !== null;
+const selfRel = () => `${projectRel}/self.md`;
+// main's self.md, or null when main has none; with no main, or the project outside the repo, the
+// working tree's (as strategyState reads the strategy).
+function selfMainText() {
+  return projectInRepo && mainRef() ? git(['show', `${mainRef()}:${selfRel()}`]) : readText(path.join(projectDir, 'self.md'));
+}
+// dashboard-data's self block (log.schema.json#self@1 dashboard): main's self.md as check.mjs's
+// dashboardSelf gives it, or null when main has none or it breaks the contract.
+function selfDashboard() {
+  const text = selfMainText();
+  const b = text === null ? null : selfDoc(text).block;
+  return b && { what: b.what, makes: b.makes, parts: b.parts.map((p) => ({ id: p.id, name: p.name, what: p.what, code: p.code })), controls: b.controls, not: b.not };
+}
+// The names rule. A draft is pushed, and on a repo not known to be private it is public, so a
+// capitalised word main's strategy and dependency files don't contain is one to check before then:
+// a name of someone the project may not want named in public. A heuristic: a lowercase name is
+// never caught, and a one-word name that starts a sentence is skipped (spec §6).
+//
+// The capitalised words of pieces ([{ where, text, sentences }]): [{ word, where }], each word once,
+// at its first piece. A word is a run of letters, digits, ' ’ and - that starts with a letter, a
+// trailing 's or ’s (and then any trailing ' ’ or -) dropped; capitalised when its first letter is
+// upper case and it is two letters or more. With sentences, a sentence's first word is skipped: at
+// the start of the text, after a blank line, on a line that starts a markdown block (#, -, *, +,
+// >, | or 1.), after a | table cell, and after . ! or ? and a space. A newline inside a paragraph
+// (a wrapped line) starts nothing. Everything else counts, inline code, links and comments too.
+function capitalisedWords(pieces) {
+  const found = [];
+  const seen = new Set();
+  for (const { where, text, sentences } of pieces) {
+    const s = String(text);
+    let prevEnd = null;
+    for (const m of s.matchAll(/[\p{L}][\p{L}\p{N}'’-]*/gu)) {
+      const gap = s.slice(prevEnd ?? 0, m.index);
+      const starts = prevEnd === null || /[.!?]\s/.test(gap) || /\n[ \t]*\r?\n/.test(gap) || /\n[ \t]*(?:[#*+>|-]|\d+\.)/.test(gap) || gap.includes('|');
+      prevEnd = m.index + m[0].length;
+      if (sentences && starts) continue;
+      const word = m[0].replace(/['’]s$/, '').replace(/['’-]+$/, '');
+      if (!/^\p{Lu}/u.test(word) || [...word].length < 2 || seen.has(word)) continue;
+      seen.add(word);
+      found.push({ word, where });
+    }
+  }
+  return found;
+}
+// The text the names rule reads, at ref: the project's strategy.md and the repo root's
+// package.json, Gemfile and requirements.txt, joined; a missing file reads as ''. With no ref, or
+// the project outside the repo, the working tree's.
+function namesAllowedText(ref = mainRef()) {
+  const at = (rel) => (projectInRepo && ref ? git(['show', `${ref}:${rel}`]) : readText(path.join(projectRoot, rel))) ?? '';
+  return [strategyRel, 'package.json', 'Gemfile', 'requirements.txt'].map(at).join('\n');
+}
+// The capitalised words of pieces that allowed doesn't name (as a whole word, ignoring case). The
+// one names function: self check, chore pr and check-pr use it, and kit-135 for exterior.md.
+function unknownNames(pieces, allowed) {
+  return capitalisedWords(pieces).filter((w) => !namesWhole(allowed, w.word));
+}
+// A self.md's pieces for the names rule. The text outside the self block ('prose', with sentences;
+// every other fenced block is in it), then the block's what, makes and each part's what (with
+// sentences), each part's name, controls[i] and not[i] (every word). The ids are left out, and so is
+// each code path has(partPath(p)) finds: it names a file already in the repo. One it doesn't (an
+// earlier blob's) is read like any text. With no parsed block, the whole file is one prose piece.
+function selfPieces(text, block, has) {
+  if (!block) return [{ where: 'prose', text: String(text), sentences: true }];
+  const lines = String(text).split(/\r?\n/);
+  const b = fencedBlocks(text).blocks.find((x) => x.info === 'self');
+  // the block's lines, opening fence to closing, become one blank line
+  lines.splice(b.line - 1, b.body.split('\n').length + 2, '');
+  const pieces = [{ where: 'prose', text: lines.join('\n'), sentences: true }];
+  const add = (where, t, sentences) => pieces.push({ where, text: t, sentences });
+  add('what', block.what, true);
+  add('makes', block.makes, true);
+  block.parts.forEach((p, i) => {
+    add(`parts[${i}].name`, p.name, false);
+    add(`parts[${i}].what`, p.what, true);
+    p.code.forEach((c, j) => { if (!has(partPath(c))) add(`parts[${i}].code[${j}]`, c, false); });
+  });
+  block.controls.forEach((c, i) => add(`controls[${i}]`, c, false));
+  block.not.forEach((c, i) => add(`not[${i}]`, c, false));
+  return pieces;
+}
+// One self.md blob's unknown words: its pieces (the whole text as prose when the contract fails, so
+// a broken draft's words still count), less what allowed names.
+function selfWords(text, has, allowed) {
+  return unknownNames(selfPieces(text, selfDoc(text).block, has), allowed);
+}
+// Whether a strategy links self.md: in its prose (outside every fenced block), an inline link to
+// self.md or ./self.md (an optional #anchor and "title"), or a reference definition naming it.
+function linksSelf(strategyText) {
+  const prose = fencedBlocks(strategyText ?? '').prose;
+  return /\]\(\s*(?:\.\/)?self\.md(?:#[^\s)]*)?(?:\s+"[^"]*")?\s*\)/.test(prose) || /^\s*\[[^\]]+\]:\s*(?:\.\/)?self\.md(?:#\S*)?\s*$/m.test(prose);
+}
+// main's strategy.md, as strategyState reads it, or null when missing.
+const strategyMainText = () => (projectInRepo && mainRef() ? git(['show', `${mainRef()}:${strategyRel}`]) : readText(path.join(projectDir, 'strategy.md')));
+// metrics' self findings, read from main (none with no main, or the project outside the repo), each
+// keyed so observeFindings keeps one observation per path or strategy blob: self-drift once per part
+// path missing at main while main's self.md holds; self-unlinked while main has a self.md its
+// strategy doesn't link; self-missing while the strategy is written and main has no self.md, its
+// next step the strategy-change link first when the strategy doesn't link it. All low.
+function selfFindings(add) {
+  const main = projectInRepo ? mainRef() : null;
+  if (!main) return;
+  const text = selfMainText();
+  const strategy = strategyMainText();
+  const strategyKey = git(['rev-parse', '--verify', '--quiet', `${main}:${strategyRel}`]) ?? undefined;
+  const linked = linksSelf(strategy);
+  if (text !== null) {
+    const { block } = selfDoc(text);
+    if (block) for (const m of selfPathsMissing(block, hasAt(main))) add('low', 'self-drift', 'self', `part ${m.part}'s path ${m.path} is not on main`, 'the code moved: draft a new self.md in a chore (self check, then chore pr and ask self-change; supervisor.md, Monitoring)', { key: m.path });
+    if (!linked) add('low', 'self-unlinked', 'self', 'main has self.md and its strategy.md does not link it', 'propose a strategy-change linking [self.md](./self.md) in place of any lines restating what the project is, in its own PR', { key: strategyKey });
+  } else if (strategyState() === 'written') {
+    const draft = 'draft self.md from the code and the strategy in a chore, run self check, and ask self-change (supervisor.md, Monitoring)';
+    add('low', 'self-missing', 'self', 'the strategy is written and main has no self.md', linked ? draft : `first propose a strategy-change linking [self.md](./self.md), in its own PR; then ${draft}`, { key: strategyKey });
+  }
+}
+// The draft's history. Every self.md blob the branch carries since its merge base is pushed with it
+// and lands with merge --no-ff, so the names rule reads each, not only the head's.
+//
+// Every distinct blob of rel that a commit in base..head introduces, oldest first: [{ commit, blob }].
+// A commit's entry is kept only when it is a plain file (mode 100644 or 100755: a folder, link or
+// submodule is the owner's-files gate's to refuse), and only when its blob is neither base's nor any
+// parent's at rel (a merge bringing main's blob in introduces nothing). A commit with no file is
+// skipped. With no base, head's whole history is read. kit-135 reuses it for exterior.md.
+function draftBlobs(base, head, rel) {
+  const blobAt = (c) => {
+    const m = /^(\d{6}) (\w+) ([0-9a-f]+)\t/.exec(git(['ls-tree', c, '--', rel], mainRoot) ?? '');
+    return m && m[2] === 'blob' && (m[1] === '100644' || m[1] === '100755') ? m[3] : null;
+  };
+  const listed = git(['rev-list', '--reverse', '--full-history', '--parents', head, ...(base ? [`^${base}`] : []), '--', rel], mainRoot);
+  const known = new Set();
+  if (base) known.add(git(['rev-parse', '--verify', '--quiet', `${base}:${rel}`], mainRoot));
+  const found = [];
+  for (const line of (listed ?? '').split('\n').filter(Boolean)) {
+    const [commit, ...parents] = line.split(' ');
+    const blob = blobAt(commit);
+    if (!blob || known.has(blob) || parents.some((p) => git(['rev-parse', '--verify', '--quiet', `${p}:${rel}`], mainRoot) === blob)) continue;
+    known.add(blob);
+    found.push({ commit, blob });
+  }
+  return found;
+}
+// The words of every draft blob of rel in base..head, as wordsOf(text, has) gives them, with has the
+// head's tree (a path the head has names the project's own file; one it lacks is read as text):
+// [{ word, where, commit }]. The head's own blob first, its words carrying commit null; then each
+// earlier blob, oldest first, a word only it holds carrying its commit. Each word once, at its first place.
+function draftWords(base, head, rel, wordsOf) {
+  const has = hasAt(head);
+  const headBlob = git(['rev-parse', '--verify', '--quiet', `${head}:${rel}`], mainRoot);
+  const blobs = draftBlobs(base, head, rel);
+  const order = [...blobs.filter((b) => b.blob === headBlob).map((b) => ({ ...b, commit: null })), ...blobs.filter((b) => b.blob !== headBlob)];
+  const words = [];
+  const seen = new Set();
+  for (const { commit, blob } of order) {
+    for (const w of wordsOf(git(['cat-file', 'blob', blob], mainRoot) ?? '', has)) {
+      if (seen.has(w.word)) continue;
+      seen.add(w.word);
+      words.push({ word: w.word, where: w.where, commit });
+    }
+  }
+  return words;
+}
+// The repo's visibility as GitHub says, for the names hold: origin's repo by name (never gh's own
+// default), PUBLIC public, PRIVATE or INTERNAL private, anything else (no owner/repo for origin, gh
+// missing, logged out, offline, or past its timeout: 15 s, DEVTEAM_GH_TIMEOUT_MS for tests) unknown,
+// which holds like public. Each answer is recorded, whole, in run/repo-visibility.json for metrics
+// (lastRepoVisibility), which makes no network call.
+const REPO_VISIBILITY = runPath('repo-visibility.json');
+function repoVisibility() {
+  const spec = ghSpec(git(['config', '--get', 'remote.origin.url']));
+  const said = spec ? repo('home').gh(['repo', 'view', spec, '--json', 'visibility', '--jq', '.visibility'], { cwd: mainRoot, timeout: Number(process.env.DEVTEAM_GH_TIMEOUT_MS) || 15000, killSignal: 'SIGKILL' }) : null;
+  const visibility = said === 'PUBLIC' ? 'public' : said === 'PRIVATE' || said === 'INTERNAL' ? 'private' : 'unknown';
+  try { writeJson(REPO_VISIBILITY, { visibility, at: new Date().toISOString() }); } catch {}
+  return visibility;
+}
+function lastRepoVisibility() {
+  try {
+    const v = readJson(REPO_VISIBILITY).visibility;
+    return ['public', 'private', 'unknown'].includes(v) ? v : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+// The words the supervisor has checked for act's draft of scope ('self', or kit-135's 'exterior'):
+// those its names-checked acts name (each a name:<word> ref, matched exactly) whose refs include act,
+// logged at or after since (the branch's merge base's committer time, in ms, as Date.parse reads the
+// log's created_at; not a finite number: nothing counts, failing closed). Only a chore's act clears
+// anything: a plan or ticket PR has no chore to name it on.
+function namesChecked(act, scope, since) {
+  const words = new Set();
+  if (!String(act).startsWith('chore-')) return words;
+  const from = Number.isFinite(since) ? since : Infinity;
+  for (const a of logObjects('act')) {
+    if (a.class !== 'names-checked' || a.scope !== scope || writerClass(a.created_by) !== 'supervisor') continue;
+    const refs = Array.isArray(a.refs) ? a.refs : [];
+    if (!refs.includes(act) || !(Date.parse(a.created_at) >= from)) continue;
+    for (const r of refs) if (typeof r === 'string' && r.startsWith('name:')) words.add(r.slice(5));
+  }
+  return words;
+}
+// check-pr's names rule for a draft: each word of words ([{ word, where, commit }]) not in checked
+// is a fail on a public repo and a warning on an unknown one; a private repo holds nothing.
+// visibility is called only when a word is unchecked, so a PR without one makes no gh call.
+function namesHoldLines({ rel, words, act, checked, visibility }) {
+  const open = words.filter((w) => !checked.has(w.word));
+  if (!open.length) return { fails: [], warns: [] };
+  const v = visibility();
+  if (v === 'private') return { fails: [], warns: [] };
+  const chore = String(act).startsWith('chore-');
+  const tail = chore
+    ? `; check it and name it on the chore (chore pr ${String(act).slice(6)} --names-checked …), or reword it; if you named it with chore pr --names-checked and this check runs where the live log isn't (a forge's CI), land the log (log-sync, then merge --chore log) and run the check again`
+    : `; a plan or ticket PR has no chore to name it on, so reword it (a change to ${path.basename(rel)} belongs in a chore)`;
+  const lines = open.map((w) => `${rel} names "${w.word}" (${w.where})${w.commit ? ` in ${w.commit.slice(0, 12)}` : ''}, which main's strategy.md and dependency files don't, on a public repo${tail}`);
+  return v === 'public' ? { fails: lines, warns: [] } : { fails: [], warns: lines };
+}
+// The names-checked act chore pr logs once every word is named: the words, the draft's blob, the chore.
+function logNamesChecked(slug, rel, blob, words) {
+  const scope = path.basename(rel, '.md');
+  return appendLog({ type: 'act', class: 'names-checked', scope, what: `checked the names ${words.join(', ')} in ${rel} (blob ${String(blob).slice(0, 12)}) before pushing chore-${slug}`, refs: [`chore-${slug}`, ...words.map((w) => `name:${w}`)], reversible: false }, 'supervisor');
+}
+// chore pr's hold on a self.md draft (spec §3.3), run after its commit and before its push: the
+// contract and each part's path at head, then the names of every draft blob. Returns null to push
+// (any warnings printed), or the refusal. named: the --names-checked words, or null.
+function choreSelfHold(slug, base, head, named, exteriorChanged = false) {
+  const rel = selfRel();
+  if (!projectInRepo || !draftBlobs(base, head, rel).length) return named && !exteriorChanged ? 'chore pr: --names-checked is for a chore changing self.md or exterior.md' : null;
+  if (git(['cat-file', '-e', `${head}:${rel}`], mainRoot) !== null) {
+    const { block, errors } = selfDoc(git(['show', `${head}:${rel}`], mainRoot) ?? '');
+    if (errors.length) return `chore pr: self.md breaks self@1: ${errors.join('; ')}; run self check`;
+    const missing = selfPathsMissing(block, hasAt(head));
+    if (missing.length) return missing.map((m) => `chore pr: part ${m.part}'s path ${m.path} is not at ${head.slice(0, 12)}`).join('\n');
+  }
+  const allowed = namesAllowedText();
+  const words = draftWords(base, head, rel, (text, has) => selfWords(text, has, allowed));
+  const shown = (w) => `"${w.word}" (${w.where})${w.commit ? ` in ${w.commit.slice(0, 12)}` : ''}`;
+  const open = words.filter((w) => !named?.has(w.word));
+  if (open.length) {
+    const v = repoVisibility();
+    if (v === 'private') {
+      for (const w of open) warn(`self.md: ${shown(w)} is in neither main's strategy.md nor its package.json, Gemfile or requirements.txt: the repo is private, so it may be pushed`);
+      return null;
+    }
+    const lines = [`chore pr: self.md names words main's strategy.md and dependency files don't, and ${v === 'public' ? 'this repo is public' : 'this repo\'s visibility is unknown'}, so the draft is public once pushed: ${open.map(shown).join(', ')}; reword them, or check each and name it: --names-checked ${words.map((w) => w.word).join(',')}`];
+    const theirs = git(['ls-remote', 'origin', `refs/heads/chore-${slug}`], mainRoot)?.split('\t')[0] || null;
+    for (const c of [...new Set(open.map((w) => w.commit).filter(Boolean))]) {
+      const pushed = theirs && git(['merge-base', '--is-ancestor', c, theirs], mainRoot) !== null;
+      lines.push(`${c.slice(0, 12)}: ${pushed ? `that commit is pushed already, so the word is public on chore-${slug}: name it once checked, or start the chore again from main (chore drop ${slug} --reason "…", then chore start ${slug} --fresh)` : `that commit is not pushed yet: drop it from the branch (git -C .worktrees/chore-${slug} rebase or reset) and run chore pr again, or check and name the word`}`);
+    }
+    return lines.join('\n');
+  }
+  if (named && words.length) logNamesChecked(slug, rel, git(['rev-parse', '--verify', '--quiet', `${head}:${rel}`], mainRoot) ?? draftBlobs(base, head, rel).pop().blob, words.map((w) => w.word));
+  return null;
+}
+// check-pr's hold on a PR changing self.md (spec §3.3), for checkPr in home: when a commit in
+// merge-base..sha changes it, the contract at sha and each part's path there (both only while sha
+// holds the file: a deletion is kit-138's gate), then namesHoldLines over every draft blob, whether
+// or not the contract holds. { fails, warns }.
+function selfDraftLines(base, sha, branch) {
+  const rel = selfRel();
+  if (!projectInRepo || !draftBlobs(base, sha, rel).length) return { fails: [], warns: [] };
+  const fails = [];
+  if (git(['cat-file', '-e', `${sha}:${rel}`], mainRoot) !== null) {
+    const { block, errors } = selfDoc(git(['show', `${sha}:${rel}`], mainRoot) ?? '');
+    fails.push(...errors.map((e) => `${rel} breaks self@1 at ${sha.slice(0, 12)}: ${e}`));
+    if (block) fails.push(...selfPathsMissing(block, hasAt(sha)).map((m) => `${rel}: part ${m.part}'s path ${m.path} is not at ${sha.slice(0, 12)}`));
+  }
+  const allowed = namesAllowedText();
+  const words = draftWords(base, sha, rel, (text, has) => selfWords(text, has, allowed));
+  const act = worldFileFails.actOf(branch);
+  const ct = base ? git(['show', '-s', '--format=%ct', base], mainRoot) : null;
+  const since = ct && /^\d+$/.test(ct) ? Number(ct) * 1000 : NaN;
+  const names = namesHoldLines({ rel, words, act, checked: namesChecked(act, 'self', since), visibility: repoVisibility });
+  return { fails: [...fails, ...names.fails], warns: names.warns };
+}
+const SELF_NOT_DRAFTED = 'self.md is not drafted yet: the supervisor drafts it from the code and the strategy (supervisor.md, Monitoring)';
+// self show [--json]: main's self.md. self check: the working tree's, the draft, against the
+// contract and each part's path on disk (errors, exit 1), then the names rule and whether main's
+// strategy links self.md (warnings, the exit unchanged).
+function cmdSelf() {
+  const sub = positional[0];
+  if (sub === 'show') {
+    gitReadCache = new Map();
+    const text = selfMainText();
+    if (text === null) return flags.json ? json(null) : out(SELF_NOT_DRAFTED);
+    const { block: b, errors } = selfDoc(text);
+    if (errors.length) {
+      for (const e of errors) out(`error: self.md: ${e}`);
+      process.exit(1);
+    }
+    if (flags.json) return json(selfDashboard());
+    const list = (xs) => (xs.length ? xs.join('; ') : 'nothing listed');
+    out(`Self: ${selfRel()} ${projectInRepo && mainRef() ? 'on main' : 'in the working tree'}`);
+    out(`What it is: ${b.what}`);
+    out(`What it makes or does: ${b.makes}`);
+    out('Parts:');
+    for (const p of b.parts) out(`  ${p.id}  ${p.name}: ${p.what} (${p.code.join(', ')})`);
+    out(`Controls: ${list(b.controls)}`);
+    out(`Does not control: ${list(b.not)}`);
+    return;
+  }
+  if (sub === 'check') {
+    const text = readText(path.join(projectDir, 'self.md'));
+    if (text === null) return out(SELF_NOT_DRAFTED);
+    const { block, errors } = selfDoc(text);
+    for (const e of errors) out(`error: self.md: ${e}`);
+    const missing = block ? selfPathsMissing(block, hasOnDisk) : [];
+    for (const m of missing) out(`error: self.md: part ${m.part}'s path ${m.path} is not in the repo`);
+    gitReadCache = new Map();
+    for (const w of selfWords(text, hasOnDisk, namesAllowedText())) out(`warning: self.md: "${w.word}" (${w.where}) is in neither main's strategy.md nor its package.json, Gemfile or requirements.txt: on a repo not known to be private, the draft is public once its branch is pushed`);
+    if (selfMainText() !== null && !linksSelf(strategyMainText())) out('warning: main\'s strategy.md does not link self.md: propose a strategy-change adding [self.md](./self.md), in its own PR');
+    process.exit(errors.length || missing.length ? 1 : 0);
+  }
+  die('usage: self show [--json] | self check');
+}
+/* self-model end */
+/* world-model start */
+// project/exterior.md, what the project relates to (log.schema.json#exterior@1): a markdown file whose
+// one fenced `exterior` block holds the contract. Rules 1 to 7 are kit-139's worldDocErrors; 8 to 10
+// follow test/fixtures/world/check.mjs, so the two refuse the same invalid/ cases.
+const EXTERIOR_REL = () => `${projectRel}/exterior.md`;
+const EXTERIOR_NOT_DRAFTED = 'exterior.md is not drafted yet: the supervisor drafts it from the strategy and self.md (supervisor.md, Monitoring)';
+// An exterior.md's text in: its parsed block (null unless it holds) and its contract errors. Past the
+// schema: an id shared across entities and signals (8), relation_word only and always for other (9),
+// and the prose outside the block naming each entity, as whole words in any case (10).
+function exteriorDoc(text) {
+  const errors = worldDocErrors(text, 'exterior');
+  if (errors.length) return { block: null, errors };
+  const b = fencedBlocks(text);
+  const v = JSON.parse(b.blocks.find((x) => x.info === 'exterior').body);
+  const seen = new Set();
+  const ids = v.entities.flatMap((e, i) => [[`exterior.entities[${i}].id`, e.id], ...e.signals.map((x, j) => [`exterior.entities[${i}].signals[${j}].id`, x.id])]);
+  for (const [where, id] of ids) {
+    if (seen.has(id)) errors.push(`${where} "${id}" is shared`);
+    seen.add(id);
+  }
+  v.entities.forEach((e, i) => {
+    if (e.relation === 'other' && e.relation_word === undefined) errors.push(`exterior.entities[${i}].relation_word is required when relation is other`);
+    if (e.relation !== 'other' && e.relation_word !== undefined) errors.push(`exterior.entities[${i}].relation_word is only for relation other`);
+    if (!namesWhole(b.prose, e.name)) errors.push(`exterior.entities[${i}] "${e.name}": the prose outside the block never names it`);
+  });
+  return { block: errors.length ? null : v, errors };
+}
+const exteriorTreeText = () => readText(path.join(projectDir, 'exterior.md'));
+// The head's strategy.md and self.md blobs (null for no file): ref's, or with ref null the working
+// tree's (git hash-object, so an uncommitted draft counts), with the strategy's text when it was read
+// from the tree (a blob hash-object didn't write can't be read back with cat-file).
+function headBlobs(ref, root = projectDir) {
+  const rels = { strategy: strategyRel, self: `${projectRel}/self.md` };
+  if (ref) {
+    const at = (rel) => git(['rev-parse', '--verify', '--quiet', `${ref}:${rel}`], mainRoot);
+    return { strategyBlob: at(rels.strategy), selfBlob: at(rels.self), strategyText: null };
+  }
+  const tree = (name) => { const f = path.join(root, name); return fs.existsSync(f) ? git(['hash-object', '--', f], mainRoot) : null; };
+  return { strategyBlob: tree('strategy.md'), selfBlob: tree('self.md'), strategyText: readText(path.join(root, 'strategy.md')) };
+}
+// Whether validate is at the draft: main can be read and the working tree's exterior.md is not
+// main's (none on main counts as differing). With no main (a depth-1 CI checkout) it is not: the
+// stale state never errors, and check-pr and merge --chore run the draft's checks (spec, The check).
+function exteriorAtDraft() {
+  if (!projectInRepo || !mainRef()) return false;
+  const f = path.join(projectDir, 'exterior.md');
+  if (!fs.existsSync(f)) return false;
+  return git(['hash-object', '--', f], mainRoot) !== git(['rev-parse', '--verify', '--quiet', `${mainRef()}:${EXTERIOR_REL()}`], mainRoot);
+}
+// Steps 2 and 3 of the check (spec, The check). Each quote is a verbatim part of the strategy_blob
+// object's text, always; a strategy_blob the repo can't read is an error at the draft and a warning
+// otherwise. At the draft, strategy_blob and self_blob are the head's strategy.md and self.md.
+function exteriorBlobLines(block, { draft, strategyBlob, selfBlob, strategyText = null }) {
+  const errors = [];
+  const warnings = [];
+  const sb = block.strategy_blob;
+  const text = strategyText !== null && sb === strategyBlob ? strategyText : git(['cat-file', 'blob', sb], mainRoot);
+  if (text === null) (draft ? errors : warnings).push(`strategy_blob ${sb.slice(0, 12)}: the repo can't read it, so its quotes go unchecked`);
+  else block.entities.forEach((e, i) => e.strategy.forEach((q, j) => {
+    if (!String(text).includes(q)) errors.push(`exterior.entities[${i}].strategy[${j}] "${q}" is not found in strategy.md at ${sb.slice(0, 8)}`);
+  }));
+  if (draft) {
+    if (sb !== strategyBlob) errors.push(`strategy_blob is not the head's strategy.md: draft from it (it names ${sb.slice(0, 12)}; the head's is ${strategyBlob ? strategyBlob.slice(0, 12) : 'missing'})`);
+    if (!selfBlob) errors.push('there is no self.md at the head: draw self.md first');
+    else if (block.self_blob !== selfBlob) errors.push(`self_blob is not the head's self.md: draw from it (it names ${block.self_blob.slice(0, 12)}; the head's is ${selfBlob.slice(0, 12)})`);
+  }
+  return { errors, warnings };
+}
+// A file at ref (the repo root's rel), or null: with ref null, nothing; with the project outside the
+// repo, the working tree's (as namesAllowedText reads it).
+const fileAtRef = (rel, ref) => (!ref ? null : projectInRepo ? git(['show', `${ref}:${rel}`], mainRoot) : readText(path.join(projectRoot, rel)));
+// The dependency names at ref, one per line (text): the keys of package.json's dependencies and
+// devDependencies (each only when a plain object), each Gemfile gem (quoted either way, with or
+// without parentheses), each requirements.txt name (comments stripped, cut at the first of =<>!~[;@
+// or a space). A file missing gives no names; a package.json that isn't JSON gives none and a warning.
+function dependencyNames(ref = mainRef()) {
+  const names = [];
+  const warnings = [];
+  const pkg = fileAtRef('package.json', ref);
+  if (pkg !== null) {
+    let v;
+    try { v = JSON.parse(pkg); } catch { warnings.push(`package.json at ${ref} is not JSON: its dependencies allow no names`); }
+    for (const k of ['dependencies', 'devDependencies']) if (isObj(v) && isObj(v[k])) names.push(...Object.keys(v[k]));
+  }
+  for (const line of (fileAtRef('Gemfile', ref) ?? '').split(/\r?\n/)) {
+    const m = /^\s*gem\s*\(?\s*(['"])([^'"]+)\1/.exec(line);
+    if (m) names.push(m[2]);
+  }
+  for (const line of (fileAtRef('requirements.txt', ref) ?? '').split(/\r?\n/)) {
+    const name = line.replace(/#.*/, '').trim().split(/[=<>!~[;@\s]/)[0];
+    if (name) names.push(name);
+  }
+  return { text: names.join('\n'), warnings };
+}
+// The names rule (spec, The names rule): an organisation or work is allowed when origin main's
+// strategy.md names it as whole words in any case, or, for depends_on, its dependency names do. The
+// branch's own strategy never counts; with no ref, nothing allows it. A group is never checked here
+// (its words are, in exteriorWords). refused: [{ index, name, line }]; warnings: the dependency files'.
+function exteriorNameLines(block, ref = mainRef()) {
+  const strategy = fileAtRef(strategyRel, ref) ?? '';
+  const deps = dependencyNames(ref);
+  const refused = [];
+  block.entities.forEach((e, i) => {
+    if (e.kind !== 'organisation' && e.kind !== 'work') return;
+    const dep = e.relation === 'depends_on';
+    if (namesWhole(strategy, e.name) || (dep && namesWhole(deps.text, e.name))) return;
+    refused.push({ index: i, name: e.name, line: `exterior.entities[${i}] "${e.name}" (${e.kind}) is not named in origin main's strategy.md${dep ? ', nor its dependency files' : ''}: name it as a group, or have the strategy name it first` });
+  });
+  return { refused, warnings: deps.warnings };
+}
+// An exterior.md's pieces for kit-139's capitalised words: the text outside the exterior block
+// (sentences; every other fenced block is in it, as selfPieces reads self.md), each name (every word, so a group's first word counts), each matters, strategy quote and signal
+// what (sentences), and each relation_word. With no parsed block, the whole text as prose.
+function exteriorPieces(text, block) {
+  if (!block) return [{ where: 'prose', text: String(text), sentences: true }];
+  const lines = String(text).split(/\r?\n/);
+  const b = fencedBlocks(text).blocks.find((x) => x.info === 'exterior');
+  // the block's lines, opening fence to closing, become one blank line
+  lines.splice(b.line - 1, b.body.split('\n').length + 2, '');
+  const pieces = [{ where: 'prose', text: lines.join('\n'), sentences: true }];
+  const add = (where, t, sentences) => pieces.push({ where, text: t, sentences });
+  block.entities.forEach((e, i) => {
+    add(`entities[${i}].name`, e.name, false);
+    add(`entities[${i}].matters`, e.matters, true);
+    e.strategy.forEach((q, j) => add(`entities[${i}].strategy[${j}]`, q, true));
+    e.signals.forEach((x, j) => add(`entities[${i}].signals[${j}].what`, x.what, true));
+    if (e.relation_word !== undefined) add(`entities[${i}].relation_word`, e.relation_word, false);
+  });
+  return pieces;
+}
+// One exterior.md text's words that origin main's strategy and dependency files don't name.
+function exteriorWords(text, block, ref = mainRef()) {
+  return unknownNames(exteriorPieces(text, block), `${namesAllowedText(ref)}\n${dependencyNames(ref).text}`);
+}
+const exteriorWordLine = (w) => `"${w.word}" (${w.where}) is in neither origin main's strategy.md nor its dependency files: on a repo not known to be private, the draft is public once its branch is pushed; reword it, or check it and name it on the chore (chore pr --names-checked)`;
+// The draft's history (spec, The check, every version): steps 1 to 3 on head ({ text, blobs }, or
+// null when there is no exterior.md at the head), then the names rule and the words on each version
+// ([{ commit, text }], commit null for the head's own, each name and word kept at its first version).
+// { errors, warns, named: [{ line, commit }], words: [{ word, where, commit }] }.
+function exteriorVersionsScan(head, versions) {
+  const errors = [];
+  const warns = [];
+  if (head) {
+    const { block, errors: e } = exteriorDoc(head.text);
+    errors.push(...e);
+    if (block) { const b = exteriorBlobLines(block, { draft: true, ...head.blobs }); errors.push(...b.errors); warns.push(...b.warnings); }
+  }
+  const named = [];
+  const words = [];
+  const seen = new Set();
+  let depWarns = null;
+  for (const { commit, text } of versions) {
+    const block = exteriorDoc(text).block;
+    if (block) {
+      const n = exteriorNameLines(block);
+      depWarns ??= n.warnings;
+      for (const r of n.refused) if (!seen.has(`n:${r.name}`)) { seen.add(`n:${r.name}`); named.push({ line: r.line, commit }); }
+    }
+    for (const w of exteriorWords(text, block)) if (!seen.has(`w:${w.word}`)) { seen.add(`w:${w.word}`); words.push({ ...w, commit }); }
+  }
+  warns.push(...(depWarns ?? []));
+  return { errors, warns, named, words };
+}
+// A line's tail naming the commit that carries it, for a version that isn't the head's own.
+const exteriorCarries = (commit) => (commit ? `; commit ${commit.slice(0, 12)} carries it: rewrite the branch (once pushed, chore drop <slug> --reason "…" first; then git reset --soft origin/main and chore pr again)` : '');
+const EXTERIOR_NO_BASE = "no merge base with main: exterior.md's drafts can't be checked";
+// check-pr's hold on a PR changing exterior.md (spec, Commands), for checkPr in home: with exterior.md
+// at sha and a commit in merge-base..sha changing it, steps 1 to 3 at sha, and the names rule (public a
+// fail, unknown a warning, private nothing) and namesHoldLines over every version. With no
+// exterior.md at sha, steps 1 to 3 are skipped (a deletion of main's is kit-138's gate) but every
+// version since the base is still read: one added then deleted would land in main's history (final-1
+// F2). With no main, one warning (merge, which has main, checks it). { fails, warns }.
+function exteriorDraftLines(base, sha, branch) {
+  const rel = EXTERIOR_REL();
+  const none = { fails: [], warns: [] };
+  if (!projectInRepo) return none;
+  const headBlob = git(['rev-parse', '--verify', '--quiet', `${sha}:${rel}`], mainRoot);
+  if (!mainRef()) return headBlob ? { fails: [], warns: ["no main to compare with: exterior.md's drafts are not checked here; merge checks them"] } : none;
+  if (!base) return headBlob ? { fails: [EXTERIOR_NO_BASE], warns: [] } : none;
+  const blobs = draftBlobs(base, sha, rel);
+  if (!blobs.length) return none;
+  const read = (b) => git(['cat-file', 'blob', b], mainRoot) ?? '';
+  const versions = [...(headBlob ? [{ commit: null, text: read(headBlob) }] : []), ...blobs.filter((b) => b.blob !== headBlob).map((b) => ({ commit: b.commit, text: read(b.blob) }))];
+  const x = exteriorVersionsScan(headBlob ? { text: read(headBlob), blobs: headBlobs(sha) } : null, versions);
+  let vis;
+  const visibility = () => (vis ??= repoVisibility());
+  const contract = new Set(headBlob ? exteriorDoc(read(headBlob)).errors : []);
+  const fails = x.errors.map((e) => (contract.has(e) ? `${rel} breaks exterior@1 at ${sha.slice(0, 12)}: ${e}` : `${rel} at ${sha.slice(0, 12)}: ${e}`));
+  const warns = x.warns.map((w) => `${rel}: ${w}`);
+  if (x.named.length) {
+    const lines = x.named.map((n) => `${rel}: ${n.line}${exteriorCarries(n.commit)}`);
+    if (visibility() === 'public') fails.push(...lines);
+    else if (visibility() === 'unknown') warns.push(...lines);
+  }
+  const act = worldFileFails.actOf(branch);
+  const ct = git(['show', '-s', '--format=%ct', base], mainRoot);
+  const since = ct && /^\d+$/.test(ct) ? Number(ct) * 1000 : NaN;
+  const h = namesHoldLines({ rel, words: x.words, act, checked: namesChecked(act, 'exterior', since), visibility });
+  return { fails: [...fails, ...h.fails], warns: [...warns, ...h.warns] };
+}
+// chore pr's hold on an exterior.md draft (spec, Commands), every read in the chore's worktree wt.
+// phase 'tree', before git add: the working tree's exterior.md and every blob already committed
+// since base, so a name in a hand commit refuses before anything new is committed. phase 'range',
+// after the commit and before the push: every blob since base, the head's first. At the draft only:
+// the tree's file differs from main's, a commit since base changes it, or there is no origin main
+// (then only the tree and HEAD's blob are read). A refused name, or on a repo not known to be
+// private a word checkedWords doesn't name, fails; unknown visibility counts as not private.
+// { fails, warns, words (to log once named), changed }.
+function exteriorChoreLines(wt, phase, { base, checkedWords }) {
+  const rel = EXTERIOR_REL();
+  const none = { fails: [], warns: [], words: [], changed: false };
+  if (!projectInRepo) return none;
+  const head = git(['rev-parse', 'HEAD'], wt);
+  const at = (ref) => (ref ? git(['rev-parse', '--verify', '--quiet', `${ref}:${rel}`], wt) : null);
+  const headBlob = at(head);
+  const treeFile = path.join(wt, rel);
+  const treeText = phase === 'tree' ? readText(treeFile) : null;
+  const main = mainRef();
+  if (main && !base) return headBlob || treeText !== null ? { ...none, fails: [EXTERIOR_NO_BASE] } : none;
+  const blobs = main ? draftBlobs(base, head, rel) : headBlob ? [{ commit: head, blob: headBlob }] : [];
+  const treeDraft = treeText !== null && (!main || git(['hash-object', '--', treeFile], wt) !== at(main));
+  if (!treeDraft && !blobs.length) return none;
+  const read = (b) => git(['cat-file', 'blob', b], wt) ?? '';
+  const root = path.join(wt, projectRel);
+  let versions;
+  let headDoc;
+  if (phase === 'tree') {
+    versions = [...blobs.map((b) => ({ commit: b.commit, text: read(b.blob) })), ...(treeText !== null ? [{ commit: null, text: treeText }] : [])];
+    headDoc = treeText !== null ? { text: treeText, blobs: headBlobs(null, root) } : null;
+  } else {
+    versions = [...(headBlob ? [{ commit: null, text: read(headBlob) }] : []), ...blobs.filter((b) => b.blob !== headBlob).map((b) => ({ commit: b.commit, text: read(b.blob) }))];
+    headDoc = headBlob ? { text: read(headBlob), blobs: headBlobs(head) } : null;
+  }
+  const x = exteriorVersionsScan(headDoc, versions);
+  const fails = [...x.errors];
+  const warns = [...x.warns];
+  let vis;
+  const visibility = () => (vis ??= repoVisibility());
+  const unknown = "the repo's visibility is unknown, which counts as not private";
+  if (x.named.length && visibility() !== 'private') fails.push(...x.named.map((n) => `${n.line}${visibility() === 'unknown' ? ` (${unknown})` : ''}${exteriorCarries(n.commit)}`));
+  const shown = (w) => `"${w.word}" (${w.where})${w.commit ? ` in ${w.commit.slice(0, 12)}` : ''}`;
+  const open = x.words.filter((w) => !checkedWords?.has(w.word));
+  if (open.length && visibility() === 'private') warns.push(...open.map((w) => `${shown(w)} is in neither origin main's strategy.md nor its dependency files: the repo is private, so it may be pushed`));
+  else if (open.length) {
+    fails.push(`exterior.md names words origin main's strategy.md and dependency files don't, and ${visibility() === 'public' ? 'this repo is public' : unknown}, so the draft is public once pushed: ${open.map(shown).join(', ')}; reword them, or check each and name it: --names-checked ${x.words.map((w) => w.word).join(',')}`);
+    for (const c of [...new Set(open.map((w) => w.commit).filter(Boolean))]) fails.push(`${c.slice(0, 12)} carries a word: rewrite the branch (once pushed, chore drop ${path.basename(wt).replace(/^chore-/, '')} --reason "…" first; then git reset --soft origin/main and chore pr again), or check and name the word`);
+  }
+  return { fails, warns, words: open.length ? [] : x.words.map((w) => w.word), changed: true };
+}
+// exterior check's lines for the working tree's exterior.md (null text: none): the contract, the
+// blobs as at the draft, then (at the draft) the names rule by the repo's visibility (public an
+// error, unknown a warning, private nothing; gh asked only when a name is refused) and the words.
+// errors exit 1; warnings leave the exit as it is.
+function exteriorCheckLines({ draft = true } = {}) {
+  const text = exteriorTreeText();
+  if (text === null) return { errors: [], warnings: [] };
+  const { block, errors } = exteriorDoc(text);
+  if (!block) return { errors, warnings: draft ? exteriorWords(text, null).map(exteriorWordLine) : [] };
+  const r = exteriorBlobLines(block, { draft, ...headBlobs(null) });
+  if (!draft) return r;
+  const names = exteriorNameLines(block);
+  r.warnings.push(...names.warnings);
+  if (names.refused.length) {
+    const v = repoVisibility();
+    if (v === 'public') r.errors.push(...names.refused.map((x) => x.line));
+    else if (v === 'unknown') r.warnings.push(...names.refused.map((x) => `${x.line} (the repo's visibility is unknown, which counts as not private)`));
+  }
+  r.warnings.push(...exteriorWords(text, block).map(exteriorWordLine));
+  return r;
+}
+// validate's lines for the working tree's exterior.md: the contract and the quotes, and the blobs at
+// the draft (exteriorAtDraft); none when there is no file. Never the names rule.
+function exteriorValidateLines() {
+  const text = exteriorTreeText();
+  if (text === null) return { errors: [], warnings: [] };
+  const { block, errors } = exteriorDoc(text);
+  if (!block) return { errors, warnings: [] };
+  return exteriorBlobLines(block, { draft: exteriorAtDraft(), ...headBlobs(null) });
+}
+// The contract's relations, in the order show and the dashboard group them by.
+const EXTERIOR_RELATIONS = ['serves', 'depends_on', 'builds_on_it', 'alternative', 'collaborates', 'governs', 'affects', 'other'];
+// dashboard-data's exterior block (log.schema.json#exterior@1 dashboard), as check.mjs's
+// dashboardExterior gives it: file order, relation_word or null, each signal's score weight×value.
+function exteriorDashboard(block) {
+  return {
+    entities: block.entities.map((e) => ({
+      entity: e.id, relation: e.relation, relation_word: e.relation_word ?? null, kind: e.kind, name: e.name, matters: e.matters, weight: e.weight,
+      signals: e.signals.map((x) => ({ signal: x.id, what: x.what, value: x.value, score: e.weight * x.value })),
+    })),
+  };
+}
+// main's exterior.md: { text, blob }, or null when main has none; with no main, or the project
+// outside the repo, the working tree's (as selfMainText reads self.md).
+function exteriorOnMain() {
+  if (projectInRepo && mainRef()) {
+    const text = git(['show', `${mainRef()}:${EXTERIOR_REL()}`], mainRoot);
+    return text === null ? null : { text, blob: git(['rev-parse', '--verify', '--quiet', `${mainRef()}:${EXTERIOR_REL()}`], mainRoot) };
+  }
+  const text = exteriorTreeText();
+  return text === null ? null : { text, blob: null };
+}
+// exterior show's lines: the Self's what, then each relation that has entities, in the contract's
+// order; under it its entities in file order, each with why it matters and its signals by score,
+// high to low, ties in file order (a stable sort).
+function exteriorShowLines(block, selfWhat) {
+  const lines = [`Self: ${selfWhat ?? 'not drafted yet'}`];
+  if (!block.entities.length) return [...lines, 'no entity drawn yet'];
+  for (const rel of EXTERIOR_RELATIONS) {
+    const es = block.entities.filter((e) => e.relation === rel);
+    if (!es.length) continue;
+    lines.push('', rel);
+    for (const e of es) {
+      lines.push(`  ${e.name} (${e.kind}, weight ${e.weight})${e.relation === 'other' ? `: ${e.relation_word}` : ''}`, `    ${e.matters}`);
+      const sig = e.signals.map((x) => ({ score: e.weight * x.value, what: x.what })).sort((a, b) => b.score - a.score);
+      for (const x of sig) lines.push(`    ${x.score}  ${x.what}`);
+    }
+  }
+  return lines;
+}
+// metrics' exterior findings, read from main with no network call (none with no main), each low and
+// keyed so observeFindings keeps one observation per name or blob pair (spec, Findings):
+// exterior-drift once per organisation or work the names rule no longer allows against main's files,
+// unless the visibility last recorded is private; exterior-stale while main's strategy.md or self.md
+// blob isn't the one exterior.md drew from; exterior-missing while main has self.md, a strategy
+// linking it, and no exterior.md. A main exterior.md breaking the contract raises none (validate
+// errors on it).
+function exteriorFindings(add) {
+  const main = projectInRepo ? mainRef() : null;
+  if (!main) return;
+  const blobAt = (rel) => git(['rev-parse', '--verify', '--quiet', `${main}:${rel}`], mainRoot);
+  const strategyBlob = blobAt(strategyRel);
+  const selfBlob = blobAt(selfRel());
+  const pair = `${strategyBlob}-${selfBlob}`;
+  const m = exteriorOnMain();
+  if (!m) {
+    if (selfBlob && linksSelf(strategyMainText())) add('low', 'exterior-missing', 'exterior', 'main has self.md and a strategy linking it, and no exterior.md', 'draft exterior.md from the strategy and self.md (supervisor.md, Monitoring) in a chore, run exterior check, and ask exterior-change', { key: pair });
+    return;
+  }
+  const { block } = exteriorDoc(m.text);
+  if (!block) return;
+  if (lastRepoVisibility() !== 'private') {
+    for (const r of exteriorNameLines(block, main).refused) add('low', 'exterior-drift', 'exterior', `exterior.md names "${r.name}", which main's strategy.md${block.entities[r.index].relation === 'depends_on' ? ' and dependency files' : ''} no longer name`, 'draft a new version of exterior.md that names it as a group, or have the strategy name it; run exterior check before chore pr', { key: r.name.toLowerCase() });
+  }
+  if (block.strategy_blob !== strategyBlob || block.self_blob !== selfBlob) add('low', 'exterior-stale', 'exterior', `exterior.md drew from ${block.strategy_blob !== strategyBlob ? 'a strategy.md' : 'a self.md'} main has moved on from`, 're-read self.md first and draft a new one if it no longer holds; then draft a new version of exterior.md from the strategy and that self.md', { key: pair });
+}
+// exterior show [--json]: the working tree's exterior.md and self.md. exterior check: the working
+// tree's, the draft.
+function cmdExterior() {
+  const sub = positional[0];
+  if (sub === 'show') {
+    const text = exteriorTreeText();
+    if (text === null) return flags.json ? json(null) : out(EXTERIOR_NOT_DRAFTED);
+    const { block, errors } = exteriorDoc(text);
+    if (errors.length) {
+      for (const e of errors) out(`error: exterior.md: ${e}`);
+      process.exit(1);
+    }
+    if (flags.json) return json(exteriorDashboard(block));
+    const selfText = readText(path.join(projectDir, 'self.md'));
+    const self = selfText === null ? null : selfDoc(selfText).block;
+    return out(exteriorShowLines(block, self?.what ?? null).join('\n'));
+  }
+  if (sub === 'check') {
+    if (exteriorTreeText() === null) return out('no exterior.md: nothing to check');
+    gitReadCache = new Map();
+    const { errors, warnings } = exteriorCheckLines({ draft: true });
+    for (const e of errors) out(`error: exterior.md: ${e}`);
+    for (const w of warnings) out(`warn: exterior.md: ${w}`);
+    process.exit(errors.length ? 1 : 0);
+  }
+  die('usage: exterior show [--json] | exterior check');
+}
+/* world-model end */
 function ownerAnswer(qid, what) {
   const q = logGet(qid);
   const v = q?.type === 'question' ? questionView(q) : null;
@@ -7352,8 +8420,14 @@ function pinRecords(id) {
     git(['fetch', '--quiet', 'origin', HS.main_branch]);
     return { sha: tip, landed: git(['merge-base', '--is-ancestor', tip, `origin/${HS.main_branch}`]) !== null };
   }
+  // Both gh reads below are killed at 15 s, as merge's other reads are (kit-793; DEVTEAM_GH_TIMEOUT_MS,
+  // a positive whole number of ms, sets it only while DEVTEAM_TEST is set): a killed read is no answer,
+  // so no merged PR is found, and no open one, and merge refuses before its gates
+  const ghMs = process.env.DEVTEAM_TEST ? Math.trunc(Number(process.env.DEVTEAM_GH_TIMEOUT_MS)) : NaN;
+  const ghSet = Number.isSafeInteger(ghMs) && ghMs > 0;
+  const ghRead = { timeout: ghSet ? ghMs : 15000, killSignal: 'SIGKILL' };
   let merged = [];
-  try { merged = JSON.parse(HR.gh(['pr', 'list', '--head', `ticket/${id}`, '--state', 'merged', '--json', 'number,headRefOid,mergedAt']) ?? '[]'); } catch {}
+  try { merged = JSON.parse(HR.gh(['pr', 'list', '--head', `ticket/${id}`, '--state', 'merged', '--json', 'number,headRefOid,mergedAt'], ghRead) ?? '[]'); } catch {}
   merged = (Array.isArray(merged) ? merged : []).sort((a, b) => String(b.mergedAt ?? '').localeCompare(String(a.mergedAt ?? '')));
   const m = tip ? merged.find((p) => p.headRefOid === tip) : merged[0];
   if (m) {
@@ -7362,7 +8436,7 @@ function pinRecords(id) {
     return { sha: m.headRefOid, landed: true, pr: m.number };
   }
   if (!tip) return { problems: none };
-  const j = HR.gh(['pr', 'view', `ticket/${id}`, '--json', 'number,headRefOid,isDraft,mergeStateStatus,state,statusCheckRollup']);
+  const j = HR.gh(['pr', 'view', `ticket/${id}`, '--json', 'number,headRefOid,isDraft,mergeStateStatus,state,statusCheckRollup'], ghRead);
   let p = null;
   try { p = j ? JSON.parse(j) : null; } catch {}
   if (!p || (p.state && p.state !== 'OPEN')) return { problems: [`no open home PR from ticket/${id} (its records): open one in home with the ticket's PR title`] };
@@ -7386,8 +8460,8 @@ function landRecords(id, rec, linkName) {
     // (cmdMerge's landCode): no hook runs, directory renames are a conflict, the merge must be
     // exactly the records onto that main with main's jobs, and it is pushed by sha, only while
     // origin's main is still that commit. The merge, its checks, the push and the fetch after a
-    // failed push are bounded (recurringRegistry.git); the worktree's add and remove, and the fetch
-    // after landing, are not (final-12 F5).
+    // failed push are bounded (recurringRegistry.git), and so is the fetch after landing (kit-791); the
+    // worktree's add and remove are not (final-12 F5).
     const checked = mainSha();
     if (!checked) return `no home ${HS.main_branch} to land on`;
     const lg = (args, cwd) => recurringRegistry.git(args, { cwd });
@@ -7432,10 +8506,11 @@ function landRecords(id, rec, linkName) {
     // still be the main the checks judged (mainSha(), read before this fetch), as landCode's moved()
     // does for the code (kit-332). The fetch is bounded (recurringRegistry.git); one that fails refuses.
     // Each gh call here is killed at its bound, as landCode's are (kit-787): gh pr merge at 60 s, each
-    // state read at 15 s (DEVTEAM_GH_TIMEOUT_MS, a positive whole number of ms, sets both, for tests),
-    // so the records' gh calls wait at most 60 + 3 x 15 + 2 x 2 = 109 s; a killed call reads as failed.
-    // The git fetches are apart: the one below is bounded (120 s), the one after landing is not.
-    const ghMs = Math.trunc(Number(process.env.DEVTEAM_GH_TIMEOUT_MS));
+    // state read at 15 s (DEVTEAM_GH_TIMEOUT_MS, a positive whole number of ms, sets both, only while
+    // DEVTEAM_TEST is set: kit-793), so the records' gh calls wait at most 60 + 3 x 15 + 2 x 2 = 109 s
+    // here, after pinRecords' two reads (15 s each) before the gates; a killed call reads as failed.
+    // Both git fetches are bounded (120 s): the one below, and the one after landing (kit-791).
+    const ghMs = process.env.DEVTEAM_TEST ? Math.trunc(Number(process.env.DEVTEAM_GH_TIMEOUT_MS)) : NaN;
     const ghSet = Number.isSafeInteger(ghMs) && ghMs > 0;
     const ghMerge = { timeout: ghSet ? ghMs : 60000, killSignal: 'SIGKILL' };
     const ghRead = { timeout: ghSet ? ghMs : 15000, killSignal: 'SIGKILL' };
@@ -7459,7 +8534,11 @@ function landRecords(id, rec, linkName) {
       out(`gh pr merge of home's records PR #${rec.pr} exited non-zero, but GitHub has #${rec.pr} merged at ${rec.sha.slice(0, 12)}: landed`);
     }
   }
-  git(['fetch', '--quiet', 'origin', HS.main_branch]);
+  // The fetch after the landing only refreshes origin/<main> here: the records have landed. It is
+  // bounded (recurringRegistry.git: 120 s, then SIGKILL; DEVTEAM_GIT_TIMEOUT_MS for tests), and one
+  // that fails or times out is said, never a refusal: their act is written next, and the code lands (kit-791)
+  const fetched = recurringRegistry.git(['fetch', '--quiet', 'origin', HS.main_branch], { cwd: mainRoot });
+  if (!fetched.ok) warn(`the records landed, but the fetch of home's ${HS.main_branch} after them ${recurringRegistry.why(fetched)}; origin/${HS.main_branch} in ${mainRoot} may not show them yet: check with git fetch origin ${HS.main_branch} there`);
   mainRefCache = undefined; mainLogCache = undefined; mergeShaCache.clear();
   return null;
 }
@@ -7487,8 +8566,19 @@ function cmdMerge() {
     }
   }
   if (viaGit && !dry && !(flagStr('title') && flagStr('body-file'))) die(`forge is git: merge needs the PR text, in ${path.relative(mainRoot, path.join(runDir, 'pr', `${branch}.md`))} ('# <title>' then the body) or as --title and --body-file`);
-  const prJson = viaGit ? null : R.gh(['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,state,url,statusCheckRollup']);
-  if (prJson === null && !dry && !viaGit) die(`no open PR from ${branch}${inR} (gh pr view failed; with no forge CLI set forge: "git")`);
+  // Every gh call merge makes is killed at its bound (kit-787, kit-793): gh pr merge at 60 s, each read
+  // at 15 s (DEVTEAM_GH_TIMEOUT_MS, a positive whole number of ms, sets both, only while DEVTEAM_TEST
+  // is set, for tests). Before and in the gates: this PR read, pinRecords' two reads of home's records
+  // PR, and the covered_by read; after them each landing's (landCode below, landRecords). So a ticket's
+  // gh calls wait at most 15 + 15 + 109 = 139 s (the PR read, the covered_by read, the landing), and
+  // 15 + 2 x 15 + 15 + 109 + 109 = 278 s with records in home. A killed call reads as failed: a read as
+  // no answer, gh pr merge as not merged (its state is read, as for any error); refused as before
+  const ghMs = process.env.DEVTEAM_TEST ? Math.trunc(Number(process.env.DEVTEAM_GH_TIMEOUT_MS)) : NaN;
+  const ghSet = Number.isSafeInteger(ghMs) && ghMs > 0;
+  const ghMerge = { timeout: ghSet ? ghMs : 60000, killSignal: 'SIGKILL' };
+  const ghRead = { timeout: ghSet ? ghMs : 15000, killSignal: 'SIGKILL' };
+  const prJson = viaGit ? null : R.gh(['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,state,url,statusCheckRollup'], ghRead);
+  if (prJson === null && !dry && !viaGit) die(`no open PR from ${branch}${inR} (gh pr view failed or did not answer; with no forge CLI set forge: "git")`);
   R.git(['fetch', '--quiet', 'origin', branch]);
   // main as each origin has it now: home's (the settings) and the ticket's repo's (what it lands on)
   fetchMain(R);
@@ -7783,7 +8873,7 @@ function cmdMerge() {
       else if (ci.length) fresh = { why: `the PR changes the forge's CI configuration (${ci.slice(0, 3).join(', ')}${ci.length > 3 ? ', …' : ''})` };
       else {
         let v = null;
-        try { v = JSON.parse(R.gh(['pr', 'view', String(pr.number), '--json', 'headRefOid,statusCheckRollup']) ?? 'null'); } catch { v = null; }
+        try { v = JSON.parse(R.gh(['pr', 'view', String(pr.number), '--json', 'headRefOid,statusCheckRollup'], ghRead) ?? 'null'); } catch { v = null; }
         if (!isObj(v)) fresh = { why: "could not read the PR's checks again" };
         else if (v.headRefOid !== sha) fresh = { why: `the head moved to ${String(v.headRefOid ?? '?').slice(0, 12)}` };
         else fresh = { rollup: v.statusCheckRollup ?? [] };
@@ -7933,17 +9023,11 @@ function cmdMerge() {
       }
       return null;
     }
-    // GitHub has no lease on the base: main is read again just before gh pr merge. Each gh call
-    // after the gates is killed at its bound (kit-787): gh pr merge at 60 s, each state read at 15 s
-    // (DEVTEAM_GH_TIMEOUT_MS, a positive whole number of ms, sets both, for tests), so the code's gh
-    // calls wait at most 60 + 3 x 15 + 2 x 2 = 109 s (with records in home, 218 s for both landings'
-    // gh calls). The git fetches are apart: moved()'s is bounded (recurringRegistry.git, 120 s),
-    // the one after landing is not. A killed call reads as failed: gh pr merge as not merged (its
-    // state is read, as for any error), a state read as no answer; refused as before
-    const ghMs = Math.trunc(Number(process.env.DEVTEAM_GH_TIMEOUT_MS));
-    const ghSet = Number.isSafeInteger(ghMs) && ghMs > 0;
-    const ghMerge = { timeout: ghSet ? ghMs : 60000, killSignal: 'SIGKILL' };
-    const ghRead = { timeout: ghSet ? ghMs : 15000, killSignal: 'SIGKILL' };
+    // GitHub has no lease on the base: main is read again just before gh pr merge. Its gh calls use
+    // merge's bounds (ghMerge, ghRead, above: kit-787), so the code's landing waits at most
+    // 60 + 3 x 15 + 2 x 2 = 109 s on gh (with records in home, 218 s for both landings' gh calls).
+    // The git fetches are apart: moved()'s is bounded (recurringRegistry.git, 120 s), the one after
+    // landing is too (kit-791: 120 s, 240 s with records in home)
     const gone = moved();
     if (gone) return gone;
     const merged = R.gh(['pr', 'merge', String(pr.number), `--${S.merge_method}`, ...(S.merge_admin === true ? ['--admin'] : []), '--match-head-commit', sha], ghMerge);
@@ -7967,7 +9051,11 @@ function cmdMerge() {
   const codeFail = relanded ? null : landCode();
   if (codeFail && pushTimedOut) die(`${rec ? `the records of ${id} landed in home at ${rec.sha.slice(0, 12)}; ` : ''}the code may have landed${inR} (${codeFail}): run ${rerun} again; it recognises the kit's own landing merge and logs its act, or lands it`);
   if (codeFail) die(rec ? `the records of ${id} landed in home at ${rec.sha.slice(0, 12)}; the code did not land in ${R.name} (${codeFail}): run merge ${id} again` : `${codeFail}; verify from the start`);
-  R.git(['fetch', '--quiet', 'origin', mainBranch]);
+  // The fetch after the landing only refreshes origin/<main> here: the code has landed. It is bounded
+  // (recurringRegistry.git: 120 s, then SIGKILL; DEVTEAM_GIT_TIMEOUT_MS for tests), and one that fails
+  // or times out is said, never a refusal: the act below is still written (kit-791)
+  const fetched = recurringRegistry.git(['fetch', '--quiet', 'origin', mainBranch], { cwd: R.root });
+  if (!fetched.ok) warn(`merged, but the fetch of ${mainBranch}${inR} after the landing ${recurringRegistry.why(fetched)}; origin/${mainBranch} in ${R.root} may not show it yet: check with git fetch origin ${mainBranch} there`);
   // home resets exactly what it reset before (G1); another repo resets all of its own caches
   if (R.name === 'home') { mainLogCache = undefined; mergeShaCache.clear(); } else R.resetCaches();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
@@ -9180,6 +10268,8 @@ function cmdRate() {
 // and page subjects the kit's rendering of log content (itself agent-written), for artifact and
 // preview subjects (a later kit's viewers) everything in it is page-written. It is shown escaped,
 // given to the supervisor only inside a data frame, and never typed into a pane.
+// The open threads a project keeps, counting the owner's only (kit-108): the supervisor's own have their
+// cap (supervisorThreadCap), so they never crowd out the owner's thread new or reopen.
 const THREAD_OPEN_MAX = 200;
 const TURN_MAX = 2000; // bytes
 // A turn as the line holds it, JSON-escaped (a quotation mark is two bytes there, a control character
@@ -9273,6 +10363,19 @@ function subjectProblem(s) {
 }
 function anchorProblem(a) {
   if (!isObj(a)) return 'anchor is an object';
+  // A canvas layer's pin (canvas-doc@1 §10): { node: "<id>" } alone, 1 to 64 characters of one line
+  // of plain text, well-formed. A node is no page element, so its rule is its own and ANCHOR_CAPS
+  // (and the lens's and the page's copies of it) don't name it.
+  if (Object.hasOwn(a, 'node')) {
+    const extra = Object.keys(a).filter((k) => k !== 'node');
+    if (extra.length) return `an anchor with a node has no ${extra.join(', ')}`;
+    const v = a.node;
+    if (typeof v !== 'string') return 'anchor.node is text';
+    if (!v) return 'anchor.node is at least 1 character';
+    if (UNSAFE_TEXT.test(v) || /\p{Cs}/u.test(v)) return 'anchor.node is one line of plain text (no control or bidi characters)';
+    const n = [...v].length;
+    return n > 64 ? `anchor.node is ${n} characters; at most 64` : null;
+  }
   for (const [k, v] of Object.entries(a)) {
     if (k === 'rect' || k === 'point') {
       const names = k === 'rect' ? ['x', 'y', 'w', 'h'] : ['x', 'y'];
@@ -9291,15 +10394,36 @@ function anchorProblem(a) {
 // A subject's key: one open thread per key (kit-97). An item by its ref, a page spot by its view and point,
 // an artifact's or a preview's spot by its page and the element the lens named, else the point. index.html's
 // tKey (with tFrameSpot) is the same function; test/thread-per-subject.test.mjs holds the two equal.
-const subjectKey = (s) => { const spot = () => (s.anchor ? `${s.anchor.selector ?? ''}|${s.anchor.text ?? ''}` : `${s.point?.x},${s.point?.y}`); return !s ? null : s.kind === 'item' ? `item:${s.ref}` : s.kind === 'page' ? `page:${s.view}:${s.at?.x}:${s.at?.y}` : s.kind === 'artifact' ? `artifact:${s.slug}:${s.path ?? 'index.html'}:${spot()}` : s.kind === 'preview' ? `preview:${s.name}:${s.route ?? ''}:${spot()}` : null; };
-// What a thread or turn line holds beyond what the schema's walk can say: sizes in bytes, a title
-// of one line, a subject with only its kind's keys, and the supervisor's fields on its own turns.
+const subjectKey = (s) => { const spot = () => (s.anchor?.node !== undefined ? `node:${s.anchor.node}` : s.anchor ? `${s.anchor.selector ?? ''}|${s.anchor.text ?? ''}` : `${s.point?.x},${s.point?.y}`); return !s ? null : s.kind === 'item' ? `item:${s.ref}` : s.kind === 'page' ? `page:${s.view}:${s.at?.x}:${s.at?.y}` : s.kind === 'artifact' ? `artifact:${s.slug}:${s.path ?? 'index.html'}:${spot()}` : s.kind === 'preview' ? `preview:${s.name}:${s.route ?? ''}:${spot()}` : null; };
+// What a thread, turn or message line holds beyond what the schema's walk can say: sizes in bytes, a
+// title of one line, a subject with only its kind's keys, the supervisor's fields on its own turns,
+// and (artifact-notes-1) the hand-over's, withdrawal's, frame's, picture's and mark's text and times.
 function threadLineProblems(o) {
   const errs = [];
   const over = (k, v, max) => { if (typeof v === 'string' && Buffer.byteLength(v) > max) errs.push(`${o.type}.${k} is ${Buffer.byteLength(v)} bytes; at most ${max}`); };
+  // artifact-notes-1: one line of text within its bytes; a time as the log stamps it; a picture
+  // that says it has a dark copy exactly when it gives that copy's sum
+  const oneLine = (v, min, max) => typeof v !== 'string' || (!UNSAFE_TEXT.test(v) && Buffer.byteLength(v) >= min && Buffer.byteLength(v) <= max);
+  const iso = (k, v) => { if (typeof v === 'string' && !READY_AT.test(v)) errs.push(`${o.type}.${k} is an ISO timestamp (2026-11-10T10:30:00.000Z)`); };
+  if (isObj(o.shot) && (o.shot.dark === true) !== (isObj(o.shot.sum) && o.shot.sum.dark !== undefined)) errs.push(`${o.type}.shot.dark goes with sum.dark`);
+  if (o.type === 'message') {
+    if (o.kind === 'addressed' && !oneLine(o.text, 0, 300)) errs.push("an addressed message's text is one line of at most 300 bytes");
+    return errs;
+  }
   if (o.type === 'thread') {
+    if (isObj(o.handed)) {
+      if (o.handed.to === 'owner' || o.handed.to === 'responder') errs.push('thread.handed.to is a session (supervisor, plan-<feature> or a ticket)');
+      iso('handed.at', o.handed.at);
+    }
+    if (isObj(o.unready)) {
+      iso('unready.at', o.unready.at);
+      if (!oneLine(o.unready.reason, 12, 300)) errs.push('thread.unready.reason is one line of 12 to 300 bytes');
+    }
+    if (isObj(o.frame) && !oneLine(o.frame.hash, 0, 200)) errs.push('thread.frame.hash is one line of at most 200 bytes');
     if (typeof o.title === 'string' && UNSAFE_TEXT.test(o.title)) errs.push('thread.title is one line of plain text');
     if (o.subject !== undefined) { const p = subjectProblem(o.subject); if (p) errs.push(`thread.subject: ${p}`); }
+    // kit-108: a thread the supervisor starts is about a question or a goal, always
+    if (o.op === 'new' && o.by === 'supervisor' && !(isObj(o.subject) && o.subject.kind === 'item' && typeof o.subject.ref === 'string' && /^(question|goal):/.test(o.subject.ref))) errs.push("supervisor may not create thread lines except about a question or a goal: a supervisor's thread has subject {\"kind\":\"item\",\"ref\":\"question:<id>\"} or goal:<id>");
     over('outcome', o.outcome, OUTCOME_MAX);
     if (isObj(o.ready)) {
       over('ready.outcome', o.ready.outcome, OUTCOME_MAX);
@@ -9311,6 +10435,9 @@ function threadLineProblems(o) {
     for (const r of Array.isArray(o.refs) ? o.refs : []) over('refs[]', r, 120);
     if (o.by === 'owner' && (o.refs !== undefined || o.question !== undefined)) errs.push("refs and question are on the supervisor's turns");
     if (o.by !== 'owner' && o.files !== undefined) errs.push("files are on the owner's own turns");
+    if (o.by === 'owner' && (o.re !== undefined || o.off_subject !== undefined)) errs.push("re and off_subject are on a reply, never the owner's turn");
+    if (typeof o.off_subject === 'string' && UNSAFE_TEXT.test(o.off_subject)) errs.push('turn.off_subject is one line of plain text');
+    over('off_subject', o.off_subject, OUTCOME_MAX);
   }
   return errs;
 }
@@ -9333,30 +10460,64 @@ function threadQuestion(q) {
 function threadViews(objects) {
   const turns = new Map();
   const asked = new Map();
+  // artifact-notes-1: a session's marks on a note (the dashboard's reader folds no messages, so none there until kit-144)
+  const marks = new Map();
   const push = (m, k, v) => (m.get(k) ?? m.set(k, []).get(k)).push(v);
   for (const o of objects.values()) {
     if (o.type === 'turn' && typeof o.thread === 'string') push(turns, o.thread, o);
     else if (o.type === 'question' && typeof o.thread === 'string') push(asked, o.thread, o);
+    else if (o.type === 'message' && o.kind === 'addressed' && typeof o.thread === 'string') push(marks, o.thread, o);
   }
-  return [...objects.values()].filter((o) => o.type === 'thread').map((t) => threadView(t, (turns.get(t.id) ?? []).sort(byTime), (asked.get(t.id) ?? []).sort(byTime)));
+  return [...objects.values()].filter((o) => o.type === 'thread').map((t) => threadView(t, (turns.get(t.id) ?? []).sort(byTime), (asked.get(t.id) ?? []).sort(byTime), (marks.get(t.id) ?? []).sort(byTime)));
 }
-// waiting: whose move it is (the owner's when the newest turn is the supervisor's or there is none).
+// waiting: whose reply is owed (supervisor, responder), or the owner's move (owedIn).
 // ready: the supervisor's proposal, until the owner says anything after it (a turn, a resolve or a
 // reopen); the owner never writes ready, since the fold's writer ranks would then lock the
 // supervisor out of it for good.
-function threadView(t, ts, qs) {
+function threadView(t, ts, qs, ms = []) {
   // by: the display side (owner or supervisor), as the card and first_reply_ms read it; writer: who wrote it (owner, supervisor, responder)
-  const turns = ts.map((u) => ({ id: u.id, by: u.created_by === 'owner' ? 'owner' : 'supervisor', writer: u.created_by, at: u.created_at, text: String(u.text ?? ''), refs: Array.isArray(u.refs) ? u.refs.filter((r) => typeof r === 'string') : [], question: typeof u.question === 'string' ? u.question : null, files: Array.isArray(u.files) ? u.files.filter(isObj).map((f) => ({ name: String(f.name ?? ''), path: String(f.path ?? ''), bytes: Number.isInteger(f.bytes) ? f.bytes : 0 })) : [] }));
+  // person (kit-252): which of the box's people said an owner turn, when its line names a well-formed one
+  const turns = ts.map((u) => ({ id: u.id, by: u.created_by === 'owner' ? 'owner' : 'supervisor', writer: u.created_by, at: u.created_at, ...(u.created_by === 'owner' && personOk(u.person) ? { person: { id: u.person.id, name: u.person.name } } : {}), text: String(u.text ?? ''), refs: Array.isArray(u.refs) ? u.refs.filter((r) => typeof r === 'string') : [], question: typeof u.question === 'string' ? u.question : null, files: Array.isArray(u.files) ? u.files.filter(isObj).map((f) => ({ name: String(f.name ?? ''), path: String(f.path ?? ''), bytes: Number.isInteger(f.bytes) ? f.bytes : 0 })) : [], ...(u.created_by === 'owner' ? { routed_to: u.routed_to === 'supervisor' || u.routed_to === 'responder' ? u.routed_to : null, delivered: u.delivered === 'typed' || u.delivered === 'queued' ? u.delivered : null } : {}) }));
+  // whose reply is owed (owedIn, kit-104): the supervisor's when a turn routed to it, or with no
+  // route, is owed; else the responder's when one routed to it is; else the owner's move
+  const owed = owedIn(ts, t);
+  let waiting = owed.some((u) => u.routed_to !== 'responder') ? 'supervisor' : owed.length ? 'responder' : 'owner';
   const status = t.status === 'resolved' ? 'resolved' : 'open';
-  const last = turns[turns.length - 1] ?? null;
   const proposed = t.updates.filter((u) => u.ready !== undefined).pop() ?? null;
   const ownerSince = !!proposed && (turns.some((u) => u.by === 'owner' && u.at > proposed.at) || t.updates.some((u) => u.status !== undefined && u.at > proposed.at));
   const ready = status === 'open' && proposed && !ownerSince && isObj(t.ready) && typeof t.ready.outcome === 'string' ? { outcome: t.ready.outcome, at: proposed.at } : null;
+  // artifact-notes-1 (supervisor.md, Artifact notes). Each from its line's own at, never a time the
+  // line carries; a hand-written field of the wrong shape is no field, and hides no older good one.
+  // The owner's last word: their newest turn, resolve or reopen; a hand-over is not one.
+  const open = status === 'open';
+  const art = isObj(t.subject) && t.subject.kind === 'artifact';
+  const lastWord = [...turns.filter((u) => u.by === 'owner').map((u) => u.at), ...t.updates.filter((u) => u.status !== undefined).map((u) => u.at)].sort().pop() ?? '';
+  // handed: the owner's newest hand-over to a session, while no word of theirs came after it
+  const handLine = t.updates.filter((u) => u.by === 'owner' && isObj(u.handed) && typeof u.handed.to === 'string' && /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(u.handed.to) && u.handed.to !== 'owner' && u.handed.to !== 'responder').pop();
+  const handed = open && handLine && handLine.at > lastWord ? { to: handLine.handed.to, at: handLine.at } : null;
+  // the supervisor's newest withdrawal; a mark before it no longer counts
+  const unreadyLine = t.updates.filter((u) => u.by === 'supervisor' && isObj(u.unready) && typeof u.unready.reason === 'string').pop() ?? null;
+  // addressed: the newest mark since the hand-over (and since any withdrawal) by the session it went to or the supervisor
+  const mark = handed ? ms.filter((m) => typeof m.text === 'string' && (m.created_by === handed.to || m.created_by === 'supervisor') && m.created_at > handed.at && m.created_at > (unreadyLine?.at ?? '')).pop() : null;
+  const addressed = mark ? { by: mark.created_by, at: mark.created_at, note: mark.text, sha: typeof mark.sha === 'string' ? mark.sha : null, draft: typeof mark.draft === 'string' ? mark.draft : null } : null;
+  // check: what the owner has to check, the mark or the supervisor's proposal; its picture or why none
+  const check = addressed ? 'addressed' : art && ready ? 'ready' : null;
+  const shot = check === 'addressed' ? (isObj(mark.shot) ? mark.shot : null) : check === 'ready' ? (isObj(proposed.shot) ? proposed.shot : null) : null;
+  const noshot = check === 'ready' && proposed.noshot === 'no-change' ? 'no-change' : null;
+  const unready = open && unreadyLine && unreadyLine.at > lastWord && !check ? { at: unreadyLine.at, reason: unreadyLine.unready.reason } : null;
+  const frame = isObj(t.frame) && Number.isInteger(t.frame.w) && Number.isInteger(t.frame.h) && typeof t.frame.hash === 'string' ? { w: t.frame.w, h: t.frame.h, hash: t.frame.hash } : null;
+  // On an open artifact note whose move it is follows its state alone (resolved; to check; with
+  // <session>; open): to check or open, the owner's; with a session, that session's; with the
+  // supervisor, the supervisor's until its first turn after the hand-over (D5: any non-owner turn).
+  if (open && art) waiting = check || !handed ? 'owner' : handed.to === 'supervisor' && !turns.some((u) => u.by !== 'owner' && u.at > handed.at) ? 'supervisor' : 'session';
+  const withSession = open && art && !check && handed ? handed.to : null;
   const firstOwner = turns.find((u) => u.by === 'owner');
   const firstReply = firstOwner ? turns.find((u) => u.by === 'supervisor' && u.at > firstOwner.at) : null;
   return {
-    id: t.id, title: String(t.title ?? ''), subject: isObj(t.subject) ? t.subject : null, status, outcome: status === 'resolved' ? t.outcome ?? null : null, ready,
-    turns, questions: qs.map(threadQuestion), waiting: last?.by === 'owner' ? 'supervisor' : 'owner',
+    // started_by: who started it, from the thread line's writer (kit-108): the owner, or the supervisor
+    id: t.id, title: String(t.title ?? ''), subject: isObj(t.subject) ? t.subject : null, started_by: t.created_by === 'supervisor' ? 'supervisor' : 'owner', status, outcome: status === 'resolved' ? t.outcome ?? null : null, ready,
+    turns, questions: qs.map(threadQuestion), waiting, ...(withSession ? { with: withSession } : {}),
+    handed, addressed, check, shot, noshot, unready, frame, source: null,
     created_at: t.created_at, resolved_at: status === 'resolved' ? t.updates.filter((u) => u.status === 'resolved').pop()?.at ?? null : null,
     activity_at: [t.created_at, ...turns.map((u) => u.at), ...t.updates.map((u) => u.at)].sort().pop(),
     first_reply_ms: firstReply ? Date.parse(firstReply.at) - Date.parse(firstOwner.at) : null,
@@ -9375,11 +10536,12 @@ function subjectWords(s) {
 }
 // The bare ids a subject names, as observation refs are elsewhere.
 const subjectIds = (s) => (!isObj(s) ? [] : s.kind === 'item' && SUBJECT_REF.test(s.ref ?? '') ? [s.ref.slice(s.ref.indexOf(':') + 1)] : s.kind === 'artifact' ? [s.slug] : s.kind === 'preview' ? [s.name] : []).filter((x) => typeof x === 'string');
-// An owner turn, typed into the supervisor's pane when it has one (as nudgeSupervisor does), as one
+// An owner turn, typed into the supervisor's pane when it has one (as nudgeSupervisor does), or into
+// the pane given (the responder's, kit-104), as one
 // line: a newline typed with send-keys -l would press Enter mid-message, and a control character
 // would reach the agent's terminal. The first 300 bytes of the words, then …. True once typed.
-function deliverOwnerTurn(t, text, files) {
-  const { target, problem } = resolvePane(supervisorTarget());
+function deliverOwnerTurn(t, text, files, pane = supervisorTarget()) {
+  const { target, problem } = resolvePane(pane);
   if (problem) return false;
   const flat = text.replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim();
   const said = Buffer.byteLength(flat) > 300 ? `${capBytes(flat, 300)}…` : flat;
@@ -9423,7 +10585,8 @@ function undeliveredTurns(now = Date.now(), { entries = false } = {}) {
     if (v.status !== 'open' || v.waiting !== 'supervisor') continue;
     let i = v.turns.length;
     while (i > 0 && v.turns[i - 1].by === 'owner') i--;
-    const mine = v.turns.slice(i);
+    // on an artifact note handed over, only the owner's turns since the hand-over (its own message is the delivery, artifact-notes-1)
+    const mine = v.turns.slice(i).filter((u) => !(v.subject?.kind === 'artifact' && v.handed) || u.at > v.handed.at);
     if (!mine.length || !mine.every((u) => Object.hasOwn(m, u.id))) continue;
     const firstMs = Date.parse(mine[0].at);
     const waited = now - firstMs;
@@ -9457,19 +10620,36 @@ function threadOpen(id, by) {
   if (t.status === 'resolved') die(by === 'owner' ? `${t.id} is resolved; reopen it first (thread reopen ${t.id} "<words>")` : `${t.id} is resolved: the owner closed it, and a reply goes nowhere until they reopen it`);
   return t;
 }
-const openThreadCount = (views = threadViews(readLog().objects)) => views.filter((x) => x.status === 'open').length;
-// Open threads by whose move: ready (the supervisor's proposal awaits the owner), else you (the
-// owner's move), else waiting (on the supervisor).
+// The owner's open threads, which THREAD_OPEN_MAX caps: the supervisor's own count toward its cap alone.
+const openThreadCount = (views = threadViews(readLog().objects)) => views.filter((x) => x.status === 'open' && x.started_by !== 'supervisor').length;
+// kit-108: the supervisor keeps at most 20 open threads of its own, the owner's reopens among them (a
+// reopen is never refused, so it can take the count past 20; the supervisor's next thread new waits).
+// null while under it, else the refusal, naming the oldest open ones.
+function supervisorThreadCap(views) {
+  const MAX = 20;
+  const mine = views.filter((x) => x.status === 'open' && x.started_by === 'supervisor').sort((a, b) => a.created_at.localeCompare(b.created_at));
+  if (mine.length < MAX) return null;
+  return `${mine.length} threads you started are open, the most you keep (${MAX}): propose resolving one the owner has read (thread ready <t-id> --outcome "<line>"), or say it in the most related of them with --off-subject "<why>". The oldest: ${mine.slice(0, 3).map((x) => x.id).join(', ')}`;
+}
+// Open threads by whose move: ready (the supervisor's proposal, or a session's mark on an artifact
+// note, awaits the owner's check), else you (the owner's move), else with (an artifact note a session
+// has, artifact-notes-1; the key only when one does), else waiting (on the supervisor).
 function threadCounts() {
-  const r = { you: 0, waiting: 0, ready: 0 };
-  for (const v of threadViews(readLog().objects)) if (v.status === 'open') r[v.ready ? 'ready' : v.waiting === 'owner' ? 'you' : 'waiting']++;
+  const r = { you: 0, waiting: 0, ready: 0, with: 0 };
+  for (const v of threadViews(readLog().objects)) if (v.status === 'open') r[v.ready || v.check ? 'ready' : v.waiting === 'owner' ? 'you' : v.waiting === 'session' ? 'with' : 'waiting']++;
+  if (!r.with) delete r.with;
   return r;
 }
 // A thread's stage set ({ by, stage, turn }) or, given null, dropped, in THREAD_WORKING_FILE under
 // its lock; entries not written for a day go on every write. True when the thread had an entry.
 // A pickup (thread show) never waits and never steps a stage back: a held lock skips it (withLock's
 // time-out would die past the show's catch), and so does an entry already naming that turn.
-function markThreadWorking(t, w, { pickup = false } = {}) {
+// kit-797, a reply in parts: part ({ n, words }) adds one to the session's partial ({ taken, bytes },
+// { same } for a repeat, or { refused }); own reads that partial without the lock ({ partial, parts }
+// or null); take ({ partial, parts }, as own read it) deletes it under the lock only if it is still
+// exactly that ({ took } or { refused }); sweep (no t, no w) deletes the words of every partial whose
+// holder died or went stale, under tryLock. Nothing dies inside the lock.
+function markThreadWorking(t, w, { pickup = false, part = null, own = false, take = null, sweep = false } = {}) {
   // The agent's pid, so a session that died mid-turn stops showing: walk up to the tmux pane's root
   // process (the one whose parent is tmux); a shell there ran the agent, which is its child on the
   // chain, else the root is the agent. Chosen by where it sits, not by a list of wrappers to skip,
@@ -9495,27 +10675,83 @@ function markThreadWorking(t, w, { pickup = false } = {}) {
   };
   // found before the lock: up to 12 `ps` calls must not run while it is held (a slow one would outlast its stale time)
   const pid = w ? agentPid() : null;
-  const change = () => {
+  // kit-797: a holder is live while its pid is (or the walk found none) and its beat is under 10
+  // minutes old, as threadWorking shows it; a partial is the holder's alone (by, pid, turn)
+  const alive = (p) => {
+    if (p === null) return true;
+    if (!Number.isInteger(p) || p <= 0) return false;
+    try { process.kill(p, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+  };
+  const live = (v, now) => alive(v.pid) && now - Date.parse(v.beat) <= 10 * 60000;
+  const mine = (v) => isObj(v) && typeof v.partial === 'string' && v.by === w.by && v.pid === pid && v.turn === w.turn;
+  const read = () => {
     let m;
     try { m = JSON.parse(readText(THREAD_WORKING_FILE) ?? '{}'); } catch {}
-    if (!isObj(m)) m = {};
+    return isObj(m) ? m : {};
+  };
+  // this session's own partial for the turn, unwritten (--after-parts): { partial, parts } or null
+  if (own) { const v = read()[t]; return mine(v) && live(v, Date.now()) ? { partial: v.partial, parts: v.parts } : null; }
+  // a partial whose holder died or went stale loses its words; a mark stays, so the card can say a
+  // reply was started and not finished, until a reply clears it, a write replaces it, or the prune
+  const drop = (m, now) => {
+    let n = 0;
+    for (const [k, v] of Object.entries(m)) if (isObj(v) && typeof v.partial === 'string' && !live(v, now)) { m[k] = { by: v.by, stage: 'unfinished', turn: v.turn, at: v.at, beat: new Date(now).toISOString(), pid: null }; n++; }
+    return n;
+  };
+  const change = () => {
+    const m = read();
+    if (sweep) { const now = Date.now(); if (drop(m, now)) writeJsonAtomic(THREAD_WORKING_FILE, m); return true; }
+    // the turn is about to be written from these parts: they go now, or a part that came in since (or a
+    // second --after-parts that took them first) refuses it, so no part is lost or written twice
+    if (take) {
+      const v = m[t];
+      if (!(mine(v) && live(v, Date.now()) && v.parts === take.parts && v.partial === take.partial)) return { refused: `your parts in ${t} changed while this turn was being written (another part came in, or another --after-parts took them): nothing was written; run --after-parts again` };
+      delete m[t];
+      writeJsonAtomic(THREAD_WORKING_FILE, m);
+      return { took: true };
+    }
     const was = isObj(m[t]) ? m[t] : null;
     if (pickup && was?.turn === w.turn) return !!was;
     if (!w && !was) return false;
     const now = Date.now();
+    const iso = new Date(now).toISOString();
     for (const [k, v] of Object.entries(m)) if (!(now - Date.parse(v?.beat) <= 86400000)) delete m[k];
-    if (w) m[t] = { by: w.by, stage: w.stage, turn: w.turn, at: was?.by === w.by && was?.turn === w.turn && typeof was.at === 'string' ? was.at : new Date(now).toISOString(), beat: new Date(now).toISOString(), pid };
-    else delete m[t];
+    drop(m, now);
+    const cur = isObj(m[t]) ? m[t] : null;
+    const at = cur?.by === w?.by && cur?.turn === w?.turn && typeof cur?.at === 'string' ? cur.at : iso;
+    let r = !!was;
+    if (part) {
+      // refusals return, never die: a die here would leave the lock behind (process.exit skips finally)
+      const held = !!cur && typeof cur.partial === 'string' && cur.turn === w.turn;
+      const ours = held && mine(cur);
+      if (held && !ours) return { refused: `${cur.by} is replying in this thread; write yours once its reply is in, or as a whole reply (thread reply ${t} "<words>")` };
+      const had = ours ? cur.parts : 0;
+      if (ours && part.n === had) return cur.last_part === part.words ? { same: had } : { refused: `part ${part.n} is already taken, with other words; send part ${had + 1} next` };
+      if (part.n !== had + 1) return { refused: `part ${part.n}: expected ${had + 1}${had ? '' : ' (a new reply, or the owner wrote since: start again from 1)'}` };
+      const partial = ours ? `${cur.partial}\n\n${part.words}` : part.words;
+      const bytes = Buffer.byteLength(partial);
+      if (bytes > TURN_MAX) return { refused: `a turn is at most ${TURN_MAX} bytes of UTF-8; with this part it would be ${bytes}: say the rest in a reply of its own` };
+      if (encodedBytes(partial) > TURN_ENCODED_MAX) return { refused: 'with this part, the reply has too many quotation marks, backslashes or control characters to keep in one log line; say it with fewer' };
+      m[t] = { by: w.by, stage: 'responding', turn: w.turn, at, beat: iso, pid, partial, parts: had + 1, part_at: iso, last_part: part.words };
+      r = { taken: had + 1, bytes };
+    } else if (w) {
+      // the same holder for the same turn keeps its partial (thread working, the pickup)
+      const keep = mine(cur) ? { partial: cur.partial, parts: cur.parts, part_at: cur.part_at, last_part: cur.last_part } : {};
+      m[t] = { by: w.by, stage: w.stage, turn: w.turn, at, beat: iso, pid, ...keep };
+    } else delete m[t];
     writeJsonAtomic(THREAD_WORKING_FILE, m);
-    return !!was;
+    return r;
   };
   // nothing to clear with no file: no lock taken, no file made
   if (!w && !fs.existsSync(THREAD_WORKING_FILE)) return false;
   fs.mkdirSync(path.dirname(THREAD_WORKING_FILE), { recursive: true });
-  return pickup ? tryLock(THREAD_WORKING_FILE, change) ?? false : withLock(THREAD_WORKING_FILE, change);
+  return pickup || sweep ? tryLock(THREAD_WORKING_FILE, change) ?? false : withLock(THREAD_WORKING_FILE, change);
 }
 // The stages to show: { "<t-id>": { by, stage, turn, at, beat } }, each from a session still alive
-// (or one whose pid the walk couldn't find) that wrote it within 10 minutes.
+// (or one whose pid the walk couldn't find) that wrote it within 10 minutes. kit-797: one with a
+// partial adds { partial, parts, part_at }, the partial cut of a box capability; a partial whose
+// holder is gone is served as { by, stage: 'unfinished', turn, at, beat } from the read that finds it
+// (its words deleted from the file), and that mark is served for a day from its beat.
 function threadWorking(now = Date.now()) {
   let m;
   try { m = JSON.parse(readText(THREAD_WORKING_FILE) ?? '{}'); } catch {}
@@ -9527,10 +10763,21 @@ function threadWorking(now = Date.now()) {
     try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
   };
   const r = {};
+  let dropped = false;
   for (const [k, v] of Object.entries(m)) {
-    if (!isObj(v) || !alive(v.pid) || !(now - Date.parse(v.beat) <= THREAD_WORKING_STALE_MS)) continue;
-    r[k] = { by: v.by, stage: v.stage, turn: v.turn, at: v.at, beat: v.beat };
+    if (!isObj(v)) continue;
+    // kit-797: a reply started and not finished shows so, whatever its pid, until cleared or a day old
+    if (v.stage === 'unfinished') { if (now - Date.parse(v.beat) <= 86400000) r[k] = { by: v.by, stage: v.stage, turn: v.turn, at: v.at, beat: v.beat }; continue; }
+    if (!alive(v.pid) || !(now - Date.parse(v.beat) <= THREAD_WORKING_STALE_MS)) {
+      // a partial whose holder is gone: its words are deleted (markThreadWorking's sweep) and its mark shown
+      if (typeof v.partial === 'string') { dropped = true; r[k] = { by: v.by, stage: 'unfinished', turn: v.turn, at: v.at, beat: v.beat }; }
+      continue;
+    }
+    // the partial cut of a box capability: the record is served outside the log's own path
+    const stream = typeof v.partial === 'string' ? { partial: uncapped(v.partial), parts: v.parts, part_at: v.part_at } : {};
+    r[k] = { by: v.by, stage: v.stage, turn: v.turn, at: v.at, beat: v.beat, ...stream };
   }
+  if (dropped) { try { markThreadWorking(null, null, { sweep: true }); } catch {} }
   return r;
 }
 // The first line new, say and ask print is the id (the dashboard reads it); for an owner turn a
@@ -9540,7 +10787,19 @@ function cmdThread() {
   // An owner's turn typed into the supervisor's pane, or held for it; one no terminal took is
   // recorded (UNDELIVERED_FILE, under its lock; entries over 7 days dropped) for the card and
   // undeliveredTurns. The words say which.
-  const deliver = (t, u, words, files) => {
+  // A turn routed to the responder (kit-104): typed into its pane when it was idle, else queued
+  // (typed into neither pane); never recorded as undelivered, since responder-overdue reaches the
+  // supervisor once it is RESPONDER_OVERDUE_MS old.
+  const deliver = (t, u, words, files, route = { to: 'supervisor' }) => {
+    words = redactClaimLinks(words);
+    if (route.to === 'responder') {
+      if (route.delivered === 'queued') return 'the responder is busy; it takes this next';
+      const pane = responderWindow().target;
+      const typed = deliverOwnerTurn(t, words, files, pane);
+      if (typed === true) return 'sent to the responder';
+      if (typed) return heldWords(typed, "the responder's");
+      return `not delivered to the responder: ${resolvePane(pane).problem ?? 'the typing failed'}; it stays owed, and the supervisor takes it once it is ${RESPONDER_OVERDUE_MS / 60000} minutes old`;
+    }
     const typed = deliverOwnerTurn(t, words, files);
     if (typed === false) withLock(UNDELIVERED_FILE, () => {
       const m = undeliveredTurns(Date.now(), { entries: true });
@@ -9568,7 +10827,111 @@ function cmdThread() {
   // comes in its usual order.
   const alone = (i) => (!wordsFrom(i) && flags.files !== undefined ? filesFlag() : undefined);
   const filled = (i, early) => (early ? `${plural(early.length, 'file')} dropped` : wordsFrom(i));
+  // routed_to (and delivered, the responder's) for an owner's turn line (kit-104)
+  const routedFields = (r) => ({ routed_to: r.to, ...(r.to === 'responder' ? { delivered: r.delivered } : {}) });
+  // kit-108: a supervisor's or responder's turn is asked for (solicited) when its thread owes an owner
+  // turn, when the responder's open promise is there (pendingOpen, kit-104: the supervisor takes it over,
+  // the responder keeps it), when (the supervisor's) a handoff for it is open, or when it names with --re
+  // the writer's own pending turn there, not yet followed up. One nothing asked for names at least one ref, and every
+  // question: and goal: ref it names (an ask's --goal too) is on subject: the thread's subject, the
+  // subject's goal, or what the thread already named. --off-subject "<why>" lets it through, kept on
+  // the turn. A reply to an owed owner turn is never refused, whatever it names.
+  const reOf = (t, by, objects) => {
+    if (flags.re === undefined) return undefined;
+    const uid = flagStr('re');
+    if (!TURN_ID.test(uid ?? '')) die('--re <u-id>: your own pending turn in this thread that this follows up');
+    const u = objects.get(uid);
+    if (u?.type !== 'turn' || u.thread !== t.id || u.created_by !== by || u.pending !== true) die(`--re ${uid}: not your pending turn in this thread (a reply you wrote in ${t.id} with --pending)`);
+    const done = logTurns(t.id, objects).find((x) => x.re === uid);
+    if (done) die(`--re ${uid}: already followed up (by ${done.id}); name what this one is about with --refs instead`);
+    return uid;
+  };
+  const offSubjectFlag = () => {
+    if (flags['off-subject'] === undefined) return undefined;
+    const why = (flagStr('off-subject') ?? '').replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim();
+    if (!why) die('--off-subject "<why>": say why this turn is about something other than its thread');
+    if (Buffer.byteLength(why) > OUTCOME_MAX) die(`--off-subject is at most ${OUTCOME_MAX} bytes`);
+    return why;
+  };
+  const onSubject = (t, objects) => {
+    const on = new Set();
+    const s = t.subject;
+    if (isObj(s) && s.kind === 'item' && typeof s.ref === 'string' && SUBJECT_REF.test(s.ref)) {
+      on.add(s.ref);
+      const k = s.ref.slice(0, s.ref.indexOf(':'));
+      const o = objects.get(s.ref.slice(k.length + 1));
+      if (k === 'question' && o?.type === 'question' && typeof o.goal === 'string') on.add(`goal:${o.goal}`);
+      if (k === 'ticket' && o?.type === 'ticket') for (const g of objects.get(o.feature)?.goals ?? []) on.add(`goal:${g}`);
+    }
+    for (const u of logTurns(t.id, objects)) {
+      for (const r of Array.isArray(u.refs) ? u.refs : []) on.add(r);
+    }
+    for (const o of objects.values()) if (o.type === 'question' && o.thread === t.id) on.add(`question:${o.id}`);
+    return on;
+  };
+  // dies when the turn is unasked-for and names nothing, or something off subject; asks: the turn asks a
+  // question of its own (thread ask), which is what it names
+  // implied, when given, gets the --re a responder's follow-up of its open promise carries unnamed
+  const askedFor = (t, by, objects, { refs = [], re, off, goal, asks = false, implied } = {}) => {
+    if (owedTurns(t.id, objects).length) return;
+    // the responder's open promise there (pendingOpen, kit-104): the supervisor's to take over; the
+    // responder's to keep, as a follow-up of that turn, held to the subject as a --re one is (task-3 F1)
+    const promise = by === 'owner' ? null : pendingOpen(logTurns(t.id, objects), t);
+    if (promise && by === 'supervisor') return;
+    if (promise && by === 'responder' && !re) { re = promise.id; if (implied) implied.re = re; }
+    // an open handoff to the supervisor for this thread, as kit-104 reads one (openHandoffs: not settled
+    // by a supervisor turn after it, named by no message's or question's re), never one it sent itself
+    if (!re && by === 'supervisor') {
+      const h = openHandoffs(objects).get(t.id);
+      if (h && objects.get(h)?.created_by !== 'supervisor') return;
+    }
+    if (off !== undefined) return;
+    const elsewhere = by === 'responder' ? 'hand it to the supervisor (send supervisor "…" --kind handoff --thread <t-id>)' : 'start its own thread (thread new --subject \'{"kind":"item","ref":"question:q-…"}\' -- "<words>")';
+    const remedies = `name what it is about with --refs <type>:<id>; if it follows up your pending turn, --re <u-id>; if it is about something else, ${elsewhere}; or say why it belongs here with --off-subject "<why>"`;
+    const waits = `nothing in ${t.id} is waiting on you (no owner turn owed${by === 'supervisor' ? ', no open handoff' : ''}, no --re)`;
+    if (!re && !refs.length && !asks) die(`${waits}: ${remedies}`);
+    const on = onSubject(t, objects);
+    const off2 = [...refs, ...(goal ? [`goal:${goal}`] : [])].filter((r) => /^(question|goal):/.test(r) && !on.has(r));
+    // a follow-up (--re) is asked for, but stays on its thread's subject unless it says why not
+    if (off2.length && re) die(`${off2.join(', ')} ${off2.length === 1 ? 'is' : 'are'} off this thread's subject: a follow-up (--re) is about what its thread is about; if it is about something else, ${elsewhere}; or say why it belongs here with --off-subject "<why>"`);
+    if (off2.length) die(`${off2.join(', ')} ${off2.length === 1 ? 'is' : 'are'} off this thread's subject, and ${waits}: ${remedies}`);
+  };
+  // kit-108: the supervisor's own thread, about a question or a goal: a thread line and a first turn,
+  // both by supervisor, the subject the turn's ref; nothing typed into any pane (the owner moves next)
+  const supervisorThread = () => {
+    supervisorOnly('thread new');
+    if (flags.files !== undefined) die("--files go with the owner's own turn");
+    if (flags.subject === undefined) die('owner commands don\'t run in an agent session (DEVTEAM_ROLE=supervisor), and a thread of your own needs --subject: thread new --subject \'{"kind":"item","ref":"question:q-…"}\' --title "<line>" -- "<words>", about a question or a goal');
+    let subject;
+    try { subject = uncapped(JSON.parse(flagStr('subject'))); } catch { die('--subject is JSON: {"kind":"item","ref":"question:q-…"}'); }
+    const p = subjectProblem(subject);
+    if (p) die(`--subject: ${p}`);
+    if (subject.kind !== 'item' || !/^(question|goal):/.test(subject.ref)) die('--subject: you start a thread about a question or a goal: {"kind":"item","ref":"question:q-…"} or {"kind":"item","ref":"goal:g-…"}');
+    const [kind, sid] = [subject.ref.slice(0, subject.ref.indexOf(':')), subject.ref.slice(subject.ref.indexOf(':') + 1)];
+    if (logGet(sid)?.type !== kind) die(`--subject: no ${kind} ${sid} in the log (${kind === 'question' ? 'questions --json' : 'goal list'})`);
+    const words = turnText(wordsFrom(1));
+    const given = uncapped(flagStr('title'));
+    if (given !== undefined && given.length > THREAD_TITLE_MAX) die(`--title is at most ${THREAD_TITLE_MAX} characters`);
+    if (given !== undefined && UNSAFE_TEXT.test(given)) die('--title is one line of plain text');
+    const title = threadTitle(given ?? words);
+    if (!title) die('--title: the thread needs a name');
+    const views = threadViews(readLog().objects);
+    const had = views.find((x) => x.status === 'open' && x.subject && subjectKey(x.subject) === subjectKey(subject));
+    if (had) die(`${had.id} is already open on this subject: say it there (thread reply ${had.id} "<words>" --refs ${subject.ref})`);
+    const capped = supervisorThreadCap(views);
+    if (capped) die(capped);
+    const line = { type: 'turn', thread: 't-00000000-000000000-supervisor', text: words, refs: [subject.ref] };
+    if (!lineFits(line, 'supervisor')) die('That first turn is too long with its link; shorten it.');
+    const t = appendLog({ type: 'thread', title, subject }, 'supervisor');
+    appendLog({ ...line, thread: t.id }, 'supervisor');
+    return out(t.id);
+  };
   if (sub === 'new') {
+    // the owner's, or the supervisor's own (kit-108); never the responder's, a worker's or a planner's
+    const role = process.env.DEVTEAM_ROLE;
+    if (role && role !== 'supervisor') die(`thread new: only the owner and the supervisor start threads (DEVTEAM_ROLE=${role}); ${role === 'responder' ? 'hand it over: send supervisor "…" --kind handoff --thread <t-id>' : 'tell the supervisor: send supervisor "…"'}`);
+    if (role === 'supervisor') return supervisorThread();
+    if (flags.re !== undefined || flags['off-subject'] !== undefined) die('--re goes with a reply (thread reply), and so does --off-subject: never the owner\'s own turn');
     const { by } = threadOwner();
     const early = alone(1);
     const words = turnText(filled(1, early));
@@ -9593,26 +10956,74 @@ function cmdThread() {
     if (had) die(`${had.id} is already open on this subject: say it there (thread say ${had.id} "<words>")`);
     const n = openThreadCount(views);
     if (n >= THREAD_OPEN_MAX) die(`${n} threads are open, the most a project keeps: resolve some first (thread list --open)`);
-    // both lines checked before the thread's is written: a refused first turn leaves no thread with none
-    if (files && !(lineFits({ type: 'thread', title, subject }, by) && lineFits({ type: 'turn', thread: `t-00000000-000000000-${by}`, text: words, files }, by))) die(FILES_TOO_LONG);
+    // routed before either line is written (kit-104), and both lines checked with the route on the
+    // turn's: a refused first turn leaves no thread with none
+    const route = responderRoute({ subject });
+    // with the owner's name on both (kit-252) too, which only files made too long before
+    if ((files || (by === 'owner' && envPerson())) && !(lineFits({ type: 'thread', title, subject }, by) && lineFits({ type: 'turn', thread: `t-00000000-000000000-${by}`, text: words, files, ...routedFields(route) }, by))) die(files ? FILES_TOO_LONG : PERSON_TOO_LONG);
     const t = appendLog({ type: 'thread', title, subject }, by);
-    const u = appendLog({ type: 'turn', thread: t.id, text: words, files }, by);
+    const u = appendLog({ type: 'turn', thread: t.id, text: words, files, ...routedFields(route) }, by);
     out(t.id);
-    return out(deliver(t, u, words, files));
+    return out(deliver(t, u, words, files, route));
   }
   // say is the owner's and reply the supervisor's or the responder's, never one falling through to the
   // other: a reply with no DEVTEAM_ROLE is still the supervisor's (as ask is), so it never lands in the
   // owner's file. The responder writes its own; anyone else goes through supervisorOnly.
+  // kit-797: a reply handed over a paragraph at a time. thread reply <t> --part <n> "<words>" puts the
+  // words on the thread's working record (markThreadWorking), never in the log; --after-parts writes
+  // the turn, those parts and its own last words joined, as any reply. Both are the replying
+  // session's: the owner's terminal and the dashboard never hold a turn (sessionBy).
+  const streamed = sub === 'reply' && (flags.part !== undefined || flags['after-parts'] !== undefined);
+  if (sub === 'say' && (flags.part !== undefined || flags['after-parts'] !== undefined)) die('--part and --after-parts go with a reply (thread reply), not the owner\'s own turn');
+  if (streamed && !sessionBy()) die('thread reply --part and --after-parts: run by the agent session replying (DEVTEAM_ROLE supervisor or responder), never the owner\'s terminal or the dashboard');
+  if (streamed && flags.part !== undefined && flags['after-parts'] !== undefined) die('--part or --after-parts: a part, or the turn after the parts, never both');
+  // the newest owner turn, by the log's own writers, and whether the caller may respond to it (as thread working)
+  const ownerTurnOf = (t, by) => {
+    const ts = [...readLog().objects.values()].filter((o) => o.type === 'turn' && o.thread === t.id).sort(byTime);
+    const turn = ts.filter((u) => u.created_by === 'owner').pop();
+    if (!turn) die(`${t.id} has no owner turn yet: nothing to respond to`);
+    const last = ts[ts.length - 1];
+    if (last.created_by !== 'owner' && by !== 'supervisor' && last.created_by !== by) die(`nothing to respond to: the last turn is ${last.created_by}'s`);
+    return turn;
+  };
+  if (streamed && flags.part !== undefined) {
+    const by = logWriter() === 'responder' ? 'responder' : (supervisorOnly('thread reply --part'), replyWriter());
+    if (!by) die('thread reply --part: the supervisor or the responder (DEVTEAM_ROLE)');
+    for (const f of ['refs', 'pending', 're', 'off-subject', 'anyway', 'files']) if (flags[f] !== undefined) die(`--${f} goes on --after-parts, with the turn: a part is words only`);
+    const [nv, ...after] = asList(flags.part);
+    if (!/^[1-9]\d{0,2}$/.test(String(nv ?? ''))) die('--part <n> "<words>": the part\'s number, from 1 (at most 999), then its words');
+    const given = [after.join(' ').trim(), wordsFrom(2)].filter(Boolean);
+    if (given.length > 1) die('--part <n> "<words>": the words once, after n or after the thread id, not both');
+    if (!given.length) die('say something: a part\'s words go after its number (--part <n> "<words>")');
+    const t = threadOpen(id, by);
+    const turn = ownerTurnOf(t, by);
+    const r = markThreadWorking(t.id, { by, stage: 'responding', turn: turn.id }, { part: { n: Number(nv), words: given[0] } });
+    if (r.refused) die(r.refused);
+    return out(r.same ? `part ${r.same} already taken: ${t.id}` : `part ${r.taken} taken: ${t.id} (${r.bytes} of ${TURN_MAX} bytes)`);
+  }
   if (sub === 'say' || sub === 'reply') {
     const by = sub === 'say' ? threadOwner().by : sub === 'reply' && logWriter() === 'responder' ? 'responder' : (supervisorOnly('thread reply'), replyWriter());
     // refused before its value is read: a reply's --files is wrong whatever it holds
     if (flags.files !== undefined && by !== 'owner') die("--files go with the owner's own turn");
     const t = threadOpen(id, by);
+    // --after-parts: the session's own parts for the newest owner turn, then its last words, if any
+    let joined;
+    let own = null;
+    let ownTurn = null;
+    if (streamed) {
+      const last = [flagStr('after-parts') ?? '', wordsFrom(2)].map((x) => x.trim()).filter(Boolean);
+      if (last.length > 1) die('--after-parts "<last words>": the words once, after the flag or after the thread id, not both');
+      ownTurn = ownerTurnOf(t, by);
+      own = markThreadWorking(t.id, { by, stage: 'responding', turn: ownTurn.id }, { own: true });
+      if (!own) die(`no parts of yours in ${t.id} for the owner's newest turn (none taken, the owner wrote since, or they went stale): write the whole reply with thread reply ${t.id} "<words>"`);
+      joined = last.length ? `${own.partial}\n\n${last[0]}` : own.partial;
+    }
     // --pending (a reply that says work follows) is a reply's; --anyway is the responder's alone
     if (flags.pending && by === 'owner') die('--pending goes with a reply (thread reply), not the owner\'s own turn');
     if (flags.anyway && by !== 'responder') die("--anyway is the responder's: it replies after the supervisor answered only to add something new");
+    if (by === 'owner' && (flags.re !== undefined || flags['off-subject'] !== undefined)) die('--re goes with a reply (thread reply), and so does --off-subject: never the owner\'s own turn');
     const early = by === 'owner' ? alone(2) : undefined;
-    const words = turnText(filled(2, early));
+    const words = turnText(joined ?? filled(2, early));
     const refs = flags.refs !== undefined ? listFlag('refs') : [];
     if (refs.length && by !== 'supervisor' && by !== 'responder') die("--refs are on the supervisor's turns and the responder's: what it did, as <type>:<id>");
     if (refs.length > 8) die('--refs names at most 8 things');
@@ -9621,21 +11032,42 @@ function cmdThread() {
     // nothing (d-20261121-072341505-supervisor, final-16b B4)
     for (const r of refs) if (r.startsWith('question:') && logGet(r.slice('question:'.length))?.type !== 'question') die(`--refs ${r} names no question in the log: name one asked (questions --json), or leave it out`);
     const files = early ?? filesFlag();
+    const objects0 = by === 'owner' ? null : readLog().objects;
+    const re = by === 'owner' ? undefined : reOf(t, by, objects0);
+    const off = by === 'owner' ? undefined : offSubjectFlag();
     // words at the encoded cap fit a line alone, not always with eight links or ten files: the line
     // as appendLog will build it, checked here so the refusal says what to do about it
-    const line = { type: 'turn', thread: t.id, text: words, refs: refs.length ? refs : undefined, files, pending: by !== 'owner' && flags.pending ? true : undefined };
-    if ((refs.length || line.pending) && !lineFits(line, by)) die('That reply is too long with its links; shorten it.');
+    // the owner's turn is routed before its line is written (kit-104), and the size check sees the route
+    const route = by === 'owner' ? responderRoute(t) : null;
+    const line = { type: 'turn', thread: t.id, text: words, refs: refs.length ? refs : undefined, files, pending: by !== 'owner' && flags.pending ? true : undefined, ...(route ? routedFields(route) : {}), re, off_subject: off };
+    if ((refs.length || line.pending || re || off) && !lineFits(line, by)) die('That reply is too long with its links; shorten it.');
     if (files && !lineFits(line, by)) die(FILES_TOO_LONG);
+    // the owner's turn carries their name from a server (kit-252): a turn at the page's cap with a
+    // long name is refused here, saying so, rather than at the log's line limit
+    if (!files && by === 'owner' && envPerson() && !lineFits(line, by)) die(PERSON_TOO_LONG);
     if (by !== 'owner') {
       const objects = readLog().objects;
       if (by === 'responder' && !flags.anyway && supervisorAnswered(t.id, objects)) die(`the supervisor has answered this (thread show ${t.id}): reply only to add something new, with --anyway`);
+      const implied = {};
+      askedFor(t, by, objects, { refs, re, off, implied });
+      // written as the follow-up it is, so show marks it and reOf sees the turn followed up (task-3-2 F2-1)
+      if (implied.re) { line.re = implied.re; if (!lineFits(line, by)) die('That reply is too long with its links; shorten it.'); }
       // the owner's turns this reply answers, before it is written: on stderr, so the id stays the first line out
-      for (const o of owedTurns(t.id, objects)) process.stderr.write(`answering ${o.id}: "${turnGist(o.text)}"\n`);
+      for (const o of owedTurns(t.id, objects).filter((o) => answersTurn(o, by))) process.stderr.write(`answering ${o.id}: "${turnGist(o.text)}"\n`);
+      // and the responder's open promise it closes (pendingOpen), so the supervisor sees it takes that
+      // work over: the responder's follow-up is refused after it (final-3 F2, final-3b F1)
+      if (by === 'supervisor') {
+        const ts = logTurns(t.id, objects);
+        const p = pendingOpen(ts, objects.get(t.id));
+        if (p && !pendingOpen([...ts, { created_by: 'supervisor', created_at: nowIso() }], objects.get(t.id))) process.stderr.write(`taking over ${p.id}: "${turnGist(p.text)}"\n`);
+      }
     }
+    // every guard passed: the parts are taken under the lock just before the turn is written (kit-797)
+    if (own) { const r = markThreadWorking(t.id, { by, stage: 'responding', turn: ownTurn.id }, { take: own }); if (r?.refused) die(r.refused); }
     const u = appendLog(line, by);
     out(u.id);
-    if (by === 'owner') out(deliver(t, u, words, files));
-    else spoke(t);
+    if (by === 'owner') out(deliver(t, u, words, files, route));
+    else if (!own) spoke(t);
     return;
   }
   // an Inbox question in every respect (ask's flags, checks and refusals), asked in this thread, and
@@ -9643,6 +11075,8 @@ function cmdThread() {
   if (sub === 'ask') {
     supervisorOnly('thread ask');
     const t = threadOpen(id, 'supervisor');
+    if (flags.re !== undefined) die('--re goes with thread reply: a question is never a follow-up');
+    const off = offSubjectFlag();
     // The question is written first (the turn names its id), so the turn's words are checked before
     // it: a question the log took and a turn it then refused would leave a question no turn shows.
     // askLine writes the question as given, so its first TURN_MAX bytes are the turn's words.
@@ -9676,8 +11110,13 @@ function cmdThread() {
       lead = `About your message: "${flat.slice(0, 80).join('')}${flat.length > 80 ? '…' : ''}"\n`;
     } else for (const k of ['seen-turn', 'at']) if (flags[k] !== undefined) die(`thread ask --${k} goes with --turn <u-id>`);
     if (encodedBytes(capBytes(`${lead}${flagStr('question') ?? ''}`, TURN_MAX)) > TURN_ENCODED_MAX) die('this question has too many quotation marks, backslashes or control characters to keep in one log line; ask it with fewer');
+    // whether the question was asked for, once its own words are known to fit (kit-108)
+    askedFor(t, 'supervisor', readLog().objects, { off, goal: flagStr('goal'), asks: true });
     const q = askLine({ thread: t.id, about });
-    appendLog({ type: 'turn', thread: t.id, text: capBytes(`${lead}${q.question}`, TURN_MAX), question: q.id }, 'supervisor');
+    // the question's turn answers every owed owner turn before it, as a reply does (final-1b F1): named
+    // on stderr before it is written, so the supervisor sees each one, the responder's included
+    for (const o of owedTurns(t.id).filter((o) => answersTurn(o, 'supervisor'))) process.stderr.write(`answering ${o.id}: "${turnGist(o.text)}"\n`);
+    appendLog({ type: 'turn', thread: t.id, text: capBytes(`${lead}${q.question}`, TURN_MAX), question: q.id, off_subject: off }, 'supervisor');
     out(q.id);
     spoke(t);
     return;
@@ -9724,16 +11163,20 @@ function cmdThread() {
     const t = logGet(id ?? '');
     if (t?.type !== 'thread') die(`no thread ${id ?? '(none given)'}`);
     if (t.status !== 'resolved') die(`${t.id} is open`);
+    if (flags.re !== undefined || flags['off-subject'] !== undefined) die('--re goes with a reply (thread reply), and so does --off-subject: never the owner\'s own turn');
     // reopening takes words, never files: said so, not dropped without a word
     if (flags.files !== undefined) die("--files go with the owner's own turn");
     const words = wordsFrom(2);
     if (words) turnText(words);
-    const n = openThreadCount();
+    // a thread the supervisor started counts toward its own cap, never the owner's, and the owner's reopen of it is never refused
+    const n = t.created_by === 'supervisor' ? 0 : openThreadCount();
     if (n >= THREAD_OPEN_MAX) die(`${n} threads are open, the most a project keeps: resolve some first (thread list --open)`);
+    // its words routed before either line is written (kit-104), as the thread will be once open
+    const route = words ? responderRoute(t) : null;
     appendLog({ type: 'thread', op: 'set', id: t.id, status: 'open' }, by);
-    const u = words ? appendLog({ type: 'turn', thread: t.id, text: words }, by) : null;
+    const u = words ? appendLog({ type: 'turn', thread: t.id, text: words, ...routedFields(route) }, by) : null;
     out(`reopened ${t.id}`);
-    if (words) return out(deliver(t, u, words));
+    if (words) return out(deliver(t, u, words, undefined, route));
     return nudgeSupervisor(`[devteam thread ${t.id} reopened by owner] devteam.mjs thread show ${t.id}`);
   }
   // The session holding the owner's turn says it is on it; the card says so until it replies.
@@ -9770,15 +11213,19 @@ function cmdThread() {
       if (by && replyWriter() && ['supervisor', 'responder'].includes(process.env.DEVTEAM_ROLE) && v.status === 'open' && last?.by === 'owner') markThreadWorking(t.id, { by, stage: 'picked-up', turn: last.id }, { pickup: true });
     } catch {}
     if (flags.json) return json(v);
-    out(`${v.id} · ${v.status}${v.status === 'open' ? ` · ${v.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}`);
-    out(threadDataFrame(v));
+    // an overdue turn the responder has is now the supervisor's to take: show says so, as list --waiting does
+    // an artifact note with a session is that session's (artifact-notes-1), in the words the card uses
+    out(`${v.id} · ${v.status}${v.status === 'open' ? ` · ${v.waiting === 'session' ? `with ${v.with}` : waitingWords(v, v.waiting === 'responder' && responderOverdue(readLog().objects).some((o) => o.thread === v.id))}` : ''}`);
+    // a thread the supervisor started names what it is about; its title is the supervisor's own words, still data
+    out(v.started_by === 'supervisor' ? `The supervisor started this thread about: ${quoteData(v.subject?.ref ?? '')}. Its title, as written: ${quoteData(v.title)}` : threadDataFrame(v));
     const moved = v.subject?.kind === 'artifact' ? artifactSubjectNow(v.subject) : null;
     if (moved) out(moved);
     // the owner's words are theirs, as in your session; your own turns are yours
     const lines = readLog().objects;
     for (const u of v.turns) {
       // the responder's turns name it (the view keeps them on the supervisor's side); a pending one says so
-      out(`${u.at} ${u.writer === 'responder' ? 'responder' : u.by} (${u.id})${lines.get(u.id)?.pending === true ? ' (pending)' : ''}${u.question ? `, asking ${u.question}` : ''}:`);
+      // an owner turn names its route (kit-104), so the responder can see which turns are the supervisor's
+      out(`${u.at} ${u.writer === 'responder' ? 'responder' : u.by} (${u.id})${lines.get(u.id)?.pending === true ? ' (pending)' : ''}${typeof lines.get(u.id)?.re === 'string' ? ` (following up ${lines.get(u.id).re})` : ''}${u.routed_to ? `, routed to the ${u.routed_to}` : ''}${u.question ? `, asking ${u.question}` : ''}${typeof lines.get(u.id)?.off_subject === 'string' ? `, off subject: ${quoteData(lines.get(u.id).off_subject)}` : ''}:`);
       // its own line breaks, a tab as the space it stands for, and nothing else a terminal acts on
       // (an escape, a bidi override, a CR)
       out(u.text.replace(/\t/g, ' ').replace(UNSAFE_TEXT_ALL, (c) => (c === '\n' ? c : '')).split('\n').map((l) => `  ${l}`).join('\n'));
@@ -9798,15 +11245,31 @@ function cmdThread() {
       for (const x of q) out(`${x.turn} in ${x.thread} (${Math.max(0, Math.round((Date.now() - Date.parse(x.at)) / 60000))} min) "${turnGist(x.text)}"`);
       return;
     }
-    let vs = threadViews(readLog().objects).sort((a, b) => b.activity_at.localeCompare(a.activity_at));
-    if (flags.waiting) vs = vs.filter((x) => x.status === 'open' && x.waiting === 'supervisor');
-    else if (!flags.all) vs = vs.filter((x) => x.status === 'open');
+    const objects = readLog().objects;
+    let vs = threadViews(objects).sort((a, b) => b.activity_at.localeCompare(a.activity_at));
+    const row = (x, words) => `${x.id} [${x.status}${words ? `, ${words}` : ''}${x.started_by === 'supervisor' ? ', from the supervisor' : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`;
+    if (flags.waiting) {
+      // the supervisor's: an owed turn routed to it (or with no route) or an open handoff naming the
+      // thread; then the threads the responder has, marked so and never also as the supervisor's
+      // (kit-104). --json lists the supervisor's only, each with its open handoff's id or null.
+      const handoffs = openHandoffs(objects);
+      const late = new Set(responderOverdue(objects).map((o) => o.thread));
+      const open = vs.filter((x) => x.status === 'open');
+      const mine = open.filter((x) => x.waiting === 'supervisor' || handoffs.has(x.id));
+      const theirs = open.filter((x) => x.waiting === 'responder' && !handoffs.has(x.id));
+      if (flags.json) return json(mine.map((x) => ({ ...x, handoff: handoffs.get(x.id) ?? null })));
+      if (!mine.length) out('no thread is waiting on the supervisor');
+      for (const x of mine) out(row(x, `waiting on the supervisor${handoffs.has(x.id) ? ` · handoff ${handoffs.get(x.id)}` : ''}`));
+      for (const x of theirs) out(row(x, waitingWords(x, late.has(x.id))));
+      return;
+    }
+    if (!flags.all) vs = vs.filter((x) => x.status === 'open');
     if (flags.json) return json(vs);
-    if (!vs.length) return out(flags.waiting ? 'no thread is waiting on the supervisor' : flags.all ? 'no threads' : 'no open threads');
-    for (const x of vs) out(`${x.id} [${x.status}${x.status === 'open' ? `, ${x.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`);
+    if (!vs.length) return out(flags.all ? 'no threads' : 'no open threads');
+    for (const x of vs) out(row(x, x.status === 'open' ? (x.waiting === 'session' ? `with ${x.with}` : waitingWords(x)) : ''));
     return;
   }
-  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--anyway]   (the supervisor\'s or the responder\'s; --anyway the responder\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting [--responder] | --open | --all] [--json]   (words may also follow --)');
+  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread new --subject \'{"kind":"item","ref":"question:q-…"}\' [--title "<line>"] -- "<words>"   (the supervisor\'s own, about a question or goal)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--re <u-id>] [--off-subject "<why>"] [--anyway]   (the supervisor\'s or the responder\'s; --anyway the responder\'s)   |   thread reply <t-id> --part <n> "<words>"   then   thread reply <t-id> --after-parts ["<last words>"] [reply\'s flags]   (a reply a paragraph at a time, from the replying session)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" [--off-subject "<why>"] <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting [--responder] | --open | --all] [--json]   (words may also follow --)');
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
@@ -11514,7 +12977,14 @@ function cmdArtifact() {
     const m = publicManifest(args[0] ?? die('usage: artifact manifest <slug> [--json]'));
     if (flags.json) return out(JSON.stringify(m));
     const bytes = Object.values(m.files).reduce((n, f) => n + f.size, 0);
-    return out(`${m.project}/${m.slug} at tree ${m.tree.slice(0, 12)}: ${Object.keys(m.files).length} files, ${bytes} bytes; published, it is https://public.<box>/${m.project}/${m.slug}/`);
+    const said = `${m.project}/${m.slug} at tree ${m.tree.slice(0, 12)}: ${Object.keys(m.files).length} files, ${bytes} bytes; published, `;
+    // A box image whose gateway serves each project at a host of its own (project-hosts@1) sets
+    // DEVTEAM_PROJECT_HOSTS=1; one from before it still serves public.<box>/<project>/<slug>/.
+    if (process.env.DEVTEAM_PROJECT_HOSTS !== '1') return out(`${said}it is https://public.<box>/${m.project}/${m.slug}/`);
+    // project-hosts@1's rules, as the gateway's Publish checks them, slug first
+    if (['api', 'artifact', 'c', 'healthz', 'presence', 'public-manifest', 'review', 'upload', 'view'].includes(m.slug)) return out(`${said}it would have no address: ${m.slug} is a path of the dashboard, so rename the artifact`);
+    if (!/^(?!\d+$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(m.project) || ['term', 'public', 'www'].includes(m.project)) return out(`${said}it would have no address: ${m.project} can't be a host name, so rename the project (settings.md's project)`);
+    return out(`${said}it is https://${m.project}.<box>/${m.slug}/`);
   }
   // artifact publish|unpublish: the owner's record of what the gateway made public. The gateway's
   // confirm page runs them through the dashboard; by hand they record intent only.
@@ -13163,7 +14633,8 @@ function ownerRefHolds(from, ref) {
   const o = ref ? logGet(ref) : null;
   if (!o) return false;
   const answered = o.type === 'question' && questionView(o).status === 'answered';
-  const spoke = (o.type === 'turn' && o.created_by === 'owner') || o.type === 'thread';
+  // a thread the owner started (kit-108: the supervisor starts its own, which holds none of the owner's words)
+  const spoke = (o.type === 'turn' || o.type === 'thread') && o.created_by === 'owner';
   return from === 'owner-answer' ? answered : from === 'owner-thread' ? spoke : from === 'owner-chat' ? answered || spoke : true;
 }
 // { from, ref }: from in x-ooda.sources, ref which one within it (a sensor's name, a finding's kind,
@@ -13248,7 +14719,7 @@ function observeFindings(m) {
   for (const o of logObjects('observation')) if (o.source_key && o.created_by === 'supervisor' && o.detector === 'metrics') recent.set(o.source_key, Math.max(recent.get(o.source_key) ?? 0, Date.parse(o.created_at)));
   let n = 0;
   for (const f of m.findings) {
-    const key = `metrics:${f.kind}:${f.subject}`;
+    const key = `metrics:${f.kind}:${f.subject}${f.key ? `:${f.key}` : ''}`;
     if (Date.now() - (recent.get(key) ?? 0) < DAY) continue;
     appendLog({ type: 'observation', source: 'metrics', subject: String(f.subject), kind: f.kind, detector: 'metrics', detail: f.detail, severity: f.sev ?? SEV[f.severity] ?? 1, valence: -1, source_key: key, fix_hint: f.suggestion }, 'supervisor');
     n++;
@@ -13270,6 +14741,10 @@ async function cmdObserveMetrics() {
   out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${learned ? `; ${learned} weekly learning record(s)` : ''}${unfetched.length ? `; ${unfetched.length} repo link(s) not fetched this tick (time budget): ${unfetched.join(', ')}` : ''}${unlisted.length ? `; ${unlisted.length} repo link(s) whose open PRs weren't read this tick (time budget): ${unlisted.join(', ')}` : ''}${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
   // finished worktrees go, at most every 30 minutes (one line when any did)
   tidyFinishedWorktrees();
+  // the hub's cache, again after everything the tick wrote, from the log read afresh, so nothing
+  // the tick wrote is newer than it (next-moves)
+  logCache = null;
+  writeMovesCache();
 }
 // The tick's fetch of each repo link's main (home's is the tick's own git fetch), four at a time
 // inside the tick's budget, so status, metrics and the dashboard read every repo's main as its
@@ -13648,7 +15123,7 @@ function mdSections(text) {
 function searchFileDocs() {
   const main = projectInRepo ? mainSha() : null;
   if (!main) return [];
-  const listAt = (sha, dirs) => (git(['ls-tree', '-r', '-z', sha, '--', ...dirs.map((d) => `${projectRel}/${d}`)]) ?? '').split('\0').filter(Boolean).map((l) => { const tab = l.indexOf('\t'); const [, type, oid] = l.slice(0, tab).split(' '); return { type, oid, p: l.slice(tab + 1).slice(projectRel.length + 1) }; }).filter((e) => e.type === 'blob' && SEARCH_FILES.test(e.p) && !UNSAFE_TEXT.test(e.p) && e.p.length <= 300);
+  const listAt = (sha, dirs) => (git(['ls-tree', '-r', '-z', sha, '--', ...dirs.map((d) => `${projectRel}/${d}`)]) ?? '').split('\0').filter(Boolean).map((l) => { const tab = l.indexOf('\t'); const [, type, oid] = l.slice(0, tab).split(' '); return { type, oid, p: l.slice(tab + 1).slice(projectRel.length + 1) }; }).filter((e) => e.type === 'blob' && (SEARCH_FILES.test(e.p) || e.p === 'self.md' || e.p === 'exterior.md') && !UNSAFE_TEXT.test(e.p) && e.p.length <= 300);
   const mainFiles = listAt(main, ['']);
   const mainOid = new Map(mainFiles.map((e) => [e.p, e.oid]));
   const reads = mainFiles.map((e) => ({ ...e, sha: main, ref: 'main' }));
@@ -15235,19 +16710,24 @@ function choreSlug(slugName) {
 }
 // A new chore worktree gets settings.worktree_files (a gitignored key, an .env) so gates can run in
 // it; `chore start` also runs worktree_setup there. log-sync and retro only commit files, so they
-// skip the setup.
-function choreWorktree(slugName, { reset = false, setup = false } = {}) {
+// skip the setup. responder: the responder's draft (responder draft), from its own worktree: honoured
+// only for the responder writer with DEVTEAM_ROLE unset or responder, so the flag alone lets no one
+// else past the main-checkout check (kept inline: test D7 loads this function by itself); it never
+// takes a worktree that appeared since the responder looked, so a rollback only removes its own.
+// start: the commit a missing worktree starts at (chore start and chore pr on an open branch, kit-296)
+function choreWorktree(slugName, { reset = false, setup = false, responder = false, start } = {}) {
   choreSlug(slugName);
   if (!commonDir || !projectInRepo) die('chores need a git checkout with the project folder inside it');
-  if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
+  if (repoRoot !== mainRoot && !(responder && logWriter() === 'responder' && [undefined, '', 'responder'].includes(process.env.DEVTEAM_ROLE))) die(`run this from the main checkout (${mainRoot})`);
   const wt = path.join(mainRoot, '.worktrees', `chore-${slugName}`);
   const main = loadSettings().main_branch;
   if (!flags['dry-run']) git(['fetch', '--quiet', 'origin', main]);
   const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
   const existed = fs.existsSync(wt);
   // add and reset with -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
-  if (!existed) { gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, base], mainRoot); seedWorktree(wt, { setup, session: true }); }
+  if (!existed) { gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, start ?? base], mainRoot); seedWorktree(wt, { setup, session: true }); }
   else if (reset) gitOrDie(['-c', 'core.useReplaceRefs=false', 'checkout', '--quiet', '-B', `chore-${slugName}`, base], wt);
+  else if (responder) die(`.worktrees/chore-${slugName} appeared meanwhile: responder draft again`);
   // in use again: the tick's tidy leaves a worktree alone until it has been quiet a while
   else { const now = new Date(); try { fs.utimesSync(wt, now, now); } catch {} }
   // one there already whose setup never passed (cut short at the deadline, held for a slot, failed:
@@ -15257,6 +16737,101 @@ function choreWorktree(slugName, { reset = false, setup = false } = {}) {
   if (existed && setup && !/^secret-/.test(slugName) && home.settings.worktree_setup && setupMarker.needed(wt, home.settings, home.root)) seedWorktree(wt, { setup, session: true });
   return wt;
 }
+// chore-records start
+// Chore records (kit-296): what a chore is for, and whether its branch is open. A branch with no
+// record is still open chore work (the C rows read git); a record adds its title and refs. Two
+// rules from the next-moves design's "When a chore is open", which kit-293's C rows reuse:
+// choreTipMerged (is this tip landed) and choreDropHolding (which drop ends it). No branch is
+// ever deleted or moved here.
+//
+// The branch's tips: origin's (asked, then fetched into refs/remotes/origin/chore-<slug>) and the
+// local one. The tip is origin's unless origin's is an ancestor of the local one (unpushed work
+// is work), or the other side is merged; diverged when both carry work. No branch anywhere: tip null.
+function choreBranch(slugName) {
+  const ref = `chore-${slugName}`;
+  const remote = `refs/remotes/origin/${ref}`;
+  let gone = false;
+  if (!flags['dry-run'] && git(['config', '--get', 'remote.origin.url']) !== null) {
+    const ls = gitRun(['ls-remote', '--exit-code', 'origin', `refs/heads/${ref}`]);
+    if (ls.status === 0) {
+      const f = gitRun(['fetch', '--quiet', 'origin', `+refs/heads/${ref}:${remote}`]);
+      if (f.status !== 0) warn(`couldn't fetch ${ref} from origin (${firstLine(f.err) || `exit ${f.status}`}); reading the refs as they are`);
+    } else if (ls.status === 2) gone = true; // not on origin: a stale copy of it says nothing (and stays)
+    else warn(`couldn't ask origin for ${ref} (${firstLine(ls.err) || `exit ${ls.status}`}); reading the refs as they are`);
+  }
+  const at = (r) => git(['rev-parse', '--verify', '--quiet', `${r}^{commit}`]) || null;
+  const local = at(`refs/heads/${ref}`);
+  const origin = gone ? null : at(remote);
+  if (!local || !origin || local === origin) return { local, origin, tip: origin ?? local, diverged: false };
+  if (ancestorOf(origin, local) === true) return { local, origin, tip: local, diverged: false };
+  if (ancestorOf(local, origin) === true) return { local, origin, tip: origin, diverged: false };
+  // a side whose tip is merged carries nothing of its own (a --fresh start not yet pushed, or a
+  // pushed tip squashed since): the tip is the other side's
+  if (choreTipMerged(slugName, local)) return { local, origin, tip: origin, diverged: false };
+  if (choreTipMerged(slugName, origin)) return { local, origin, tip: local, diverged: false };
+  return { local, origin, tip: origin, diverged: true };
+}
+// Merged: in main; or git cherry lists no + (each commit's patch is in main); or a merge-chore act
+// names chore-<slug> at the tip or at a commit the tip is an ancestor of (a squash of several).
+function choreTipMerged(slugName, tip) {
+  const main = mainRef();
+  if (!tip || !main) return false;
+  if (ancestorOf(tip, main) === true) return true;
+  const ch = gitRun(['cherry', main, tip]);
+  if (ch.status === 0 && !/^\+/m.test(ch.out)) return true;
+  const at = new RegExp(`^merged chore-${escapeRe(slugName)} at ([0-9a-f]{40})\\b`);
+  return logObjects('act').some((a) => {
+    if (a.class !== 'merge-chore') return false;
+    const s = at.exec(String(a.what ?? ''))?.[1];
+    return !!s && (s === tip || ancestorOf(tip, s) === true);
+  });
+}
+// The newest chore-drop decision that holds on tip, as { id, sha }, or null. A decision names the
+// branch by refs (exactly chore-<slug>) or by the token chore-<slug> in what, with no letter,
+// digit, - or . beside it once one sentence-ending . is set aside. Its sha is the first 7-40 hex
+// token after that token (in all of what when only refs name it). With a sha this clone has, it
+// holds while the tip is that commit or an ancestor of it; else while no commit is newer than it.
+function choreDropHolding(slugName, tip) {
+  if (!tip) return null;
+  const name = `chore-${slugName}`;
+  const tok = new RegExp(`(?<![A-Za-z0-9.-])${escapeRe(name)}(?=\\.?(?:[^A-Za-z0-9.-]|$))`);
+  const tipAt = commitDateOf(tip);
+  let held = null;
+  for (const d of logObjects('decision')) {
+    if (d.class !== 'chore-drop' || correctionOf(d)) continue;
+    const what = String(d.what ?? '');
+    const m = tok.exec(what);
+    if (!m && !(d.refs ?? []).includes(name)) continue;
+    const sha = /(?<![0-9A-Za-z])[0-9a-f]{7,40}(?![0-9A-Za-z])/.exec(m ? what.slice(m.index + name.length) : what)?.[0] ?? null;
+    // resolved here, never taken on its form: a 40-hex sha this clone lacks reads as no sha
+    const full = sha ? git(['rev-parse', '--verify', '--quiet', `${sha}^{commit}`]) || null : null;
+    const holds = full ? ancestorOf(tip, full) === true : !(tipAt > Date.parse(d.created_at));
+    if (holds && (!held || d.created_at >= held.at)) held = { id: d.id, sha, at: d.created_at };
+  }
+  return held && { id: held.id, sha: held.sha };
+}
+const choreDropWords = (slugName, tip, drop, wtThere = false) => `chore-${slugName} at ${tip} is dropped (chore drop ${drop.id}, at ${drop.sha ?? 'no sha'}): ${wtThere ? `remove .worktrees/chore-${slugName} (git worktree remove), then ` : ''}chore start ${slugName} --fresh starts it again from main, or commit to it again to reopen it`;
+// --what: one plain line, the chore's title for the owner; --for: the refs it serves (goal:<id>, a ticket).
+function choreRecordFlags(slugName) {
+  const what = flags.what === undefined ? undefined : (flagStr('what') ?? '').trim();
+  if (what !== undefined && (!what || /[\r\n]/.test(what) || what.length > 200)) die('--what is one plain line of 1 to 200 characters');
+  const given = [...new Set(asList(flags.for).flatMap((v) => String(v).split(/[\s,]+/)).filter(Boolean))];
+  if (flags.for === true || (flags.for !== undefined && !given.length)) die('--for names the refs the chore serves: --for goal:<id>[,<id>…]');
+  const refs = given.filter((r) => r !== `chore-${slugName}`);
+  if (refs.length > 10 || refs.some((r) => r.length > 120)) die('--for takes at most 10 refs, each at most 120 characters');
+  return { what, refs };
+}
+const choreRecord = (slugName, what, refs) => appendLog({ type: 'act', class: 'chore-start', what, refs: [`chore-${slugName}`, ...refs], reversible: true }, 'supervisor');
+// chore start and chore pr make a missing worktree from an existing branch only when it is open:
+// diverged, dropped and (for pr) merged are refused; for start, merged starts from main
+function choreOpenTip(slugName, b, verb) {
+  if (b.diverged) die(`chore-${slugName} differs here (${b.local}) and on origin (${b.origin}): bring them together first; ${verb} changed nothing`);
+  if (choreTipMerged(slugName, b.tip)) return null;
+  const drop = choreDropHolding(slugName, b.tip);
+  if (drop) die(choreDropWords(slugName, b.tip, drop));
+  return b.tip;
+}
+// chore-records end
 function openPr(wt, branch, title, bodyText) {
   const main = loadSettings().main_branch;
   if (loadSettings().forge === 'git') {
@@ -15338,26 +16913,117 @@ function cmdChore() {
   if (sub === 'start') {
     if (!slugName) die('usage: chore start <slug>');
     supervisorOnly('chore');
+    choreSlug(slugName);
     // Upkeep work starts only while Upkeep runs; keeping the record (the log, the fleet handoff,
     // posted secrets) never waits.
     const um = goalMode(upkeepOrVirtual());
-    if (um !== 'run' && !isRecordKeeping(choreSlug(slugName)) && !flags.force) die(`Upkeep is ${holdWords(um)}: no new upkeep chore starts (goal hold upkeep run --owner, or --force, logged)`);
-    const wt = choreWorktree(slugName, { setup: true });
+    if (um !== 'run' && !isRecordKeeping(slugName) && !flags.force) die(`Upkeep is ${holdWords(um)}: no new upkeep chore starts (goal hold upkeep run --owner, or --force, logged)`);
+    const rec = choreRecordFlags(slugName);
+    if (!commonDir || !projectInRepo) die('chores need a git checkout with the project folder inside it');
+    if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
+    // a missing worktree on a branch that exists: an open tip is checked out as it is, a merged one
+    // starts from main, a dropped one only with --fresh (whose act names the old tip first)
+    let start;
+    let recorded = false;
+    const made = !fs.existsSync(path.join(mainRoot, '.worktrees', `chore-${slugName}`));
+    if (!made && flags.fresh) die(`.worktrees/chore-${slugName} is there: --fresh starts a missing worktree only; remove it first (git worktree remove .worktrees/chore-${slugName})`);
+    if (!made) {
+      const head = git(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], path.join(mainRoot, '.worktrees', `chore-${slugName}`));
+      const drop = head && !choreTipMerged(slugName, head) ? choreDropHolding(slugName, head) : null;
+      if (drop) die(choreDropWords(slugName, head, drop, true));
+    }
+    if (made) {
+      const b = choreBranch(slugName);
+      if (b.diverged) die(`chore-${slugName} differs here (${b.local}) and on origin (${b.origin}): bring them together first; chore start changed nothing`);
+      if (flags.fresh) {
+        const drop = choreDropHolding(slugName, b.tip);
+        if (!drop) die(`no chore drop holds chore-${slugName}${b.tip ? ` at ${b.tip}` : ''}: --fresh starts again from main only a dropped branch`);
+        choreRecord(slugName, `${rec.what ?? `started chore-${slugName}`}; fresh from main; old tip ${b.tip}`, rec.refs);
+        recorded = true;
+      } else if (b.tip) start = choreOpenTip(slugName, b, 'chore start') ?? undefined;
+    }
+    const wt = choreWorktree(slugName, { setup: true, start });
+    if (!recorded && (made || rec.what !== undefined || rec.refs.length)) choreRecord(slugName, rec.what ?? `started chore-${slugName}`, rec.refs);
     // the jobs' chore started past Upkeep's hold is the supervisor's call, so it is logged (kit-162)
     const holdRefs = ['upkeep', 'chore-recurring'];
     if (um !== 'run' && slugName === 'recurring') appendLog({ type: 'act', class: 'goal-hold', what: `started chore-recurring while Upkeep is ${um === 'drain' ? 'drained' : holdWords(um)}, with --force`, refs: holdRefs, reversible: true }, 'supervisor');
     return out(wt);
   }
-  if (sub !== 'pr' || !slugName || !flagStr('title')) die('usage: chore start <slug>   |   chore pr <slug> --title "<summary>"');
+  if (sub === 'adopt' || sub === 'drop') {
+    if (!slugName) die(`usage: chore ${sub} <slug> ${sub === 'drop' ? '--reason "<why>"' : '[--what "…"] [--for <refs>]'}`);
+    supervisorOnly('chore');
+    choreSlug(slugName);
+    if (flags.fresh) die("--fresh is chore start's");
+    const reason = sub === 'drop' ? (flagStr('reason') ?? '').trim() : null;
+    if (sub === 'drop' && (!reason || /[\r\n]/.test(reason) || reason.length > 500)) die('chore drop needs --reason "<why>", one line of 1 to 500 characters');
+    const rec = sub === 'adopt' ? choreRecordFlags(slugName) : null;
+    if (!commonDir) die('chores need a git checkout');
+    const b = choreBranch(slugName);
+    if (!b.tip) die(`no branch chore-${slugName} locally or on origin`);
+    if (sub === 'adopt') return out(choreRecord(slugName, rec.what ?? `adopted chore-${slugName} at ${b.tip}`, rec.refs).id);
+    const d = appendLog({ type: 'decision', class: 'chore-drop', what: `dropped chore-${slugName} at ${b.tip}: ${reason}`, rationale: reason, refs: [`chore-${slugName}`], reversible: true, authority: 'constitution' }, 'supervisor');
+    return out(`${d.id}\nchore-${slugName} stays on every ref${fs.existsSync(path.join(mainRoot, '.worktrees', `chore-${slugName}`)) ? `, and so does .worktrees/chore-${slugName}` : ''}; chore start ${slugName} --fresh starts it again from main`);
+  }
+  if (sub !== 'pr' || !slugName || !flagStr('title')) die('usage: chore start <slug> [--what "…"] [--for <refs>] [--fresh]   |   chore adopt <slug> [--what "…"] [--for <refs>]   |   chore drop <slug> --reason "<why>"   |   chore pr <slug> --title "<summary>" [--names-checked <word,…>]');
+  // --names-checked a,b: the self.md and exterior.md drafts' words the supervisor has checked are fine to name in public
+  const named = flags['names-checked'] === undefined ? null : asList(flags['names-checked']).flatMap((v) => String(v).split(',')).map((x) => x.trim());
+  if (named && (!named.length || named.some((x) => !x))) die('--names-checked needs one or more words, comma-separated');
   supervisorOnly('chore');
   choreSlug(slugName);
   const wt = path.join(mainRoot, '.worktrees', `chore-${slugName}`);
-  if (!fs.existsSync(wt)) die(`no worktree .worktrees/chore-${slugName}; devteam.mjs chore start ${slugName}`);
+  if (flags.fresh) die("--fresh is chore start's");
+  if (!fs.existsSync(wt)) {
+    const b = commonDir ? choreBranch(slugName) : { tip: null };
+    if (!b.tip) die(`no worktree .worktrees/chore-${slugName}; devteam.mjs chore start ${slugName}`);
+    const tip = choreOpenTip(slugName, b, 'chore pr');
+    if (!tip) die(`chore-${slugName} is merged at ${b.tip}: chore start ${slugName} starts it again from main`);
+    choreWorktree(slugName, { setup: true, start: tip });
+  }
   // a plain folder left where the worktree was would have git add the main checkout's changes
   if (realPath(git(['rev-parse', '--show-toplevel'], wt) ?? '') !== realPath(wt)) die(`.worktrees/chore-${slugName} is not a worktree (was it tidied away?): move what you wrote aside, then devteam.mjs chore start ${slugName}`);
+  // origin's main as it is now: the base and the names the strategy and dependency files allow
+  fetchMain();
+  // the exterior.md hold (kit-135), before anything is staged: the working tree's draft and every
+  // version already committed since main, so a refused name is never committed by this run
+  const named0 = named && new Set(named);
+  const exTree = exteriorChoreLines(wt, 'tree', { base: mainRef() ? git(['merge-base', mainRef(), gitOrDie(['rev-parse', 'HEAD'], wt)]) : null, checkedWords: named0 });
+  if (exTree.fails.length) die(exTree.fails.map((f) => `chore pr: ${f}`).join('\n'));
   gitOrDie(['add', '-A'], wt);
-  if (gitOrDie(['status', '--porcelain'], wt)) gitOrDie(['commit', '--quiet', '-m', `chore-${slugName}: ${flagStr('title')}`], wt);
-  gitOrDie(['push', '--quiet', '--force', 'origin', `chore-${slugName}:chore-${slugName}`], wt);
+  const committed = Boolean(gitOrDie(['status', '--porcelain'], wt));
+  if (committed) gitOrDie(['commit', '--quiet', '-m', `chore-${slugName}: ${flagStr('title')}`], wt);
+  // the self.md hold (spec §3.3): a refusal undoes this run's commit, and only it, so the draft stays
+  // staged as it was and the refused words never reach a pushed commit
+  const head = gitOrDie(['rev-parse', 'HEAD'], wt);
+  // a drop that still holds at the head (nothing new committed since it): its commits stay unproposed
+  const dropped = choreTipMerged(slugName, head) ? null : choreDropHolding(slugName, head);
+  if (dropped) {
+    if (committed) gitOrDie(['reset', '--quiet', '--soft', 'HEAD~1'], wt);
+    die(choreDropWords(slugName, head, dropped, true));
+  }
+  // the push is forced: origin's tip as it is now, with commits this head lacks, is open work it would
+  // overwrite (a start that couldn't reach origin, or a push from elsewhere), unless it is merged or
+  // a drop holds it (the --fresh case)
+  const there = choreBranch(slugName).origin;
+  if (there && there !== head && ancestorOf(there, head) !== true && !choreTipMerged(slugName, there) && !choreDropHolding(slugName, there)) {
+    if (committed) gitOrDie(['reset', '--quiet', '--soft', 'HEAD~1'], wt);
+    die(`chore-${slugName} on origin is at ${there}, with commits this head (${head}) lacks: bring them in first (git -C .worktrees/chore-${slugName} pull --rebase origin chore-${slugName}), or chore drop ${slugName} to replace them; chore pr changed nothing`);
+  }
+  const base = mainRef() ? git(['merge-base', mainRef(), head]) : null;
+  // and again over every version since main, after the commit and before the push (kit-135)
+  const exRange = exteriorChoreLines(wt, 'range', { base, checkedWords: named0 });
+  if (exRange.fails.length) {
+    if (committed) gitOrDie(['reset', '--quiet', '--soft', 'HEAD~1'], wt);
+    die(exRange.fails.map((f) => `chore pr: ${f}`).join('\n'));
+  }
+  const held = choreSelfHold(slugName, base, head, named0, exRange.changed);
+  if (held) {
+    if (committed) gitOrDie(['reset', '--quiet', '--soft', 'HEAD~1'], wt);
+    die(held);
+  }
+  for (const w of exRange.warns) warn(`exterior.md: ${w}`);
+  if (named && exRange.words.length) logNamesChecked(slugName, EXTERIOR_REL(), git(['rev-parse', '--verify', '--quiet', `${head}:${EXTERIOR_REL()}`], wt) ?? 'none', exRange.words);
+  // forced, but only over the origin tip read above: a push from elsewhere since then is refused
+  gitOrDie(['push', '--quiet', `--force-with-lease=chore-${slugName}:${there ?? ''}`, 'origin', `chore-${slugName}:chore-${slugName}`], wt);
   const pr = openPr(wt, `chore-${slugName}`, `chore-${slugName}: ${flagStr('title')}`, flagStr('body') ?? flagStr('title'));
   out(`pushed chore-${slugName}${pr ? `: ${pr}` : ''}\nmerge it once CI passes, then: git worktree remove .worktrees/chore-${slugName}`);
 }
@@ -16613,6 +18279,8 @@ function collectMetrics(since, reviewsSince = 0) {
     // draft in front of the owner, then medium while the owner reads it.
     const strategyAsked = questions().some((q) => q.status === 'open' && q.class === 'strategy-change');
     if (live.length && sState !== 'written') add(strategyAsked ? 'medium' : 'high', 'strategy-unwritten', strategyRel, sState === 'missing' ? `${plural(live.length, 'goal')} running and no strategy on ${settings.main_branch}` : `${plural(live.length, 'goal')} running and the strategy is still the template`, `draft it next, while work carries on, in a chore from what you can read, then ask the owner to approve it (ask --class strategy-change; supervisor.md §1)${sState === 'missing' ? '; init writes the template' : ''}`);
+    selfFindings(add);
+    exteriorFindings(add);
     const all = questions();
     const open = all.filter((q) => q.status === 'open' && q.goal_hold !== 'let-go');
     for (const g of goals.filter((x) => x.status === 'ready' || ((x.status ?? 'draft') === 'draft' && open.some((q) => q.goal === x.id)))) {
@@ -16627,8 +18295,7 @@ function collectMetrics(since, reviewsSince = 0) {
       const r = goalAtTarget(g);
       if (!r) continue;
       // a No about this same value stands until the value moves or the goal changes
-      const basis = goalMetBasis(g);
-      if (all.some((q) => q.class === 'goal-met' && q.goal === g.id && (q.status === 'open' || (q.status === 'answered' && (q.asked_at > r.created_at || (q.met?.basis === basis && q.met?.reading?.value === r.measure.value && !sameAnswer(q.answer, GOAL_MET_CHOICES[0].label))))))) continue;
+      if (goalAtTargetQuiet(g, r, all)) continue;
       const m = measureOf(g);
       add('medium', 'goal-at-target', g.id, `"${g.title}" reads ${r.measure.value}${m.unit ? ` ${m.unit}` : ''} (${r.created_at.slice(0, 10)}), its target ${m.target}, and is still running: only the owner marks it met`, `ask the owner in the Inbox, never only in chat: ask --class goal-met --goal ${g.id} --recommendation yes (the kit writes the question; planning.md §1)`);
     }
@@ -16657,16 +18324,8 @@ function collectMetrics(since, reviewsSince = 0) {
   // planner in flight for it while planner slots are free.
   {
     const ps = planners();
-    const busy = new Set(ps.flatMap((p) => p.goals));
     // a goal whose design waits on another goal's (plan_after) waits until that one is approved
-    // (a goal let go, or one that doesn't exist, holds nothing back)
-    const blockedBy = (g) => (g.plan_after ?? []).filter((d) => logGet(d.goal)?.type === 'goal' && (logGet(d.goal).status ?? 'draft') === 'draft');
-    const waiting = logObjects('goal').filter((g) => {
-      if (busy.has(g.id) || ['met', 'abandoned'].includes(g.status) || blockedBy(g).length || goalMode(g) !== 'run') return false;
-      const c = goalCheck(g);
-      if ((g.status ?? 'draft') === 'draft') return !c.definition.length && !questions().some((q) => q.goal === g.id && q.status === 'open');
-      return g.status === 'ready' && c.coverage.some((x) => x.includes('has no feature') || x.startsWith('no feature names'));
-    }).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
+    const { waiting } = idlePlanningGoals(ps);
     const cap = settings.max_active_planners;
     // while the fleet drains for a move, nothing new starts: no idle planning, no idle capacity
     if (!drained && waiting.length && (cap == null || ps.length < cap)) idlePlanning = waiting.length;
@@ -16677,7 +18336,10 @@ function collectMetrics(since, reviewsSince = 0) {
   // in ready's order, so the workers it names first are fixes, then what a higher-priority goal waits on
   const prio = effectivePriorities(ts);
   const sevOf = (t) => { const inc = t.kind === 'fix' ? incidentOfTicket(t.id) : null; return inc ? incidentSeverity(inc) : 0; };
-  const startable = ready.filter((t) => !overlapsActive(t, activeIds, ts).length).map((t) => ({ t, kind: t.kind, severity: sevOf(t), priority: prio.get(t.id)?.priority })).sort(readyOrder).map((x) => x.t);
+  // and none its component's cap holds back, as the ticket rows' T12 reads it (a-20261123-192551256-supervisor);
+  // memory stays out of this list: memory-full speaks for it
+  const componentFull = (t) => activeIds.filter((x) => ts.get(x)?.component === t.component).length >= capOf(settings.max_active_per_component);
+  const startable = ready.filter((t) => !overlapsActive(t, activeIds, ts).length && !componentFull(t)).map((t) => ({ t, kind: t.kind, severity: sevOf(t), priority: prio.get(t.id)?.priority })).sort(readyOrder).map((x) => x.t);
   // a ready fix ticket may use an incident slot past the cap
   const readyFix = startable.filter((t) => t.kind === 'fix').map((t) => ({ ...t, sev: incidentSeverity(incidentOfTicket(t.id) ?? { fingerprints: [] }) })).sort((a, b) => b.sev - a.sev);
   if (!drained && readyFix.length && active >= capOf(settings.max_active_tickets) && active < capOf(settings.max_active_tickets) + (settings.incident_slots ?? 0) && !memFull) add('medium', 'idle-capacity', `${readyFix.length} fix ready`, `${active}/${capWords(settings.max_active_tickets)} workers active, and an incident slot is free`, `make a worker for: ${readyFix[0].id}`);
@@ -16737,10 +18399,35 @@ function collectMetrics(since, reviewsSince = 0) {
   // A thread answer whose cited turn doesn't bear it out: a record for the owner to look at, never a block.
   for (const x of threadAnswersUnbound()) add('medium', 'thread-answer-unbound', x.id, `recorded from a thread as the owner's words, but it ${x.why}`, 'check it on the dashboard; if the owner never said it, correct the answer');
   // A thread the owner wrote in that has waited over 10 minutes for the supervisor: a reply dropped,
-  // or the supervisor busier than it said. By id only: a subject's title may be page-written.
+  // or the supervisor busier than it said. Timed from its oldest owed turn routed to the supervisor
+  // or with no route (kit-104): a turn the responder has is never the supervisor's to wait on, and
+  // a later turn of the responder's never restarts the clock. By id only: a subject's title may be page-written.
+  const logNow = readLog().objects;
+  const turnsNow = turnsByThread(logNow);
   for (const x of threadsNow.filter((y) => y.status === 'open' && y.waiting === 'supervisor')) {
-    const ago = now - Date.parse(x.turns[x.turns.length - 1].at);
+    // an artifact note the owner handed to the supervisor waits from the hand-over (artifact-notes-1)
+    if (x.subject?.kind === 'artifact' && x.handed?.to === 'supervisor') {
+      const since = now - Date.parse(x.handed.at);
+      if (since > THREAD_WAIT_MS) add('medium', 'thread-waiting', x.id, `the owner handed this note over ${Math.round(since / 60000)} min ago and has no reply`, `thread list --waiting, then thread show ${x.id} and reply with thread reply (first, when the work takes more than a turn)`);
+      continue;
+    }
+    const first = owedIn(turnsNow.get(x.id) ?? [], logNow.get(x.id)).find((u) => u.routed_to !== 'responder');
+    if (!first) continue;
+    const ago = now - Date.parse(first.created_at);
     if (ago > THREAD_WAIT_MS) add('medium', 'thread-waiting', x.id, `the owner wrote in this thread ${Math.round(ago / 60000)} min ago and has no reply`, `thread list --waiting, then thread show ${x.id} and reply with thread reply (first, when the work takes more than a turn)`);
+  }
+  // The responder (kit-104). Overdue: a turn routed to it still owed past RESPONDER_OVERDUE_MS, or its
+  // pending turn not followed up past RESPONDER_PENDING_MS (pendingOpen); high, so wait brings the supervisor,
+  // which takes it (and every turn routes to it until it is answered). From the log alone, so an
+  // answer or a resolve clears it. By id only.
+  for (const o of responderOverdue(logNow, now, turnsNow)) add('high', 'responder-overdue', o.thread, o.why === 'owed' ? `the owner's turn ${o.turn} went to the responder ${o.min} min ago and has no answer` : `the responder's pending reply ${o.turn} has had no follow-up for ${o.min} min`, `answer it in the thread (thread show ${o.thread}, then thread reply ${o.thread}), then look at the responder (responder --resume)`);
+  // Down or stuck: only while settings.responder is on, the fleet's session is up and the fleet is
+  // neither parked nor draining (a park stops it on purpose; a drain refuses its start), so a project
+  // with no fleet session raises none (ruling a-20261123-045530036-supervisor (b)).
+  if (settings.responder !== false && fleetMode() !== 'park' && !draining()) {
+    const h = responderHealth();
+    if (h.session && h.problem) add('medium', 'responder-down', 'responder', `the responder isn't running: ${h.problem}; the owner's turns go to the supervisor meanwhile`, 'devteam.mjs responder --resume (supervisor.md §13)');
+    else if (h.stuck) add('medium', 'responder-stuck', 'responder', `the responder's pane is waiting on a prompt: "${h.stuck}"; the owner's turns go to the supervisor meanwhile`, `look (tmux select-window -t '${tmuxTarget(RESPONDER_NAME)}') and clear it, or responder --stop then responder`);
   }
   // An owner's turn no supervisor terminal took, unseen or unanswered (undeliveredTurns): high, so
   // it reaches past the stalled supervisor (hello's alert: machine status, the hub). By id only.
@@ -16890,6 +18577,10 @@ function collectMetrics(since, reviewsSince = 0) {
     }
   }
   linkDutyFindings(settings, now, add);
+  // The move findings come last: a move is covered by what the run raised above (next-moves).
+  const moves = nextMoves();
+  for (const x of moveFindings(moves, f, now)) add(x.severity, x.kind, x.subject, x.detail, x.suggestion);
+  writeMovesCache(moves);
   const order = { high: 0, medium: 1, low: 2 };
   // A finding someone has looked at and set aside (`ack`) moves to acknowledged until the ack
   // expires or its subject changes; it is never hidden.
@@ -17123,7 +18814,308 @@ function waitCause(ref) {
 // values chore: branch | ahead | pr | for
 // values wait.state: open | resolved | failed
 function nextMoves() {
-  return [];
+  movesReadAt();
+  return memo('next-moves', () => [...goalMovesNow(), ...ticketMoves().values(), ...planners().map(plannerMove)]);
+}
+// The two thresholds, as numbers: a setting that isn't a number of zero or more counts as its default.
+const moveSetting = (key) => { const v = loadSettings()[key]; return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : SETTINGS_DEFAULTS[key]; };
+const isoOf = (t) => new Date(t).toISOString();
+// A move's flag and rung, by its holder and age alone: none for no next move, nothing while quiet,
+// stalled past next_move_stall_hours whoever holds it, owed past next_move_owed_minutes when the
+// supervisor does. Rung 2 from acks is the age ladder's (kit-297).
+function moveFlag(m) {
+  if (m.quiet) return { flag: null, rung: 0 };
+  if (m.holder === 'nobody') return { flag: 'none', rung: 0 };
+  const age = Date.now() - Date.parse(m.since);
+  if (age > moveSetting('next_move_stall_hours') * 3600000) return { flag: 'stalled', rung: 2 };
+  if (m.holder === 'supervisor' && age > moveSetting('next_move_owed_minutes') * 60000) return { flag: 'owed', rung: 1 };
+  return { flag: null, rung: 0 };
+}
+function newMove(subject, title, o) {
+  const m = { subject, move: o.move, words: o.words, holder: o.holder, ref: o.ref ?? null, title, since: isoOf(o.since), command: o.command ?? null, covered_by: o.covered_by ?? [], quiet: o.quiet ?? null, via: null, flag: null, rung: 0 };
+  const f = moveFlag(m);
+  // a row that is never owed (T2b) is only ever stalled
+  return Object.assign(m, o.neverOwed && f.flag === 'owed' ? { flag: null, rung: 0 } : f);
+}
+// A copied move: its source's holder, since, flag and rung (and what it is, unless the row says),
+// on this subject, via the source.
+const copiedMove = (subject, title, src, o = {}) => ({ ...src, ...o, subject, title, via: src.subject });
+const qRef = (q) => ({ kind: 'q', id: q.id });
+const askedMove = (q) => ({ move: 'answer-question', words: `Answer: ${q.question}`, holder: 'owner', ref: qRef(q), since: q.asked_at, covered_by: [{ kind: 'owner-question-waiting', subject: q.id }] });
+const PLANNING_COVER = [{ kind: 'idle-planning', subject: '*' }, { kind: 'memory-full', subject: '*' }];
+// goal-at-target's quiet rule: a goal-met question about the goal open, or one answered after this
+// reading, or a No about the same value and basis, which stands until the value moves or the goal
+// changes. collectMetrics' finding and the goal rows (G12) both ask it.
+function goalAtTargetQuiet(g, r, qs = questions()) {
+  const basis = goalMetBasis(g);
+  return qs.some((q) => q.class === 'goal-met' && q.goal === g.id && (q.status === 'open' || (q.status === 'answered' && (q.asked_at > r.created_at || (q.met?.basis === basis && q.met?.reading?.value === r.measure.value && !sameAnswer(q.answer, GOAL_MET_CHOICES[0].label))))));
+}
+// A goal whose design waits on another goal's (plan_after) waits while that one is a draft (a goal
+// let go, or one that doesn't exist, holds nothing back).
+const planAfterBlockers = (g) => (g.plan_after ?? []).filter((d) => logGet(d.goal)?.type === 'goal' && (logGet(d.goal).status ?? 'draft') === 'draft');
+// A ready goal whose current milestone has a precondition no feature covers (or no feature at all).
+function needsFeatures(g, c = goalCheck(g)) {
+  return g.status === 'ready' && c.coverage.some((x) => x.includes('has no feature') || x.startsWith('no feature names'));
+}
+// The goals that need planning with nobody planning them: a fully defined draft goal with no open
+// question, or a ready goal that needsFeatures, with no planner on it, running, and waiting on no
+// other goal's design; highest priority first. full: the planner slots are all taken.
+function idlePlanningGoals(ps = planners()) {
+  const busy = new Set(ps.flatMap((p) => p.goals));
+  const waiting = logObjects('goal').filter((g) => {
+    if (busy.has(g.id) || ['met', 'abandoned'].includes(g.status) || planAfterBlockers(g).length || goalMode(g) !== 'run') return false;
+    const c = goalCheck(g);
+    if ((g.status ?? 'draft') === 'draft') return !c.definition.length && !questions().some((q) => q.goal === g.id && q.status === 'open');
+    return needsFeatures(g, c);
+  }).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
+  const cap = loadSettings().max_active_planners;
+  return { waiting, cap, full: cap != null && ps.length >= cap };
+}
+// The goal rows, G1 to G20, first match wins (designs/every-goal-always-has-a-next-move.md). G4b and
+// G4c are kit-298's; a chore started --for a goal (G16) is kit-293's; until kit-289's ticket rows,
+// G16 names the first unmerged ticket, in progress.
+function goalMovesNow() {
+  const qs = questions();
+  const ps = planners();
+  const pMoves = new Map(ps.map((p) => [p.feature, plannerMove(p)]));
+  const idle = idlePlanningGoals(ps);
+  let memFull;
+  const queued = () => idle.full || !!(memFull ??= memoryFull());
+  const goals = logObjects('goal').filter((g) => !isUpkeep(g));
+  const done = new Map();
+  const visiting = new Set();
+  const moveOf = (g) => {
+    if (!done.has(g.id)) { visiting.add(g.id); done.set(g.id, goalRow(g)); visiting.delete(g.id); }
+    return done.get(g.id);
+  };
+  // the plan_after chain from g comes back to g
+  const loops = (g) => { const seen = new Set(); const walk = (x) => planAfterBlockers(x).some((d) => d.goal === g.id || (!seen.has(d.goal) && (seen.add(d.goal), walk(logGet(d.goal))))); return walk(g); };
+  function goalRow(g) {
+    const status = g.status ?? 'draft';
+    const id = g.id;
+    const title = g.title ?? id;
+    const at = (o) => newMove(`goal:${id}`, title, o);
+    const lastChange = (g.updates ?? []).at(-1)?.at ?? g.created_at;
+    // the log's schema allows draft, ready, met and abandoned only (a line off it isn't folded), so
+    // what isn't met or abandoned is draft or ready
+    if (['met', 'abandoned'].includes(status)) return null; // G1
+    const mode = goalMode(g);
+    if (mode !== 'run') {
+      const hv = holdView(g);
+      const holder = hv.by === 'owner' ? 'owner' : 'supervisor';
+      if (mode === 'park' || mode === 'let-go') return at({ move: mode === 'park' ? 'parked' : 'let-go', words: mode === 'let-go' ? 'Let go' : holder === 'owner' ? 'Parked by you' : 'Parked', holder, quiet: 'hold', since: hv.since ?? lastChange }); // G2
+      if (hv.state === 'drained') return at({ move: 'draining', words: 'Draining: nothing new starts', holder, quiet: 'drain', since: hv.since ?? lastChange }); // G3
+    }
+    // a fleet drain (the drain act, draining()) with nothing of the goal's running
+    const fleetDrain = mode === 'run' ? draining() : null;
+    if (fleetDrain && !liveSessions().some((x) => sessionGoals(x.name).some((y) => y.id === id))) return at({ move: 'draining', words: 'Draining: nothing new starts', holder: 'supervisor', quiet: 'drain', since: fleetDrain.created_at }); // G3, a fleet drain
+    const open = qs.filter((q) => q.goal === id && q.status === 'open').sort((a, b) => a.asked_at.localeCompare(b.asked_at));
+    const met = open.find((q) => q.class === 'goal-met');
+    if (met) return at({ ...askedMove(met), move: 'answer-goal-met', words: 'Answer: is it met?' }); // G4
+    const draft = status === 'draft';
+    if (draft && open.length) return at(askedMove(open[0])); // G5
+    if (draft && goalCheck(g).definition.length) return at({ move: 'ask-definition', words: "Ask you what's missing from its definition", holder: 'supervisor', since: lastChange, command: `ask --kind goal-definition --goal ${id} --question "…"` }); // G6
+    const mineP = ps.filter((p) => p.goals.includes(id)).sort((a, b) => b.waiting_on_supervisor.length - a.waiting_on_supervisor.length || a.feature.localeCompare(b.feature))[0];
+    const verdict = (g.updates ?? []).filter((u) => u.decision).at(-1);
+    if (draft && !mineP && verdict?.decision.verdict === 'refine') return at({ move: 'rework-design', words: 'Rework the design with your notes', holder: 'supervisor', since: verdict.at, command: `planner <feature> --goal ${id}` }); // G7
+    if (mineP) return copiedMove(`goal:${id}`, title, pMoves.get(mineP.feature)); // G8 (its move is P2), G9
+    if (draft) {
+      const ahead = planAfterBlockers(g);
+      if (ahead.length) {
+        if (loops(g)) return at({ move: 'break-plan-after-loop', words: 'Break the plan_after loop', holder: 'supervisor', since: lastChange, command: `goal set ${id} --plan-after <g-id> --reason "…"` }); // G10, a loop
+        const a = logGet(ahead[0].goal);
+        const src = visiting.has(a.id) ? null : moveOf(a);
+        if (src) return copiedMove(`goal:${id}`, title, src, { move: 'waits-for-goal', words: `Waits for ${a.title ?? a.id}'s design`, ref: { kind: 'goal', id: a.id } }); // G10
+      }
+      // since it became defined: its last change, or the baseline reading that completed it
+      const defined = [lastChange, currentReadings(id)[0]?.created_at].filter(Boolean).sort().at(-1);
+      return at({ move: 'start-planner', words: 'Start a planner', holder: 'supervisor', quiet: queued() ? 'queue' : null, since: defined, command: `planner <feature> --goal ${id}`, covered_by: PLANNING_COVER }); // G11
+    }
+    // ready
+    const r = goalAtTarget(g);
+    const ask = `ask --class goal-met --goal ${id} --recommendation yes`;
+    if (r && !goalAtTargetQuiet(g, r, qs)) return at({ move: 'ask-goal-met', words: 'Ask you whether it is met', holder: 'supervisor', since: r.created_at, command: ask, covered_by: [{ kind: 'goal-at-target', subject: id }] }); // G12
+    const feats = goalFeatures(id);
+    const ts = [...tickets().values()].filter((t) => isActive(t) && feats.includes(t.feature)).sort((a, b) => a.created_at.localeCompare(b.created_at));
+    const allMerged = ts.length > 0 && ts.every((t) => mergeShaFor(t.id));
+    const lastMerge = allMerged ? isoOf(Math.max(...ts.map((t) => mergedAt(t.id) ?? 0))) : null;
+    const m = measureOf(g);
+    // a goal-met question withdrawn (or defaulted) since the merge asked nothing: it is asked again.
+    // An answered one counts by when it was answered: one asked while the last ticket was in flight
+    // and answered after it merged judged the merged work (a No there is G18's, not a re-ask).
+    if (allMerged && m.source === 'owner' && !qs.some((q) => q.class === 'goal-met' && q.goal === id && ['open', 'answered'].includes(q.status) && (q.status === 'answered' ? q.answered_at : q.asked_at) > lastMerge)) return at({ move: 'ask-goal-met', words: 'Ask you whether it is met', holder: 'supervisor', since: lastMerge, command: ask, covered_by: [{ kind: 'goal-work-merged', subject: id }] }); // G13
+    if (needsFeatures(g)) return at({ move: 'plan-next-features', words: 'Plan the next features', holder: 'supervisor', quiet: mode === 'drain' || fleetDrain ? 'drain' : queued() ? 'queue' : null, since: milestoneSince(g), command: `planner <feature> --goal ${id}`, covered_by: PLANNING_COVER }); // G14
+    const bare = feats.find((f) => !ts.some((t) => t.feature === f));
+    if (bare) return at({ move: 'plan-tickets', words: `Plan the tickets for ${features().get(bare).title ?? bare}`, holder: 'supervisor', since: features().get(bare).created_at, command: `planner ${bare} --goal ${id}` }); // G15
+    const lead = leadTicketMove(ts.filter((t) => !mergeShaFor(t.id)));
+    if (lead) return copiedMove(`goal:${id}`, title, lead); // G16
+    const read = ['repo', 'prod'].includes(m.source);
+    const readings = goalReadings(id);
+    const last = readings.at(-1) ?? null;
+    if (read && !readings.some((x) => x.created_at > lastMerge)) return at({ move: 'take-reading', words: 'Take a reading', holder: 'supervisor', since: lastMerge, command: `goal reading ${id} --run` }); // G17
+    const change = open.find((q) => q.class === 'goal-change' && isObj(q.change) && ('measure' in q.change || 'milestones' in q.change));
+    if (change) return at(askedMove(change)); // G17b
+    const no = qs.filter((q) => q.class === 'goal-met' && q.goal === id && q.status === 'answered').sort((a, b) => a.answered_at.localeCompare(b.answered_at)).at(-1);
+    if (no && !sameAnswer(no.answer, GOAL_MET_CHOICES[0].label)) {
+      const note = String(no.answer).includes(' — ') ? String(no.answer).split(' — ').slice(1).join(' — ').trim() : '';
+      if (!ts.some((t) => t.created_at > no.answered_at)) return at({ move: 're-plan-after-no', words: `Re-plan: you said it isn't met yet${note ? ` (${note})` : ''}`, holder: 'supervisor', since: no.answered_at }); // G18
+      if (read && lastMerge > no.answered_at && last && no.met?.basis === goalMetBasis(g) && no.met?.reading?.value === last.measure.value) return at({ move: 're-plan-or-change-measure', words: "Work merged since your No and the measure hasn't moved: re-plan, or propose a change to the measure", holder: 'supervisor', since: lastMerge, command: `ask --class goal-change --goal ${id} --change '{"measure": …}' --question "…"` }); // G18b
+    }
+    if (last && (currentMilestone(g) || !reached(g, m.target, last.measure.value))) return at({ move: 're-plan-measure-short', words: "Re-plan: the work merged but the measure didn't move enough", holder: 'supervisor', since: last.created_at }); // G19
+    return at({ move: 'no-next-move', words: 'No next move', holder: 'nobody', since: lastChange }); // G20
+  }
+  return goals.map(moveOf).filter(Boolean);
+}
+// When a ready goal's current milestone became current: the first reading that reached the one
+// before it, else the owner's approval, else when the goal was written.
+function milestoneSince(g) {
+  const cur = currentMilestone(g);
+  const approved = (g.updates ?? []).filter((u) => u.decision?.verdict === 'approve' || u.status === 'ready').at(-1)?.at ?? g.created_at;
+  if (!cur || cur.n === 1) return approved;
+  const prev = g.milestones[cur.n - 2];
+  return goalReadings(g.id).find((r) => r.created_at >= approved && reached(g, prev.target, r.measure.value))?.created_at ?? approved;
+}
+// A ticket's last sign: its worker's newest line, else its own line's last change.
+function ticketSince(t) {
+  const lines = memo('lines-by', () => { const m = new Map(); for (const l of readLog().lines) if (l.at && l.by) m.set(l.by, l.at > (m.get(l.by) ?? '') ? l.at : m.get(l.by)); return m; });
+  return lines.get(t.id) ?? (t.updates ?? []).at(-1)?.at ?? t.created_at;
+}
+// The first line of a writer's current phase run: walking back over its phase lines (oldest first),
+// the first with the last line's `to` after one with another (liveness pings repeat the same to).
+function phaseRunStart(phases) {
+  const last = phases.at(-1);
+  if (!last) return null;
+  let i = phases.length - 1;
+  while (i > 0 && phases[i - 1].to === last.to) i--;
+  return phases[i];
+}
+// A ticket's phase in words, for the worker's move (T8).
+const PHASE_WORDS = Object.freeze({ starting: 'Starting', spec: 'Writing the spec', plan: 'Writing the plan', contract: 'Landing the contract', build: 'Building', verify: 'Verifying', 'final-review': 'In final review' });
+// The open messages that ask for a reply, oldest first per session: from it, or about its ticket
+// (idsAwaitingReply's rule: not info, ruling or answer; no message or question re it; not settled
+// by a landing).
+function openAsksBy() {
+  return memo('open-asks-by', () => {
+    const msgs = logObjects('message');
+    const replied = new Set([...msgs, ...logObjects('question')].map((m) => m.re).filter(Boolean));
+    const by = new Map();
+    for (const m of msgs.filter((x) => !['info', 'ruling', 'answer'].includes(x.kind) && !replied.has(x.id) && !settledByLanding(x)).sort(byTime)) for (const who of [m.created_by, m.ticket]) if (who && !by.has(who)) by.set(who, m);
+    return by;
+  });
+}
+// The ticket rows, T1 to T14 (T2b after T3), first match wins: one move per active, unmerged
+// ticket, by id (designs/every-goal-always-has-a-next-move.md). A ticket waiting on a dependency
+// copies that dependency's move (T9, via).
+function ticketMoves() {
+  return memo('ticket-moves', () => {
+    const ts = tickets();
+    const s = loadSettings();
+    const openQs = questions().filter((q) => q.status === 'open').sort((a, b) => a.asked_at.localeCompare(b.asked_at));
+    const asks = openAsksBy();
+    const fleetDrain = draining();
+    const activeIds = [...ts.values()].filter(countsAsWorker).map((t) => t.id);
+    let memFull;
+    // when a slot last freed: the latest merge of any ticket, or the latest park
+    let freed;
+    const slotFreed = () => (freed ??= Math.max(0, ...[...ts.keys()].map((id) => mergedAt(id) ?? 0), ...logObjects('phase').filter((p) => p.to === 'parked' && writerClass(p.created_by) !== 'planner').map((p) => Date.parse(p.created_at) || 0)));
+    // when it became ready: the later of its line and its dependencies' latest merge
+    const readySince = (t) => Math.max(Date.parse(t.created_at) || 0, ...(t.depends_on ?? []).map((d) => mergedAt(d) ?? 0));
+    const done = new Map();
+    const visiting = new Set();
+    const moveOf = (t) => {
+      if (!done.has(t.id)) { visiting.add(t.id); done.set(t.id, ticketRow(t)); visiting.delete(t.id); }
+      return done.get(t.id);
+    };
+    function ticketRow(t) {
+      const id = t.id;
+      const title = t.title ?? id;
+      const at = (o) => newMove(`ticket:${id}`, title, o);
+      if (!isActive(t) || mergeShaFor(id)) return null; // T1
+      const mode = ticketMode(t);
+      if (mode === 'park' || mode === 'let-go') {
+        const g = ticketGoals(t).find((x) => ['park', 'let-go'].includes(goalMode(x)));
+        const hv = g ? holdView(g) : null;
+        return at({ move: 'held-by-goal', words: `Held: ${hv?.reason ?? (mode === 'let-go' ? 'its goal is let go' : 'its goal is parked')}`, holder: hv?.by === 'owner' ? 'owner' : 'supervisor', quiet: 'hold', since: hv?.since ?? (t.updates ?? []).at(-1)?.at ?? t.created_at }); // T2
+      }
+      const q = openQs.find((x) => x.ticket === id || (x.blocks ?? []).includes(id));
+      if (q) return at({ ...askedMove(q), covered_by: [{ kind: 'blocked-on-owner', subject: id }, { kind: 'owner-question-waiting', subject: q.id }] }); // T3
+      if (isHeld(t)) return at({ move: 'held', words: `Held: ${t.held.trim()}. Release it, or ask`, holder: 'supervisor', since: (t.updates ?? []).filter((u) => typeof u.held === 'string' && u.held.trim()).at(-1)?.at ?? t.created_at, command: `ticket release ${id} --reason "…"`, neverOwed: true }); // T2b
+      const w = workerState(id);
+      const phase = w?.phase ?? null;
+      const run = w?.phase_started_at ?? null;
+      const msg = asks.get(id);
+      if (['done', 'merging'].includes(phase)) return at({ move: 'merge-it', words: 'Merge it', holder: 'supervisor', since: run, command: `merge ${id}` }); // T4
+      if (phase === 'awaiting-word') return at({ move: 'give-word', words: 'Give the word, or merge', holder: 'supervisor', since: run, command: `send ${id} "…" --kind ruling${msg ? ` --re ${msg.id}` : ''}`, covered_by: [{ kind: 'waiting-on-supervisor', subject: id }] }); // T5
+      const depOpen = (t.depends_on ?? []).find((d) => !mergeShaFor(d));
+      if (msg || (phase === 'blocked' && !depOpen)) return at({ move: 'answer-message', words: 'Answer its message', holder: 'supervisor', ref: msg ? { kind: 'm', id: msg.id } : null, since: msg ? msg.created_at : run, command: `send ${id} "…" --kind ruling${msg ? ` --re ${msg.id}` : ''}`, covered_by: [{ kind: 'blocked', subject: id }, { kind: 'blocked-without-question', subject: id }, ...(msg ? [{ kind: 'unanswered-message', subject: msg.id }] : [])] }); // T6
+      if (phase === 'parked' && ['run', 'drain'].includes(mode) && !fleetDrain) return at({ move: 'resume', words: 'Resume it', holder: 'supervisor', since: run, command: `worker ${id} --resume`, covered_by: [{ kind: 'parked-under-run', subject: id }] }); // T7
+      // an Upkeep chore ticket runs a recurring job: recurring-stuck on that job covers its move too
+      const job = t.feature === CHORES ? recurringChores.refJob(id) : null;
+      const stuck = job ? [{ kind: 'recurring-stuck', subject: `recurring:${job}` }] : [];
+      const notStarted = !phase || (phase === 'starting' && stoppedLaunch(id));
+      if (phase in PHASE_WORDS && !notStarted) return at({ move: phase === 'final-review' ? 'final-review' : phase, words: PHASE_WORDS[phase], holder: 'worker', since: run, covered_by: [...['stale-worker', 'agent-exited', 'blocked-prompt'].map((kind) => ({ kind, subject: id })), ...stuck] }); // T8
+      if ((notStarted || phase === 'blocked') && depOpen) {
+        const d = ts.get(depOpen);
+        const src = d && !visiting.has(depOpen) ? moveOf(d) : null;
+        const since = isoOf(readySince(t));
+        if (src) return copiedMove(`ticket:${id}`, title, src, { move: 'waits-for-ticket', words: `Waits for ${depOpen} to merge`, ref: { kind: 'ticket', id: depOpen }, since }); // T9
+        return at({ move: 'no-next-move', words: `No next move: it waits for ${depOpen}, which has none`, holder: 'nobody', since: readySince(t) }); // T14, a dependency with no move
+      }
+      if (notStarted) {
+        const why = notSchedulable(t);
+        if (why && why !== 'parked') return at({ move: 'cant-start', words: `Can't start: ${why}`, holder: 'supervisor', since: readySince(t), covered_by: ['link-unreachable', 'repo-unreachable', 'unowned-files'].map((kind) => ({ kind, subject: '*' })) }); // T10
+      }
+      const goalDrain = mode === 'drain' ? ticketGoals(t).find((x) => goalMode(x) === 'drain') : null;
+      if ((notStarted && (goalDrain || fleetDrain)) || (phase === 'parked' && fleetDrain)) {
+        const hv = goalDrain && !fleetDrain ? holdView(goalDrain) : null;
+        return at({ move: 'draining', words: 'Draining: it starts after', holder: hv?.by === 'owner' ? 'owner' : 'supervisor', quiet: 'drain', since: hv?.since ?? fleetDrain?.created_at ?? readySince(t) }); // T11
+      }
+      if (notStarted && mode === 'run') {
+        const since = readySince(t);
+        const overlap = overlapsActive(t, activeIds, ts);
+        if (overlap.length) return at({ move: 'waits-for-slot', words: `Waits for ${overlap[0]}`, holder: 'supervisor', quiet: 'queue', since }); // T12, touches overlap
+        const cap = capOf(s.max_active_tickets) + (t.kind === 'fix' ? (s.incident_slots ?? 0) : 0);
+        const inComponent = activeIds.filter((x) => ts.get(x)?.component === t.component).length;
+        if (activeIds.length >= cap || inComponent >= capOf(s.max_active_per_component) || (memFull ??= !!memoryFull(s))) return at({ move: 'waits-for-slot', words: 'Waits for a worker slot', holder: 'supervisor', quiet: 'queue', since }); // T12
+        return at({ move: 'start-worker', words: 'Start a worker', holder: 'supervisor', since: Math.max(since, slotFreed()), command: `worker ${id}`, covered_by: [{ kind: 'idle-capacity', subject: '*' }, ...stuck] }); // T13
+      }
+      return at({ move: 'no-next-move', words: 'No next move', holder: 'nobody', since: ticketSince(t) }); // T14
+    }
+    for (const t of ts.values()) moveOf(t);
+    return new Map([...done].filter(([, m]) => m));
+  });
+}
+// A ready goal's lead ticket's move (G16), from its open tickets (oldest first): one the supervisor
+// holds (it owes something), else one the owner holds, else the furthest along in flight (T8), else
+// the first ready (T12, T13) in ready's order, else the first not yet ready. Quiet moves hold
+// nothing up, so they lead only when nothing else is there; ties go to the oldest move.
+const PHASE_RANK = ['starting', 'spec', 'plan', 'contract', 'build', 'verify', 'final-review'];
+function leadTicketMove(open) {
+  const all = ticketMoves();
+  const ms = open.map((t) => all.get(t.id)).filter(Boolean);
+  const oldest = (xs) => xs.sort((a, b) => a.since.localeCompare(b.since))[0];
+  const loud = ms.filter((m) => !m.quiet);
+  const idOf = (m) => m.subject.slice('ticket:'.length);
+  return oldest(loud.filter((m) => m.holder === 'supervisor'))
+    ?? oldest(loud.filter((m) => m.holder === 'owner'))
+    ?? loud.filter((m) => !m.via && m.holder === 'worker').sort((a, b) => PHASE_RANK.indexOf(b.move) - PHASE_RANK.indexOf(a.move) || a.since.localeCompare(b.since))[0]
+    ?? ((prio) => ms.filter((m) => ['start-worker', 'waits-for-slot'].includes(m.move)).map((m) => ({ m, kind: tickets().get(idOf(m))?.kind, severity: 0, priority: prio.get(idOf(m))?.priority })).sort(readyOrder)[0]?.m)(effectivePriorities(tickets()))
+    ?? ms[0] ?? null;
+}
+// One move on a line: who holds it, what, how long, and owed, stalled or quiet.
+const moveLine = (m) => `${m.holder}  ${m.words}  ${moveAge(m.since)}${m.flag === 'none' ? '  no move' : m.flag ? `  ${m.flag}` : ''}${m.quiet ? `  (${m.quiet})` : ''}`;
+// The planner rows, P1 to P4.
+function plannerMove(p) {
+  const by = `plan-${p.feature}`;
+  const at = (o) => newMove(`planner:${p.feature}`, p.title ?? p.feature, o);
+  const q = p.waiting_on_owner.map((id) => questions().find((x) => x.id === id)).filter(Boolean).sort((a, b) => a.asked_at.localeCompare(b.asked_at))[0];
+  if (q) return at(askedMove(q)); // P1
+  const msg = p.waiting_on_supervisor[0];
+  if (msg) return at({ move: 'answer-planner', words: `Answer the planner: ${msg.kind}`, holder: 'supervisor', ref: { kind: 'm', id: msg.id }, since: logGet(msg.id)?.created_at ?? p.last_seen ?? nowIso(), command: `send ${by} "…" --kind ruling`, covered_by: [{ kind: 'unanswered-message', subject: msg.id }, { kind: 'blocked-without-question', subject: by }] }); // P2
+  const seen = p.last_seen ?? nowIso();
+  const held = p.goals.length && p.goals.every((id) => ['park', 'let-go'].includes(goalMode(logGet(id))));
+  if (p.parked || held) return at({ move: 'parked', words: 'Parked', holder: 'planner', quiet: 'hold', since: lastPhaseOf(by)?.created_at ?? seen }); // P3
+  return at({ move: 'planning', words: 'Planning', holder: 'planner', since: seen, covered_by: ['stale-planner', 'planner-gone', 'agent-exited', 'blocked-prompt'].map((kind) => ({ kind, subject: by })) }); // P4
 }
 // The move whose subject is this one ("goal:<g-id>", …), or null.
 function nextMoveOf(subject) {
@@ -17153,6 +19145,53 @@ function cmdMoves() {
     for (const m of mine) L.push(`  ${m.subject}  ${m.words}  ${moveAge(m.since)}${m.flag === 'none' ? '  no move' : m.flag ? `  ${m.flag}` : ''}${m.quiet ? `  (${m.quiet})` : ''}`);
   }
   out(L.join('\n'));
+}
+// The three move findings, from the moves and the findings already raised in the same run: a pure
+// function of the two (and the clock), so a test can load it on its own. Only a move's own subject
+// raises one: never a quiet move (it waits on purpose), never a copied one (via: its source raises
+// it). A move is covered when a finding its covered_by names was raised in the run, on that subject
+// or, for "*", on any; a covered move raises nothing, though it keeps its flag. By the move's flag:
+// none (no row knew the state: G20, T14) raises no-next-move, owed (rung 1) move-owed, stalled
+// (rung 2) move-stalled; each is high, so wait wakes on it. The finding's subject is
+// "<subject> <move>:<ref id>", so an ack sets aside one move with one ref, and a new move or a new
+// ref is a new finding.
+function moveFindings(moves, raised, now = Date.now()) {
+  const covered = (m) => (m.covered_by ?? []).some((c) => raised.some((f) => f.kind === c.kind && (c.subject === '*' || String(f.subject) === c.subject)));
+  const ageOf = (since) => { const t = Date.parse(since); if (Number.isNaN(t)) return 'since ?'; const min = Math.max(0, Math.floor((now - t) / 60000)); return min < 120 ? `${min} min` : min < 2880 ? `${Math.floor(min / 60)} h` : `${Math.floor(min / 1440)} d`; };
+  const KIND = { none: 'no-next-move', owed: 'move-owed', stalled: 'move-stalled' };
+  const stalledHint = (m) => (m.holder === 'owner' ? 'remind the owner what it holds up; a question that needn\'t be the owner\'s is withdrawn and decided (W1)'
+    : m.holder === 'supervisor' ? `${m.command ? `${m.command}: ` : ''}do it, or record why it waits (ack with a reason)`
+      : 'look at its pane (capture it), and unstick it or record why it waits');
+  const out = [];
+  for (const m of moves) {
+    const kind = KIND[m.flag];
+    if (!kind || m.quiet || m.via || covered(m)) continue;
+    const subject = `${m.subject} ${m.move}:${m.ref?.id ?? ''}`;
+    const detail = `${m.title}: ${m.words} (${m.holder === 'nobody' ? 'no row knows this state' : `held by the ${m.holder}`}, ${ageOf(m.since)})`;
+    const suggestion = kind === 'no-next-move' ? 'work out the move by hand, and file the missing row as a kit lesson (knowledge add --kit)'
+      : kind === 'move-owed' ? (m.command ?? 'do it, or record why it waits (ack with a reason)') : stalledHint(m);
+    out.push({ severity: 'high', kind, subject, detail, suggestion });
+  }
+  return out;
+}
+// The hub's cache (next-move@1's fourth place): the goals' moves, with at the time the log they
+// come from was read, so a line written after that read is newer than the cache.
+// collectMetrics writes it each run, and observe-metrics again as its last step, from a fresh read
+// after every line the tick wrote. A write that fails costs one tick's view, never the run.
+// when the log the moves come from was read: taken on that same read, and no earlier than its
+// newest line, since appendLog keeps each file's times increasing and a line can run ahead of
+// the clock (ISO times in one format compare as strings)
+const movesReadAt = () => memo('next-moves-at', () => {
+  const now = nowIso();
+  let newest = '';
+  for (const l of readLog().lines) if (typeof l.at === 'string' && l.at > newest) newest = l.at;
+  return newest > now ? newest : now;
+});
+const MOVES_CACHE = () => path.join(runPath('cache'), 'next-moves.json');
+function writeMovesCache(moves = nextMoves(), at = movesReadAt()) {
+  // the box's operator only reads (its metrics included), so it leaves the cache as it was
+  if (process.env.DEVTEAM_ROLE === 'operator') return;
+  try { writeJson(MOVES_CACHE(), { next_move: 1, at, moves: moves.filter((m) => m.subject.startsWith('goal:')) }); } catch {}
 }
 /* next-moves end */
 // Per-ticket progress data for the burn-up, board and roadmap.
@@ -17306,6 +19345,8 @@ function dashboardDataRead() {
     // next-move@1: every move the table names (the comment above nextMoves())
     next_moves: nextMoves(),
     ooda: collectOoda(),
+    self: selfDashboard(),
+    exterior: (() => { const m = exteriorOnMain(); const d = m && exteriorDoc(m.text); return d?.block ? exteriorDashboard(d.block) : null; })(),
     autonomy,
     autonomy_score: autonomyScore(autonomy, efficiency, awareness),
     threads: threadCounts(),
@@ -17458,6 +19499,70 @@ async function pickDashboardPort({ skip = [] } = {}) {
   die(`every dashboard port in ${span} is taken: stop an instance, or pin one with "dashboard_port" in settings.md (the hub won't list a port outside ${span})`);
 }
 
+/* personHeader start */
+// kit-252: which of the box's people gave an owner action. The box's gateway says so in
+// x-devteam-person (presence@1 §4's form). A dashboard or the hub, once a request has passed every
+// check it makes today, hands that person to the action's own child alone, as DEVTEAM_PERSON (JSON),
+// and the child's owner lines carry it as person (logLineFor, operatorAppend). Attribution, never
+// authority (design P6): nothing reads it to decide who may do what, and with no header nothing
+// changes (a laptop, or a gateway from before people).
+// Read once, as the script loads, and taken out of this process's environment: nothing it starts (a
+// tmux server, an agent, a gate's command, gh) ever inherits a person.
+const ENV_PERSON = process.env.DEVTEAM_PERSON;
+delete process.env.DEVTEAM_PERSON;
+const PERSON_ID = /^[A-Za-z0-9._:@/-]{1,64}$/;
+const PERSON_NAME_ENCODED = /^(?:[A-Za-z0-9\-_.!~*'()]|%[0-9A-Fa-f]{2})+$/;
+const PERSON_NAME_BYTES = 80;
+const PERSON_TOO_LONG = 'That is too long with your name on it; shorten it.';
+const PERSON_MALFORMED = "the request's person (x-devteam-person) is malformed";
+const personNameBytes = (s) => Buffer.byteLength(JSON.stringify(s)) - 2;
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+// The one rule for a person, wherever one is read: { id, name } and nothing else; the id §4's; the
+// name a non-empty, whole string (no lone surrogate) of at most 80 bytes of JSON without its quotes.
+function personOk(p) {
+  return isObj(p) && Object.keys(p).length === 2 && typeof p.id === 'string' && PERSON_ID.test(p.id) && typeof p.name === 'string' && p.name !== '' && !LONE_SURROGATE.test(p.name) && personNameBytes(p.name) <= PERSON_NAME_BYTES;
+}
+// §4's cut: the longest start, by whole characters, of at most 80 bytes of JSON.
+function cutPersonName(name) {
+  let out = '';
+  let n = 0;
+  for (const ch of name) { const b = personNameBytes(ch); if (n + b > PERSON_NAME_BYTES) break; out += ch; n += b; }
+  return out;
+}
+// A request's person: null with no header, { bad: true } for anything §4 refuses (a second header
+// included), else { id, name }, the name decoded and cut.
+function requestPerson(req) {
+  const vs = [];
+  for (let i = 0; i < req.rawHeaders.length; i += 2) if (req.rawHeaders[i].toLowerCase() === 'x-devteam-person') vs.push(req.rawHeaders[i + 1]);
+  if (!vs.length) return null;
+  const m = vs.length === 1 ? /^([^;]*);name=(.*)$/.exec(vs[0]) : null;
+  if (!m || !PERSON_ID.test(m[1]) || !PERSON_NAME_ENCODED.test(m[2])) return { bad: true };
+  const bytes = [];
+  for (let i = 0; i < m[2].length;) { if (m[2][i] === '%') { bytes.push(parseInt(m[2].slice(i + 1, i + 3), 16)); i += 3; } else { bytes.push(m[2].charCodeAt(i)); i += 1; } }
+  let name;
+  try { name = new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(bytes)); } catch { return { bad: true }; }
+  const cut = cutPersonName(name);
+  return cut ? { id: m[1], name: cut } : { bad: true };
+}
+// This command's person, from its server: null unset; set but not a person, it dies before anything
+// is written.
+let envPersonRead;
+function envPerson() {
+  if (ENV_PERSON === undefined) return null;
+  if (envPersonRead === undefined) {
+    let p = null;
+    try { p = JSON.parse(ENV_PERSON); } catch {}
+    if (!personOk(p)) die('DEVTEAM_PERSON is not a person');
+    envPersonRead = { id: p.id, name: p.name };
+  }
+  return envPersonRead;
+}
+// An owner action's env with its request's person, for that child alone.
+const personEnv = (env, person) => (person ? { ...env, DEVTEAM_PERSON: JSON.stringify({ id: person.id, name: person.name }) } : env);
+// Checked now, as the script loads: a command handed a bad one does nothing at all (a secret posted
+// to its sink and then refused at its log line would be one done and not recorded).
+envPerson();
+/* personHeader end */
 // An owner action a server runs (a dashboard's, or the hub's for the operator's threads): replied to
 // as soon as the child says it is done (its reply pipe, fd 3), before it types into a pane; what it
 // says on stderr after that goes to the log. A child that exits without replying (refused, or an
@@ -17497,7 +19602,8 @@ function runOwnerAction(args, { env, timeout = 0, input = null, log = () => {}, 
 // action as the supervisor's (TMUX stays, so the children's tmux finds the same server).
 function ownerActionEnv(channel) {
   const env = { ...process.env, DEVTEAM_CHANNEL: channel };
-  for (const k of ['TMUX_PANE', 'DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) delete env[k];
+  // and never the server's own person (kit-252): a child gets only its request's (personEnv)
+  for (const k of ['TMUX_PANE', 'DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_PERSON']) delete env[k];
   return env;
 }
 // The hub: every dashboard tries to serve 127.0.0.1:HUB_PORT (unless the box's image serves it:
@@ -17954,12 +20060,17 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
         for (const [n, at] of seenNonces) if (now - at > 2 * OPERATOR_PROOF_MS) seenNonces.delete(n);
         seenNonces.set(proof.nonce, now);
       }
+      // who pressed it (kit-252), only now that every check above has passed
+      const person = requestPerson(req);
+      if (person?.bad) return send(400, 'application/json', JSON.stringify({ error: PERSON_MALFORMED }));
       let args = null;
       // a body no check foresaw is a bad request, never a crash: a throw here would end the dashboard
       try { const parsed = JSON.parse(raw.toString('utf8') || '{}'); args = isObj(parsed) ? act(parsed) : null; } catch { args = null; }
       if (args && args.some((a) => typeof a !== 'string' || a.includes('\0'))) args = null;
       if (!args) return send(400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
-      const r = await runOwnerAction(args, { env: proof ? { ...ownerEnv, DEVTEAM_THREAD_PROOF: 'stdin' } : ownerEnv, timeout: 120000, log, input: proof ? JSON.stringify(proof) : null, cwd: actionCwd });
+      // Start writes no line, and the operator's tmux session it opens must carry no person
+      const env = personEnv(ownerEnv, args[1] === 'start' ? null : person);
+      const r = await runOwnerAction(args, { env: proof ? { ...env, DEVTEAM_THREAD_PROOF: 'stdin' } : env, timeout: 120000, log, input: proof ? JSON.stringify(proof) : null, cwd: actionCwd });
       // what the operator is at is asked afresh before the next read answers: a press may have
       // started it, and a read served from before the press would offer Start again
       op.at = 0;
@@ -18376,9 +20487,17 @@ function loginChangedStop(target, name, budget, ours) {
   if (raw.map((l) => l.trim()).some((l) => PANE_BUSY.test(l) || promptRe.test(l) || PANE_TRUST.test(l) || /Enter to confirm/.test(l) || LIMIT_MENU.test(l))) return false;
   if (clientActiveOn(target) || !ours()) return null;
   const now = Date.now();
-  const verdict = claimRestart(name, budget, now);
-  if (verdict !== 'go') return verdict;
-  const ok = draft ? tmux(['send-keys', '-t', target, 'Enter']) : typeNow(target, prompt);
+  // the claim and the key under the pane's typing lock (kit-618): the owner's floor, or a busy lock,
+  // is not due (null), before any restart is spent on it
+  const held = typeLock.run(target, (outer) => {
+    if (outer && ownerLineOpen(target)) return { verdict: null };
+    const verdict = claimRestart(name, budget, now);
+    if (verdict !== 'go') return { verdict };
+    return { ok: draft ? tmux(['send-keys', '-t', target, 'Enter']) : typeNow(target, prompt) };
+  });
+  if (held.busy) return null;
+  if ('verdict' in held.value) return held.value.verdict;
+  const { ok } = held.value;
   appendLog({ type: 'observation', source: 'pane', kind: 'login-continued', subject: name, detail: !ok ? 'a session stopped by a login change could not be sent its continue prompt' : draft ? "a session stopped by a login change had the kit's continue prompt unsent in its input: Enter was pressed" : 'a session stopped by a login change was sent a continue prompt on the active account, which has room', detector: 'pane', source_key: `login-continued ${name} ${now}` });
   if (!ok) out(`could not continue ${name}: tmux did not take the keys`);
   return ok ? 'continued' : 'failed';
@@ -18678,8 +20797,17 @@ function restartSupervisor(budget) {
   // the same order as --replace-agent: everything is checked once more, right before it is replaced
   const again = supervisorToRestart(until);
   if (again?.target !== target || again.id !== id) { releaseRestart('supervisor', now); return null; }
-  let failed = replacePaneProcess(target, mainRoot);
-  if (!failed && !typeNow(target, `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix()}${cmd} '${SUPERVISOR_RESTART_PROMPT}'`)) failed = `could not type into ${target}; run ${cmd} there`;
+  // the respawn and its typing under the pane's typing lock (kit-618), taken only now, so the owner's
+  // keys never wait on origin's read: while the owner's line is open, or another writer holds the
+  // lock, nothing is replaced and the attempt is given back (the next due tick asks again)
+  const held = typeLock.run(target, (outer) => {
+    if (outer && ownerLineOpen(target)) return null;
+    let why = replacePaneProcess(target, mainRoot);
+    if (!why && !typeNow(target, `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix()}${cmd} '${SUPERVISOR_RESTART_PROMPT}'`)) why = `could not type into ${target}; run ${cmd} there`;
+    return { why };
+  });
+  if (held.busy || !held.value) { releaseRestart('supervisor', now); return null; }
+  const failed = held.value.why;
   appendLog({ type: 'observation', source: 'pane', kind: 'limit-restarted', subject: 'supervisor', detail: failed ? `the supervisor, stopped at a usage limit, could not be restarted: ${failed}` : `the supervisor, stopped at a usage limit, was restarted on conversation ${id}`, detector: 'pane', source_key: `limit-restarted supervisor ${now}` });
   if (failed) out(`could not restart the supervisor: ${failed}`);
   return failed ? 'failed' : 'restarted';
@@ -19174,8 +21302,11 @@ function legacyRecover(root, name, { dry, force, session, window }) {
     // bare, as that kit writes it: a supervisor-pane-role there is a file its kit doesn't know, which
     // its fleet status says holds a move
     fs.writeFileSync(paneFile, pane);
-    // by pane id: a dot in a window name reads as a pane to tmux
-    if (!tmux(['send-keys', '-t', pane, '-l', `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix(session)}${cmd} ${id ? `"$(cat '${promptFile}')"` : shq(promptPointer(promptFile))}`]) || !tmux(['send-keys', '-t', pane, 'Enter'])) return `NOT started (its window opened but could not be typed into: pane ${pane})`;
+    // by pane id: a dot in a window name reads as a pane to tmux; under that pane's typing lock in the
+    // repo's own run folder (kit-618). A pane just opened has no floor of the owner's; a busy lock is
+    // a window that could not be typed into
+    const typed = typeLock.run(pane, (outer) => !(outer && ownerLineOpen(pane)) && tmux(['send-keys', '-t', pane, '-l', `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix(session)}${cmd} ${id ? `"$(cat '${promptFile}')"` : shq(promptPointer(promptFile))}`]) && tmux(['send-keys', '-t', pane, 'Enter']), { run });
+    if (typed.busy || !typed.value) return `NOT started (its window opened but could not be typed into: pane ${pane})`;
     return `${id ? `resumed session ${id}` : 'started fresh'}${missing.length ? ` (asked to get: ${missing.join(' ')})` : ''}`;
   };
   if (dry) return go();
@@ -19221,6 +21352,50 @@ function paneState(pane, cmd = (sh('tmux', ['list-panes', '-a', '-F', '#{pane_id
   if (plainText(dim === -1 ? text : text.slice(0, dim)).trim()) return 'typing';
   return busy ? 'busy' : 'ready';
 }
+// The owner's floor (kit-618, terminal@1 §11): the keys route records `<ms> done|open` on the
+// supervisor's pane as @devteam-owner-floor, and while it holds no kit writer types there or presses
+// Enter. Whether it still holds, read by a writer under the pane's typing lock (or, release: false,
+// by a reader that only looks). With no floor, false, and nothing more is read. A value that doesn't
+// parse is open, from time 0. A pane at a shell or gone took the owner's line with its agent: both
+// marks go, and false, before the settle. Within 3 s of its stamp (or up to 3 s ahead of it) it
+// holds. After: on a prompt read readable, ready or busy release it, and so do a dialog or a limit
+// a done floor; on one never read, a done floor is released and an open one holds. A release unsets
+// it, or the kit's own half-typed line would later read typing and hold its next write.
+function ownerLineOpen(pane, { release = true } = {}) {
+  const SETTLE_MS = 3000;
+  // the pane's command in the same read: a pane this read found is never gone by a second call failing
+  const got = sh('tmux', ['display', '-p', '-t', pane, '#{pane_id}\tC#{pane_current_command}\tR#{@devteam-prompt-readable}\tF#{@devteam-owner-floor}']);
+  const c = got?.indexOf('\tC') ?? -1;
+  const r = c === -1 ? -1 : got.indexOf('\tR', c + 2);
+  const f = r === -1 ? -1 : got.indexOf('\tF', r + 2);
+  if (f === -1) return false;
+  const floor = got.slice(f + 2);
+  if (!floor) return false;
+  const id = got.slice(0, c);
+  const m = /^(\d{13}) (done|open)$/.exec(floor);
+  const at = m ? Number(m[1]) : 0;
+  const kind = m ? m[2] : 'open';
+  const s = paneState(id, got.slice(c + 2, r));
+  if (s === 'shell' || s === 'gone') {
+    sh('tmux', ['set-option', '-p', '-u', '-t', id, '@devteam-owner-floor', ';', 'set-option', '-p', '-u', '-t', id, '@devteam-prompt-readable']);
+    return false;
+  }
+  const readable = promptReadable(id, s, got.slice(r + 2, f));
+  const age = Date.now() - at;
+  if (age < SETTLE_MS && age >= -SETTLE_MS) return true;
+  const released = readable ? s === 'ready' || s === 'busy' || (kind === 'done' && (s === 'dialog' || s === 'limit')) : kind === 'done';
+  if (!released) return true;
+  if (release) sh('tmux', ['set-option', '-p', '-u', '-t', id, '@devteam-owner-floor']);
+  return false;
+}
+// Whether the pane's prompt has ever been read as one (@devteam-prompt-readable, the first time
+// at ready, busy or typing, recorded then): until it has, a floor's release can't trust a reading.
+function promptReadable(pane, s, mark = sh('tmux', ['display', '-p', '-t', pane, '#{@devteam-prompt-readable}'])) {
+  if (mark) return true;
+  if (!['ready', 'busy', 'typing'].includes(s)) return false;
+  sh('tmux', ['set-option', '-p', '-t', pane, '@devteam-prompt-readable', String(Date.now())]);
+  return true;
+}
 const machineUsage = 'usage: machine status [--questions | --knowledge] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text> | machine alert --clear | machine limit-state <pane> | machine pane-state <pane>';
 // tell and alert speak on the machine: the operator's, or the owner's at a terminal; never a session
 // in a fleet, which would be speaking as someone else.
@@ -19259,12 +21434,16 @@ function machineAlert(words) {
 // whatever is typed there next: pressed again, as the kit's lost Enter does, up to TELL_ENTER_TRIES
 // in all, each after a longer wait (a loaded machine redraws slowly). False when it's still there.
 const TELL_ENTER_TRIES = 3;
+// Run under machine tell's typing lock, so no owner post arrives meanwhile; a floor set by a writer
+// that takes no lock (an older kit) is read before each retry, and presses nothing: 'floor'.
 function enterLanded(p) {
   const settle = (n) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.DEVTEAM_TELL_SETTLE_SECONDS ?? 1) * 1000 * n);
   settle(1);
   for (let tries = 1; paneState(p) === 'typing'; tries++) {
     if (tries >= TELL_ENTER_TRIES) return false;
+    if (ownerLineOpen(p)) return 'floor';
     tmux(['send-keys', '-t', p, 'Enter']);
+    typeLock.touch();
     settle(tries + 1);
   }
   return true;
@@ -19287,11 +21466,19 @@ function machineTell(words) {
   try { rec = readJson(path.join(root, 'docs', 'devteam', 'run', 'supervisor-up.json')); } catch {}
   const p = supervisorPaneIn(root, notedPaneOf(root), rec && typeof rec === 'object' ? rec : null, { strict: true });
   if (!p || p === process.env.TMUX_PANE) return say('not told: no supervisor is up in its root', 3);
-  const s = paneState(p);
-  if (!['ready', 'busy'].includes(s)) return say(`not told: its pane is at ${s}`, 3);
-  if (!tmux(['send-keys', '-t', p, '-l', `${TELL_PREFIX}${text}`]) || !tmux(['send-keys', '-t', p, 'Enter'])) return say(`not told: could not type into pane ${p}`, 3);
-  if (!enterLanded(p)) return say(`not delivered: the message is still in its input (pane ${p}) after ${TELL_ENTER_TRIES} presses; clear it before anyone types there`, 3);
-  say(`told (pane ${p})`, 0);
+  // from the look to the last Enter under the pane's typing lock, in that root's run folder (kit-618)
+  const held = typeLock.run(p, (outer) => {
+    if (outer && ownerLineOpen(p)) return say("not told: the owner's line is open", 3);
+    const s = paneState(p);
+    if (!['ready', 'busy'].includes(s)) return say(`not told: its pane is at ${s}`, 3);
+    if (!tmux(['send-keys', '-t', p, '-l', `${TELL_PREFIX}${text}`]) || !tmux(['send-keys', '-t', p, 'Enter'])) return say(`not told: could not type into pane ${p}`, 3);
+    typeLock.touch();
+    const landed = enterLanded(p);
+    if (landed === 'floor') return say(`not delivered: the owner began a line in its terminal (pane ${p}) after the message was typed; look at it before anyone types there`, 3);
+    if (!landed) return say(`not delivered: the message is still in its input (pane ${p}) after ${TELL_ENTER_TRIES} presses; clear it before anyone types there`, 3);
+    say(`told (pane ${p})`, 0);
+  }, { run: path.join(root, 'docs', 'devteam', 'run') });
+  if (held.busy) say('not told: its terminal is busy; try again', 3);
 }
 // ===== operator threads: the owner and the machine's operator, from the hub's Overview =====
 //
@@ -19700,7 +21887,8 @@ function operatorThreads(lines = operatorLines()) {
     if (o.type === 'thread' && o.op === 'new' && !threads.has(o.id)) threads.set(o.id, { id: o.id, title: threadTitle(o.title), subject: operatorSubjectProblem(o.subject) ? null : o.subject, status: 'open', turns: [], created_at: o.at, closed_at: null, activity_at: o.at, ...(boxed ? { signed: signedThread(o) } : {}) });
     const t = threads.get(o.type === 'turn' ? o.thread : o.id);
     if (!t) continue;
-    if (o.type === 'turn') t.turns.push({ id: o.id, by: o.by, at: o.at, text: capBytes(o.text, TURN_MAX), ...(boxed && o.by === 'owner' ? { signed: signedTurn(o, t) } : {}) });
+    // person (kit-252): beside the proof, not in it; well-formed (personOk) or none
+    if (o.type === 'turn') t.turns.push({ id: o.id, by: o.by, at: o.at, text: capBytes(o.text, TURN_MAX), ...(boxed && o.by === 'owner' ? { signed: signedTurn(o, t) } : {}), ...(o.by === 'owner' && personOk(o.person) ? { person: { id: o.person.id, name: o.person.name } } : {}) });
     else if (o.op === 'set' && ['open', 'closed'].includes(o.status) && (!boxed || signedSet(o, t))) { t.status = o.status; t.closed_at = o.status === 'closed' ? o.at : null; }
     if (o.at > t.activity_at) t.activity_at = o.at;
   }
@@ -19709,9 +21897,23 @@ function operatorThreads(lines = operatorLines()) {
 // One line, whole: the store is shared by the hub's children and the operator's own commands.
 // Several lines (a thread and its first turn) go in one write, so a reader never sees the first
 // without the rest; and a thread with no turn yet is still a thread to every reader.
+// A claim link's token never reaches the store (redactClaimLinks). A box's gateway redacts a press
+// before it signs it, so its proof body is already clean; one from an older gateway isn't, and its
+// body is redacted too, which leaves that turn reading as unsigned: its signed bytes are gone.
 function operatorAppend(...os) {
   const at = nowIso();
-  const lines = os.map((o) => ({ v: 1, at, ...o }));
+  const clean = (o) => {
+    const c = { ...o };
+    for (const k of ['text', 'title', 'subject']) if (k in c) c[k] = redactClaimLinks(c[k]);
+    if (typeof c.proof?.body === 'string') {
+      const d = Buffer.from(c.proof.body, 'base64').toString('utf8');
+      const r = redactClaimLinks(d);
+      if (r !== d) c.proof = { ...c.proof, body: Buffer.from(r).toString('base64') };
+    }
+    return c;
+  };
+  // the owner's lines say which of the box's people gave them (kit-252), beside a signed line's proof
+  const lines = os.map((o) => ({ v: 1, at, ...clean(o), ...(o.by === 'owner' && envPerson() ? { person: envPerson() } : {}) }));
   fs.mkdirSync(operatorDir(), { recursive: true });
   fs.appendFileSync(operatorThreadsFile(), lines.map((l) => `${JSON.stringify(l)}\n`).join(''));
   return lines.length === 1 ? lines[0] : lines;
@@ -21051,6 +23253,9 @@ function cmdAccountsTick() {
   const session = tmuxSession();
   const supKey = (() => { const { target } = resolvePane(supervisorTarget()); return target ? paneKey(target) : null; })();
   flushAllHeld([...(supervisorRestarted && supKey ? [supKey] : []), ...[...state.resumed.filter((n) => !(n === 'supervisor' && continued.has(n))), ...state.relaunched].map((n) => `${session}:${n}`)]);
+  // an idle responder with turns queued for it is told so, once a minute (kit-104); a failure here
+  // never stops the tick's own record
+  try { nudgeResponder(); } catch (e) { warn(`responder nudge: ${e?.message ?? e}`); }
   fs.mkdirSync(runDir, { recursive: true });
   const tmp = `${ACCOUNTS_FILE}.${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(state));
@@ -21780,7 +23985,9 @@ function termRoutes({ port, host, log }) {
     child.stdin.end(typeof input === 'string' ? input : undefined);
   });
   const root = realPath(mainRoot);
-  const fmt = TERM_FIELDS.map((f) => `#{${f}}`).join('\t');
+  // the display's two lines (S14, S34): TERM_FIELDS, then the supervisor's held key's window and its
+  // prompt-readable mark, kept off TERM_FIELDS; capture's rows follow
+  const fmt = `${TERM_FIELDS.map((f) => `#{${f}}`).join('\t')}\n#{@devteam-prompt-readable}\t#{window_name}`;
   // the display line, by field name (a tab in the start path stays in it)
   const fieldsOf = (line) => { const v = line.split('\t'); const n = TERM_FIELDS.length; if (v.length > n) v.splice(n - 2, v.length - n + 1, v.slice(n - 2, -1).join('\t')); return Object.fromEntries(TERM_FIELDS.map((f, i) => [f, v[i] ?? ''])); };
   // the supervisor's: the marked pane only, as an id (S11)
@@ -21799,8 +24006,13 @@ function termRoutes({ port, host, log }) {
     const ids = got.out.split('\n').map((l) => l.split('\t')).map(([id, dead, ...tag]) => [id, dead, tag.join('\t')]).filter(([id, dead, tag]) => /^%\d+$/.test(id) && dead === '0' && tag === root && id !== m).map(([id]) => id);
     return (shellPane = ids.sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))[0] ?? null);
   }
-  // held is kit-618's; until the floor ships it is this (§6). The etag covers only whether oldest_ms is due.
+  // held (§6): the Shell's, and a screen not read, is this; the supervisor's is read with each screen
+  // (kit-618), from its window's held lines and its pane's prompt-readable mark. The etag covers only
+  // whether oldest_ms is due.
   const held = () => ({ count: 0, oldest_ms: 0, prompt: 'readable' });
+  // the keys route's 503 (§8, kit-618): the typing lock busy for 2 s, or the floor not recorded
+  const busyWords = 'the terminal is busy; try again';
+  const heldOf = (which, f, mark, win) => (which === 'supervisor' ? { ...supervisorHeld(`${f.session_name}:${win}`), prompt: mark ? 'readable' : 'unknown' } : held());
   const withEtag = (s, raw) => {
     const etag = sha256(JSON.stringify({ ...s, held: { ...s.held, oldest_ms: s.held.oldest_ms >= 120000 } })).slice(0, 20);
     // raw, the read's fields, for the keys route's 423s and 409s: never sent
@@ -21825,21 +24037,31 @@ function termRoutes({ port, host, log }) {
     const got = await tmuxCall(['display', '-p', '-t', P, fmt, ';', 'capture-pane', '-e', '-p', '-t', P]);
     if (!got.ok && !got.missing) { log(`/api/term/${which}: tmux failed: ${got.timedOut ? 'timed out' : got.err.trim()}`); return { error: TERM_WORDS.read }; }
     const out = got.ok ? got.out.split('\n') : [];
+    if (out.length > 1 && out.at(-1) === '') out.pop();
     const f = got.ok ? fieldsOf(out[0]) : null;
     // a display line that didn't parse is a failed read, never a screen
     if (f && !(/^%\d+$/.test(f.pane_id) && /^\d+$/.test(f.pane_width) && /^\d+$/.test(f.pane_height))) { log(`/api/term/${which}: tmux's display line didn't parse`); return { error: TERM_WORDS.read }; }
     const why = f ? notOurs(which, f) : 'missing';
     // the Shell's pane moved or went: forget it, and look once more
     if (why && which === 'shell') { shellPane = null; if (again) return readNow(which, false); }
+    const rows = Number(f?.pane_height ?? 0);
+    // the screen is the last rows lines, so a newline in the window's name never shifts a row; the
+    // second line is everything between: the mark, a tab, the window's name
+    const top = Math.max(2, out.length - rows);
+    const [mark = '', ...win] = out.slice(1, top).join('\n').split('\t');
+    // the agent that read the prompt is gone: so is its reading (K3-1); a failed unset is read again next time
+    if (which === 'supervisor' && (why === 'shell' || why === 'dead') && mark) {
+      const unset = await tmuxCall(['set-option', '-p', '-u', '-t', P, '@devteam-prompt-readable']);
+      if (!unset.ok) log(`/api/term/${which}: tmux failed to unset @devteam-prompt-readable: ${unset.timedOut ? 'timed out' : unset.err.trim()}`);
+    }
     if (why) return gone(which, { pane: P, why, fields: f });
-    const rows = Number(f.pane_height);
-    const lines = out.slice(1, 1 + rows).map(termLine);
+    const lines = out.slice(top, top + rows).map(termLine);
     while (lines.length < rows) lines.push('');
     return withEtag({
       v: 1, which, pane: f.pane_id, state: 'live', cols: Number(f.pane_width), rows,
       cursor: { x: Number(f.cursor_x), y: Number(f.cursor_y), visible: f.cursor_flag === '1' },
       modes: { app_cursor: f.keypad_cursor_flag === '1', app_keypad: f.keypad_flag === '1' },
-      history_size: Number(f.history_size), held: held(), lines,
+      history_size: Number(f.history_size), held: heldOf(which, f, mark, win.join('\t')), lines,
     }, { pane: P, why: null, fields: f });
   }
   // Per which: the read in flight, shared, and its result for cacheMs. A send voids it and bumps the
@@ -21918,10 +24140,40 @@ function termRoutes({ port, host, log }) {
     if (went()) return;
     const key = `${b.page}\n${which}`;
     if (b.seq <= (lastSeq.get(key) ?? 0)) return json(res, 200, { ...s, taken: false });
-    // taken the moment the send starts: a send that fails part way is never typed again
-    lastSeq.set(key, b.seq);
-    // kit-618: the typing lock, then the owner's floor, go here (supervisor only)
-    const sent = 'data' in b ? await sendData(s.pane, Buffer.from(b.data, 'hex')) : await sendPaste(s.pane, b.paste);
+    const keysNow = async () => {
+      // taken the moment the send starts: a send that fails part way is never typed again
+      lastSeq.set(key, b.seq);
+      return 'data' in b ? sendData(s.pane, Buffer.from(b.data, 'hex')) : sendPaste(s.pane, b.paste);
+    };
+    let sent;
+    if (which === 'supervisor') {
+      // §3 steps 13 and 14 (kit-618, §11): the pane's typing lock, then the owner's floor, then the
+      // send, all in one hold. An Enter or a Ctrl+C ends the line (done); a paste, Escape or any other
+      // key leaves it open. A refusal here keeps the seq free.
+      const data = 'data' in b ? Buffer.from(b.data, 'hex') : null;
+      const kind = data?.length && [0x0d, 0x03].includes(data[data.length - 1]) ? 'done' : 'open';
+      const floor = () => tmuxCall(['set-option', '-p', '-t', s.pane, '@devteam-owner-floor', `${Date.now()} ${kind}`]);
+      const locked = await typeLockAsync(s.pane, async () => {
+        // the marked pane, again: it can have moved while the post waited for the lock
+        if (marked() !== s.pane) return { refused: [423, TERM_WORDS.moved, 'the marked pane moved while the post waited for the typing lock'] };
+        if (went()) return { gone: true };
+        // the lock's stamp refreshed after each tmux call of the hold (spec, The lock; terminal@1 §11)
+        const set = await floor();
+        typeLock.touch();
+        if (!set.ok) return { refused: [503, busyWords, `the owner's floor could not be recorded: ${set.timedOut ? 'timed out' : set.err.trim()}`] };
+        const got = await keysNow();
+        typeLock.touch();
+        // stamped again once the keys reached tmux, so the settle runs from then; the first stands if not
+        const again = await floor();
+        typeLock.touch();
+        if (!again.ok) log(`/api/term/${which}/keys: tmux failed to record the owner's floor again after the send: ${again.timedOut ? 'timed out' : again.err.trim()}`);
+        return { sent: got };
+      }, { waitMs: 2000 });
+      if (locked.busy) return no(503, busyWords, 'the pane\'s typing lock stayed busy for 2 s');
+      if (locked.value.refused) return no(...locked.value.refused);
+      if (locked.value.gone) return;
+      sent = locked.value.sent;
+    } else sent = await keysNow();
     voidScreen(which);
     if (!sent.ok) { log(`/api/term/${which}/keys: tmux failed on the send: ${sent.timedOut ? 'timed out' : sent.err.trim()}`); return json(res, 500, { error: TERM_WORDS.sent }); }
     // the screen after the change: read until it differs, for up to SETTLE_MS; a failed read keeps the
@@ -22326,10 +24578,29 @@ async function dashRoutesUpload(D, req, res, q) {
   if ((req.method === 'GET' || req.method === 'HEAD') && req.url.startsWith('/upload/')) return await serveLaptopUpload(req, res, req.url.split('?')[0], send);
   return DASH_NEXT;
 }
-// /api/hello; / and /index.html; /api/data
+// /api/hello (with level, for a box's level header); / and /index.html; /api/data (with viewer: { level })
 async function dashRoutesPage(D, req, res, q) {
+  // The level the box's gateway says this request is (kit-250): exactly one x-devteam-level line,
+  // exactly full or view, or null. Only the gateway sets it (it drops the browser's copy); a laptop
+  // has none. It changes what the page shows, never what this server lets anyone do.
+  const viewerLevel = () => {
+    const lines = [];
+    for (let i = 0; i < req.rawHeaders.length; i += 2) if (req.rawHeaders[i].toLowerCase() === 'x-devteam-level') lines.push(req.rawHeaders[i + 1]);
+    return lines.length === 1 && (lines[0] === 'full' || lines[0] === 'view') ? lines[0] : null;
+  };
+  // the body with the level spliced in as its first key, for a box's level: /api/data's viewer: { level },
+  // hello's level (its viewer: 1 is a kit capability the gateway reads). The string it was given never
+  // changes (a kept one stays as it was), and only an object is spliced.
+  const withViewer = (body, key = 'viewer') => {
+    const level = viewerLevel();
+    const open = body.search(/\S/);
+    if (!level || open < 0 || body[open] !== '{') return body;
+    const rest = body.slice(open + 1);
+    return `{"${key}":${JSON.stringify(key === 'viewer' ? { level } : level)}${rest.trimStart().startsWith('}') ? '' : ','}${rest}`;
+  };
   const { page, pageCsp, send, helloBody, stageFrames, dashboardData, logWatch } = D;
-  if (req.method === 'GET' && req.url === '/api/hello') return send(res, 200, 'application/json', helloBody());
+  // hello carries it too, as level: the artifact and preview viewer reads no /api/data, and polls this already
+  if (req.method === 'GET' && req.url === '/api/hello') return send(res, 200, 'application/json', withViewer(helloBody(), 'level'));
   // frame-src 'self': a frame of this page (a review page, an HTML mock) may navigate itself, and
   // this keeps it on the dashboard; a sandbox alone would let it load any URL, query string and all.
   if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
@@ -22354,7 +24625,8 @@ async function dashRoutesPage(D, req, res, q) {
     try { version = sha256(fs.readFileSync(page)).slice(0, 16); } catch {}
     // a run that failed or timed out serves the last good data, marked stale
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-devteam-page': version, ...(r.ok ? {} : { 'x-devteam-stale': 'true' }) });
-    return res.end(r.ok ? r.stdout : D.lastData);
+    // a fresh run's or the kept last good data, with the viewer for a box's level (D.lastData untouched)
+    return res.end(withViewer(r.ok ? r.stdout : D.lastData));
   }
   return DASH_NEXT;
 }
@@ -22774,8 +25046,17 @@ async function dashRoutesOwner(D, req, res, q) {
   // a bad request, never a crash: a throw from an end handler is an uncaught exception, and that
   // ends the dashboard.
   const guarded = (f) => { try { f(); } catch { body = ''; if (!res.headersSent) send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' })); } };
+  // Who gave it (kit-252): read in each branch after its own checks and just before its child, so
+  // a request refused before is refused the same way with any header. A malformed one answers 400
+  // and nothing runs; false then means it was answered.
+  const personOr400 = () => {
+    const p = requestPerson(req);
+    if (!p?.bad) return p;
+    send(res, 400, 'application/json', JSON.stringify({ error: PERSON_MALFORMED }));
+    return false;
+  };
   // The owner's own process, with the body on its stdin (never in argv or the server's output).
-  const ownerChild = (args, input) => runAction(args, { input }).then((r) => send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') || 'failed', out: r.stdout.trim() })));
+  const ownerChild = (args, input, person) => runAction(args, { input, person }).then((r) => send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') || 'failed', out: r.stdout.trim() })));
   // Check now (kit-251): fleet status after a fetch from origin. A POST, as every other request that
   // changes refs is: the body is read to its end (the cap above holds) and nothing in it is used.
   if (isCheck) return req.on('end', async () => {
@@ -22810,8 +25091,11 @@ async function dashRoutesOwner(D, req, res, q) {
         paneNonces.set(proof.nonce, now);
       }
       if (D.paneAnswering) return send(res, 409, 'application/json', JSON.stringify({ error: 'another answer is on its way to the terminal; wait for it' }));
+      // after every check above and before any key is sent: a malformed person types nothing
+      const person = personOr400();
+      if (person === false) return;
       D.paneAnswering = true;
-      paneAnswer({ digest: parsed.digest, option: parsed.option, escape: parsed.escape === true, proof }).then((a) => a, (e) => ({ status: 500, body: { error: `nothing more was done: ${e?.message ?? e}` } })).then((a) => { D.paneAnswering = false; if (!res.headersSent) send(res, a.status, 'application/json', JSON.stringify(a.body)); });
+      paneAnswer({ digest: parsed.digest, option: parsed.option, escape: parsed.escape === true, proof, person }).then((a) => a, (e) => ({ status: 500, body: { error: `nothing more was done: ${e?.message ?? e}` } })).then((a) => { D.paneAnswering = false; if (!res.headersSent) send(res, a.status, 'application/json', JSON.stringify(a.body)); });
     }));
   }
   // The owner's Save on the Settings page: exactly { key, value }, an askable key, and on a box the
@@ -22837,7 +25121,9 @@ async function dashRoutesOwner(D, req, res, q) {
         for (const [n, at] of ownerSettingNonces) if (now - at > 2 * OPERATOR_PROOF_MS) ownerSettingNonces.delete(n);
         ownerSettingNonces.set(proof.nonce, now);
       }
-      ownerChild(['owner-setting', parsed.key, parsed.value === null ? 'none' : String(parsed.value)], proof ? JSON.stringify({ proof }) : null);
+      const person = personOr400();
+      if (person === false) return;
+      ownerChild(['owner-setting', parsed.key, parsed.value === null ? 'none' : String(parsed.value)], proof ? JSON.stringify({ proof }) : null, person);
     }));
   }
   if (isSecret) {
@@ -22848,7 +25134,9 @@ async function dashRoutesOwner(D, req, res, q) {
       try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
       body = '';
       if (!ID.test(parsed.id ?? '') || typeof parsed.values !== 'object' || !parsed.values) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
-      ownerChild(['secret', 'post', parsed.id, '--json'], JSON.stringify(parsed.values));
+      const person = personOr400();
+      if (person === false) { parsed = null; return; }
+      ownerChild(['secret', 'post', parsed.id, '--json'], JSON.stringify(parsed.values), person);
       parsed = null;
     }));
   }
@@ -22862,14 +25150,18 @@ async function dashRoutesOwner(D, req, res, q) {
       if (name === 'review-draft') {
         if (parsed.state === undefined) return send(res, 400, 'application/json', JSON.stringify({ error: 'a draft has a state' }));
         const savedAt = typeof parsed.saved_at === 'string' && !Number.isNaN(Date.parse(parsed.saved_at)) ? parsed.saved_at : nowIso();
-        return ownerChild(['review', 'draft', parsed.id, '-'], JSON.stringify({ state: parsed.state, saved_at: savedAt }));
+        const person = personOr400();
+        if (person === false) return;
+        return ownerChild(['review', 'draft', parsed.id, '-'], JSON.stringify({ state: parsed.state, saved_at: savedAt }), person);
       }
       // The answer is the object the owner's preview rendered: its JSON text is hashed in the page
       // and here, and the owner's process reads exactly those bytes.
       if (!isObj(parsed.result) || !/^[0-9a-f]{64}$/.test(parsed.sha256 ?? '')) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields: { id, result, sha256 }' }));
       const textOut = JSON.stringify(parsed.result);
       if (sha256(Buffer.from(textOut)) !== parsed.sha256) return send(res, 400, 'application/json', JSON.stringify({ error: 'the result is not the one the preview showed (its sha256 differs); nothing was answered' }));
-      ownerChild(['answer', parsed.id, '--review-result', '-', ...autonomyArgs(parsed)], textOut);
+      const person = personOr400();
+      if (person === false) return;
+      ownerChild(['answer', parsed.id, '--review-result', '-', ...autonomyArgs(parsed)], textOut, person);
     }));
   }
   req.on('end', async () => {
@@ -22881,7 +25173,9 @@ async function dashRoutesOwner(D, req, res, q) {
     try { args = action(parsed); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' })); }
     if (args && args.some((a) => typeof a !== 'string' || a.includes('\0'))) args = null;
     if (!args) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
-    const r = await runAction(args, { timeout: ACTION_MS[name] ?? 0 });
+    const person = personOr400();
+    if (person === false) return;
+    const r = await runAction(args, { timeout: ACTION_MS[name] ?? 0, person });
     // what the hub lists (the Inbox count, the fleet's mode) follows an owner action at once
     if (r.ok) refreshHello();
     send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') }));
@@ -22927,7 +25221,8 @@ async function cmdDashboard() {
   const describing = new Map();
   // /api/artifact-versions runs in flight, by slug: one child process however many ask at once
   const versioning = new Map();
-  const runAction = (args, o = {}) => runOwnerAction(args, { ...o, env: ownerEnv, log });
+  // person: the request's (kit-252), on this child's env alone
+  const runAction = (args, { person = null, ...o } = {}) => runOwnerAction(args, { ...o, env: personEnv(ownerEnv, person), log });
   const { ID, text, autonomyArgs, turnOk, lineOk, filesArgs, ACTIONS, ACTION_MS } = dashboardActions();
   const send = (res, code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', ...extra }); res.end(body); };
   // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 30 s
@@ -23352,7 +25647,7 @@ async function cmdDashboard() {
   let paneAnswering = false;
   const tmuxAsync = (args) => new Promise((resolve) => { try { execFile('tmux', args, { encoding: 'utf8', timeout: 10000 }, (err, so) => resolve(err ? null : so)); } catch { resolve(null); } });
   const PANE_SETTLE_MS = 1500;
-  async function paneAnswer({ digest, option, escape = false, proof }) {
+  async function paneAnswer({ digest, option, escape = false, proof, person = null }) {
     const no = (error, status = 400) => ({ status, body: { error } });
     const r = await run(['pane', 'question', '--json', '--pane'], { timeout: 20000 });
     let st = null;
@@ -23366,20 +25661,13 @@ async function cmdDashboard() {
     // Esc only where the menu itself says it cancels: on a menu whose Esc exits (a folder-trust form) it ends the session
     const notCancel = `nothing was answered: Esc here may not cancel (the terminal says: ${String(st.ask.hint ?? '').replace(/\s+/g, ' ').trim() || 'nothing about Esc'}); answer it in the terminal`;
     if (escape && !paneEscCancels(st.ask.hint)) return no(notCancel);
-    const look = async () => { const t = await tmuxAsync(['-u', 'capture-pane', '-p', '-t', st.target]); return t === null ? null : screenLines(t); };
+    // look and keyed run only inside the typing lock's hold below, so each refreshes its stamp after its tmux call
+    const look = async () => { const t = await tmuxAsync(['-u', 'capture-pane', '-p', '-t', st.target]); typeLock.touch(); return t === null ? null : screenLines(t); };
+    const keyed = async (args) => { const r = await tmuxAsync(args); typeLock.touch(); return r; };
     const menuIn = (lines) => { const a = lines ? paneAskingIn(lines) : null; return a?.kind === 'menu' && a.digest === digest ? a : null; };
-    // once more, right before the key
-    const last = menuIn(await look());
-    if (!last) return no("nothing was answered: the question in the supervisor's terminal changed or went as you clicked; read what it shows now");
-    if (escape && !paneEscCancels(last.hint)) return no(notCancel);
-    // tests only: the moment between that look and the key, in which a question can go
-    const pause = Number(process.env.DEVTEAM_PANE_ANSWER_DELAY_MS ?? 0);
-    if (pause > 0) await new Promise((w) => setTimeout(w, pause));
     // until the question is gone or changed, or its cursor has moved
     const settle = async (was) => { let lines = null; for (let t = 0; t < PANE_SETTLE_MS; t += 100) { await new Promise((w) => setTimeout(w, 100)); lines = await look(); const m = menuIn(lines); if (!lines || !m || m.selected !== was) break; } return lines; };
-    // the Escape key, by name, alone: no digit, no Enter. The menu gone is the answer; the same menu
-    // still up is reported as a key that may not have landed, as a digit's is, with no second key.
-    const record = (fields, why) => runAction(['pane', 'answered', '--owner'], { timeout: 30000, input: JSON.stringify({ digest, ...fields, first: String(st.ask.first ?? ''), artifact: st.ask.artifact ?? undefined, taken: !why, ...(why ? { why } : {}), ...(proof ? { proof } : {}) }) });
+    const record = (fields, why) => runAction(['pane', 'answered', '--owner'], { timeout: 30000, person, input: JSON.stringify({ digest, ...fields, first: String(st.ask.first ?? ''), artifact: st.ask.artifact ?? undefined, taken: !why, ...(why ? { why } : {}), ...(proof ? { proof } : {}) }) });
     const finish = async (rec, keys, why, after) => {
       // the prompt it was is answered: out of the Inbox's count now, not at the next look
       if (hello) { if (hello.supervisor_question && hello.supervisor_question.kind !== 'limit' && hello.prompts > 0 && hello.inbox > 0) { hello.prompts--; hello.inbox--; } hello.supervisor_question = null; }
@@ -23389,33 +25677,53 @@ async function cmdDashboard() {
       if (why) return no(`The key was sent, but it may not have landed: ${why}. Look at the terminal${after}.`, 409);
       return { status: 200, body: { ok: true, out: said } };
     };
-    if (escape) {
-      if ((await tmuxAsync(['send-keys', '-t', st.target, 'Escape'])) === null) return no(`nothing was answered: the key could not be sent to ${st.target}`, 500);
-      const lines = await settle(st.ask.selected);
-      const why = menuIn(lines) ? 'the same question still shows after Esc' : !lines ? 'the terminal could not be read after the key' : null;
-      return finish(await record({ escape: true, keys: 'Escape' }, why), 'Escape', why, '');
-    }
-    if ((await tmuxAsync(['send-keys', '-t', st.target, '-l', String(option)])) === null) return no(`nothing was answered: the key could not be sent to ${st.target}`, 500);
-    let lines = await settle(st.ask.selected);
-    let keys = String(option);
-    let still = menuIn(lines);
-    // the same question showing with the cursor where it was: a menu that took the digit and was asked
-    // again at once (a retry, two calls in parallel) looks just like one that ignored it, so no Enter,
-    // which would answer a question the owner never saw; the digit is logged as one that may not have landed
-    const again = !!still && still.selected === st.ask.selected && st.ask.selected === option;
-    if (still && !again) {
-      // still up, and the digit moved the cursor onto the option: Enter takes it
-      if (still.selected !== option) return no(`not answered: the terminal did not take the key ${option} (the question is still up, on option ${still.selected}); answer it in the terminal`);
-      if ((await tmuxAsync(['send-keys', '-t', st.target, 'Enter'])) === null) return no(`not answered: option ${option} is selected but Enter could not be sent; answer it in the terminal`, 500);
-      keys = `${option}, Enter`;
-      lines = await settle(option);
-      still = menuIn(lines);
-      if (still) return no(`not answered: the question is still up with option ${option} selected, after ${keys}; answer it in the terminal`);
-    }
-    // what the pane shows after: the menu took the key unless the digit is sitting in the input box
-    const draft = lines ? paneDraftIn(lines) : null;
-    const why = again ? `the same question still shows after the key, with the cursor where it was (it ignored the digit, or took it and was asked again), so no Enter was sent; answer what shows now in the terminal or on the card` : !lines ? 'the terminal could not be read after the key' : draft !== null && draft.endsWith(String(option)) ? `the question went as the key was sent, and "${option}" is now in the terminal's input box` : null;
-    return finish(await record({ option, label: opt.label, keys }, why), keys, why, ', and clear its input box if the digit is there');
+    // From the last look through the last settle under the pane's typing lock (kit-618, terminal@1
+    // §11), so no key post or kit writer lands between the look and the key, or between the digit and
+    // its Enter. The owner's floor isn't read: this is the owner's own press on a card. The lock is let
+    // go before record runs pane answered, whose flush takes it afresh. Back: { answer } (a refusal),
+    // or what was sent, for record.
+    const pressed = await typeLockAsync(st.target, async () => {
+      // once more, right before the key
+      const last = menuIn(await look());
+      if (!last) return { answer: no("nothing was answered: the question in the supervisor's terminal changed or went as you clicked; read what it shows now") };
+      if (escape && !paneEscCancels(last.hint)) return { answer: no(notCancel) };
+      // tests only: the moment between that look and the key, in which a question can go
+      const pause = Number(process.env.DEVTEAM_PANE_ANSWER_DELAY_MS ?? 0);
+      if (pause > 0) await new Promise((w) => setTimeout(w, pause));
+      // the Escape key, by name, alone: no digit, no Enter. The menu gone is the answer; the same menu
+      // still up is reported as a key that may not have landed, as a digit's is, with no second key.
+      if (escape) {
+        if ((await keyed(['send-keys', '-t', st.target, 'Escape'])) === null) return { answer: no(`nothing was answered: the key could not be sent to ${st.target}`, 500) };
+        const lines = await settle(st.ask.selected);
+        const why = menuIn(lines) ? 'the same question still shows after Esc' : !lines ? 'the terminal could not be read after the key' : null;
+        return { fields: { escape: true, keys: 'Escape' }, keys: 'Escape', why, after: '' };
+      }
+      if ((await keyed(['send-keys', '-t', st.target, '-l', String(option)])) === null) return { answer: no(`nothing was answered: the key could not be sent to ${st.target}`, 500) };
+      let lines = await settle(st.ask.selected);
+      let keys = String(option);
+      let still = menuIn(lines);
+      // the same question showing with the cursor where it was: a menu that took the digit and was asked
+      // again at once (a retry, two calls in parallel) looks just like one that ignored it, so no Enter,
+      // which would answer a question the owner never saw; the digit is logged as one that may not have landed
+      const again = !!still && still.selected === st.ask.selected && st.ask.selected === option;
+      if (still && !again) {
+        // still up, and the digit moved the cursor onto the option: Enter takes it
+        if (still.selected !== option) return { answer: no(`not answered: the terminal did not take the key ${option} (the question is still up, on option ${still.selected}); answer it in the terminal`) };
+        if ((await keyed(['send-keys', '-t', st.target, 'Enter'])) === null) return { answer: no(`not answered: option ${option} is selected but Enter could not be sent; answer it in the terminal`, 500) };
+        keys = `${option}, Enter`;
+        lines = await settle(option);
+        still = menuIn(lines);
+        if (still) return { answer: no(`not answered: the question is still up with option ${option} selected, after ${keys}; answer it in the terminal`) };
+      }
+      // what the pane shows after: the menu took the key unless the digit is sitting in the input box
+      const draft = lines ? paneDraftIn(lines) : null;
+      const why = again ? `the same question still shows after the key, with the cursor where it was (it ignored the digit, or took it and was asked again), so no Enter was sent; answer what shows now in the terminal or on the card` : !lines ? 'the terminal could not be read after the key' : draft !== null && draft.endsWith(String(option)) ? `the question went as the key was sent, and "${option}" is now in the terminal's input box` : null;
+      return { fields: { option, label: opt.label, keys }, keys, why, after: ', and clear its input box if the digit is there' };
+    }, { waitMs: 10000 });
+    if (pressed.busy) return no('nothing was answered: the terminal is busy; try again', 503);
+    const p = pressed.value;
+    if (p.answer) return p.answer;
+    return finish(await record(p.fields, p.why), p.keys, p.why, p.after);
   }
   const bodyMs = uploadLimits().bodyMs;
   // set while it hands over to a new kit (kit-288): what it still answers closes its connection
@@ -23559,9 +25867,9 @@ async function cmdDashboard() {
 
 /* cmdDashboard end */
 const PROMPTS = {
-  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. When you type a password or one-time code with devteam.mjs browser, pipe it in from a variable or a 0600 file (browser type <ref> --stdin), never as an argument or a literal in the command: a command line is readable by other local users. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for. Setup ends when start-up (supervisor.md §1, steps 1-6) has run, whatever it held (for a new adoption, the strategy draft and the first question to the owner). From then on, keep the loop until the owner stops you (or a move is ready, supervisor.md §12): run the tick (supervisor.md §3), then start node docs/devteam/scripts/devteam.mjs wait in the background (in the foreground only where your harness can\'t be woken by a finished command), tick again when it returns, and start it again. Never end a turn without a wait running, not even one that ends on a question to the owner or a summary: the owner answers in the Inbox and in threads, not in this chat, and unless your tmux pane is recorded to have them typed in, only wait brings them to you.',
+  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. For any login, 2FA or captcha in devteam.mjs browser, hand the browser to the owner with browser handover, and never type a password or one-time code yourself (supervisor.md, The browser: outside websites). If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for. Setup ends when start-up (supervisor.md §1, steps 1-6) has run, whatever it held (for a new adoption, the strategy draft and the first question to the owner). From then on, keep the loop until the owner stops you (or a move is ready, supervisor.md §12): run the tick (supervisor.md §3), then start node docs/devteam/scripts/devteam.mjs wait in the background (in the foreground only where your harness can\'t be woken by a finished command), tick again when it returns, and start it again. Never end a turn without a wait running, not even one that ends on a question to the owner or a summary: the owner answers in the Inbox and in threads, not in this chat, and unless your tmux pane is recorded to have them typed in, only wait brings them to you.',
   worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Before asking for a spec or plan review, run the first-pass checks in worker.md §4 (every done-when shown by acceptance checks that fail when the behaviour breaks, each seen failing against broken code, its line in the acceptance table\'s red seen cell; every claim about code sourced with a file:line or a command in the spec\'s Today (sources) table; a Refusals and edges section in every spec; a TL;DR that names the approach and matches the plan; a plan buildable as written). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3). Build each plan task marked `Model: fast` in a subagent on the fast model (`settings --get model_tiers`) unless the plan says `- Built here: <why>` under it (worker.md §3).',
-  responder: 'You are the responder for this repository: you answer the owner\'s thread messages at once, while the supervisor works. Read docs/devteam/process/supervisor.md §13 (The responder), the only part of that doc that is yours, and follow it. Your first action on any turn, typed or taken from the queue, is a reply: node docs/devteam/scripts/devteam.mjs thread reply <t-id> "…" (add --pending only when you will do the work yourself, then reply again when it is done). When you are done, run node docs/devteam/scripts/devteam.mjs thread list --waiting --responder and take the next turn. Hand anything else to the supervisor with node docs/devteam/scripts/devteam.mjs send supervisor "…" --kind handoff --thread <t-id>. Write to the owner in plain words. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write in your folder and then run, never inline, and remove it when it has run.',
+  responder: 'You are the responder for this repository: you answer the owner\'s thread messages at once, while the supervisor works. Read docs/devteam/process/supervisor.md §13 (The responder), the only part of that doc that is yours, and follow it. Your first action on any turn, typed or taken from the queue, is a reply: node docs/devteam/scripts/devteam.mjs thread reply <t-id> "…" (add --pending only when you will do the work yourself, then reply again when it is done, with --re <the pending reply\'s u-id>). When you are done, run node docs/devteam/scripts/devteam.mjs thread list --waiting --responder and take the next turn. Hand anything else to the supervisor with node docs/devteam/scripts/devteam.mjs send supervisor "…" --kind handoff --thread <t-id>. Write to the owner in plain words. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write in your folder and then run, never inline, and remove it when it has run.',
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
 // What a prompt says about a repo, from settings alone (a view: no checkout needed).
@@ -23782,21 +26090,29 @@ const promptPointer = (file) => `Your prompt for this session is in the file ${p
 // once pasted, and a paste that fails drops it too, so nothing is left on the server. Only the line
 // is recorded: the lost-Enter rescue matches the line's tail, and a pasted image shows as [Image #n].
 let dropSeq = 0;
+// All of it under the pane's typing lock: outermost, it first reads the owner's floor, and types
+// nothing (false) while that holds, or when the lock stays busy; under a caller's hold (typeInto,
+// flushHeld, loginChangedStop, a restart), the caller read it. The stamp is touched after each call.
 function typeNow(target, line, paste = null) {
   const files = Array.isArray(paste) && paste.length ? paste : null;
-  let ok;
-  if (!files) ok = tmux(['send-keys', '-t', target, '-l', line]) && tmux(['send-keys', '-t', target, 'Enter']);
-  else {
-    const buf = `devteam-drop-${process.pid}-${++dropSeq}`;
-    // the paths loaded first, the line typed only then: a load that fails leaves nothing in the input
-    // box, so a held line typed again later isn't typed after a copy of itself
-    ok = sh('tmux', ['load-buffer', '-b', buf, '-'], { input: dropPaste(files), stdio: ['pipe', 'pipe', 'ignore'] }) !== null;
-    if (ok && !tmux(['send-keys', '-t', target, '-l', `${line} `])) { tmux(['delete-buffer', '-b', buf]); ok = false; }
-    if (ok && !tmux(['paste-buffer', '-p', '-d', '-b', buf, '-t', target])) { tmux(['delete-buffer', '-b', buf]); ok = false; }
-    ok = ok && (!dropSpace(files) || tmux(['send-keys', '-t', target, '-l', ' '])) && tmux(['send-keys', '-t', target, 'Enter']);
-  }
-  if (ok) recordSent(target, line);
-  return ok;
+  const t = (args) => { const r = tmux(args); typeLock.touch(); return r; };
+  const held = typeLock.run(target, (outer) => {
+    if (outer && ownerLineOpen(target)) return false;
+    let ok;
+    if (!files) ok = t(['send-keys', '-t', target, '-l', line]) && t(['send-keys', '-t', target, 'Enter']);
+    else {
+      const buf = `devteam-drop-${process.pid}-${++dropSeq}`;
+      // the paths loaded first, the line typed only then: a load that fails leaves nothing in the input
+      // box, so a held line typed again later isn't typed after a copy of itself
+      ok = sh('tmux', ['load-buffer', '-b', buf, '-'], { input: dropPaste(files), stdio: ['pipe', 'pipe', 'ignore'] }) !== null;
+      if (ok && !t(['send-keys', '-t', target, '-l', `${line} `])) { tmux(['delete-buffer', '-b', buf]); ok = false; }
+      if (ok && !t(['paste-buffer', '-p', '-d', '-b', buf, '-t', target])) { tmux(['delete-buffer', '-b', buf]); ok = false; }
+      ok = ok && (!dropSpace(files) || t(['send-keys', '-t', target, '-l', ' '])) && t(['send-keys', '-t', target, 'Enter']);
+    }
+    if (ok) recordSent(target, line);
+    return ok;
+  });
+  return held.busy ? false : held.value;
 }
 // A message for an agent: typed now, or held while its pane asks (flushHeld types it once the pane
 // is ready again) and behind any line already held for it, so they arrive in order. True once
@@ -23804,18 +26120,30 @@ function typeNow(target, line, paste = null) {
 // (a dialog answered in the terminal), 'held-limit' (the usage-limit menu), 'held-queued' (nothing
 // asked now, but lines held earlier go first and the pane is not ready for them); false when it
 // could be neither. A launch command typed into a fresh window is typeNow's: it must not wait.
+// The whole decision under the pane's typing lock (kit-618): the owner's floor first, whatever the
+// pane asks (a writer's look can release a done floor on a dialog), then the asking look, then the
+// hold. While the floor holds the line is held: 'held-floor', or the asking reason when it asks.
+// The lock busy for 10 s: held outside it (a hold types nothing), 'held-busy'.
 function typeInto(target, line, paste = null) {
+  const held = typeLock.run(target, (outer) => {
+    const floor = outer && ownerLineOpen(target);
+    const key = paneKey(target);
+    if (!key) return floor ? false : typeNow(target, line, paste);
+    const asking = paneAsking(target);
+    const waits = floor || asking;
+    // the look and the hold under the window's lock: a put-back can't fall between them. null: type
+    // now; false: it could not be held
+    const file = heldLock(key, () => (!waits && !heldPending(key)) ? null : holdLine(key, target, line, paste) ?? false);
+    if (file === null) return typeNow(target, line, paste);
+    if (!file) return waits ? false : typeNow(target, line, paste);
+    if (!waits) flushHeld(key);
+    if (!fs.existsSync(file)) return true;
+    return asking ? (asking.kind === 'menu' ? 'held-card' : asking.kind === 'limit' ? 'held-limit' : 'held-terminal') : floor ? 'held-floor' : 'held-queued';
+  });
+  if (!held.busy) return held.value;
+  // held under the window's own lock, as every hold is: a flusher's claim can't fall inside it
   const key = paneKey(target);
-  if (!key) return typeNow(target, line, paste);
-  const asking = paneAsking(target);
-  // the look and the hold under the window's lock: a put-back can't fall between them. null: type
-  // now; false: it could not be held
-  const file = heldLock(key, () => (!asking && !heldPending(key)) ? null : holdLine(key, target, line, paste) ?? false);
-  if (file === null) return typeNow(target, line, paste);
-  if (!file) return asking ? false : typeNow(target, line, paste);
-  if (!asking) flushHeld(key);
-  if (!fs.existsSync(file)) return true;
-  return !asking ? 'held-queued' : asking.kind === 'menu' ? 'held-card' : asking.kind === 'limit' ? 'held-limit' : 'held-terminal';
+  return key && heldLock(key, () => holdLine(key, target, line, paste)) ? 'held-busy' : false;
 }
 // Why a line is held, in words: every one begins "recorded and held" (the dashboard reads that).
 const heldWords = (why, whose) => `recorded and held: ${{
@@ -23823,6 +26151,8 @@ const heldWords = (why, whose) => `recorded and held: ${{
   'held-terminal': `${whose} terminal has a dialog up that only the terminal can answer (no card can), and typing now would answer it. It is typed once someone answers it there`,
   'held-limit': `${whose} terminal is stopped at a usage-limit menu, and typing now would answer it. It is typed once the session is running again`,
   'held-queued': `${whose} terminal asks nothing now, but lines held for it earlier go first and it is not showing its input box yet. It is typed, in order, at the next look`,
+  'held-floor': 'the owner is typing a line in that terminal, and typing now would join it. It is typed once they send or clear their line',
+  'held-busy': 'another writer has been typing into that terminal for 10 s. It is typed, in order, at the next look',
 }[why]}`;
 // paste: the paths of files the owner dropped with it, pasted after the line (typeNow)
 function nudgeSupervisor(line, paste = null) {
@@ -29004,7 +31334,16 @@ function cmdWait() {
     else {
       // main's copy of the log as it is now: a wait can outlast many moves of main
       logCache = null;
-      const owner = readLog().lines.filter((l) => l.by === 'owner').map((l) => ({ k: l.id, at: Date.parse(l.at) }));
+      // not the owner's turns routed to the responder, nor the thread line (new, or a reopen) whose
+      // first owner turn at or after it is (kit-104): those are the responder's, and an overdue one
+      // comes back as responder-overdue. A thread line read before its turn is written wakes once.
+      const ls = readLog().lines.filter((l) => l.by === 'owner');
+      const turnsOf = new Map();
+      for (const l of ls) if (l.type === 'turn' && typeof l.thread === 'string') (turnsOf.get(l.thread) ?? turnsOf.set(l.thread, []).get(l.thread)).push(l);
+      for (const us of turnsOf.values()) us.sort((a, b) => String(a.at).localeCompare(String(b.at)));
+      const opens = (l) => l.type === 'thread' && (l.op === 'new' || (l.op === 'set' && l.status === 'open'));
+      const responders = (l) => l.type === 'turn' ? l.routed_to === 'responder' : opens(l) && (turnsOf.get(l.id) ?? []).find((u) => u.at >= l.at)?.routed_to === 'responder';
+      const owner = ls.filter((l) => !responders(l)).map((l) => ({ k: l.id, at: Date.parse(l.at) }));
       const got = sub(['messages', '--open', '--to', 'supervisor', '--json']);
       const msgs = (got ?? []).map((m) => ({ k: `${m.id} [${m.kind}] from ${m.created_by}: ${String(m.text).slice(0, 160)}`, at: Date.parse(m.created_at) }));
       last = got ? { key, owner, msgs } : null;
@@ -30190,12 +32529,16 @@ The whole system as planned now: the sum of every design so far. Written at boot
 `;
 
 // project/strategy.md as init makes it: why the project exists and how it wins, the owner's. The
-// supervisor drafts it at adoption and judges each goal's impact against it; the kit never parses
-// it (it only knows missing, this template, or written).
+// supervisor drafts it at adoption and judges each goal's impact against it; the kit reads it only
+// for whether it links self.md (`linksSelf`), beside missing, this template, or written.
 const STRATEGY_TEMPLATE_MARK = 'devteam:strategy-template';
+// The template links self.md in its opening lines. The kit reads it for one thing, beside missing,
+// template or written: whether it carries the link to self.md (`linksSelf`).
 const STRATEGY_MD = `# Strategy
 
 <!-- ${STRATEGY_TEMPLATE_MARK}: delete this line when you write the strategy -->
+
+What the project is, what it makes and its parts are in [self.md](./self.md); this page says why it exists, who it serves and how it wins.
 
 Why this project exists and how it wins. The supervisor drafts it; only the owner approves a change (class strategy-change).
 Goals are judged against it (planning.md §1). Keep it to one page.
@@ -33045,25 +35388,56 @@ function responderWindowRefusal(w) {
 // A thread's turns from the log's own lines (created_by, created_at), never the view, which names
 // every non-owner turn the supervisor's; oldest first.
 const logTurns = (threadId, objects = readLog().objects) => [...objects.values()].filter((o) => o.type === 'turn' && o.thread === threadId).sort(byTime);
-// The owner's turns in a thread still owed an answer (the spine's single rule, as kit-103's
-// done-when 3 words it): any later non-owner turn answers an owner turn, and a resolve of the
-// thread after it leaves it owed nothing, by time, so a reopen with no words doesn't bring it back.
-// Every "the owner said it" here is a line's writer, never its text. routed_to plays no part yet:
-// kit-104, which writes it, brings it into the answered rule.
-function owedTurns(threadId, objects = readLog().objects) {
-  const ts = logTurns(threadId, objects);
-  const resolvedAt = (objects.get(threadId)?.updates ?? []).filter((u) => u.status === 'resolved').map((u) => String(u.at)).sort().pop() ?? '';
-  const answeredAt = ts.filter((u) => u.created_by !== 'owner').pop()?.created_at ?? '';
-  return ts.filter((u) => u.created_by === 'owner' && u.created_at > answeredAt && u.created_at > resolvedAt);
+// Whether a reply written by `by` answers the owner's turn u (the spine's Answered rule, kit-104):
+// a turn routed to the supervisor only by the supervisor; one routed to the responder by the
+// responder or the supervisor; one with no route (an older kit's) by any non-owner, as before.
+// Every "the owner said it" here is a line's writer (created_by), never its text.
+const answersTurn = (u, by) => by !== 'owner' && (!u.routed_to || by === 'supervisor' || by === u.routed_to);
+// The owner's turns still owed an answer, from a thread's turns (log lines, oldest first) and the
+// thread: an owner turn is answered by a turn in the thread at or after it (a tie answers) whose
+// writer answers it (answersTurn), and a resolve of the thread after it leaves it owed nothing, by
+// time, so a reopen with no words doesn't bring it back. One pure rule for the queue, idleness,
+// threadView.waiting, thread list --waiting, thread-waiting and responder-overdue (kit-104).
+function owedIn(ts, thread) {
+  const resolvedAt = (thread?.updates ?? []).filter((u) => u.status === 'resolved').map((u) => String(u.at)).sort().pop() ?? '';
+  return ts.filter((u) => u.created_by === 'owner' && String(u.created_at) > resolvedAt && !ts.some((w) => w.created_at >= u.created_at && answersTurn(u, w.created_by)));
+}
+// The owner's turns in a thread still owed an answer (owedIn on the log's own lines).
+const owedTurns = (threadId, objects = readLog().objects) => owedIn(logTurns(threadId, objects), objects.get(threadId));
+// The responder's open promise in a thread (final-1 F2, final-1b F2): its newest turn there is
+// pending, no resolve of the thread came after it, and no supervisor turn after it settled it. A
+// supervisor turn settles it unless it is a question, or it was written within RESPONDER_PENDING_MS
+// of the promise and every owed owner turn it answered came after the supervisor's own question asked
+// after the promise (its reply in that exchange answers the owner's answer, not the promise). Once the
+// promise is overdue any reply settles it: the supervisor takes it, as with an owed turn (final-2b
+// F1). A reply answering nothing owed takes it over too (the backstop). The turn, or null. On the
+// log's lines, oldest first.
+function pendingOpen(ts, thread) {
+  const mine = ts.filter((u) => u.created_by === 'responder').pop();
+  if (mine?.pending !== true) return null;
+  const resolvedAt = (thread?.updates ?? []).filter((u) => u.status === 'resolved').map((u) => String(u.at)).sort().pop() ?? '';
+  if (resolvedAt > String(mine.created_at)) return null;
+  const asked = ts.find((u) => u.created_by === 'supervisor' && u.question && u.created_at >= mine.created_at)?.created_at;
+  for (const s of ts) {
+    if (s.created_by !== 'supervisor' || s.created_at < mine.created_at || s.question) continue;
+    if (Date.parse(s.created_at) - Date.parse(mine.created_at) > RESPONDER_PENDING_MS) return null;
+    const answers = owedIn(ts.filter((u) => u.created_at < s.created_at), thread).filter((u) => answersTurn(u, 'supervisor'));
+    if (!asked || !answers.length || answers.some((u) => u.created_at < asked)) return null;
+  }
+  return mine;
 }
 // The responder's guard: since its own last turn in the thread (or ever, with none) the supervisor
 // has written, and the owner has said nothing after that. A reply then would answer what the
-// supervisor already answered (both backstop cases of the spine's Failure modes).
+// supervisor already answered (both backstop cases of the spine's Failure modes). Never while its
+// own promise there is open (pendingOpen): the follow-up it owes is its to write. After the
+// supervisor's own question (thread ask) only owner words routed to the responder lift it: the
+// owner's answer to that question is the supervisor's (final-3b F2).
 function supervisorAnswered(threadId, objects = readLog().objects) {
   const ts = logTurns(threadId, objects);
+  if (pendingOpen(ts, objects.get(threadId))) return false;
   const mine = ts.filter((u) => u.created_by === 'responder').pop()?.created_at ?? '';
   const sup = ts.filter((u) => u.created_by === 'supervisor').pop();
-  return !!sup && sup.created_at > mine && !ts.some((u) => u.created_by === 'owner' && u.created_at > sup.created_at);
+  return !!sup && sup.created_at > mine && !ts.some((u) => u.created_by === 'owner' && u.created_at > sup.created_at && (!sup.question || u.routed_to === 'responder'));
 }
 // A turn's first n characters on one line, for a terminal: control characters and runs of
 // whitespace as one space, … when cut.
@@ -33081,11 +35455,225 @@ function responderQueue(objects = readLog().objects) {
   }
   return q.sort((a, b) => a.at.localeCompare(b.at));
 }
+// kit-104: a turn routed to the responder still owed past this is overdue (the supervisor takes it,
+// and every turn after it until it is answered); so is the responder's pending turn not followed up
+// (pendingOpen) past RESPONDER_PENDING_MS, which is also how long a pending turn keeps it busy.
+const RESPONDER_OVERDUE_MS = 3 * 60000;
+const RESPONDER_PENDING_MS = 10 * 60000;
+// Every thread's turns from a fold's objects, oldest first, in one pass.
+function turnsByThread(objects) {
+  const m = new Map();
+  for (const o of objects.values()) if (o.type === 'turn' && typeof o.thread === 'string') (m.get(o.thread) ?? m.set(o.thread, []).get(o.thread)).push(o);
+  for (const ts of m.values()) ts.sort(byTime);
+  return m;
+}
+// Whether the responder can take a turn now, from tmux alone: { problem } (the fleet's session or
+// its window missing, its pane exited or at a shell; session says whether the fleet's session is
+// up), { stuck: line } (a blocked-prompt pattern, or a menu or dialog the kit reads, which would
+// hold a typed line), or { target } (an agent, asking nothing).
+function responderHealth() {
+  const w = responderWindow();
+  if (!w.has) return { problem: `no tmux session "${w.session}"`, session: false };
+  if (!w.there) return { problem: `no window ${w.shown}`, session: true };
+  const { target, problem } = resolvePane(w.target);
+  if (problem) return { problem, session: true };
+  const waits = paneWaitingIn(RESPONDER_NAME);
+  if (waits) return { stuck: waits.line, target, session: true };
+  const asking = paneAsking(target);
+  if (asking) {
+    const lines = String(asking.kind === 'menu' ? asking.question ?? '' : asking.text ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
+    return { stuck: (lines.find((l) => ENTER_CONFIRMS.test(l)) ?? lines[0] ?? `a ${asking.kind}`).slice(0, 200), target, session: true };
+  }
+  return { target, session: true };
+}
+// Idle: no owner turn routed to it and typed is still owed, and its own newest turn (any thread)
+// is not a pending one under RESPONDER_PENDING_MS old. Turns queued for it never make it busy.
+function responderIdle(objects, now = Date.now(), byThread = turnsByThread(objects)) {
+  for (const [id, ts] of byThread) if (owedIn(ts, objects.get(id)).some((u) => u.routed_to === 'responder' && u.delivered === 'typed')) return false;
+  const mine = [...byThread.values()].flat().filter((u) => u.created_by === 'responder').sort(byTime).pop();
+  return !(mine?.pending === true && now - Date.parse(mine.created_at) < RESPONDER_PENDING_MS);
+}
+// The responder's overdue turns, per open thread: an owner turn routed to it, still owed, older
+// than RESPONDER_OVERDUE_MS; or its open promise (pendingOpen) older than RESPONDER_PENDING_MS.
+// [{ thread, turn, why, min }], from the log alone (owedIn), so an answer or a resolve clears it.
+function responderOverdue(objects, now = Date.now(), byThread = turnsByThread(objects)) {
+  const found = [];
+  for (const [id, ts] of byThread) {
+    const t = objects.get(id);
+    if (t?.type !== 'thread' || t.status === 'resolved') continue;
+    const late = owedIn(ts, t).find((u) => u.routed_to === 'responder' && now - Date.parse(u.created_at) > RESPONDER_OVERDUE_MS);
+    if (late) { found.push({ thread: id, turn: late.id, why: 'owed', min: Math.floor((now - Date.parse(late.created_at)) / 60000) }); continue; }
+    const p = pendingOpen(ts, t);
+    if (p && now - Date.parse(p.created_at) > RESPONDER_PENDING_MS) found.push({ thread: id, turn: p.id, why: 'pending', min: Math.floor((now - Date.parse(p.created_at)) / 60000) });
+  }
+  return found;
+}
+// The open handoffs to the supervisor, by thread: of those not settled by a supervisor turn after
+// it (settledByLanding) and named by no reply's re, the newest per thread (an older one when the
+// newest was answered). Map thread -> message id.
+function openHandoffs(objects = readLog().objects) {
+  const replied = new Set([...objects.values()].filter((o) => o.type === 'message' || o.type === 'question').map((o) => o.re).filter(Boolean));
+  const m = new Map();
+  for (const o of [...objects.values()].filter((x) => x.type === 'message' && x.kind === 'handoff' && x.to === 'supervisor' && typeof x.thread === 'string').sort(byTime)) {
+    if (!replied.has(o.id) && !settledByLanding(o)) m.set(o.thread, o.id);
+  }
+  return m;
+}
+// The idle nudge (kit-104): when the responder's pane has an agent asking nothing, it is idle and its
+// queue isn't empty, the accounts tick types this line into it, at most once a minute
+// (RESPONDER_NUDGE_FILE, { at }, written after the typing: a crash between them costs one extra
+// nudge, never a turn). Never into a busy responder. Named at load, so the loose-file check knows it.
+const RESPONDER_NUDGE_FILE = runPath('responder-nudge.json');
+const RESPONDER_NUDGE = '[devteam responder] a turn is waiting — devteam.mjs thread list --waiting --responder';
+const RESPONDER_NUDGE_MS = 60000;
+function nudgeResponder(now = Date.now()) {
+  if (loadSettings().responder === false) return false;
+  const objects = readLog().objects;
+  if (!responderQueue(objects).length) return false;
+  if (!responderIdle(objects, now)) return false;
+  let at = 0;
+  try { at = Date.parse(JSON.parse(readText(RESPONDER_NUDGE_FILE) ?? 'null')?.at) || 0; } catch {}
+  // a time in the future (the clock stepped back) is no record, so it can't hold the nudge off for long
+  if (at <= now && now - at < RESPONDER_NUDGE_MS) return false;
+  const h = responderHealth();
+  if (!h.target || h.stuck) return false;
+  if (!typeInto(h.target, RESPONDER_NUDGE)) return false;
+  writeJsonAtomic(RESPONDER_NUDGE_FILE, { at: new Date(now).toISOString() });
+  return true;
+}
+// A thread's state in the supervisor's words (thread list, show): whose reply is owed, or the owner's move.
+const waitingWords = (v, overdue = false) => (v.waiting === 'supervisor' ? 'waiting on the supervisor' : v.waiting === 'responder' ? `the responder has it${overdue ? ' · overdue' : ''}` : "the owner's move");
+// Whether the worktree at dir changed <slug>'s folder since it left main: a tracked change against
+// its merge-base with origin's main (committed or not), or an untracked file there. A copy older than
+// main's but unchanged since the worktree was cut draws nothing. 'unreadable' when git can't say
+// (no merge-base, a folder that isn't its own worktree, an error): the caller fails closed on it.
+function artifactChangedIn(dir, slug, main) {
+  const top = responderGit(['rev-parse', '--show-toplevel'], dir);
+  if (top.status !== 0 || realPath(top.stdout.trim()) !== realPath(dir)) {
+    // not its own worktree, so git can't say. A stray plain folder (no .git entry at all) holding no
+    // copy of the slug can't be drawing it, and never blocks every draft (final-1 F2); one with a
+    // .git git can't read may be deleting the slug, so it stays unreadable (final-2 F3)
+    let stray = false;
+    try { fs.lstatSync(path.join(dir, '.git')); } catch { stray = true; }
+    if (stray) try { fs.lstatSync(path.join(dir, ARTIFACTS_REL, slug)); } catch { return false; }
+    return 'unreadable';
+  }
+  const mb = responderGit(['merge-base', 'HEAD', `origin/${main}`], dir);
+  const base = mb.status === 0 ? mb.stdout.trim() : '';
+  if (!base) return 'unreadable';
+  const folder = `${ARTIFACTS_REL}/${slug}`;
+  const diff = responderGit(['diff', '--quiet', base, '--', folder], dir);
+  if (diff.status === 1) return true;
+  if (diff.status !== 0) return 'unreadable';
+  const ls = responderGit(['ls-files', '--others', '--exclude-standard', '--', folder], dir);
+  if (ls.status !== 0) return 'unreadable';
+  return ls.stdout.trim() !== '';
+}
+// responder draft <slug> [--new --title t --summary s [--for '<json>'] [--kind k]]: the responder
+// opens (or reuses) .worktrees/chore-artifact-<slug>, a chore worktree the supervisor lands with
+// chore pr / merge --chore as any other. Refused, naming each one, while a ticket's, planner's or
+// other session's worktree (or another machine's branch) draws the slug: the owner's change is
+// relayed there. Every git call of its own goes through responderGit/responderOrigin, so nothing
+// another session planted (a hook, an fsmonitor, a replace ref) runs as the responder.
+function responderDraft() {
+  const slug = positional[1];
+  const role = process.env.DEVTEAM_ROLE;
+  // DEVTEAM_TICKET or DEVTEAM_FEATURE set at all, blank included, is a worker's or planner's session, as ownerWriter reads it (final-1 F3, final-2 F2)
+  if (flags.owner || process.env.DEVTEAM_CHANNEL || process.env.DEVTEAM_TICKET !== undefined || process.env.DEVTEAM_FEATURE !== undefined || logWriter() !== 'responder' || ![undefined, '', 'responder'].includes(role)) die("responder draft: the responder's command; the supervisor opens a draft with chore start artifact-<slug>");
+  const usage = 'usage: responder draft <slug> [--new --title "…" --summary "…" [--for \'["goal:g"]\'] [--kind mock|diagram|docs]]';
+  if (!slug || !LINK_ID.test(slug) || positional.length > 2) die(usage);
+  const title = flagStr('title'), summary = flagStr('summary');
+  if (flags.new && (!title || !summary)) die('--new needs --title and --summary');
+  const main = loadSettings().main_branch;
+  const name = `chore-artifact-${slug}`;
+  const wt = path.join(mainRoot, '.worktrees', name);
+  const touch = () => { const now = new Date(); try { fs.utimesSync(wt, now, now); } catch {} };
+  // a draft already there is the responder's own: used, whoever else draws the slug
+  let there = null;
+  try { there = fs.lstatSync(wt); } catch {}
+  if (there) {
+    // a link planted at the draft's path (to a ticket's worktree, say) is never taken as the draft,
+    // and no git runs there: only the folder itself, at .worktrees/<name> (final-1 F1)
+    const notHere = () => die(`.worktrees/${name} is not a git worktree: move it aside, then responder draft ${slug} again`);
+    if (there.isSymbolicLink() || realPath(wt) !== path.join(realPath(path.join(mainRoot, '.worktrees')), name)) notHere();
+    const top = responderGit(['rev-parse', '--show-toplevel'], wt);
+    if (top.status !== 0 || realPath(top.stdout.trim()) !== realPath(wt)) notHere();
+    if (flags.new) die(`.worktrees/${name} is already there: responder draft ${slug} edits it`);
+    const st = responderGit(['status', '--porcelain'], wt);
+    if (st.status !== 0) die(`.worktrees/${name}: git status failed: ${(st.stderr || '').trim()}`);
+    if (st.stdout.trim()) { touch(); return out(realPath(wt)); }
+    const fetched = responderOrigin(['fetch', '--quiet', 'origin', main]);
+    if (fetched.status !== 0) die(`responder draft: fetching origin's ${main} failed: ${(fetched.stderr || '').trim() || `exit ${fetched.status}`}`);
+    const head = responderGit(['rev-parse', 'HEAD'], wt).stdout?.trim();
+    const onMain = responderGit(['merge-base', '--is-ancestor', 'HEAD', `origin/${main}`], wt).status === 0;
+    // landed (merged, squashed, or never committed to): start again from main as it is now; a
+    // pushed chore commit not yet merged is kept
+    if (onMain || (head && mergedAtSha(name, head))) choreWorktree(`artifact-${slug}`, { responder: true, reset: true });
+    else touch();
+    return out(realPath(wt));
+  }
+  // a session drawing the slug: every worktree that changed its folder since it left main, and every
+  // other machine's branch that did (a local row hides those in remote_branches)
+  const known = tickets();
+  const found = new Map();
+  const relay = (who) => `relay the owner's change with send ${who} "…" (thread <t-id>)`;
+  const handOver = 'hand it over: send supervisor "…" --kind handoff --thread <t-id>';
+  let names = [];
+  try { names = fs.readdirSync(path.join(mainRoot, '.worktrees')); } catch {}
+  for (const w of names) {
+    if (w === name) continue;
+    const dir = draftWorktree(w);
+    if (!dir) continue;
+    const changed = artifactChangedIn(dir, slug, main);
+    if (!changed) continue;
+    const where = `.worktrees/${w}`;
+    if (changed === 'unreadable') { found.set(w, `${where} can't be read, so it may be drawing ${slug} (${w}); ${handOver}`); continue; }
+    const rec = /^records-(.+)$/.exec(w);
+    const session = known.has(w) || /^plan-./.test(w) ? w : rec && known.has(rec[1]) ? rec[1] : null;
+    found.set(w, session ? `${slug} is being drawn in ${where} (${session}); ${relay(session)}` : `${slug} is being drawn in ${where} (${w}); ${handOver}`);
+  }
+  const branches = new Set();
+  for (const a of draftArtifacts().filter((d) => d.slug === slug)) {
+    if (String(a.at).startsWith('origin:')) branches.add(a.branch ?? String(a.at).slice('origin:'.length));
+    for (const b of a.remote_branches ?? []) branches.add(b);
+  }
+  for (const b of branches) {
+    const t = /^ticket\/(.+)$/.exec(b), p = /^plan\/(.+)$/.exec(b);
+    const session = t && known.has(t[1]) ? t[1] : p ? `plan-${p[1]}` : null;
+    const where = `branch ${b} on origin`;
+    // keyed by the branch's own name, so it sorts among the worktrees by name
+    found.set(`${b}\0branch`, session ? `${slug} is being drawn in ${where} (${session}); ${relay(session)}` : `${slug} is being drawn in ${where} (${b}); ${handOver}`);
+  }
+  if (found.size) die(`responder draft ${slug}: refused, nothing made:\n${[...found.keys()].sort().map((k) => `  ${found.get(k)}`).join('\n')}`);
+  const landed = landedArtifacts().some((a) => a.slug === slug);
+  if (!flags.new && !landed) die(`no artifact ${slug} on main; to start one: responder draft ${slug} --new --title "…" --summary "…"`);
+  if (flags.new && landed) die(`${slug} is on main; responder draft ${slug} edits it`);
+  // make it; a failed artifact new takes back only what this run made
+  const had = responderGit(['rev-parse', '--verify', '-q', `refs/heads/${name}`]);
+  const was = had.status === 0 ? had.stdout.trim() : null;
+  choreWorktree(`artifact-${slug}`, { responder: true });
+  if (flags.new) {
+    const args = ['artifact', 'new', slug, '--title', title, '--summary', summary];
+    if (flagStr('for') !== undefined) args.push('--for', flagStr('for'));
+    if (flags.kind !== undefined) args.push('--kind', flagStr('kind') ?? '');
+    const r = spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...args], { cwd: wt, env: { ...process.env, DEVTEAM_ROLE: 'responder' }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60000 });
+    if (r.stderr) process.stderr.write(r.stderr);
+    if (r.status !== 0 || r.error) {
+      responderGit(['worktree', 'remove', '--force', wt]);
+      if (was) responderGit(['branch', '-f', name, was]);
+      else responderGit(['branch', '-D', name]);
+      die(`responder draft ${slug}: artifact new failed (${r.error?.message ?? `exit ${r.status}`}); the draft was taken back`);
+    }
+  }
+  out(realPath(wt));
+}
 // Its help lines, in Setup and roles (HELP_SETUP reads them; this region sits above HELP).
 const RESPONDER_HELP = `  responder [--resume | --stop]   supervisor: the thread responder, a quick session that answers the owner's thread turns (window responder, .worktrees/responder at main, the owner's responder_command); --stop ends it, --resume restarts it in its window
+  responder draft <slug> [--new --title t --summary s]   the responder: open (or reuse) .worktrees/chore-artifact-<slug> to edit a landed artifact, or start one there with --new; refused, naming the session, while a ticket or planner draws it
   prompt responder   the responder's prompt: its section of supervisor.md (§13)`;
 // responder [--resume | --stop]: the supervisor starts, restarts or stops the responder.
 function cmdResponder() {
+  if (positional[0] === 'draft') return responderDraft();
   // every channel is one of the owner's surfaces (the dashboard, the hub, the owner's terminal)
   if (flags.owner || process.env.DEVTEAM_CHANNEL) die('responder: the supervisor starts the responder (settings.responder turns it off)');
   supervisorOnly('responder');
@@ -33172,6 +35760,39 @@ function cmdResponder() {
   }
 }
 /* responder-session end */
+// Who owes the reply to the owner's next turn in thread t (kit-104; the spine's routing rules 1, 3
+// and 4), worked out once, before the turn is written, and stored on it (routed_to, and delivered
+// for the responder); nothing recomputes it. t may be a thread not yet written ({ subject }).
+// { to: 'supervisor' } or { to: 'responder', delivered: 'typed' | 'queued', target }; why says why
+// the supervisor's. A subject naming a record not in the log takes the ordinary rules. Every "the
+// owner said it" here is a line's writer, never its text.
+function responderRoute(t, objects = readLog().objects, s = loadSettings(), now = Date.now()) {
+  const ownerCorrected = (r) => (r.updates ?? []).some((u) => u.corrected !== undefined && writerClass(u.by) === 'owner');
+  // 1: its own open question asked in the thread, or a subject still the supervisor's
+  if (t.id && [...objects.values()].some((o) => o.type === 'question' && o.thread === t.id && threadQuestion(o).status === 'open')) return { to: 'supervisor', why: 'its open question' };
+  const ref = isObj(t.subject) && t.subject.kind === 'item' && typeof t.subject.ref === 'string' ? t.subject.ref : '';
+  const rec = ref.includes(':') ? objects.get(ref.slice(ref.indexOf(':') + 1)) : null;
+  const kind = ref.slice(0, ref.indexOf(':'));
+  if (rec && rec.type === kind) {
+    if (kind === 'question' && threadQuestion(rec).status === 'open') return { to: 'supervisor', why: 'an open question' };
+    if (kind === 'decision' && !ownerCorrected(rec)) return { to: 'supervisor', why: 'an uncorrected decision' };
+    // the owner's own acts can't be corrected, so their threads take the ordinary rules; an act that
+    // carried out a decision follows that decision (F8-4)
+    if (kind === 'act' && rec.created_by !== 'owner') {
+      const d = typeof rec.decision === 'string' ? objects.get(rec.decision) : null;
+      if (!ownerCorrected(d?.type === 'decision' ? d : rec)) return { to: 'supervisor', why: 'an uncorrected act' };
+    }
+  }
+  // 2: the responder can't take it
+  if (s.responder === false) return { to: 'supervisor', why: 'the responder is off' };
+  const h = responderHealth();
+  if (h.problem) return { to: 'supervisor', why: h.problem };
+  if (h.stuck) return { to: 'supervisor', why: `the responder is stuck: ${h.stuck}` };
+  const byThread = turnsByThread(objects);
+  if (responderOverdue(objects, now, byThread).length) return { to: 'supervisor', why: 'a responder turn is overdue' };
+  // 3: the responder's, typed when idle
+  return { to: 'responder', delivered: responderIdle(objects, now, byThread) ? 'typed' : 'queued', target: h.target };
+}
 
 /* HELP start */
 /* helpSections start */
@@ -33202,7 +35823,7 @@ const HELP_GRAPH = `The graph (planning.md)
   ticket hold <id> --reason r --for <cause>… [--until <date>] [--whole "<why>"]   supervisor or planner: hold a ticket, naming what it waits on (q-…, a ticket, chore:<slug>, goal:<g-id>, pr:<link>#<n>, run:<link>:<id>, external:<words>; the last three need --until, at most 30 days ahead)
   ticket release <id> [--reason r]       supervisor or planner: lift a ticket's hold
   validate [--strict] [--plan <feature>]  graph rules D1-D11, reviews, goals, log health (--plan: the feature a detached plan head plans)
-  waves [--feature f] | ready [--plan-ahead] | status [--json] | roadmap [--json]
+  waves [--feature f] | ready [--plan-ahead] | status [--json] | roadmap [--json]   status also prints each running goal with its next move under it
   moves [--json] [--holder owner|supervisor|planner|worker|nobody]   every running goal's, active ticket's, planner's and open chore's next move: what, who holds it, since when, owed or stalled marked (next-move@1)
   components check [--ref r] [--repo <link> [--path <checkout>]] [--count] [--json]   coverage: every tracked path at r (default main) owned by exactly one component line; exit 1 on any gap (--count: the Baseline's number); --repo checks another repo's tree under home's lines`;
 const HELP_CHECKS = `Checks and merging (quality.md)
@@ -33248,10 +35869,11 @@ const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
   answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> --said "<whole clauses>" [--at <n>] [--seen-turn <u-id>]   (a question asked with thread ask --turn) | answer <qid> --defaulted   (supervisor)
   thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --; refused in the supervisor's own pane
+  thread new --subject '{"kind":"item","ref":"question:q-…"}' [--title "<line>"] -- "<words>"   (supervisor)   your own thread about a question or goal (or goal:g-…), for what belongs to no open thread; at most 20 open; nothing is typed anywhere, the owner sees it as from you
   settings set <key> <1..20|none> [--for <act-id>]   (the supervisor sets max_active_tickets or max_active_per_component in its settings chore, .worktrees/chore-settings; none is no limit; --for names the owner's owner-setting act it lands, which must be the latest for the key with this value. It applies once merge --chore settings lands it)
   owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor's own settings, max_active_tickets or max_active_per_component; none is no limit. The dashboard's Settings page runs it on Save; the supervisor lands it with settings set in its settings chore)
   pane question [--json]   (what the supervisor's terminal is asking; the owner answers it on the dashboard's card, which sends that option's digit key and nothing else: no command answers it)
-  thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--anyway] | thread ask <t-id> --question "…" <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor; the responder replies too)   reply, ask an Inbox question in it, propose resolving it
+  thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--re <u-id>] [--off-subject "<why>"] [--anyway] | thread reply <t-id> --part <n> "<words>", then thread reply <t-id> --after-parts ["<last words>"] [reply's flags] | thread ask <t-id> --question "…" [--off-subject "<why>"] <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor; the responder replies too)   reply, ask an Inbox question in it, propose resolving it; a turn nothing waits on (no owner turn owed, no open handoff) names its --refs on the thread's subject, or follows up your --pending turn with --re <that turn>, or says --off-subject "<why>"
   thread working <t-id> [--done]   (the session holding the owner's turn: the card shows it is responding until you reply)
   thread show <t-id> [--json] | thread list [--waiting [--responder] | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply; --waiting --responder: the owner's turns owed and routed to the responder, oldest first
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]   questions print in Inbox order: the most valuable first
@@ -33272,7 +35894,10 @@ const HELP_OBSERVE = `Observe and orient
   observe-metrics | observe-spend | orient [--json] | metrics [--since date] [--json]   (observe-metrics records spend lines too, and each ended week's learning record)
   ack <finding-kind> <subject> --reason r [--owner]   set a finding aside for finding_ack_hours (a merge commit: for good)
   timeline <ticket-id> [--json]   the ticket and every log line, review and file that bears on it
-  governance [--json]   the kit's governance and process files and the project's strategy and exterior: title, last change, changed here
+  governance [--json]   the kit's governance and process files and the project's strategy, Self and exterior: title, last change, changed here
+  self show [--json]   main's project/self.md, what the project is: what it is, makes, its parts with their paths, what it controls and what not; --json is the dashboard's self block, null when not drafted
+  self check   the working tree's self.md against self@1, each part's path on disk, and the names rule; errors exit 1, warnings don't
+  exterior show [--json] | exterior check   the working tree's project/exterior.md, what the project relates to, by relation, with each entity's signals and scores (--json the dashboard's exterior block, null when not drafted); check: the working tree's against exterior@1, its blobs and quotes at the draft, and the names rule; errors exit 1
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
   search "<words>" [--type <log type>|doc]… [--since <date>] [--limit n] [--json]   what the project already wrote about it, best first, quoted as data (supervisor.md §6)
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …`;
@@ -33284,7 +35909,7 @@ const HELP_GOALS = `Goals and retros
   goal order [<g-id> …] --approved <qid>   supervisor: apply an answered goal-change --order question, exactly the order it proposed
   goal reading <g-id> --run | --approved <qid> | --value n   a reading by the measure's source: --run runs a repo check on main or a prod check; --approved records an owner goal's yes from its answered goal-met question; --value only for a goal with no source, or the owner's own (--owner)
   retro [--due | --print | close <date> --summary s --refs ids]
-  chore start <slug> | chore pr <slug> --title t    a supervisor-written file (design, retro, architecture) and its PR`;
+  chore start <slug> [--what "…"] [--for <refs>] [--fresh] | chore adopt <slug> [--what "…"] [--for <refs>] | chore drop <slug> --reason "…" | chore pr <slug> --title t [--names-checked <word,…>]    a supervisor-written file (design, retro, architecture) and its PR; on a public or unknown repo it holds a self.md or exterior.md draft's unchecked names (capitalised words main's strategy.md and dependency files don't contain) until --names-checked names each, and an exterior.md naming an organisation or work main's strategy.md doesn't, which --names-checked never clears; chore start keeps an open branch's commits, refuses a dropped one unless --fresh, and records --what (the chore's title for the owner) and --for (the refs it serves); chore adopt records an existing branch; chore drop ends a chore and keeps its branch`;
 const HELP_RECURRING = `Jobs under Upkeep (supervisor.md, Recurring jobs)
   recurring list [--json]   main's jobs (project/recurring.json at main) in name order: kind, every, title, who registered each through an answered recurring-edit question (or not), the runs a day against the cap of 100, and the pending questions; a file on main that doesn't read prints its problem and exits 1. --json: { entries: [{ name, entry, runs_a_day, registered: { qid, at, by, act } | null, problems?: ["…"] }], runs_a_day, cap, pending: [{ qid, name, change, status }] }; problems is there only when an entry breaks the shape (validate says the same)
   recurring show <name> [--json]   one job on main in full, who registered it, its problems if it breaks the shape, and its pending questions
@@ -33343,7 +35968,7 @@ const COMMANDS_DECIDE = {
   ask: cmdAsk, answer: cmdAnswer, unread: cmdUnread, thread: cmdThread, pane: cmdPane, 'owner-setting': cmdOwnerSetting, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
 };
 const COMMANDS_OBSERVE = {
-  observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, governance: cmdGovernance, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
+  observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, governance: cmdGovernance, self: cmdSelf, exterior: cmdExterior, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
 };
 const COMMANDS_GOALS = {
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
