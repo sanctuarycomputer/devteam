@@ -7145,7 +7145,8 @@ function avStep(by) {
   if (document.getElementById('av-shot')) return;
   const list = avStep.list();
   if (!list.length) return;
-  const i = list.findIndex((t) => t.id === (avStep.want?.id ?? TL.open));
+  // (a step under way counts until the owner opens something else)
+  const i = list.findIndex((t) => t.id === (avStep.want && TL.open === avStep.want.open ? avStep.want.id : TL.open));
   avStep.to(i < 0 ? (by > 0 ? list[0] : list[list.length - 1]) : list[(i + by + list.length) % list.length]);
 }
 // To check, Open or All: as kept in this browser, else To check once any note is.
@@ -7174,6 +7175,8 @@ avStep.where = (t) => {
 };
 avStep.to = (t, { gone = false, opening = false } = {}) => {
   avStep.off = null;
+  // a move whose page never said it came is no one's any more
+  if (avStep.sent && TS.ready && Date.now() >= avStep.sent.until) avStep.sent = null;
   const want = avStep.want = { id: t.id, gone, av: AV, open: TL.open, draft: TL.draft };
   // Show me's open is already loading the note's page; what the route opens as it ends is its own, not the owner's
   if (opening) { avStep.sent = { av: AV, ...avStep.where(t), load: true, until: Date.now() + 3000 }; setTimeout(() => { want.open = TL.open; want.draft = TL.draft; }, 0); }
@@ -7191,11 +7194,10 @@ avStep.land = (from = '') => {
   const is = (d) => TS.ready && TS.path === d.file && (d.vh === null || TS.hash === d.vh);
   const scroll = (t) => { const { selector, tag, text, rect } = t.subject.anchor ?? {}; if (selector) tsPost({ type: 'scroll-to', anchor: { selector, tag, text, rect } }); };
   // where the frame was sent, until its lens says so (a page loaded for it has come, whatever view it then shows);
-  // what the page being left says is none of it. A move that never said so is forgotten once the stage is ready.
+  // what the page being left says is none of it
   let sent = avStep.sent, came = null;
   if (sent && sent.av !== AV) sent = null;
-  else if (sent && (is(sent) || (from === 'ready' && sent.load && TS.path === sent.file))) { came = sent; sent = null; }
-  else if (sent && TS.ready && Date.now() >= sent.until) sent = null;
+  else if (sent && ((from === 'nav' && is(sent)) || (from === 'ready' && TS.path === sent.file && (sent.load || is(sent))))) { came = sent; sent = null; }
   avStep.sent = sent;
   const then = came?.scroll && TL.open === came.scroll && TL.threads.find((x) => x.id === came.scroll);
   if (then) scroll(then);
@@ -7212,8 +7214,8 @@ avStep.land = (from = '') => {
     const go = TS.ready && TS.path === to.file && !!to.vh && !sent?.load, f = tsFrame(), page = artSrc(AV.slug, AV.at) + to.file, src = page + (to.vh ?? '');
     avStep.sent = { av: AV, ...to, load: !go, until: Date.now() + 3000 };
     if (go) tsPost({ type: 'go', hash: to.vh });
-    // (a page not ready yet that is this one already is left to come)
-    else if (TS.ready || f.getAttribute('src') !== src) {
+    // (a page not ready yet that is this file already is left to come, whatever its view)
+    else if (TS.ready || (f.getAttribute('src') ?? '').split('#')[0].replace(/\/$/, '/index.html') !== page) {
       // opened: without the view, so a live reload puts back the view the lens names (kit-142)
       f.dataset.opened = page;
       f.src = src;
@@ -10020,7 +10022,12 @@ function tlCardBody(t) {
     if (box) box.placeholder = check ? 'Not yet? Say what is still wrong' : t?.turns?.length ? 'Reply' : 'Message';
     turns.scrollTop = turns.scrollHeight;
   }
-  const line = !t ? '' : t.status === 'resolved' ? `Resolved${t.outcome ? `: ${t.outcome}` : ''}. Writing reopens it.` : tCardState(t, Date.now(), TL.typed[t.id] === 'held' && !askShown() ? true : TL.typed[t.id], TL.pane) ?? '';
+  const said = !t ? '' : t.status === 'resolved' ? `Resolved${t.outcome ? `: ${t.outcome}` : ''}. Writing reopens it.` : tCardState(t, Date.now(), TL.typed[t.id] === 'held' && !askShown() ? true : TL.typed[t.id], TL.pane) ?? '';
+  // an open note's newest words are the owner's and nobody's yet (kit-144): they wait for Hand over, whatever the send
+  // said and after a reload too. Words a session, the responder or a session's record has, or on their way, are as ever.
+  const newest = t?.turns?.at(-1), routed = newest?.routed_to ?? 'supervisor';
+  const kept = s?.kind === 'artifact' && !!newest && newest.by === 'owner' && !newest.pending && routed === 'supervisor' && tNoteState(t) === 'open' && !/ (picked it up\.|is responding…)$/.test(said);
+  const line = kept ? 'Kept with the note: Hand over sends it to the session drawing it.' : said;
   // a live region: written only when the words change, so a poll with the same stage announces nothing
   const state = tlEl('tl-c-state');
   if (state.textContent !== line) state.textContent = line;

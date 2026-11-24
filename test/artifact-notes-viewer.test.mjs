@@ -266,6 +266,7 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await V.p.click('#av-handover');
     await V.p.ev(`showArtifact('pricing', 'main', { picked: true }); void 0`);
     await new Promise((r) => setTimeout(r, 1500));
+    assert.equal(await V.p.ev(`window.__posts.filter((x) => x.action === 'artifact-handoff').length`), 4, 'setup: it was posted');
     assert.deepEqual(await V.p.ev(`[AV.at, ${text('#e-avn')}]`), ['main', ''], "another version's refusal");
   });
 
@@ -507,6 +508,10 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     const V = await tabOf({ [N.trial]: withFrame(ROW.C12(), ''), [N.cancel]: withFrame(ROW.C12(), '') });
     await openAt(V, AV_WT, 'plan-pricing');
     await has(V, '#av-next', 'the stepper');
+    // a new note with no card open: the draft alone says so
+    await V.p.ev(`(avStep.sent = null, tlClose(), avStep.want = { id: ${J(N.cancel)}, av: AV, open: null, draft: null }, tlStart({ subject: tsSubject(null, 700, 500), title: 'x', x: 700, y: 500 }), avStep.land('late'), true)`);
+    assert.deepEqual(await V.p.ev('[TL.open, !!TL.draft, avStep.want]'), [null, true, null], 'dropped by a draft alone');
+    await V.p.ev('(tlClose(), true)');
     for (const [what, act, undo] of [
       ['a new note', `tlStart({ subject: tsSubject(null, 700, 500), title: 'x', x: 700, y: 500 })`, 'tlClose()'],
       ['pin mode', 'tlPinMode(true)', 'tlPinMode(false)'],
@@ -539,6 +544,34 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await V.p.ev(`(tlOpen(${J(N.trial)}, false), avStep(1), true)`);
     await V.soon(`TL.open === ${J(N.cancel)}`, 'the next step goes from the open card');
     assert.equal(await V.p.ev('window.__sets'), 1, 'no load: it is on that page');
+    // the owner opens another card while a step is under way: the next goes from that card, at once
+    await V.p.ev(`(avStep.sent = null, avStep.want = { id: ${J(N.cancel)}, av: AV, open: ${J(N.cancel)}, draft: TL.draft }, TL.open = ${J(N.trial)}, true)`);
+    assert.equal(await V.p.ev(`(() => { let to = null; const was = avStep.to; avStep.to = (t) => { to = t.id; }; avStep(1); avStep.to = was; return to; })()`), N.cancel, 'from the open card, not the step');
+  });
+  await sub('A8e: late never sends again; a late page is scrolled to when it comes; a forgotten move holds nothing', async () => {
+    const V = await tabOf({ [N.trial]: withFrame(ROW.C12(), ''), [N.cancel]: withFrame(ROW.C12(), '') });
+    await openAt(V, AV_WT, 'plan-pricing');
+    await has(V, '#av-next', 'the stepper');
+    const cancel = `TL.threads.find((t) => t.id === ${J(N.cancel)})`;
+    // sent, and the stage is ready elsewhere (a link the owner followed): late opens the card and sends nothing
+    await V.p.ev(`(window.__sets = 0, new MutationObserver((l) => { window.__sets += l.length; }).observe(tsFrame(), { attributes: true, attributeFilter: ['src'] }), tlOpen(${J(N.trial)}, false), document.activeElement?.blur?.(), avStep.sent = { av: AV, file: 'faq.html', vh: '', load: true, until: Date.now() - 1 }, avStep.want = { id: ${J(N.cancel)}, av: AV, open: TL.open, draft: TL.draft }, window.__k = window.__tsPosts.length, avStep.land('late'), true)`);
+    await V.p.ev(FRAMES);
+    assert.deepEqual(await V.p.ev(`[window.__sets, TL.open, avStep.sent?.scroll]`), [0, N.cancel, N.cancel], 'nothing sent again');
+    // the page comes: scrolled to
+    await V.p.ev(`(TS.path = 'faq.html', avStep.land('ready'), true)`);
+    assert.equal(await V.p.ev(`window.__tsPosts.slice(window.__k).filter((m) => m.type === 'scroll-to' && m.anchor.selector === '#q-cancel').length`), 1, 'scrolled when it came');
+    // a move that never said so
+    await V.p.ev(`(TS.path = 'index.html', tlOpen(${J(N.trial)}, false), avStep.sent = { av: AV, file: 'x.html', vh: '', load: true, until: Date.now() - 1 }, avStep.to(${cancel}), true)`);
+    assert.equal(await V.p.ev('window.__sets'), 0 + 1, 'the next step sends the frame at once');
+    assert.equal(await V.p.ev(`avStep.sent?.file`), 'faq.html', 'and waits for its own page');
+    // a page not ready that is this file already is never loaded again
+    await V.p.ev(`(avStep.sent = null, avStep.want = null, TS.ready = false, tsFrame().setAttribute('src', artSrc(AV.slug, AV.at)), true)`);
+    await V.p.ev(FRAMES);
+    await V.p.ev(`(window.__sets = 0, tlOpen(${J(N.cancel)}, false), document.activeElement?.blur?.(), avStep.want = { id: ${J(N.trial)}, av: AV, open: TL.open, draft: TL.draft }, TS.ready = false, avStep.land('late'), true)`);
+    await V.p.ev(FRAMES);
+    assert.equal(await V.p.ev('window.__sets'), 0, 'the plain address is index.html');
+    // Show me's own load is on its way from the start
+    assert.equal(await V.p.ev(`(avStep.sent = null, avStep.to(${cancel}, { opening: true }), avStep.sent?.file)`), 'faq.html', "Show me's page is on its way");
   });
   await sub('A6b: where a note is: a path with no view and no frame, or a bare #, says nothing of the view', async () => {
     const V = await tabOf({});
@@ -619,6 +652,51 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     assert.deepEqual(await posts(), [N.trial], 'the note shown');
   });
 
+  await sub('A23: an open note whose newest turn is the owner\'s is kept with it, whatever the send said; the rest as today', async () => {
+    const KEPT = 'Kept with the note: Hand over sends it to the session drawing it.';
+    const ago = (m) => new Date(Date.now() - m * 60000).toISOString();
+    const own = (m, o = {}) => ({ id: 'u-20261120-100000000-owner', by: 'owner', at: ago(m), text: 'Make it primary', refs: [], question: null, files: [], ...o });
+    const sup = (m) => ({ ...own(m), id: 'u-20261120-110000000-supervisor', by: 'supervisor', text: 'Why?' });
+    const V = await tabOf({ [N.trial]: { ...ROW.C20(), turns: [own(1)] } });
+    await openAt(V, AV_WT, 'plan-pricing');
+    await cardOf(V, N.trial);
+    const line = () => V.p.ev(text('#tl-c-state'));
+    const says = async (row, typed) => {
+      await V.rows({ [N.trial]: row });
+      await V.p.ev(`(TL.typed[${J(N.trial)}] = ${J(typed ?? null)}, TL.polled = true, tlRefresh(), true)`);
+      await V.p.ev(FRAMES);
+      await new Promise((r) => setTimeout(r, 400));
+      return line();
+    };
+    assert.equal(await says({ ...ROW.C20(), turns: [own(1)] }, false), KEPT, 'a send no terminal took');
+    assert.equal(await says({ ...ROW.C20(), turns: [own(30)] }), KEPT, 'after a reload, 30 minutes on');
+    assert.equal(await says({ ...ROW.C20(), turns: [own(30, { routed_to: 'supervisor' })] }), KEPT, 'a turn from before, routed to the supervisor');
+    const before = [];
+    for (const [what, row] of [
+      ['a note handed over', { ...ROW.C1(), turns: [own(30)] }],
+      ['a note to check', { ...ROW.C17(), turns: [own(30)] }],
+      ['a turn a session has', { ...ROW.C20(), turns: [own(1, { routed_to: 'session', routed_session: 'kit-9-x' })] }],
+      ["the supervisor's reply", { ...ROW.C20(), turns: [own(30), sup(5)] }],
+      ['a resolved note', { ...ROW.C20(), status: 'resolved', outcome: 'done', turns: [own(30)] }],
+      ['a turn on its way', { ...ROW.C20(), turns: [own(0, { id: null, pending: true })] }],
+      ['a turn the responder has', { ...ROW.C20(), turns: [own(1, { routed_to: 'responder', delivered: 'typed' })] }],
+    ]) before.push([what, await says(row)]);
+    for (const [what, said] of before) assert.notEqual(said, KEPT, what);
+    const of = Object.fromEntries(before);
+    assert.match(of['a note handed over'], /supervisor/, 'handed over: as today');
+    assert.match(of['a note to check'], /supervisor/, 'to check: as today');
+    assert.match(of['a turn a session has'], /the agent on|kit-9-x/i, "a session's: as today");
+    assert.equal(of["the supervisor's reply"], '', 'a reply: nothing, as today');
+    assert.match(of['a resolved note'], /^Resolved/, 'resolved: as today');
+    assert.equal(of['a turn on its way'], 'Sending…', 'on its way: as today');
+    assert.match(of['a turn the responder has'], /responder/, "the responder's: as today");
+    // a session whose record has it says so first; a thread on anything but an artifact is as today
+    const drawn = (over, stage) => V.p.ev(`(() => { const was = TL.working; TL.working = ${stage ? `{ [${J(N.trial)}]: { turn: ${J(own(1).id)}, stage: ${J(stage)}, by: 'supervisor', at: new Date().toISOString() } }` : 'null'}; tlCardBody({ ...TL.threads.find((x) => x.id === ${J(N.trial)}), turns: [${J(own(1))}], status: 'open', check: null, handed: null, ...${J(over)} }); TL.working = was; return document.getElementById('tl-c-state').textContent; })()`);
+    assert.equal(await drawn({}), KEPT, 'setup: kept');
+    assert.match(await drawn({}, 'responding'), / is responding…$/, 'a working session first');
+    assert.match(await drawn({}, 'picked-up'), / picked it up\.$/, 'one that picked it up too');
+    for (const subject of [null, { kind: 'page', page: 'library' }, { kind: 'preview', name: 'p', route: '/' }]) assert.notEqual(await drawn({ subject }), KEPT, `not on an artifact: ${J(subject)}`);
+  });
   await sub('A13: a ready artifact card shows the outcome; Resolve sends thread-accept with its at', async () => {
     const V = await tabOf({ [N.onMain]: ROW.C11() });
     await openAt(V, AV_MAIN, 'main');
@@ -683,7 +761,10 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     // the panel's thread route open on another thread: Show me still lands its card
     const X = await tabOf({ [N.trial]: withFrame(ROW.C12(), '') , [N.plans]: withFrame(ROW.C12(), '') }, '#library?th=open');
     await X.soon(`!!document.querySelector('[data-tl-show="${N.trial}"]')`, 'the rows');
-    await X.p.ev(`(tlOpen(${J(N.plans)}, false), avShowMe(${J(N.trial)}), true)`);
+    // (the head's thread is put back by the route as it ends: no move of the owner's)
+    await X.p.ev(`(thGo({ th: 'open', t: ${J(N.plans)} }), true)`);
+    await X.soon(`TH.t === ${J(N.plans)} && TL.open === ${J(N.plans)}`, 'setup: the head names a thread');
+    await X.p.ev(`(tlOpen(${J(N.trial)}, false), avShowMe(${J(N.trial)}), true)`);
     await X.soon(`TL.open === ${J(N.trial)} && TS.ready && TS.at === 'plan-pricing'`, "another card open: Show me's own card lands");
   });
 
