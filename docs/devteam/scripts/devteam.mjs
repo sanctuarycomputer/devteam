@@ -2439,6 +2439,9 @@ function fetchLinkMain(R, refusing = 'refusing to judge against a stale main', {
     if (start) no('it has no origin url');
     return;
   }
+  // git fetches from the first of several urls, and repo() checks the last
+  const urls = (R.git(['config', '-z', '--get-all', 'remote.origin.url'], R.root) ?? '').split('\0').filter(Boolean);
+  if (start && urls.length > 1) no(`its origin has ${urls.length} urls (git config --get-all remote.origin.url), and only one can be the repo checked; keep one`);
   if (!start) {
     const fr = gitRun(['fetch', '--quiet', 'origin', `+refs/heads/${rb}:refs/remotes/origin/${rb}`], R.root);
     if (fr.status !== 0) no(redactUrl(firstLine(fr.err)) || `exit ${fr.status}`);
@@ -2458,8 +2461,14 @@ function fetchLinkMain(R, refusing = 'refusing to judge against a stale main', {
   }
   if (!at[rb]) no(`origin has no ${rb}`);
   const held = [rb, start].filter((b) => at[b]);
-  toOrigin(['fetch', '--quiet', '--no-tags', 'origin', ...held.map((b) => `+refs/heads/${b}:refs/remotes/origin/${b}`)]);
+  // Into no ref: a fetch writes through a symbolic tracking ref, moving the branch it names. The
+  // tracking refs are set below, by sha, without following one.
+  toOrigin(['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--refmap=', 'origin', ...held.map((b) => `refs/heads/${b}`)]);
   for (const b of held) if (responderGit(['cat-file', '-e', `${at[b]}^{commit}`], R.root, { GIT_NO_LAZY_FETCH: '1' }).status !== 0) no(`${at[b].slice(0, 8)} did not arrive`);
+  for (const b of held) {
+    const set = responderGit(['update-ref', '--no-deref', `refs/remotes/origin/${b}`, at[b]], R.root);
+    if (set.status !== 0) no(redactUrl(firstLine(set.stderr).replace(/^fatal: /, '')) || `exit ${set.status}`);
+  }
   R.resetCaches();
   return { main: at[rb], branch: at[start] ?? null };
 }

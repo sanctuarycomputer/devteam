@@ -304,6 +304,69 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
         assert.match(r.err, /origin has no ticket\/ch-22-v, so nothing was started/, 'B14');
       } finally { fs.rmSync(grafts); }
     });
+    // a git on PATH that runs sh first (once) on the first call whose words match, then the real git
+    const before = (name, words, sh) => {
+      const bin = path.join(F.base, name);
+      const said = path.join(F.base, `${name}.txt`);
+      const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+      write(path.join(bin, 'git'), `#!/bin/sh\ncase " $* " in ${words}) [ -e '${said}' ] || { ${sh(realGit)} && echo done > '${said}'; } ;; esac\nexec '${realGit}' "$@"\n`);
+      fs.chmodSync(path.join(bin, 'git'), 0o755);
+      return { said, env: { ...SUP, PATH: `${bin}${path.delimiter}${process.env.PATH}` } };
+    };
+    // a git on PATH that refuses every call whose words match, doing nothing
+    const refusing = (name, words) => before(name, words, () => `{ echo 'error: refused by the test' >&2; exit 4; }`).env;
+    await t.test('S3: a configured refspec doesn\'t make the start\'s fetch write another branch', tmux, () => {
+      ticket('ch-57-b');
+      const main = git(['rev-parse', 'origin/main'], old);
+      git(['push', '-q', 'origin', `${planted(old, main, 'pushed')}:refs/heads/ticket/ch-57-b`], old);
+      git(['branch', 'bystander-6', main], old);
+      git(['config', '--add', 'remote.origin.fetch', '+refs/heads/ticket/ch-57-b:refs/heads/bystander-6'], old);
+      try {
+        ok(old, ['worker', 'ch-57-b'], SUP);
+        assert.equal(git(['rev-parse', 'refs/heads/bystander-6'], old), main, 'S3: the other branch is unmoved');
+      } finally { git(['config', '--unset', 'remote.origin.fetch', 'bystander-6'], old); }
+    });
+    await t.test('O2: a home whose origin has two urls is refused', tmux, () => {
+      ticket('ch-40-k');
+      const url = git(['config', '--get', 'remote.origin.url'], old);
+      git(['config', '--add', 'remote.origin.url', url], old);
+      try {
+        const r = run(old, ['worker', 'ch-40-k'], SUP);
+        assert.notEqual(r.status, 0, `O2: refused, not started: ${r.out}`);
+        assert.match(r.err, /could not fetch origin main in home: its origin has 2 urls/, 'O2');
+        assert.ok(!fs.existsSync(wt('ch-40-k')), 'O2: no worktree');
+      } finally { git(['config', '--replace-all', 'remote.origin.url', url], old); }
+    });
+    await t.test('S1: a symbolic tracking ref of the ticket\'s branch is not written through', tmux, () => {
+      ticket('ch-41-l');
+      const main = git(['rev-parse', 'origin/main'], old);
+      const pushed = planted(old, main, 'pushed');
+      git(['push', '-q', 'origin', `${pushed}:refs/heads/ticket/ch-41-l`], old);
+      git(['branch', 'bystander-3', main], old);
+      git(['symbolic-ref', 'refs/remotes/origin/ticket/ch-41-l', 'refs/heads/bystander-3'], old);
+      const r = run(old, ['worker', 'ch-41-l'], SUP);
+      assert.equal(r.status, 0, r.err);
+      assert.equal(git(['rev-parse', 'refs/heads/bystander-3'], old), main, 'S1: the branch it names is unmoved');
+      assert.equal(git(['rev-parse', 'HEAD'], wt('ch-41-l')), pushed, 'S1: from origin\'s branch');
+      assert.equal(git(['rev-parse', 'refs/remotes/origin/ticket/ch-41-l'], old), pushed, 'S1: the tracking ref is origin\'s');
+    });
+    await t.test('A1: a commit origin named that the fetch doesn\'t bring is refused', tmux, () => {
+      ticket('ch-42-m');
+      const main = git(['rev-parse', 'origin/main'], old);
+      const url = git(['config', '--get', 'remote.origin.url'], old);
+      const named = path.join(F.base, 'elsewhere-clone');
+      git(['clone', '-q', url, named], old);
+      git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'only on origin'], named);
+      const gone = git(['rev-parse', 'HEAD'], named);
+      git(['push', '-q', 'origin', `${gone}:refs/heads/ticket/ch-42-m`], named);
+      // origin's branch is moved back between ls-remote and the fetch
+      const b = before('git-origin-moves', `*' fetch '*'ticket/ch-42-m'*`, (g) => `'${g}' --git-dir='${url}' update-ref refs/heads/ticket/ch-42-m ${main}`);
+      const r = run(old, ['worker', 'ch-42-m'], b.env);
+      assert.ok(fs.existsSync(b.said), 'A1: origin moved');
+      assert.notEqual(r.status, 0, `A1: refused, not started: ${r.out}`);
+      assert.match(r.err, new RegExp(`${gone.slice(0, 8)} did not arrive`), 'A1');
+      assert.ok(!fs.existsSync(wt('ch-42-m')), 'A1: no worktree');
+    });
   } finally { F.done(); }
 });
 
@@ -326,6 +389,30 @@ test('a linked repo: the worker\'s base is its origin\'s main whatever the check
       git(['update-ref', 'refs/remotes/origin/trunk', moved], F.console);
       const G = okIn(old, ['goal', 'add', '--title', 'Real', '--outcome', 'real', '--measure', 'real markers', '--target', '1', '--unit', 'markers', '--direction', 'up', '--source', 'repo', '--link', 'console', '--check', 'grep -c real marker.txt || true', '--non-goals', 'none', '--preconditions', 'a'], SUP).trim();
       assert.match(okIn(old, ['goal', 'reading', G, '--run'], SUP), /^recorded 1 for /, 'L3: read on origin\'s trunk');
+    });
+    await t.test('S2: a symbolic origin/trunk is not written through', tmux, () => {
+      ticket('console-03-c');
+      git(['branch', 'bystander', moved], F.console);
+      git(['symbolic-ref', 'refs/remotes/origin/trunk', 'refs/heads/bystander'], F.console);
+      const r = runIn(old, ['worker', 'console-03-c'], SUP);
+      assert.equal(r.status, 0, r.err);
+      assert.equal(git(['rev-parse', 'refs/heads/bystander'], F.console), moved, 'S2: the branch it names is unmoved');
+      assert.equal(git(['rev-parse', 'HEAD'], wt('console-03-c')), real, 'S2: origin\'s trunk');
+    });
+    await t.test('L4: two urls, the first another repo\'s', tmux, () => {
+      ticket('console-04-d');
+      const url = git(['config', '--get', 'remote.origin.url'], F.console);
+      const other = path.join(F.base, 'other.git');
+      git(['clone', '-q', '--bare', F.console, other], F.console);
+      git(['update-ref', 'refs/heads/trunk', moved], other);
+      git(['config', '--replace-all', 'remote.origin.url', other], F.console);
+      git(['config', '--add', 'remote.origin.url', url], F.console);
+      try {
+        const r = runIn(old, ['worker', 'console-04-d'], SUP);
+        assert.notEqual(r.status, 0, `L4: refused, not started: ${r.out}`);
+        assert.match(r.err, /could not fetch origin trunk in console: its origin has 2 urls/, 'L4: says why');
+        assert.ok(!fs.existsSync(wt('console-04-d')), 'L4: no worktree');
+      } finally { git(['config', '--replace-all', 'remote.origin.url', url], F.console); }
     });
     await t.test('L2: an unset remote.origin.url and a moved origin/trunk', tmux, () => {
       ticket('console-02-b');
