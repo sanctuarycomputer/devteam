@@ -11370,6 +11370,7 @@ const ARTIFACT_LENS = String.raw`(() => {
   // placed and nav.
   if (window.parent === window || window.__devteamLens) return;
   window.__devteamLens = true;
+  // helpers: the shooter injects from here
   const CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024, path: 300, hash: 200 };
   const WATCH_MAX = 200;
   const KEY_MAX = 120;
@@ -11402,6 +11403,7 @@ const ARTIFACT_LENS = String.raw`(() => {
   const DOT = '(?:\\.|%(?:25){0,4}2e|\\\\{0,8}u002e|&#(?:x0{0,4}2e|0{0,4}46);)';
   const OWN_RE = OWN ? new RegExp('(?:' + SLASH + 'c' + SLASH + ')?' + OWN.split('.').map((p) => p.replace(/[^\w-]/g, (c) => '\\' + c)).join(DOT), 'gi') : null;
   const unCap = (s) => { const t = String(s == null ? '' : s).replace(TOKEN, ''); return OWN_RE ? t.replace(OWN_RE, '') : t; };
+  // helpers: to here
 
   // --- what is where ------------------------------------------------------------------------------
   // an id or a class a person wrote, not one a build made (digit runs, hashes, React's :r1:)
@@ -11458,6 +11460,7 @@ const ARTIFACT_LENS = String.raw`(() => {
     }
     return capDots(unCap(top.outerHTML), CAPS.html);
   };
+  // finder: the shooter injects from here
   const rectOf = (el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }; };
   const textOf = (el) => cap(oneLine(unCap(el.textContent)), CAPS.text);
   const anchorOf = (el, x, y) => {
@@ -11500,6 +11503,7 @@ const ARTIFACT_LENS = String.raw`(() => {
     if (best) return { el: best, changed: false, text: a.text, hidden: false };
     return bestHidden ? { el: bestHidden, changed: false, text: a.text, hidden: true } : null;
   };
+  // finder: to here
 
   // --- what the viewer watches: sent when it moves -------------------------------------------------
   let watched = [];
