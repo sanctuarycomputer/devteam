@@ -3970,39 +3970,50 @@ function partsAtMain(repoName, file) {
 const isSplitFile = (file, s = loadSettings()) => Array.isArray(s.split_files) && s.split_files.some((g) => typeof g === 'string' && pathMatches(g, file));
 // A file this long at main is big: a whole-file claim on it that orders two tickets warns (validate).
 const BIG_FILE_LINES = 1500;
-// A test file, by the usual layouts: a test/, tests/, spec/ or __tests__/ folder, or a name ending
-// .test.<ext>, .spec.<ext>, _test.<ext> or _spec.rb.
-const TEST_FILE_RE = /(^|\/)(test|tests|spec|__tests__)\/|[._](test|spec)\.[a-z0-9]+$|_spec\.rb$/;
-// The text a done-when quotes: `code` spans and "strings", 4 to 80 characters, not a path or a
-// command line (those name what runs, not what a test asserts).
+// A test file, by the usual layouts: a test/, tests/, spec/, __tests__/, e2e/ or cypress/ folder, or a
+// name like x.test.js, x.spec.ts, x_test.go, x_spec.rb, test_x.py, XTest.java or XTests.swift.
+const TEST_FILE_RE = /(^|\/)(test|tests|spec|__tests__|e2e|cypress)\/|[._](test|spec)\.[a-z0-9]+$|(^|\/)test_[^/]+\.py$|[a-z0-9]Tests?\.(java|kt|swift|cs|scala)$/;
+// The text a done-when quotes: `code` spans and "strings" (straight or curly). Each quote is taken
+// whole, whatever its length, so a short one can't pair its closing mark with the next one's opening;
+// then those of 4 to 80 characters are kept, less a path or a command line, which name what runs,
+// not what a test asserts. Those exclusions only ever miss a warning (UI text such as "3/4" too).
 function doneWhenQuotes(t) {
   const out = new Set();
   for (const d of t.done_when ?? []) {
     if (typeof d !== 'string') continue;
-    for (const m of d.matchAll(/`([^`\n]{4,80})`|"([^"\n]{4,80})"|\u201c([^\u201d\n]{4,80})\u201d/g)) {
+    for (const m of d.matchAll(/`([^`\n]*)`|"([^"\n]*)"|\u201c([^\u201d\n]*)\u201d/g)) {
       const q = (m[1] ?? m[2] ?? m[3]).trim();
-      if (q.length < 4 || q.includes('/') || /^(node|npm|npx|git|bin\/|bundle|yarn|pnpm|make|cd|devteam)\b/.test(q)) continue;
+      if (q.length < 4 || q.length > 80 || q.includes('/') || /^(node|npm|npx|git|bin\/|bundle|yarn|pnpm|make|cd|devteam)\b/.test(q)) continue;
       out.add(q);
       if (out.size >= 12) return [...out];
     }
   }
   return [...out];
 }
-// [quote, test files at main that hold it and no touches entry of t covers], for each quote that has any.
+// [quote, test files at main that hold it and no touches entry of t covers], for each quote that has
+// any. One grep for all of a ticket's quotes, at the repo's root (a ref's grep searches only below the
+// directory it runs in), as fixed strings, text files only. A path#part entry covers its whole file:
+// the test may assert the text anywhere in it, and naming the file is what lets the ticket change it.
 function testsOutsideTouches(t) {
   const rn = repoOfTicketLink(t);
   if (!repoReadable(rn)) return [];
   const R = repo(rn);
   const ref = R.mainRef();
-  if (!ref) return [];
+  const quotes = doneWhenQuotes(t);
+  if (!ref || !quotes.length) return [];
   const covered = (f) => (t.touches ?? []).some((g) => { const p = trimSlash(touchPath(g)); return pathMatches(p, f) || f.startsWith(`${p}/`); });
-  const out = [];
-  for (const q of doneWhenQuotes(t)) {
-    const hits = (R.git(['grep', '-l', '-F', '-e', q, ref, '--']) ?? '').split('\n').filter(Boolean).map((l) => l.slice(ref.length + 1));
-    const missed = hits.filter((f) => TEST_FILE_RE.test(f) && !covered(f));
-    if (missed.length) out.push([q, missed]);
+  const out = (R.git(['grep', '-I', '-o', '-F', ...quotes.flatMap((q) => ['-e', q]), ref, '--'], R.root) ?? '').split('\n').filter(Boolean);
+  const by = new Map();
+  for (const line of out) {
+    const rest = line.slice(ref.length + 1);
+    const i = rest.indexOf(':');
+    if (i < 0) continue;
+    const f = rest.slice(0, i), q = rest.slice(i + 1);
+    if (!TEST_FILE_RE.test(f) || covered(f) || !quotes.includes(q)) continue;
+    if (!by.has(q)) by.set(q, new Set());
+    by.get(q).add(f);
   }
-  return out;
+  return quotes.filter((q) => by.has(q)).map((q) => [q, [...by.get(q)]]);
 }
 // Whether two touches entries of tickets in one repo can collide (D4, ready). Paths that don't
 // overlap never do; a whole file or a glob overlaps as before. Two parts of one file: names that
