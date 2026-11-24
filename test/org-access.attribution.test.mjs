@@ -121,7 +121,8 @@ before(async () => {
   await until(async () => { try { const j = await (await fetch(`http://127.0.0.1:${HUB}/instances.json`)).json(); label = j.instances.find((x) => x.port === P)?.name; return !!label; } catch { return false; } }, 'the hub, listing the dashboard');
 }, { timeout: 120000 });
 after(async () => {
-  dash?.stop();
+  // waited for: a dashboard still stopping, or its children, writes into the folder F.done() deletes (kit-803)
+  await dash?.stop();
   if (gw) { gw.g.server.closeAllConnections?.(); await new Promise((r) => gw.g.server.close(r)); }
   if (ttydServer) { ttydServer.closeAllConnections?.(); await new Promise((r) => ttydServer.close(r)); }
   F?.done();
