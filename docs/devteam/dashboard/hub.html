@@ -1981,9 +1981,9 @@ async function oaAddPasskey() {
 // and the one-time link card. The open box, card and link are nodes kept in OA (`openNode`,
 // `panelNode`) so a redraw re-inserts them, typed text and all; the link lives only in its card.
 const OA_WORDS = { rename: 'Rename', relink: 'Send a new link', revoke: 'Revoke the link', remove: 'Remove' };
-// A menu item's label, by the row: Make full (a View member; kit-250 adds the move to View), Make
-// admin or Take Admin away by their role, Make owner, and Leave this box on your own row.
-const oaWord = (x, a) => (a === 'level' ? (x.level === 'view' ? 'Make full' : null)
+// A menu item's label, by the row: Make full on a View member and Make view only on a Full one,
+// Make admin or Take Admin away by their role, Make owner, and Leave this box on your own row.
+const oaWord = (x, a) => (a === 'level' ? (x.level === 'view' ? 'Make full' : 'Make view only')
   : a === 'role' ? (x.role === 'admin' ? 'Take Admin away' : 'Make admin')
   : a === 'transfer' ? 'Make owner'
   : a === 'remove' && x.you ? 'Leave this box'
@@ -2136,15 +2136,15 @@ function oaConfirmBox(x, kind) {
   const leave = kind === 'remove' && x.you;
   const unmake = kind === 'role' && x.role === 'admin';
   const words = {
-    level: `Make ${f} full? They can then change anything except People, and open the terminal, which reaches every repo and the box's GitHub and AI logins.`,
+    level: x.level === 'view' ? `Make ${f} full? They can then change anything except People, and open the terminal, which reaches every repo and the box's GitHub and AI logins.` : `Make ${f} view only? Their terminal and anything else open that changes things closes now. What they already did with the terminal stays, such as a program left running.`,
     role: unmake ? `Take Admin away from ${f}? They stay Full, and can no longer manage people.` : `Make ${f} an admin? They can then move members between Full and View only, and rename or remove members and other admins. They can't invite, make admins, or touch your row.${x.level === 'view' ? ' They become Full too.' : ''}`,
     transfer: `Make ${f} the owner of this box? ${f} can then invite, make admins and hand it over again. You become an admin. Only ${f} can undo this.`,
     relink: `Make a new link for ${f}? Opening it adds a sign-in method (a passkey) to their account; their others keep working. Use it when they lost theirs. They are told one was added.`,
     remove: leave ? 'Leave this box? You are signed out everywhere now, and your sign-in methods stop working. Only the owner can invite you back.' : `Remove ${f}? They are signed out everywhere now, and their sign-in methods stop working. What they did with the terminal stays, such as a program left running or a login copied; if that matters, change the box's logins.`,
     revoke: relinked ? `Revoke ${f}'s new link? It stops working now; their sign-in methods keep working.` : `Revoke ${f}'s invite link? It stops working now.`,
   }[kind];
-  const yes = { level: 'Make full', role: unmake ? 'Take Admin away' : 'Make admin', transfer: `Make ${f} the owner`, relink: 'Make the link', remove: leave ? 'Leave' : 'Remove', revoke: 'Revoke' }[kind];
-  const extra = { level: { level: 'full' }, role: { role: unmake ? 'member' : 'admin' } }[kind] ?? {};
+  const yes = { level: x.level === 'view' ? 'Make full' : 'Make view only', role: unmake ? 'Take Admin away' : 'Make admin', transfer: `Make ${f} the owner`, relink: 'Make the link', remove: leave ? 'Leave' : 'Remove', revoke: 'Revoke' }[kind];
+  const extra = { level: { level: x.level === 'view' ? 'full' : 'view' }, role: { role: unmake ? 'member' : 'admin' } }[kind] ?? {};
   const d = el('div', 'oa-confirm');
   d.id = 'oa-confirm';
   const go = () => oaSending(d, async () => {
@@ -2156,7 +2156,7 @@ function oaConfirmBox(x, kind) {
     if (kind === 'relink') return oaShowLink(`Send this link to ${f} yourself`, `It works once, for 24 hours. Opening it adds a passkey to ${f}'s account.`, r.json.link);
     oaDrawPeople();
     oaToast({
-      level: `${f} is now full`,
+      level: x.level === 'view' ? `${f} is now full` : `${f} is now view only`,
       role: unmake ? `${f} is no longer an admin` : `${f} is now an admin`,
       transfer: `${f} is now the owner. You are an admin`,
       remove: `${f} was removed and signed out`,
@@ -2188,23 +2188,30 @@ function oaInviteCard() {
   inp.dataset.k = 'settings:invite-name';
   inp.setAttribute('aria-label', 'Their name');
   const pick = el('fieldset', 'lvl-pick');
-  const opt = el('label', 'lvl-opt');
-  const radio = el('input');
-  radio.type = 'radio';
-  radio.name = 'oa-level';
-  radio.value = 'full';
-  radio.checked = true;
-  const words = el('span');
-  words.append(el('b', '', 'Full'), el('span', '', "Everything you can do here except People: answer questions, steer supervisors, open the terminal. The terminal reaches every repo and the box's GitHub and AI logins."));
-  opt.append(radio, words);
-  pick.append(el('legend', '', 'Level'), opt);
+  const card = (value, name, text) => {
+    const opt = el('label', 'lvl-opt');
+    const radio = el('input');
+    radio.type = 'radio';
+    radio.name = 'oa-level';
+    radio.value = value;
+    radio.checked = value === 'full';
+    radio.dataset.k = `settings:invite-${value}`;
+    const words = el('span');
+    words.append(el('b', '', name), el('span', '', text));
+    opt.append(radio, words);
+    return opt;
+  };
+  pick.append(el('legend', '', 'Level'),
+    card('full', 'Full', "Everything you can do here except People: answer questions, steer supervisors, open the terminal. The terminal reaches every repo and the box's GitHub and AI logins."),
+    card('view', 'View only', 'Sees everything here: the hub, dashboards, artifacts, boards, goals and what agents print. Changes nothing and has no terminal. One exception: opening a running preview can set off what that app does when a page opens.'));
   const err = el('div', 'oa-err');
   err.setAttribute('role', 'alert');
   const make = () => oaSending(d, async () => {
     err.textContent = '';
-    const r = await oaPost(oaPeoplePath('invite'), { name: inp.value, level: 'full' });
+    const level = pick.querySelector('input[name="oa-level"]:checked')?.value === 'view' ? 'view' : 'full';
+    const r = await oaPost(oaPeoplePath('invite'), { name: inp.value, level });
     if (r.status !== 200) return oaRefused(r, err, { 'bad-name': 'Give them a name, so you can tell people apart here.', 'name-taken': 'Someone here already has that name.' });
-    oaShowLink(`Send this link to ${oaFirst(inp.value)} yourself`, 'It works once, for 24 hours. Whoever opens it first makes a passkey and joins as full.', r.json.link);
+    oaShowLink(`Send this link to ${oaFirst(inp.value)} yourself`, `It works once, for 24 hours. Whoever opens it first makes a passkey and joins as ${level === 'view' ? 'view only' : 'full'}.`, r.json.link);
   });
   inp.onkeydown = (e) => { if (e.key === 'Enter') make(); };
   const acts = el('div', 'acts');

@@ -360,9 +360,9 @@ test('org-access A15: an admin\'s People list offers what they may do, nothing o
     assert.deepEqual(acts[lee.id], [], 'an invite not used yet');
     assert.deepEqual(acts[sam.id], ['rename', 'remove'], 'their own row: Rename, Leave');
     assert.deepEqual(acts[kai.id], ['rename', 'remove'], 'another admin');
-    assert.deepEqual(acts[ana.id], ['rename', 'remove'], 'a Full member (Make view only is kit-250\'s)');
+    assert.deepEqual(acts[ana.id], ['rename', 'level', 'remove'], 'a Full member: Make view only (kit-250)');
     assert.deepEqual(acts[vic.id], ['rename', 'level', 'remove'], 'a View member: Make full');
-    assert.deepEqual(acts[bea.id], ['rename', 'remove'], 'a member with a new link out');
+    assert.deepEqual(acts[bea.id], ['rename', 'level', 'remove'], 'a member with a new link out');
   } finally { await gw.close(); }
 });
 
@@ -374,11 +374,11 @@ test('kit-253: an admin changes nothing on an invite not used yet', async () => 
   } finally { await gw.close(); }
 });
 
-test('kit-253: a move to View is refused until kit-250, for the owner and admins; a bad level or role is refused', async () => {
+// the move to View itself, and its refusals, are kit-250's (test/org-access.view.test.mjs)
+test('kit-253: a bad level or role is refused, for the owner and admins', async () => {
   const { gw, C, ana } = await box('k-view');
   try {
-    await refuses(gw, C.owner, 'level', { id: ana.id, rev: rev(gw, ana.id), level: 'view' }, 400, 'view-not-yet', 'the owner makes Ana view only');
-    await refuses(gw, C.sam, 'level', { id: ana.id, rev: rev(gw, ana.id), level: 'view' }, 400, 'view-not-yet', 'Sam makes Ana view only');
+    await refuses(gw, C.sam, 'level', { id: ana.id, rev: rev(gw, ana.id), level: 'admin' }, 400, 'bad-request', 'Sam: a level that isn\'t one');
     await refuses(gw, C.owner, 'level', { id: ana.id, rev: rev(gw, ana.id), level: 'root' }, 400, 'bad-request', 'a level that isn\'t one');
     await refuses(gw, C.owner, 'level', { id: ana.id, rev: rev(gw, ana.id) }, 400, 'bad-request', 'no level');
     await refuses(gw, C.owner, 'role', { id: ana.id, rev: rev(gw, ana.id), role: 'owner' }, 400, 'bad-request', 'role owner (that is transfer)');
@@ -513,19 +513,19 @@ test('kit-253: the owner\'s People list offers Make admin and Make owner only wh
     const a = await acts(C.owner);
     assert.deepEqual(a[owner.id], ['rename'], 'their own row');
     assert.deepEqual(a[lee.id], ['revoke'], 'an invite not used yet');
-    assert.deepEqual(a[ana.id], ['rename', 'role', 'transfer', 'relink', 'remove'], 'a Full member');
+    assert.deepEqual(a[ana.id], ['rename', 'level', 'role', 'transfer', 'relink', 'remove'], 'a Full member: Make view only (kit-250)');
     assert.deepEqual(a[vic.id], ['rename', 'level', 'role', 'transfer', 'relink', 'remove'], 'a View member: Make full');
     assert.deepEqual(a[sam.id], ['rename', 'role', 'transfer', 'relink', 'remove'], 'an admin');
-    assert.deepEqual(a[bea.id], ['revoke', 'rename', 'remove'], 'a new link out: no Make admin, Make owner or second link');
-    assert.deepEqual(a[stu.id], ['rename', 'role', 'relink', 'remove'], 'no passkey: no Make owner');
+    assert.deepEqual(a[bea.id], ['revoke', 'rename', 'level', 'remove'], 'a new link out: no Make admin, Make owner or second link');
+    assert.deepEqual(a[stu.id], ['rename', 'level', 'role', 'relink', 'remove'], 'no passkey: no Make owner');
     invite(gw, ana.id, Date.now() - 1);
-    assert.deepEqual((await acts(C.owner))[ana.id], ['revoke', 'rename', 'remove'], 'an expired link not revoked: Revoke, and no Make admin, Make owner or second link');
+    assert.deepEqual((await acts(C.owner))[ana.id], ['revoke', 'rename', 'level', 'remove'], 'an expired link not revoked: Revoke, and no Make admin, Make owner or second link');
     gw.write({ ...gw.state(), invites: gw.state().invites.filter((x) => x.person !== ana.id) });
     // the stand-in owner: the owner's actions, without Make owner
     const s = gw.state();
     gw.write({ ...s, people: s.people.filter((p) => p.role !== 'owner') });
     const st = await acts(C.owner);
-    assert.deepEqual(st[ana.id], ['rename', 'role', 'relink', 'remove'], 'the stand-in: no Make owner');
+    assert.deepEqual(st[ana.id], ['rename', 'level', 'role', 'relink', 'remove'], 'the stand-in: no Make owner');
   } finally { await gw.close(); }
 });
 

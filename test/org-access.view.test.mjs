@@ -512,3 +512,131 @@ test('org-access A14: a level change takes effect on the next request', async ()
     assert.equal((await full.req('GET', '/box.json')).status, 200, 'still signed in');
   } finally { await gw.close(); }
 });
+
+import { canDrive, openChrome } from './lib/chrome.mjs';
+const CHROME_OK = { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 120000 };
+
+// --- People offers View: the level route, the list, the invite (T2) ------------------------------
+// The owner, Kai (an admin), Jo (Full), Ana (View), Pam (invited, not joined), each signed in now.
+async function peopleSetup(name, extra) {
+  const V = await viewSetup(name, extra);
+  const kaiKey = authenticator();
+  const [kai, pam] = seed(V.gw, [{ name: 'Kai', role: 'admin', level: 'full', methods: [kaiKey.method()] }, { name: 'Pam', level: 'full', methods: [] }]);
+  seedInvite(V.gw, pam.id);
+  const admin = browser(V.gw, { session: mintSession(V.gw, kai.id, kai.methods[0].id) });
+  const ownerRow = V.gw.state().people.find((p) => p.role === 'owner');
+  return { ...V, kai, pam, admin, ownerRow };
+}
+const move = (gw, b, id, level, rev = rowOf(gw, id).rev) => b.post('/auth/people/level', { id, rev, level });
+const refusedCode = (r, status, code, what) => {
+  assert.equal(r.status, status, `${what}: ${r.status} ${r.body}`);
+  assert.equal(r.json?.code, code, `${what}: ${r.body}`);
+};
+test('org-access A14: the owner and an admin move a member to View and back', async () => {
+  const { gw, owner, admin, jo, ana, kai, pam, ownerRow } = await peopleSetup('c18');
+  try {
+    for (const [who, b] of [['the owner', owner], ['an admin', admin]]) {
+      const r0 = rowOf(gw, jo.id).rev;
+      const v = await move(gw, b, jo.id, 'view');
+      ok(v, `${who}: Jo to View`);
+      assert.deepEqual(v.json, { ok: true, rev: r0 + 1 }, `${who}: its rev`);
+      assert.equal(rowOf(gw, jo.id).level, 'view');
+      const f = await move(gw, b, jo.id, 'full');
+      ok(f, `${who}: Jo back to Full`);
+      assert.deepEqual(f.json, { ok: true, rev: r0 + 2 });
+      assert.equal(rowOf(gw, jo.id).level, 'full');
+      for (const level of ['view', 'full']) refusedCode(await move(gw, b, ownerRow.id, level), 403, 'not-allowed', `${who}: the owner's row at ${level}`);
+      refusedCode(await move(gw, b, kai.id, 'view'), 403, 'not-allowed', `${who}: an admin's row at View`);
+      for (const level of ['view', 'full']) refusedCode(await move(gw, b, pam.id, level), 403, 'not-allowed', `${who}: a pending row at ${level}`);
+      const before = fs.readFileSync(gw.file, 'utf8');
+      const same = await move(gw, b, ana.id, 'view');
+      assert.deepEqual(same.json, { ok: true, rev: rowOf(gw, ana.id).rev }, `${who}: Ana is View already`);
+      assert.equal(fs.readFileSync(gw.file, 'utf8'), before, `${who}: nothing written`);
+      refusedCode(await move(gw, b, jo.id, 'view', rowOf(gw, jo.id).rev - 1), 409, 'stale', `${who}: a stale rev`);
+      refusedCode(await move(gw, b, jo.id, 'admin'), 400, 'bad-request', `${who}: level admin`);
+      refusedCode(await b.post('/auth/people/level', { id: jo.id, rev: rowOf(gw, jo.id).rev }), 400, 'bad-request', `${who}: no level`);
+    }
+    assert.equal(rowOf(gw, kai.id).level, 'full', 'Kai is still Full');
+    assert.equal(rowOf(gw, pam.id).level, 'full', 'Pam is still her invite\'s level');
+  } finally { await gw.close(); }
+});
+test('org-access A14: a move to View closes their terminal and preview sockets and drops their push subscriptions', { timeout: 20000 }, async () => {
+  const B = await boxWithInstance('c19');
+  try {
+    const { gw, owner, full, jo, pv } = B;
+    const s = gw.state();
+    gw.write({ ...s, people: s.people.map((p) => (p.id === jo.id ? { ...p, pushSubs: [{ endpoint: 'https://push.example/jo', keys: { p256dh: 'a', auth: 'b' }, added_at: new Date().toISOString() }] } : p)) });
+    const term = await upgrade(gw, `term.${gw.host}`, `http://term.${gw.host}`, full.jar.session, '/ws', { keep: true });
+    const prev = await upgrade(gw, pv, `http://${pv}`, full.jar.session, '/hmr', { keep: true });
+    assert.equal(term.status, 101, 'Jo\'s terminal socket opened');
+    assert.equal(prev.status, 101, 'Jo\'s preview socket opened');
+    const closed = (sock, what) => new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error(`${what} still open after 1 s`)), 1000);
+      sock.once('close', () => { clearTimeout(t); resolve(); });
+    });
+    const both = Promise.all([closed(term.socket, 'the terminal socket'), closed(prev.socket, 'the preview socket')]);
+    ok(await move(gw, owner, jo.id, 'view'), 'Jo to View');
+    await both;
+    assert.deepEqual(rowOf(gw, jo.id).pushSubs, [], 'their push subscriptions are gone');
+  } finally { await B.close(); }
+});
+test('org-access A14: People lists the level action on every joined member, for the owner and an admin', async () => {
+  const { gw, owner, admin, jo, ana, kai, pam, ownerRow } = await peopleSetup('c20');
+  try {
+    const has = (list, id) => list.json.people.find((x) => x.id === id)?.actions ?? null;
+    const byOwner = await owner.req('GET', '/auth/people/list');
+    ok(byOwner, 'the owner\'s list');
+    for (const id of [jo.id, ana.id]) assert.ok(has(byOwner, id).includes('level'), `the owner: ${id}`);
+    for (const id of [ownerRow.id, kai.id, pam.id]) assert.ok(!has(byOwner, id).includes('level'), `the owner: none on ${id}`);
+    const byAdmin = await admin.req('GET', '/auth/people/list');
+    ok(byAdmin, 'the admin\'s list');
+    for (const id of [jo.id, ana.id]) assert.ok(has(byAdmin, id).includes('level'), `the admin: ${id}`);
+    for (const id of [ownerRow.id, kai.id, pam.id]) assert.ok(!(has(byAdmin, id) ?? []).includes('level'), `the admin: none on ${id}`);
+  } finally { await gw.close(); }
+});
+const tokenOf = (link) => decodeURIComponent(new URL(link).hash.slice(1));
+test('org-access A14: an invite at View claims at View', async () => {
+  const gw = await gateway('c21');
+  try {
+    const { owner } = await claim(gw);
+    const r = await owner.post('/auth/people/invite', { name: 'Vi', level: 'view' });
+    ok(r, 'an invite at View');
+    assert.equal(rowOf(gw, r.json.person.id).level, 'view', 'its row is View');
+    const peek = await gw.raw('POST', '/auth/claim/invite', { body: { token: tokenOf(r.json.link) } });
+    assert.equal(peek.json.level, 'view', 'the invite page learns View');
+    const key = authenticator();
+    const b = browser(gw);
+    const st = await b.post('/auth/method/passkey/start', { purpose: 'invite', token: tokenOf(r.json.link) });
+    ok(st, 'invite start');
+    ok(await b.post('/auth/method/passkey/finish', { purpose: 'invite', name: 'laptop', ...key.create(st.json, gw.publicUrl) }), 'invite finish');
+    assert.equal((await b.req('GET', '/box.json')).json.level, 'view', 'they join at View');
+    for (const level of ['admin', 'owner', 7, null]) refusedCode(await owner.post('/auth/people/invite', { name: 'Bea', level }), 400, 'bad-request', `level ${JSON.stringify(level)}`);
+  } finally { await gw.close(); }
+});
+test('org-access A14: in Chrome, the invite page says view only for a View invite', CHROME_OK, async () => {
+  const gw = await gateway('c21b');
+  const chrome = await openChrome();
+  try {
+    const { owner } = await claim(gw);
+    const p = await chrome.newPage();
+    await p.send('Runtime.enable');
+    const said = async (level, name) => {
+      const r = await owner.post('/auth/people/invite', { name, level });
+      ok(r, `an invite at ${level}`);
+      // from about:blank: a link that differs only by its hash would not load the page again
+      await p.send('Page.navigate', { url: 'about:blank' });
+      for (let i = 0; i < 50 && (await p.ev('location.href').catch(() => '')) !== 'about:blank'; i++) await sleep(100);
+      await p.send('Page.navigate', { url: `${gw.publicUrl}/auth/claim#${encodeURIComponent(tokenOf(r.json.link))}` });
+      for (let i = 0; i < 100; i++) {
+        const t = await p.ev(`document.getElementById('who')?.textContent ?? ''`).catch(() => '');
+        if (t.includes(name)) return t;
+        await sleep(100);
+      }
+      return '';
+    };
+    const view = await said('view', 'Vi');
+    assert.equal(view, `You're invited to ${gw.host}, Vi, as view only: you can see the hub, dashboards, artifacts, boards and goals, and change nothing. One exception: opening a running preview can set off what that app does when a page opens.`);
+    const full = await said('full', 'Fu');
+    assert.equal(full, `You're invited to ${gw.host}, Fu, as Full: you can do everything on the box except manage people.`);
+  } finally { await chrome.close(); await gw.close(); }
+});

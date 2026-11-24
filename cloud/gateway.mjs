@@ -1480,9 +1480,7 @@ export function createGateway(opts = {}) {
     const got = await peopleBody(req, res, who.session);
     if (!got) return;
     const { s, body } = got;
-    if (body.level !== undefined && body.level !== 'full') {
-      return body.level === 'view' ? refuse(res, 400, 'view-not-yet', 'View arrives in a later release; invite at Full for now.') : refuse(res, 400, 'bad-request', 'a level is full');
-    }
+    if (body.level !== undefined && body.level !== 'full' && body.level !== 'view') return refuse(res, 400, 'bad-request', 'a level is full or view');
     // a file from before people gets its owner row here, stamped as start stamps it: a people list
     // with no stamp reads, at the next start, as an older gateway's change and is reset
     const base = s.people ? s : stamped(withOwner(s));
@@ -1492,7 +1490,7 @@ export function createGateway(opts = {}) {
     const open = liveInvites(base);
     if (open.length >= MAX_INVITES || base.people.length >= MAX_PEOPLE) return refuse(res, 409, 'too-many', `A box holds ${MAX_PEOPLE} people and ${MAX_INVITES} open invites; remove one first.`);
     const iso = new Date().toISOString();
-    const row = { id: newId('p-'), name, role: 'member', level: 'full', methods: [], pushSubs: [], added_at: iso, last_seen: null, notices: [], rev: 1 };
+    const row = { id: newId('p-'), name, role: 'member', level: body.level === 'view' ? 'view' : 'full', methods: [], pushSubs: [], added_at: iso, last_seen: null, notices: [], rev: 1 };
     const { link, invite } = newInvite(row.id);
     store.save({ ...base, people: [...base.people, row], invites: [...open, invite] });
     log(`invited "${name}"`);
@@ -1528,7 +1526,7 @@ export function createGateway(opts = {}) {
   const hasPasskey = (s, row) => ownMethods(s, row).some((m) => m.type === 'passkey');
   const isAdmin = (person) => roleOf(person) === 'admin';
   // A move to Full is offered only to a View member (an admin is always Full); kit-250 adds View.
-  const raisable = (row) => roleOf(row) === 'member' && row.level === 'view';
+  const movable = (row) => roleOf(row) === 'member';
   // The newest invite naming the row: a first invite for someone who never joined, else a new link.
   const linkOf = (s, row) => {
     const mine = (s.invites ?? []).filter((x) => x.person === row.id);
@@ -1548,12 +1546,12 @@ export function createGateway(opts = {}) {
         if (isOwner(row)) return ['rename'];
         const link = linkOf(s, row);
         if (!joined(s, row)) return link ? ['revoke'] : ['remove'];
-        const lv = raisable(row) ? ['level'] : [];
+        const lv = movable(row) ? ['level'] : [];
         if (link) return ['revoke', 'rename', ...lv, 'remove'];
         return ['rename', ...lv, 'role', ...(hasPasskey(s, row) && viewer.id !== null ? ['transfer'] : []), 'relink', 'remove'];
       }
       if (!isAdmin(viewer) || isOwner(row) || !joined(s, row)) return [];
-      return ['rename', ...(raisable(row) ? ['level'] : []), 'remove'];
+      return ['rename', ...(movable(row) ? ['level'] : []), 'remove'];
     })();
     return offered.filter((a) => !mayPeople(viewer, row, a, s));
   };
@@ -1578,6 +1576,7 @@ export function createGateway(opts = {}) {
       if (action === 'remove' && isOwner(row)) return no('Nobody can remove the box\'s owner.');
       if (action === 'revoke' && isOwner(row)) return no('The box\'s owner has no link to revoke.');
       if (action === 'level' && roleOf(row) !== 'member') return no(isAdmin(row) ? 'An admin is always Full; take Admin away first' : 'The box\'s owner is always Full');
+      if (action === 'level' && !joined(s, row)) return no('They haven\'t joined yet: their level is their invite\'s');
       if (action === 'role' && (self || isOwner(row))) return no('The owner stops being the owner only by handing the box over');
       if (action === 'transfer' && (self || isOwner(row))) return no('You already own this box');
       return null;
@@ -1645,17 +1644,20 @@ export function createGateway(opts = {}) {
     log(left ? 'a person left the box: their sessions, invites and open sockets ended' : 'a person was removed: their sessions, invites and open sockets ended');
     return json(res, 200, { ok: true }, left ? { 'set-cookie': cookie('', 0) } : undefined);
   };
-  // A move to Full (kit-250 adds View). Already Full: its rev, nothing written (R4).
+  // A move between Full and View (kit-250). Already there: its rev, nothing written (R4). A move to
+  // View drops their push subscriptions in the same write, then closes their terminal and preview
+  // sockets; their sessions go on, at View from their next request.
   const levelRoute = async (req, res, who) => {
     const g = await peopleGuard(req, res, who, 'level');
     if (!g) return;
     const { s, row, body } = g;
-    if (body.level === 'view') return refuse(res, 400, 'view-not-yet', 'View arrives in a later release; keep them at Full for now');
-    if (body.level !== 'full') return refuse(res, 400, 'bad-request', 'a level is full');
-    if (row.level === 'full') return json(res, 200, { ok: true, rev: row.rev });
+    if (body.level !== 'full' && body.level !== 'view') return refuse(res, 400, 'bad-request', 'a level is full or view');
+    if (levelOf(row) === body.level) return json(res, 200, { ok: true, rev: row.rev });
     const rev = row.rev + 1;
-    store.save({ ...s, people: s.people.map((x) => (x.id === row.id ? { ...x, level: 'full', rev } : x)) });
-    log('a person was made full');
+    const next = body.level === 'view' ? { level: 'view', pushSubs: [], rev } : { level: 'full', rev };
+    store.save({ ...s, people: s.people.map((x) => (x.id === row.id ? { ...x, ...next } : x)) });
+    if (body.level === 'view') dropPerson(row.id);
+    log(body.level === 'view' ? 'a person was made view only: their terminal and preview sockets closed' : 'a person was made full');
     return json(res, 200, { ok: true, rev });
   };
   // Make admin (joined, no link out; a View member becomes Full too) or Take Admin away (they stay
@@ -3674,7 +3676,7 @@ if (!token) location.replace('/auth/login');
 else post('/auth/claim/invite', { token }).then((i) => {
   again = i.again === true;
   if (again) { el('h').textContent = 'Add a sign-in method to your account'; el('who').textContent = 'This link adds a sign-in method (a passkey) to ' + i.name + '\\'s account on ' + host + '. Your other sign-in methods keep working.'; el('how').textContent = ''; el('go').textContent = 'Create passkey'; }
-  else el('who').textContent = 'You\\'re invited to ' + host + ', ' + i.name + ', as ' + (i.level === 'full' ? 'Full: you can do everything on the box except manage people.' : String(i.level) + '.');
+  else el('who').textContent = 'You\\'re invited to ' + host + ', ' + i.name + ', as ' + (i.level === 'view' ? 'view only: you can see the hub, dashboards, artifacts, boards and goals, and change nothing. One exception: opening a running preview can set off what that app does when a page opens.' : 'Full: you can do everything on the box except manage people.');
 }, (e) => (/expired or was used/.test(e.message) ? dead() : err(e.message + ' Reload to try again.')));
 el('go').onclick = run(async () => {
   try { await create('/auth/method/passkey/start', '/auth/method/passkey/finish', { purpose: 'invite', token, name: el('name').value }); }

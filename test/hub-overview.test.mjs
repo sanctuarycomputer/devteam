@@ -880,12 +880,13 @@ const peopleList = { viewer: { id: 'p-owner', role: 'owner', invite: true }, peo
   { id: 'p-owner', name: 'Robin Hale', role: 'owner', level: 'full', you: true, methods: 2, added_at: '2026-11-10T09:00:00.000Z', last_seen: '2026-11-20T09:00:00.000Z', rev: 1, link: null, actions: ['rename'] },
   { id: 'p-ana', name: 'Ana Costa', role: 'member', level: 'full', you: false, methods: 1, added_at: '2026-11-15T09:00:00.000Z', last_seen: null, rev: 3, link: null, actions: ['rename', 'relink', 'remove'] },
 ] };
-async function boxSettings(t, role, { peopleAt = null } = {}) {
+async function boxSettings(t, role, { peopleAt = null, people = peopleList, fresh = 0 } = {}) {
   let F;
   F = await fixtureHub(t, { kit: 'v0.57.0', image: true, box: () => {
     const at = (h) => `http://${h}.localhost:${F.port}/`;
     return { box: 2, terminal: at('terminal'), project: `http://{project}.localhost:${F.port}/`, passkeys: `http://hub.localhost:${F.port}/auth/passkeys`, previews: at('previews'), image: { release: 'v0.57.0', tools: { 'claude-code': '2.4.1' } }, ...(role ? { role } : {}), ...(role === 'member' ? {} : { people: peopleAt ?? `http://hub.localhost:${F.port}/auth/people/list` }) };
-  }, auth: (_, p) => (p === '/auth/method/list' ? [200, { methods: signInMethods, notices: [], fresh_ms: 0 }] : p === '/auth/people/list' && role !== 'member' ? [200, peopleList] : [403, { error: 'no', code: 'not-allowed' }]) });
+  }, auth: (_, p) => (p === '/auth/method/list' ? [200, { methods: signInMethods, notices: [], fresh_ms: fresh }] : p === '/auth/people/list' && role !== 'member' ? [200, people]
+    : p === '/auth/people/invite' && role === 'owner' ? [200, { person: { id: 'p-new', rev: 1 }, link: `http://hub.localhost:${F.port}/auth/claim#a-token`, expires: Date.now() + 864e5 }] : [403, { error: 'no', code: 'not-allowed' }]) });
   F.setList([]);
   const p = await hubPage(t, `http://hub.localhost:${F.port}/#settings`);
   let loaded = false;
@@ -920,6 +921,45 @@ test("Settings on a box: Your sign-in and People in place of Signing in › Pass
   await p.ev(`[...document.querySelectorAll('#hub-settings button')].find((x) => x.textContent.trim() === 'Add a passkey').focus()`);
   await p.ev('paintSettings()');
   assert.equal(await p.ev(`document.activeElement?.textContent.trim() === 'Add a passkey'`), true, 'Add a passkey keeps focus');
+});
+
+// People offers View (kit-250): a Full member's menu offers Make view only, with the mock's
+// confirmation; a View member's offers Make full; Invite someone has the View only card, and a View
+// invite's link says they join as view only.
+const viewPeople = { viewer: peopleList.viewer, people: [peopleList.people[0],
+  { ...peopleList.people[1], actions: ['rename', 'level', 'relink', 'remove'] },
+  { id: 'p-vic', name: 'Vic Moreno', role: 'member', level: 'view', you: false, methods: 1, added_at: '2026-11-16T09:00:00.000Z', last_seen: null, rev: 2, link: null, actions: ['rename', 'level', 'relink', 'remove'] }] };
+test('org-access A14: People offers View', CHROME, async (t) => {
+  const got = await boxSettings(t, 'owner', { people: viewPeople, fresh: 3600e3 });
+  if (!got) return t.skip("headless Chrome can't load hub.localhost here");
+  const { p } = got;
+  const person = (id) => `#hub-settings .person[data-id=${JSON.stringify(id)}]`;
+  const menuOf = async (id) => {
+    await p.ev(`document.querySelector(${JSON.stringify(`${person(id)} .menu-btn`)}).click()`);
+    await p.until('its menu', `Boolean(document.querySelector('.oa-menu'))`);
+    return p.ev(`[...document.querySelectorAll('.oa-menu button')].map((b) => b.textContent)`);
+  };
+  const pick = (words) => p.ev(`[...document.querySelectorAll('.oa-menu button')].find((b) => b.textContent === ${JSON.stringify(words)}).click()`);
+  const closeMenu = () => p.ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); true`);
+  await p.until('the People rows', `document.querySelectorAll('#hub-settings .person').length === 3`);
+  assert.deepEqual(await menuOf('p-ana'), ['Rename', 'Make view only', 'Send a new link', 'Remove'], 'a Full member');
+  await pick('Make view only');
+  await p.until('the confirmation', `Boolean(document.querySelector('#oa-confirm'))`);
+  assert.equal(await p.ev(`document.querySelector('#oa-confirm p').textContent`), 'Make Ana view only? Their terminal and anything else open that changes things closes now. What they already did with the terminal stays, such as a program left running.');
+  assert.equal(await p.ev(`document.querySelector('#oa-confirm .acts button').textContent`), 'Make view only');
+  await p.ev(`[...document.querySelectorAll('#oa-confirm button')].find((b) => b.textContent === 'Cancel').click()`);
+  await p.until('closed', `!document.querySelector('#oa-confirm')`);
+  assert.deepEqual(await menuOf('p-vic'), ['Rename', 'Make full', 'Send a new link', 'Remove'], 'a View member');
+  await closeMenu();
+  await p.until('the menu closed', `!document.querySelector('.oa-menu')`);
+  await p.ev(`[...document.querySelectorAll('#oa-people button')].find((b) => b.textContent === 'Invite someone').click()`);
+  await p.until('the invite card', `Boolean(document.querySelector('#oa-invite input'))`);
+  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#oa-invite .lvl-opt b')].map((b) => b.textContent)`), ['Full', 'View only']);
+  assert.equal(await p.ev(`[...document.querySelectorAll('#oa-invite .lvl-opt')][1].querySelector('span span').textContent`), 'Sees everything here: the hub, dashboards, artifacts, boards, goals and what agents print. Changes nothing and has no terminal. One exception: opening a running preview can set off what that app does when a page opens.');
+  await p.ev(`(() => { const i = document.querySelector('#oa-invite input'); i.value = 'Sam Rivera'; i.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('#oa-invite input[value="view"]').click(); return true; })()`);
+  await p.ev(`[...document.querySelectorAll('#oa-invite button')].find((b) => b.textContent === 'Make the invite link').click()`);
+  await p.until('the link card', `Boolean(document.querySelector('#oa-link'))`);
+  assert.equal(await p.ev(`document.querySelector('#oa-link p').textContent`), 'It works once, for 24 hours. Whoever opens it first makes a passkey and joins as view only.');
 });
 
 test('Settings on a box: a member gets Your sign-in and no People', CHROME, async (t) => {
