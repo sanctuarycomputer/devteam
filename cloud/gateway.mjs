@@ -1099,7 +1099,10 @@ export function createGateway(opts = {}) {
   const COOKIE = 'devteam_session';
   const dir = opts.dir ?? gatewayDir();
   const ttydPort = Number(opts.ttydPort ?? env.DEVTEAM_TTYD_PORT ?? 7681);
-  const store = stateStore(dir);
+  const stored = stateStore(dir);
+  // every write is followed by a look at the open presence sockets (endPresence), in the same turn
+  let afterSave = () => {};
+  const store = { load: stored.load, save: (s) => { stored.save(s); afterSave(); } };
   const firstFile = (...c) => c.find((f) => f && fs.existsSync(f));
   const hubPage = fs.readFileSync(firstFile(opts.hubPage, env.DEVTEAM_HUB_PAGE, path.join(here, 'hub.html'), path.join(here, '..', 'docs', 'devteam', 'dashboard', 'hub.html')));
   const ttydPage = () => fs.readFileSync(opts.ttydPage ?? env.DEVTEAM_TTYD_PAGE ?? path.join(here, 'ttyd.html'));
@@ -1864,7 +1867,8 @@ export function createGateway(opts = {}) {
   // x-devteam-person and x-devteam-level never pass, on any route.
   const upstreamHeaders = (req, port, publicOrigin, { loopbackHost = '127.0.0.1' } = {}) => {
     const h = {};
-    for (const [k, v] of Object.entries(req.headers)) if (!HOP.has(k) && !k.startsWith('x-forwarded-') && !k.startsWith('fly-') && !k.startsWith('rndr-') && !k.startsWith('render-') && k !== 'x-devteam-person' && k !== 'x-devteam-level') h[k] = v;
+    // a name with a space before its colon is no header of ours, and older Nodes let one in
+    for (const [k, v] of Object.entries(req.headers)) if (k === k.trim() && !HOP.has(k) && !k.startsWith('x-forwarded-') && !k.startsWith('fly-') && !k.startsWith('rndr-') && !k.startsWith('render-') && k !== 'x-devteam-person' && k !== 'x-devteam-level') h[k] = v;
     h.host = `${loopbackHost}:${port}`;
     if (req.headers.origin === publicOrigin) h.origin = `http://${loopbackHost}:${port}`;
     const rest = String(req.headers.cookie ?? '').split(';').map((p) => p.trim()).filter((p) => p && p.split('=')[0] !== COOKIE).join('; ');
@@ -3512,16 +3516,105 @@ export function createGateway(opts = {}) {
   // passes, before anything is awaited, so a removal at any point after closes it.
   const heldSockets = new Map();
   const holdSocket = (socket, person) => {
-    heldSockets.set(socket, person?.id ?? null);
+    heldSockets.set(socket, { person: person?.id ?? null });
     socket.once('close', () => heldSockets.delete(socket));
   };
-  const dropPerson = (id) => { for (const [sock, holder] of heldSockets) if (holder === id) sock.destroy(); };
+  const dropPerson = (id) => { for (const [sock, holder] of heldSockets) if (holder.person === id) sock.destroy(); };
+  // A /presence socket (presence@1 §2) lives no longer than its session, at the level it opened with.
+  // Looked at after every write (sign-out, removal, a level or role change), at the session's own end,
+  // and each second while any is open, for a write by another process (devteam-reclaim). A state that
+  // can't be read ends them all: the page tries again.
+  const PRESENCE_POLL_MS = 1000;
+  let presencePoll = null;
+  const presenceOpen = () => [...heldSockets].filter(([, h]) => h.session);
+  const endPresence = () => {
+    const open = presenceOpen();
+    if (!open.length) { clearInterval(presencePoll); presencePoll = null; return; }
+    let s = null;
+    try { s = store.load(); } catch {}
+    for (const [sock, h] of open) {
+      let now = null;
+      try { now = s ? stillHeld(s, h.session) : null; } catch {}
+      if (!now || (now.person.id ?? null) !== h.person || levelOf(now.person) !== h.level) sock.destroy();
+    }
+  };
+  afterSave = endPresence;
+  const holdPresence = (socket, { session, person }) => {
+    holdSocket(socket, person);
+    heldSockets.set(socket, { person: person?.id ?? null, session, level: levelOf(person) });
+    const end = setTimeout(endPresence, Math.min(Math.max(session.expires - Date.now(), 0) + 1, 2 ** 31 - 1));
+    end.unref();
+    socket.once('close', () => clearTimeout(end));
+    if (!presencePoll) { presencePoll = setInterval(endPresence, PRESENCE_POLL_MS); presencePoll.unref(); }
+  };
   // The supervisor's browser view (the preview the hub labels so): whoever opens it drives the
   // owner's signed-in browser, so it is the owner's alone, under any name its port is listed by.
   const ownerOnlyPreview = (name) => {
     const link = previews.get(name);
     if (!link || link.ambiguous) return false;
     return browserPorts.has(link.port);
+  };
+  // A refusal, and the socket gone a second later even if the browser keeps its half open or sends on.
+  const endUpgrade = (socket, code, msg) => {
+    socket.on('error', () => {});
+    socket.end(`HTTP/1.1 ${code} ${msg}\r\nconnection: close\r\ncontent-length: 0\r\n\r\n`);
+    socket.resume();
+    const t = setTimeout(() => socket.destroy(), 1000);
+    t.unref();
+    socket.once('close', () => clearTimeout(t));
+  };
+  // An upgrade, forwarded on a raw socket. extra: headers the gateway sets over the browser's.
+  // answerMs: how long the upstream has to answer (0: no limit). only101: any other answer is told by
+  // its status alone and both sides end, and nothing of the browser's goes on before a 101: a server
+  // with no such socket (an older kit) would read what came next as requests the gateway never saw.
+  const relayUpgrade = (req, socket, head, { port, host, own, loopbackHost, extra = null, answerMs = 0, only101 = false }) => {
+    // each side's pipe listens to both: more than Node's 10 without any leak
+    socket.setMaxListeners(20);
+    const up = net.connect(port, host);
+    const late = answerMs ? setTimeout(() => socket.destroy(), answerMs) : null;
+    late?.unref();
+    socket.once('close', () => clearTimeout(late));
+    up.on('error', () => socket.destroy());
+    socket.on('error', () => up.destroy());
+    socket.on('close', () => up.destroy());
+    up.once('close', () => socket.destroy());
+    up.on('connect', () => {
+      if (socket.destroyed) return up.destroy();
+      const h = { ...upstreamHeaders(req, port, own, { loopbackHost }), ...extra };
+      h.connection = 'Upgrade';
+      h.upgrade = req.headers.upgrade;
+      const lines = [`GET ${req.url} HTTP/1.1`, ...Object.entries(h).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`)];
+      up.write(`${lines.join('\r\n')}\r\n\r\n`);
+      if (head?.length && !only101) up.write(head);
+      // The handshake's answer gets the rules any response does (cookies above all): held until its
+      // headers are whole, then relayed, so a Set-Cookie on a 101 can't shadow anything either.
+      let held = Buffer.alloc(0);
+      const onHead = (chunk) => {
+        held = Buffer.concat([held, chunk]);
+        const text = held.toString('latin1');
+        const end = /\r?\n\r?\n/.exec(text);
+        if (!end) { if (held.length > 64 * 1024) { up.destroy(); socket.destroy(); } return; }
+        up.off('data', onHead);
+        clearTimeout(late);
+        const status = /^HTTP\/1\.[01] (\d{3})(?: |\r|\n|$)/.exec(text)?.[1];
+        if (only101 && status !== '101') {
+          up.removeAllListeners('close');
+          up.destroy();
+          return endUpgrade(socket, status && status >= '400' ? status : '502', 'Refused');
+        }
+        const filtered = previewHandshake(text.slice(0, end.index), own, port);
+        if (!filtered) { up.destroy(); socket.destroy(); return; }
+        socket.write(Buffer.from(`${filtered}\r\n\r\n`, 'latin1'));
+        if (only101 && head?.length) up.write(head);
+        const rest = held.subarray(end.index + end[0].length);
+        if (rest.length) socket.write(rest);
+        pipeline(up, socket, () => {});
+        pipeline(socket, up, () => {});
+      };
+      up.on('data', onHead);
+      return undefined;
+    });
+    return undefined;
   };
   const previewUpgrade = async (req, socket, head, name, refuse) => {
     const own = previewOrigin(name);
@@ -3532,8 +3625,10 @@ export function createGateway(opts = {}) {
     if (who.person?.level === 'view') return refuse(403, 'Forbidden');
     if (!isOwner(who.person) && ownerOnlyPreview(name)) return refuse(403, 'Forbidden');
     holdSocket(socket, who.person);
-    if (!req.url.startsWith('/') || req.url.startsWith('//')) return refuse(400, 'Bad Request');
     const link = previews.get(name);
+    // a project's name that has the form of a preview's: no socket of its but /presence
+    if (!link && projects.has(name)) return refuse(421, 'Misdirected Request');
+    if (!req.url.startsWith('/') || req.url.startsWith('//')) return refuse(400, 'Bad Request');
     if (!link || link.ambiguous) return refuse(503, 'Service Unavailable');
     const open = previewSockets.get(name) ?? new Set();
     if (open.size >= PREVIEW_SOCKETS) return refuse(429, 'Too Many Requests');
@@ -3545,44 +3640,38 @@ export function createGateway(opts = {}) {
     open.add(socket);
     const drop = () => { open.delete(socket); if (!open.size && previewSockets.get(name) === open) previewSockets.delete(name); };
     socket.once('close', drop);
-    const up = net.connect(link.port, host);
-    up.on('error', () => socket.destroy());
-    socket.on('error', () => up.destroy());
-    socket.on('close', () => up.destroy());
-    up.once('close', () => socket.destroy());
-    up.on('connect', () => {
-      if (socket.destroyed) return up.destroy();
-      const h = upstreamHeaders(req, link.port, own, { loopbackHost: 'localhost' });
-      h.connection = 'Upgrade';
-      h.upgrade = req.headers.upgrade;
-      const lines = [`GET ${req.url} HTTP/1.1`, ...Object.entries(h).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`)];
-      up.write(`${lines.join('\r\n')}\r\n\r\n`);
-      if (head?.length) up.write(head);
-      // The handshake's answer gets the rules any response does (cookies above all): held until its
-      // headers are whole, then relayed, so a Set-Cookie on a 101 can't shadow anything either.
-      let held = Buffer.alloc(0);
-      const onHead = (chunk) => {
-        held = Buffer.concat([held, chunk]);
-        const text = held.toString('latin1');
-        const end = /\r?\n\r?\n/.exec(text);
-        if (!end) { if (held.length > 64 * 1024) { up.destroy(); socket.destroy(); } return; }
-        up.off('data', onHead);
-        const filtered = previewHandshake(text.slice(0, end.index), own, link.port);
-        if (!filtered) { up.destroy(); socket.destroy(); return; }
-        socket.write(Buffer.from(`${filtered}\r\n\r\n`, 'latin1'));
-        const rest = held.subarray(end.index + end[0].length);
-        if (rest.length) socket.write(rest);
-        pipeline(up, socket, () => {});
-        pipeline(socket, up, () => {});
-      };
-      up.on('data', onHead);
-      return undefined;
-    });
-    return undefined;
+    return relayUpgrade(req, socket, head, { port: link.port, host, own, loopbackHost: 'localhost' });
   };
-  // The terminal's WebSocket, on the terminal's name, its Origin, a session; and any preview's.
+  // A page's presence socket (presence@1 §2), on a project's name or the box's own: that name's Origin
+  // (an artifact frame's is null), a session, at any level, and the person and level the gateway says.
+  // Project and preview names share a form, so the list decides, once there is a session.
+  const PRESENCE_ANSWER_MS = opts.presenceAnswerMs ?? 10000; // only a test shortens it
+  const presenceUpgrade = async (req, socket, head, label, refuse) => {
+    const own = label ? projectOrigin(label) : PUB;
+    if (req.headers.origin !== own) return refuse(403, 'Forbidden');
+    let who = null;
+    try { who = store.load().passkeys.length ? sessionOf(req) : null; } catch { return refuse(503, 'Service Unavailable'); }
+    if (!who) return refuse(401, 'Unauthorized');
+    const person = personHeader(who.person);
+    if (person === false) return refuse(500, 'Internal Server Error');
+    holdPresence(socket, who);
+    socket.on('error', () => socket.destroy());
+    let port = HUB_PORT;
+    if (label) {
+      let found = resolveLabel(label);
+      if (!found) { await refreshWithin(1000); found = resolveLabel(label); }
+      if (socket.destroyed) return undefined;
+      if (!found?.port) return previewOf(req.headers.host) && !found?.shared ? previewUpgrade(req, socket, head, label, refuse) : refuse(421, 'Misdirected Request');
+      port = found.port;
+    }
+    return relayUpgrade(req, socket, head, { port, host: '127.0.0.1', own, loopbackHost: '127.0.0.1', extra: person ? { 'x-devteam-person': person, 'x-devteam-level': levelOf(who.person) } : null, answerMs: PRESENCE_ANSWER_MS, only101: true });
+  };
+  // The terminal's WebSocket, on the terminal's name, its Origin, a session; any preview's; and presence.
   server.on('upgrade', (req, socket, head) => {
-    const refuse = (code, msg) => { socket.end(`HTTP/1.1 ${code} ${msg}\r\nconnection: close\r\ncontent-length: 0\r\n\r\n`); };
+    const refuse = (code, msg) => endUpgrade(socket, code, msg);
+    const label = labelOf(req.headers.host);
+    // the path exactly as sent, less a query, as the relay reads it: only /presence is /presence
+    if (req.method === 'GET' && req.url.split('?')[0] === '/presence' && (label || req.headers.host === pubUrl.host)) return presenceUpgrade(req, socket, head, label, refuse).catch(() => socket.destroy());
     const pv = previewOf(req.headers.host);
     if (pv) return previewUpgrade(req, socket, head, pv, refuse).catch(() => socket.destroy());
     if (req.headers.host !== termHost) return refuse(421, 'Misdirected Request');
