@@ -355,7 +355,10 @@ async function libraryOn(t, { width = 1440, height = 900, init, box = null, page
     await p.send('Page.navigate', { url: 'about:blank' });
     await soon("location.href === 'about:blank'", 'about:blank');
     await p.send('Page.navigate', { url: `${at}/${hash}` });
-    await soon(loaded, 'the page with its data');
+    // and loaded (kit-784): until the load event, Chrome makes a script's hash change with no user gesture (every
+    // p.ev here) replace the entry rather than add one, so a Back or a close after it would land off the page
+    // a test with its own request tap (page) holds a request of the page on purpose, so its load may never come: it keeps the old wait
+    await soon(page ? loaded : `document.readyState === 'complete' && ${loaded}`, 'the page with its data');
   };
   return { p, soon, port, go, at, made, box };
 }

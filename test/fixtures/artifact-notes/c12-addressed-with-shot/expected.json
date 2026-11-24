@@ -1,0 +1,49 @@
+{
+ "about": "a mark carrying its picture",
+ "thread": "t-20261120-100012000-owner",
+ "view": {
+  "handed": {
+   "to": "plan-pricing",
+   "at": "2026-11-20T10:01:12.000Z"
+  },
+  "addressed": {
+   "by": "plan-pricing",
+   "at": "2026-11-20T10:02:12.000Z",
+   "note": "Trial button now says Start free trial.",
+   "sha": "3f7c2a9e1b0d4c5f6a7b8c9d0e1f2a3b4c5d6e7f",
+   "draft": "plan-pricing"
+  },
+  "check": "addressed",
+  "shot": {
+   "stamp": "20261120-100600000",
+   "w": 1400,
+   "h": 860,
+   "src": "main",
+   "sha": "3f7c2a9e1b0d4c5f6a7b8c9d0e1f2a3b4c5d6e7f",
+   "dirty": true,
+   "anchor": "point",
+   "dark": false,
+   "sum": {
+    "light": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+   }
+  },
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "owner"
+ },
+ "api": {
+  "handed": {
+   "to": "plan-pricing",
+   "at": "2026-11-20T10:01:12.000Z"
+  },
+  "addressed": null,
+  "check": null,
+  "shot": null,
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "session",
+  "with": "plan-pricing"
+ }
+}

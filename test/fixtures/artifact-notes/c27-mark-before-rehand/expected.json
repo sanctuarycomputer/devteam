@@ -1,0 +1,18 @@
+{
+ "about": "a mark made before the owner handed the note over again counts for nothing",
+ "thread": "t-20261120-100027000-owner",
+ "view": {
+  "handed": {
+   "to": "plan-pricing",
+   "at": "2026-11-20T10:04:27.000Z"
+  },
+  "addressed": null,
+  "check": null,
+  "shot": null,
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "session",
+  "with": "plan-pricing"
+ }
+}

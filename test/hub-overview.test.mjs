@@ -409,8 +409,9 @@ async function listenOn(t, srv, port = 0, host = '127.0.0.1') {
   defer(t, () => new Promise((r) => { srv.closeAllConnections?.(); srv.close(() => r()); }));
   return srv.address().port;
 }
-async function fixtureHub(t, { ports = [], box = null, kit: hubKit = 'v0.57.0', image } = {}) {
-  const F = { list: [], asks: new Map(), hashes: new Map(), fail: new Map(), delay: new Map() };
+// auth: the gateway's /auth/* answers on a box, (F, pathname) => [status, body] (Your sign-in and People)
+async function fixtureHub(t, { ports = [], box = null, kit: hubKit = 'v0.57.0', image, auth = null } = {}) {
+  const F = { posts: [], list: [], asks: new Map(), hashes: new Map(), fail: new Map(), delay: new Map() };
   F.setList = (list) => { F.list = list; };
   for (const port of ports) {
     F.asks.set(port, []);
@@ -436,6 +437,20 @@ async function fixtureHub(t, { ports = [], box = null, kit: hubKit = 'v0.57.0', 
     const u = new URL(q.url, 'http://x');
     if (u.pathname === '/') { s.writeHead(200, { 'content-type': 'text/html' }); return s.end(hubHtml()); }
     if (u.pathname === '/instances.json') { s.writeHead(200, { 'content-type': 'application/json' }); return s.end(JSON.stringify({ hub: 1, kit: hubKit, ...(image ? { image: true } : {}), instances: F.list })); }
+    // what a page posts to /auth/* is kept in F.posts ({ path, body }), and the answer is auth's
+    if (u.pathname.startsWith('/auth/') && auth) {
+      let raw = '';
+      q.on('data', (c) => { raw += c; });
+      q.on('end', () => {
+        let got = null;
+        try { got = raw ? JSON.parse(raw) : null; } catch {}
+        if (q.method === 'POST') F.posts.push({ path: u.pathname, body: got });
+        const [code, body] = auth(F, u.pathname, got);
+        s.writeHead(code, { 'content-type': 'application/json' });
+        s.end(JSON.stringify(body));
+      });
+      return;
+    }
     if (u.pathname === '/box.json' && box) { s.writeHead(200, { 'content-type': 'application/json' }); return s.end(JSON.stringify(box(F))); }
     s.writeHead(404, { 'content-type': 'application/json' });
     s.end('{}');
@@ -871,34 +886,249 @@ test('Settings: the Notify button is the live control, the Test row once notific
   assert.equal(await p.ev(`${send}.textContent`), 'Test sent', 'its answer outlives a repaint');
 });
 
-test("Settings on a box: Signing in and Serving, boxLine's parts", CHROME, async (t) => {
+// A box's Settings, as the gateway answers them for a role: Your sign-in from /auth/method/list, and
+// People from /auth/people/list only when /box.json names it (the owner and admins).
+const signInMethods = [{ id: 'm-a', type: 'passkey', label: 'MacBook', added_at: '2026-11-10T09:00:00.000Z', last_used: '2026-11-20T09:00:00.000Z' }, { id: 'm-b', type: 'passkey', label: 'Phone', added_at: '2026-11-12T09:00:00.000Z', last_used: null }];
+const peopleList = { viewer: { id: 'p-owner', role: 'owner', invite: true }, people: [
+  { id: 'p-owner', name: 'Robin Hale', role: 'owner', level: 'full', you: true, methods: 2, added_at: '2026-11-10T09:00:00.000Z', last_seen: '2026-11-20T09:00:00.000Z', rev: 1, link: null, actions: ['rename'] },
+  { id: 'p-ana', name: 'Ana Costa', role: 'member', level: 'full', you: false, methods: 1, added_at: '2026-11-15T09:00:00.000Z', last_seen: null, rev: 3, link: null, actions: ['rename', 'relink', 'remove'] },
+] };
+async function boxSettings(t, role, { peopleAt = null, people = peopleList, fresh = 0 } = {}) {
   let F;
   F = await fixtureHub(t, { kit: 'v0.57.0', image: true, box: () => {
     const at = (h) => `http://${h}.localhost:${F.port}/`;
-    return { box: 2, terminal: at('terminal'), project: `http://{project}.localhost:${F.port}/`, passkeys: at('auth'), previews: at('previews'), image: { release: 'v0.57.0', tools: { 'claude-code': '2.4.1' } } };
-  } });
+    return { box: 2, terminal: at('terminal'), project: `http://{project}.localhost:${F.port}/`, passkeys: `http://hub.localhost:${F.port}/auth/passkeys`, previews: at('previews'), image: { release: 'v0.57.0', tools: { 'claude-code': '2.4.1' } }, ...(role ? { role } : {}), ...(role === 'member' ? {} : { people: peopleAt ?? `http://hub.localhost:${F.port}/auth/people/list` }) };
+  }, auth: (_, p) => (p === '/auth/method/list' ? [200, { methods: signInMethods, notices: [], fresh_ms: fresh }] : p === '/auth/people/list' && role !== 'member' ? [200, people]
+    : p === '/auth/people/level' && role !== 'member' ? [200, { ok: true, rev: 9 }]
+    : p === '/auth/people/invite' && role === 'owner' ? [200, { person: { id: 'p-new', rev: 1 }, link: `http://hub.localhost:${F.port}/auth/claim#a-token`, expires: Date.now() + 864e5 }] : [403, { error: 'no', code: 'not-allowed' }]) });
   F.setList([]);
   const p = await hubPage(t, `http://hub.localhost:${F.port}/#settings`);
   let loaded = false;
   for (let i = 0; i < 100 && !loaded; i++) { loaded = (await p.ev(`document.title`).catch(() => '')) === 'devteam'; if (!loaded) await new Promise((r) => setTimeout(r, 100)); }
-  if (!loaded) return t.skip("headless Chrome can't load hub.localhost here");
-  await p.until('the box rows', `document.querySelectorAll('#hub-settings .sec').length === 4`);
-  assert.deepEqual(await p.ev(setGroups), ['This machine', 'Signing in', 'Notifications', 'Serving']);
+  return loaded ? { F, p } : null;
+}
+
+test("Settings on a box: Your sign-in and People in place of Signing in › Passkeys, and Serving, boxLine's parts", CHROME, async (t) => {
+  const got = await boxSettings(t, 'owner');
+  if (!got) return t.skip("headless Chrome can't load hub.localhost here");
+  const { F, p } = got;
+  await p.until('the box rows', `document.querySelectorAll('#hub-settings .sec').length === 5 && document.querySelectorAll('#hub-settings .person').length === 2`);
+  assert.deepEqual(await p.ev(setGroups), ['This machine', 'Your sign-in', 'People', 'Notifications', 'Serving']);
   const rel = await p.ev(setRow('Box release'));
   assert.deepEqual([rel.key, rel.value, rel.desc], ['DEVTEAM_KIT_RELEASE', 'v0.57.0', 'the box image this machine runs']);
   const hub = await p.ev(setRow('Hub'));
   assert.deepEqual([hub.key, hub.value, hub.amber], ['hub', 'hub v0.57.0', false]);
   const cc = await p.ev(setRow('Claude Code'));
   assert.deepEqual([cc.key, cc.value, cc.desc], ['DEVTEAM_BOX_TOOLS', '2.4.1', 'the version on this box']);
-  const pk = await p.ev(setRow('Passkeys'));
-  assert.deepEqual([pk.key, pk.link, pk.yours], ['passkeys', ['Manage', `http://auth.localhost:${F.port}/`], true]);
+  assert.equal(await p.ev(setRow('Passkeys')), null, 'no Signing in › Passkeys row');
+  // Your sign-in: a row per method, each with Remove, and Add a passkey
+  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#hub-settings .set-row.method .t')].map((x) => x.textContent.trim())`), ['Passkey · MacBook', 'Passkey · Phone']);
+  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#hub-settings .set-row.method .r button')].map((x) => x.textContent.trim())`), ['Remove', 'Remove']);
+  assert.equal(await p.ev(`[...document.querySelectorAll('#hub-settings button')].some((x) => x.textContent.trim() === 'Add a passkey')`), true);
+  // People: each person, the owner's Invite someone
+  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#hub-settings .person .nm')].map((x) => x.firstChild.textContent.trim())`), ['Robin Hale', 'Ana Costa']);
+  assert.equal(await p.ev(`[...document.querySelectorAll('#hub-settings button')].some((x) => x.textContent.trim() === 'Invite someone')`), true);
   const pv = await p.ev(setRow('Previews'));
   assert.deepEqual([pv.key, pv.link], ['previews', ['Previews', `http://previews.localhost:${F.port}/`]]);
   assert.equal(await p.ev(`[...document.querySelectorAll('#tabs [role=tab]')].some((x) => x.textContent === 'Terminal')`), true, 'the Terminal tab stays');
-  // a link keeps the keyboard across the repaint
-  await p.ev(`document.querySelector('#hub-settings a[href^="http://auth."]').focus()`);
+  // a control keeps the keyboard across the repaint
+  await p.ev(`[...document.querySelectorAll('#hub-settings button')].find((x) => x.textContent.trim() === 'Add a passkey').focus()`);
   await p.ev('paintSettings()');
-  assert.equal(await p.ev(`document.activeElement?.textContent === 'Manage' && document.activeElement.closest('#hub-settings') !== null`), true, 'Manage keeps focus');
+  assert.equal(await p.ev(`document.activeElement?.textContent.trim() === 'Add a passkey'`), true, 'Add a passkey keeps focus');
+});
+
+// People offers View (kit-250): a Full member's menu offers Make view only, with the mock's
+// confirmation; a View member's offers Make full; Invite someone has the View only card, and a View
+// invite's link says they join as view only.
+const viewPeople = { viewer: peopleList.viewer, people: [peopleList.people[0],
+  { ...peopleList.people[1], actions: ['rename', 'level', 'relink', 'remove'] },
+  { id: 'p-vic', name: 'Vic Moreno', role: 'member', level: 'view', you: false, methods: 1, added_at: '2026-11-16T09:00:00.000Z', last_seen: null, rev: 2, link: null, actions: ['rename', 'level', 'relink', 'remove'] }] };
+test('org-access A14: People offers View', CHROME, async (t) => {
+  const got = await boxSettings(t, 'owner', { people: viewPeople, fresh: 3600e3 });
+  if (!got) return t.skip("headless Chrome can't load hub.localhost here");
+  const { F, p } = got;
+  const posted = (path) => F.posts.filter((x) => x.path === path).map((x) => x.body);
+  const toastIs = (words) => p.until(`the toast "${words}"`, `document.querySelector('.oa-toast')?.textContent === ${JSON.stringify(words)}`);
+  const person = (id) => `#hub-settings .person[data-id=${JSON.stringify(id)}]`;
+  const menuOf = async (id) => {
+    await p.ev(`document.querySelector(${JSON.stringify(`${person(id)} .menu-btn`)}).click()`);
+    await p.until('its menu', `Boolean(document.querySelector('.oa-menu'))`);
+    return p.ev(`[...document.querySelectorAll('.oa-menu button')].map((b) => b.textContent)`);
+  };
+  const pick = (words) => p.ev(`[...document.querySelectorAll('.oa-menu button')].find((b) => b.textContent === ${JSON.stringify(words)}).click()`);
+  const closeMenu = () => p.ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); true`);
+  await p.until('the People rows', `document.querySelectorAll('#hub-settings .person').length === 3`);
+  assert.deepEqual(await menuOf('p-ana'), ['Rename', 'Make view only', 'Send a new link', 'Remove'], 'a Full member');
+  await pick('Make view only');
+  await p.until('the confirmation', `Boolean(document.querySelector('#oa-confirm'))`);
+  assert.equal(await p.ev(`document.querySelector('#oa-confirm p').textContent`), 'Make Ana view only? Their terminal and anything else open that changes things closes now. What they already did with the terminal stays, such as a program left running.');
+  assert.equal(await p.ev(`document.querySelector('#oa-confirm .acts button').textContent`), 'Make view only');
+  await p.ev(`[...document.querySelectorAll('#oa-confirm button')].find((b) => b.textContent === 'Cancel').click()`);
+  await p.until('closed', `!document.querySelector('#oa-confirm')`);
+  assert.deepEqual(posted('/auth/people/level'), [], 'Cancel sends nothing');
+  // yes on Make view only posts view for Ana, and the toast says so
+  await menuOf('p-ana');
+  await pick('Make view only');
+  await p.until('the confirmation', `Boolean(document.querySelector('#oa-confirm'))`);
+  await p.ev(`document.querySelector('#oa-confirm .acts button').click()`);
+  for (let i = 0; i < 100 && posted('/auth/people/level').length < 1; i++) await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(posted('/auth/people/level').map((b) => [b?.id, b?.level]), [['p-ana', 'view']], 'Make view only posts view');
+  await toastIs('Ana is now view only');
+  await p.until('the confirmation closed', `!document.querySelector('#oa-confirm')`);
+  // and yes on Make full posts full for Vic
+  assert.deepEqual(await menuOf('p-vic'), ['Rename', 'Make full', 'Send a new link', 'Remove'], 'a View member');
+  await pick('Make full');
+  await p.until('the confirmation', `Boolean(document.querySelector('#oa-confirm'))`);
+  assert.equal(await p.ev(`document.querySelector('#oa-confirm .acts button').textContent`), 'Make full');
+  await p.ev(`document.querySelector('#oa-confirm .acts button').click()`);
+  for (let i = 0; i < 100 && posted('/auth/people/level').length < 2; i++) await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(posted('/auth/people/level').map((b) => [b?.id, b?.level]), [['p-ana', 'view'], ['p-vic', 'full']], 'Make full posts full');
+  await toastIs('Vic is now full');
+  await p.until('the confirmation closed', `!document.querySelector('#oa-confirm')`);
+  if (await p.ev(`Boolean(document.querySelector('.oa-menu'))`)) await closeMenu();
+  await p.until('the menu closed', `!document.querySelector('.oa-menu')`);
+  await p.ev(`[...document.querySelectorAll('#oa-people button')].find((b) => b.textContent === 'Invite someone').click()`);
+  await p.until('the invite card', `Boolean(document.querySelector('#oa-invite input'))`);
+  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#oa-invite .lvl-opt b')].map((b) => b.textContent)`), ['Full', 'View only']);
+  assert.equal(await p.ev(`[...document.querySelectorAll('#oa-invite .lvl-opt')][1].querySelector('span span').textContent`), 'Sees everything here: the hub, dashboards, artifacts, boards, goals and what agents print. Changes nothing and has no terminal. One exception: opening a running preview can set off what that app does when a page opens.');
+  // the default, left as it is: Full, posted as full and said as full
+  await p.ev(`(() => { const i = document.querySelector('#oa-invite input'); i.value = 'Pat Lee'; i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+  await p.ev(`[...document.querySelectorAll('#oa-invite button')].find((b) => b.textContent === 'Make the invite link').click()`);
+  await p.until('the link card', `Boolean(document.querySelector('#oa-link'))`);
+  assert.equal(await p.ev(`document.querySelector('#oa-link p').textContent`), 'It works once, for 24 hours. Whoever opens it first makes a passkey and joins as full.');
+  assert.deepEqual(posted('/auth/people/invite'), [{ name: 'Pat Lee', level: 'full' }], 'the default invite posts full');
+  await p.ev(`[...document.querySelectorAll('#oa-link button')].find((b) => b.textContent === 'Done').click()`);
+  await p.until('the link card closed', `!document.querySelector('#oa-link')`);
+  await p.ev(`[...document.querySelectorAll('#oa-people button')].find((b) => b.textContent === 'Invite someone').click()`);
+  await p.until('the invite card again', `Boolean(document.querySelector('#oa-invite input'))`);
+  await p.ev(`(() => { const i = document.querySelector('#oa-invite input'); i.value = 'Sam Rivera'; i.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('#oa-invite input[value="view"]').click(); return true; })()`);
+  await p.ev(`[...document.querySelectorAll('#oa-invite button')].find((b) => b.textContent === 'Make the invite link').click()`);
+  await p.until('the link card', `Boolean(document.querySelector('#oa-link'))`);
+  assert.equal(await p.ev(`document.querySelector('#oa-link p').textContent`), 'It works once, for 24 hours. Whoever opens it first makes a passkey and joins as view only.');
+  assert.deepEqual(posted('/auth/people/invite'), [{ name: 'Pat Lee', level: 'full' }, { name: 'Sam Rivera', level: 'view' }], 'the invite posts the level chosen');
+});
+
+// The hub at View (kit-250): the Terminal tab is there but disabled and opens nothing; a "View only"
+// badge ends the tab bar and the mock's line sits under it; Settings says what View may change, its
+// Notifications row holds a disabled Off in place of the control, and no Test row; the fleet switch
+// sends nothing.
+async function viewHub(t, level) {
+  const [A] = await freePorts(1);
+  let F;
+  F = await fixtureHub(t, { ports: [A], kit: 'v0.57.0', image: true, box: () => {
+    const at = (h) => `http://${h}.localhost:${F.port}/`;
+    return { box: 2, terminal: at('terminal'), project: `http://{project}.localhost:${F.port}/`, passkeys: at('auth'), previews: at('previews'), image: { release: 'v0.57.0', tools: {} }, role: 'member', level };
+  }, auth: (_, p) => (p === '/auth/method/list' ? [200, { methods: signInMethods, notices: [], fresh_ms: 0 }] : [403, { error: 'no', code: 'not-allowed' }]) });
+  F.setList([hello('alpha', A), hello('beta', A)]);
+  const p = await hubPage(t, `http://hub.localhost:${F.port}/`);
+  let loaded = false;
+  for (let i = 0; i < 100 && !loaded; i++) { loaded = (await p.ev(`document.title`).catch(() => '')) === 'devteam'; if (!loaded) await new Promise((r) => setTimeout(r, 100)); }
+  return loaded ? { F, p, A } : null;
+}
+const termTab = `[...document.querySelectorAll('#tabs [role=tab]')].find((x) => x.textContent === 'Terminal')`;
+const hubToast = `(document.querySelector('.oa-toast')?.textContent ?? null)`;
+test('org-access A14: the hub at View: Terminal tab, badge, line, Settings', CHROME, async (t) => {
+  const got = await viewHub(t, 'view');
+  if (!got) return t.skip("headless Chrome can't load hub.localhost here");
+  const { F, p, A } = got;
+  await p.until('the Terminal tab', `Boolean(${termTab})`);
+  assert.equal(await p.ev(`${termTab}.getAttribute('aria-disabled')`), 'true', 'the Terminal tab');
+  assert.equal(await p.ev(`${termTab}.title`), 'View only: no terminal');
+  await p.ev(`${termTab}.click()`);
+  await p.until('the toast', `${hubToast} === 'View only: no terminal'`);
+  assert.equal(await p.ev(`[...document.querySelectorAll('iframe')].some((x) => /terminal/.test(x.src))`), false, 'no terminal frame');
+  assert.equal(await p.ev(`term`), null, 'term stays null');
+  assert.equal(await p.ev(`${termTab}.tabIndex`), -1, 'out of the Tab order');
+  await p.ev(`draw()`);
+  await p.until('a redraw', `document.querySelectorAll('#tabs [role=tab]').length >= 3`);
+  assert.equal(await p.ev(`document.querySelector('#tabs [role=tab]').textContent`), 'Terminal', 'the Terminal tab stays first after a redraw');
+  // the badge ends the tab bar, after the tabs' strip; the line sits under the bar
+  assert.deepEqual(await p.ev(`(() => { const b = document.getElementById('view-only'); return b && [b.textContent, b.previousElementSibling?.id, b.parentElement.tagName, b === b.parentElement.lastElementChild, !b.hidden]; })()`), ['View only', 'tabs', 'HEADER', true, true]);
+  assert.equal(await p.ev(`document.querySelector('header').nextElementSibling?.id ?? null`), 'view-line');
+  assert.equal(await p.ev(`document.getElementById('view-line').textContent`), 'View only: you can look at everything on this box. Buttons that would change something are greyed out.');
+  assert.equal(await p.ev(`document.body.classList.contains('view-only')`), true);
+  // the fleet switch: a Park press asks no confirmation and sends nothing
+  await p.until('the machine switch', `!!document.querySelector('#ov-body > .ov-head .fleet-switch[data-scope=machine]')`);
+  await p.ev(`${kBtn('machine:park')}.click()`);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(await p.ev(textK('machine:park')), 'Park', 'no confirmation');
+  assert.equal(await p.ev(hubToast), 'View only: you can look, but not change anything');
+  await focusK(p, 'machine:park');
+  await p.key(' ');
+  await p.key('Enter');
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(await p.ev(textK('machine:park')), 'Park', 'no confirmation by the keyboard either');
+  // the thread composer: Enter in it sends nothing (its handler sends on keydown, with no click)
+  assert.equal(await composerEnter(p), 0, 'Enter in the composer sends nothing');
+  // (a Run press here proves nothing: the projects run already, and their {project} names aren't served)
+  assert.deepEqual(F.asks.get(A), [], 'nothing asked');
+  // Settings: the line, a disabled Off in the Notifications row, and no Test row even once notifications are on
+  await p.send('Page.navigate', { url: `http://hub.localhost:${F.port}/#settings` });
+  await p.until('the box rows', `document.querySelectorAll('#hub-settings .sec').length >= 3 && Boolean(${termTab})`);
+  assert.equal(await p.ev(`document.querySelector('#hub-settings .ov-head + .view-line')?.textContent ?? null`), 'View only: you can change your own sign-in methods here; the rest is read-only.');
+  const notes = `[...document.querySelectorAll('#hub-settings .set-row')].find((x) => x.querySelector('.t')?.firstChild?.textContent.trim() === 'New Inbox items')`;
+  assert.deepEqual(await p.ev(`(() => { const b = ${notes}?.querySelector('.r button'); return b && [b.textContent.trim(), b.getAttribute('aria-disabled'), b.title]; })()`), ['Off', 'true', 'View only: notifications are for Full people']);
+  assert.equal(await p.ev(`Boolean(${notes}.querySelector('#notify'))`), false, 'not the Notify control');
+  assert.equal(await p.ev(`Boolean(${notes}.querySelector('.badge.amber'))`), false, 'not marked yours to change');
+  await p.ev(`${notes}.querySelector('.r button').click()`);
+  await p.until('its toast', `${hubToast} === 'View only: notifications are for Full people'`);
+  await p.ev(`box.push = 'push'; pushSub = { endpoint: 'e' }; paintSettings(); true`);
+  assert.equal(await p.ev(setRow('Test')), null, 'no Test row');
+  assert.equal(await p.ev(`Boolean(document.getElementById('notify'))`), true, 'the Notify control is kept, off the page');
+});
+// A thread composer stood in for the card's (the hub's own keydown handler sends from #tl-c-text on
+// Enter, with no click), its tlSend spied on; then a real Enter. Answers how many sends ran.
+const composerEnter = async (p) => {
+  await p.ev(`(() => { window.__sends = 0; tlSend = () => { window.__sends++; }; document.getElementById('tl-c-text')?.remove(); const ta = document.createElement('textarea'); ta.id = 'tl-c-text'; ta.value = 'hello'; document.body.append(ta); ta.focus(); return true; })()`);
+  await p.key('Enter');
+  await new Promise((r) => setTimeout(r, 300));
+  return p.ev('window.__sends');
+};
+test('org-access A14: the hub stops and greys exactly spec §3\'s writes (one list, twice)', () => {
+  const src = hubHtml();
+  const js = /^const HUB_WRITES = ("[^\n]*");$/m.exec(src);
+  const css = /^  body\.view-only :is\(([^\n]*)\) \{ opacity: \.45; cursor: not-allowed; \}$/m.exec(src);
+  assert.ok(js && css, 'both lists found');
+  const want = ['.fleet-switch [data-fleet]', '[data-tl-send]', '#tl-c-text', '[data-tl-start]', '[data-tl-end]', '[data-tl-reopen]', '#view-notify'];
+  assert.deepEqual(JSON.parse(js[1]).split(', '), want);
+  assert.deepEqual(css[1].split(', '), want);
+  // and the listener hears the keyboard
+  assert.match(src, /for \(const type of \['click', 'submit', 'keydown'\]\) window\.addEventListener\(type, viewStop, true\);/);
+});
+test('org-access A14: the hub at Full has its Terminal tab, no badge and no line', CHROME, async (t) => {
+  const got = await viewHub(t, 'full');
+  if (!got) return t.skip("headless Chrome can't load hub.localhost here");
+  const { p } = got;
+  await p.until('the Terminal tab', `Boolean(${termTab})`);
+  assert.equal(await p.ev(`${termTab}.getAttribute('aria-disabled')`), null);
+  assert.equal(await p.ev(`Boolean(term)`), true);
+  assert.equal(await p.ev(`Boolean(document.getElementById('view-only') || document.getElementById('view-line'))`), false);
+  assert.equal(await p.ev(`document.body.classList.contains('view-only')`), false);
+  assert.equal(await composerEnter(p), 1, 'at Full, Enter in the composer sends');
+});
+
+test('Settings on a box: a member gets Your sign-in and no People', CHROME, async (t) => {
+  const got = await boxSettings(t, 'member');
+  if (!got) return t.skip("headless Chrome can't load hub.localhost here");
+  const { p } = got;
+  await p.until('the box rows', `document.querySelectorAll('#hub-settings .sec').length === 4 && document.querySelectorAll('#hub-settings .set-row.method').length === 2`);
+  assert.deepEqual(await p.ev(setGroups), ['This machine', 'Your sign-in', 'Notifications', 'Serving']);
+});
+
+test('Settings on a box: an older gateway, with no role, keeps Signing in › Passkeys', CHROME, async (t) => {
+  const got = await boxSettings(t, undefined);
+  if (!got) return t.skip("headless Chrome can't load hub.localhost here");
+  await got.p.until('the box rows', `document.querySelectorAll('#hub-settings .sec').length === 4`);
+  assert.deepEqual(await got.p.ev(setGroups), ['This machine', 'Signing in', 'Notifications', 'Serving']);
+  assert.notEqual(await got.p.ev(setRow('Passkeys')), null, 'its Passkeys row');
+});
+test('Settings on a box: People named on another origin is never read (connect-src is the page\'s own)', CHROME, async (t) => {
+  const other = await boxSettings(t, 'owner', { peopleAt: 'http://elsewhere.localhost:9/auth/people/list' });
+  if (!other) return t.skip("headless Chrome can't load hub.localhost here");
+  await other.p.until('the box rows', `document.querySelectorAll('#hub-settings .set-row.method').length === 2`);
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.deepEqual(await other.p.ev(setGroups), ['This machine', 'Your sign-in', 'Notifications', 'Serving'], 'no People from another origin');
+  assert.equal(await other.p.ev(`performance.getEntriesByType('resource').some((e) => e.name.includes('elsewhere'))`), false, 'nothing fetched there');
 });
 
 // The hub can't post an owner action. Its Overview asks the project's dashboard, in its frame, and

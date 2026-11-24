@@ -1,0 +1,37 @@
+{
+ "about": "a valid mark, then one from a session not handed to: the valid one stands",
+ "thread": "t-20261120-100008000-owner",
+ "view": {
+  "handed": {
+   "to": "plan-pricing",
+   "at": "2026-11-20T10:01:08.000Z"
+  },
+  "addressed": {
+   "by": "plan-pricing",
+   "at": "2026-11-20T10:02:08.000Z",
+   "note": "Trial button now says Start free trial.",
+   "sha": "3f7c2a9e1b0d4c5f6a7b8c9d0e1f2a3b4c5d6e7f",
+   "draft": "plan-pricing"
+  },
+  "check": "addressed",
+  "shot": null,
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "owner"
+ },
+ "api": {
+  "handed": {
+   "to": "plan-pricing",
+   "at": "2026-11-20T10:01:08.000Z"
+  },
+  "addressed": null,
+  "check": null,
+  "shot": null,
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "session",
+  "with": "plan-pricing"
+ }
+}

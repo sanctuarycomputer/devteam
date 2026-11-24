@@ -1,0 +1,2 @@
+{"v":1,"id":"u-20261120-100132000-supervisor","type":"turn","op":"new","thread":"t-20261120-100032000-owner","text":"On it.","at":"2026-11-20T10:01:32.000Z","by":"supervisor"}
+{"v":1,"id":"t-20261120-100032000-owner","type":"thread","op":"set","ready":{"outcome":"The trial button reads Start free trial.","at":"2026-11-20T10:02:32.000Z"},"noshot":"no-change","at":"2026-11-20T10:02:32.000Z","by":"supervisor"}

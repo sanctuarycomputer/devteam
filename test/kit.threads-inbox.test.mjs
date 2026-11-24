@@ -150,7 +150,7 @@ test('threads: answers from a turn, the tick and thread show', async (t) => {
     const Q = F.sup(['thread', 'ask', T, '--question', 'Narrow the goal to EU orders?', '--recommendation', 'Yes', '--goal', F.goal, '--stake', '2', '--urgency', '1']);
     const U = F.owner(['thread', 'say', T, 'yes, go ahead']).split('\n')[0];
     const S = F.sup(['thread', 'reply', T, 'On it.']);
-    const SR = F.owner(['thread', 'reply', T, 'Still on it.']);
+    const SR = F.owner(['thread', 'reply', T, 'Still on it.', '--refs', `question:${Q}`]);
     const elsewhere = F.owner(['thread', 'say', T2, 'yes']).split('\n')[0];
     assert.match(F.fails(['answer', Q, 'Yes', '--from-turn', U]), /the supervisor records what the owner said in a thread/);
     assert.match(F.fails(['answer', Q, 'Yes', '--from-turn', U], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'demo-01-x' }), /the supervisor records/);
@@ -165,7 +165,7 @@ test('threads: answers from a turn, the tick and thread show', async (t) => {
     assert.deepEqual([q.status, q.answered_by, q.channel, q.said, q.turn, q.matched], ['answered', 'owner', 'thread', 'yes, go ahead', U, true]);
     assert.equal(show(T).questions[0].status, 'answered');
     // one turn settles one question
-    const Q3 = F.sup(['thread', 'ask', T, '--question', 'And tell the US team?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+    const Q3 = F.sup(['thread', 'ask', T, '--question', 'And tell the US team?', '--goal', F.goal, '--stake', '1', '--urgency', '1', '--off-subject', 'a second question on the goal the first one served']);
     const later = F.owner(['thread', 'say', T, 'yes to that too']).split('\n')[0];
     assert.match(F.fails(['answer', Q3, 'yes', '--from-turn', U], F.SUP), new RegExp(`already settled ${Q}`));
     F.sup(['answer', Q3, 'yes', '--from-turn', later]);

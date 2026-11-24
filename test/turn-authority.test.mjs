@@ -86,7 +86,7 @@ test('turn authority', async (t) => {
       const QL = askAbout(TL, UL, 'Ship it?');
       assert.equal(show(TL).turns.find((x) => x.question === QL).text, `About your message: "${'🚀'.repeat(79)} …"\nShip it?`);
       // the turn must be the owner's, and in this thread (A3, A4)
-      const S = F.sup(['thread', 'reply', T, 'Looking.']);
+      const S = F.sup(['thread', 'reply', T, 'Looking.', '--refs', `question:${Q}`]);
       refused(['thread', 'ask', T, '--turn', S, ...q('About that?')], /that turn is the supervisor's/);
       const { T: T2, U: U2 } = thread('Elsewhere', 'Ship the banner.');
       refused(['thread', 'ask', T, '--turn', U2, ...q('About that?')], new RegExp(`that turn is in ${T2}, not ${T}`));
@@ -152,7 +152,7 @@ test('turn authority', async (t) => {
       const words = 'Merge the dashboard PR. Then tell the team.';
       const { T, U } = thread('Dashboard PR', words);
       const Q1 = askAbout(T, U, 'Merge the dashboard PR now?');
-      const Q2 = askAbout(T, U, 'Tell the team?');
+      const Q2 = askAbout(T, U, 'Tell the team?', ['--off-subject', 'a second question on the same message']);
       // A2: a part clause, words not there, or a ? left out
       refused(answer(Q1, U, 'Merge the dashboard'), /part of a clause; give the whole clause: "Merge the dashboard PR\."/);
       refused(answer(Q1, U, 'Merge the PR.'), /isn't in the turn/);
@@ -169,7 +169,7 @@ test('turn authority', async (t) => {
         refused(['answer', Q1, 'Yes', k, k === '--at' ? '0' : U], new RegExp(`answer ${k} goes with --from-turn`), {});
       }
       // A4: the supervisor's own turn never binds
-      const S = F.sup(['thread', 'reply', T, 'Looking.']);
+      const S = F.sup(['thread', 'reply', T, 'Looking.', '--refs', `question:${Q1}`]);
       refused(answer(Q1, S, 'Looking.'), /that turn is the supervisor's/);
       // A8: what the owner wrote after the question's seen is read first
       const said = refused(answer(Q1, U, 'Merge the dashboard PR.'), /the owner wrote in .* after/);
@@ -189,7 +189,7 @@ test('turn authority', async (t) => {
       assert.deepEqual(raw(Q2).find((l) => l.answer !== undefined).said_at, [24, 43]);
       assert.equal(JSON.parse(F.owner(['questions', '--id', Q2, '--json']))[0].status, 'answered');
       // A6: a clause-bound turn takes no whole-turn answer, and a whole-turn-bound one takes no clause
-      const Qw = F.sup(['thread', 'ask', T, ...q('Whole?')]);
+      const Qw = F.sup(['thread', 'ask', T, ...q('Whole?'), '--off-subject', 'a whole-turn question beside the clause ones']);
       const W = say(T, 'Yes to that.');
       refused(['answer', Qw, 'Yes', '--from-turn', U], /already settled/);
       F.sup(['answer', Qw, 'Yes', '--from-turn', W]);
@@ -284,14 +284,14 @@ test('turn authority', async (t) => {
       refused(['correct', D9, '--from-turn', U9, '--said', 'Wrong.'], /supervisor records/, {});
       refused(['correct', D9, '--from-turn', U9], /--said/);
       // a clause already bound by an answer on the same turn
-      const Qa = askAbout(T9, U9, 'Ship it now?');
+      const Qa = askAbout(T9, U9, 'Ship it now?', ['--off-subject', 'a question on the message after a note']);
       F.sup(answer(Qa, U9, 'Ship it.'));
       refused(['correct', D9, '--from-turn', U9, '--said', 'Ship it.'], /overlap what already settled/);
       F.sup(['correct', D9, '--from-turn', U9, '--said', 'Wrong.']);
       assert.deepEqual(set(D9).corrected.said_at, [0, 6]);
       // the correction binds its clause for answers too, and the turn for a whole-turn answer (task-3 T3-1)
-      refused(answer(askAbout(T9, U9, 'Was it wrong?'), U9, 'Wrong.'), new RegExp(`overlap what already corrected ${D9}`));
-      refused(['answer', F.sup(['thread', 'ask', T9, ...q('Whole turn?')]), 'Yes', '--from-turn', U9], /already settled/);
+      refused(answer(askAbout(T9, U9, 'Was it wrong?', ['--off-subject', 'a third question on the same message']), U9, 'Wrong.'), new RegExp(`overlap what already corrected ${D9}`));
+      refused(['answer', F.sup(['thread', 'ask', T9, ...q('Whole turn?'), '--off-subject', 'a whole-turn question beside the clause ones']), 'Yes', '--from-turn', U9], /already settled/);
       // a turn that carries only a correction takes no whole-turn answer either (task-3-2 R3-1)
       const D7 = call('decision');
       const { T: T7, U: U7 } = on(`decision:${D7}`, 'Wrong. Fine otherwise.');

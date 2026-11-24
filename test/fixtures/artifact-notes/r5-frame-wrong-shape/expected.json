@@ -1,0 +1,14 @@
+{
+ "about": "a frame whose w is text: no frame",
+ "thread": "t-20261120-100037000-owner",
+ "view": {
+  "handed": null,
+  "addressed": null,
+  "check": null,
+  "shot": null,
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "owner"
+ }
+}

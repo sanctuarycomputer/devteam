@@ -90,6 +90,8 @@ exit 0
     "merge-word": "Merging a ticket",
     "approve-feature-plan": "Approving a feature's plan",
     "merge-chore": "Merging a chore",
+    "chore-start": "Starting a chore",
+    "chore-drop": "Dropping a chore",
     "worker-slots": "Starting and stopping workers",
     "replan-within-feature": "Replanning the tickets of a feature",
     "add-ticket": "Adding a ticket",
@@ -123,6 +125,7 @@ exit 0
     "goal-change": "Changing a goal",
     "strategy-change": "Changing the strategy",
     "self-change": "Changing what the project is",
+    "names-checked": "Checking the names in a draft before it is public",
     "exterior-change": "Changing what the project relates to",
     "goal-met": "Saying a goal is met",
     "registry-attest": "Confirming the registry is complete",
@@ -200,6 +203,7 @@ exit 0
       "matched": null,
       "hash": "<sha>",
       "rewritten": false,
+      "answered_person": null,
       "labels": [
         "yes",
         "no"
@@ -949,7 +953,34 @@ exit 0
     ]
   },
   "planners": [],
-  "next_moves": [],
+  "next_moves": [
+    {
+      "subject": "ticket:g1-01-a",
+      "move": "answer-question",
+      "words": "Answer: Ship g1 behind a flag?",
+      "holder": "owner",
+      "ref": {
+        "kind": "q",
+        "id": "q-<sha>-<sha>-supervisor"
+      },
+      "title": "g1-01-a",
+      "command": null,
+      "covered_by": [
+        {
+          "kind": "blocked-on-owner",
+          "subject": "g1-01-a"
+        },
+        {
+          "kind": "owner-question-waiting",
+          "subject": "q-<sha>-<sha>-supervisor"
+        }
+      ],
+      "quiet": null,
+      "via": null,
+      "flag": null,
+      "rung": 0
+    }
+  ],
   "ooda": {
     "goals": [],
     "roadmap": {
@@ -1612,6 +1643,8 @@ exit 0
       "unknown": 0
     }
   },
+  "self": null,
+  "exterior": null,
   "autonomy": {
     "decisions": {
       "score": {
@@ -2134,6 +2167,17 @@ exit 0
       "owner_only": null
     },
     {
+      "key": "session_threads",
+      "group": "Agents and sessions",
+      "name": "Threads to sessions",
+      "description": "a thread about a live worker's or planner's work goes straight to it; off sends those to the responder",
+      "shown": "value",
+      "value": true,
+      "set": false,
+      "default": true,
+      "owner_only": null
+    },
+    {
       "key": "responder_command",
       "group": "Agents and sessions",
       "name": "Responder command",
@@ -2419,6 +2463,28 @@ exit 0
       "group": "Questions and findings",
       "name": "A finding set aside for",
       "description": "hours a set-aside finding stays quiet, unless its subject changes; a merge on a main stays set aside for good",
+      "shown": "value",
+      "value": 24,
+      "set": false,
+      "default": 24,
+      "owner_only": null
+    },
+    {
+      "key": "next_move_owed_minutes",
+      "group": "Questions and findings",
+      "name": "A move owed after",
+      "description": "minutes a next move the supervisor holds may wait before it is owed",
+      "shown": "value",
+      "value": 60,
+      "set": false,
+      "default": 60,
+      "owner_only": null
+    },
+    {
+      "key": "next_move_stall_hours",
+      "group": "Questions and findings",
+      "name": "A move stalled after",
+      "description": "hours any next move may stay the same before it is stalled, whoever holds it",
       "shown": "value",
       "value": 24,
       "set": false,

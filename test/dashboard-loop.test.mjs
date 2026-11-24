@@ -140,7 +140,9 @@ test('Self Improvement: sortable record tables, Orient as knowledge, lessons you
   const go = async (hash) => { await p.ev(`location.hash = ${JSON.stringify(hash)}; void 0`); await p.ev(FRAMES); };
   const closePeek = async () => { await p.ev("document.getElementById('drawer-close')?.click(); void 0"); await soon("document.getElementById('drawer').hidden", 'the peek closed'); };
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#loop` });
-  await soonIn(p, 120000)('!!DATA && !document.querySelector("main.waiting")', 'the first data drawn');
+  // and loaded (kit-784): until the load event, Chrome makes a script's hash change with no user gesture (every
+  // p.ev here) replace the entry rather than add one, so a Back or a close after it would land off the page
+  await soonIn(p, 120000)('document.readyState === "complete" && !!DATA && !document.querySelector("main.waiting")', 'the first data drawn');
 
   await t.test('Observe, Orient, Decide and Act are dbTables with sortable headers and no type column', async () => {
     for (const tab of ['observe', 'orient', 'decide', 'act']) {
@@ -418,7 +420,8 @@ test('Self Improvement: every table draws record text as text, never as markup',
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: INIT });
   const soon = soonIn(p);
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#loop` });
-  await soonIn(p, 120000)('!!DATA && !document.querySelector("main.waiting")', 'the first data drawn');
+  // and loaded, as the first visit (kit-784)
+  await soonIn(p, 120000)('document.readyState === "complete" && !!DATA && !document.querySelector("main.waiting")', 'the first data drawn');
   for (const tab of ['observe', 'orient', 'decide', 'act']) {
     await p.ev(`location.hash = ${JSON.stringify(`#loop?lt=${tab}`)}; void 0`);
     await soon(`${rowsOf(tab)}.some((tr) => tr.textContent.includes('onerror=window.__xss'))`, `${tab}: the hostile record's text, drawn as text`);

@@ -1,0 +1,15 @@
+{
+ "about": "a ready, its withdrawal, then an owner turn: nothing proposed, nothing withdrawn",
+ "thread": "t-20261120-100022000-owner",
+ "view": {
+  "handed": null,
+  "addressed": null,
+  "check": null,
+  "shot": null,
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "owner",
+  "ready": null
+ }
+}
