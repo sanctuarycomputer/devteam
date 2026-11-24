@@ -526,6 +526,11 @@ test('kit-253: the owner\'s People list offers Make admin and Make owner only wh
     gw.write({ ...s, people: s.people.filter((p) => p.role !== 'owner') });
     const st = await acts(C.owner);
     assert.deepEqual(st[ana.id], ['rename', 'level', 'role', 'relink', 'remove'], 'the stand-in: no Make owner');
+    // and the stand-in's level action works both ways (kit-250)
+    await accepts(gw, C.owner, 'level', { id: ana.id, rev: rev(gw, ana.id), level: 'view' }, 'the stand-in makes Ana view only');
+    assert.equal(rowOf(gw.state(), ana.id).level, 'view', 'Ana is View');
+    await accepts(gw, C.owner, 'level', { id: ana.id, rev: rev(gw, ana.id), level: 'full' }, 'the stand-in makes Ana full');
+    assert.equal(rowOf(gw.state(), ana.id).level, 'full', 'Ana is Full');
   } finally { await gw.close(); }
 });
 

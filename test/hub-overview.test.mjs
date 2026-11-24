@@ -411,7 +411,7 @@ async function listenOn(t, srv, port = 0, host = '127.0.0.1') {
 }
 // auth: the gateway's /auth/* answers on a box, (F, pathname) => [status, body] (Your sign-in and People)
 async function fixtureHub(t, { ports = [], box = null, kit: hubKit = 'v0.57.0', image, auth = null } = {}) {
-  const F = { list: [], asks: new Map(), hashes: new Map(), fail: new Map(), delay: new Map() };
+  const F = { posts: [], list: [], asks: new Map(), hashes: new Map(), fail: new Map(), delay: new Map() };
   F.setList = (list) => { F.list = list; };
   for (const port of ports) {
     F.asks.set(port, []);
@@ -437,7 +437,20 @@ async function fixtureHub(t, { ports = [], box = null, kit: hubKit = 'v0.57.0', 
     const u = new URL(q.url, 'http://x');
     if (u.pathname === '/') { s.writeHead(200, { 'content-type': 'text/html' }); return s.end(hubHtml()); }
     if (u.pathname === '/instances.json') { s.writeHead(200, { 'content-type': 'application/json' }); return s.end(JSON.stringify({ hub: 1, kit: hubKit, ...(image ? { image: true } : {}), instances: F.list })); }
-    if (u.pathname.startsWith('/auth/') && auth) { const [code, body] = auth(F, u.pathname); s.writeHead(code, { 'content-type': 'application/json' }); return s.end(JSON.stringify(body)); }
+    // what a page posts to /auth/* is kept in F.posts ({ path, body }), and the answer is auth's
+    if (u.pathname.startsWith('/auth/') && auth) {
+      let raw = '';
+      q.on('data', (c) => { raw += c; });
+      q.on('end', () => {
+        let got = null;
+        try { got = raw ? JSON.parse(raw) : null; } catch {}
+        if (q.method === 'POST') F.posts.push({ path: u.pathname, body: got });
+        const [code, body] = auth(F, u.pathname, got);
+        s.writeHead(code, { 'content-type': 'application/json' });
+        s.end(JSON.stringify(body));
+      });
+      return;
+    }
     if (u.pathname === '/box.json' && box) { s.writeHead(200, { 'content-type': 'application/json' }); return s.end(JSON.stringify(box(F))); }
     s.writeHead(404, { 'content-type': 'application/json' });
     s.end('{}');
@@ -886,6 +899,7 @@ async function boxSettings(t, role, { peopleAt = null, people = peopleList, fres
     const at = (h) => `http://${h}.localhost:${F.port}/`;
     return { box: 2, terminal: at('terminal'), project: `http://{project}.localhost:${F.port}/`, passkeys: `http://hub.localhost:${F.port}/auth/passkeys`, previews: at('previews'), image: { release: 'v0.57.0', tools: { 'claude-code': '2.4.1' } }, ...(role ? { role } : {}), ...(role === 'member' ? {} : { people: peopleAt ?? `http://hub.localhost:${F.port}/auth/people/list` }) };
   }, auth: (_, p) => (p === '/auth/method/list' ? [200, { methods: signInMethods, notices: [], fresh_ms: fresh }] : p === '/auth/people/list' && role !== 'member' ? [200, people]
+    : p === '/auth/people/level' && role !== 'member' ? [200, { ok: true, rev: 9 }]
     : p === '/auth/people/invite' && role === 'owner' ? [200, { person: { id: 'p-new', rev: 1 }, link: `http://hub.localhost:${F.port}/auth/claim#a-token`, expires: Date.now() + 864e5 }] : [403, { error: 'no', code: 'not-allowed' }]) });
   F.setList([]);
   const p = await hubPage(t, `http://hub.localhost:${F.port}/#settings`);
@@ -932,7 +946,9 @@ const viewPeople = { viewer: peopleList.viewer, people: [peopleList.people[0],
 test('org-access A14: People offers View', CHROME, async (t) => {
   const got = await boxSettings(t, 'owner', { people: viewPeople, fresh: 3600e3 });
   if (!got) return t.skip("headless Chrome can't load hub.localhost here");
-  const { p } = got;
+  const { F, p } = got;
+  const posted = (path) => F.posts.filter((x) => x.path === path).map((x) => x.body);
+  const toastIs = (words) => p.until(`the toast "${words}"`, `document.querySelector('.oa-toast')?.textContent === ${JSON.stringify(words)}`);
   const person = (id) => `#hub-settings .person[data-id=${JSON.stringify(id)}]`;
   const menuOf = async (id) => {
     await p.ev(`document.querySelector(${JSON.stringify(`${person(id)} .menu-btn`)}).click()`);
@@ -949,8 +965,27 @@ test('org-access A14: People offers View', CHROME, async (t) => {
   assert.equal(await p.ev(`document.querySelector('#oa-confirm .acts button').textContent`), 'Make view only');
   await p.ev(`[...document.querySelectorAll('#oa-confirm button')].find((b) => b.textContent === 'Cancel').click()`);
   await p.until('closed', `!document.querySelector('#oa-confirm')`);
+  assert.deepEqual(posted('/auth/people/level'), [], 'Cancel sends nothing');
+  // yes on Make view only posts view for Ana, and the toast says so
+  await menuOf('p-ana');
+  await pick('Make view only');
+  await p.until('the confirmation', `Boolean(document.querySelector('#oa-confirm'))`);
+  await p.ev(`document.querySelector('#oa-confirm .acts button').click()`);
+  for (let i = 0; i < 100 && posted('/auth/people/level').length < 1; i++) await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(posted('/auth/people/level').map((b) => [b?.id, b?.level]), [['p-ana', 'view']], 'Make view only posts view');
+  await toastIs('Ana is now view only');
+  await p.until('the confirmation closed', `!document.querySelector('#oa-confirm')`);
+  // and yes on Make full posts full for Vic
   assert.deepEqual(await menuOf('p-vic'), ['Rename', 'Make full', 'Send a new link', 'Remove'], 'a View member');
-  await closeMenu();
+  await pick('Make full');
+  await p.until('the confirmation', `Boolean(document.querySelector('#oa-confirm'))`);
+  assert.equal(await p.ev(`document.querySelector('#oa-confirm .acts button').textContent`), 'Make full');
+  await p.ev(`document.querySelector('#oa-confirm .acts button').click()`);
+  for (let i = 0; i < 100 && posted('/auth/people/level').length < 2; i++) await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(posted('/auth/people/level').map((b) => [b?.id, b?.level]), [['p-ana', 'view'], ['p-vic', 'full']], 'Make full posts full');
+  await toastIs('Vic is now full');
+  await p.until('the confirmation closed', `!document.querySelector('#oa-confirm')`);
+  if (await p.ev(`Boolean(document.querySelector('.oa-menu'))`)) await closeMenu();
   await p.until('the menu closed', `!document.querySelector('.oa-menu')`);
   await p.ev(`[...document.querySelectorAll('#oa-people button')].find((b) => b.textContent === 'Invite someone').click()`);
   await p.until('the invite card', `Boolean(document.querySelector('#oa-invite input'))`);
@@ -960,6 +995,7 @@ test('org-access A14: People offers View', CHROME, async (t) => {
   await p.ev(`[...document.querySelectorAll('#oa-invite button')].find((b) => b.textContent === 'Make the invite link').click()`);
   await p.until('the link card', `Boolean(document.querySelector('#oa-link'))`);
   assert.equal(await p.ev(`document.querySelector('#oa-link p').textContent`), 'It works once, for 24 hours. Whoever opens it first makes a passkey and joins as view only.');
+  assert.deepEqual(posted('/auth/people/invite'), [{ name: 'Sam Rivera', level: 'view' }], 'the invite posts the level chosen');
 });
 
 test('Settings on a box: a member gets Your sign-in and no People', CHROME, async (t) => {
