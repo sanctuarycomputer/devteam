@@ -201,6 +201,7 @@ exit 0
       "matched": null,
       "hash": "<sha>",
       "rewritten": false,
+      "answered_person": null,
       "labels": [
         "yes",
         "no"

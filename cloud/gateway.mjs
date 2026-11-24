@@ -1844,14 +1844,32 @@ export function createGateway(opts = {}) {
 
   // --- requests that look local to the kit, and its headers mapped back to the public names ---
   const HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'referer', 'forwarded', 'x-real-ip', 'true-client-ip', 'cf-connecting-ip']);
+  // Who a request is and what it may see are the gateway's to say (kit-252): the browser's copies of
+  // x-devteam-person and x-devteam-level never pass, on any route.
   const upstreamHeaders = (req, port, publicOrigin, { loopbackHost = '127.0.0.1' } = {}) => {
     const h = {};
-    for (const [k, v] of Object.entries(req.headers)) if (!HOP.has(k) && !k.startsWith('x-forwarded-') && !k.startsWith('fly-') && !k.startsWith('rndr-') && !k.startsWith('render-')) h[k] = v;
+    for (const [k, v] of Object.entries(req.headers)) if (!HOP.has(k) && !k.startsWith('x-forwarded-') && !k.startsWith('fly-') && !k.startsWith('rndr-') && !k.startsWith('render-') && k !== 'x-devteam-person' && k !== 'x-devteam-level') h[k] = v;
     h.host = `${loopbackHost}:${port}`;
     if (req.headers.origin === publicOrigin) h.origin = `http://${loopbackHost}:${port}`;
     const rest = String(req.headers.cookie ?? '').split(';').map((p) => p.trim()).filter((p) => p && p.split('=')[0] !== COOKIE).join('; ');
     if (rest) h.cookie = rest; else delete h.cookie;
     return h;
+  };
+  // The person a session is, as x-devteam-person (presence@1 §4) for a dashboard or the hub to put on
+  // the owner's lines it writes for them (kit-252): null for the owner's stand-in (a state from before
+  // people: no person, the owner as ever), false for a row whose id or name the header can't carry
+  // (only a hand-edited state makes one), never a throw. A lone surrogate is U+FFFD (encodeURIComponent
+  // throws on one), and the name is cut, by whole characters, to 80 bytes of JSON without its quotes.
+  // Attribution, not authority: it is not signed, and the kit gives it no say in who may do what.
+  const PERSON_ID = /^[A-Za-z0-9._:@/-]{1,64}$/;
+  const personHeader = (person) => {
+    if (!person || person.id === null) return null;
+    if (typeof person.id !== 'string' || !PERSON_ID.test(person.id) || typeof person.name !== 'string') return false;
+    const whole = person.name.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD');
+    let name = '';
+    let n = 0;
+    for (const ch of whole) { const b = Buffer.byteLength(JSON.stringify(ch)) - 2; if (n + b > 80) break; name += ch; n += b; }
+    return name ? `${person.id};name=${encodeURIComponent(name)}` : false;
   };
   const LOOP = /http:\/\/(?:127\.0\.0\.1|localhost):(\d+)/g;
   // A block port to its project's host, as the list last said; a port no one name holds stays as sent.
@@ -1886,8 +1904,9 @@ export function createGateway(opts = {}) {
     return { ...out, ...hsts };
   };
   // viewer: null, or for the viewer's page whether the wrapper's grant holds (viewerAncestors)
-  const proxy = (req, res, { port, path: p, publicOrigin, cap, extra = null, viewer = null }) => {
-    const up = http.request({ host: '127.0.0.1', port, method: req.method, path: p, headers: upstreamHeaders(req, port, publicOrigin) }, (ur) => {
+  // person: the session's x-devteam-person (personHeader), on a dashboard's request alone
+  const proxy = (req, res, { port, path: p, publicOrigin, cap, extra = null, viewer = null, person = null }) => {
+    const up = http.request({ host: '127.0.0.1', port, method: req.method, path: p, headers: { ...upstreamHeaders(req, port, publicOrigin), ...(person ? { 'x-devteam-person': person } : {}) } }, (ur) => {
       // Never kept: a page an agent served once on this name must not come back from the browser's
       // cache after a real dashboard has taken its port.
       const head = downstreamHeaders(ur.headers, cap, publicOrigin);
@@ -1910,7 +1929,7 @@ export function createGateway(opts = {}) {
   // The body is read whole (it is small) so its hash is what is signed; whatever signature headers
   // the browser sent are replaced.
   const SIGNED_POSTS = { '/api/pane-answer': paneSignature, '/api/owner-setting': ownerSettingSignature };
-  const signedPost = (req, res, port, publicOrigin, route, signer) => {
+  const signedPost = (req, res, port, publicOrigin, route, signer, person = null) => {
     const chunks = [];
     let size = 0;
     req.on('data', (c) => { size += c.length; if (size <= 20000) chunks.push(c); else chunks.length = 0; });
@@ -1918,7 +1937,7 @@ export function createGateway(opts = {}) {
     req.on('end', () => {
       if (size > 20000) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
       const data = Buffer.concat(chunks);
-      const up = http.request({ host: '127.0.0.1', port, method: 'POST', path: route, headers: { ...upstreamHeaders(req, port, publicOrigin), 'content-length': data.length, ...signer(threadKey(store).privateKey, port, data) } }, (ur) => {
+      const up = http.request({ host: '127.0.0.1', port, method: 'POST', path: route, headers: { ...upstreamHeaders(req, port, publicOrigin), ...(person ? { 'x-devteam-person': person } : {}), 'content-length': data.length, ...signer(threadKey(store).privateKey, port, data) } }, (ur) => {
         res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, undefined, publicOrigin), 'cache-control': 'no-store' });
         pipeline(ur, res, () => {});
       });
@@ -2073,12 +2092,12 @@ export function createGateway(opts = {}) {
   // hub's own Unix user and can send the hub any header, so on a box the hub takes a press only
   // with this signature, checked against the public half the boot gave root (gateway.mjs thread-key).
   const HUB_POSTS = ['thread-new', 'thread-say', 'thread-close', 'thread-reopen', 'start'];
-  const hubAsk = (method, p, body = null) => new Promise((settle) => {
+  const hubAsk = (method, p, body = null, person = null) => new Promise((settle) => {
     let deadline = null;
     const resolve = (v) => { clearTimeout(deadline); settle(v); };
     const none = () => resolve(null);
     const data = body === null ? null : Buffer.from(JSON.stringify(body));
-    const up = http.request({ host: '127.0.0.1', port: HUB_PORT, path: p, method, timeout: 150000, headers: { host: `127.0.0.1:${HUB_PORT}`, 'sec-fetch-site': 'same-origin', ...(data ? { origin: `http://127.0.0.1:${HUB_PORT}`, 'content-type': 'application/json', 'content-length': data.length, ...hubSignature(threadKey(store).privateKey, p, data) } : {}) } }, (ur) => {
+    const up = http.request({ host: '127.0.0.1', port: HUB_PORT, path: p, method, timeout: 150000, headers: { host: `127.0.0.1:${HUB_PORT}`, 'sec-fetch-site': 'same-origin', ...(person ? { 'x-devteam-person': person } : {}), ...(data ? { origin: `http://127.0.0.1:${HUB_PORT}`, 'content-type': 'application/json', 'content-length': data.length, ...hubSignature(threadKey(store).privateKey, p, data) } : {}) } }, (ur) => {
       const chunks = [];
       let size = 0;
       ur.on('data', (c) => { size += c.length; if (size > 4 * 1024 * 1024) { none(); up.destroy(); } else chunks.push(c); });
@@ -2096,10 +2115,10 @@ export function createGateway(opts = {}) {
   // what the press asked, 403 for a press the hub wouldn't take: its signature, its key, a
   // replay). Only the status and the one line of error go back from a refusal. Anything else (no
   // hub, a hub on a kit from before these threads, something else on the port) is a 502.
-  const operatorThreads = async (req, res, action) => {
+  const operatorThreads = async (req, res, action, person = null) => {
     let body = null;
     if (action) { body = await readJson(req, 20000); if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'missing or invalid fields' }); body = redactClaimLinks(body); }
-    const r = await hubAsk(action ? 'POST' : 'GET', action ? `/operator/${action}` : '/operator/threads', body);
+    const r = await hubAsk(action ? 'POST' : 'GET', action ? `/operator/${action}` : '/operator/threads', body, person);
     const answered = r && r.json && typeof r.json === 'object' && !Array.isArray(r.json);
     if (answered && r.status === 200) return json(res, 200, r.json);
     if (answered && [400, 403].includes(r.status) && typeof r.json.error === 'string') return json(res, r.status, { error: r.json.error.slice(0, 600) });
@@ -3095,6 +3114,9 @@ export function createGateway(opts = {}) {
         return send(res, claimed ? 401 : 403, 'text/plain; charset=utf-8', claimed ? 'sign in with your passkey' : 'this box is unclaimed');
       }
       const { session, person } = who;
+      // who this session is, for the kit (kit-252): read here, once, before anything is forwarded
+      const personH = personHeader(person);
+      if (personH === false) return send(res, 500, 'text/plain; charset=utf-8', "this person's record can't be read");
       // Only now, with the session, does the name mean anything: a miss asks the hub once, shared.
       let port = null;
       let pv = null;
@@ -3125,10 +3147,10 @@ export function createGateway(opts = {}) {
         if (['GET', 'HEAD'].includes(req.method) && rawPath.startsWith('/upload/')) return await serveUpload(req, res, rawPath);
         const prefix = req.method === 'GET' && ['iframe', 'document'].includes(req.headers['sec-fetch-dest']) && ['same-origin', 'none'].includes(req.headers['sec-fetch-site']) ? ARTIFACT.exec(rawPath)?.[0] : null;
         if (prefix) return redirect(res, `${capFor(port, prefix, session)}${req.url}`);
-        if (req.method === 'POST' && Object.hasOwn(SIGNED_POSTS, rawPath)) return signedPost(req, res, port, own, rawPath, SIGNED_POSTS[rawPath]);
+        if (req.method === 'POST' && Object.hasOwn(SIGNED_POSTS, rawPath)) return signedPost(req, res, port, own, rawPath, SIGNED_POSTS[rawPath], personH);
         // the viewer, by its path as the kit resolves it: the box may frame it only under the wrapper's grant
         const viewer = VIEWER.test(p) || VIEWER.test(rawPath) ? { granted: wrapGranted(label, rawPath, url) } : null;
-        return proxy(req, res, { port, path: req.url, publicOrigin: own, viewer, extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
+        return proxy(req, res, { port, path: req.url, publicOrigin: own, viewer, person: personH, extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
       }
       // The terminal: the gateway's copy of ttyd's page. Only its socket reaches ttyd (see upgrade).
       if (isTerm) {
@@ -3207,8 +3229,8 @@ export function createGateway(opts = {}) {
       if (req.method === 'GET' && p === '/box.json') return json(res, 200, { box: 2, terminal: `${TERM}/`, project: `${pubUrl.protocol}//{project}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, previews: `${PUB}/dev/`, push: vapid().publicKey, image: BOX_IMAGE, role: roleOf(person), ...(roleOf(person) === 'member' ? {} : { people: `${PUB}/auth/people/list` }) });
       if (req.method === 'GET' && p === '/instances.json') return instances(req, res);
       if (req.method === 'GET' && p === '/memory.json') return memory(req, res, url.searchParams);
-      if (req.method === 'GET' && p === '/operator/threads') return operatorThreads(req, res, null);
-      if (req.method === 'POST' && p.startsWith('/operator/') && HUB_POSTS.includes(p.slice(10))) return operatorThreads(req, res, p.slice(10));
+      if (req.method === 'GET' && p === '/operator/threads') return operatorThreads(req, res, null, personH);
+      if (req.method === 'POST' && p.startsWith('/operator/') && HUB_POSTS.includes(p.slice(10))) return operatorThreads(req, res, p.slice(10), personH);
       if (req.method === 'POST' && p === '/push/subscribe') {
         const sub = pushSubscription(await readJson(req));
         if (!sub) return json(res, 400, { error: 'that is not a push subscription this box can send to' });
