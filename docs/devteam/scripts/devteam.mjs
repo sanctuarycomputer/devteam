@@ -2586,7 +2586,10 @@ const logGet = (id) => readLog().objects.get(id) ?? null;
 const byTime = (a, b) => a.created_at.localeCompare(b.created_at);
 // A message is handled when a reply cites it (--re), or when the supervisor routed it to the owner
 // as a question that cites it (ask --re): then it waits on the owner, which the question shows.
-const handledMessages = () => new Set([...logObjects('message'), ...logObjects('question')].map((x) => x.re).filter(Boolean));
+// A handoff is closed only by the supervisor's re (kit-109, ruling a-20261123-051656528): a session's
+// hand-written line naming its own handoff closes nothing (handoffClosers, also openHandoffs').
+const handoffClosers = (xs, isHandoff) => new Set(xs.filter((x) => x.re && (!isHandoff(x.re) || x.created_by === 'supervisor')).map((x) => x.re));
+const handledMessages = () => { const msgs = logObjects('message'); const h = new Set(msgs.filter((m) => m.kind === 'handoff').map((m) => m.id)); return handoffClosers([...msgs, ...logObjects('question')], (id) => h.has(id)); };
 
 // What the owner saw: the question with every field it was asked with (later lines may only add
 // the supervisor's status, reason and rating, and the owner's own fields). The rating (stake,
@@ -26321,13 +26324,18 @@ function cmdSend() {
   // responder-1: a reply's re closes what it names in every reader of open messages, so the
   // responder's never carries one (integrity refuses the line too; this says so before it is built)
   if (re && from === 'responder') die('the responder replies to no message (re): a reply would close what it names; send info, or hand the thread over with --kind handoff --thread <t-id>');
+  // kit-109: a ticket or planner writer hands over a thread bound to it, and only the supervisor's
+  // re closes a handoff (handledMessages), so a session's re naming one is refused before it is written
+  const session = ['ticket', 'planner'].includes(writerClass(from));
+  if (re && session && logGet(re)?.type === 'message' && logGet(re).kind === 'handoff') die('a handoff stays open until the supervisor answers it in its thread; say more there with thread reply, or send another handoff');
   if (kind === 'handoff') {
-    if (from !== 'responder' || to !== 'supervisor') die('a handoff is the responder\'s: the responder hands threads to the supervisor (send supervisor "…" --kind handoff --thread <t-id>, run as the responder)');
+    if (!(from === 'responder' || session) || to !== 'supervisor') die('a handoff is the responder\'s: the responder hands threads to the supervisor (send supervisor "…" --kind handoff --thread <t-id>, run as the responder)');
     if (!thread) die('a handoff names its thread: --thread <t-id>');
     const t = logGet(thread);
     if (t?.type !== 'thread') die(`no thread ${thread} (devteam.mjs thread list)`);
     // a resolved thread takes no supervisor turn, so its handoff could never settle
     if (t.status === 'resolved') die(`${thread} is resolved: the owner closed it, so a handoff on it could never be answered there; ask the owner to reopen it, or send --kind info`);
+    if (session && boundWriter(t.subject) !== from) die("this thread isn't about your work; hand over only in a thread about your ticket or plan");
   }
   if (re && logGet(re)?.type !== 'message') warn(`--re ${re} matches no logged message`);
   out(sendLine({ to, kind, text, re, sha, from, ticket: flagStr('ticket') ?? (from === 'owner' ? null : currentTicketId()), thread }).id);
@@ -31353,7 +31361,8 @@ function cmdWait() {
       for (const l of ls) if (l.type === 'turn' && typeof l.thread === 'string') (turnsOf.get(l.thread) ?? turnsOf.set(l.thread, []).get(l.thread)).push(l);
       for (const us of turnsOf.values()) us.sort((a, b) => String(a.at).localeCompare(String(b.at)));
       const opens = (l) => l.type === 'thread' && (l.op === 'new' || (l.op === 'set' && l.status === 'open'));
-      const responders = (l) => l.type === 'turn' ? l.routed_to === 'responder' : opens(l) && (turnsOf.get(l.id) ?? []).find((u) => u.at >= l.at)?.routed_to === 'responder';
+      const notMine = (r) => r === 'responder' || r === 'session';
+      const responders = (l) => l.type === 'turn' ? notMine(l.routed_to) : opens(l) && notMine((turnsOf.get(l.id) ?? []).find((u) => u.at >= l.at)?.routed_to);
       const owner = ls.filter((l) => !responders(l)).map((l) => ({ k: l.id, at: Date.parse(l.at) }));
       const got = sub(['messages', '--open', '--to', 'supervisor', '--json']);
       const msgs = (got ?? []).map((m) => ({ k: `${m.id} [${m.kind}] from ${m.created_by}: ${String(m.text).slice(0, 160)}`, at: Date.parse(m.created_at) }));
@@ -35527,7 +35536,7 @@ function responderOverdue(objects, now = Date.now(), byThread = turnsByThread(ob
 // it (settledByLanding) and named by no reply's re, the newest per thread (an older one when the
 // newest was answered). Map thread -> message id.
 function openHandoffs(objects = readLog().objects) {
-  const replied = new Set([...objects.values()].filter((o) => o.type === 'message' || o.type === 'question').map((o) => o.re).filter(Boolean));
+  const replied = handoffClosers([...objects.values()].filter((o) => o.type === 'message' || o.type === 'question'), (id) => objects.get(id)?.type === 'message' && objects.get(id).kind === 'handoff');
   const m = new Map();
   for (const o of [...objects.values()].filter((x) => x.type === 'message' && x.kind === 'handoff' && x.to === 'supervisor' && typeof x.thread === 'string').sort(byTime)) {
     if (!replied.has(o.id) && !settledByLanding(o)) m.set(o.thread, o.id);

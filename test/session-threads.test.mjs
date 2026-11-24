@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { dashboardOnFreePort, hasTmux, line, threadsFixture, write } from './lib/kit.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -226,6 +226,8 @@ test('kit-109 session-bound threads', { skip: NO_TMUX, timeout: 600000 }, async 
     F.g(['checkout', '-q', 'main'], F.old);
     F.g(['merge', '-q', '--no-ff', '-m', `Merge pull request #9 from o/ticket/${M}`, `ticket/${M}`], F.old);
     F.g(['push', '-q', 'origin', 'main'], F.old);
+    // the fixture's merge has no merge act; acked, so its high finding doesn't wake wait (S5b, S5f)
+    F.sup(['ack', 'merged-without-merge', M, '--reason', 'a fixture merge, no real PR']);
     const tm = F.newThread(item(`ticket:${M}`));
     const o = F.lineOf(tm.U);
     assert.ok(o.routed_to === 'responder' && o.routed_session === undefined, `fell through to the responder: ${o.routed_to}/${o.routed_session}`);
@@ -388,5 +390,70 @@ test('kit-109 session-bound threads', { skip: NO_TMUX, timeout: 600000 }, async 
     const v = JSON.parse(F.owner(['thread', 'show', T, '--json']));
     assert.deepEqual([v.waiting, v.with], ['session', W]);
     assert.match(F.sup(['thread', 'list', '--waiting']), new RegExp(`${T} \\[open, the agent on ${W} has it`));
+  });
+
+  // ---- done-when 5: hand-offs
+  let hid = null;
+  await t.test('S5a: send supervisor --kind handoff --thread from a bound worker is accepted', () => {
+    const r = F.run(F.old, ['send', 'supervisor', 'the owner wants this merged', '--kind', 'handoff', '--thread', tw.T], WORKER(W));
+    hid = /^m-\S+/.exec(r.out)?.[0] ?? null;
+    assert.equal(F.lineOf(hid ?? 'none').kind, 'handoff', r.err);
+  });
+  await t.test('S5b: it wakes a running wait', async () => {
+    fs.writeFileSync(path.join(F.old, 'docs/devteam/run/wait-since'), `${Date.now()}\n`);
+    await new Promise((r) => setTimeout(r, 50));
+    const w = spawn(process.execPath, [path.join(F.old, 'docs/devteam/scripts/devteam.mjs'), 'wait', '--minutes', '1'], { cwd: F.old, env: F.env(SUP), stdio: ['ignore', 'pipe', 'pipe'] });
+    let o = '';
+    let gone = false;
+    w.stdout.on('data', (b) => { o += b; });
+    w.on('close', () => { gone = true; });
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.equal(gone, false, `wait returned before anything happened: ${o.slice(0, 300)}`);
+    const r = F.run(F.old, ['send', 'supervisor', 'and please re-run CI', '--kind', 'handoff', '--thread', tw.T], WORKER(W));
+    const id = /^m-\S+/.exec(r.out)?.[0] ?? 'refused';
+    const woke = gone || await Promise.race([new Promise((res) => w.on('close', () => res(true))), new Promise((res) => setTimeout(() => res(false), 45000))]);
+    w.kill();
+    assert.ok(woke && o.includes(id), `wait woke on ${id}: ${o.slice(0, 300)}`);
+  });
+  await t.test('S5c: it stays open until a supervisor turn in t', () => {
+    const open = () => JSON.parse(F.sup(['messages', '--open', '--json'])).filter((m) => m.kind === 'handoff' && m.thread === tw.T);
+    F.run(F.old, ['thread', 'reply', tw.T, 'one more from W', '--refs', `ticket:${W}`], WORKER(W));
+    const was = open().length;
+    F.sup(['thread', 'reply', tw.T, 'I will merge it after review']);
+    assert.deepEqual([was > 0, open().length], [true, 0], 'open after W spoke, settled by the supervisor');
+  });
+  await t.test("S5d: a session's handoff naming a thread not bound to it is refused", () => {
+    assert.match(Object.values(F.run(F.old, ['send', 'supervisor', 'x', '--kind', 'handoff', '--thread', tp.T], WORKER(W))).join(' '), /this thread isn't about your work/);
+  });
+
+  let h5 = null;
+  await t.test("S5e: W's own re on its handoff leaves it open: send --re refused, a hand-written re line ignored", () => {
+    h5 = /^m-\S+/.exec(F.run(F.old, ['send', 'supervisor', 'please decide the tiers', '--kind', 'handoff', '--thread', tw.T], WORKER(W)).out)?.[0] ?? null;
+    assert.ok(h5, 'a handoff to test with');
+    const r = F.run(F.old, ['send', 'supervisor', 'never mind', '--re', h5], WORKER(W));
+    assert.match(Object.values(r).join(' '), /a handoff stays open until the supervisor answers it/);
+    const mid = F.hand(W, { type: 'message', id: `m-${new Date().toISOString().replace(/[-:.Z]/g, '').replace('T', '-')}-${W}`, to: 'supervisor', kind: 'info', text: 'never mind', re: h5 }, 0, `${W}.jsonl`);
+    assert.ok(JSON.parse(F.sup(['messages', '--json'])).some((m) => m.id === mid), 'the hand-written line is read');
+    assert.equal(JSON.parse(F.sup(['messages', '--open', '--json'])).some((m) => m.id === h5), true, `the handoff ${h5} is still open`);
+  });
+  await t.test("S5g: the supervisor's re closes the handoff", () => {
+    assert.ok(h5, 'S5e made a handoff');
+    F.sup(['send', W, 'Two tiers: decided', '--kind', 'answer', '--re', h5]);
+    assert.equal(JSON.parse(F.sup(['messages', '--open', '--json'])).some((m) => m.id === h5), false, `the handoff ${h5} is closed`);
+  });
+  await t.test('S5f: wait does not return on an owner turn routed to a session', async () => {
+    fs.writeFileSync(path.join(F.old, 'docs/devteam/run/wait-since'), `${Date.now()}\n`);
+    await new Promise((r) => setTimeout(r, 50));
+    const w = spawn(process.execPath, [path.join(F.old, 'docs/devteam/scripts/devteam.mjs'), 'wait', '--minutes', '1'], { cwd: F.old, env: F.env(SUP), stdio: ['ignore', 'pipe', 'pipe'] });
+    let o = '';
+    let gone = false;
+    w.stdout.on('data', (b) => { o += b; });
+    w.on('close', () => { gone = true; });
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.equal(gone, false, `wait returned before anything happened: ${o.slice(0, 300)}`);
+    const U = F.say(tw.T, 'quick one for the worker');
+    const woke = gone || await Promise.race([new Promise((res) => w.on('close', () => res(true))), new Promise((res) => setTimeout(() => res(false), 30000))]);
+    w.kill();
+    assert.equal(woke && o.includes(U), false, `wait stayed asleep on ${U}: ${o.slice(0, 200)}`);
   });
 });
