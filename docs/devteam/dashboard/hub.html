@@ -1870,7 +1870,9 @@ function oaNeedFresh() {
   OA.open = null; OA.panel = null; OA.link = null;
   oaCloseMenu();
   oaRedraw();
-  window.scrollTo(0, 0);
+  // Settings scrolls inside its own view, not the window: the note is at its top
+  setEl.scrollTo(0, 0);
+  oaToast("Confirm it's you first");
 }
 function oaFreshNote() {
   if (!SEC.fresh) {
@@ -1979,9 +1981,12 @@ function oaMeta(x) {
     return `${level} · invite link not used yet · expires in ${plural(Math.max(1, Math.round((x.link.expires - Date.now()) / 3600e3)), 'hour')}`;
   }
   const newLink = x.link?.kind === 'new-link' && !x.link.expired ? ' · a new link not used yet' : '';
-  return `${plural(x.methods, 'sign-in method')} · ${x.last_seen ? `signed in ${agoText(x.last_seen)}` : 'never signed in'}${newLink}`;
+  // your own row: you are signed in, reading it (a claim sets no last_seen), as the mock draws it
+  return `${plural(x.methods, 'sign-in method')} · ${x.you ? 'signed in now' : x.last_seen ? `signed in ${agoText(x.last_seen)}` : 'never signed in'}${newLink}`;
 }
 // the ⋯ menu: one at a time, closed by Escape, a click outside it, or a choice
+// The menu is placed on the body, fixed: Settings scrolling under it closes it, as a click outside does.
+setEl.addEventListener('scroll', () => oaCloseMenu(), { passive: true });
 function oaCloseMenu(back = false) {
   if (!OA.menu) return;
   const id = OA.menu.dataset.person;

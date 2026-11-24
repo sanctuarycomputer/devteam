@@ -774,6 +774,7 @@ test('org-access A3: in Chrome, the owner\'s People work as the mock does', CHRO
   assert.equal(await p.ev(textOf('#oa-people .oa-intro')), 'Everyone here sees everything on this box. Full people can also change anything but People. Admins move members between Full and View only, and rename or remove people; only you invite, make admins or hand the box over. For someone who must not see the rest, set up a box of their own.');
   assert.equal(await p.ev(textOf(`${personSel(B.lee.id)} .pmeta`)), 'Full · invite link not used yet · expires in 24 hours', 'Lee, invited');
   assert.equal(await p.ev(textOf(`${personSel(B.ana.id)} .pmeta`)), '1 sign-in method · never signed in', 'Ana, joined');
+  assert.equal(await p.ev(textOf(`${personSel(B.ownerRow.id)} .pmeta`)), '1 sign-in method · signed in now', 'the owner\'s own row: signed in, though the claim set no last_seen');
   assert.deepEqual(await p.ev(`[...document.querySelectorAll('#hub-settings .person .badge')].map((b) => b.textContent)`), ['Owner', 'Admin', 'Full', 'invited']);
   assert.equal(await p.ev(textOf(`${personSel(B.ownerRow.id)} .nm`)), 'Owner (you) Owner', 'the owner\'s own row');
 
@@ -797,6 +798,16 @@ test('org-access A3: in Chrome, the owner\'s People work as the mock does', CHRO
   // an action this hub doesn't know (a newer gateway's) is left out, never a blank item
   await p.ev(`OA.list.people.find((x) => x.id === ${JSON.stringify(B.ownerRow.id)}).actions.push('level'); oaDrawPeople(); true`);
   assert.deepEqual(await menuOf(p, B.ownerRow.id), ['Rename'], 'no blank item');
+  // Settings scrolling under it closes it (it is fixed on the body)
+  await p.ev(`(() => { const v = document.getElementById('settings-view'); v.scrollTop = 0; return true; })()`);
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 500, deviceScaleFactor: 1, mobile: false });
+  await p.ev(`document.getElementById('settings-view').scrollTop = 120; true`);
+  await p.until('Settings scrolled', `document.getElementById('settings-view').scrollTop > 0`);
+  await p.until('scrolling closes the menu', `!document.querySelector('.oa-menu')`);
+  await p.ev(`document.getElementById('settings-view').scrollTop = 0; true`);
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+  await sleep(200);
+  await menuOf(p, B.ownerRow.id);
   // focus going nowhere (a mouse press on an item in Safari or Firefox) leaves it open
   await p.ev(`document.activeElement.blur(); true`);
   await sleep(200);
@@ -960,8 +971,14 @@ test('org-access A3: in Chrome, the owner\'s People work as the mock does', CHRO
   await q.until('the rename box', `Boolean(document.querySelector('#oa-rename input'))`);
   assert.equal(await q.ev(textOf('#oa-rename p')), 'Your name, as others here see it:');
   await q.ev(typeIn('#oa-rename input', 'Robin'));
+  // on a phone, from lower down the page: the note comes into view, with its toast
+  await q.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 500, deviceScaleFactor: 1, mobile: true });
+  await q.ev(`(() => { const v = document.getElementById('settings-view'); v.scrollTop = v.scrollHeight; return true; })()`);
+  await q.until('Settings scrolled down', `document.getElementById('settings-view').scrollTop > 200`);
   await q.ev(clickText('#oa-rename button', 'Save'));
   await q.until('Confirm it\'s you', `Boolean(document.querySelector('#oa-fresh'))`);
+  await q.until('the note in view', `(() => { const b = document.querySelector('#oa-fresh').getBoundingClientRect(); return b.top >= 0 && b.bottom <= innerHeight; })()`);
+  await q.until('its toast', `${toast} === "Confirm it's you first"`);
   assert.deepEqual(ownerOf(B.gw), o, 'the owner\'s row unchanged');
 });
 
@@ -977,7 +994,7 @@ test('org-access A3: in Chrome, an admin\'s People: the admin\'s words, each row
   assert.equal(await p.ev(`document.querySelectorAll('#hub-settings .person .menu-btn').length`), 0, 'no menus: nothing here is an admin\'s to change yet');
   assert.equal(await p.ev(`[...document.querySelectorAll('#oa-people button')].some((b) => b.textContent === 'Invite someone')`), false, 'no Invite someone');
   assert.equal(await p.ev(textOf(`${personSel(B.sam.id)} .nm`)), 'Sam Rivera (you) Admin', 'his own row');
-  assert.equal(await p.ev(textOf(`${personSel(B.sam.id)} .pmeta`)), '1 sign-in method · never signed in');
+  assert.equal(await p.ev(textOf(`${personSel(B.sam.id)} .pmeta`)), '1 sign-in method · signed in now', 'the admin\'s own row: signed in, reading it');
   assert.equal(await p.ev(textOf(`${personSel(B.ana.id)} .pmeta`)), '1 sign-in method · signed in 2 h ago');
   assert.equal(await p.ev(textOf(`${personSel(B.lee.id)} .pmeta`)), 'Full · invite link expired');
 });
