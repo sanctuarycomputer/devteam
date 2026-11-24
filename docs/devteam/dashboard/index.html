@@ -1008,6 +1008,15 @@ try {
   /* the artifact changed since the frame loaded it (kit-206): an outline at the pill's border width, over its border; a
      keyboard's focus ring still shows over it */
   #av-reload.stale:not(:focus-visible) { outline: 1px solid var(--amber); outline-offset: -1px; }
+  /* the notes (kit-145): the stepper, Hand over and who has them, pills as the rest */
+  #av-notes:not([hidden]) { display: inline-flex; align-items: center; gap: 8px; flex: none; min-width: 0; }
+  #av-step { display: inline-flex; align-items: center; gap: 4px; height: 20px; }
+  #av-stepn { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #av-filter { height: 20px; width: auto; margin: 0; padding: 0 4px; border: 1px solid var(--line-2); border-radius: 999px; background: var(--surface); color: var(--fg); font-size: 11px; line-height: 18px; }
+  .av-bar span.av-pill:not([hidden]) { display: inline-flex; align-items: center; box-sizing: border-box; border: 1px solid var(--line-2); color: var(--fg-2); white-space: nowrap; }
+  #e-avn:empty { display: none; }
+  #e-avn { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+  @media (max-width: 600px) { #av-filter, #av-with { display: none !important; } #av-notes:not([hidden]) { gap: 4px; } }
   @media (max-width: 600px) { .av-bar .av-label { display: none; } .av-bar .av-pill { padding: 0 6px; } }
 /* css-viewer-bar end */
   #av-frame, #pv-frame { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; background: #fff; display: block; }
@@ -1246,7 +1255,7 @@ try {
 /* css-overview end */
 /* css-view-only start */
   /* View only (kit-250): what the gateway refuses a view-only person looks it, and says why when pressed */
-  body.view-only :is([data-answer], [data-cant], [data-reply], [data-dontuse], [data-post-secrets], [data-overrule-send], [data-correct-send], [data-rv-answer], [data-decline], [data-rv-decline], [data-know], [data-oa-know], [data-oa-goal], [data-hold-id], [data-met-id], [data-goal-move], [data-preview-start], [data-preview-stop], [data-forget], [data-limit-save], [data-limit-none], [data-limit-step], .fleet-switch [data-fleet], [data-checknow], [data-tl-send], [data-tl-accept], [data-tl-notyet], [data-tl-resolve-go], [data-tl-reopen], [data-goal-grip], [data-ask-option], [data-ask-esc], a[href*="/public/"], .dropbox[data-drop] textarea, .dropbox[data-drop] input, #tl-c-text) { opacity: .45; cursor: not-allowed; }
+  body.view-only :is([data-answer], [data-cant], [data-reply], [data-dontuse], [data-post-secrets], [data-overrule-send], [data-correct-send], [data-rv-answer], [data-decline], [data-rv-decline], [data-know], [data-oa-know], [data-oa-goal], [data-hold-id], [data-met-id], [data-goal-move], [data-preview-start], [data-preview-stop], [data-forget], [data-limit-save], [data-limit-none], [data-limit-step], .fleet-switch [data-fleet], [data-checknow], [data-tl-send], [data-tl-accept], [data-tl-notyet], [data-tl-resolve-go], [data-tl-reopen], [data-goal-grip], [data-ask-option], [data-ask-esc], #av-handover, a[href*="/public/"], .dropbox[data-drop] textarea, .dropbox[data-drop] input, #tl-c-text) { opacity: .45; cursor: not-allowed; }
   .av-head #view-only { margin-left: 6px; }
   #view-only { color: var(--amber-fg); background: color-mix(in srgb, var(--amber) 16%, transparent); }
   #view-only-toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 60; max-width: min(90vw, 480px); padding: 8px 14px; border-radius: 8px; background: var(--fg); color: var(--bg); font-size: 13px; box-shadow: 0 4px 16px rgb(0 0 0 / .18); }
@@ -1417,6 +1426,7 @@ try {
   <div class="av-bar">
     <i class="av-kind icon-layout-dashboard" aria-hidden="true"></i>
     <div class="av-head"><b id="av-title"></b><span class="badge" id="av-kind">Mock</span><span class="av-ver-wrap"><button type="button" class="badge ver-pill" id="av-ver" aria-haspopup="listbox" aria-expanded="false" title="Its versions"><span id="av-where"></span><i class="icon-chevron-down" aria-hidden="true"></i></button><div id="av-vers" class="av-pop" role="listbox" aria-label="Versions" hidden></div></span><span id="av-project" class="muted"></span><span id="av-note" class="badge high" hidden></span><span id="av-hint" class="muted" hidden>Click the page, then hold Shift to point at something</span></div>
+    <span id="av-notes" hidden><span id="av-step"><button type="button" class="ghost av-pill" id="av-prev" title="Previous note" aria-label="Previous note">‹</button><span id="av-stepn"></span><button type="button" class="ghost av-pill" id="av-next" title="Next note" aria-label="Next note">›</button><select id="av-filter" aria-label="Which notes"><option value="check">To check</option><option value="open">Open</option><option value="all">All</option></select></span><button type="button" class="av-pill" id="av-handover" hidden></button><span class="av-pill" id="av-with" hidden></span><span class="err" id="e-avn"></span></span>
     <button class="ghost av-pill" id="av-reload" title="Load the page again" aria-label="Reload"><i class="icon-rotate-cw" aria-hidden="true"></i><span class="av-label">Reload</span></button>
     <span class="av-pub-wrap"></span>
     <span id="av-run"></span><span class="err av-run-err"></span>
@@ -6794,6 +6804,7 @@ function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp =
   if ($('av-frame').getAttribute('src') !== src) { const f = avFreshFrame('av-frame'); f.dataset.opened = src; f.src = src; }
   $('artifact-view').hidden = false;
   avHint();
+  avNotes.draw();
 }
 // The reload button says when main's artifact on the stage changed since its frame loaded it (the
 // latest fingerprint seen is another), until a press loads it. A draft reloads by itself
@@ -6941,6 +6952,8 @@ function showPreview(name, info) {
   if (info?.opened && VIEWER) { try { if (!sessionStorage.getItem(seen)) { sessionStorage.setItem(seen, '1'); location.reload(); return 'reload'; } } catch {} }
   else { try { sessionStorage.removeItem(seen); } catch {} }
   AV = { preview: name };
+  // an artifact's notes are none of a preview's
+  $('av-notes').hidden = true;
   // a dropped image the stage showed gone, the bar's controls back (kit-171); Reload as every preview has it
   avUploadOff();
   $('av-reload').hidden = false;
@@ -7025,6 +7038,63 @@ function openArtifact(raw) {
   document.body.style.overflow = 'hidden';
   $('av-close').focus();
 }
+// ---- notes on an artifact, in its viewer (kit-145): the version's notes, Hand over, the stepper ----
+// One note's state, from what the threads read says of it (kit-143's fields) and nothing else: to check,
+// with a session, or open; a resolved thread is no note.
+function tNoteState(t) {
+  return t.status !== 'open' ? 'resolved' : t.check ? 'check' : t.handed ? 'with' : 'open';
+}
+// The shown version's open notes, as their pins are numbered: those placed on it; on main also a published
+// tree's, and a worktree's the Library lists no more; and on any version the notes to check whose change is
+// there (Show me opens it). Fields of kit-143's rows only: nothing here is worked out from the log.
+function avNotes() {
+  if (!AV || AV.preview || TS.kind !== 'artifact') return [];
+  const listed = DATA?.library?.artifacts ?? null;
+  const here = (s, t) => (t.check && t.source?.slug === AV.slug && t.source.at === AV.at)
+    || (s.slug === AV.slug && (s.at === AV.at || (AV.at === 'main' && (String(s.at).startsWith('tree:') || (!!listed && !listed.some((a) => a.slug === s.slug && a.at === s.at))))));
+  const at = new Map(tPins(TL.threads).flatMap((g) => g.ids).map((id, i) => [id, i]));
+  return TL.threads.filter((t) => t.subject?.kind === 'artifact' && tNoteState(t) !== 'resolved' && here(t.subject, t))
+    .sort((a, b) => (at.get(a.id) ?? Infinity) - (at.get(b.id) ?? Infinity));
+}
+// The bar's group drawn from them: the stepper, Hand over (N open notes; none, no button) and who has the rest.
+// A hand-over just answered is believed until a read shows it (or 10 s have gone): the notes it took are with
+// that session. What was said of a version goes when another is shown.
+avNotes.draw = () => {
+  const notes = avNotes();
+  if (avNotes.av !== AV) { avNotes.av = AV; $('e-avn').textContent = ''; }
+  const said = AV?.handed;
+  if (said && (Date.now() > said.until || notes.some((t) => said.ids.includes(t.id) && tNoteState(t) !== 'open'))) AV.handed = null;
+  const given = AV?.handed?.ids ?? [];
+  const open = notes.filter((t) => tNoteState(t) === 'open' && !given.includes(t.id));
+  const withs = notes.find((t) => tNoteState(t) === 'with');
+  const words = AV?.handed?.words ?? (withs ? `With ${withs.with ?? withs.handed?.to}` : '');
+  $('av-notes').hidden = !notes.length;
+  $('av-handover').hidden = !open.length;
+  const label = `Hand over (${open.length})`;
+  if ($('av-handover').textContent !== label) $('av-handover').textContent = label;
+  $('av-with').hidden = !words;
+  if ($('av-with').textContent !== words) $('av-with').textContent = words;
+  if (typeof avStep === 'function') avStep.draw(notes);
+};
+// Hand over: the version's open notes to the session the server picks (kit-144). One request at a time (press
+// would queue a second behind the first), and its answer written only while that version is still shown.
+async function avHandOver() {
+  const av = AV;
+  if (!av || av.preview || av.notesBusy) return;
+  const ids = avNotes().filter((t) => tNoteState(t) === 'open').map((t) => t.id);
+  if (!ids.length) return;
+  av.notesBusy = true;
+  const say = (words, gone) => { if (AV === av) { av.handed = { words, ids: gone, until: Date.now() + 10000 }; avNotes.draw(); setTimeout(avNotes.draw, 10050); } };
+  try {
+    await press('avn', {
+      build: () => ({ action: 'artifact-handoff', body: { slug: av.slug, at: av.at } }),
+      apply: () => { $('e-avn').textContent = ''; av.handed = null; },
+      onOk: (out) => { if (out.count > 0) say(`With ${out.to}`, ids); else say('Nothing to hand over', []); tlRefresh(); },
+      errId: 'avn',
+    });
+  } finally { av.notesBusy = false; }
+}
+document.addEventListener('click', (e) => { if (e.target.closest?.('#av-handover')) avHandOver(); });
 function closeArtifact() {
   if (!AV) return false;
   AV = null;
@@ -8623,7 +8693,7 @@ function renderOverview() {
 // /api/hello's level for the viewer tab, which reads no /api/data), the page says "View only" beside the kit badge and greys the writes,
 // and a press on one shows why instead of sending it. The gateway refuses those writes anyway; this is
 // so nobody presses and waits. Navigation is left alone: tabs, filters, links, Back, peeks, copy.
-const VIEW_WRITES = "[data-answer], [data-cant], [data-reply], [data-dontuse], [data-post-secrets], [data-overrule-send], [data-correct-send], [data-rv-answer], [data-decline], [data-rv-decline], [data-know], [data-oa-know], [data-oa-goal], [data-hold-id], [data-met-id], [data-goal-move], [data-preview-start], [data-preview-stop], [data-forget], [data-limit-save], [data-limit-none], [data-limit-step], .fleet-switch [data-fleet], [data-checknow], [data-tl-send], [data-tl-accept], [data-tl-notyet], [data-tl-resolve-go], [data-tl-reopen], [data-goal-grip], [data-ask-option], [data-ask-esc], a[href*=\"/public/\"], .dropbox[data-drop] textarea, .dropbox[data-drop] input, #tl-c-text";
+const VIEW_WRITES = "[data-answer], [data-cant], [data-reply], [data-dontuse], [data-post-secrets], [data-overrule-send], [data-correct-send], [data-rv-answer], [data-decline], [data-rv-decline], [data-know], [data-oa-know], [data-oa-goal], [data-hold-id], [data-met-id], [data-goal-move], [data-preview-start], [data-preview-stop], [data-forget], [data-limit-save], [data-limit-none], [data-limit-step], .fleet-switch [data-fleet], [data-checknow], [data-tl-send], [data-tl-accept], [data-tl-notyet], [data-tl-resolve-go], [data-tl-reopen], [data-goal-grip], [data-ask-option], [data-ask-esc], #av-handover, a[href*=\"/public/\"], .dropbox[data-drop] textarea, .dropbox[data-drop] input, #tl-c-text";
 const VIEW_TOAST = 'View only: you can look, but not change anything';
 let viewToastAt = 0;
 function viewToast() {
@@ -9782,7 +9852,7 @@ function tlCard() {
   // one card poll at a time: reads slower than 2 s don't pile up
   if (t && !TL.polling) TL.polling = setInterval(() => { if (document.visibilityState !== 'visible' || !TL.open || TL.polled) return; TL.polled = true; tlRefresh().finally(() => { TL.polled = false; }); }, 2000);
 }
-function tlDraw() { tlMarkRow(); tlCard(); thDraw(); tlPins(); askDraw(); }
+function tlDraw() { tlMarkRow(); tlCard(); thDraw(); tlPins(); avNotes.draw(); askDraw(); }
 // The open thread's Settings row is marked (.tl-marked) while its card is open: Settings draws the mark.
 function tlMarkRow() {
   const t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
@@ -10164,7 +10234,7 @@ const TH_TITLES = { supervisor: "The supervisor's terminal: the follow-on goal",
 // An open thread's one state, by kit-84's rule (the hub's threads: { you, waiting, ready }), so the button
 // here and the hub's tab agree: ready to accept, else your move (the supervisor spoke last, or no turns),
 // else waiting on the supervisor. The owner's pending presses are laid over TL.threads, so a send moves it.
-const tState = (t) => (t.ready ? 'ready' : t.waiting === 'owner' ? 'you' : 'wait');
+const tState = (t) => (t.ready || t.check ? 'ready' : t.waiting === 'owner' ? 'you' : 'wait');
 function tCounts(threads) {
   const c = { open: 0, you: 0, ready: 0, wait: 0 };
   for (const t of threads) if (t.status === 'open') { c.open++; c[tState(t)]++; }
