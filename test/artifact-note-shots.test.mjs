@@ -633,3 +633,69 @@ test('C4c C4f an addressed mark\'s draft is what Show me opens, and what a ready
   const plain = await k.show(await k.note(pageNote(k)));
   assert.equal(plain.source, null, 'nothing to check, no source');
 });
+
+// --- withdrawing a mark -------------------------------------------------------------------------------
+const REASON = 'The picture shows the old button';
+const unready = (k, id, reason = REASON, extra = { DEVTEAM_ROLE: 'supervisor' }) => k.run(['thread', 'unready', id, '--reason', reason], extra);
+const toldOf = (k, id) => k.lines().filter((o) => o.type === 'message' && o.kind === 'info' && o.thread !== undefined && String(o.text).includes(id));
+
+test('C11a C11d thread unready over a proposal, once', async () => {
+  const k = shotKit();
+  const { id, line } = await k.readyOn(k.subject());
+  assert.ok(line);
+  const r = await unready(k, id);
+  assert.equal(r.status, 0, said(r));
+  const w = k.last((o) => o.type === 'thread' && o.op === 'set' && o.id === id);
+  assert.equal(w.by, 'supervisor');
+  assert.equal(w.ready, null);
+  assert.deepEqual(Object.keys(w.unready).sort(), ['at', 'reason']);
+  assert.equal(w.unready.reason, REASON);
+  const v = await k.show(id);
+  assert.deepEqual([v.check, v.ready, v.source, v.unready.reason], [null, null, null, REASON]);
+  const was = k.logBytes();
+  const again = await unready(k, id);
+  assert.equal(again.status, 1);
+  assert.ok(again.out.includes(`${id} has nothing to check: no proposal or addressed mark stands`), said(again));
+  assert.equal(k.logBytes(), was);
+});
+
+test('C11b the session whose mark is withdrawn is told; the supervisor is not', async () => {
+  const k = shotKit();
+  const theirs = await addressed(k, k.subject(), 'plan-pricing');
+  const r = await unready(k, theirs);
+  assert.equal(r.status, 0, said(r));
+  const told = toldOf(k, theirs);
+  assert.equal(told.length, 1);
+  assert.deepEqual([told[0].by, told[0].to], ['supervisor', 'plan-pricing']);
+  assert.equal(told[0].text, `Your mark on ${theirs} was withdrawn: ${REASON}. Fix it and mark it again: devteam.mjs artifact notes pricing.`);
+  assert.match(r.stdout, /plan-pricing/);
+  assert.equal((await k.show(theirs)).check, null);
+  const own = await addressed(k, k.subject(), 'supervisor');
+  const r2 = await unready(k, own);
+  assert.equal(r2.status, 0, said(r2));
+  assert.ok(r2.stdout.includes(`withdrew your own mark on ${own}`), said(r2));
+  assert.deepEqual(toldOf(k, own), []);
+});
+
+test('C11c each refusal of thread unready, and no line', async () => {
+  const k = shotKit();
+  const fresh = await k.note(k.subject());
+  const { id } = await k.readyOn(k.subject());
+  const was = k.logBytes();
+  for (const [what, at, reason, env, want] of [
+    ['nothing to check', fresh, REASON, undefined, /has nothing to check: no proposal or addressed mark stands/],
+    ['11 bytes', id, 'Too short!!', undefined, /--reason is 12 to 300 bytes/],
+    ['301 bytes', id, 'x'.repeat(301), undefined, /--reason is 12 to 300 bytes/],
+    ['a newline', id, 'The picture\nshows the old one', undefined, /--reason is one line/],
+    ['none', id, '', undefined, /--reason is 12 to 300 bytes/],
+    ['a worker', id, REASON, { DEVTEAM_ROLE: 'worker' }, /thread unready: the supervisor does this/],
+    ['a planner', id, REASON, { DEVTEAM_FEATURE: 'pricing' }, /thread unready: the supervisor does this/],
+    ['no thread', 't-20990101-000000000-owner', REASON, undefined, /no thread/],
+  ]) {
+    const r = await unready(k, at, reason, env);
+    assert.equal(r.status, 1, what);
+    assert.match(r.out, want, what);
+    assert.ok(!/usage:/.test(r.out), what);
+    assert.equal(k.logBytes(), was, what);
+  }
+});

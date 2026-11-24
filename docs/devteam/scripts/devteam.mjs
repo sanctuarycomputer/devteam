@@ -11201,6 +11201,24 @@ function cmdThread() {
     spoke(t);
     return;
   }
+  // The supervisor takes a mark back (its own proposal, or a session's addressed mark), saying why; the
+  // session whose mark it was is told (kit-147).
+  if (sub === 'unready') {
+    supervisorOnly('thread unready');
+    const t = threadOpen(id, 'supervisor');
+    const reason = (flagStr('reason') ?? '').trim();
+    if (UNSAFE_TEXT.test(reason)) die('--reason is one line');
+    if (Buffer.byteLength(reason) < 12 || Buffer.byteLength(reason) > 300) die('--reason is 12 to 300 bytes');
+    const v = threadViewOf(t.id);
+    if (!v.check) die(`${t.id} has nothing to check: no proposal or addressed mark stands`);
+    appendLog({ type: 'thread', op: 'set', id: t.id, ready: null, unready: { at: nowIso(), reason } }, 'supervisor');
+    if (v.check === 'addressed' && v.addressed.by !== 'supervisor') {
+      sendLine({ to: v.addressed.by, kind: 'info', thread: t.id, from: 'supervisor', text: `Your mark on ${t.id} was withdrawn: ${reason}. Fix it and mark it again: devteam.mjs artifact notes ${v.subject?.slug}.` });
+      out(`withdrew ${v.addressed.by}'s mark on ${t.id}, and told ${v.addressed.by}`);
+    } else out(`withdrew your own mark on ${t.id}`);
+    spoke(t);
+    return;
+  }
   // Resolving is the owner's: their status and outcome (always written, null for none, so a reopened
   // thread resolved again keeps no old outcome), and an observation the loop reads with the rest.
   if (sub === 'resolve') {
