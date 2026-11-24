@@ -2379,12 +2379,41 @@ function fetchMain(R = null) {
 // Another repo's main, fetched into its checkout by the same rule as home's: skipped when the
 // checkout has no origin, refused when the fetch fails, so nothing is judged, read or started on a
 // stale main. (repo() matches a checkout to its link by origin, so the skip is home's rule kept.)
-function fetchLinkMain(R, refusing = 'refusing to judge against a stale main') {
-  if (R.git(['config', '--get', 'remote.origin.url'], R.root) === null) return;
+// The refspec is named: the checkout's remote.origin.fetch is any session's to blank, and the fetch
+// would then leave a moved origin/<main> in place.
+// start (kit-790): a branch a session's new worktree is for, in home or another repo. Main and that
+// branch are read from origin by sha, and the shas returned ({ main, branch: null when origin has
+// none }): a start never takes a local ref's word for either. With no origin to read, it refuses.
+function fetchLinkMain(R, refusing = 'refusing to judge against a stale main', { start = null } = {}) {
   const rb = R.settings.main_branch;
-  const fr = gitRun(['fetch', '--quiet', 'origin', rb], R.root);
-  if (fr.status !== 0) die(`could not fetch origin ${rb} in ${R.name}: ${redactUrl(firstLine(fr.err)) || `exit ${fr.status}`}; ${refusing}`);
+  const no = (why) => die(`could not fetch origin ${rb} in ${R.name}: ${why}; ${refusing}`);
+  if (R.git(['config', '--get', 'remote.origin.url'], R.root) === null) {
+    if (start) no('it has no origin url');
+    return;
+  }
+  if (!start) {
+    const fr = gitRun(['fetch', '--quiet', 'origin', `+refs/heads/${rb}:refs/remotes/origin/${rb}`], R.root);
+    if (fr.status !== 0) no(redactUrl(firstLine(fr.err)) || `exit ${fr.status}`);
+    R.resetCaches();
+    return;
+  }
+  // in its own process group, so a hung transport goes with it at the deadline
+  const toOrigin = (args) => {
+    const r = spawnSync(process.execPath, ['-e', RESPONDER_GROUP_RUN, '--', '120000', 'git', ...RESPONDER_GIT, ...args], { cwd: R.root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: 130000 });
+    if (r.status !== 0) no(r.status === 124 ? 'it did not answer in time' : redactUrl(firstLine(r.stderr).replace(/^fatal: /, '')) || `exit ${r.status}`);
+    return String(r.stdout ?? '');
+  };
+  const at = {};
+  // ls-remote matches a pattern against the end of a ref's name, so only an exact name counts
+  for (const [sha, ref] of toOrigin(['ls-remote', 'origin', `refs/heads/${rb}`, `refs/heads/${start}`]).split('\n').map((l) => l.split('\t'))) {
+    for (const b of [rb, start]) if (/^[0-9a-f]{40,64}$/.test(sha) && ref === `refs/heads/${b}`) at[b] = sha;
+  }
+  if (!at[rb]) no(`origin has no ${rb}`);
+  const held = [rb, start].filter((b) => at[b]);
+  toOrigin(['fetch', '--quiet', '--no-tags', 'origin', ...held.map((b) => `+refs/heads/${b}:refs/remotes/origin/${b}`)]);
+  for (const b of held) if (responderGit(['cat-file', '-e', `${at[b]}^{commit}`], R.root, { GIT_NO_LAZY_FETCH: '1' }).status !== 0) no(`${at[b].slice(0, 8)} did not arrive`);
   R.resetCaches();
+  return { main: at[rb], branch: at[start] ?? null };
 }
 // In a read-only command, full ref names resolve from one for-each-ref listing (a dashboard
 // refresh asked git about each ticket branch separately: ~90 processes). Anything else, and every
@@ -26845,15 +26874,33 @@ function makeSession(role) {
   const R = role === 'worker' ? repoOfTicket(tickets().get(id)) : repo('home');
   const mb = R.settings.main_branch;
   if (!fs.existsSync(wt)) {
-    if (R.name === 'home') R.git(['fetch', '--quiet', 'origin', mb]);
-    else fetchLinkMain(R, 'refusing to start a ticket on a stale main');
-    // a branch pushed from another machine (a moved fleet) continues from origin, never from main
-    R.git(['fetch', '--quiet', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
-    const base = R.resolveCommit(`origin/${mb}`) ? `origin/${mb}` : mb;
+    // what origin holds, by sha: main, and the branch if it was pushed (a moved fleet continues from
+    // it, never from main). Every local ref is any session's to write without a push (kit-790).
+    const at = fetchLinkMain(R, 'refusing to start a ticket on a stale main', { start: branch });
+    const local = R.resolveCommit(`refs/heads/${branch}`);
     // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
-    if (R.resolveCommit(`refs/heads/${branch}`)) R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', wt, branch], R.root);
-    else if (R.resolveCommit(`refs/remotes/origin/${branch}`)) R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--track', '-b', branch, wt, `origin/${branch}`], R.root);
-    else R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-b', branch, wt, base], R.root);
+    if (local) R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', wt, branch], R.root);
+    else {
+      const sha = at.branch ?? at.main;
+      R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-B', branch, wt, sha], R.root);
+      // -B sets the branch and then checks it out by name, so a session moving it in between would
+      // win: what landed is read back, and undone if it isn't the sha chosen. The branch goes back to
+      // where it was before the add, and only from where the add left it.
+      const read = (args, cwd) => { const r = responderGit(args, cwd); return r.status === 0 ? r.stdout.trim() : null; };
+      const seen = read(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], R.root);
+      const head = read(['rev-parse', '--verify', '--quiet', 'HEAD'], wt);
+      if (head !== sha || read(['symbolic-ref', '--short', 'HEAD'], wt) !== branch) {
+        R.git(['worktree', 'remove', '--force', wt], R.root);
+        if (local) R.git(['update-ref', `refs/heads/${branch}`, local, seen ?? '0'.repeat(local.length)], R.root);
+        else if (seen) R.git(['update-ref', '-d', `refs/heads/${branch}`, seen], R.root);
+        die(`the new worktree holds ${head ? head.slice(0, 8) : 'no commit'}, not ${sha.slice(0, 8)}: something moved ${branch} while it was checked out, so nothing was started; try again`);
+      }
+    }
+    // set by config: --track fails where the checkout's fetch refspec is blank
+    if (R.git(['config', '--get', `branch.${branch}.merge`], R.root) === null) {
+      R.gitOrDie(['config', `branch.${branch}.remote`, 'origin'], R.root);
+      R.gitOrDie(['config', `branch.${branch}.merge`, `refs/heads/${at.branch ? branch : mb}`], R.root);
+    }
     madeWorktree = true;
   }
   // A harness keeps its sessions by directory on its own machine: a worktree made just now has no
