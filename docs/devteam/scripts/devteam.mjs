@@ -12943,7 +12943,7 @@ ${shotSlice('finder')}
     }
     state = !f ? 'gone' : f.hidden ? 'hidden' : f.changed ? 'changed' : 'found';
     box = spot.recorded;
-    if (f) text = f.text;
+    if (f) text = String(f.text).slice(0, 10000);
     if (state === 'found' || state === 'changed') {
       f.el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
       await frames();
@@ -12957,6 +12957,13 @@ ${shotSlice('finder')}
   const css = { all: 'initial', position: 'fixed', 'box-sizing': 'border-box', left: (box.x - 4) + 'px', top: (box.y - 4) + 'px', width: (box.w + 8) + 'px', height: (box.h + 8) + 'px', border: '2px solid #ff1f8f', 'pointer-events': 'none', 'z-index': '2147483647' };
   for (const k in css) ring.style.setProperty(k, css[k], 'important');
   document.documentElement.appendChild(ring);
+  // above an open dialog or popover, which no z-index is
+  try { ring.popover = 'manual'; ring.showPopover(); } catch (e) { /* none here */ }
+  // a zoom on the page's root sizes the ring too: undone by what it came to
+  const set = (k, v) => ring.style.setProperty(k, v + 'px', 'important');
+  const was = ring.getBoundingClientRect();
+  const by = was.width / (box.w + 8) || 1;
+  if (Math.abs(by - 1) > 0.01) { set('width', (box.w + 8) / by); set('height', (box.h + 8) / by); set('border-width', 2 / by); set('left', (box.x - 4) / by); set('top', (box.y - 4) / by); }
   await frames();
   return { state, box, text, innerWidth, innerHeight, scrollX, scrollY };
 })()`;
@@ -13028,7 +13035,8 @@ function shotSha(at) {
   if (!sha) throw new Error(`${at} has no commit to name the picture's source by; no mark written`);
   return sha;
 }
-const shotDirty = (at, slug) => at !== 'main' && !!git(['status', '--porcelain', '--', `${ARTIFACTS_REL}/${slug}`], draftWorktree(at));
+// A git that can't say is a change. It takes no lock in a session's worktree.
+const shotDirty = (at, slug) => at !== 'main' && git(['--no-optional-locks', 'status', '--porcelain', '--untracked-files=normal', '--', `${ARTIFACTS_REL}/${slug}`], draftWorktree(at)) !== '';
 // The picture of a note's spot in one copy of its artifact: { shot, lines, files }.
 async function noteShot(view, src, { now } = {}) {
   const { slug, anchor, point, path: where = '' } = view.subject;
@@ -13071,11 +13079,14 @@ async function noteShot(view, src, { now } = {}) {
       });
     } finally { srv.close(); dead.close(); }
   })();
+  // a draft's files are read as the page asks for them, so an edit meanwhile may be in the picture
+  if (src !== 'main' && shotSha(src) !== sha) throw new Error(`${src} moved to another commit while its picture was taken; no mark written`);
+  const changed = dirty || shotDirty(src, slug);
   const { light } = taken;
   const dark = taken.dark.equals(light.png) ? null : taken.dark;
   const { stamp, files, sum } = shotWrite(view.id, light.png, dark, now ?? Date.now());
   return {
-    shot: { stamp, w: light.innerWidth, h: light.innerHeight, src, sha, dirty, anchor: light.state, dark: !!dark, sum },
+    shot: { stamp, w: light.innerWidth, h: light.innerHeight, src, sha, dirty: changed, anchor: light.state, dark: !!dark, sum },
     files,
     lines: [
       `picture: ${files[0]}${dark ? ' (and -dark.png)' : ''}`,
@@ -13102,17 +13113,21 @@ const shotOrder = ({ subject: { slug, at }, addressed }, holds) => {
   return found ? { at: found, slug } : null;
 };
 // The copy of the artifact Show me opens for a note to check, or null.
+// threadViews asks, for every command, of lines anyone may have written by hand: it never throws.
 function noteSource(view, holds = shotHolds()) {
   const { slug } = view.subject;
-  if (!LINK_ID.test(slug ?? '')) return null;
-  if (view.check !== 'ready' || !view.shot) return shotOrder(view, holds);
-  const at = [view.shot.src, 'main'].find((x) => holds(x, slug));
-  return at ? { at, slug } : null;
+  if (typeof slug !== 'string' || !LINK_ID.test(slug)) return null;
+  try {
+    if (view.check !== 'ready' || !view.shot) return shotOrder(view, holds);
+    const at = [view.shot.src, 'main'].find((x) => holds(x, slug));
+    return at ? { at, slug } : null;
+  } catch { return null; }
 }
 // The copy a new proposal's picture is taken from: what Show me opens once it is written. An addressed
 // mark that stands stays the one to check, so its order holds; else main first.
 function readySource(view, holds = shotHolds()) {
   const { slug } = view.subject;
+  if (typeof slug !== 'string' || !LINK_ID.test(slug)) return null;
   return !view.addressed && holds('main', slug) ? { at: 'main', slug } : shotOrder(view, holds);
 }
 // The one way a mark gets its picture: { kind: 'ready' }, or { kind: 'addressed', by, draft }.

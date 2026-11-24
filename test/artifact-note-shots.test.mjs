@@ -3,149 +3,24 @@
 // Each test is named by its check in the ticket's spec. Real Chrome, over the kit's DevTools pipe: this
 // file never skips, and fails its first test when the machine has none.
 // Run: node --test test/artifact-note-shots.test.mjs
-import { after, test } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import crypto from 'node:crypto';
-import dgram from 'node:dgram';
 import fs from 'node:fs';
 import http from 'node:http';
-import os from 'node:os';
 import path from 'node:path';
-import zlib from 'node:zlib';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { chromePath } from './lib/chrome.mjs';
-import { dashboardOnFreePort, kit, testDir, threadsFixture, until, write } from './lib/kit.mjs';
-
-const SRC = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
-const LENS = /const ARTIFACT_LENS = String\.raw`([^`]*)`;/.exec(SRC)[1];
-const FIXTURES = path.join(testDir, 'fixtures', 'artifact-shots');
-const MARKERS = ['// helpers: the shooter injects from here', '// helpers: to here', '// finder: the shooter injects from here', '// finder: to here'];
-const count = (text, part) => text.split(part).length - 1;
-const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
-
-// --- the fixture: one project for the file, its artifact pricing on main ------------------------------
-// Chrome's singleton socket path is capped, so its TMPDIR is short and this file's own.
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'ks'));
-// Another server on this machine, which a page under a capture must never reach; the fixtures name it
-// as __OTHER__.
-const reached = [];
-// (anything else on the machine that looks at a new port asks for /)
-const other = http.createServer((q, s) => { if (q.url !== '/') reached.push(q.url); s.end('x'); });
-other.on('upgrade', (q, sock) => { reached.push(`upgrade ${q.url}`); sock.destroy(); });
-await new Promise((r) => other.listen(0, '127.0.0.1', r));
-const OTHER = `http://127.0.0.1:${other.address().port}`;
-const udp = dgram.createSocket('udp4');
-udp.on('message', () => { reached.push('udp'); });
-await new Promise((r) => udp.bind(0, '127.0.0.1', r));
-let made = null;
-after(() => { udp.close(); other.closeAllConnections?.(); other.close(); made?.F.done(); fs.rmSync(TMP, { recursive: true, force: true }); });
-function shotKit() {
-  if (made) return made;
-  const F = threadsFixture('shots');
-  const arts = path.join(F.old, 'docs/devteam/project/artifacts');
-  fs.cpSync(FIXTURES, path.join(arts, 'pricing'), { recursive: true, filter: (f) => !f.endsWith('.sh') });
-  for (const f of fs.readdirSync(path.join(arts, 'pricing')).filter((x) => /\.(html|js)$/.test(x))) { const at = path.join(arts, 'pricing', f); fs.writeFileSync(at, fs.readFileSync(at, 'utf8').replaceAll('__OTHER__', OTHER).replaceAll('__UDP__', String(udp.address().port))); }
-  fs.symlinkSync('app.js', path.join(arts, 'pricing', 'link.js'));
-  write(path.join(arts, 'pricing', '.secret.js'), '// never served\n');
-  F.g(['add', '-A'], F.old);
-  F.g(['commit', '-qm', 'pricing'], F.old);
-  F.g(['push', '-q', 'origin', 'main'], F.old);
-  const DT = path.join(F.old, 'docs/devteam/scripts/devteam.mjs');
-  const SUP = { DEVTEAM_ROLE: 'supervisor' };
-  const childEnv = (extra = {}) => { const e = { ...F.env({}), HOME: F.home, TMPDIR: TMP, DEVTEAM_TEST: '1', DEVTEAM_CHROME_NO_SANDBOX: '1', CHROME_PATH: chromePath ?? '', ...extra }; for (const k of Object.keys(e)) if (e[k] === undefined) delete e[k]; return e; };
-  // async, so a server this test holds answers while the command runs
-  const run = (args, extra = {}) => new Promise((resolve) => {
-    const p = spawn(process.execPath, [DT, ...args], { cwd: F.old, env: childEnv(extra), stdio: ['ignore', 'pipe', 'pipe'] });
-    let o = '', e = '';
-    p.stdout.on('data', (b) => { o += b; });
-    p.stderr.on('data', (b) => { e += b; });
-    p.on('close', (status) => resolve({ status, stdout: o, stderr: e, out: `${o}${e}`.trim() }));
-  });
-  const lines = () => fs.readdirSync(F.logDir).filter((f) => f.endsWith('.jsonl')).sort().flatMap((f) => fs.readFileSync(path.join(F.logDir, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)));
-  const last = (pred) => lines().filter(pred).sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0)).pop();
-  const logBytes = () => fs.readdirSync(F.logDir).sort().map((f) => `${f}:${fs.statSync(path.join(F.logDir, f)).size}`).join(' ');
-  const shots = path.join(F.old, 'docs/devteam/run/shots');
-  const files = (id) => (fs.existsSync(path.join(shots, id)) ? fs.readdirSync(path.join(shots, id)).sort() : []);
-  const tree = () => { const all = []; const walk = (d) => { if (fs.existsSync(d)) for (const e of fs.readdirSync(d, { withFileTypes: true })) { const f = path.join(d, e.name); all.push(f); if (e.isDirectory()) walk(f); } }; walk(shots); return all.sort().join('\n'); };
-  // a subject of its own each time (one open thread per subject): the selector gains a :not() that
-  // matches everything
-  let n = 0;
-  const subject = (o = {}, anchor = {}) => ({ kind: 'artifact', slug: 'pricing', at: 'main', path: 'found.html', anchor: { selector: `#buy:not(.n${++n})`, tag: 'button', text: 'Start trial', rect: { x: 600, y: 400, w: 100, h: 60 }, ...anchor }, point: { x: 620, y: 420 }, ...o });
-  const pointNote = (o = {}) => ({ kind: 'artifact', slug: 'pricing', at: 'main', path: 'found.html', point: { x: 40 + ++n / 1000, y: 20 }, ...o });
-  // a note as thread new leaves it, its two lines written by hand: a command saved on every test that
-  // only needs one to be there
-  let notes = 0;
-  const note = async (s, { frame } = {}) => {
-    const ago = 900000 - ++notes * 1000;
-    const id = F.hand('owner', { type: 'thread', title: 'A note', ...(s ? { subject: s } : {}), ...(frame ? { frame } : {}) }, ago);
-    F.hand('owner', { type: 'turn', thread: id, text: 'Make it say Annual' }, ago - 500);
-    return id;
-  };
-  const noteByCommand = async (s, { frame } = {}) => {
-    const r = await run(['thread', 'new', '--title', 'A note', ...(s ? [`--subject=${JSON.stringify(s)}`] : []), ...(frame ? [`--frame=${JSON.stringify(frame)}`] : []), '--', 'Make it say Annual']);
-    assert.equal(r.status, 0, r.out);
-    return /t-\d{8}-\d{9}-[a-z0-9-]+/.exec(r.stdout)[0];
-  };
-  const ready = async (id, extra = {}) => {
-    const r = await run(['thread', 'ready', id, '--outcome', 'The button now says Annual'], { ...SUP, ...extra });
-    return { ...r, id, line: last((o) => o.type === 'thread' && o.op === 'set' && o.id === id && o.ready) };
-  };
-  const readyOn = async (s, { frame, ...extra } = {}) => ready(await note(s, { frame }), extra);
-  const light = (r) => png(fs.readFileSync(path.join(shots, r.id, `${r.line.shot.stamp}-light.png`)));
-  const show = async (id) => JSON.parse((await run(['thread', 'show', id, '--json'], SUP)).stdout);
-  const seen = (file) => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean) : []);
-  return (made = { F, DT, SUP, arts, shots, run, lines, last, logBytes, files, tree, subject, pointNote, note, noteByCommand, ready, readyOn, light, show, seen, childEnv });
-}
-
-// --- a PNG's pixels: every row filter undone (Chrome uses them all) ------------------------------------
-function png(buf) {
-  const w = buf.readUInt32BE(16), h = buf.readUInt32BE(20), bpp = { 2: 3, 6: 4 }[buf[25]];
-  assert.ok(bpp && buf[24] === 8 && buf[28] === 0, 'an 8-bit RGB or RGBA PNG, not interlaced');
-  const idat = [];
-  for (let at = 8; at < buf.length;) { const len = buf.readUInt32BE(at); if (buf.toString('latin1', at + 4, at + 8) === 'IDAT') idat.push(buf.subarray(at + 8, at + 8 + len)); at += 12 + len; }
-  const raw = zlib.inflateSync(Buffer.concat(idat)), stride = w * bpp, data = Buffer.alloc(stride * h);
-  for (let y = 0; y < h; y++) {
-    const f = raw[y * (stride + 1)];
-    for (let i = 0; i < stride; i++) {
-      const a = i >= bpp ? data[y * stride + i - bpp] : 0, b = y ? data[(y - 1) * stride + i] : 0, c = i >= bpp && y ? data[(y - 1) * stride + i - bpp] : 0;
-      const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
-      const add = [0, a, b, (a + b) >> 1, pa <= pb && pa <= pc ? a : pb <= pc ? b : c][f];
-      data[y * stride + i] = (raw[y * (stride + 1) + 1 + i] + add) & 255;
-    }
-  }
-  return { w, h, px: (x, y) => { const at = y * stride + x * bpp; return [data[at], data[at + 1], data[at + 2], bpp === 4 ? data[at + 3] : 255]; } };
-}
-const near = (px, rgb) => rgb.every((v, i) => Math.abs(px[i] - v) <= 8);
-const RING = [0xff, 0x1f, 0x8f];
-// the ring's four lines 2 px outside box (in the picture's own pixels), and none 20 px inside it
-function ringAt(p, { x, y, w, h }) {
-  const cx = Math.round(x + w / 2), cy = Math.round(y + h / 2);
-  const on = [[x - 3, cy], [x + w + 2, cy], [cx, y - 3], [cx, y + h + 2]].every(([a, b]) => near(p.px(a, b), RING));
-  return on && !near(p.px(x + Math.min(20, Math.floor(w / 2)), y + Math.min(20, Math.floor(h / 2))), RING);
-}
-
-// a stand-in Chrome from the fixtures, and the arguments of each launch of it
-let fakes = 0;
-function fake(name, as = name) {
-  const file = path.join(TMP, `f${++fakes}`, as);
-  fs.mkdirSync(path.dirname(file));
-  fs.copyFileSync(path.join(FIXTURES, name), file);
-  fs.chmodSync(file, 0o755);
-  return { file, dir: path.dirname(file), launches: () => (fs.existsSync(`${file}.log`) ? fs.readFileSync(`${file}.log`, 'utf8').trim().split('\n').map((l) => l.split(' ')) : []) };
-}
-const seenFile = () => path.join(TMP, `seen${++fakes}.log`);
-// the body of a top-level function or const in the kit, for a string check
-const body = (name) => new RegExp(`\\n(?:async )?(?:function|const) ${name}\\b[\\s\\S]*?\\n\\}`).exec(SRC)?.[0] ?? '';
-const region = () => /\/\* note-shots start \*\/([\s\S]*?)\/\* note-shots end \*\//.exec(SRC)?.[1] ?? '';
+import { dashboardOnFreePort, testDir, until, write } from './lib/kit.mjs';
+import { LENS, MARKERS, SRC, TMP, addressed, body, count, cut, each, fake, pageNote, png, region, said, seenFile, sha256, shotKit, worktree } from './fixtures/artifact-shots/kit.mjs';
 
 test('C1c every test runs, and the file fails with no Chrome', () => {
   assert.ok(chromePath, 'no Chrome: install Chrome or Chromium, or set CHROME_PATH');
-  const own = fs.readFileSync(path.join(testDir, 'artifact-note-shots.test.mjs'), 'utf8').split('\n');
+  const own = ['artifact-note-shots.test.mjs', 'artifact-note-shots-page.test.mjs', 'fixtures/artifact-shots/kit.mjs'].flatMap((f) => fs.readFileSync(path.join(testDir, f), 'utf8').split('\n'));
   const said = own.filter((l) => /skip|todo/i.test(l) && !/^\/\//.test(l)); // no-skip-check
   assert.deepEqual(said.filter((l) => !l.endsWith('// no-skip-check')), []); // no-skip-check
   assert.equal(own.filter((l) => l.endsWith('// no-skip-check')).length, 3); // no-skip-check
   const list = spawnSync(process.execPath, [path.join(testDir, 'run.mjs'), '--list'], { cwd: path.join(testDir, '..'), encoding: 'utf8' }).stdout;
-  assert.match(list, /artifact-note-shots\.test\.mjs\s+chrome\b/);
+  for (const f of ['artifact-note-shots', 'artifact-note-shots-page']) assert.match(list, new RegExp(`${f}\\.test\\.mjs\\s+chrome\\b`));
 });
 
 test('C2b no websocket in the kit', () => {
@@ -258,93 +133,6 @@ test('C9 other threads: as before, no Chrome', async () => {
   }
 });
 
-const HOSTS = [.../const ARTIFACT_CDNS = (\[.*?\]);/.exec(SRC)[1].matchAll(/'https:\/\/([^']+)'/g), .../const ARTIFACT_FONT_HOSTS = (\[.*?\]);/.exec(SRC)[1].matchAll(/'https:\/\/([^']+)'/g)].map((m) => m[1]);
-
-// The network checks' captures, taken together: what the hook said of each.
-let walls = null;
-const wall = (what) => (walls ??= (async () => {
-  const k = shotKit();
-  reached.length = 0;
-  const got = {};
-  await each([['requests', '1'], ['routes', '1'], ['leave', '1'], ['paths', '1'], ['assets', undefined]], async ([page, noCsp]) => {
-    const hook = seenFile();
-    await k.readyOn(k.subject({ path: `${page}.html` }), { DEVTEAM_TEST_SHOT_SEEN: hook, DEVTEAM_TEST_SHOT_NO_CSP: noCsp });
-    got[page] = k.seen(hook);
-  });
-  got.k = k;
-  return got;
-})()).then((got) => got[what]);
-
-test('C7a C7b C7c requests go to the capture and the allowed hosts alone', async () => {
-  const said = await wall('requests');
-  assert.deepEqual(reached, [], 'the other server saw nothing');
-  for (const u of [`${OTHER}/fetch`, `${OTHER}/img`, 'https://example.invalid/x', 'https://cdn.jsdelivr.net.evil.example/x']) assert.ok(said.includes(`fail ${u}`), `fail ${u}: ${said.join(' | ')}`);
-  for (const u of ['https://cdn.jsdelivr.net/x', 'https://fonts.gstatic.com/x']) assert.ok(said.includes(`continue ${u}`), `continue ${u}`);
-  assert.ok(said.some((l) => /^serve \/requests\.html csp=no$/.test(l)), 'the CSP is off, so the wall stands alone');
-});
-
-test('C7d one list of hosts, one set of headers', () => {
-  const csp = /const artifactCsp = [\s\S]*?\n};/.exec(SRC)[0];
-  assert.ok(csp.includes('ARTIFACT_FONT_HOSTS') && !csp.includes('https://fonts.'));
-  for (const h of ['https://fonts.googleapis.com', 'https://fonts.gstatic.com']) assert.equal(count(SRC.slice(SRC.indexOf('const ARTIFACT_CDNS')), `'${h}'`) , 1, `${h} written once`);
-  const allowed = body('shotRequestAllowed');
-  assert.ok(allowed.includes('ARTIFACT_CDNS') && allowed.includes('ARTIFACT_FONT_HOSTS'));
-  assert.ok(body('shotServe').includes('artifactHeaders('), 'the capture server');
-  const route = SRC.slice(SRC.indexOf("rawPath.startsWith('/artifact/')"));
-  assert.ok(route.slice(0, route.indexOf('return DASH_NEXT')).includes('artifactHeaders('), 'the dashboard');
-});
-
-test('C7e the proxy flags: dead but for the capture and the allowed hosts', async () => {
-  const k = shotKit();
-  const dies = fake('fake-chrome.sh');
-  await k.readyOn(k.subject(), { CHROME_PATH: dies.file });
-  assert.ok(dies.launches().length >= 1);
-  for (const a of dies.launches()) {
-    assert.ok(a.some((x) => /^--proxy-server=http:\/\/127\.0\.0\.1:\d+$/.test(x)), a.join(' '));
-    const bypass = a.find((x) => x.startsWith('--proxy-bypass-list=')).slice(20).split(';');
-    assert.equal(bypass[0], '<-loopback>');
-    assert.match(bypass[1], /^127\.0\.0\.1:\d+$/);
-    assert.deepEqual(bypass.slice(2), HOSTS);
-    for (const f of ['--webrtc-ip-handling-policy=disable_non_proxied_udp', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp']) assert.ok(a.includes(f), f);
-    assert.deepEqual(a.join(' ').match(/--host-resolver-rules=(.*?) (?:--|about:)/)?.[1].split(',').map((x) => x.trim()), ['MAP * ~NOTFOUND', 'EXCLUDE 127.0.0.1', ...HOSTS.map((h) => `EXCLUDE ${h}`)], 'no name resolved but the allowed hosts\'');
-    assert.ok(!a.some((x) => x === `--proxy-server=http://${bypass[1]}`), 'the dead proxy is not the capture server');
-  }
-});
-
-test('C7f no route to another server', async () => {
-  const said = await wall('routes');
-  assert.deepEqual(reached, []);
-  assert.ok(said.includes('serve /sw.js csp=no'), `the service worker was asked for: ${said.join(' | ')}`);
-  for (const t of ['ws', 'sw', 'rtc', 'shared']) assert.ok(said.includes(`serve /tried-${t} csp=no`), `${t} was tried: ${said.join(' | ')}`);
-  assert.ok(said.includes(`fail ${OTHER}/worker`), 'the worker fetched');
-  assert.ok(said.includes(`fail ${OTHER}/moved`), 'the page tried to move');
-});
-
-test('C7f the page stays, and leaves no file', async () => {
-  const k = await wall('k');
-  const said = await wall('leave');
-  assert.ok(said.includes('fail https://unpkg.com/x.html'), said.join(' | '));
-  const left = [];
-  const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.name.startsWith('left-behind')) left.push(path.join(d, e.name)); if (e.isDirectory()) walk(path.join(d, e.name)); } };
-  for (const d of [k.F.home, TMP, k.F.old].filter((x) => fs.existsSync(x))) walk(d);
-  assert.deepEqual(left, []);
-});
-
-test('the capture serves the artifact\'s plain files and nothing else', async () => {
-  assert.deepEqual((await wall('paths')).filter((l) => l.startsWith('serve /got-')), ['serve /got-plain csp=no']);
-});
-
-test('C7g every file under the policy, and no hook outside tests', async () => {
-  const k = await wall('k');
-  const served = (await wall('assets')).filter((l) => l.startsWith('serve '));
-  for (const f of ['/assets.html', '/app.js', '/app.css']) assert.ok(served.includes(`serve ${f} csp=yes`), `${f}: ${served.join(' | ')}`);
-  assert.deepEqual(served.filter((l) => !l.endsWith(' csp=yes')), []);
-  const off = seenFile();
-  await k.readyOn(k.subject({ path: 'assets.html' }), { DEVTEAM_TEST: undefined, DEVTEAM_TEST_SHOT_SEEN: off, DEVTEAM_TEST_SHOT_NO_CSP: '1' });
-  assert.ok(!fs.existsSync(off), 'no hook file');
-  assert.ok(!/process\.env\.DEVTEAM_TEST/.test(region()), 'each hook read through browserTestEnv');
-});
-
 test('C8a C8c a page that loops, a Chrome that says nothing, nothing to picture: refused, nothing written', async () => {
   const k = shotKit();
   const hook = seenFile();
@@ -389,7 +177,7 @@ test('C10a C10c thread new --frame: recorded, and every bound held', async () =>
     assert.match(r.out, want, what);
     assert.equal(k.logBytes(), was, `${what}: no line`);
   };
-  for (const [what, f] of [['w 319', { w: 319, h: 700, hash: '' }], ['w 3841', { w: 3841, h: 700, hash: '' }], ['w 900.5', { w: 900.5, h: 700, hash: '' }], ['w text', { w: '900', h: 700, hash: '' }], ['h 239', { w: 900, h: 239, hash: '' }], ['h 2161', { w: 900, h: 2161, hash: '' }], ['hash tab2', { w: 900, h: 700, hash: 'tab2' }], ['hash 201 bytes', { w: 900, h: 700, hash: `#${'x'.repeat(200)}` }], ['hash newline', { w: 900, h: 700, hash: '#a\nb' }], ['no hash', { w: 900, h: 700 }], ['an extra key', { w: 900, h: 700, hash: '', x: 1 }], ['a list', [900, 700, '']], ['null', null]]) await bad(what, JSON.stringify(f), k.subject(), /--frame/);
+  for (const [what, f] of [['w 319', { w: 319, h: 700, hash: '' }], ['w 3841', { w: 3841, h: 700, hash: '' }], ['w 900.5', { w: 900.5, h: 700, hash: '' }], ['w text', { w: '900', h: 700, hash: '' }], ['h 239', { w: 900, h: 239, hash: '' }], ['h 2161', { w: 900, h: 2161, hash: '' }], ['hash tab2', { w: 900, h: 700, hash: 'tab2' }], ['hash 201 bytes', { w: 900, h: 700, hash: `#${'x'.repeat(200)}` }], ['hash 203 bytes, 102 characters', { w: 900, h: 700, hash: `#${'é'.repeat(101)}` }], ['hash bidi', { w: 900, h: 700, hash: '#a\u202eb' }], ['hash newline', { w: 900, h: 700, hash: '#a\nb' }], ['no hash', { w: 900, h: 700 }], ['an extra key', { w: 900, h: 700, hash: '', x: 1 }], ['a list', [900, 700, '']], ['null', null]]) await bad(what, JSON.stringify(f), k.subject(), /--frame/);
   await bad('not JSON', '{w:900}', k.subject(), /--frame/);
   await bad('an item subject', JSON.stringify(frame), { kind: 'item', ref: `goal:${k.F.goal}` }, /--frame goes with an artifact subject/);
   for (const f of [{ w: 320, h: 240, hash: '' }, { w: 3840, h: 2160, hash: `#${'x'.repeat(199)}` }]) { const at = await k.noteByCommand(k.subject(), { frame: f }); assert.deepEqual(k.last((o) => o.type === 'thread' && o.op === 'new' && o.id === at).frame, f); }
@@ -416,112 +204,13 @@ test('C10b the thread-new POST carries the frame, and refuses a bad one', async 
     const bad = await post({ title: 'A badly framed note', text: 'Words', subject: k.subject(), frame: { w: 100 } });
     assert.equal(bad.status, 400);
     assert.equal(named('A badly framed note'), undefined);
+    // refused before a command is spawned, and what is spawned carries no capability
+    const action = /\n    'thread-new': \(b\) => \{[\s\S]*?\n    \},\n/.exec(SRC)?.[0] ?? '';
+    assert.ok(action.includes('!frameProblem(frame, subject)') && /frame[^;]*uncapped\(|uncapped\([^;]*frame/.test(action), action.slice(0, 80));
     const none = await post({ title: 'A note with no frame', text: 'Words', subject: k.subject() });
     assert.equal(none.status, 200);
     assert.ok(!('frame' in named('A note with no frame')));
   } finally { await dash.stop(); }
-});
-
-// a capture is mostly waiting: three at a time
-async function each(list, fn) { const at = [...list]; await Promise.all([0, 1, 2].map(async () => { while (at.length) await fn(at.shift()); })); }
-const NINE = { w: 900, h: 700, hash: '' };
-// where found.html's button is in its 320x200 picture
-const MIDDLE = { x: 110, y: 70, w: 100, h: 60 };
-const lit = (k, r) => fs.readFileSync(path.join(k.shots, r.id, `${r.line.shot.stamp}-light.png`));
-const said = (r) => `${r.status}: ${r.out}`;
-
-test('C1a C1b C6b C15a a found note: the line, the file, the ring, what is printed', async () => {
-  const k = shotKit();
-  const r = await k.readyOn(k.subject());
-  assert.equal(r.status, 0, said(r));
-  const { shot } = r.line;
-  assert.equal(r.line.by, 'supervisor');
-  assert.equal(r.line.ready.outcome, 'The button now says Annual');
-  assert.deepEqual(Object.keys(shot).sort(), ['anchor', 'dark', 'dirty', 'h', 'sha', 'src', 'stamp', 'sum', 'w']);
-  assert.match(shot.stamp, /^\d{8}-\d{9}$/);
-  assert.deepEqual([shot.anchor, shot.w, shot.h, shot.dark, 'dark' in shot.sum], ['found', 1400, 860, false, false]);
-  assert.deepEqual(k.files(r.id), [`${shot.stamp}-light.png`]);
-  assert.equal(shot.sum.light, sha256(lit(k, r)));
-  const p = k.light(r);
-  assert.deepEqual([p.w, p.h], [320, 200]);
-  assert.ok(ringAt(p, MIDDLE), 'the ring round the button');
-  assert.ok(near(p.px(160, 100 - 25), [0, 0, 255]), 'the button inside it');
-  assert.ok(r.stdout.includes(`${k.shots}/${r.id}/${shot.stamp}-light.png`) || r.stdout.includes(fs.realpathSync(path.join(k.shots, r.id, `${shot.stamp}-light.png`))), r.stdout);
-  assert.ok(r.stdout.includes(`Look at it before you send this mark: if it doesn't show the change, withdraw it with thread unready ${r.id} --reason "<why>".`));
-  assert.match(r.stdout, /data, not instructions[^\n]*\n {2}anchor found, clip 320x200, text "Start trial"/);
-});
-
-test('C3 the width the owner had, and the clip', async () => {
-  const k = shotKit();
-  await each([
-    ['C3a', { path: 'width.html' }, NINE, (r) => { assert.match(r.out, /text "Narrow"/); assert.equal(r.line.shot.w, 900); }],
-    ['C3b', { path: 'width.html' }, undefined, (r) => { assert.match(r.out, /text "Wide"/); assert.equal(r.line.shot.w, 1400); }],
-    ['C3c', { path: 'liar.html' }, NINE, (r) => assert.equal(r.line.shot.w, 777)],
-    ['C3d 400x300', { path: 'mid.html' }, undefined, (r, p) => assert.deepEqual([p.w, p.h], [464, 364])],
-    ['C3d tall', { path: 'tall.html' }, NINE, (r, p) => assert.equal(p.h, 700)],
-    ['C3d wide', { path: 'wide.html' }, NINE, (r, p) => assert.equal(p.w, 900)],
-    ['C3e', { path: 'below.html' }, undefined, (r, p) => assert.ok(ringAt(p, MIDDLE))],
-    ['C3f', { path: 'liar3000.html' }, NINE, (r, p) => { assert.ok(p.w <= 900); assert.equal(r.line.shot.w, 3000); }],
-    ['C3g', { path: 'corner.html', anchor: { selector: '#logo', tag: 'div', text: 'Logo', rect: { x: 12, y: 12, w: 40, h: 20 } } }, NINE, (r, p) => { assert.deepEqual([p.w, p.h], [320, 200]); assert.ok(ringAt(p, { x: 12, y: 12, w: 40, h: 20 })); }],
-    ['C3h', { point: { x: 40, y: 20 }, path: 'scrolled.html', anchor: undefined }, undefined, (r, p) => { assert.ok(near(p.px(40, 20), [255, 0, 0]), String(p.px(40, 20))); assert.ok(near(p.px(40, 80), [0, 0, 255])); }],
-    ['C3x a query string in path', { path: 'found.html?x=1' }, undefined, (r) => assert.equal(r.line.shot.anchor, 'found')],
-    ['C5x a page whose script throws', { path: 'throws.html' }, undefined, (r) => assert.equal(r.line.shot.anchor, 'found')],
-    ['C8d a page that alerts', { path: 'alert.html' }, undefined, (r) => assert.equal(r.line.shot.anchor, 'found')],
-  ], async ([what, o, frame, check]) => {
-    const r = await k.readyOn(k.subject(o), { frame });
-    assert.equal(r.status, 0, `${what}: ${said(r)}`);
-    try { check(r, k.light(r)); } catch (e) { e.message = `${what}: ${e.message}`; throw e; }
-  });
-});
-
-test('C5 the state of the spot, and the view it is on', async () => {
-  const k = shotKit();
-  const tab = { w: 1400, h: 860, hash: '#tab2' };
-  const green = (r, p) => assert.ok(near(p.px(40, 20), [0, 170, 0]), String(p.px(40, 20)));
-  await each([
-    ['C5b', k.subject({ path: 'changed.html' }), undefined, 'changed', (r) => assert.match(r.out, /text "Start free trial"/)],
-    ['C5c', k.subject({ path: 'details.html' }), undefined, 'found', (r, p) => assert.deepEqual([p.w, p.h], [320, 200])],
-    ['C5d', k.subject({ path: 'tabs-js.html' }), undefined, 'hidden', (r, p) => assert.ok(ringAt(p, MIDDLE))],
-    ['C5e', k.subject({ path: 'gone.html' }), undefined, 'gone', (r, p) => assert.ok(ringAt(p, MIDDLE))],
-    ['C5f', k.pointNote(), undefined, 'point', (r, p) => assert.deepEqual([p.w, p.h], [480, 320])],
-    ['C5g #tab2', k.subject({ path: 'tabs.html' }), tab, 'found', () => {}],
-    ['C5g none', k.subject({ path: 'tabs.html' }), { ...tab, hash: '' }, 'hidden', () => {}],
-    ['C5h no frame', k.pointNote({ path: 'tabs.html#tab2' }), undefined, 'point', green],
-    ['C5h a frame with no hash', k.pointNote({ path: 'tabs.html#tab2' }), { ...tab, hash: '' }, 'point', green],
-  ], async ([what, s, frame, state, check]) => {
-    const r = await k.readyOn(s, { frame });
-    assert.equal(r.status, 0, `${what}: ${said(r)}`);
-    assert.equal(r.line.shot.anchor, state, what);
-    try { check(r, k.light(r)); } catch (e) { e.message = `${what}: ${e.message}`; throw e; }
-  });
-});
-
-test('C6a a page with dark styles has a dark picture', async () => {
-  const k = shotKit();
-  const r = await k.readyOn(k.subject({ path: 'dark.html' }));
-  assert.equal(r.status, 0, said(r));
-  const { shot } = r.line;
-  assert.equal(shot.dark, true);
-  const dark = fs.readFileSync(path.join(k.shots, r.id, `${shot.stamp}-dark.png`));
-  assert.equal(shot.sum.dark, sha256(dark));
-  assert.ok(near(png(dark).px(20, 20), [0x11, 0x11, 0x11]));
-  assert.ok(near(k.light(r).px(20, 20), [255, 255, 255]));
-  assert.ok(ringAt(png(dark), MIDDLE));
-  assert.match(r.stdout, /-light\.png \(and -dark\.png\)/);
-});
-
-test('C15b the page is not trusted with what is printed or recorded', async () => {
-  const k = shotKit();
-  const r = await k.readyOn(k.subject({ path: 'hostile.html' }));
-  assert.equal(r.status, 0, said(r));
-  const text = JSON.parse(/text (".*")$/m.exec(r.stdout)[1]);
-  assert.ok([...text].length <= 80 && text.includes('[link removed]'), text);
-  assert.ok(!r.stdout.includes('\u202e') && !r.stdout.includes('abcdefghijklmnop'));
-  const bad = await k.readyOn(k.subject({ path: 'badstate.html' }));
-  assert.equal(bad.status, 1);
-  assert.match(bad.out, /the page answered the picture with something else/);
-  assert.equal(bad.line, undefined);
-  assert.deepEqual(k.files(bad.id), []);
 });
 
 test('the pictures go only in their own folder: a symlinked one is refused', async () => {
@@ -537,22 +226,12 @@ test('the pictures go only in their own folder: a symlinked one is refused', asy
   fs.unlinkSync(path.join(k.shots, id));
 });
 
-test('C5y two captures at once', async () => {
-  const k = shotKit();
-  const ids = [await k.note(k.subject()), await k.note(k.subject())];
-  const hooks = [seenFile(), seenFile()];
-  const rs = await Promise.all(ids.map((id, i) => k.ready(id, { DEVTEAM_TEST_SHOT_SEEN: hooks[i] })));
-  for (const r of rs) assert.equal(r.status, 0, said(r));
-  const of = (i, re) => k.seen(hooks[i]).map((l) => re.exec(l)?.[1]).filter(Boolean);
-  for (const re of [/ profile=(.*)$/, /^continue (http:\/\/127\.0\.0\.1:\d+)/]) assert.equal(of(0, re).filter((x) => of(1, re).includes(x)).length, 0, String(re));
-  for (const r of rs) { assert.deepEqual(k.files(r.id), [`${r.line.shot.stamp}-light.png`]); assert.equal(r.line.shot.sum.light, sha256(lit(k, r))); }
-});
-
 test('a thread resolved while its picture is taken gets no proposal', async () => {
   const k = shotKit();
   const id = await k.note(k.subject({ path: 'slow.html' }));
-  const going = k.ready(id);
-  await new Promise((r) => setTimeout(r, 1500));
+  const hook = seenFile();
+  const going = k.ready(id, { DEVTEAM_TEST_SHOT_SEEN: hook });
+  await until(() => k.seen(hook).includes('page'), 'the picture to have begun');
   assert.equal((await k.run(['thread', 'resolve', id])).status, 0);
   const r = await going;
   assert.equal(r.status, 1, r.out);
@@ -560,29 +239,6 @@ test('a thread resolved while its picture is taken gets no proposal', async () =
   assert.equal(r.line, undefined);
   assert.deepEqual(k.files(id), []);
 });
-
-// --- which copy is pictured ---------------------------------------------------------------------------
-// a session's worktree with its own copy of an artifact, committed
-function worktree(k, name, slug, label) {
-  const root = path.join(k.F.old, '.worktrees', name);
-  if (!fs.existsSync(root)) k.F.g(['worktree', 'add', '-q', '-b', name, root], k.F.old);
-  const dir = path.join(root, 'docs/devteam/project/artifacts', slug);
-  write(path.join(dir, 'artifact.json'), '{"v":1,"title":"A page","summary":"A page","by":"supervisor"}\n');
-  write(path.join(dir, 'index.html'), `<!doctype html><button id="buy">${label}</button>\n`);
-  k.F.g(['add', '-A'], root);
-  k.F.g(['commit', '-qm', `${slug}: ${label}`], root);
-  return { root, dir, head: () => k.F.g(['rev-parse', 'HEAD'], root), remove: () => { k.F.g(['worktree', 'remove', '--force', root], k.F.old); k.F.g(['branch', '-D', name], k.F.old); } };
-}
-const pageNote = (k, o = {}) => k.subject({ path: 'index.html', ...o });
-// a note the owner handed over and a session marked addressed, as kit-144 will write it
-let marks = 0;
-async function addressed(k, s, by, extra = {}) {
-  const id = await k.note(s);
-  k.F.hand('owner', { type: 'thread', op: 'set', id, handed: { to: by, at: new Date(Date.now() - 20).toISOString() } }, 20);
-  const m = `m-20261123-${String(++marks).padStart(9, '0')}-${by}`;
-  k.F.hand(by, { id: m, type: 'message', to: 'owner', kind: 'addressed', thread: id, text: 'The button now says Annual', ...extra }, 0);
-  return id;
-}
 
 test('C4a C4e main first, never a stale checkout', async () => {
   const k = shotKit();
@@ -604,6 +260,7 @@ test('C4b C4d a draft alone: pictured from it, then main once it is gone', async
   const k = shotKit();
   const wt = worktree(k, 'chore-artifact-drafty', 'drafty', 'Chore');
   const s = () => pageNote(k, { slug: 'drafty', at: 'chore-artifact-drafty' });
+  write(path.join(wt.root, 'other.txt'), 'a change outside the artifact\n');
   const r = await k.readyOn(s());
   assert.equal(r.status, 0, said(r));
   assert.match(r.out, /text "Chore"/);
@@ -614,6 +271,24 @@ test('C4b C4d a draft alone: pictured from it, then main once it is gone', async
   const d = await k.readyOn(s());
   assert.match(d.out, /text "Chore edited"/);
   assert.equal(d.line.shot.dirty, true);
+  // an edit and a commit while the picture is taken
+  const during = async (what) => {
+    fs.writeFileSync(path.join(wt.dir, 'index.html'), '<!doctype html><button id="buy">Chore</button>\n');
+    k.F.g(['add', '-A'], wt.root);
+    k.F.g(['commit', '-q', '--allow-empty', '-m', 'clean'], wt.root);
+    const hook = seenFile();
+    const going = k.readyOn(s(), { DEVTEAM_TEST_SHOT_SEEN: hook });
+    await until(() => k.seen(hook).some((l) => l.startsWith('launch ')), 'Chrome to launch');
+    fs.writeFileSync(path.join(wt.dir, 'index.html'), '<!doctype html><button id="buy">After</button>\n');
+    if (what === 'commit') k.F.g(['commit', '-qam', 'after'], wt.root);
+    return going;
+  };
+  const edited = await during('edit');
+  assert.equal(edited.line?.shot.dirty, true, said(edited));
+  const moved = await during('commit');
+  assert.equal(moved.status, 1, said(moved));
+  assert.match(moved.out, /moved to another commit/);
+  assert.deepEqual(k.files(moved.id), []);
   fs.cpSync(wt.dir, path.join(k.arts, 'drafty'), { recursive: true });
   k.F.g(['add', '-A'], k.F.old);
   k.F.g(['commit', '-qm', 'drafty lands'], k.F.old);
@@ -637,6 +312,41 @@ test('C4c C4f an addressed mark\'s draft is what Show me opens, and what a ready
   assert.deepEqual((await k.show(id)).source, { at: 'main', slug: 'pricing' });
   const plain = await k.show(await k.note(pageNote(k)));
   assert.equal(plain.source, null, 'nothing to check, no source');
+});
+
+test('C4 the order, and the copy\'s own commit and changes', () => {
+  const has = (...at) => (x) => at.includes(x);
+  const { shotOrder, noteSource, markShot } = cut(['LINK_ID', 'shotOrder', 'noteSource', 'readySource', 'markShot'], { shotHolds: () => has('kit-9-x', 'main'), noteShot: (view, src) => src });
+  const v = (o = {}) => ({ subject: { slug: 'p', at: 'kit-9-x' }, addressed: { draft: 'kit-8-y' }, ...o });
+  assert.deepEqual(['kit-8-y', 'kit-9-x', 'chore-artifact-p', 'main'].map((_, i, all) => shotOrder(v(), has(...all.slice(i)))?.at), ['kit-8-y', 'kit-9-x', 'chore-artifact-p', 'main']);
+  assert.equal(shotOrder(v(), has()), null);
+  for (const at of ['kit-9-x', 'main']) assert.equal(noteSource(v({ addressed: null, check: 'addressed', subject: { slug: 'p', at } }), has(at)).at, at);
+  for (const slug of [['racy'], undefined, 7, '../x']) assert.equal(noteSource({ subject: { slug, at: 'kit-9-x' }, check: 'ready', shot: null }, has('kit-9-x')), null);
+  assert.equal(noteSource({ subject: { slug: 'p', at: 'main' }, check: 'ready' }, () => { throw new Error('a path'); }), null, 'a throw is no source');
+  // what kit-144 marks with
+  assert.equal(markShot(v({ addressed: null }), { kind: 'addressed', by: 'supervisor', draft: 'kit-9-x' }), 'kit-9-x');
+  assert.equal(markShot(v({ subject: { slug: 'p', at: 'main' } }), { kind: 'addressed', by: 'supervisor' }), 'main');
+  const git = (top, status) => cut(['shotSha', 'shotDirty'], { ARTIFACTS_REL: 'a', mainSha: () => 'm', draftWorktree: () => '/wt', git: (a) => (a.includes('--show-toplevel') ? top : a.includes('status') ? (git.asked = a, status) : 'sha') });
+  assert.equal(git('/wt', '').shotSha('x'), 'sha');
+  assert.throws(() => git('/main', '').shotSha('x'), /has no commit/);
+  assert.deepEqual(['', ' M a', null].map((st) => git('/wt', st).shotDirty('x', 'p')), [false, true, true]);
+  assert.ok(git.asked.includes('--no-optional-locks') && git.asked.includes('--untracked-files=normal'));
+});
+
+test('a hand-written note of the wrong shape stops no command', async () => {
+  const k = shotKit();
+  const wt = worktree(k, 'kit-2-racy', 'racy', 'Racy');
+  // in a log of its own, gone after
+  const before = new Map(fs.readdirSync(k.F.logDir).map((f) => [f, fs.readFileSync(path.join(k.F.logDir, f))]));
+  try {
+    const id = await k.note(pageNote(k, { slug: ['racy'], at: 'kit-2-racy' }));
+    k.F.hand('supervisor', { type: 'thread', op: 'set', id, ready: { at: new Date().toISOString(), outcome: 'The button now says Annual' } }, 0);
+    const r = await k.run(['thread', 'list'], k.SUP);
+    assert.equal(r.status, 0, said(r));
+  } finally {
+    for (const f of fs.readdirSync(k.F.logDir)) { if (before.has(f)) fs.writeFileSync(path.join(k.F.logDir, f), before.get(f)); else fs.unlinkSync(path.join(k.F.logDir, f)); }
+    wt.remove();
+  }
 });
 
 // --- withdrawing a mark -------------------------------------------------------------------------------
