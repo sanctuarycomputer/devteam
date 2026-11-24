@@ -1,0 +1,326 @@
+{
+ "C6b": {
+  "fail": "not ok 1 - terminal A11: at most one key post is in flight; queued keys merge up to 4096 bytes; a failed post is not retried",
+  "err": "'the keys queued behind the first were merged: 4 posts'",
+  "exit": "1",
+  "at": "2026-11-24T04:38:51.317Z"
+ },
+ "C7b": {
+  "fail": "not ok 1 - terminal A11: at most one key post is in flight; queued keys merge up to 4096 bytes; a failed post is not retried",
+  "err": "'timed out: a 500: fixed words'",
+  "exit": "1",
+  "at": "2026-11-24T04:56:32.591Z"
+ },
+ "C11b": {
+  "fail": "not ok 1 - terminal A11: the poll stops when the panel closes",
+  "err": "the panel closed: no reads",
+  "exit": "1",
+  "at": "2026-11-24T04:56:38.145Z"
+ },
+ "C15b": {
+  "fail": "not ok 1 - terminal A11b: a multi-line paste asks 'Paste N lines?'; confirmed, one paste post; cancelled, nothing",
+  "err": "nothing of it sent: the cap is in bytes",
+  "exit": "1",
+  "at": "2026-11-24T04:39:47.149Z"
+ },
+ "C18b": {
+  "fail": "not ok 1 - terminal A12: th=shell posts shell/open once and draws the shell; an ended shell shows 'The shell ended.' with Open a new shell",
+  "err": "\"the Shell tab draws the shell's screen, never the supervisor's\"",
+  "exit": "1",
+  "at": "2026-11-24T04:39:54.452Z"
+ },
+ "C24b": {
+  "fail": "not ok 1 - terminal A13: a not-loopback refusal shows its note and stops asking",
+  "err": "asked once",
+  "exit": "1",
+  "at": "2026-11-24T04:40:03.102Z"
+ },
+ "C34b": {
+  "fail": "not ok 1 - terminal A14b: the page asks GET /api/term/token once on load, before any tab is pressed; why view hides both tabs",
+  "err": "{\"refuse\":\"view\"}: no terminal tab while the token is asked",
+  "exit": "1",
+  "at": "2026-11-24T04:56:43.847Z"
+ },
+ "C1": {
+  "fail": "not ok 1 - terminal A11: th=supervisor draws the fake's screen with xterm.js, loaded with its integrity hash only on the first open",
+  "err": "\"timed out: the fake's screen drawn by xterm\"",
+  "exit": "1",
+  "at": "2026-11-24T04:40:42.848Z"
+ },
+ "C2": {
+  "fail": "not ok 1 - terminal A11: th=supervisor draws the fake's screen with xterm.js, loaded with its integrity hash only on the first open",
+  "err": "'with an integrity hash'",
+  "exit": "1",
+  "at": "2026-11-24T04:40:50.121Z"
+ },
+ "C3": {
+  "fail": "not ok 1 - terminal A11: th=supervisor draws the fake's screen with xterm.js, loaded with its integrity hash only on the first open",
+  "err": "xterm.js is not asked for before a terminal tab opens",
+  "exit": "1",
+  "at": "2026-11-24T04:40:56.645Z"
+ },
+ "C4": {
+  "fail": "not ok 1 - terminal A11: typing 'echo hi' and Enter posts the bytes, in order, and the echo shows",
+  "err": "'timed out: the echo on the screen'",
+  "exit": "1",
+  "at": "2026-11-24T04:41:26.447Z"
+ },
+ "C5": {
+  "fail": "not ok 1 - terminal A11: at most one key post is in flight; queued keys merge up to 4096 bytes; a failed post is not retried",
+  "err": "'post 2 started before post 1 was answered'",
+  "exit": "1",
+  "at": "2026-11-24T04:41:36.150Z"
+ },
+ "C6": {
+  "fail": "not ok 1 - terminal A11: at most one key post is in flight; queued keys merge up to 4096 bytes; a failed post is not retried",
+  "err": "'no post over 4096 bytes: 1,3,1,5000'",
+  "exit": "1",
+  "at": "2026-11-24T04:41:49.842Z"
+ },
+ "C7": {
+  "fail": "not ok 1 - terminal A11: at most one key post is in flight; queued keys merge up to 4096 bytes; a failed post is not retried",
+  "err": "the refused post is sent once and never retried",
+  "exit": "1",
+  "at": "2026-11-24T04:42:02.845Z"
+ },
+ "C8": {
+  "fail": "not ok 1 - terminal A11: the screen polls only while the document is visible and its box is seen",
+  "err": "the document hidden: no reads",
+  "exit": "1",
+  "at": "2026-11-24T04:42:13.123Z"
+ },
+ "C9": {
+  "fail": "not ok 1 - terminal A11: the screen polls only while the document is visible and its box is seen",
+  "err": "the box off screen: no reads",
+  "exit": "1",
+  "at": "2026-11-24T04:42:26.030Z"
+ },
+ "C10": {
+  "fail": "not ok 1 - terminal A11: in the hub's frame, hub-visible false stops the poll and true starts it again",
+  "err": "no reads after hub-visible false",
+  "exit": "1",
+  "at": "2026-11-24T04:42:34.452Z"
+ },
+ "C11": {
+  "fail": "not ok 1 - terminal A11: the poll stops when another tab is chosen",
+  "err": "the Threads tab chosen: no reads",
+  "exit": "1",
+  "at": "2026-11-24T04:42:43.823Z"
+ },
+ "C12": {
+  "fail": "not ok 1 - terminal A11: a screen line carrying a query (DSR, a focus-report mode, an 8-bit CSI) types nothing back",
+  "err": "no post without a key press",
+  "exit": "1",
+  "at": "2026-11-24T04:42:51.237Z"
+ },
+ "C13": {
+  "fail": "not ok 1 - terminal A11b: a multi-line paste asks 'Paste N lines?'; confirmed, one paste post; cancelled, nothing",
+  "err": "'timed out: the question'",
+  "exit": "1",
+  "at": "2026-11-24T04:43:18.135Z"
+ },
+ "C14": {
+  "fail": "not ok 1 - terminal A11b: a multi-line paste asks 'Paste N lines?'; confirmed, one paste post; cancelled, nothing",
+  "err": "a paste post, not keys",
+  "exit": "1",
+  "at": "2026-11-24T04:43:26.440Z"
+ },
+ "C15": {
+  "fail": "not ok 1 - terminal A11b: a multi-line paste asks 'Paste N lines?'; confirmed, one paste post; cancelled, nothing",
+  "err": "nothing of it sent: the cap is in bytes",
+  "exit": "1",
+  "at": "2026-11-24T04:43:34.449Z"
+ },
+ "C16": {
+  "fail": "not ok 1 - terminal A11b: a multi-line paste asks 'Paste N lines?'; confirmed, one paste post; cancelled, nothing",
+  "err": "as it was pasted: the server drops bracket markers (terminal@1 §8)",
+  "exit": "1",
+  "at": "2026-11-24T04:43:44.213Z"
+ },
+ "C17": {
+  "fail": "not ok 1 - terminal A12: th=shell posts shell/open once and draws the shell; an ended shell shows 'The shell ended.' with Open a new shell",
+  "err": "'timed out: the panel open and at rest'",
+  "exit": "1",
+  "at": "2026-11-24T04:44:09.506Z"
+ },
+ "C17m": {
+  "fail": "not ok 1 - terminal A12: th=shell posts shell/open once and draws the shell; an ended shell shows 'The shell ended.' with Open a new shell",
+  "err": "shell/open posted once",
+  "exit": "1",
+  "at": "2026-11-24T04:44:20.141Z"
+ },
+ "C18": {
+  "fail": "not ok 1 - terminal A12: th=shell posts shell/open once and draws the shell; an ended shell shows 'The shell ended.' with Open a new shell",
+  "err": "'timed out: typed into the shell'",
+  "exit": "1",
+  "at": "2026-11-24T04:44:48.011Z"
+ },
+ "C19": {
+  "fail": "not ok 1 - terminal A12: th=shell posts shell/open once and draws the shell; an ended shell shows 'The shell ended.' with Open a new shell",
+  "err": "'timed out: The shell ended.'",
+  "exit": "1",
+  "at": "2026-11-24T04:45:15.320Z"
+ },
+ "C20": {
+  "fail": "not ok 1 - terminal A13: state gone shows 'The supervisor isn't running.' with the recover command and polls every 5 s",
+  "err": "'timed out: the panel open and at rest'",
+  "exit": "1",
+  "at": "2026-11-24T04:45:43.112Z"
+ },
+ "C21": {
+  "fail": "not ok 1 - terminal A13: state gone shows 'The supervisor isn't running.' with the recover command and polls every 5 s",
+  "err": "'every 5 s while it is gone: 36 reads in 6 s'",
+  "exit": "1",
+  "at": "2026-11-24T04:45:54.125Z"
+ },
+ "C22": {
+  "fail": "not ok 1 - terminal A13: on a box the not-running state links the Terminal page",
+  "err": "Expected values to be strictly equal:",
+  "exit": "1",
+  "at": "2026-11-24T04:45:58.623Z"
+ },
+ "C23": {
+  "fail": "not ok 1 - terminal A13: with the xterm.js script blocked the tab shows the plain screen and sends no keys",
+  "err": "`timed out: the plain screen: {\"lib\":\"failed\",\"html\":\"<div class=\\\\\"term-bar\\\\\"><span class=\\\\\"where\\\\\">The supervisor's terminal</span><span class=\\\\\"live\\\\\" data-term-live=\\\\\"\\\\\"><i class=\\\\\"dot\\\\\" aria-hidden=\\\\\"true\\\\\"></i><span>live</span></span></div><div class=\\\\\"term-state\\\\\" hidden=\\\\\"\\\\\"></div><div class=\\\\\"term-wrap\\\\\"><div class=\\\\\"term-screen\\\\\"></div><pre class=\\\\\"term-plain\\\\\" hidden=\\\\\"\\\\\"></pre></div><div class=\\\\\"term-ask\\\\\" hidden=\\\\\"\\\\\" role=\\\\\"group\\\\\" aria-label=\\\\\"Paste\\\\\"></div><div class=\\\\\"term-hint small muted\\\\\" aria-live=\\\\\"polite\\\\\"><span>The terminal couldn't load, so typing is off. This is the screen as text.</span></div>\"}`",
+  "exit": "1",
+  "at": "2026-11-24T04:46:24.111Z"
+ },
+ "C24": {
+  "fail": "not ok 1 - terminal A13: a not-loopback refusal shows its note and stops asking",
+  "err": "'timed out: the note'",
+  "exit": "1",
+  "at": "2026-11-24T04:46:48.034Z"
+ },
+ "C25": {
+  "fail": "not ok 1 - terminal A13: a cross-site refusal shows its note and stops asking",
+  "err": "asked twice",
+  "exit": "1",
+  "at": "2026-11-24T04:46:53.311Z"
+ },
+ "C26": {
+  "fail": "not ok 1 - terminal A13: the /view/ page keeps both slots disabled",
+  "err": "Expected values to be strictly deep-equal:",
+  "exit": "1",
+  "at": "2026-11-24T04:46:56.445Z"
+ },
+ "C27": {
+  "fail": "not ok 1 - terminal A13: held kit messages behind an open owner line show the waiting note",
+  "err": "'the count alone never shows the note'",
+  "exit": "1",
+  "at": "2026-11-24T05:09:58.820Z"
+ },
+ "C28": {
+  "fail": "not ok 1 - terminal A14: the font scales down to fit the columns, to a 9 px floor, then the screen scrolls sideways",
+  "err": "'timed out: scaled down'",
+  "exit": "1",
+  "at": "2026-11-24T04:47:29.547Z"
+ },
+ "C28f": {
+  "fail": "not ok 1 - terminal A14: the font scales down to fit the columns, to a 9 px floor, then the screen scrolls sideways",
+  "err": "'timed out: the floor'",
+  "exit": "1",
+  "at": "2026-11-24T04:47:56.327Z"
+ },
+ "C28c": {
+  "fail": "not ok 1 - terminal A14: the font scales down to fit the columns, to a 9 px floor, then the screen scrolls sideways",
+  "err": "'the screen scrolls sideways, not clipped'",
+  "exit": "1",
+  "at": "2026-11-24T04:48:02.011Z"
+ },
+ "C29": {
+  "fail": "not ok 1 - terminal A14: Wide widens the panel to half the window on a terminal tab, is remembered, and moves a side peek with it",
+  "err": "'timed out: half the 1440 px window'",
+  "exit": "1",
+  "at": "2026-11-24T04:48:27.415Z"
+ },
+ "C29r": {
+  "fail": "not ok 1 - terminal A14: Wide widens the panel to half the window on a terminal tab, is remembered, and moves a side peek with it",
+  "err": "remembered",
+  "exit": "1",
+  "at": "2026-11-24T04:48:32.141Z"
+ },
+ "C29p": {
+  "fail": "not ok 1 - terminal A14: Wide widens the panel to half the window on a terminal tab, is remembered, and moves a side peek with it",
+  "err": "\"timed out: the peek's right edge at the wide panel's left\"",
+  "exit": "1",
+  "at": "2026-11-24T04:48:57.505Z"
+ },
+ "C30": {
+  "fail": "not ok 1 - terminal A14: Ctrl+] releases focus; Escape goes to the pane; the + button hides on terminal tabs",
+  "err": "'timed out: released'",
+  "exit": "1",
+  "at": "2026-11-24T04:49:24.125Z"
+ },
+ "C30e": {
+  "fail": "not ok 1 - terminal A14: Ctrl+] releases focus; Escape goes to the pane; the + button hides on terminal tabs",
+  "err": "Escape is typed into the pane",
+  "exit": "1",
+  "at": "2026-11-24T04:49:30.417Z"
+ },
+ "C31": {
+  "fail": "not ok 1 - terminal A14: Ctrl+] releases focus; Escape goes to the pane; the + button hides on terminal tabs",
+  "err": "the + hidden on Supervisor",
+  "exit": "1",
+  "at": "2026-11-24T04:49:35.622Z"
+ },
+ "C32": {
+  "fail": "not ok 1 - terminal measure: the measure check passes at 1440, 720 and 390 px with a terminal tab open",
+  "err": "'timed out: the panel open and at rest'",
+  "exit": "1",
+  "at": "2026-11-24T04:50:01.529Z"
+ },
+ "C32m": {
+  "fail": "not ok 1 - terminal measure: the measure check passes at 1440, 720 and 390 px with a terminal tab open",
+  "err": "not running, Wide, 1440x900: prose: p is 687px, wider than --measure 672px: \"To bring it back, run this in a terminal\"",
+  "exit": "1",
+  "at": "2026-11-24T04:50:08.622Z"
+ },
+ "C33": {
+  "fail": "not ok 1 - terminal A14b: the page asks GET /api/term/token once on load, before any tab is pressed; why view hides both tabs",
+  "err": "one token request on load",
+  "exit": "1",
+  "at": "2026-11-24T04:50:15.438Z"
+ },
+ "C34": {
+  "fail": "not ok 1 - terminal A14b: the page asks GET /api/term/token once on load, before any tab is pressed; why view hides both tabs",
+  "err": "{\"refuse\":\"view\"}: both terminal tabs hidden",
+  "exit": "1",
+  "at": "2026-11-24T04:52:09.837Z"
+ },
+ "C35": {
+  "fail": "not ok 1 - terminal A14b: held over 2 minutes on an unknown prompt adds the answer-it-here sentence; app_cursor makes ArrowUp ESC O A",
+  "err": "'under 2 minutes: no note'",
+  "exit": "1",
+  "at": "2026-11-24T05:10:06.253Z"
+ },
+ "C35u": {
+  "fail": "not ok 1 - terminal A14b: held over 2 minutes on an unknown prompt adds the answer-it-here sentence; app_cursor makes ArrowUp ESC O A",
+  "err": "'timed out: the note with the answer-it-here sentence'",
+  "exit": "1",
+  "at": "2026-11-24T05:10:34.648Z"
+ },
+ "C36": {
+  "fail": "not ok 1 - terminal A14b: held over 2 minutes on an unknown prompt adds the Enter hint; app_cursor makes ArrowUp ESC O A; a slow read backs off to 2 s and a fast one comes back",
+  "err": "app_cursor: ESC O A",
+  "exit": "1",
+  "at": "2026-11-24T04:50:57.262Z"
+ },
+ "C37": {
+  "fail": "not ok 1 - terminal A14b: a slow read backs off to 2 s and a fast one comes back",
+  "err": "'slow reads: the gap doubles (2004,2009,2004,2010)'",
+  "exit": "1",
+  "at": "2026-11-24T05:09:03.412Z"
+ },
+ "C37f": {
+  "fail": "not ok 1 - terminal A14b: a slow read backs off to 2 s and a fast one comes back",
+  "err": "'fast reads: back to 150 ms (2005,2005,2005,2006)'",
+  "exit": "1",
+  "at": "2026-11-24T05:09:24.021Z"
+ },
+ "C38": {
+  "fail": "not ok 1 - the panel and its button",
+  "err": "Expected values to be strictly deep-equal:",
+  "exit": "1",
+  "at": "2026-11-24T04:51:48.062Z"
+ }
+}
