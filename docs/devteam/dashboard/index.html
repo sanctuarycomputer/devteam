@@ -1247,6 +1247,7 @@ try {
 /* css-view-only start */
   /* View only (kit-250): what the gateway refuses a view-only person looks it, and says why when pressed */
   body.view-only :is([data-answer], [data-cant], [data-reply], [data-dontuse], [data-post-secrets], [data-overrule-send], [data-correct-send], [data-rv-answer], [data-decline], [data-rv-decline], [data-know], [data-oa-know], [data-oa-goal], [data-hold-id], [data-met-id], [data-goal-move], [data-preview-start], [data-preview-stop], [data-forget], [data-limit-save], [data-limit-none], [data-limit-step], .fleet-switch [data-fleet], [data-checknow], [data-tl-send], [data-tl-accept], [data-tl-notyet], [data-tl-resolve-go], [data-tl-reopen], [data-goal-grip], [data-ask-option], [data-ask-esc], a[href*="/public/"], .dropbox[data-drop] textarea, .dropbox[data-drop] input, #tl-c-text) { opacity: .45; cursor: not-allowed; }
+  .av-head #view-only { margin-left: 6px; }
   #view-only { color: var(--amber-fg); background: color-mix(in srgb, var(--amber) 16%, transparent); }
   #view-only-toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 60; max-width: min(90vw, 480px); padding: 8px 14px; border-radius: 8px; background: var(--fg); color: var(--bg); font-size: 13px; box-shadow: 0 4px 16px rgb(0 0 0 / .18); }
 /* css-view-only end */
@@ -8651,12 +8652,14 @@ function viewStop(e) {
   else if (e.type === 'drop') stop = Boolean(write || el.closest('.dropbox[data-drop]'));
   else if (e.type === 'pointerdown') stop = Boolean(el.closest('[data-goal-grip]'));
   else if (e.type === 'keydown') {
+    if (e.isComposing || e.keyCode === 229) return;
     const typing = write && write.matches('textarea, input:not([type=checkbox], [type=radio], [type=button], [type=submit])');
     stop = Boolean(write) && (e.key === 'Enter' || (e.key === ' ' && !typing)) || ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && Boolean(el.closest('[data-goal-grip]')));
   }
   if (!stop) return;
   e.preventDefault();
   e.stopImmediatePropagation();
+  if (e.type === 'drop') el.closest('.dropbox')?.classList.remove('drop-over');
   viewToast();
 }
 let viewListening = false;
@@ -8670,8 +8673,9 @@ function viewOnly(level) {
     b.id = 'view-only';
     b.textContent = 'View only';
     b.title = 'View only: you can look at everything on this box. Buttons that would change something are greyed out.';
-    const kit = document.getElementById('kit');
-    if (kit) kit.after(b); else document.body.prepend(b);
+    // the viewer tab hides .app (and #kit with it): there it goes in the viewer's bar, after the kind
+    const at = document.getElementById(VIEWER ? 'av-kind' : 'kit');
+    if (at) at.after(b); else document.body.prepend(b);
   }
   if (b) b.hidden = !view;
   if (view && !viewListening) {

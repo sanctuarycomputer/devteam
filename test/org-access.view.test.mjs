@@ -733,6 +733,8 @@ test('org-access A14: a dashboard served at View shows View only and sends no wr
   const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('DEVTEAM_') || k === 'DEVTEAM_HUB_PORT' || k === 'DEVTEAM_PORT_BASE')), HOME: base };
   const dt = (args) => { const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: root, env: { ...env, DEVTEAM_ROLE: 'supervisor' }, encoding: 'utf8', timeout: 60000 }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
   const Q = dt(['ask', '--question', 'Ship it?', '--choices', '[{"label":"Yes"},{"label":"No"}]']);
+  // a second, answered by the page moved to Full (the first stays open for the Full page)
+  const Q2 = dt(['ask', '--question', 'Ship that too?', '--choices', '[{"label":"Yes"},{"label":"No"}]']);
   // an artifact landed on main, for the viewer tab
   const art = path.join(root, 'docs/devteam/project/artifacts/view-mock');
   fs.mkdirSync(art, { recursive: true });
@@ -764,7 +766,8 @@ test('org-access A14: a dashboard served at View shows View only and sends no wr
       }
     };
     const card = `#questions [data-qcard="${Q}"]`;
-    const pickYes = (p) => p.ev(`(() => { const r = document.querySelector(${JSON.stringify(`${card} input[data-pick][value="Yes"]`)}); r.click(); return r.checked; })()`);
+    const card2 = `#questions [data-qcard="${Q2}"]`;
+    const pickYes = (p, c = card) => p.ev(`(() => { const r = document.querySelector(${JSON.stringify(`${c} input[data-pick][value="Yes"]`)}); r.click(); return r.checked; })()`);
     // served View: the class, the badge, no write, the toast; navigation still works
     const p = await at('view', '/#questions');
     await until(p, `/^updated/.test(document.getElementById('when')?.textContent ?? '')`, 'the first render');
@@ -773,6 +776,8 @@ test('org-access A14: a dashboard served at View shows View only and sends no wr
     assert.equal(await p.ev(`document.getElementById('view-only')?.title ?? null`), VIEW_LINE, "the badge's title");
     await until(p, `Boolean(document.querySelector(${JSON.stringify(`${card} [data-answer]`)}))`, 'the question card');
     await new Promise((r) => setTimeout(r, 600));
+    const look = (pg) => pg.ev(`(() => { const s = getComputedStyle(document.querySelector(${JSON.stringify(`${card} [data-answer]`)})); return [s.opacity, s.cursor]; })()`);
+    assert.deepEqual(await look(p), ['0.45', 'not-allowed'], 'Answer greyed at View');
     assert.equal(await pickYes(p), true, 'a pick is not a write');
     assert.equal(await p.ev(`document.querySelector(${JSON.stringify(`${card} [data-answer]`)}).disabled`), false, 'Answer is live, so a click reaches it');
     await p.click(`${card} [data-answer]`);
@@ -788,10 +793,22 @@ test('org-access A14: a dashboard served at View shows View only and sends no wr
     await p.ev(`tlHide?.(); document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); true`);
     await p.click('.side a[href="#board"]');
     await until(p, `PAGE_NOW === 'board'`, 'a tab click still changes page');
+    // moved to Full while the page is open: the next read drops the class and the badge, and a press posts
+    await p.send('Network.setExtraHTTPHeaders', { headers: { 'x-devteam-level': 'full' } });
+    await until(p, `!document.body.classList.contains('view-only')`, 'the class goes on the next read', 40000);
+    assert.equal(await p.ev(`document.getElementById('view-only').hidden`), true, 'the badge goes');
+    await p.click('.side a[href="#questions"]').catch(() => p.ev(`location.hash = '#questions'`));
+    await until(p, `Boolean(document.querySelector(${JSON.stringify(`${card2} [data-answer]`)}))`, 'the second question card');
+    await new Promise((r) => setTimeout(r, 600));
+    assert.equal(await pickYes(p, card2), true);
+    await p.click(`${card2} [data-answer]`);
+    await until(p, `window.__posts.length > 0`, 'the press posts once Full');
     p.close();
     // the viewer tab learns the level from /api/viewer
     const v = await at('view', '/view/artifact/view-mock');
     await until(v, `document.body.classList.contains('view-only')`, 'the viewer tab gets the class');
+    await until(v, `(() => { const r = document.getElementById('view-only')?.getBoundingClientRect(); return Boolean(r && r.width > 0 && r.height > 0); })()`, 'the viewer tab shows the badge');
+    assert.deepEqual(await v.ev(`(() => { const b = document.getElementById('view-only'); return [b.textContent, b.closest('.av-bar') !== null]; })()`), ['View only', true], 'in its bar');
     v.close();
     // served Full: no class, no badge, and the same press posts
     const f = await at('full', '/#questions');
@@ -800,6 +817,7 @@ test('org-access A14: a dashboard served at View shows View only and sends no wr
     assert.equal(await f.ev(`Boolean(document.getElementById('view-only') && !document.getElementById('view-only').hidden)`), false, 'no badge at Full');
     await until(f, `Boolean(document.querySelector(${JSON.stringify(`${card} [data-answer]`)}))`, 'the question card (full)');
     await new Promise((r) => setTimeout(r, 600));
+    assert.deepEqual(await look(f), ['1', 'pointer'], 'Answer not greyed at Full');
     assert.equal(await pickYes(f), true);
     await f.click(`${card} [data-answer]`);
     await until(f, `window.__posts.length > 0`, 'the press posts at Full');
@@ -809,4 +827,12 @@ test('org-access A14: a dashboard served at View shows View only and sends no wr
     await dash.stop();
     fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
+});
+
+test('org-access A14: the page greys exactly the writes it stops (one list, twice)', () => {
+  const src = fs.readFileSync(fileURLToPath(new URL('../docs/devteam/dashboard/index.html', import.meta.url)), 'utf8');
+  const js = /^const VIEW_WRITES = ("[^\n]*");$/m.exec(src);
+  const css = /^  body\.view-only :is\(([^\n]*)\) \{ opacity: \.45; cursor: not-allowed; \}$/m.exec(src);
+  assert.ok(js && css, 'both lists found');
+  assert.deepEqual(css[1].split(', '), JSON.parse(js[1]).split(', '));
 });
