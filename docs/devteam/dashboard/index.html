@@ -3449,7 +3449,8 @@ function qblock(text, links) {
 const qplain = (text, links) => String(text ?? '').replace(new RegExp(NAME_REF.source, 'g'), (all, n) => (links || []).find((x) => x.name === n)?.title ?? all);
 // In a peek (inPeek) it is read-only: no anchor, and no Overrule, which stays on the Inbox's card (kit-88 spec §2.3).
 function answeredCard(q, { inPeek = false } = {}) {
-  const how = q.status === 'defaulted' ? 'went with the default; you didn’t answer in time' : q.status === 'withdrawn' ? 'withdrawn by the supervisor' : `answered ${CHANNEL_WORDS[q.channel] || ''}`;
+  // who answered, when one of the box's people did (kit-252): how is escaped where it is drawn
+  const how = q.status === 'defaulted' ? 'went with the default; you didn’t answer in time' : q.status === 'withdrawn' ? 'withdrawn by the supervisor' : `${q.answered_person ? `${q.answered_person.name} answered` : 'answered'} ${CHANNEL_WORDS[q.channel] || ''}`;
   return `<div class="card small"${inPeek ? '' : ` id="a-${esc(q.id)}"`}${subj('question', q.id, qplain(q.question, q.links))}>
     <div>${qlink(q.id, q.question)}</div>
     ${q.answer && !isFilled(q.answer, q.files) ? `<div><b>${esc(q.answer)}</b></div>` : ''}
@@ -9536,7 +9537,8 @@ function tlTurnBody(u, t) {
 // Each turn's files as chips under its words; files sent alone (kit-171 §4) show their chips, not the words the
 // kit recorded for them, pending or posted.
 function tlTurns(t) {
-  return t.turns.map((u) => `<div class="tl-turn ${u.by}"><div class="meta">${u.by === 'owner' ? 'You' : 'The supervisor'} · ${esc(when(u.at))}</div>${tlTurnBody(isFilled(u.text, u.files) ? { ...u, text: '' } : u, t)}${chipsHtml(u.files ?? [])}${u.refs.length ? `<div class="tl-refs">${u.refs.map(tlRef).join('')}</div>` : ''}</div>`).join('');
+  // an owner turn a person on the box gave names them (kit-252); older lines, a laptop and a pending turn say You
+  return t.turns.map((u) => `<div class="tl-turn ${u.by}"><div class="meta">${u.by === 'owner' ? (u.person ? esc(u.person.name) : 'You') : 'The supervisor'} · ${esc(when(u.at))}</div>${tlTurnBody(isFilled(u.text, u.files) ? { ...u, text: '' } : u, t)}${chipsHtml(u.files ?? [])}${u.refs.length ? `<div class="tl-refs">${u.refs.map(tlRef).join('')}</div>` : ''}</div>`).join('');
 }
 // The card's body, redrawn only when what it shows changed and never under the owner's hands (a
 // focused control in its turns, a question card mid-answer), so a pick or a note survives a poll.
