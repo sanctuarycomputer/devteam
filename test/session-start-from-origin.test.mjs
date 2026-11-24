@@ -105,10 +105,11 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
       ticket('ch-08-h');
       git(['push', '-q', 'origin', `${real}:refs/heads/x/refs/heads/ticket/ch-08-h`], old);
       git(['push', '-q', 'origin', `${planted(old, real)}:refs/heads/x/refs/heads/main`], old);
-      ok(old, ['worker', 'ch-08-h'], SUP);
-      assert.equal(git(['rev-parse', 'HEAD'], wt('ch-08-h')), real, 'B7');
-      assert.equal(upstream(old, 'ticket/ch-08-h'), 'origin/main', 'B7: tracks main');
-      git(['push', '-q', 'origin', ':refs/heads/x/refs/heads/main', ':refs/heads/x/refs/heads/ticket/ch-08-h'], old);
+      try {
+        ok(old, ['worker', 'ch-08-h'], SUP);
+        assert.equal(git(['rev-parse', 'HEAD'], wt('ch-08-h')), real, 'B7');
+        assert.equal(upstream(old, 'ticket/ch-08-h'), 'origin/main', 'B7: tracks main');
+      } finally { git(['push', '-q', 'origin', ':refs/heads/x/refs/heads/main', ':refs/heads/x/refs/heads/ticket/ch-08-h'], old); }
     });
     await t.test('H1: a new branch is based on origin\'s main by sha, not on origin/main read again', tmux, () => {
       ticket('ch-07-g');
@@ -248,7 +249,7 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
     const failing = (name, words) => {
       const bin = path.join(F.base, name);
       const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
-      write(path.join(bin, 'git'), `#!/bin/sh\ncase " $* " in ${words}) echo 'fatal: failed by the test' >&2; exit 128 ;; esac\nexec '${realGit}' "$@"\n`);
+      write(path.join(bin, 'git'), `#!/bin/sh\ncase " $* " in ${words}) '${realGit}' "$@" >/dev/null; echo 'fatal: failed by the test' >&2; exit 128 ;; esac\nexec '${realGit}' "$@"\n`);
       fs.chmodSync(path.join(bin, 'git'), 0o755);
       return { ...SUP, PATH: `${bin}${path.delimiter}${process.env.PATH}` };
     };
@@ -264,6 +265,13 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
       assert.notEqual(r.status, 0, `H7: refused, not started: ${r.out}`);
       assert.match(r.err, /git could not compare ticket\/ch-19-s with origin's: failed by the test; nothing was started/, 'H7');
       assert.equal(git(['rev-parse', 'refs/heads/ticket/ch-19-s'], old), head, 'H7: the branch keeps its commit');
+    });
+    await t.test('H8: kept commits git fails to count are refused, not counted as none', tmux, () => {
+      const head = ranWithWork('ch-23-w');
+      const r = run(old, ['worker', 'ch-23-w', '--resume'], failing('git-no-count', `*' rev-list --count '*`));
+      assert.notEqual(r.status, 0, `H8: refused, not started: ${r.out}`);
+      assert.match(r.err, /git could not compare ticket\/ch-23-w with origin's: failed by the test; nothing was started/, 'H8');
+      assert.equal(git(['rev-parse', 'refs/heads/ticket/ch-23-w'], old), head, 'H8: the branch keeps its commit');
     });
     await t.test('B12: a symbolic tracking ref is removed, not the branch it names', tmux, () => {
       ticket('ch-20-t');

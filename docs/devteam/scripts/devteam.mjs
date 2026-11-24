@@ -26884,7 +26884,7 @@ function makeSession(role) {
     const local = R.resolveCommit(`refs/heads/${branch}`);
     const base = at.branch ?? at.main;
     // no grafts file or commit-graph a session wrote counts as a commit's history
-    const history = (args) => responderGit(['-c', 'core.commitGraph=false', ...args], R.root, { GIT_GRAFT_FILE: '/dev/null' });
+    const history = (args) => responderGit(['-c', 'core.commitGraph=false', '-c', 'advice.graftFileDeprecated=false', ...args], R.root, { GIT_GRAFT_FILE: '/dev/null' });
     const cannot = (r) => die(`git could not compare ${branch} with origin's: ${redactUrl(firstLine(r.stderr).replace(/^fatal: /, '')) || `exit ${r.status}`}; nothing was started`);
     const anc = (a, b) => { const r = history(['merge-base', '--is-ancestor', a, b]); return r.status === 0 || (r.status === 1 ? false : cannot(r)); };
     // Only a session that ran here has commits of its own origin may lack (worker --remove keeps the
