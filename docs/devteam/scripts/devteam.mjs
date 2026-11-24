@@ -8054,7 +8054,7 @@ function exteriorVersionsScan(head, versions) {
   return { errors, warns, named, words };
 }
 // A line's tail naming the commit that carries it, for a version that isn't the head's own.
-const exteriorCarries = (commit) => (commit ? `; commit ${commit.slice(0, 12)} carries it: rewrite the branch (git reset --soft origin/main, then chore pr again)` : '');
+const exteriorCarries = (commit) => (commit ? `; commit ${commit.slice(0, 12)} carries it: rewrite the branch (once pushed, chore drop <slug> --reason "…" first; then git reset --soft origin/main and chore pr again)` : '');
 const EXTERIOR_NO_BASE = "no merge base with main: exterior.md's drafts can't be checked";
 // check-pr's hold on a PR changing exterior.md (spec, Commands), for checkPr in home: with exterior.md
 // at sha and a commit in merge-base..sha changing it, steps 1 to 3 at sha, and the names rule (public a
@@ -8135,7 +8135,7 @@ function exteriorChoreLines(wt, phase, { base, checkedWords }) {
   if (open.length && visibility() === 'private') warns.push(...open.map((w) => `${shown(w)} is in neither origin main's strategy.md nor its dependency files: the repo is private, so it may be pushed`));
   else if (open.length) {
     fails.push(`exterior.md names words origin main's strategy.md and dependency files don't, and ${visibility() === 'public' ? 'this repo is public' : unknown}, so the draft is public once pushed: ${open.map(shown).join(', ')}; reword them, or check each and name it: --names-checked ${x.words.map((w) => w.word).join(',')}`);
-    for (const c of [...new Set(open.map((w) => w.commit).filter(Boolean))]) fails.push(`${c.slice(0, 12)} carries a word: rewrite the branch (git reset --soft origin/main, then chore pr again), or check and name the word`);
+    for (const c of [...new Set(open.map((w) => w.commit).filter(Boolean))]) fails.push(`${c.slice(0, 12)} carries a word: rewrite the branch (once pushed, chore drop ${path.basename(wt).replace(/^chore-/, '')} --reason "…" first; then git reset --soft origin/main and chore pr again), or check and name the word`);
   }
   return { fails, warns, words: open.length ? [] : x.words.map((w) => w.word), changed: true };
 }
@@ -16888,7 +16888,8 @@ function cmdChore() {
   }
   for (const w of exRange.warns) warn(`exterior.md: ${w}`);
   if (named && exRange.words.length) logNamesChecked(slugName, EXTERIOR_REL(), git(['rev-parse', '--verify', '--quiet', `${head}:${EXTERIOR_REL()}`], wt) ?? 'none', exRange.words);
-  gitOrDie(['push', '--quiet', '--force', 'origin', `chore-${slugName}:chore-${slugName}`], wt);
+  // forced, but only over the origin tip read above: a push from elsewhere since then is refused
+  gitOrDie(['push', '--quiet', `--force-with-lease=chore-${slugName}:${there ?? ''}`, 'origin', `chore-${slugName}:chore-${slugName}`], wt);
   const pr = openPr(wt, `chore-${slugName}`, `chore-${slugName}: ${flagStr('title')}`, flagStr('body') ?? flagStr('title'));
   out(`pushed chore-${slugName}${pr ? `: ${pr}` : ''}\nmerge it once CI passes, then: git worktree remove .worktrees/chore-${slugName}`);
 }

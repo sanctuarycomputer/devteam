@@ -324,6 +324,33 @@ test('next-moves A16: chore records: start --what --for, adopt, drop, and a star
       assert.equal(g(['rev-parse', 'HEAD'], wt), local, 'the local tip, since origin has no such branch');
     });
 
+    await t.test('a dropped chore started again with --fresh lands with chore pr over its dropped tip on origin', () => {
+      const old1 = branchWith(F, 'u1', 1, { push: true });
+      ok(old, ['chore', 'drop', 'u1', '--reason', 'start it again'], SUP);
+      const wt = ok(old, ['chore', 'start', 'u1', '--fresh'], SUP).trim();
+      fs.writeFileSync(path.join(wt, 'u1-again.md'), 'u1 again\n');
+      ok(old, ['chore', 'pr', 'u1', '--title', 'u1 again'], SUP);
+      const head = g(['rev-parse', 'HEAD'], wt);
+      assert.notEqual(head, old1);
+      assert.equal(originTip(F, 'u1'), head, 'origin is at the fresh head, the dropped tip replaced');
+    });
+
+    await t.test('a chore slug used again after its squash merge lands with chore pr over its merged tip on origin', () => {
+      const tip = branchWith(F, 'u2', 2, { push: true });
+      const sq = path.join(F.base, 'squash-u2');
+      g(['worktree', 'add', '-q', '--detach', sq, 'origin/main'], old);
+      g(['merge', '-q', '--squash', 'chore-u2'], sq);
+      g(['commit', '-qm', 'chore-u2: squashed'], sq);
+      g(['push', '-q', 'origin', 'HEAD:main'], sq);
+      g(['worktree', 'remove', '--force', sq], old);
+      hand(F, { type: 'act', class: 'merge-chore', what: `merged chore-u2 at ${tip}`, refs: ['chore-u2'], reversible: true });
+      const wt = ok(old, ['chore', 'start', 'u2'], SUP).trim();
+      assert.equal(g(['rev-parse', 'HEAD'], wt), main(), 'a merged tip starts again from main');
+      fs.writeFileSync(path.join(wt, 'u2-next.md'), 'u2 next\n');
+      ok(old, ['chore', 'pr', 'u2', '--title', 'u2 next'], SUP);
+      assert.equal(originTip(F, 'u2'), g(['rev-parse', 'HEAD'], wt), 'origin is at the new head, the merged tip replaced');
+    });
+
     await t.test('CLASS_WORDS has chore-start and chore-drop', () => {
       const src = fs.readFileSync(path.join(kit, 'scripts/devteam.mjs'), 'utf8');
       const words = src.match(/const CLASS_WORDS = Object\.freeze\(\{([\s\S]*?)\}\);/)[1];
@@ -334,6 +361,14 @@ test('next-moves A16: chore records: start --what --for, adopt, drop, and a star
       const src = fs.readFileSync(path.join(kit, 'scripts/devteam.mjs'), 'utf8');
       const fn = src.slice(src.indexOf('function choreSelfHold('), src.indexOf('\n}\n', src.indexOf('function choreSelfHold(')));
       assert.match(fn, /start the chore again from main \(chore drop \$\{slug\} --reason "…", then chore start \$\{slug\} --fresh\)/);
+    });
+
+    await t.test("the exterior.md hold names chore drop before a pushed branch is rewritten", () => {
+      const src = fs.readFileSync(path.join(kit, 'scripts/devteam.mjs'), 'utf8');
+      const carries = src.slice(src.indexOf('const exteriorCarries = '), src.indexOf('\n', src.indexOf('const exteriorCarries = ')));
+      assert.ok(carries.includes('rewrite the branch (once pushed, chore drop <slug> --reason "…" first; then git reset --soft origin/main and chore pr again)'), carries);
+      const lines = src.slice(src.indexOf('function exteriorChoreLines('), src.indexOf('\n}\n', src.indexOf('function exteriorChoreLines(')));
+      assert.ok(lines.includes("carries a word: rewrite the branch (once pushed, chore drop ${path.basename(wt).replace(/^chore-/, '')} --reason \"…\" first; then git reset --soft origin/main and chore pr again)"), 'exteriorChoreLines names the drop');
     });
 
     await t.test('supervisor.md names chore start --what, chore adopt and chore drop', () => {
