@@ -28,6 +28,7 @@ const rects = () => Object.fromEntries(ids.map((id) => { const r = document.getE
 const view = () => { document.body.dataset.view = location.hash === '#annual' ? 'annual' : 'monthly'; };
 view();
 const say = () => parent.postMessage({ own: 'at', page: ${J(page)}, hash: location.hash, rects: rects() }, '*');
+addEventListener('focusin', (e) => parent.postMessage({ own: 'focus', id: e.target.id }, '*'));
 addEventListener('load', () => { say(); requestAnimationFrame(() => requestAnimationFrame(say)); });
 addEventListener('resize', say);
 addEventListener('hashchange', () => { view(); say(); });
@@ -373,8 +374,14 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     assert.ok(await V.settle(`TL.open !== ${J(first)}`, 3000), 'ArrowRight from the frame stepped');
     // the page's own field and radio keep their arrows (a real click focuses each, in the frame)
     for (const id of ['field', 'plan-annual']) {
-      await V.frameClick(id, 'pricing/index.html', { load: false }).catch(() => {});
+      // no card over the stage; the element pressed is the frame's, and the page says it has the focus
+      await V.p.ev('tlClose(); void 0');
+      const at = await V.p.ev(`(() => { const m = window.__own.filter((m) => m.own === 'at' && m.rects && m.rects[${J(id)}]).pop(), f = tsFrame(), r = f.getBoundingClientRect(), e = m.rects[${J(id)}]; const x = r.left + f.clientLeft + e.x + e.w / 2, y = r.top + f.clientTop + e.y + e.h / 2; return { x, y, hit: document.elementFromPoint(x, y) === f }; })()`);
+      assert.ok(at.hit, `setup: #${id} is not covered`);
+      await V.p.clickAt(at.x, at.y);
+      await V.soon(`window.__own.filter((m) => m.own === 'focus').pop()?.id === ${J(id)}`, `setup: the page's #${id} has the focus`);
       const now = await V.p.ev('TL.open');
+      assert.equal(now, null, 'setup: no card open');
       await V.p.key('ArrowRight');
       await new Promise((r) => setTimeout(r, 400));
       assert.equal(await V.p.ev('TL.open'), now, `nothing with the page's #${id} focused`);
