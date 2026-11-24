@@ -4,7 +4,7 @@
 // measure or recurring check another tree (its CLAUDE.md, its .claude files, what worktree_setup
 // runs) under the real commit's id. So every checkout runs git with -c core.useReplaceRefs=false,
 // which also beats a core.useReplaceRefs=true a session sets in the repo's config (where
-// --no-replace-objects alone loses): each fixture sets it. Each path is its own subtest, so each
+// --no-replace-objects alone loses, on older git (2.39)): each fixture sets it. Each path is its own subtest, so each
 // one's red line is its own.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -71,6 +71,8 @@ test('home: every checkout of a planted main holds the real tree', async (t) => 
       assert.equal(marker(wt('ch-01-a')), 'real\n', 'A1');
     });
     await t.test('A2: a worker whose local branch exists (makeSession)', tmux, () => {
+      // at origin's commit: a ticket that hasn't run takes no local branch origin doesn't hold (kit-790)
+      git(['push', '-q', 'origin', `${real}:refs/heads/ticket/ch-02-b`], old);
       git(['branch', 'ticket/ch-02-b', real], old);
       ok(old, ['worker', 'ch-02-b'], SUP);
       assert.equal(marker(wt('ch-02-b')), 'real\n', 'A2');
@@ -230,26 +232,29 @@ test('box-pins changed --smoke: the image checkout and the fixtures\' kits are t
   }
 });
 
-// kit-764 final-1 F1: a launch fetches origin's main into origin/<main> itself, before makeSession
-// does, so a session that moved its local origin/main (no push) can't decide a new worktree's base
-// even when makeSession's own later fetch fails. A git on PATH refuses exactly that fetch
-// ("fetch --quiet origin main"); the launch's own ("fetch --quiet --no-tags origin +refs/…") passes.
-test('O1: a new worker\'s worktree comes from origin\'s main when makeSession\'s own fetch fails', tmux, () => {
+// kit-764 final-1 F1, kit-790: a launch reads origin's main itself, and makeSession reads it again
+// by sha for the new worktree's base, so a session that moved its local origin/main (no push)
+// can't decide that base. When makeSession's own read of origin fails, nothing starts: a git on
+// PATH refuses exactly that read ("ls-remote origin refs/heads/main …"); the launch's own
+// ("ls-remote --symref origin HEAD") passes.
+test('O1: a new worker whose makeSession read of origin fails is refused, and nothing starts', tmux, () => {
   const F = fleetFixture('no-replace-origin');
-  const { old, ok } = F;
+  const { old, ok, run } = F;
   try {
     markMain(old);
     // the session's move: origin/main at a local commit origin never had
     const moved = commitWith(old, 'HEAD', 'HEAD', { 'marker.txt': 'moved\n' }, 'moved');
     git(['update-ref', 'refs/remotes/origin/main', moved], old);
-    const bin = path.join(F.base, 'git-refuses-fetch');
+    const bin = path.join(F.base, 'git-refuses-read');
     const said = path.join(F.base, 'refused.txt');
     const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
-    write(path.join(bin, 'git'), `#!/bin/sh\ncase " $* " in *" fetch --quiet origin main ") echo "$*" >> '${said}'; echo 'fatal: refused by the test' >&2; exit 128 ;; esac\nexec '${realGit}' "$@"\n`);
+    write(path.join(bin, 'git'), `#!/bin/sh\ncase " $* " in *" ls-remote origin refs/heads/main "*) echo "$*" >> '${said}'; echo 'fatal: refused by the test' >&2; exit 128 ;; esac\nexec '${realGit}' "$@"\n`);
     fs.chmodSync(path.join(bin, 'git'), 0o755);
     ok(old, ['ticket', 'add', 'ch-09-o', '--json', JSON.stringify({ title: 'ch-09-o', feature: 'chores', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['ch/ch-09-o/**'], done_when: ['the tidy check passes in CI'] })], SUP);
-    ok(old, ['worker', 'ch-09-o'], { ...SUP, PATH: `${bin}${path.delimiter}${process.env.PATH}` });
-    assert.match(fs.existsSync(said) ? fs.readFileSync(said, 'utf8') : '', /fetch --quiet origin main/, 'makeSession\'s own fetch was refused');
-    assert.equal(marker(path.join(old, '.worktrees', 'ch-09-o')), 'real\n', 'O1: based on origin\'s main, not the moved local ref');
+    const r = run(old, ['worker', 'ch-09-o'], { ...SUP, PATH: `${bin}${path.delimiter}${process.env.PATH}` });
+    assert.notEqual(r.status, 0, `O1: refused, not started: ${r.out}`);
+    assert.match(r.err, /could not fetch origin main in home: refused by the test; refusing to start a ticket on a stale main/, 'O1');
+    assert.ok(!fs.existsSync(path.join(old, '.worktrees', 'ch-09-o')), 'O1: no worktree');
+    assert.match(fs.readFileSync(said, 'utf8'), /ls-remote origin refs\/heads\/main/, 'makeSession\'s own read was the one refused');
   } finally { F.done(); }
 });
