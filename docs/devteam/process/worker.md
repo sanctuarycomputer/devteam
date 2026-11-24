@@ -77,7 +77,7 @@ Phases: `spec`, `plan`, `contract`, `build`, `verify`, `final-review`, `awaiting
 
 ## 6. Gates and observations
 
-Run every gate through the recorder, so slow and flaky tests show up: `devteam.mjs gate test --junit reports/junit.xml -- pnpm test`. It passes the command's exit status through.
+Run every gate through the recorder, so slow and flaky tests show up: `devteam.mjs gate test --junit reports/junit.xml -- pnpm test`. It passes the command's exit status through. When a gate waits on CI, give it a slow poll: `gh run watch <id> --exit-status --interval 60`. gh's default asks every 3 seconds, about 60 calls a minute, so one or two watchers use up the 5,000 calls an hour that every session on the machine's login shares.
 
 Record what is worth knowing beyond your ticket as an observation: a slow or flaky test, a confusing contract, a tool that kept failing, something that went well and should be repeated.
 
