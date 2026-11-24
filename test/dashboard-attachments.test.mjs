@@ -198,17 +198,17 @@ test('the page: drop files into the Inbox answer, a reply and a new thread; pill
   await soon(`!!${card(Q1)} && !!${card(Q4)}`, 'the question cards');
   await soon("document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'", 'the panel on Inbox, at rest');
   // what a box's highlight looks like now: its class, border style and colour, and --blue's colour
-  const lit = (key) => p.ev(`(() => { const b = ${box(key)}; const s = getComputedStyle(b); const probe = document.createElement('i'); probe.style.color = 'var(--blue)'; b.append(probe); const blue = getComputedStyle(probe).color; probe.remove(); return { on: b.classList.contains('drop-over'), style: s.borderTopStyle, colour: s.borderTopColor, blue }; })()`);
+  const lit = (key, act) => p.ev(`(() => { ${act}; const b = ${box(key)}; const s = getComputedStyle(b); const probe = document.createElement('i'); probe.style.color = 'var(--blue)'; b.append(probe); const blue = getComputedStyle(probe).color; probe.remove(); return { on: b.classList.contains('drop-over'), style: s.borderTopStyle, colour: s.borderTopColor, blue }; })()`);
+  // Each drag and the look after it are one evaluation: the poll (300 ms here) redraws the card, and a redraw
+  // between them would be what the look sees.
+  const files = (target) => `window.__drag(${target}, ['dragenter', 'dragover'], window.__dt([{ name: 'a.txt', text: 'a' }]))`;
   const highlight = async (key, target) => {
-    await p.ev(`window.__drag(${target}, ['dragenter', 'dragover'], window.__dt([{ name: 'a.txt', text: 'a' }])); void 0`);
-    const on = await lit(key);
+    const on = await lit(key, files(target));
     assert.equal(on.on, true, `${key}: lit under a drag of files`);
     assert.equal(on.style, 'dashed', `${key}: dashed`);
     assert.equal(on.colour, on.blue, `${key}: blue`);
-    await p.ev(`${box(key)}.dispatchEvent(new DragEvent('dragleave', { bubbles: true, cancelable: true, relatedTarget: document.body, dataTransfer: window.__dt([]) })); void 0`);
-    assert.equal((await lit(key)).on, false, `${key}: off after dragleave`);
-    await p.ev(`(() => { const dt = new DataTransfer(); dt.setData('text/plain', 'words'); window.__drag(${target}, ['dragenter', 'dragover'], dt); })()`);
-    assert.equal((await lit(key)).on, false, `${key}: a drag of text alone lights nothing`);
+    assert.equal((await lit(key, `${files(target)}; if (!${box(key)}.classList.contains('drop-over')) throw new Error('not lit before the dragleave'); ${box(key)}.dispatchEvent(new DragEvent('dragleave', { bubbles: true, cancelable: true, relatedTarget: document.body, dataTransfer: window.__dt([]) }))`)).on, false, `${key}: off after dragleave`);
+    assert.equal((await lit(key, `const words = new DataTransfer(); words.setData('text/plain', 'words'); window.__drag(${target}, ['dragenter', 'dragover'], words)`)).on, false, `${key}: a drag of text alone lights nothing`);
   };
   // a pill's parts, as the owner sees them
   const pillsOf = (key) => p.ev(`${pills(key)}.map((x) => ({ state: x.dataset.pillState, icon: x.querySelector('i')?.className ?? '', name: x.querySelector('.pill-name')?.textContent ?? '', size: x.querySelector('.pill-size')?.textContent ?? '', why: x.querySelector('.pill-why')?.textContent ?? '', remove: !!x.querySelector('button[data-pill-remove]') }))`);
