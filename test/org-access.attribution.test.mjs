@@ -324,6 +324,15 @@ test('log.schema.json: an owner line with person passes log-check, not set aside
   assert.deepEqual([ok.status, /person/.test(ok.said)], [0, false], ok.said);
 });
 
+test('log.schema.json: the owner\'s set lines with person pass log-check: a thread resolved, an act corrected', () => {
+  const p = { id: hanako.id, name: NAME };
+  const act = ['supervisor', { type: 'act', id: 'a-20260101-000000000-supervisor', class: 'note', what: 'did a thing' }];
+  const ok = F.checkWith(threadLine, act,
+    ['owner', { type: 'thread', op: 'set', id: 't-20260101-000000000-owner', status: 'resolved', person: p }],
+    ['owner', { type: 'act', op: 'set', id: 'a-20260101-000000000-supervisor', corrected: { reason: 'not this' }, person: p }]);
+  assert.deepEqual([ok.status, /person/.test(ok.said)], [0, false], ok.said);
+});
+
 test('log.schema.json: an owner line without person still passes log-check', () => {
   const ok = F.checkWith(threadLine, ['owner', turnLine({})]);
   assert.equal(ok.status, 0, ok.said);

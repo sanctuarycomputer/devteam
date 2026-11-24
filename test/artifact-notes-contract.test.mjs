@@ -67,7 +67,7 @@ test('artifact-notes-contract: the schema, the fake, and what log-check refuses'
       }
       assert.ok(ms.properties.kind.enum.includes('addressed'), 'message.kind takes addressed');
       assert.match(ms.properties.kind.description, /artifact-notes-1[^.]*addressed[^.]*no reply/, 'the kind says an addressed message awaits no reply');
-      assert.deepEqual(SCHEMA['x-authority'].set.thread, { owner: ['status', 'outcome', 'handed'], supervisor: ['ready', 'shot', 'noshot', 'unready'] });
+      assert.deepEqual(SCHEMA['x-authority'].set.thread, { owner: ['status', 'outcome', 'handed', 'person'], supervisor: ['ready', 'shot', 'noshot', 'unready'] });
       assert.deepEqual(th.properties.shot, ms.properties.shot, 'the two copies of shot are the same');
       for (const k of ['handed', 'shot', 'noshot', 'unready']) assert.ok(th['x-set-only'].includes(k), `thread.${k} is set-only`);
       assert.ok(!th['x-set-only'].includes('frame'), 'frame is on the new line');
