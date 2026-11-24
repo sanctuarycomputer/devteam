@@ -467,7 +467,7 @@ onBox('org-access A14: a dashboard request carries the session\'s level, never t
   assert.equal(devSeen.at(-1)?.h['x-devteam-level'], undefined, 'a preview request carries no level');
 });
 onBox('org-access A12: a view session\'s /api/term/* on a dashboard is 403 {why:view}', async ({ view, at, alpha, seen }) => {
-  for (const [m, r] of [['GET', '/api/term/token'], ['GET', '/api/term/supervisor/screen'], ['POST', '/api/term/shell/keys'], ['GET', '/api//term/token'], ['GET', '/api/%74erm/token'], ['GET', '/api/x/../term/token'], ['GET', '/api/%2e%2e/api/term/token']]) {
+  for (const [m, r] of [['GET', '/api/term/token'], ['GET', '/api/term/supervisor/screen'], ['POST', '/api/term/shell/keys'], ['GET', '/api//term/token'], ['GET', '/api/%74erm/token'], ['GET', '/api/x/../term/token'], ['GET', '/api/%2e%2e/api/term/token'], ['GET', '/api/x%3F/..%2Fterm/token'], ['GET', '/api/x%23/..%2Fterm/token']]) {
     const x = await at(view, alpha, m, r, { body: m === 'POST' ? {} : undefined });
     assert.equal(x.status, 403, `${m} ${r}: ${x.status}`);
     assert.equal(x.body, '{"why":"view"}', `${m} ${r}`);

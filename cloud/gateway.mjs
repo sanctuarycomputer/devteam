@@ -2286,13 +2286,20 @@ export function createGateway(opts = {}) {
   // the 403's type and body. project: the name is a dashboard's (not a preview's); p: the pathname.
   const VIEW_ANY = 'View only: you can look at everything here, but not change anything.';
   const VIEW_TERM = 'View only: there is no terminal for view-only people.';
-  // terminal@1 §3's reading of a path, as the dashboard routes it: parsed as a URL, percent-decoded
-  // (kept as it is if it won't decode), repeated slashes folded, dot segments resolved
+  // terminal@1 §3's reading of a path, as the dashboard routes it: percent-decoded (kept as it is if
+  // it won't decode), repeated slashes folded, dot segments resolved. By hand, never by parsing the
+  // decoded path as a URL again: a decoded ? or # would end it there.
   const termPath = (raw) => {
-    const resolved = (x) => { try { return new URL(x, 'http://x').pathname; } catch { return x; } };
-    let d = resolved(raw.replace(/^\/+/, '/')); // a leading // would be read as a host
-    try { d = decodeURIComponent(d); } catch {}
-    return resolved(d.replace(/\/+/g, '/'));
+    let d = raw;
+    try { d = decodeURIComponent(raw); } catch {}
+    const out = [];
+    const segs = d.replace(/\/+/g, '/').split('/').slice(1);
+    segs.forEach((seg, i) => {
+      if (seg === '..') out.pop();
+      else if (seg !== '.') out.push(seg);
+      if ((seg === '.' || seg === '..') && i === segs.length - 1) out.push('');
+    });
+    return `/${out.join('/')}`;
   };
   const VIEW_EXEMPT = (p, method) => (method === 'POST' && p === '/auth/logout') || p.startsWith('/auth/method/') || p === '/auth/passkeys' || p.startsWith('/auth/passkeys/');
   const viewRefusal = (req, person, { isBox, isTerm, project, p }) => {
