@@ -8,7 +8,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LIMITS, openPresence, shapeErrors, startPresenceFake } from './lib/presence-fake.mjs';
-import { between, check, closedWithin, closeEvery, dashboard, fill200, hereMsg, HUB_PORT, json, kinds, onlyProbe, open, P, peopleIds, peopleWith, sentinel, until } from './lib/presence-relay-fixture.mjs';
+import { between, check, closedWithin, closeEvery, dashboard, fill200, hereMsg, HUB_PORT, json, kinds, onlyProbe, open, P, peopleIds, peopleWith, sansBase, sentinel, until } from './lib/presence-relay-fixture.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const contract = () => fs.readFileSync(path.join(here, 'contracts', 'presence.md'), 'utf8');
@@ -466,7 +466,7 @@ test('presence A35: the hub reads every length form and fragments, and closes 10
 }));
 
 test('presence A8: the hello carries present, one entry per visible person, capped at 50; nothing about presence is kept', check(async () => {
-  const { url, port, runDir, dash } = await dashboard();
+  const { F, url, port, runDir, dash } = await dashboard();
   // (d) run/ listed before anything connects, and again after
   const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : e.isFile() ? [path.join(d, e.name)] : []));
   const before = new Set(walk(runDir).map((f) => path.relative(runDir, f)));
@@ -515,7 +515,7 @@ test('presence A8: the hello carries present, one entry per visible person, capp
   for (const f of files) {
     const rel = path.relative(runDir, f);
     assert.ok(!/presence/i.test(rel), `no path under run/ names presence (${rel})`);
-    assert.ok(!fs.readFileSync(f).includes('zq7'), `run/${rel} holds nothing of the test's presence`);
+    assert.ok(!sansBase(F, fs.readFileSync(f, 'utf8')).includes('zq7'), `run/${rel} holds nothing of the test's presence`);
   }
-  assert.ok(!dash.out().includes('zq7'), "the dashboard's output holds nothing of the test's presence");
+  assert.ok(!sansBase(F, dash.out()).includes('zq7'), "the dashboard's output holds nothing of the test's presence");
 }));
