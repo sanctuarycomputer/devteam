@@ -23,7 +23,8 @@ test('threads: records and the thread commands', async (t) => {
     ok(thread, ['owner', { type: 'turn', thread: T, text: 'Narrow this to the EU launch' }], ['supervisor', { type: 'turn', thread: T, text: 'Done.', refs: [`goal:${F.goal}`, 'act:a-20261110-101719000-supervisor'], question: 'q-20261110-101700000-supervisor' }]);
     ok(thread, ['owner', { type: 'thread', op: 'set', id: T, status: 'resolved', outcome: null }], ['supervisor', { type: 'thread', op: 'set', id: T, ready: { outcome: 'EU only', at: '2026-11-10T10:30:00.000Z' } }]);
     refused(/supervisor may not create thread lines/, ['supervisor', { type: 'thread', title: 'x' }]);
-    refused(/ticket may not create turn lines/, ['demo-01-x', { type: 'turn', thread: T, text: 'x' }, 'demo-01-x.jsonl']);
+    // responder-2 (kit-109): a ticket writes turns in threads bound to it, and they ask nothing
+    refused(/a session's turns ask nothing/, ['demo-01-x', { type: 'turn', thread: T, text: 'x', question: 'q-20261110-100000000-supervisor' }, 'demo-01-x.jsonl']);
     refused(/owner may not set thread\.ready/, thread, ['owner', { type: 'thread', op: 'set', id: T, ready: { outcome: 'x', at: '2026-11-10T10:30:00.000Z' } }]);
     // threadView compares ready.at with the owner's lines as text, so it is the log's own stamp
     refused(/ready\.at is an ISO timestamp/, thread, ['supervisor', { type: 'thread', op: 'set', id: T, ready: { outcome: 'x', at: 'yesterday' } }]);

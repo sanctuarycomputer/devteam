@@ -1734,8 +1734,16 @@ function integrity(o, file) {
     if (o.type === 'message' && o.kind === 'addressed' && (typeof o.thread !== 'string' || o.to !== 'owner' || !['supervisor', 'planner', 'ticket'].includes(cls))) return "an addressed message goes to the owner, names its thread, and is a session's";
     if (o.type === 'message' && o.kind !== 'addressed' && (o.draft !== undefined || o.shot !== undefined)) return 'draft and shot are on an addressed message';
     if (o.type === 'thread' && o.frame !== undefined && !(isObj(o.subject) && o.subject.kind === 'artifact')) return "frame is on an artifact note's first line";
-    if (o.type === 'turn' && (o.routed_to !== undefined || o.delivered !== undefined) && cls !== 'owner') return "routed_to and delivered are on the owner's turns";
+    if (o.type === 'turn' && (o.routed_to !== undefined || o.delivered !== undefined || o.routed_session !== undefined) && cls !== 'owner') return "routed_to and delivered are on the owner's turns";
     if (o.type === 'turn' && o.delivered !== undefined && o.routed_to !== 'responder') return 'delivered goes with routed_to responder';
+    // responder-2: a turn routed to a session names it, and only such a turn does; it names a ticket
+    // or a planner, never the supervisor, the responder or the owner (the session owes the reply)
+    if (o.type === 'turn' && (o.routed_to === 'session') !== (o.routed_session !== undefined)) return 'routed_session goes with routed_to session';
+    if (o.type === 'turn' && o.routed_session !== undefined && !['ticket', 'planner'].includes(writerClass(o.routed_session))) return 'routed_session is a ticket or planner';
+    // responder-2: a session's turn (a ticket's or a planner's, in a thread bound to it) answers and
+    // asks nothing, and a planner's lives in its monthly file with its other non-graph lines
+    if (o.type === 'turn' && (cls === 'ticket' || cls === 'planner') && o.question !== undefined) return "a session's turns ask nothing";
+    if (o.type === 'turn' && cls === 'planner' && file && !MONTHLY.test(file.replace(/\.jsonl$/, ''))) return `a planner's turns belong in its monthly file, ${o.by}-<yyyy-mm>.jsonl`;
     if (o.type === 'turn' && o.pending !== undefined && cls === 'owner') return "pending is on a reply, never the owner's turn";
     // The owner's only acts are records: of publishing an artifact (artifact publish|unpublish), of
     // answering what the supervisor's terminal asked (pane answer), and of putting the goals in order
