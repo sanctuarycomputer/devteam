@@ -4,7 +4,7 @@
 // measure or recurring check another tree (its CLAUDE.md, its .claude files, what worktree_setup
 // runs) under the real commit's id. So every checkout runs git with -c core.useReplaceRefs=false,
 // which also beats a core.useReplaceRefs=true a session sets in the repo's config (where
-// --no-replace-objects alone loses): each fixture sets it. Each path is its own subtest, so each
+// --no-replace-objects alone loses, on older git (2.39)): each fixture sets it. Each path is its own subtest, so each
 // one's red line is its own.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

@@ -35271,7 +35271,7 @@ function inResponderWorktree() {
 }
 // git for the responder's start. What it could have planted never runs or counts: no shared hook
 // (final-1 F6), no fsmonitor (F4), no replaced object (F5; kit-778: core.useReplaceRefs=true in a
-// config beats --no-replace-objects, and the command line's -c beats every config).
+// config beats --no-replace-objects on older git (2.39), and the command line's -c beats every config).
 const RESPONDER_GIT = ['--no-replace-objects', '-c', 'core.useReplaceRefs=false', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
 const responderGit = (args, cwd = mainRoot, env = null) => spawnSync('git', [...RESPONDER_GIT, ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: 120000, ...(env ? { env: { ...process.env, ...env } } : {}) });
 // A git call to origin, in its own process group: at the deadline the whole group goes, so a hung
