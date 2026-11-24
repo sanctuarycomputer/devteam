@@ -7,6 +7,9 @@ import path from 'node:path';
 import { hasTmux, json, review, write } from './lib/kit.mjs';
 import { homeRecords, readyInHome, recordsFixture, SUP, VERIF } from './lib/multirepo-home-fixture.mjs';
 
+// metrics 3 minutes on: past the grace merged-without-merge gives a merge just made (kit-808)
+const LATE = { NODE_OPTIONS: `--import=data:text/javascript,${encodeURIComponent('const now = Date.now; Date.now = () => now() + 180000;')}` };
+
 test('records in home: the worker\'s records worktree and prompt, review-worktree\'s records checkout, timeline, and --remove', (t) => {
   const F = recordsFixture('records-worktrees');
   const { old, g, okIn, runIn, ticket } = F;
@@ -124,7 +127,7 @@ test('records in home: a half-done merge, then a review record added on home\'s 
     assert.match(act.what, new RegExp(`; records at ${last.sha} in home$`));
     const landings = json(okIn(old, ['log', '--type', 'act', '--json'])).filter((a) => String(a.what).startsWith(`merged home's ticket/${id} at `)).map((a) => a.what.split(' ')[4].replace(/:$/, ''));
     assert.deepEqual(landings, [r.head, last.sha], 'each records landing logged its own act; the forged merges have none');
-    const f = json(okIn(old, ['metrics', '--json'])).findings;
+    const f = json(okIn(old, ['metrics', '--json'], {}, LATE)).findings;
     assert.ok(!f.some((x) => x.kind === 'records-without-code'));
     assert.deepEqual(f.filter((x) => x.kind === 'merged-without-merge').map((x) => x.subject).sort(), [`home:${evil.slice(0, 12)}`, `home:${forged.slice(0, 12)}`].sort(), 'both records merges are named by the act; the forged ones stay flagged');
     // --remove: a dirty records worktree refuses before anything is removed
@@ -189,7 +192,7 @@ test('records in home: a hand-made merge borrowing the records subject is never 
     okIn(old, ['merge', id], SUP);
     const act = json(okIn(old, ['log', '--type', 'act', '--json'])).find((a) => a.class === 'merge-word' && (a.refs ?? []).includes(id));
     assert.doesNotMatch(act.what, /and earlier at/, 'neither hand-made merge is named');
-    const flagged = json(okIn(old, ['metrics', '--json'])).findings.filter((x) => x.kind === 'merged-without-merge').map((x) => x.subject).sort();
+    const flagged = json(okIn(old, ['metrics', '--json'], {}, LATE)).findings.filter((x) => x.kind === 'merged-without-merge').map((x) => x.subject).sort();
     assert.deepEqual(flagged, [viaClean, viaAncestry, viaFootprint, viaEmpty, viaReadme].map((s) => `home:${s.slice(0, 12)}`).sort());
   } finally { F.done(); }
 });

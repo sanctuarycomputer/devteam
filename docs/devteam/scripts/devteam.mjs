@@ -18719,6 +18719,10 @@ function collectMetrics(since, reviewsSince = 0) {
       // every sha a merge act names: a records-in-home ticket's act names its records merge's head too
       const heads = new Set(acts.flatMap((a) => [...String(a.what ?? '').matchAll(/\bat ([0-9a-f]{40})\b/g)].map((x) => x[1])));
       const worded = new Set(acts.filter((a) => a.class === 'merge-word').flatMap((a) => a.refs ?? []));
+      // merge's act is logged seconds after the forge lands the merge (kit-808), so a merge raises nothing
+      // in its first 2 minutes. Read now, not collectMetrics' now: one that lands while it runs would be
+      // later than that. A commit time in the future is raised at once, so a date can't hide a merge.
+      const justMerged = (at) => { const age = Date.now() - at; return age >= 0 && age < 120000; };
       const seen = new Set();
       for (const t of ts.values()) {
         const at = mergedAt(t.id);
@@ -18726,6 +18730,7 @@ function collectMetrics(since, reviewsSince = 0) {
         const sha = mergeShaFor(t.id);
         const name = repoOfTicketLink(t);
         seen.add(sha);
+        if (justMerged(at)) continue;
         add('high', 'merged-without-merge', t.id, `${t.id} reached ${name === 'home' ? '' : `${name}'s `}main at ${sha.slice(0, 12)} with no merge act: no gates, reviews or checks ran on it`, `check it now (check-pr${name === 'home' ? '' : ` --repo ${name}`} at that sha, its records, its gates); a revert is a ticket of its own; then find how it landed (a push to main, the forge's button) and close that path`, { sev: 3 });
       }
       for (const name of ['home', ...Object.entries(settings.links ?? {}).filter(([, l]) => LINK_KINDS[l?.kind]?.hostsComponents).map(([id]) => id)]) {
@@ -18735,7 +18740,7 @@ function collectMetrics(since, reviewsSince = 0) {
         if (!ref) continue;
         for (const row of (R.git(['log', ref, '--first-parent', '--merges', `--since=${Math.floor(since / 1000)}`, '--format=%H %ct %P']) ?? '').split('\n').filter(Boolean)) {
           const [sha, ct, , p2] = row.split(' ');
-          if (Number(ct) * 1000 < since || seen.has(sha) || heads.has(p2)) continue;
+          if (Number(ct) * 1000 < since || seen.has(sha) || heads.has(p2) || justMerged(Number(ct) * 1000)) continue;
           add('high', 'merged-without-merge', `${name}:${sha.slice(0, 12)}`, `${name === 'home' ? '' : `${name}'s `}main has merge ${sha.slice(0, 12)} (of ${p2.slice(0, 12)}) that no merge act made: no gates, reviews or checks ran on it`, 'find what it merged and check it now; merges go through devteam.mjs merge, never the forge\'s button or a push to main', { sev: 3 });
         }
       }
