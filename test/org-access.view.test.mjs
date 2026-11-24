@@ -591,6 +591,72 @@ test('org-access A14: a move to View closes their terminal and preview sockets a
     assert.deepEqual(rowOf(gw, jo.id).pushSubs, [], 'their push subscriptions are gone');
   } finally { await B.close(); }
 });
+// --- push across a move to View (kit-801) ---------------------------------------------------------
+// A subscription the gateway takes (pushSubscription): a real P-256 point and a 16-byte secret.
+const subscribing = (endpoint) => { const ecdh = crypto.createECDH('prime256v1'); ecdh.generateKeys(); return { endpoint, keys: { p256dh: u(ecdh.getPublicKey()), auth: u(crypto.randomBytes(16)) } }; };
+// The hub on PORTS, for the gateway's poller: its list is whatever `list()` says now.
+const listHub = async (list) => {
+  const hub = http.createServer((q, s) => { q.resume(); s.writeHead(200, { 'content-type': 'application/json' }); s.end(JSON.stringify({ hub: 1, instances: list() })); });
+  await new Promise((r) => hub.listen(PORTS, '127.0.0.1', r));
+  return { close: () => { hub.closeAllConnections?.(); return new Promise((r) => hub.close(r)); } };
+};
+// A POST whose body is held back: its headers and first bytes go now, the rest on finish().
+// answered() is its answer if one came already, else null.
+function heldPost(gw, cookie, route, body) {
+  const text = JSON.stringify(body);
+  let got = null;
+  let r = null;
+  const done = new Promise((resolve, reject) => {
+    r = http.request({ host: '127.0.0.1', port: gw.port, method: 'POST', path: route, headers: { host: gw.host, origin: gw.publicUrl, 'content-type': 'application/json', cookie, 'content-length': Buffer.byteLength(text) } }, (res) => {
+      let b = '';
+      res.on('data', (c) => { b += c; });
+      res.on('end', () => { let j = null; try { j = JSON.parse(b); } catch {} got = { status: res.statusCode, body: b, json: j }; resolve(got); });
+    });
+    r.on('error', reject);
+  });
+  r.write(text.slice(0, 5));
+  return { answered: () => got, finish: () => { r.end(text.slice(5)); return done; } };
+}
+test('org-access A14: a push subscribe still being read when its person is moved to View saves nothing and is never sent to', async () => {
+  const sent = [];
+  const pushFetch = async (endpoint) => { sent.push(endpoint); return { status: 201 }; };
+  const { gw, owner, full, jo } = await viewSetup('c19b', { pushFetch });
+  let list = [{ devteam: 1, root: '/r/one', name: 'one', port: INSTANCE, inbox: 1 }];
+  const hub = await listHub(() => list);
+  try {
+    await gw.g.pollPush();
+    assert.deepEqual(sent, [], 'the backlog is recorded');
+    const late = heldPost(gw, full.jar.session, '/push/subscribe', subscribing('https://web.push.apple.com/jo-late'));
+    await sleep(300);
+    assert.equal(late.answered(), null, 'admitted at Full: the gateway is waiting on its body');
+    ok(await move(gw, owner, jo.id, 'view'), 'Jo to View');
+    const r = await late.finish();
+    assert.deepEqual(rowOf(gw, jo.id).pushSubs, [], 'no subscription saved');
+    isView(r, 'the subscribe whose body ended after the move');
+    list = list.map((x) => ({ ...x, inbox: x.inbox + 1 }));
+    await gw.g.pollPush();
+    assert.deepEqual(sent, [], 'no notification sent to it');
+  } finally { await hub.close(); await gw.close(); }
+});
+test('org-access A14: the sender skips a View person\'s subscriptions', async () => {
+  const sent = [];
+  const pushFetch = async (endpoint) => { sent.push(endpoint); return { status: 201 }; };
+  const { gw, ana, jo } = await viewSetup('c19c', { pushFetch });
+  let list = [{ devteam: 1, root: '/r/one', name: 'one', port: INSTANCE, inbox: 1 }];
+  const hub = await listHub(() => list);
+  try {
+    await gw.g.pollPush();
+    assert.deepEqual(sent, [], 'the backlog is recorded');
+    // a View row holding a device anyway (a hand-edited state, or one written mid-move)
+    const at = new Date().toISOString();
+    const dev = (endpoint) => { const x = subscribing(endpoint); return { endpoint, p256dh: x.keys.p256dh, auth: x.keys.auth, at }; };
+    const s = gw.state();
+    gw.write({ ...s, people: s.people.map((p) => (p.id === ana.id ? { ...p, pushSubs: [dev('https://web.push.apple.com/ana')] } : p.id === jo.id ? { ...p, pushSubs: [dev('https://web.push.apple.com/jo')] } : p)) });
+    list = list.map((x) => ({ ...x, inbox: x.inbox + 1 }));
+    await gw.g.pollPush();
+    assert.deepEqual(sent, ['https://web.push.apple.com/jo'], 'Jo\'s device alone: none of Ana\'s');
+  } finally { await hub.close(); await gw.close(); }
+});
 test('org-access A14: People lists the level action on every joined member, for the owner and an admin', async () => {
   const { gw, owner, admin, jo, ana, kai, pam, ownerRow } = await peopleSetup('c20');
   try {
@@ -624,6 +690,18 @@ test('org-access A14: an invite at View claims at View', async () => {
     for (const level of ['admin', 'owner', 7, null]) refusedCode(await owner.post('/auth/people/invite', { name: 'Bea', level }), 400, 'bad-request', `level ${JSON.stringify(level)}`);
   } finally { await gw.close(); }
 });
+// The invite page's View sentence, as its script writes it (the Chrome test below reads it drawn).
+const INVITE_VIEW = 'view only: you can see everything here (the hub, dashboards, artifacts, boards and goals) and change only your own sign-in methods. One exception: opening a running preview can set off what that app does when a page opens.';
+test('org-access A14: the invite page tells a View invite they change only their own sign-in methods', async () => {
+  const gw = await gateway('c21a');
+  try {
+    await claim(gw);
+    const r = await gw.raw('GET', '/auth/claim');
+    ok(r, 'the invite page');
+    assert.ok(!/change nothing/.test(r.body), 'no "change nothing"');
+    assert.ok(r.body.includes(`'${INVITE_VIEW}'`), 'the View sentence');
+  } finally { await gw.close(); }
+});
 test('org-access A14: in Chrome, the invite page says view only for a View invite', CHROME_OK, async () => {
   const gw = await gateway('c21b');
   const chrome = await openChrome();
@@ -646,7 +724,7 @@ test('org-access A14: in Chrome, the invite page says view only for a View invit
       return '';
     };
     const view = await said('view', 'Vi');
-    assert.equal(view, `You're invited to ${gw.host}, Vi, as view only: you can see the hub, dashboards, artifacts, boards and goals, and change nothing. One exception: opening a running preview can set off what that app does when a page opens.`);
+    assert.equal(view, `You're invited to ${gw.host}, Vi, as ${INVITE_VIEW}`);
     const full = await said('full', 'Fu');
     assert.equal(full, `You're invited to ${gw.host}, Fu, as Full: you can do everything on the box except manage people.`);
   } finally { await chrome.close(); await gw.close(); }
