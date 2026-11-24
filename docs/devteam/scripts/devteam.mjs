@@ -11168,6 +11168,19 @@ function cmdThread() {
     const outcome = (flagStr('outcome') ?? '').replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim();
     if (!outcome) die('thread ready needs --outcome "<one line: how it ended>"');
     if (Buffer.byteLength(outcome) > OUTCOME_MAX) die(`--outcome is at most ${OUTCOME_MAX} bytes`);
+    // an artifact note's proposal carries the kit's picture of the spot: no picture, no line (kit-147)
+    if (t.subject?.kind === 'artifact') return (async () => {
+      const r = await markShot(threadViewOf(t.id), { kind: 'ready' });
+      // a line refused ends the process (die) or throws: either way its pictures go
+      let written = false;
+      process.once('exit', () => { if (!written) for (const f of r.files) fs.rmSync(f, { force: true }); });
+      appendLog({ type: 'thread', op: 'set', id: t.id, ready: { outcome, at: nowIso() }, shot: r.shot }, 'supervisor');
+      written = true;
+      shotSweep(t.id, Date.now());
+      out(`proposed resolving ${t.id}: ${outcome}`);
+      for (const l of r.lines) out(l);
+      spoke(t);
+    })();
     // a new proposal replaces a standing one: the newest ready line is the one the card shows
     appendLog({ type: 'thread', op: 'set', id: t.id, ready: { outcome, at: nowIso() } }, 'supervisor');
     out(`proposed resolving ${t.id}: ${outcome}`);
@@ -12718,6 +12731,99 @@ function artifactTreeOkSync(id, slug) {
   if (ok) artifactTrees.add(key);
   return ok;
 }
+/* note-shots start */
+// The kit's own picture of an artifact note's spot (kit-147): a fresh headless Chrome on its DevTools
+// pipe, a profile of its own, gone with it. The page is untrusted. Every refusal here is a thrown
+// Error, never die, so what was opened is always closed.
+const SHOT_START_MS = 8000;
+const SHOT_LIMIT_MS = 20000;
+const SHOT_LATE = 'the picture took longer than 20 s (a page that never settles, or a script that loops); no mark written';
+const SHOT_ANSWER = 'the page answered the picture with something else';
+const shotHook = (line) => { const f = browserTestEnv('DEVTEAM_TEST_SHOT_SEEN'); if (f) fs.appendFileSync(f, `${line}\n`); };
+// One Chrome, up once it answers on its pipe, with a page attached; { started: false } when it exits or
+// says nothing in 8 s. cap.launch is the Chrome the 20 s limit kills.
+async function shotLaunch({ noSandbox = false, extraArgs = [], cap }) {
+  const bin = browserChrome({ fail: () => { throw new Error('thread ready on an artifact note needs Chrome to take its picture: install Chrome or Chromium, or set CHROME_PATH'); } });
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-shot-'));
+  const launch = { profile, tmp: null, child: null, cdp: null, page: null };
+  launch.kill = () => { if (launch.child?.pid) try { process.kill(-launch.child.pid, 'SIGKILL'); } catch {} };
+  cap.launch = launch;
+  const t = browserChromeTmp(profile);
+  launch.tmp = t.own;
+  shotHook(`launch sandbox=${noSandbox ? 'no' : 'yes'} profile=${profile}`);
+  const child = launch.child = spawn(bin, [
+    '--headless=new', '--remote-debugging-pipe', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
+    '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync', '--hide-scrollbars',
+    '--renderer-process-limit=2', '--js-flags=--max-old-space-size=256', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--disable-quic',
+    ...(process.platform === 'linux' ? ['--password-store=basic'] : []), ...extraArgs, ...(noSandbox ? ['--no-sandbox'] : []), 'about:blank',
+  ], { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'], env: { ...process.env, TMPDIR: t.tmpdir } });
+  launch.gone = new Promise((resolve) => { child.once('exit', resolve); child.once('error', resolve); });
+  // a child that never spawned has no pipe that closes
+  child.once('error', () => { for (const s of child.stdio) s?.destroy(); });
+  let timer;
+  const cdp = await Promise.race([
+    cdpBrowser(child).catch(() => null),
+    launch.gone.then(() => null),
+    new Promise((resolve) => { timer = setTimeout(() => resolve(null), SHOT_START_MS); }),
+  ]);
+  clearTimeout(timer);
+  if (!cdp) return { ...launch, started: false };
+  launch.cdp = cdp;
+  const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
+  const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+  launch.page = { sessionId, targetId };
+  launch.crashed = new Promise((_, reject) => {
+    const crashed = () => reject(new Error('the page crashed; no mark written'));
+    cdp.on('Inspector.targetCrashed', (p, sid) => { if (sid === sessionId) crashed(); });
+    cdp.on('Target.detachedFromTarget', (p) => { if (p.sessionId === sessionId) crashed(); });
+  });
+  launch.crashed.catch(() => {});
+  shotHook('page');
+  return launch;
+}
+// The sandbox first, always. Once more without it only when the operator allows it, and only when no
+// page was ever opened: a crash after that is the page's doing.
+async function shotChrome({ extraArgs = [], cap }) {
+  const start = async (noSandbox) => {
+    try { return await shotLaunch({ noSandbox, extraArgs, cap }); } catch (e) { if (!cap.launch?.child || !cap.launch.cdp || cap.launch.page) throw e; return { started: false }; }
+  };
+  const refused = "Chrome didn't start (its sandbox may not be available here); set DEVTEAM_CHROME_NO_SANDBOX=1 to allow one try without it";
+  const first = await start(false);
+  if (first.started !== false) return first;
+  await shotDone(cap.launch);
+  if (cap.late) throw new Error(SHOT_LATE);
+  if (process.env.DEVTEAM_CHROME_NO_SANDBOX !== '1') throw new Error(refused);
+  out("Chrome's sandbox didn't start here; took the picture without it (DEVTEAM_CHROME_NO_SANDBOX=1)");
+  const second = await start(true);
+  if (second.started === false) throw new Error("Chrome didn't start, with its sandbox or without it");
+  return second;
+}
+// Chrome's group killed, its pipe closed, its profile and temp folder removed. Safe to call twice.
+async function shotDone(launch) {
+  if (!launch) return;
+  launch.kill();
+  launch.cdp?.close();
+  if (launch.gone) { let t; await Promise.race([launch.gone, new Promise((r) => { t = setTimeout(r, 3000); })]); clearTimeout(t); launch.kill(); }
+  for (const d of [launch.profile, launch.tmp]) if (d) try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch {}
+}
+// fn with 20 s and a Chrome: past them Chrome is killed; on every way out it is gone.
+async function shotWithin(fn) {
+  const cap = { launch: null, late: false };
+  let timer;
+  const limit = new Promise((_, reject) => { timer = setTimeout(() => { cap.late = true; cap.launch?.kill(); reject(new Error(SHOT_LATE)); }, SHOT_LIMIT_MS); });
+  try { return await Promise.race([fn(cap), limit]); } finally { clearTimeout(timer); await shotDone(cap.launch); }
+}
+// The one way a mark gets its picture: of the copy Show me will open once the mark is written.
+async function markShot(view, mark) {
+  return shotWithin(async (cap) => {
+    const launch = await shotChrome({ cap });
+    if (browserTestEnv('DEVTEAM_TEST_SHOT_CRASH')) await Promise.race([launch.cdp.send('Page.crash', {}, launch.page.sessionId), launch.crashed]);
+    throw new Error(SHOT_ANSWER);
+  });
+}
+// Old pictures removed (task 9).
+function shotSweep(id, now) {}
+/* note-shots end */
 // An artifact's versions, newest first: its drafts (a worktree's copy that differs from main's), then
 // main's version (landed) and the ones before it (earlier), from the walk artifactTreeOk makes, so
 // every tree listed is one /artifact/tree/ serves. Only trees with an artifact.json, each once at its
@@ -32973,15 +33079,16 @@ const BROWSER_MAC_CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Googl
 const BROWSER_CHROME_NAMES = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser'];
 const browserExecutable = (f) => { try { fs.accessSync(f, fs.constants.X_OK); return fs.statSync(f).isFile(); } catch { return false; } };
 // Chrome's binary: CHROME_PATH, then the macOS app, then each name on PATH in order. A CHROME_PATH
-// that isn't an executable file is refused, never passed over.
-function browserChrome() {
+// that isn't an executable file is refused, never passed over. fail is told why there is none, and never
+// returns (the note shooter's throws its own words).
+function browserChrome({ fail = (m) => die(m) } = {}) {
   const looked = (first) => `browser: no Chrome found (looked for ${first}, ${[...(process.platform === 'darwin' ? [BROWSER_MAC_CHROME] : []), ...BROWSER_CHROME_NAMES].join(', ')}); install Chrome or Chromium, or set CHROME_PATH to its binary`;
   const given = process.env.CHROME_PATH;
-  if (given) return browserExecutable(given) ? given : die(looked(`CHROME_PATH=${given}, not an executable file`));
+  if (given) return browserExecutable(given) ? given : fail(looked(`CHROME_PATH=${given}, not an executable file`));
   if (browserExecutable(BROWSER_MAC_CHROME)) return BROWSER_MAC_CHROME;
   const dirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
   for (const n of BROWSER_CHROME_NAMES) for (const d of dirs) if (browserExecutable(path.join(d, n))) return path.join(d, n);
-  return die(looked('CHROME_PATH'));
+  return fail(looked('CHROME_PATH'));
 }
 // Who may run it, and on what, in this order, before anything else; each refusal exits 1 and changes
 // nothing. The role check is the kit's supervisor guard loosened to let an empty role through (the

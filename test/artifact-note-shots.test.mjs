@@ -31,7 +31,7 @@ function shotKit() {
   if (made) return made;
   const F = threadsFixture('shots');
   const arts = path.join(F.old, 'docs/devteam/project/artifacts');
-  fs.cpSync(FIXTURES, path.join(arts, 'pricing'), { recursive: true });
+  fs.cpSync(FIXTURES, path.join(arts, 'pricing'), { recursive: true, filter: (f) => !f.endsWith('.sh') });
   F.g(['add', '-A'], F.old);
   F.g(['commit', '-qm', 'pricing'], F.old);
   F.g(['push', '-q', 'origin', 'main'], F.old);
@@ -100,10 +100,26 @@ function ringAt(p, { x, y, w, h }) {
   return on && !near(p.px(x + Math.min(20, Math.floor(w / 2)), y + Math.min(20, Math.floor(h / 2))), RING);
 }
 
-test('C1c no skip, and it fails with no Chrome', () => {
+// a stand-in Chrome from the fixtures, and the arguments of each launch of it
+let fakes = 0;
+function fake(name, as = name) {
+  const file = path.join(TMP, `f${++fakes}`, as);
+  fs.mkdirSync(path.dirname(file));
+  fs.copyFileSync(path.join(FIXTURES, name), file);
+  fs.chmodSync(file, 0o755);
+  return { file, dir: path.dirname(file), launches: () => (fs.existsSync(`${file}.log`) ? fs.readFileSync(`${file}.log`, 'utf8').trim().split('\n').map((l) => l.split(' ')) : []) };
+}
+const seenFile = () => path.join(TMP, `seen${++fakes}.log`);
+// the body of a top-level function or const in the kit, for a string check
+const body = (name) => new RegExp(`\\n(?:async )?(?:function|const) ${name}\\b[\\s\\S]*?\\n\\}`).exec(SRC)?.[0] ?? '';
+const region = () => /\/\* note-shots start \*\/([\s\S]*?)\/\* note-shots end \*\//.exec(SRC)?.[1] ?? '';
+
+test('C1c every test runs, and the file fails with no Chrome', () => {
   assert.ok(chromePath, 'no Chrome: install Chrome or Chromium, or set CHROME_PATH');
-  const own = fs.readFileSync(path.join(testDir, 'artifact-note-shots.test.mjs'), 'utf8').split('\n').filter((l) => !/^\s*\/\//.test(l) && !l.endsWith('// no-skip-check') && !l.startsWith("test('C1c no")); // no-skip-check
-  assert.deepEqual(own.filter((l) => /skip|todo/i.test(l)), []); // no-skip-check
+  const own = fs.readFileSync(path.join(testDir, 'artifact-note-shots.test.mjs'), 'utf8').split('\n');
+  const said = own.filter((l) => /skip|todo/i.test(l) && !/^\/\//.test(l)); // no-skip-check
+  assert.deepEqual(said.filter((l) => !l.endsWith('// no-skip-check')), []); // no-skip-check
+  assert.equal(own.filter((l) => l.endsWith('// no-skip-check')).length, 3); // no-skip-check
   const list = spawnSync(process.execPath, [path.join(testDir, 'run.mjs'), '--list'], { cwd: path.join(testDir, '..'), encoding: 'utf8' }).stdout;
   assert.match(list, /artifact-note-shots\.test\.mjs\s+chrome\b/);
 });
@@ -121,6 +137,88 @@ test('C14a one finder, the lens\'s own', () => {
   const finder = LENS.slice(at[2], at[3]);
   for (const d of ['const find = (a) =>', 'const hiddenEl =', 'const textOf =', 'const rectOf =']) assert.ok(finder.includes(d), `${d} in the finder's slice`);
   for (const d of ['const CAPS =', 'const cap =', 'const oneLine =', 'const num =', 'const unCap =']) assert.ok(LENS.slice(at[0], at[1]).includes(d), `${d} in the helpers' slice`);
-  const region = /\/\* note-shots start \*\/([\s\S]*?)\/\* note-shots end \*\//.exec(SRC)?.[1] ?? '';
-  for (const d of ['const find =', 'const hiddenEl =', 'const textOf =']) assert.equal(count(region, d), 0, `the shooter has no ${d} of its own`);
+  assert.ok(region(), 'the note-shots region');
+  for (const d of ['find', 'hiddenEl', 'textOf']) assert.ok(!new RegExp(`(?:const|let|var|function) ${d}\\b`).test(region()), `the shooter has no ${d} of its own`);
+});
+
+test('C2a a pipe, no port, and a profile of its own that goes', async () => {
+  const k = shotKit();
+  const dies = fake('fake-chrome.sh');
+  await k.readyOn(k.subject(), { CHROME_PATH: dies.file });
+  assert.ok(dies.launches().length >= 1, 'the fake Chrome was launched');
+  for (const a of dies.launches()) {
+    for (const f of ['--headless=new', '--remote-debugging-pipe', '--disable-quic', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp']) assert.ok(a.includes(f), f);
+    assert.ok(!a.some((x) => x.startsWith('--remote-debugging-port')), 'no port');
+    assert.ok(a.find((x) => x.startsWith('--user-data-dir=')).slice(16).startsWith(`${TMP}${path.sep}`), 'a profile under the temp folder');
+  }
+  const profiles = [];
+  for (let i = 0; i < 2; i++) {
+    const wrap = fake('wrap-chrome.sh');
+    const hook = seenFile();
+    await k.readyOn(k.subject(), { CHROME_PATH: wrap.file, REAL_CHROME: chromePath, DEVTEAM_TEST_SHOT_SEEN: hook });
+    const mine = k.seen(hook).filter((l) => l.startsWith('launch ')).map((l) => / profile=(.*)$/.exec(l)[1]);
+    assert.ok(mine.length >= 1 && wrap.launches().length === mine.length, 'a launch line each launch');
+    for (const p of mine) assert.ok(!fs.existsSync(p), `${p} is gone`);
+    profiles.push(...mine);
+  }
+  assert.equal(new Set(profiles).size, profiles.length, 'no shared profile');
+  assert.deepEqual(fs.readdirSync(TMP).filter((f) => /^dc|^devteam-shot-/.test(f)), [], 'no profile or temp folder is left');
+});
+
+test('C2c one list of Chrome\'s names', async () => {
+  const k = shotKit();
+  const named = fake('fake-chrome.sh', 'google-chrome');
+  await k.readyOn(k.subject(), { CHROME_PATH: undefined, PATH: `${named.dir}${path.delimiter}${process.env.PATH}` });
+  assert.ok(named.launches().length >= 1, 'the google-chrome first on PATH was launched');
+  assert.equal(count(SRC, 'const BROWSER_CHROME_NAMES ='), 1);
+  assert.equal(count(SRC, "'google-chrome-stable'"), 1);
+  assert.ok(region().includes('browserChrome('), 'the shooter finds Chrome as the browser does');
+});
+
+test('C8a no sandbox only when the operator says so, and only second', async () => {
+  const k = shotKit();
+  const dies = fake('fake-chrome.sh');
+  const r = await k.readyOn(k.subject(), { CHROME_PATH: dies.file });
+  assert.equal(r.status, 1);
+  assert.equal(r.line, undefined);
+  assert.deepEqual(dies.launches().map((a) => a.includes('--no-sandbox')), [false, true]);
+  assert.match(r.out, /Chrome's sandbox didn't start here; took the picture without it \(DEVTEAM_CHROME_NO_SANDBOX=1\)/);
+  const again = fake('fake-chrome.sh');
+  const r2 = await k.readyOn(k.subject(), { CHROME_PATH: again.file, DEVTEAM_CHROME_NO_SANDBOX: undefined });
+  assert.equal(r2.status, 1);
+  assert.deepEqual(again.launches().map((a) => a.includes('--no-sandbox')), [false]);
+  assert.match(r2.out, /Chrome didn't start \(its sandbox may not be available here\); set DEVTEAM_CHROME_NO_SANDBOX=1 to allow one try without it/);
+});
+
+test('C8b a crash after the page opened is never tried again', async () => {
+  const k = shotKit();
+  const wrap = fake('wrap-chrome.sh');
+  const hook = seenFile();
+  const r = await k.readyOn(k.subject(), { CHROME_PATH: wrap.file, REAL_CHROME: chromePath, DEVTEAM_TEST_SHOT_SEEN: hook, DEVTEAM_TEST_SHOT_CRASH: '1' });
+  assert.equal(r.status, 1, r.out);
+  assert.equal(r.line, undefined);
+  assert.match(r.out, /the page crashed; no mark written/);
+  const said = k.seen(hook);
+  const page = said.indexOf('page');
+  assert.ok(page > 0, 'the page opened');
+  assert.deepEqual(said.slice(page).filter((l) => l.startsWith('launch ')), []);
+});
+
+test('C8c no Chrome: refused, nothing written', async () => {
+  const k = shotKit();
+  const id = await k.note(k.subject());
+  const was = [k.logBytes(), k.tree()];
+  const r = await k.ready(id, { CHROME_PATH: path.join(TMP, 'no-such-chrome') });
+  assert.equal(r.status, 1);
+  assert.match(r.out, /thread ready on an artifact note needs Chrome to take its picture: install Chrome or Chromium, or set CHROME_PATH/);
+  assert.deepEqual([k.logBytes(), k.tree()], was);
+});
+
+test('C9 other threads: as before, no Chrome', async () => {
+  const k = shotKit();
+  for (const s of [null, { kind: 'item', ref: `goal:${k.F.goal}` }, { kind: 'preview', name: 'cool-tiger', route: '/', point: { x: 1, y: 1 } }, { kind: 'page', view: 'overview', at: { x: 0.5, y: 0.5 } }]) {
+    const r = await k.readyOn(s, { CHROME_PATH: path.join(TMP, 'no-such-chrome') });
+    assert.equal(r.status, 0, `${s?.kind ?? 'no subject'}: ${r.out}`);
+    assert.ok(r.line && !('shot' in r.line), `${s?.kind ?? 'no subject'}: a ready line, no shot`);
+  }
 });
