@@ -409,7 +409,8 @@ async function listenOn(t, srv, port = 0, host = '127.0.0.1') {
   defer(t, () => new Promise((r) => { srv.closeAllConnections?.(); srv.close(() => r()); }));
   return srv.address().port;
 }
-async function fixtureHub(t, { ports = [], box = null, kit: hubKit = 'v0.57.0', image } = {}) {
+// auth: the gateway's /auth/* answers on a box, (F, pathname) => [status, body] (Your sign-in and People)
+async function fixtureHub(t, { ports = [], box = null, kit: hubKit = 'v0.57.0', image, auth = null } = {}) {
   const F = { list: [], asks: new Map(), hashes: new Map(), fail: new Map(), delay: new Map() };
   F.setList = (list) => { F.list = list; };
   for (const port of ports) {
@@ -436,6 +437,7 @@ async function fixtureHub(t, { ports = [], box = null, kit: hubKit = 'v0.57.0', 
     const u = new URL(q.url, 'http://x');
     if (u.pathname === '/') { s.writeHead(200, { 'content-type': 'text/html' }); return s.end(hubHtml()); }
     if (u.pathname === '/instances.json') { s.writeHead(200, { 'content-type': 'application/json' }); return s.end(JSON.stringify({ hub: 1, kit: hubKit, ...(image ? { image: true } : {}), instances: F.list })); }
+    if (u.pathname.startsWith('/auth/') && auth) { const [code, body] = auth(F, u.pathname); s.writeHead(code, { 'content-type': 'application/json' }); return s.end(JSON.stringify(body)); }
     if (u.pathname === '/box.json' && box) { s.writeHead(200, { 'content-type': 'application/json' }); return s.end(JSON.stringify(box(F))); }
     s.writeHead(404, { 'content-type': 'application/json' });
     s.end('{}');
@@ -871,34 +873,77 @@ test('Settings: the Notify button is the live control, the Test row once notific
   assert.equal(await p.ev(`${send}.textContent`), 'Test sent', 'its answer outlives a repaint');
 });
 
-test("Settings on a box: Signing in and Serving, boxLine's parts", CHROME, async (t) => {
+// A box's Settings, as the gateway answers them for a role: Your sign-in from /auth/method/list, and
+// People from /auth/people/list only when /box.json names it (the owner and admins).
+const signInMethods = [{ id: 'm-a', type: 'passkey', label: 'MacBook', added_at: '2026-11-10T09:00:00.000Z', last_used: '2026-11-20T09:00:00.000Z' }, { id: 'm-b', type: 'passkey', label: 'Phone', added_at: '2026-11-12T09:00:00.000Z', last_used: null }];
+const peopleList = { viewer: { id: 'p-owner', role: 'owner', invite: true }, people: [
+  { id: 'p-owner', name: 'Robin Hale', role: 'owner', level: 'full', you: true, methods: 2, added_at: '2026-11-10T09:00:00.000Z', last_seen: '2026-11-20T09:00:00.000Z', rev: 1, link: null, actions: ['rename'] },
+  { id: 'p-ana', name: 'Ana Costa', role: 'member', level: 'full', you: false, methods: 1, added_at: '2026-11-15T09:00:00.000Z', last_seen: null, rev: 3, link: null, actions: ['rename', 'relink', 'remove'] },
+] };
+async function boxSettings(t, role, { peopleAt = null } = {}) {
   let F;
   F = await fixtureHub(t, { kit: 'v0.57.0', image: true, box: () => {
     const at = (h) => `http://${h}.localhost:${F.port}/`;
-    return { box: 2, terminal: at('terminal'), project: `http://{project}.localhost:${F.port}/`, passkeys: at('auth'), previews: at('previews'), image: { release: 'v0.57.0', tools: { 'claude-code': '2.4.1' } } };
-  } });
+    return { box: 2, terminal: at('terminal'), project: `http://{project}.localhost:${F.port}/`, passkeys: `http://hub.localhost:${F.port}/auth/passkeys`, previews: at('previews'), image: { release: 'v0.57.0', tools: { 'claude-code': '2.4.1' } }, ...(role ? { role } : {}), ...(role === 'member' ? {} : { people: peopleAt ?? `http://hub.localhost:${F.port}/auth/people/list` }) };
+  }, auth: (_, p) => (p === '/auth/method/list' ? [200, { methods: signInMethods, notices: [], fresh_ms: 0 }] : p === '/auth/people/list' && role !== 'member' ? [200, peopleList] : [403, { error: 'no', code: 'not-allowed' }]) });
   F.setList([]);
   const p = await hubPage(t, `http://hub.localhost:${F.port}/#settings`);
   let loaded = false;
   for (let i = 0; i < 100 && !loaded; i++) { loaded = (await p.ev(`document.title`).catch(() => '')) === 'devteam'; if (!loaded) await new Promise((r) => setTimeout(r, 100)); }
-  if (!loaded) return t.skip("headless Chrome can't load hub.localhost here");
-  await p.until('the box rows', `document.querySelectorAll('#hub-settings .sec').length === 4`);
-  assert.deepEqual(await p.ev(setGroups), ['This machine', 'Signing in', 'Notifications', 'Serving']);
+  return loaded ? { F, p } : null;
+}
+
+test("Settings on a box: Your sign-in and People in place of Signing in › Passkeys, and Serving, boxLine's parts", CHROME, async (t) => {
+  const got = await boxSettings(t, 'owner');
+  if (!got) return t.skip("headless Chrome can't load hub.localhost here");
+  const { F, p } = got;
+  await p.until('the box rows', `document.querySelectorAll('#hub-settings .sec').length === 5 && document.querySelectorAll('#hub-settings .person').length === 2`);
+  assert.deepEqual(await p.ev(setGroups), ['This machine', 'Your sign-in', 'People', 'Notifications', 'Serving']);
   const rel = await p.ev(setRow('Box release'));
   assert.deepEqual([rel.key, rel.value, rel.desc], ['DEVTEAM_KIT_RELEASE', 'v0.57.0', 'the box image this machine runs']);
   const hub = await p.ev(setRow('Hub'));
   assert.deepEqual([hub.key, hub.value, hub.amber], ['hub', 'hub v0.57.0', false]);
   const cc = await p.ev(setRow('Claude Code'));
   assert.deepEqual([cc.key, cc.value, cc.desc], ['DEVTEAM_BOX_TOOLS', '2.4.1', 'the version on this box']);
-  const pk = await p.ev(setRow('Passkeys'));
-  assert.deepEqual([pk.key, pk.link, pk.yours], ['passkeys', ['Manage', `http://auth.localhost:${F.port}/`], true]);
+  assert.equal(await p.ev(setRow('Passkeys')), null, 'no Signing in › Passkeys row');
+  // Your sign-in: a row per method, each with Remove, and Add a passkey
+  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#hub-settings .set-row.method .t')].map((x) => x.textContent.trim())`), ['Passkey · MacBook', 'Passkey · Phone']);
+  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#hub-settings .set-row.method .r button')].map((x) => x.textContent.trim())`), ['Remove', 'Remove']);
+  assert.equal(await p.ev(`[...document.querySelectorAll('#hub-settings button')].some((x) => x.textContent.trim() === 'Add a passkey')`), true);
+  // People: each person, the owner's Invite someone
+  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#hub-settings .person .nm')].map((x) => x.firstChild.textContent.trim())`), ['Robin Hale', 'Ana Costa']);
+  assert.equal(await p.ev(`[...document.querySelectorAll('#hub-settings button')].some((x) => x.textContent.trim() === 'Invite someone')`), true);
   const pv = await p.ev(setRow('Previews'));
   assert.deepEqual([pv.key, pv.link], ['previews', ['Previews', `http://previews.localhost:${F.port}/`]]);
   assert.equal(await p.ev(`[...document.querySelectorAll('#tabs [role=tab]')].some((x) => x.textContent === 'Terminal')`), true, 'the Terminal tab stays');
-  // a link keeps the keyboard across the repaint
-  await p.ev(`document.querySelector('#hub-settings a[href^="http://auth."]').focus()`);
+  // a control keeps the keyboard across the repaint
+  await p.ev(`[...document.querySelectorAll('#hub-settings button')].find((x) => x.textContent.trim() === 'Add a passkey').focus()`);
   await p.ev('paintSettings()');
-  assert.equal(await p.ev(`document.activeElement?.textContent === 'Manage' && document.activeElement.closest('#hub-settings') !== null`), true, 'Manage keeps focus');
+  assert.equal(await p.ev(`document.activeElement?.textContent.trim() === 'Add a passkey'`), true, 'Add a passkey keeps focus');
+});
+
+test('Settings on a box: a member gets Your sign-in and no People', CHROME, async (t) => {
+  const got = await boxSettings(t, 'member');
+  if (!got) return t.skip("headless Chrome can't load hub.localhost here");
+  const { p } = got;
+  await p.until('the box rows', `document.querySelectorAll('#hub-settings .sec').length === 4 && document.querySelectorAll('#hub-settings .set-row.method').length === 2`);
+  assert.deepEqual(await p.ev(setGroups), ['This machine', 'Your sign-in', 'Notifications', 'Serving']);
+});
+
+test('Settings on a box: an older gateway, with no role, keeps Signing in › Passkeys', CHROME, async (t) => {
+  const got = await boxSettings(t, undefined);
+  if (!got) return t.skip("headless Chrome can't load hub.localhost here");
+  await got.p.until('the box rows', `document.querySelectorAll('#hub-settings .sec').length === 4`);
+  assert.deepEqual(await got.p.ev(setGroups), ['This machine', 'Signing in', 'Notifications', 'Serving']);
+  assert.notEqual(await got.p.ev(setRow('Passkeys')), null, 'its Passkeys row');
+});
+test('Settings on a box: People named on another origin is never read (connect-src is the page\'s own)', CHROME, async (t) => {
+  const other = await boxSettings(t, 'owner', { peopleAt: 'http://elsewhere.localhost:9/auth/people/list' });
+  if (!other) return t.skip("headless Chrome can't load hub.localhost here");
+  await other.p.until('the box rows', `document.querySelectorAll('#hub-settings .set-row.method').length === 2`);
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.deepEqual(await other.p.ev(setGroups), ['This machine', 'Your sign-in', 'Notifications', 'Serving'], 'no People from another origin');
+  assert.equal(await other.p.ev(`performance.getEntriesByType('resource').some((e) => e.name.includes('elsewhere'))`), false, 'nothing fetched there');
 });
 
 // The hub can't post an owner action. Its Overview asks the project's dashboard, in its frame, and
