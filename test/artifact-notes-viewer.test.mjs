@@ -761,7 +761,7 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await has(V, '#tl-card .tl-wd .tx', 'the withdrawn mark');
     await V.p.ev(`document.querySelector('#tl-c-note').firstElementChild.insertAdjacentHTML('beforeend', '<div class="tl-nview">x</div><span class="badge">x</span>'); void 0`);
     assert.deepEqual(await V.p.ev(`[${mw('#tl-card .tl-wd .tx')}, ${mw('#tl-card .tl-nview')}]`), ['560px', '560px'], 'the withdrawn mark and the view line');
-    assert.deepEqual(await V.p.ev(`['#av-step', '#av-next', '#av-filter', '#tl-card .badge'].map((q) => getComputedStyle(document.querySelector(q)).maxWidth)`), ['none', 'none', 'none', 'none'], 'the controls uncapped');
+    assert.deepEqual(await V.p.ev(`['#av-step', '#av-next', '#tl-card .badge', '.tl-pin'].map((q) => getComputedStyle(document.querySelector(q)).maxWidth)`), ['none', 'none', 'none', 'none'], 'the controls uncapped');
     assert.deepEqual(await V.p.ev(`[${mw('#av-notes')}, ${mw('#av-handover')}, ${mw('#tl-c-title')}, ${mw('#artifact-view')}]`), ['none', 'none', 'none', 'none'], 'the bar and the viewer uncapped');
   });
 });
