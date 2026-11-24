@@ -3311,6 +3311,13 @@ export function createGateway(opts = {}) {
       if (req.method === 'GET' && p === '/memory.json') return memory(req, res, url.searchParams);
       if (req.method === 'GET' && p === '/operator/threads') return operatorThreads(req, res, null, personH);
       if (req.method === 'POST' && p.startsWith('/operator/') && HUB_POSTS.includes(p.slice(10))) return operatorThreads(req, res, p.slice(10), personH);
+      // a file for a thread with the operator: dropped as on an instance's name (the session and the Origin
+      // rule above), and served back to the hub's own page alone, which its browser says it is
+      if (req.method === 'POST' && rawPath === '/upload') { clearTimeout(bodyTimer); return await receiveUpload(req, res, url.searchParams.get('name')); }
+      if (['GET', 'HEAD'].includes(req.method) && rawPath.startsWith('/upload/')) {
+        if (req.headers['sec-fetch-site'] !== 'same-origin') return send(res, 403, 'text/plain; charset=utf-8', 'dropped files only to the hub\'s own page');
+        return await serveUpload(req, res, rawPath);
+      }
       if (req.method === 'POST' && p === '/push/subscribe') {
         const sub = pushSubscription(await readJson(req));
         if (!sub) return json(res, 400, { error: 'that is not a push subscription this box can send to' });
