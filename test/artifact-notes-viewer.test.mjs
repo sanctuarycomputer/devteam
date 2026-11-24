@@ -211,7 +211,22 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
 
   // every tab gets V.rows
   // a tab with the stubs in (for this page and every reload), these rows laid over the threads, read once
-  const tabOf = async (rows, hash = '#library', size = {}) => { const V = await visit(hash, size); V.rows = (r) => rowsIn(V, r); await V.p.send('Page.addScriptToEvaluateOnNewDocument', { source: STUB }); await V.p.ev(STUB); await V.rows(rows); return V; };
+  const tabOf = async (rows, hash = '#library', size = {}) => { const V = await visit(hash, size); V.rows = (r) => rowsIn(V, r); await V.p.send('Page.addScriptToEvaluateOnNewDocument', { source: STUB }); await V.p.ev(STUB); await V.rows(rows); V.p.click = pressAt(V); return V; };
+  // a real press once the element is shown and at rest: a fixed card moves after a scroll or its picture's answer,
+  // and p.click's own scrollIntoView would move the card itself
+  const pressAt = (V) => async (sel) => {
+    await V.soon(`!!document.querySelector(${J(sel)})`, `setup: ${sel} is there`);
+    const rect = `(() => { const e = document.querySelector(${J(sel)}); if (!e) return null; const r = e.getBoundingClientRect(); return r.width ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null; })()`;
+    let was = null;
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 60));
+      const at = await V.p.ev(rect);
+      if (at && was && at.x === was.x && at.y === was.y) { await V.p.clickAt(at.x, at.y); return; }
+      was = at;
+    }
+    throw new Error(`${sel} never came to rest`);
+  };
+
 
   await sub('A1: Hand over (N) counts the open notes and is absent at 0', async () => {
     const V = await tabOf({ [N.trial]: ROW.C20(), [N.plans]: ROW.C20(), [N.annual]: ROW.C1() });

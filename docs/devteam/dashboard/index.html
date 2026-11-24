@@ -959,6 +959,8 @@ try {
 
 /* css-library end */
 /* css-viewer start */
+  /* a note's running text measures 5 of 12 columns of the page (kit-145) */
+  :root { --av-measure: calc((var(--page-max, 1200px) - 2 * var(--page-pad, 32px) - 11 * var(--gap, 16px)) / 2 + 5 * var(--gap, 16px)); }
   /* the artifact viewer: a page the fleet drew, a modal over the scrim from under the page bar (--bar-h, so the Inbox button above it stays
      clear) to 16px from the window's sides and bottom; its right edge is --av-right, which the open Inbox panel moves left of itself (8px all
      round under 600px, below) */
@@ -1062,7 +1064,7 @@ try {
   .tl-ctx summary b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
   .tl-ctx .kv code { overflow-wrap: anywhere; }
   .tl-turns { overflow-y: auto; flex: 1; min-height: 60px; display: flex; flex-direction: column; gap: 8px; padding: 4px 0; }
-  .tl-turn .tl-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .tl-turn .tl-text { max-width: var(--av-measure); white-space: pre-wrap; overflow-wrap: anywhere; }
   .tl-turn.owner { align-self: flex-end; max-width: 88%; background: color-mix(in srgb, var(--blue) 10%, var(--surface)); border-radius: 8px; padding: 6px 8px; }
   .tl-refs { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 2px; font-size: 12px; }
   .tl-compose textarea { margin-top: 6px; }
@@ -1072,6 +1074,8 @@ try {
   .tl-pins { position: absolute; left: 0; top: 0; width: 0; height: 0; }
   .tl-pin { position: absolute; z-index: 10; width: 22px; height: 22px; padding: 0; margin: 0; border-radius: 50%; border: 2px solid #fff; background: var(--blue); color: #fff; font: 600 11px/18px var(--sans); text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
   .tl-pin.on { outline: 2px solid var(--blue); outline-offset: 2px; }
+  .tl-pin.handed { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--blue); }
+  .tl-pin.check::after { content: '\2713'; position: absolute; right: -7px; bottom: -6px; width: 13px; height: 13px; border-radius: 50%; background: var(--green); color: #fff; font: 700 9px/13px var(--sans); }
   .tl-pin sup { font-size: 9px; margin-left: 1px; }
   /* the in-panel thread (kit-89 spec §2.4): the one card, moved into #th-card-slot, static, the slot's width,
      no frame of its own and no height of its own (the slot scrolls); its title and × are the pane's row and the
@@ -1160,7 +1164,8 @@ try {
   /* a note on an artifact (kit-145): what there is to check, a mark withdrawn, where a step landed */
   .tl-addr { margin: 6px 0; padding: 6px 8px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--surface)); font-size: 12px; }
   .tl-addr .by { color: var(--muted); }
-  .tl-addr .tx, .tl-wd .tx { overflow-wrap: anywhere; }
+  .tl-addr .tx, .tl-wd .tx { max-width: var(--av-measure); overflow-wrap: anywhere; }
+  .tl-nview { max-width: var(--av-measure); }
   button.tl-shot { display: block; width: auto; height: auto; margin: 6px 0 2px; padding: 0; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
   .tl-shot img { display: block; width: 160px; height: auto; }
   .tl-shot-cap { font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
@@ -9824,7 +9829,10 @@ function tsPins() {
   // none until this page's lens is ready: a point is only where the last page's pin was
   const pins = !tsOn() || !TS.ready ? [] : tPins(TL.threads).filter((g) => tFrameOn(g.subject, TS)).map((g) => {
     const r = tsRect(g.subject);
-    return r && { id: g.ids[g.ids.length - 1], cls: `tl-pin${g.ids.includes(TL.open) ? ' on' : ''}`, left: `${Math.round(r.fx - 11)}px`, top: `${Math.round(r.fy - 11)}px`, label: `Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`, html: `${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}` };
+    // a note with a session has a ring, one to check a check; a pin of several says the one that waits on the owner
+    const states = TL.threads.filter((t) => g.ids.includes(t.id)).map(tNoteState);
+    const note = g.subject.kind !== 'artifact' ? '' : states.includes('check') ? ' check' : states.includes('with') ? ' handed' : '';
+    return r && { id: g.ids[g.ids.length - 1], cls: `tl-pin${g.ids.includes(TL.open) ? ' on' : ''}${note}`, left: `${Math.round(r.fx - 11)}px`, top: `${Math.round(r.fy - 11)}px`, label: `Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`, html: `${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}` };
   }).filter(Boolean);
   // a stage pin pressed or focused is kept through a redraw as a page pin is (tlHeld): the press is
   // recorded for it too (the layer's pointerdown), though it sits on the stage, outside #tl
@@ -10267,6 +10275,10 @@ function tlSend() {
   const sent = files.length ? { files } : {};
   const p = { thread: t ? t.id : `pending-${++tlFresh}`, real: named ? t.id : null, turn: tPendingTurn(words, new Date().toISOString(), files), had: t ? tHad(t, words) : 0, fresh: t ? null : { title: draft?.title || tLine(text || files[0].name, T_TITLE_MAX), subject: draft?.subject || null }, confirmed: false };
   if (t && !named) p.firstOf = TL.pend.find((x) => x.fresh && tPendId(x) === t.id);
+  // a new note on the artifact shown goes with the frame it was made in (kit-145), within the server's bounds (kit-147)
+  const on = p.fresh?.subject, f = on?.kind === 'artifact' && TS.kind === 'artifact' && TS.slug === on.slug && TS.at === on.at ? tsFrame() : null;
+  const within = (n, lo, hi) => Math.min(hi, Math.max(lo, Math.round(n)));
+  const frame = f ? { frame: { w: within(f.clientWidth, 320, 3840), h: within(f.clientHeight, 240, 2160), hash: TS.hash ?? '' } } : {};
   let taken = null;
   press(`tl:${p.thread}`, {
     build: () => {
@@ -10274,7 +10286,7 @@ function tlSend() {
       // the first words were refused, so there is no thread to say this into
       if (!id && p.firstOf) throw new Error("the thread wasn't started (its first words weren't saved), so this wasn't sent either");
       if (id) { p.real = id; return { action: resolved ? 'thread-reopen' : 'thread-say', body: { id, text, ...sent } }; }
-      return { action: 'thread-new', body: { title: p.fresh.title, subject: p.fresh.subject || undefined, text, ...sent } };
+      return { action: 'thread-new', body: { title: p.fresh.title, subject: p.fresh.subject || undefined, text, ...frame, ...sent } };
     },
     apply: () => {
       TL.pend.push(p);
