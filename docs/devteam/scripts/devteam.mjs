@@ -35490,18 +35490,24 @@ const owedTurns = (threadId, objects = readLog().objects) => owedIn(logTurns(thr
 // of the promise and every owed owner turn it answered came after the supervisor's own question asked
 // after the promise (its reply in that exchange answers the owner's answer, not the promise). Once the
 // promise is overdue any reply settles it: the supervisor takes it, as with an owed turn (final-2b
-// F1). A reply answering nothing owed takes it over too (the backstop). The turn, or null. On the
-// log's lines, oldest first.
+// F1). A reply answering nothing owed takes it over too (the backstop). The owner's answer given
+// outside the thread (the Inbox, or chat) to a question the supervisor asked there counts as an owner
+// turn at its time, since it writes none (kit-794); one recorded from a turn is that turn. The turn,
+// or null. On the log's lines, oldest first.
 function pendingOpen(ts, thread) {
   const mine = ts.filter((u) => u.created_by === 'responder').pop();
   if (mine?.pending !== true) return null;
   const resolvedAt = (thread?.updates ?? []).filter((u) => u.status === 'resolved').map((u) => String(u.at)).sort().pop() ?? '';
   if (resolvedAt > String(mine.created_at)) return null;
   const asked = ts.find((u) => u.created_by === 'supervisor' && u.question && u.created_at >= mine.created_at)?.created_at;
+  const inbox = !asked ? [] : ts.filter((u) => u.created_by === 'supervisor' && u.question)
+    .flatMap((u) => logGet(u.question)?.updates ?? [])
+    .filter((a) => a.answer !== undefined && writerClass(a.by) === 'owner' && !a.turn)
+    .map((a) => ({ created_by: 'owner', created_at: a.at }));
   for (const s of ts) {
     if (s.created_by !== 'supervisor' || s.created_at < mine.created_at || s.question) continue;
     if (Date.parse(s.created_at) - Date.parse(mine.created_at) > RESPONDER_PENDING_MS) return null;
-    const answers = owedIn(ts.filter((u) => u.created_at < s.created_at), thread).filter((u) => answersTurn(u, 'supervisor'));
+    const answers = owedIn([...ts, ...inbox].filter((u) => u.created_at < s.created_at), thread).filter((u) => answersTurn(u, 'supervisor'));
     if (!asked || !answers.length || answers.some((u) => u.created_at < asked)) return null;
   }
   return mine;

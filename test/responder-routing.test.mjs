@@ -299,6 +299,12 @@ test('responder routing (kit-104)', { skip: NO_TMUX, timeout: 280000 }, async (t
   });
 
   // ---- done-when 5: the findings ----
+  // the supervisor's thread ask as the kit would have written it agoMs ago: the question, and its turn
+  const inboxQuestion = (T, agoMs) => {
+    const Q = F.hand('supervisor', { type: 'question', kind: 'decision', question: 'Which colour?', goal: F.goal, thread: T, stake: 1, urgency: 1 }, agoMs);
+    F.writerTurn('supervisor', T, agoMs, { question: Q });
+    return Q;
+  };
   const overdueIn = (T) => F.metrics().find((f) => f.kind === 'responder-overdue' && f.subject === T);
   const owedLong = () => { const T = oldThread(30 * MIN); F.ownerTurn(T, 4 * MIN); return T; };
   await it('M1a responder-overdue (high): a turn routed to the responder owed past 3 minutes', () => {
@@ -541,6 +547,93 @@ test('responder routing (kit-104)', { skip: NO_TMUX, timeout: 280000 }, async (t
     assert.match(s.err, new RegExp(`^taking over ${P}: "responder's turn"`, 'm'), s.err);
     const again = after(() => F.run(['thread', 'reply', T, '--', 'and done'], SUP));
     assert.doesNotMatch(again.err, /taking over/);
+  });
+  // kit-794: the owner's answer to the supervisor's thread ask through the Inbox (no turn)
+  await it('Z8a the responder\'s pending promise outlives the supervisor\'s own question answered from the Inbox, as in the thread (Z2): its follow-up is taken (kit-794)', () => {
+    const T = oldThread(30 * MIN);
+    F.ownerTurn(T, 20 * MIN);
+    const P = F.writerTurn('responder', T, 5 * MIN, { pending: true });
+    const Q = after(() => ask(T));
+    after(() => F.owner(['answer', Q, 'Teal']));
+    after(() => F.sup(['thread', 'reply', T, '--', 'Teal it is']));
+    const r = after(() => F.run(['thread', 'reply', T, '--', 'the follow-up I promised'], RESPONDER));
+    assert.equal(r.status, 0, `the promise ${P} is still the responder's to keep: ${r.err}`);
+  });
+  await it('Z8b the supervisor\'s reply to an Inbox answer says nothing of taking over the promise (kit-794)', () => {
+    const T = oldThread(30 * MIN);
+    F.ownerTurn(T, 20 * MIN);
+    F.writerTurn('responder', T, 5 * MIN, { pending: true });
+    const Q = after(() => ask(T));
+    after(() => F.owner(['answer', Q, 'Teal']));
+    const s = after(() => F.run(['thread', 'reply', T, '--', 'Teal it is'], SUP));
+    assert.equal(s.status, 0, s.err);
+    assert.doesNotMatch(s.err, /taking over/, 'its reply answers the Inbox answer, not the promise');
+  });
+  await it('Z9 a promise left open by an Inbox-answered question raises responder-overdue past 10 minutes (kit-794)', () => {
+    const T = oldThread(30 * MIN);
+    F.ownerTurn(T, 20 * MIN);
+    const P = F.writerTurn('responder', T, 15 * MIN, { pending: true });
+    const Q = inboxQuestion(T, 14 * MIN);
+    F.hand('owner', { type: 'question', op: 'set', id: Q, answer: 'Teal' }, 13 * MIN);
+    F.writerTurn('supervisor', T, 12 * MIN);
+    const late = overdueIn(T);
+    assert.equal(late?.severity, 'high', 'unkept past 10 minutes');
+    assert.match(late.detail, new RegExp(P));
+  });
+  await it('Z10 only the reply to the Inbox answer is in its exchange: the supervisor\'s next one, answering nothing owed, takes the promise over (kit-794)', () => {
+    const T = oldThread(30 * MIN);
+    F.ownerTurn(T, 20 * MIN);
+    const P = F.writerTurn('responder', T, 5 * MIN, { pending: true });
+    const Q = after(() => ask(T));
+    after(() => F.owner(['answer', Q, 'Teal']));
+    after(() => F.sup(['thread', 'reply', T, '--', 'Teal it is']));
+    const s = after(() => F.run(['thread', 'reply', T, '--', 'and the promised work is done'], SUP));
+    assert.equal(s.status, 0, s.err);
+    assert.match(s.err, new RegExp(`^taking over ${P}:`, 'm'));
+    const r = after(() => F.run(['thread', 'reply', T, '--', 'a late follow-up'], RESPONDER));
+    assert.notEqual(r.status, 0, 'refused: one reply to the promise');
+    assert.match(r.err, /the supervisor has answered this/);
+  });
+  await it('Z11 a supervisor reply while its question is still unanswered takes the promise over, and the Inbox answer after it doesn\'t give it back (kit-794)', () => {
+    const T = oldThread(30 * MIN);
+    F.ownerTurn(T, 20 * MIN);
+    const P = F.writerTurn('responder', T, 5 * MIN, { pending: true });
+    const Q = after(() => ask(T));
+    const s = after(() => F.run(['thread', 'reply', T, '--', 'I have it meanwhile'], SUP));
+    assert.match(s.err, new RegExp(`^taking over ${P}:`, 'm'));
+    after(() => F.owner(['answer', Q, 'Teal']));
+    const r = after(() => F.run(['thread', 'reply', T, '--', 'a late follow-up'], RESPONDER));
+    assert.notEqual(r.status, 0, 'refused');
+    assert.match(r.err, /the supervisor has answered this/);
+  });
+  await it('Z12 an answer recorded from an owner\'s turn (--from-turn) counts once: the reply that turn got closes the exchange, and the next one takes the promise over (kit-794)', () => {
+    const T = oldThread(30 * MIN);
+    F.ownerTurn(T, 20 * MIN);
+    const P = F.writerTurn('responder', T, 5 * MIN, { pending: true });
+    const Q = after(() => ask(T));
+    const a = after(() => F.say(T, 'Teal'));
+    after(() => F.sup(['thread', 'reply', T, '--', 'Teal it is']));
+    after(() => F.sup(['answer', Q, 'Teal', '--from-turn', a.U]));
+    const s = after(() => F.run(['thread', 'reply', T, '--', 'and the promised work is done'], SUP));
+    assert.match(s.err, new RegExp(`^taking over ${P}:`, 'm'), s.err);
+  });
+  await it('Z13 an answer recorded from the supervisor\'s chat (--from-chat) keeps the promise open as an Inbox one does (kit-794)', () => {
+    const T = oldThread(30 * MIN);
+    F.ownerTurn(T, 20 * MIN);
+    F.writerTurn('responder', T, 15 * MIN, { pending: true });
+    const Q = inboxQuestion(T, 14 * MIN);
+    F.hand('owner', { type: 'question', op: 'set', id: Q, answer: 'Teal', channel: 'chat', said: 'Teal' }, 13 * MIN);
+    F.writerTurn('supervisor', T, 12 * MIN);
+    assert.equal(overdueIn(T)?.severity, 'high');
+  });
+  await it('Z14 only the owner\'s answer counts: a question the supervisor withdrew leaves its next reply answering nothing owed, and that takes the promise over (kit-794)', () => {
+    const T = oldThread(30 * MIN);
+    F.ownerTurn(T, 20 * MIN);
+    const P = F.writerTurn('responder', T, 5 * MIN, { pending: true });
+    const Q = after(() => ask(T));
+    after(() => F.sup(['withdraw', Q, '--reason', 'no longer needed']));
+    const s = after(() => F.run(['thread', 'reply', T, '--', 'I have it from here'], SUP));
+    assert.match(s.err, new RegExp(`^taking over ${P}:`, 'm'), s.err);
   });
   await it('Z4 a pending promise before a resolve raises no responder-overdue after a reopen with no words (final-1b F2)', () => {
     const T = oldThread(30 * MIN);
