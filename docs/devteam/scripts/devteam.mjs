@@ -11359,11 +11359,19 @@ function cmdThread() {
     const t = threadOpen(id, 'owner');
     const v = threadViewOf(t.id);
     let outcome = flags.outcome !== undefined ? (flagStr('outcome') ?? '').replace(/\s+/g, ' ').trim() : '';
+    if (flags.accept && flags['accept-addressed']) die('--accept takes the supervisor\'s proposal and --accept-addressed a session\'s mark: one of them');
     if (flags.accept) {
       if (!v.ready) die(`${t.id} has no proposal from the supervisor to accept; resolve it with your own --outcome`);
       // --at names the proposal the owner saw (the dashboard always sends it), as answer's --seen does
       if (flags.at !== undefined && flagStr('at') !== v.ready.at) die('The supervisor changed its proposal; read it again.');
       outcome = v.ready.outcome;
+    }
+    // the session's mark on an artifact note, bound to the one the owner read
+    if (flags['accept-addressed']) {
+      if (typeof flags.at !== 'string') die('--accept-addressed needs --at <the addressed note\'s time>, so you accept the note you read');
+      if (!v.addressed) die(`${t.id} has no addressed note to accept`);
+      if (flags.at !== v.addressed.at) die('The note changed; read it again');
+      outcome = v.addressed.note;
     }
     if (UNSAFE_TEXT.test(outcome)) die('--outcome is one line of plain text');
     if (Buffer.byteLength(outcome) > OUTCOME_MAX) die(`--outcome is at most ${OUTCOME_MAX} bytes`);
@@ -11454,6 +11462,8 @@ function cmdThread() {
     return;
   }
   if (sub === 'list') {
+    if (flags.with !== undefined && (typeof flags.with !== 'string' || !LINK_ID.test(flags.with) || ['owner', 'responder'].includes(flags.with))) die('--with <session>: supervisor, plan-<feature> or a ticket id');
+    if (flags.with !== undefined) for (const k of ['waiting', 'all', 'open', 'responder']) if (flags[k]) die(`--with lists a session's notes: it takes no --${k}`);
     if (flags.responder && !flags.waiting) die('--responder goes with --waiting: thread list --waiting --responder');
     if (flags.responder) {
       const q = responderQueue();
@@ -11480,13 +11490,16 @@ function cmdThread() {
       for (const x of theirs) out(row(x, x.waiting === 'session' ? `${sessionWords(x.with, objects)} has it` : waitingWords(x, late.has(x.id))));
       return;
     }
+    // a session's notes: handed to it, not yet marked or resolved, the oldest hand-over first
+    if (flags.with !== undefined) vs = vs.filter((x) => x.handed && x.with === flags.with).sort((a, b) => a.handed.at.localeCompare(b.handed.at));
     if (!flags.all) vs = vs.filter((x) => x.status === 'open');
     if (flags.json) return json(vs);
+    if (flags.with !== undefined && !vs.length) return out(`no notes are with ${flags.with}`);
     if (!vs.length) return out(flags.all ? 'no threads' : 'no open threads');
     for (const x of vs) out(row(x, x.status === 'open' ? (x.waiting === 'session' ? `with ${x.with}` : waitingWords(x)) : ''));
     return;
   }
-  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread new --subject \'{"kind":"item","ref":"question:q-…"}\' [--title "<line>"] -- "<words>"   (the supervisor\'s own, about a question or goal)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--re <u-id>] [--off-subject "<why>"] [--anyway]   (the supervisor\'s or the responder\'s; --anyway the responder\'s)   |   thread reply <t-id> --part <n> "<words>"   then   thread reply <t-id> --after-parts ["<last words>"] [reply\'s flags]   (a reply a paragraph at a time, from the replying session)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" [--off-subject "<why>"] <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting [--responder] | --open | --all] [--json]   (words may also follow --)');
+  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread new --subject \'{"kind":"item","ref":"question:q-…"}\' [--title "<line>"] -- "<words>"   (the supervisor\'s own, about a question or goal)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--re <u-id>] [--off-subject "<why>"] [--anyway]   (the supervisor\'s or the responder\'s; --anyway the responder\'s)   |   thread reply <t-id> --part <n> "<words>"   then   thread reply <t-id> --after-parts ["<last words>"] [reply\'s flags]   (a reply a paragraph at a time, from the replying session)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" [--off-subject "<why>"] <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>] | --accept-addressed --at <when it was marked>]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting [--responder] | --with <session> | --open | --all] [--json]   (words may also follow --)');
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
@@ -13613,6 +13626,121 @@ function artifactSubjectNow(s) {
   if (fingerprint(src.entries) === s.fp) return null;
   return tree ? `main has changed ${s.slug} since this published version` : `the artifact ${s.slug} has changed since this thread began`;
 }
+/* artifactNotes start */
+// The notes on one copy of an artifact (artifact-notes-1; supervisor.md, Artifact notes): the open
+// threads on this slug placed at `at`, oldest first. main's also holds those on a published tree, and
+// on a worktree that is gone, which no session works in any more.
+function artifactNoteSet(slug, at = 'main') {
+  const here = (s) => {
+    const placed = typeof s.at === 'string' ? s.at : 'main';
+    return placed === at || (at === 'main' && (placed.startsWith('tree:') || (WT_NAME.test(placed) && !draftWorktree(placed))));
+  };
+  return threadViews(readLog().objects)
+    .filter((v) => v.status === 'open' && v.subject?.kind === 'artifact' && v.subject.slug === slug && here(v.subject))
+    .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+}
+// Who takes the notes placed at `at`: the planner or the ticket whose worktree it is, else the supervisor.
+const artifactRecipient = (at) => ((PLAN_WRITER.test(at) || tickets().has(at)) && draftWorktree(at) ? at : 'supervisor');
+const noteState = (v) => (v.check ? 'to check' : v.handed ? `with ${v.handed.to}` : 'open');
+// The slug and --at a notes command takes.
+function artifactNotesArgs(sub, slug) {
+  if (!LINK_ID.test(slug ?? '')) die(`usage: artifact ${sub} <slug> [--at main|<worktree>|tree:<id>] [--json]: a slug is lowercase words joined by - (mock-checkout)`);
+  const at = flags.at === undefined ? 'main' : flagStr('at') ?? '';
+  if (!ARTIFACT_AT.test(at)) die('--at is main, a worktree name, or tree:<id>');
+  return { slug, at };
+}
+// artifact notes <slug> [--at <where>] [--json]: every note there not resolved. The header is the kit's
+// own words and ids; what the page or a session wrote is inside the data frame, quoted.
+function artifactNotesCmd(slug, at) {
+  const vs = artifactNoteSet(slug, at);
+  if (flags.json) return json(vs.map((v) => ({ id: v.id, path: typeof v.subject.path === 'string' ? v.subject.path : null, state: noteState(v), title: v.title, subject: v.subject, turns: v.turns.filter((u) => u.by === 'owner'), handed: v.handed, addressed: v.addressed, check: v.check, shot: v.shot, noshot: v.noshot, unready: v.unready, frame: v.frame, source: v.source })));
+  if (!vs.length) return out(`no notes on artifact ${slug} at ${at}`);
+  for (const v of vs) {
+    out(`${v.id} · ${noteState(v)}`);
+    out(threadDataFrame(v));
+    if (v.addressed) out(`  addressed.note: ${quoteData(v.addressed.note)} (by ${v.addressed.by} at ${v.addressed.at})`);
+    if (v.unready) out(`  unready.reason: ${quoteData(v.unready.reason)}`);
+    for (const u of v.turns) if (u.by === 'owner') {
+      out(`owner (${u.id}) ${u.at}:`);
+      out(u.text.replace(/\t/g, ' ').replace(UNSAFE_TEXT_ALL, (c) => (c === '\n' ? c : '')).split('\n').map((l) => `  ${l}`).join('\n'));
+    }
+  }
+}
+/* artifactNotes end */
+/* artifactHandoff start */
+// artifact handoff <slug> [--at <where>] [--json]: the owner hands the open notes there to the session
+// drawing that copy: a line on each note, then one message, which names ids and counts and never
+// anything a page wrote. A recipient with no pane keeps it in its messages, and the supervisor is
+// nudged with the same line.
+function artifactHandoffCmd(slug, at) {
+  const { by } = ownerWriter('the owner hands notes over: they press Hand over on the dashboard, or run artifact handoff in their own terminal');
+  const to = artifactRecipient(at);
+  // two presses at once hand a note over once
+  const notes = withLock(runPath('artifact-handoff'), () => {
+    logCache = null;
+    const open = artifactNoteSet(slug, at).filter((v) => noteState(v) === 'open');
+    for (const v of open) appendLog({ type: 'thread', op: 'set', id: v.id, handed: { to, at: nowIso() } }, by);
+    return open;
+  });
+  const count = notes.length;
+  if (!count) return flags.json ? json({ to, typed: false, count }) : out(`no open notes on artifact ${slug} at ${at}: nothing handed over`);
+  const report = {};
+  sendLine({ to, kind: 'info', from: by, text: `${plural(count, 'note')} on artifact ${slug} ${count === 1 ? 'is' : 'are'} yours: devteam.mjs artifact notes ${slug} --at ${at}. Mark each with devteam.mjs artifact addressed <thread> --note "what changed".` }, report);
+  if (to !== 'supervisor' && !report.typed) nudgeSupervisor(report.line);
+  if (flags.json) return json({ to, typed: !!report.typed, count });
+  out(`handed ${plural(count, 'note')} on artifact ${slug} to ${to}`);
+  out(report.typed === true ? `typed into ${to}'s pane`
+    : report.typed ? `held for ${to}'s pane: ${heldWords(report.typed, to === 'supervisor' ? "the supervisor's" : `${to}'s`)}`
+      : to === 'supervisor' ? 'not typed: the supervisor has no pane; it stays in its messages and unread'
+        : `not typed: ${to} has no pane; it stays in ${to}'s messages, and the supervisor is nudged with the same line`);
+}
+/* artifactHandoff end */
+/* artifactAddressed start */
+// artifact addressed <t-id> --note "<what changed>" [--sha <commit>] [--draft <worktree>]: the session a
+// note was handed to (or the supervisor) marks it, with the kit's picture of the spot: no picture, no
+// mark. The owner checks it; nobody's pane is typed into.
+async function artifactAddressedCmd(id) {
+  const by = logWriter();
+  if (by === 'responder') die("the responder doesn't mark notes: hand the thread over");
+  if (by === 'supervisor') supervisorOnly('artifact addressed');
+  const note = uncapped((flagStr('note') ?? '').replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim());
+  if ([...note].length < 12) die('say what changed for this note (at least 12 characters): the Start trial button is primary; the line under it says the trial ends after 14 days');
+  if (Buffer.byteLength(note) > 300) die(`--note is at most 300 bytes; this one is ${Buffer.byteLength(note)}`);
+  const sha = flagStr('sha');
+  if (flags.sha !== undefined && !/^[0-9a-f]{7,64}$/.test(sha ?? '')) die('--sha is a commit: 7 to 64 hex digits');
+  // handed to the writer, as the note stands now
+  const mine = () => {
+    const t = threadOpen(id, 'supervisor');
+    const v = threadViewOf(t.id);
+    if (v.subject?.kind !== 'artifact') die(`${t.id} is not a note on an artifact`);
+    if (!v.handed) die(`${t.id} has not been handed over: the owner hands notes over`);
+    if (by !== v.handed.to && by !== 'supervisor') die(`${t.id} was handed to ${v.handed.to}, not to ${by}`);
+    return { t, v };
+  };
+  const { t, v } = mine();
+  const { slug } = v.subject;
+  const holds = (name) => WT_NAME.test(name) && name !== 'main' && !!artifactSource(name, slug);
+  let draft = null;
+  if (flags.draft !== undefined) {
+    draft = flagStr('draft') ?? '';
+    if (!holds(draft)) die('--draft is a worktree under .worktrees/ that holds this artifact (never main, a published tree, a reviewer\'s or a scratch one); leave it out when the change is on main');
+  } else if (realPath(path.dirname(repoRoot)) === realPath(path.join(mainRoot, '.worktrees')) && holds(path.basename(repoRoot))) draft = path.basename(repoRoot);
+  const answers = shotAnswers(v, t);
+  const r = await markShot(v, { kind: 'addressed', by, draft });
+  // a refusal from here ends the process (die) or throws: either way the pictures go
+  let written = false;
+  process.once('exit', () => { if (!written) for (const f of r.files) fs.rmSync(f, { force: true }); });
+  // the picture takes seconds: the owner may have written, or closed the thread, meanwhile
+  logCache = null;
+  const now = mine();
+  if (shotAnswers(now.v, now.t) !== answers) die(`${t.id} changed while its picture was taken (a new turn of the owner's, a hand-over or a mark): read it, then mark it again`);
+  appendLog({ type: 'message', to: 'owner', kind: 'addressed', thread: t.id, text: note, ...(sha ? { sha } : {}), ...(draft ? { draft } : {}), shot: r.shot }, by);
+  written = true;
+  try { shotSweep(t.id, Date.now()); } catch (e) { warn(`old pictures not removed: ${e.message}`); }
+  out(`marked ${t.id} addressed`);
+  for (const l of r.lines) out(l);
+}
+/* artifactAddressed end */
 // artifact new <slug> --title --summary [--for '[…]'] [--kind mock|diagram|docs]: scaffold a page in this worktree.
 // artifact check [<slug>…]: the checks merge runs, on this checkout's artifacts.
 function cmdArtifact() {
@@ -13706,7 +13834,12 @@ function cmdArtifact() {
     if (flags.json) return json(r);
     return out(r.versions.map((v) => (v.kind === 'draft' ? `draft ${v.worktree} ${v.time}` : `${v.kind} ${v.tree.slice(0, 12)} ${v.commit.slice(0, 12)} ${v.time}`)).join('\n'));
   }
-  die('usage: artifact new <slug> --title t --summary s [--for json] [--kind mock|diagram|docs] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact versions <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
+  if (sub === 'handoff' || sub === 'notes') {
+    const { slug, at } = artifactNotesArgs(sub, args[0]);
+    return sub === 'handoff' ? artifactHandoffCmd(slug, at) : artifactNotesCmd(slug, at);
+  }
+  if (sub === 'addressed') return artifactAddressedCmd(args[0]);
+  die('usage: artifact new <slug> --title t --summary s [--for json] [--kind mock|diagram|docs] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact versions <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner | artifact handoff <slug> [--at <where>] [--json] | artifact notes <slug> [--at <where>] [--json] | artifact addressed <t-id> --note "<what changed>" [--sha <commit>] [--draft <worktree>]');
 }
 function cmdArtifacts() {
   gitReadCache = new Map();
@@ -27131,7 +27264,9 @@ function cmdSend() {
 }
 // Log one message and type it into the recipient's pane. The log is the record; the pane is
 // delivery. A recipient whose pane is gone catches up with `messages`.
-function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null, thread = null }) {
+// report: an object a caller passes to learn what was typed (typeInto's answer; false when no pane took
+// it) and the line itself.
+function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null, thread = null }, report = null) {
   const target = to === 'supervisor' ? supervisorTarget() : tmuxTarget(to);
   const resolved = resolvePane(target);
   const { target: exact } = resolved;
@@ -27141,7 +27276,9 @@ function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null, 
   if (!problem && sh('tmux', ['display-message', '-p', '-t', exact, '#{window_name}']) === OPERATOR_WINDOW) problem = 'that is the machine\'s operator, which takes no messages from a fleet';
   // thread only on a handoff's line, so every other message's line is as before
   const line = appendLog({ type: 'message', to, kind, text, re, sha, ticket: ticket ?? (tickets().has(to) ? to : null), ...(thread ? { thread } : {}) }, from);
-  const typed = problem ? false : typeInto(exact, `[devteam ${kind} ${line.id} from ${from}${re ? ` re ${re}` : ''}${sha ? ` @ ${sha}` : ''}] ${text}`);
+  const said = `[devteam ${kind} ${line.id} from ${from}${re ? ` re ${re}` : ''}${sha ? ` @ ${sha}` : ''}] ${text}`;
+  const typed = problem ? false : typeInto(exact, said);
+  if (report) Object.assign(report, { typed, line: said });
   if (!typed) warn(`${line.id} recorded but not delivered to "${to}": ${problem ?? `could not type into ${exact}`}; it shows in their \`messages\``);
   else if (typed !== true) warn(`${line.id} ${heldWords(typed, to === 'supervisor' ? "the supervisor's" : `${to}'s`)}`);
   return line;
@@ -36805,6 +36942,9 @@ const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   artifact manifest <slug> [--json]   what publishing a landed artifact would put up: main's tree, each file's sha256 (the cloud gateway's confirm page reads it)
   artifact describe <slug> [--at main|<worktree>|tree:<id>] [--json]   what a viewer shows of an artifact there (title, fingerprint) and main's fingerprint (the dashboard's /api/view reads it)
   artifact versions <slug> [--json]   an artifact's versions: its drafts, main's, then earlier ones by date (the dashboard's /api/artifact-versions reads it)
+  artifact handoff <slug> [--at main|<worktree>|tree:<id>] [--json]   (owner) hand the open notes on that copy to the session drawing it (the dashboard's Hand over)
+  artifact notes <slug> [--at main|<worktree>|tree:<id>] [--json]   the notes on that copy not yet resolved: each one's state, the spot as data, the owner's words
+  artifact addressed <t-id> --note "<what changed>" [--sha <commit>] [--draft <worktree>]   (the session a note was handed to, or the supervisor) mark it, with the kit's picture of the spot: look at it
   artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner   the owner's record that a landed artifact went public or came down (the gateway's confirm page runs these; by hand they record intent only)
   artifacts [--json]              landed artifacts, and drafts in session worktrees
   preview <port> [--label "<one line>"]   register a server you are running; prints the link for this machine (a name derived from project, session and label)
@@ -36827,14 +36967,14 @@ const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   unread [--json]   what the owner wrote that the supervisor hasn't dealt with yet (answers, thread turns, decisions), oldest first, each with its ref   |   unread ack <ref> [<ref> …]   (supervisor) dealt with exactly those lines
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
   answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> --said "<whole clauses>" [--at <n>] [--seen-turn <u-id>]   (a question asked with thread ask --turn) | answer <qid> --defaulted   (supervisor)
-  thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --; refused in the supervisor's own pane
+  thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>] | --accept-addressed --at <when it was marked>] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --; refused in the supervisor's own pane
   thread new --subject '{"kind":"item","ref":"question:q-…"}' [--title "<line>"] -- "<words>"   (supervisor)   your own thread about a question or goal (or goal:g-…), for what belongs to no open thread; at most 20 open; nothing is typed anywhere, the owner sees it as from you
   settings set <key> <1..20|none> [--for <act-id>]   (the supervisor sets max_active_tickets or max_active_per_component in its settings chore, .worktrees/chore-settings; none is no limit; --for names the owner's owner-setting act it lands, which must be the latest for the key with this value. It applies once merge --chore settings lands it)
   owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor's own settings, max_active_tickets or max_active_per_component; none is no limit. The dashboard's Settings page runs it on Save; the supervisor lands it with settings set in its settings chore)
   pane question [--json]   (what the supervisor's terminal is asking; the owner answers it on the dashboard's card, which sends that option's digit key and nothing else: no command answers it)
   thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--re <u-id>] [--off-subject "<why>"] [--anyway] | thread reply <t-id> --part <n> "<words>", then thread reply <t-id> --after-parts ["<last words>"] [reply's flags] | thread ask <t-id> --question "…" [--off-subject "<why>"] <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>" | thread unready <t-id> --reason "<line>"   (supervisor; the responder replies too)   reply, ask an Inbox question in it, propose resolving it (on an artifact note it takes a picture of the spot: look at it), withdraw a proposal or a session's mark; a turn nothing waits on (no owner turn owed, no open handoff) names its --refs on the thread's subject, or follows up your --pending turn with --re <that turn>, or says --off-subject "<why>"
   thread working <t-id> [--done]   (the session holding the owner's turn: the card shows it is responding until you reply)
-  thread show <t-id> [--json] | thread list [--waiting [--responder] | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply; --waiting --responder: the owner's turns owed and routed to the responder, oldest first
+  thread show <t-id> [--json] | thread list [--waiting [--responder] | --with <session> | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply; --waiting --responder: the owner's turns owed and routed to the responder, oldest first; --with: the artifact notes handed to that session, not yet marked
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]   questions print in Inbox order: the most valuable first
   ask … --stake 1-3 --urgency 1-3 [--settles <qid>… --settles-if "<answer>"]   rate every question: how much of what the fleet does next rides on the answer, how soon waiting costs, and the open questions one answer would settle (stake 3, same goal or feature)
   rate <qid> [--stake 1-3] [--urgency 1-3] [--settles <qid>… | --settles none] [--unsettles <qid>…] [--settles-if "<answer>"]   supervisor: rate an open question again; --settles adds to what it settles
