@@ -1,1 +1,1 @@
-self.addEventListener('install', (e) => { e.waitUntil(fetch('__OTHER__/sw', { mode: 'no-cors' }).catch(() => {})); });
+self.addEventListener('install', (e) => { e.waitUntil(fetch('__OTHER__/sw', { mode: 'no-cors' }).catch(() => fetch('/tried-sw').catch(() => {}))); });

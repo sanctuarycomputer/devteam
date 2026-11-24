@@ -6,6 +6,7 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import dgram from 'node:dgram';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -28,18 +29,24 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'ks'));
 // Another server on this machine, which a page under a capture must never reach; the fixtures name it
 // as __OTHER__.
 const reached = [];
-const other = http.createServer((q, s) => { reached.push(q.url); s.end('x'); });
+// (anything else on the machine that looks at a new port asks for /)
+const other = http.createServer((q, s) => { if (q.url !== '/') reached.push(q.url); s.end('x'); });
 other.on('upgrade', (q, sock) => { reached.push(`upgrade ${q.url}`); sock.destroy(); });
 await new Promise((r) => other.listen(0, '127.0.0.1', r));
 const OTHER = `http://127.0.0.1:${other.address().port}`;
+const udp = dgram.createSocket('udp4');
+udp.on('message', () => { reached.push('udp'); });
+await new Promise((r) => udp.bind(0, '127.0.0.1', r));
 let made = null;
-after(() => { other.closeAllConnections?.(); other.close(); made?.F.done(); fs.rmSync(TMP, { recursive: true, force: true }); });
+after(() => { udp.close(); other.closeAllConnections?.(); other.close(); made?.F.done(); fs.rmSync(TMP, { recursive: true, force: true }); });
 function shotKit() {
   if (made) return made;
   const F = threadsFixture('shots');
   const arts = path.join(F.old, 'docs/devteam/project/artifacts');
   fs.cpSync(FIXTURES, path.join(arts, 'pricing'), { recursive: true, filter: (f) => !f.endsWith('.sh') });
-  for (const f of fs.readdirSync(path.join(arts, 'pricing')).filter((x) => /\.(html|js)$/.test(x))) { const at = path.join(arts, 'pricing', f); fs.writeFileSync(at, fs.readFileSync(at, 'utf8').replaceAll('__OTHER__', OTHER)); }
+  for (const f of fs.readdirSync(path.join(arts, 'pricing')).filter((x) => /\.(html|js)$/.test(x))) { const at = path.join(arts, 'pricing', f); fs.writeFileSync(at, fs.readFileSync(at, 'utf8').replaceAll('__OTHER__', OTHER).replaceAll('__UDP__', String(udp.address().port))); }
+  fs.symlinkSync('app.js', path.join(arts, 'pricing', 'link.js'));
+  write(path.join(arts, 'pricing', '.secret.js'), '// never served\n');
   F.g(['add', '-A'], F.old);
   F.g(['commit', '-qm', 'pricing'], F.old);
   F.g(['push', '-q', 'origin', 'main'], F.old);
@@ -263,7 +270,7 @@ test('C7a C7b C7c requests go to the capture and the allowed hosts alone', async
   await k.readyOn(k.subject({ path: 'requests.html' }), { DEVTEAM_TEST_SHOT_SEEN: hook, DEVTEAM_TEST_SHOT_NO_CSP: '1' });
   assert.deepEqual(reached, [], 'the other server saw nothing');
   const said = k.seen(hook);
-  for (const u of [`${OTHER}/fetch`, `${OTHER}/img`, 'https://example.invalid/x']) assert.ok(said.includes(`fail ${u}`), `fail ${u}: ${said.join(' | ')}`);
+  for (const u of [`${OTHER}/fetch`, `${OTHER}/img`, 'https://example.invalid/x', 'https://cdn.jsdelivr.net.evil.example/x']) assert.ok(said.includes(`fail ${u}`), `fail ${u}: ${said.join(' | ')}`);
   for (const u of ['https://cdn.jsdelivr.net/x', 'https://fonts.gstatic.com/x']) assert.ok(said.includes(`continue ${u}`), `continue ${u}`);
   assert.ok(said.some((l) => /^serve \/requests\.html csp=no$/.test(l)), 'the CSP is off, so the wall stands alone');
 });
@@ -290,6 +297,8 @@ test('C7e the proxy flags: dead but for the capture and the allowed hosts', asyn
     assert.equal(bypass[0], '<-loopback>');
     assert.match(bypass[1], /^127\.0\.0\.1:\d+$/);
     assert.deepEqual(bypass.slice(2), HOSTS);
+    for (const f of ['--webrtc-ip-handling-policy=disable_non_proxied_udp', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp']) assert.ok(a.includes(f), f);
+    assert.deepEqual(a.join(' ').match(/--host-resolver-rules=(.*?) (?:--|about:)/)?.[1].split(',').map((x) => x.trim()), ['MAP * ~NOTFOUND', 'EXCLUDE 127.0.0.1', ...HOSTS.map((h) => `EXCLUDE ${h}`)], 'no name resolved but the allowed hosts\'');
     assert.ok(!a.some((x) => x === `--proxy-server=http://${bypass[1]}`), 'the dead proxy is not the capture server');
   }
 });
@@ -302,8 +311,27 @@ test('C7f no route to another server', async () => {
   const said = k.seen(hook);
   assert.deepEqual(reached, []);
   assert.ok(said.includes('serve /sw.js csp=no'), `the service worker was asked for: ${said.join(' | ')}`);
+  for (const t of ['ws', 'sw', 'rtc']) assert.ok(said.includes(`serve /tried-${t} csp=no`), `${t} was tried: ${said.join(' | ')}`);
   assert.ok(said.includes(`fail ${OTHER}/worker`), 'the worker fetched');
   assert.ok(said.includes(`fail ${OTHER}/moved`), 'the page tried to move');
+});
+
+test('C7f the page stays, and leaves no file', async () => {
+  const k = shotKit();
+  const hook = seenFile();
+  await k.readyOn(k.subject({ path: 'leave.html' }), { DEVTEAM_TEST_SHOT_SEEN: hook, DEVTEAM_TEST_SHOT_NO_CSP: '1' });
+  assert.ok(k.seen(hook).includes('fail https://unpkg.com/x.html'), k.seen(hook).join(' | '));
+  const left = [];
+  const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.name.startsWith('left-behind')) left.push(path.join(d, e.name)); if (e.isDirectory()) walk(path.join(d, e.name)); } };
+  for (const d of [k.F.home, TMP, k.F.old].filter((x) => fs.existsSync(x))) walk(d);
+  assert.deepEqual(left, []);
+});
+
+test('the capture serves the artifact\'s plain files and nothing else', async () => {
+  const k = shotKit();
+  const hook = seenFile();
+  await k.readyOn(k.subject({ path: 'paths.html' }), { DEVTEAM_TEST_SHOT_SEEN: hook, DEVTEAM_TEST_SHOT_NO_CSP: '1' });
+  assert.deepEqual(k.seen(hook).filter((l) => l.startsWith('serve /got-')), ['serve /got-plain csp=no']);
 });
 
 test('C7g every file under the policy, and no hook outside tests', async () => {
@@ -316,6 +344,7 @@ test('C7g every file under the policy, and no hook outside tests', async () => {
   const off = seenFile();
   await k.readyOn(k.subject({ path: 'assets.html' }), { DEVTEAM_TEST: undefined, DEVTEAM_TEST_SHOT_SEEN: off, DEVTEAM_TEST_SHOT_NO_CSP: '1' });
   assert.ok(!fs.existsSync(off), 'no hook file');
+  assert.ok(!/process\.env\.DEVTEAM_TEST/.test(region()), 'each hook read through browserTestEnv');
 });
 
 test('C8c a page that loops, and nothing to picture: refused, nothing written', async () => {
@@ -509,7 +538,7 @@ test('C5y two captures at once', async () => {
   for (const r of rs) assert.equal(r.status, 0, said(r));
   const of = (i, re) => k.seen(hooks[i]).map((l) => re.exec(l)?.[1]).filter(Boolean);
   for (const re of [/ profile=(.*)$/, /^continue (http:\/\/127\.0\.0\.1:\d+)/]) assert.equal(of(0, re).filter((x) => of(1, re).includes(x)).length, 0, String(re));
-  assert.notEqual(rs[0].line.shot.stamp, rs[1].line.shot.stamp);
+  for (const r of rs) { assert.deepEqual(k.files(r.id), [`${r.line.shot.stamp}-light.png`]); assert.equal(r.line.shot.sum.light, sha256(lit(k, r))); }
 });
 
 test('a thread resolved while its picture is taken gets no proposal', async () => {

@@ -1,0 +1,6 @@
+<!doctype html><title>Paths</title>
+<button id="buy">Start trial</button>
+<script>
+Object.defineProperty(document, 'fonts', { value: { ready: new Promise((r) => setTimeout(r, 800)) } });
+for (const [n, u] of Object.entries({ plain: 'app.js', decoded: 'ap%70.js', dot: '.secret.js', link: 'link.js' })) fetch(u).then((r) => r.ok && fetch('got-' + n)).catch(() => {});
+</script>

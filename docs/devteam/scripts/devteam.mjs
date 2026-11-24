@@ -12779,7 +12779,7 @@ async function shotLaunch({ noSandbox = false, extraArgs = [], cap }) {
   const child = launch.child = spawn(bin, [
     '--headless=new', '--remote-debugging-pipe', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync', '--hide-scrollbars',
-    '--renderer-process-limit=2', '--js-flags=--max-old-space-size=256', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--disable-quic',
+    '--renderer-process-limit=2', '--js-flags=--max-old-space-size=256', ...['', 'force-'].map((f) => `--${f}webrtc-ip-handling-policy=disable_non_proxied_udp`), '--disable-quic',
     ...extraArgs, ...(noSandbox ? ['--no-sandbox'] : []), 'about:blank',
   ], { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'], env: { ...process.env, TMPDIR: t.tmpdir } });
   launch.gone = new Promise((resolve) => { child.once('exit', resolve); child.once('error', resolve); });
@@ -12844,9 +12844,10 @@ const artifactHeaders = (rel, origin, self) => ({
   'content-type': ARTIFACT_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store',
   'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': artifactCsp(origin, self),
 });
-// What the page may ask for: the capture server and the hosts an artifact may load from, nothing else.
-function shotRequestAllowed(url, origin) {
-  try { return [origin, ...ARTIFACT_CDNS, ...ARTIFACT_FONT_HOSTS].includes(new URL(url).origin); } catch { return false; }
+// What the page may ask for: the capture server and the hosts an artifact may load from, nothing else. A
+// document is the capture server's alone, so the page never becomes one of those hosts'.
+function shotRequestAllowed(url, origin, type) {
+  try { return [origin, ...(type === 'Document' ? [] : [...ARTIFACT_CDNS, ...ARTIFACT_FONT_HOSTS])].includes(new URL(url).origin); } catch { return false; }
 }
 const shotListen = (srv) => new Promise((resolve, reject) => { srv.once('error', reject); srv.listen(0, '127.0.0.1', () => resolve(srv.address().port)); });
 // One artifact's files on a loopback port, each path found as the dashboard's artifact route finds it
@@ -12881,11 +12882,12 @@ async function shotOpen(launch, url, { w, h }) {
   const send = (m, p = {}) => cdp.send(m, p, sessionId);
   const origin = new URL(url).origin;
   cdp.on('Fetch.requestPaused', (p, sid) => {
-    const ok = shotRequestAllowed(p.request.url, origin);
+    const ok = shotRequestAllowed(p.request.url, origin, p.resourceType);
     shotHook(`${ok ? 'continue' : 'fail'} ${p.request.url}`);
     (ok ? cdp.send('Fetch.continueRequest', { requestId: p.requestId }, sid) : cdp.send('Fetch.failRequest', { requestId: p.requestId, errorReason: 'BlockedByClient' }, sid)).catch(() => {});
   });
   cdp.on('Page.javascriptDialogOpening', (p, sid) => { cdp.send('Page.handleJavaScriptDialog', { accept: false }, sid).catch(() => {}); });
+  await cdp.send('Browser.setDownloadBehavior', { behavior: 'deny' });
   await send('Page.enable');
   await send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
   await send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile: false });
@@ -13010,7 +13012,7 @@ function shotSha(at) {
 }
 const shotDirty = (at, slug) => at !== 'main' && !!git(['status', '--porcelain', '--', `${ARTIFACTS_REL}/${slug}`], draftWorktree(at));
 // The picture of a note's spot in one copy of its artifact: { shot, lines, files }.
-async function noteShot(view, src, { now = Date.now() } = {}) {
+async function noteShot(view, src, { now } = {}) {
   const { slug, anchor, point, path: where = '' } = view.subject;
   const at = src ? artifactAt(src, slug) : null;
   if (!at) throw new Error(`nothing to picture: ${slug} isn't on main or in a draft`);
@@ -13024,7 +13026,9 @@ async function noteShot(view, src, { now = Date.now() } = {}) {
   const srv = await shotServe(at.entries, { csp: !browserTestEnv('DEVTEAM_TEST_SHOT_NO_CSP') });
   const dead = await shotDeadProxy();
   const hosts = [...ARTIFACT_CDNS, ...ARTIFACT_FONT_HOSTS].map((h) => new URL(h).host);
-  const extraArgs = [`--proxy-server=http://127.0.0.1:${dead.port}`, `--proxy-bypass-list=${['<-loopback>', `127.0.0.1:${srv.port}`, ...hosts].join(';')}`];
+  const extraArgs = [`--proxy-server=http://127.0.0.1:${dead.port}`, `--proxy-bypass-list=${['<-loopback>', `127.0.0.1:${srv.port}`, ...hosts].join(';')}`,
+    // no name the page makes up is looked up (an ICE server's is, around the proxy)
+    `--host-resolver-rules=${['MAP * ~NOTFOUND', ...['127.0.0.1', ...hosts].map((h) => `EXCLUDE ${h}`)].join(', ')}`];
   const url = `${srv.origin}/${file.replace(/^\/+/, '')}${anchor?.selector ? frame.hash : pathHash}`;
   const taken = await (async () => {
     try {
@@ -13051,7 +13055,7 @@ async function noteShot(view, src, { now = Date.now() } = {}) {
   })();
   const { light } = taken;
   const dark = taken.dark.equals(light.png) ? null : taken.dark;
-  const { stamp, files, sum } = shotWrite(view.id, light.png, dark, now);
+  const { stamp, files, sum } = shotWrite(view.id, light.png, dark, now ?? Date.now());
   return {
     shot: { stamp, w: light.innerWidth, h: light.innerHeight, src, sha, dirty, anchor: light.state, dark: !!dark, sum },
     files,
