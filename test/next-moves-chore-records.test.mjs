@@ -49,6 +49,20 @@ function moveMain(F, name) {
   F.g(['push', '-q', 'origin', 'HEAD:main'], dir);
   F.g(['worktree', 'remove', '--force', dir], F.old);
 }
+// one more commit on an existing ref: the local chore-<slug> (no worktree left), or origin's when
+// asked (made elsewhere and pushed, so the local branch doesn't have it)
+function commitOn(F, slug, name, { origin = false } = {}) {
+  const dir = path.join(F.base, `more-${name}`);
+  if (origin) F.g(['worktree', 'add', '-q', '--detach', dir, `origin/chore-${slug}`], F.old);
+  else F.g(['worktree', 'add', '-q', dir, `chore-${slug}`], F.old);
+  fs.writeFileSync(path.join(dir, `${name}.md`), `${name}\n`);
+  F.g(['add', '-A'], dir);
+  F.g(['commit', '-qm', name], dir);
+  if (origin) F.g(['push', '-q', 'origin', `HEAD:chore-${slug}`], dir);
+  const tip = F.g(['rev-parse', 'HEAD'], dir);
+  F.g(['worktree', 'remove', '--force', dir], F.old);
+  return tip;
+}
 const refused = (F, args, re) => { const r = F.run(F.old, args, SUP); assert.notEqual(r.status, 0, `${args.join(' ')} should be refused: ${r.out}`); assert.match(r.err, re); return r; };
 
 test('next-moves A16: chore records: start --what --for, adopt, drop, and a start that keeps an open branch', async (t) => {
@@ -114,6 +128,29 @@ test('next-moves A16: chore records: start --what --for, adopt, drop, and a star
       ok(old, ['chore', 'pr', 'e1', '--title', 'e1 again'], SUP);
       assert.equal(g(['rev-parse', 'HEAD'], wtOf(F, 'e1')), tip);
       assert.equal(originTip(F, 'e1'), tip);
+    });
+
+    await t.test('chore start on a pushed branch with local commits past it keeps them, and chore pr pushes them', () => {
+      const pushed = branchWith(F, 'o1', 1, { push: true });
+      const tip = commitOn(F, 'o1', 'o1-local');
+      assert.equal(originTip(F, 'o1'), pushed, 'origin is one commit behind');
+      const wt = ok(old, ['chore', 'start', 'o1'], SUP).trim();
+      assert.equal(g(['rev-parse', 'HEAD'], wt), tip, "the worktree starts at the local tip, not origin's");
+      assert.equal(tipOf(F, 'chore-o1'), tip, 'the local branch is never reset to origin');
+      ok(old, ['chore', 'pr', 'o1', '--title', 'o1 local'], SUP);
+      assert.equal(originTip(F, 'o1'), tip, 'origin gets the local commit');
+    });
+
+    await t.test('a branch whose local and origin sides each carry work is refused by chore start and chore pr; chore drop keeps both', () => {
+      branchWith(F, 'p1', 1, { push: true });
+      const there = commitOn(F, 'p1', 'p1-origin', { origin: true });
+      const here = commitOn(F, 'p1', 'p1-local');
+      refused(F, ['chore', 'start', 'p1'], /chore-p1 differs here .*and on origin/);
+      refused(F, ['chore', 'pr', 'p1', '--title', 'p1'], /chore-p1 differs here .*and on origin/);
+      assert.equal(fs.existsSync(wtOf(F, 'p1')), false, 'no worktree made');
+      assert.deepEqual([tipOf(F, 'chore-p1'), originTip(F, 'p1')], [here, there], 'both sides are as they were');
+      ok(old, ['chore', 'drop', 'p1', '--reason', 'two sides of it'], SUP);
+      assert.deepEqual([tipOf(F, 'chore-p1'), originTip(F, 'p1')], [here, there], 'chore drop moves neither side');
     });
 
     await t.test('chore start on a squash-merged chore (merge-chore act at its tip) starts from main', () => {
