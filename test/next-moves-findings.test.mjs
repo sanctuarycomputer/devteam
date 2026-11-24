@@ -419,6 +419,19 @@ test('next-moves A12: output: moves, /api/data, goal views and status carry the 
     const tail = body.trimEnd().split('\n').filter((l) => !/^\s*\/\//.test(l)).slice(-3).map((l) => l.trim());
     assert.deepEqual(tail, ['tidyFinishedWorktrees();', 'logCache = null;', 'writeMovesCache();'], 'the cache is written last, after the tidy');
   });
+  await t.test('the cache is no older than the newest line it read, though a line\'s time runs ahead of the clock', () => {
+    // appendLog keeps each file's times increasing, so a busy file's next line can carry a time
+    // past the clock; one a minute ahead stands in for it
+    const live = path.join(P.F.old, 'docs/devteam/run/log');
+    const file = fs.readdirSync(live).filter((f) => f.endsWith('.jsonl')).sort().at(-1);
+    const obs = fs.readFileSync(path.join(live, file), 'utf8').trimEnd().split('\n').map((l) => JSON.parse(l)).filter((l) => l.type === 'observation').at(-1) ?? assert.fail('an observation line to copy');
+    const ahead = new Date(Date.now() + 60000).toISOString();
+    fs.appendFileSync(path.join(live, file), `${JSON.stringify({ ...obs, id: `o-${ahead.slice(0, 10).replace(/-/g, '')}-${ahead.slice(11, 23).replace(/[:.]/g, '')}-${obs.by}`, at: ahead })}\n`);
+    fs.rmSync(cache, { force: true });
+    P.metrics();
+    const c = json(fs.readFileSync(cache, 'utf8'));
+    assert.ok(c.at >= ahead, `the cache (${c.at}) is no older than the line it read (${ahead})`);
+  });
 });
 
 test('next-moves: idle-capacity reads the rows: a ticket its component\'s cap holds back isn\'t offered', () => {

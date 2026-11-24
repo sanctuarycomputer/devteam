@@ -18829,8 +18829,15 @@ function moveFindings(moves, raised, now = Date.now()) {
 // come from was read, so a line written after that read is newer than the cache.
 // collectMetrics writes it each run, and observe-metrics again as its last step, from a fresh read
 // after every line the tick wrote. A write that fails costs one tick's view, never the run.
-// when the log the moves come from was read: taken on that same read, just after it
-const movesReadAt = () => memo('next-moves-at', nowIso);
+// when the log the moves come from was read: taken on that same read, and no earlier than its
+// newest line, since appendLog keeps each file's times increasing and a line can run ahead of
+// the clock (ISO times in one format compare as strings)
+const movesReadAt = () => memo('next-moves-at', () => {
+  const now = nowIso();
+  let newest = '';
+  for (const l of readLog().lines) if (typeof l.at === 'string' && l.at > newest) newest = l.at;
+  return newest > now ? newest : now;
+});
 const MOVES_CACHE = () => path.join(runPath('cache'), 'next-moves.json');
 function writeMovesCache(moves = nextMoves(), at = movesReadAt()) {
   // the box's operator only reads (its metrics included), so it leaves the cache as it was
