@@ -1,7 +1,7 @@
 // View only (cloud/gateway.mjs, kit-250): a View session reads and changes nothing. The gateway
 // refuses it every method but GET and HEAD (sign-out and its own sign-in methods excepted), the
 // terminal and its socket, signed and operator posts, publishing, uploads, preview sockets and push;
-// it tells dashboards the level (x-devteam-level, /api/data's viewer, GET /api/viewer) and the hub
+// it tells dashboards the level (x-devteam-level, /api/data's viewer, /api/hello's level) and the hub
 // (/box.json's level); the owner and admins move members Full↔View, which closes their sockets and
 // drops their push subscriptions at once. Tests for the org-access goal's measure are named
 // 'org-access A12: …' and 'org-access A14: …'. The helpers below are test/org-access.methods.test.mjs's
@@ -165,7 +165,8 @@ async function gateway(name, extra = {}) {
   // write-to-tmp-then-rename, so the store sees a replaced file and re-reads it
   const write = (s) => { const t = `${file}.test.tmp`; fs.writeFileSync(t, JSON.stringify(s, null, 2), { mode: 0o600 }); fs.renameSync(t, file); };
   const raw = (method, route, { body, cookie = '', headers = {} } = {}) => new Promise((resolve, reject) => {
-    const h = { host, ...(method !== 'GET' ? { origin: publicUrl, 'content-type': 'application/json' } : {}), ...(cookie ? { cookie } : {}), ...headers };
+    // a body always framed: node sends a DELETE's unchunked, so without a length its bytes read as a second request
+    const h = { host, ...(method !== 'GET' ? { origin: publicUrl, 'content-type': 'application/json' } : {}), ...(cookie ? { cookie } : {}), ...(body === undefined ? {} : { 'content-length': Buffer.byteLength(JSON.stringify(body)) }), ...headers };
     const r = http.request({ host: '127.0.0.1', port, method, path: route, headers: h }, (res) => {
       let b = '';
       res.on('data', (c) => { b += c; });
@@ -693,11 +694,12 @@ test('org-access A14: /api/data\'s viewer and /api/hello\'s level echo the gatew
       assert.equal(Object.keys(hj)[0], 'level', `/api/hello: ${level} first`);
       assert.equal(hj.viewer, 1, `/api/hello: ${level}: its viewer capability kept`);
     }
-    const helloPlain = (await getWith(R.port, '/api/hello', [])).body;
+    // hello's values fill in with the dashboard's first tick, so its keys, not its bytes, are compared
+    const helloKeys = Object.keys(JSON.parse((await getWith(R.port, '/api/hello', [])).body));
+    assert.equal(helloKeys.includes('level'), false, 'a laptop\'s hello has no level');
     for (const lines of [[], [['x-devteam-level', 'admin']], [['x-devteam-level', 'view'], ['x-devteam-level', 'full']]]) {
-      assert.equal((await getWith(R.port, '/api/hello', lines)).body, helloPlain, `/api/hello as it was: ${JSON.stringify(lines)}`);
+      assert.deepEqual(Object.keys(JSON.parse((await getWith(R.port, '/api/hello', lines)).body)), helloKeys, `/api/hello as it was: ${JSON.stringify(lines)}`);
     }
-    assert.equal(JSON.parse(helloPlain).level, undefined, 'a laptop\'s hello has no level');
   } finally { await R.close(); }
 });
 

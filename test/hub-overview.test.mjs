@@ -1058,6 +1058,8 @@ test('org-access A14: the hub at View: Terminal tab, badge, line, Settings', CHR
   await p.key('Enter');
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(await p.ev(textK('machine:park')), 'Park', 'no confirmation by the keyboard either');
+  // the thread composer: Enter in it sends nothing (its handler sends on keydown, with no click)
+  assert.equal(await composerEnter(p), 0, 'Enter in the composer sends nothing');
   // (a Run press here proves nothing: the projects run already, and their {project} names aren't served)
   assert.deepEqual(F.asks.get(A), [], 'nothing asked');
   // Settings: the line, a disabled Off in the Notifications row, and no Test row even once notifications are on
@@ -1074,6 +1076,14 @@ test('org-access A14: the hub at View: Terminal tab, badge, line, Settings', CHR
   assert.equal(await p.ev(setRow('Test')), null, 'no Test row');
   assert.equal(await p.ev(`Boolean(document.getElementById('notify'))`), true, 'the Notify control is kept, off the page');
 });
+// A thread composer stood in for the card's (the hub's own keydown handler sends from #tl-c-text on
+// Enter, with no click), its tlSend spied on; then a real Enter. Answers how many sends ran.
+const composerEnter = async (p) => {
+  await p.ev(`(() => { window.__sends = 0; tlSend = () => { window.__sends++; }; document.getElementById('tl-c-text')?.remove(); const ta = document.createElement('textarea'); ta.id = 'tl-c-text'; ta.value = 'hello'; document.body.append(ta); ta.focus(); return true; })()`);
+  await p.key('Enter');
+  await new Promise((r) => setTimeout(r, 300));
+  return p.ev('window.__sends');
+};
 test('org-access A14: the hub stops and greys exactly spec §3\'s writes (one list, twice)', () => {
   const src = hubHtml();
   const js = /^const HUB_WRITES = ("[^\n]*");$/m.exec(src);
@@ -1094,6 +1104,7 @@ test('org-access A14: the hub at Full has its Terminal tab, no badge and no line
   assert.equal(await p.ev(`Boolean(term)`), true);
   assert.equal(await p.ev(`Boolean(document.getElementById('view-only') || document.getElementById('view-line'))`), false);
   assert.equal(await p.ev(`document.body.classList.contains('view-only')`), false);
+  assert.equal(await composerEnter(p), 1, 'at Full, Enter in the composer sends');
 });
 
 test('Settings on a box: a member gets Your sign-in and no People', CHROME, async (t) => {
