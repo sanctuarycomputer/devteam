@@ -209,7 +209,7 @@ test('C8a a Chrome that says nothing is killed with its children after 8 s', asy
   assert.equal(r.status, 1);
   assert.match(r.out, /Chrome didn't start/);
   assert.ok(took >= 8000 && took < 16000, `${took} ms`);
-  await until(() => !spawnSync('ps', ['-eo', 'args'], { encoding: 'utf8' }).stdout.includes('sleep 97531'), 'its child to be gone');
+  await until(() => !spawnSync('ps', ['-eo', 'args'], { encoding: 'utf8' }).stdout.split('\n').includes('sleep 97531'), 'its child to be gone');
 });
 
 test('C8a a Chrome that dies once its page exists is not tried again', async () => {
