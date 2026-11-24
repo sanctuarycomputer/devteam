@@ -56,6 +56,8 @@ const REQUESTS = (F) => ({
   'hub /presence?*': [[400, '/presence?x=1']],
   'hub /': [[200, '/']],
   'hub /instances.json': [[200, '/instances.json']],
+  // an operator thread's file: the laptop hub's own folder (on a box the gateway serves them)
+  'hub /upload/*': [[{ laptop: 200, box: 404 }, `/upload/${F.upload}`], [404, `/upload/2020-01-01-${'0'.repeat(24)}/none.txt`]],
   'hub /memory.json': [[200, '/memory.json']],
   'hub /memory.json?*': [[200, '/memory.json?since=8d'], [200, `/memory.json?after=${new Date(Date.now() - 3600000).toISOString().replace(/\.\d{3}Z$/, 'Z')}`]],
   // the thread written into this run's store, folded and answered (on a box, the boxed fold)
@@ -68,7 +70,7 @@ const REQUESTS = (F) => ({
 const LAPTOP_PARTS = [
   ['dash /upload/*', 'dash /api/hello', 'dash /', 'dash /index.html', 'dash /api/data*', 'dash re:^\\/view\\/artifact\\/([^/]+)$', 'dash re:^\\/view\\/preview\\/([^/]+)$', 'dash /api/artifact-fp', 'dash /api/view', 'dash /api/artifact-versions', 'dash /api/artifact-remote', 'dash /api/threads'],
   ['dash /api/fleet', 'dash /api/record', 'dash /api/peek', 'dash /api/sensor', 'dash /api/schema', 'dash /api/timeline', 'dash /api/governance', 'dash /api/file', 'dash /api/review', 'dash /public-manifest/*'],
-  ['dash re:^\\/api\\/shot\\/(t-\\d{8}-\\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*)\\/(\\d{8}-\\d{9}-(?:light|dark)\\.png)$', 'dash /artifact/*', 'dash re:^\\/review\\/([^/]+)\\/([^/]*)$', 'dash /presence', 'dash /presence?*', 'term /api/term/token', 'term re:^\\/api\\/term\\/(supervisor|shell)\\/(screen|history|keys)$', 'hub /presence', 'hub /presence?*', 'hub /', 'hub /instances.json', 'hub /memory.json', 'hub /memory.json?*', 'hub /operator/threads'],
+  ['dash re:^\\/api\\/shot\\/(t-\\d{8}-\\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*)\\/(\\d{8}-\\d{9}-(?:light|dark)\\.png)$', 'dash /artifact/*', 'dash re:^\\/review\\/([^/]+)\\/([^/]*)$', 'dash /presence', 'dash /presence?*', 'term /api/term/token', 'term re:^\\/api\\/term\\/(supervisor|shell)\\/(screen|history|keys)$', 'hub /presence', 'hub /presence?*', 'hub /', 'hub /instances.json', 'hub /upload/*', 'hub /memory.json', 'hub /memory.json?*', 'hub /operator/threads'],
 ];
 const PARTS = { laptop: LAPTOP_PARTS, box: [LAPTOP_PARTS.flat()] };
 
@@ -245,6 +247,7 @@ function getSafeFixture() {
   const real = fs.realpathSync(F.old);
   F.upload = `2026-11-20-${'a'.repeat(24)}/note.txt`;
   write(path.join(F.home, '.devteam', 'uploads', `${path.basename(real).replace(/[^A-Za-z0-9-]+/g, '-').slice(0, 40)}-${crypto.createHash('sha256').update(real).digest('hex').slice(0, 8)}`, F.upload), 'a dropped note\n');
+  write(path.join(F.home, '.devteam', 'uploads', `hub-${PORTS}`, F.upload), 'a note for the operator\n');
   F.preload = path.join(F.base, 'a13-preload.mjs');
   fs.writeFileSync(F.preload, PRELOAD);
   F.cmds = path.join(F.base, 'a13-commands.jsonl');
