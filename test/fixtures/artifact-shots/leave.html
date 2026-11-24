@@ -1,0 +1,11 @@
+<!doctype html><title>Leave</title>
+<button id="buy">Start trial</button>
+<script>
+Object.defineProperty(document, 'fonts', { value: { ready: new Promise((r) => setTimeout(r, 1500)) } });
+const a = document.createElement('a');
+a.href = URL.createObjectURL(new Blob(['x']));
+a.download = 'left-behind.txt';
+document.documentElement.append(a);
+a.click();
+setTimeout(() => { location.href = 'https://unpkg.com/x.html'; }, 700);
+</script>
