@@ -7125,7 +7125,7 @@ async function avHandOver() {
     });
   } finally { av.notesBusy = false; }
 }
-document.addEventListener('click', (e) => { if (e.target.closest?.('#av-handover')) avHandOver(); });
+/* avStep start */
 // The stepper: one note back (-1) or on (1) in the filter's list, from the note a step is on its way to, else
 // the open card's, else from the list's end. want: the step (or Show me) under way: its note, whether the frame
 // was sent there, and whether it came from a version gone (the card says main is shown).
@@ -7198,6 +7198,8 @@ avStep.unseen = (t) => {
   if (!tFrameOn(t.subject, TS)) return true;
   return !!t.subject.anchor?.selector && TS.rects.get(TS.keyOf.get(tKey(t.subject)))?.rect === null;
 };
+// Hand over's press and the stepper's
+document.addEventListener('click', (e) => { if (e.target.closest?.('#av-handover')) avHandOver(); });
 document.addEventListener('click', (e) => { const b = e.target.closest?.('#av-prev, #av-next'); if (b) avStep(b.id === 'av-prev' ? -1 : 1); });
 $('av-filter').addEventListener('change', () => { lsSet('devteam.notes.filter', $('av-filter').value); avNotes.draw(); });
 // ArrowLeft and ArrowRight on the dashboard's own window, with the viewer up and nothing that takes them focused.
@@ -7209,9 +7211,11 @@ window.addEventListener('keydown', (e) => {
   e.preventDefault();
   avStep(e.key === 'ArrowLeft' ? -1 : 1);
 });
+/* avStep end */
 // The note Show me is opening ({ id, gone }), for the one open that follows: no head carries it, so a reload or
 // Back opens the artifact on its first page.
 let SHOW_NOTE = null;
+/* avShowMe start */
 // Show me: a note to check on the copy its change is in (its source, the server's word), on its own page with its
 // card open; main, saying so, when that copy is gone. The version shown already: a step.
 function avShowMe(id) {
@@ -7226,6 +7230,8 @@ function avShowMe(id) {
   location.hash = artHref(slug, at);
 }
 document.addEventListener('click', (e) => { const b = e.target.closest?.('[data-tl-show]'); if (b) avShowMe(b.dataset.tlShow); });
+/* avShowMe end */
+/* tShot start */
 // A to-check note's picture (kit-147): its thumbnail with what it is of, or why there is none. small: a panel
 // row's, the thumbnail alone. Its address is made only of a thread's id and a stamp as the kit writes them; one the
 // server hasn't (tShot.missing) is said, never a broken image.
@@ -7287,6 +7293,7 @@ document.addEventListener('error', (e) => {
   tShot.missing.add(e.target.getAttribute('src'));
   tlDraw();
 }, true);
+/* tShot end */
 function closeArtifact() {
   if (!AV) return false;
   AV = null;
