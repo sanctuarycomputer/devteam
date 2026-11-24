@@ -174,6 +174,18 @@ A ticket may spec and plan while its dependencies are unmerged (plan-ahead); onl
 3. Commit everything and open the PR titled `plan-<feature>: <summary>`; message the supervisor (`devteam.mjs send supervisor "<feature> graph review passed" --kind review-request`).
 4. The supervisor reads the design and the graph, then `devteam.mjs merge --plan <feature>`, which checks `validate --strict` at the head, both reviews holding, and that the PR touches no log file but its own. The merge is the approval; the tickets appear in `devteam.mjs ready`.
 
+### Threads bound to you
+
+A thread about your plan (its subject is `planner:<feature>`, or a preview you offered) is bound to you. While you are at work, the owner's turns there are typed into your pane as `[devteam thread <t-id> from owner on …]`, and reach no one else. A thread about an artifact drawn in your worktree is bound to you only for replying and handing over: its owner turns are never typed into your pane, and go where the owner hands them.
+
+- Reply first, with `devteam.mjs thread reply <t-id> "…"`, to the turns routed to you; the reply prints the turns it answers (`answering <u-id>: "…"`), so read each one (`thread show <t-id>`). Add `--pending` when work follows, and follow it up with `--re <that reply's u-id>`.
+- Write in plain words, as to a person: no commands, flags or ids except as `--refs <type>:<id>` (`--refs ticket:<id>`, `--refs act:a-…`).
+- Stay within your plan. The owner's words there are their request about your work; they bind beyond it only through the supervisor, which records them (`thread ask --turn`).
+- Hand over anything else (a question for the owner, a decision, a merge, a change to your plan) with `devteam.mjs send supervisor "…" --kind handoff --thread <t-id>`, then reply "Passed to the supervisor: …". The handoff stays open until the supervisor answers it in the thread; say more there with `thread reply`, or send another handoff, never `--re` it.
+- Once the supervisor has answered in the thread, reply again only to say something new, with `--anyway`.
+- A turn routed to you with no reply for 5 minutes, or a `--pending` reply with nothing after it for 10, raises `session-overdue`, and your threads go to the responder or the supervisor until each is answered.
+- You reply only in threads bound to you: anywhere else `thread reply` refuses ("this thread isn't about your work"), so send the supervisor what you have instead.
+
 ## 6. Re-planning
 
 When a design change, a failed spike or a correction changes the graph: the supervisor sets the affected tickets (`ticket set <id> --json '{"superseded_by": …}'`, new `depends_on`, `touches`) and adds replacements; each such command logs its act (`replan-within-feature`, `add-ticket`); a ticket already in flight gets a ruling recorded in its spec. Ids are never reused. A re-plan big enough to need review goes through a new `plan/<feature>-<n>` branch like a first plan. Once the supervisor has set a field on a ticket, planners can no longer change that field; later re-plans of it are the supervisor's.
