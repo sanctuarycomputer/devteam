@@ -2109,24 +2109,42 @@ function logWriter() {
 // with no DEVTEAM_ROLE set on a command is caught by its pane: the one its own commands as the
 // supervisor recorded (rememberSupervisorPane), or the one DEVTEAM_SUPERVISOR names. The dashboard's
 // children run with no TMUX_PANE, wherever it was started. hint: what the supervisor does instead,
-// for the command at hand.
-function ownerWriter(hint) {
-  if (process.env.DEVTEAM_ROLE) die(`owner commands don't run in an agent session (DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE})`);
+// for the command at hand. heard: the supervisor records the owner's words (answer, goal decide and
+// correct with --from-chat or --from-turn): its role is needed there, and the session check below is
+// the same.
+function ownerWriter(hint, { heard = false } = {}) {
+  if (heard && (process.env.DEVTEAM_ROLE !== 'supervisor' || logWriter() !== 'supervisor')) die('the supervisor records what the owner said in a thread or in its session; in your own terminal, run the command without --from-chat or --from-turn');
+  if (!heard && process.env.DEVTEAM_ROLE) die(`owner commands don't run in an agent session (DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE})`);
   if (inResponderWorktree()) die("owner commands don't run in the responder's worktree");
   // A worker's or planner's session, whatever DEVTEAM_ROLE says: DEVTEAM_TICKET or DEVTEAM_FEATURE
-  // set at all (a session that blanks one is still one), a checkout on a ticket/ or plan/ branch, or
-  // a folder under a .worktrees folder (every session's worktree, a detached one or another repo's
+  // set at all (a session that blanks one is still one), a checkout on a ticket/ or plan/ branch, a
+  // folder under a .worktrees folder (every session's worktree, a detached one or another repo's
   // included; home's .worktrees by its real path too, for one that is a link), even with every
-  // variable cleared.
+  // variable cleared, or DEVTEAM_HOME set (every worker, planner and responder has it) in a folder
+  // that is no checkout of home's. git reads the cwd's own checkout here, as the caller can't steer
+  // it: every GIT_* variable of theirs is dropped, so GIT_DIR can't make a ticket/ checkout read as
+  // home's main, and no system or global config is read (a HOME or GIT_CONFIG_* of theirs with a bad
+  // value would make git fail, and a failed read finds no branch); any owner's checkout reads
+  // (safe.directory=*, for a read of the branch and the common dir only).
   const session = (() => {
     for (const k of ['DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) if (process.env[k] !== undefined) return `${k}=${JSON.stringify(process.env[k])}`;
-    const b = cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']);
+    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_')));
+    Object.assign(env, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: os.devNull });
+    // safe.directory=* lets git read a checkout another user owns, whose own config could name
+    // programs (core.fsmonitor and the like); rev-parse runs none, and every session runs as the
+    // same user as the owner, so this opens nothing new
+    const own = (args) => { try { return execFileSync('git', ['-c', 'safe.directory=*', ...args], { cwd: process.cwd(), env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; } };
+    const b = own(['rev-parse', '--abbrev-ref', 'HEAD']);
     if (b && /^(ticket|plan)\//.test(b)) return `this checkout is on ${b}`;
     const cwd = realPath(process.cwd());
     const homeWt = realPath(path.join(mainRoot, '.worktrees'));
-    return cwd.split(path.sep).includes('.worktrees') || cwd.startsWith(`${homeWt}${path.sep}`) ? `${cwd} is under a .worktrees folder, where sessions work` : null;
+    if (cwd.split(path.sep).includes('.worktrees') || cwd.startsWith(`${homeWt}${path.sep}`)) return `${cwd} is under a .worktrees folder, where sessions work`;
+    if (process.env.DEVTEAM_HOME === undefined) return null;
+    const common = own(['rev-parse', '--path-format=absolute', '--git-common-dir']);
+    return common && commonDir && realPath(common) === realPath(commonDir) ? null : `DEVTEAM_HOME is set, and ${cwd} is no checkout of home's; in your own terminal, unset DEVTEAM_HOME or run this from home's main checkout`;
   })();
   if (session) die(`owner commands don't run in a worker's or planner's session (${session}); the owner runs them in their own terminal from home's main checkout, or on the dashboard, and a session sends the supervisor what it needs`);
+  if (heard) return { by: 'owner' };
   const pane = process.env.TMUX_PANE;
   if (!pane || !process.env.TMUX) return { by: 'owner' };
   const how = process.env.DEVTEAM_SUPERVISOR === pane ? 'DEVTEAM_SUPERVISOR in this environment names this pane as the supervisor\'s. If this is your own terminal, open this terminal without DEVTEAM_SUPERVISOR set'
@@ -10155,7 +10173,7 @@ function cmdAnswer() {
   const fromTurn = flags['from-turn'] !== undefined;
   // --at and --seen-turn pick and read a turn's clause: only with --from-turn --said (final-1 F2)
   if (!fromTurn) for (const k of ['at', 'seen-turn']) if (flags[k] !== undefined) die(`answer --${k} goes with --from-turn <u-id> --said`);
-  const { by } = fromChat || fromTurn ? { by: 'owner' } : ownerWriter();
+  const { by } = fromChat || fromTurn ? ownerWriter(null, { heard: true }) : ownerWriter();
   const files = filesFlag();
   const v = openQuestion(id, ['open', 'defaulted']);
   // a job change takes only the owner's own Yes: never words the supervisor records from chat, and
@@ -14589,7 +14607,7 @@ function cmdCorrect() {
     if (!flagStr('said')?.trim()) die('correct --from-turn or --from-chat needs --said "<the owner\'s words>"');
     if (flags['from-chat'] !== undefined && flags.at !== undefined) die('correct --at goes with --from-turn: which match of a repeated clause');
   } else for (const k of ['said', 'at']) if (flags[k] !== undefined) die(`correct --${k} goes with --from-turn or --from-chat`);
-  const by = heard ? 'owner' : flags.retro ? (supervisorOnly('correct --retro'), 'supervisor') : ownerWriter().by;
+  const by = heard ? ownerWriter(null, { heard: true }).by : flags.retro ? (supervisorOnly('correct --retro'), 'supervisor') : ownerWriter().by;
   const act = logGet(actId);
   if (!['act', 'decision'].includes(act?.type)) die(`no decision or act ${actId}`);
   if (act.type === 'act' && act.created_by === 'owner') die(`${actId} is the owner's own record (${act.class}), not a call; nothing to correct`);
@@ -16468,7 +16486,7 @@ function cmdGoal() {
     // a goal is approved on its design, never on words said before it: the whole turn, newer than the question
     if (fromTurn && flags['from-chat'] !== undefined) die('goal decide: --from-turn or --from-chat, not both');
     if (fromTurn && ['said', 'at', 'seen-turn'].some((k) => flags[k] !== undefined)) die('goal decide --from-turn takes the whole turn: a goal is approved on its design, so --said, --at and --seen-turn aren\'t accepted there');
-    const { by } = said || fromTurn ? { by: 'owner' } : ownerWriter();
+    const { by } = said || fromTurn ? ownerWriter(null, { heard: true }) : ownerWriter();
     const chat = said ? { channel: 'chat' } : fromTurn ? { channel: 'thread' } : {};
     const g = logGet(id);
     if (g?.type !== 'goal') die(`no goal ${id}`);
