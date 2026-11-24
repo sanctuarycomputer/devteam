@@ -266,6 +266,12 @@ export function g1Outputs(F) {
   for (const f of owners) fs.writeFileSync(path.join(durable, f), fs.readFileSync(path.join(durable, f), 'utf8').replace(/\n$/, ''));
   g(['commit', '-qam', 'chore-log: the owner file without its last newline'], old);
   g(['push', '-q', 'origin', 'main'], old);
+  // a command 3 minutes on: past the grace merged-without-merge gives a merge just made (kit-808). A
+  // process of its own: run's is already started, so it reads no NODE_OPTIONS
+  const late = (args) => {
+    const r = spawnSync(process.execPath, [path.join(old, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: old, env: { ...F.env({}), NODE_OPTIONS: `--import=data:text/javascript,${encodeURIComponent('const now = Date.now; Date.now = () => now() + 180000;')}` }, encoding: 'utf8' });
+    return { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() };
+  };
   const both = (r) => `exit ${r.status}\n--- stdout\n${r.out}\n--- stderr\n${r.err}\n`;
   // metrics and fleet status carry clocks and durations; everything else in them must not move
   const TIMEY = /(^since$|_at$|^at$|^now$|hours|minutes|seconds|_ms$|^ms$|^until$|^parity$)/;
@@ -278,12 +284,12 @@ export function g1Outputs(F) {
     'check-ticket': both(run(old, ['check-ticket', 'g1-01-a', '--sha', head, '--title', 'g1-01-a: work', '--body-file', bodyFile])),
     'prompt-worker': both(run(old, ['prompt', 'worker', 'g1-01-a'])),
     'merge-dry-run': both(run(old, ['merge', 'g1-01-a', '--dry-run'], SUP)),
-    metrics: jsonOut(run(old, ['metrics', '--json'])),
+    metrics: jsonOut(late(['metrics', '--json'])),
     'fleet-status': jsonOut(run(old, ['fleet', 'status', '--json', '--no-fetch'], SUP)),
     knowledge: both(run(old, ['knowledge', '--for', 'g1-01-a'])),
     orient: both(run(old, ['orient'])),
     questions: both(run(old, ['questions'])),
-    'dashboard-data': jsonOut(run(old, ['dashboard-data'])),
+    'dashboard-data': jsonOut(late(['dashboard-data'])),
     'peek-ticket': jsonOut(run(old, ['peek', 'ticket', 'g1-01-a'])),
   };
   return Object.fromEntries(Object.entries(outs).map(([k, v]) => [k, g1Norm(v, F.base)]));
