@@ -66,8 +66,8 @@ const ok = (r) => { assert.equal(r.status, 0, said(r)); return r.out; };
 const refused = (r, re) => { assert.equal(r.status, 1, said(r)); assert.match(r.err, re); };
 const lines = () => fs.readdirSync(F.logDir).filter((f) => f.endsWith('.jsonl')).flatMap((f) => fs.readFileSync(path.join(F.logDir, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)));
 const bytes = () => JSON.stringify([...F.snapLog()].map(([f, b]) => [f, String(b)]).sort());
-// a case on its own log: what it wrote is taken out again
-const fresh = (fn) => async (t) => { const snap = F.snapLog(); try { await fn(t); } finally { F.restoreLog(snap); fs.rmSync(path.join(F.old, 'docs/devteam/run/undelivered-turns.json'), { force: true }); } };
+// a case on its own log: what it wrote is taken out again, and the lines held for a window of its name
+const fresh = (fn) => async (t) => { const snap = F.snapLog(); try { await fn(t); } finally { F.restoreLog(snap); for (const f of ['undelivered-turns.json', 'held']) fs.rmSync(path.join(F.old, 'docs/devteam/run', f), { recursive: true, force: true }); } };
 // refused, with nothing written
 const refusedQuietly = (run, re) => { const was = bytes(); refused(run(), re); assert.equal(bytes(), was, 'nothing written'); };
 let n = 0;
@@ -173,6 +173,7 @@ test('C1d a line held for the session is said so, counts as typed, and nudges no
     assert.deepEqual(JSON.parse(ok(cli(handoff('--at', 'plan-pricing', '--json'), P))), { to: 'plan-pricing', typed: true, count: 1 });
     await new Promise((r) => setTimeout(r, 500));
     assert.deepEqual([w.typed(), pane.typed()], ['', '']);
+    assert.ok(fs.readdirSync(path.join(F.old, 'docs/devteam/run/held')).length, 'held where fresh clears it');
   } finally { w.close(); }
 }));
 
@@ -399,7 +400,8 @@ test('C3b C3c the page hands over, and reads where it went; a second press hands
       const body = { slug: 'pricing', at: 'plan-pricing' };
       assert.deepEqual(await post('artifact-handoff', body), { status: 200, said: { to: 'plan-pricing', typed: true, count: 1 } });
       assert.equal(lines().find((l) => l.id === id && l.handed).by, 'owner');
-      await until(() => w.typed().includes('1 note on artifact pricing is yours'), 'the line in the session');
+      const [sent] = ownerMessages();
+      await until(() => w.typed().includes(`[devteam info ${sent.id} from owner] ${sent.text}`), 'its own line in the session');
       assert.deepEqual(await post('artifact-handoff', body), { status: 200, said: { to: 'plan-pricing', typed: false, count: 0 } });
       assert.equal(ownerMessages().length, 1, 'a second press sends nothing');
       w.close();
