@@ -35893,10 +35893,13 @@ function sessionRoute(t, objects = readLog().objects, s = loadSettings(), now = 
   return w;
 }
 // w in the owner's words: the agent on its ticket's title, or the planner for its feature
+// One line of plain text wherever it prints (thread show's headers, --waiting, session-overdue): a
+// title is a planner's words, so a line break or an escape in it never starts a line of its own.
 function sessionWords(w, objects = readLog().objects) {
   if (writerClass(w) === 'planner') return `the planner for ${w.slice('plan-'.length)}`;
-  const title = objects.get(w)?.title;
-  return `the agent on ${typeof title === 'string' && title ? title : w}`;
+  const raw = objects.get(w)?.title;
+  const title = typeof raw === 'string' ? raw.replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim() : '';
+  return `the agent on ${title || w}`;
 }
 /* sessionBinding end */
 // Who owes the reply to the owner's next turn in thread t (kit-104; the spine's routing rules 1, 3
