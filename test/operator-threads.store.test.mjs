@@ -98,6 +98,19 @@ test('the store: a thread, its turns, closed and opened again, kept beside the o
   assert.match(M.run(['show', 'ot-20260101-000000000-000000']).stderr, /no operator thread/);
 });
 
+test('a turn keeps the files it carries: the name, the real path and size, in the store, list and show', () => {
+  const M = machine({ starts: false });
+  const file = path.join(M.home, '.devteam', 'uploads', `hub-${M.hub}`, `2026-11-24-${'a'.repeat(24)}`, 'a.txt');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, 'four');
+  const f = { name: 'a.txt', path: file, bytes: 4 };
+  const id = M.ok(['new', `--files=${JSON.stringify([f])}`, '--', 'with a file']).split('\n')[0];
+  M.ok(['say', id, 'without']);
+  assert.deepEqual(M.store().map((l) => l.files), [undefined, [f], undefined]);
+  assert.deepEqual(M.list()[0].turns.map((x) => x.files), [[f], undefined]);
+  assert.match(M.ok(['show', id], OP), /with a file\n {2}file .*"a\.txt" at ".*a\.txt", 4 bytes/);
+});
+
 test('a box keeps them in ~/operator, on the disk that outlives a deploy', () => {
   const M = machine({ box: true });
   const id = M.pressOk('thread-new', { text: 'hello' }).split('\n')[0];
