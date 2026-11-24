@@ -1491,11 +1491,17 @@ export function createGateway(opts = {}) {
   };
 
   // --- People: the list, and the changes kit-249 owns (rename, revoke, remove) ---------------------
-  // Who sees People: the owner (the stand-in included) and admins. Admins act on nothing yet; kit-253
-  // gives them rename and remove (a-20261123-051441425-supervisor).
+  // Who sees People: the owner (the stand-in included) and admins. Admins rename, remove and raise
+  // joined members and admins, and leave (kit-253, a-20261123-051441425-supervisor).
   const seesPeople = (person) => roleOf(person) !== 'member';
   const FRESH_AGAIN = "Confirm it's you: sign in again, then make the change again";
   const joined = (s, row) => ownMethods(s, row).length > 0;
+  // Any invite naming the row, expired or not, is a link out until it is revoked (kit-253 R3).
+  const linkOut = (s, id) => (s.invites ?? []).some((x) => x.person === id);
+  const hasPasskey = (s, row) => ownMethods(s, row).some((m) => m.type === 'passkey');
+  const isAdmin = (person) => roleOf(person) === 'admin';
+  // A move to Full is offered only to a View member (an admin is always Full); kit-250 adds View.
+  const raisable = (row) => roleOf(row) === 'member' && row.level === 'view';
   // The newest invite naming the row: a first invite for someone who never joined, else a new link.
   const linkOf = (s, row) => {
     const mine = (s.invites ?? []).filter((x) => x.person === row.id);
@@ -1507,12 +1513,23 @@ export function createGateway(opts = {}) {
   // per person: with one out, Revoke comes first and no second link is offered (relink still takes
   // one, replacing it). Someone who never joined and whose link is gone (swept as expired by an
   // invite or relink's save) can only be removed.
+  // Make admin and Make owner only where they land: joined, no link out, and for Make owner a passkey,
+  // never from the stand-in (it restarts first). The list never offers what mayPeople refuses.
   const peopleActions = (s, viewer, row) => {
-    if (!isOwner(viewer)) return [];
-    if (isOwner(row)) return ['rename'];
-    const link = linkOf(s, row);
-    if (!joined(s, row)) return link ? ['revoke'] : ['remove'];
-    return link && !link.expired ? ['revoke', 'rename', 'remove'] : ['rename', 'relink', 'remove'];
+    const offered = (() => {
+      if (isOwner(viewer)) {
+        if (isOwner(row)) return ['rename'];
+        const link = linkOf(s, row);
+        if (!joined(s, row)) return link ? ['revoke'] : ['remove'];
+        const lv = raisable(row) ? ['level'] : [];
+        if (link && !link.expired) return ['revoke', 'rename', ...lv, 'remove'];
+        const lands = linkOut(s, row.id) ? [] : ['role', ...(hasPasskey(s, row) && viewer.id !== null ? ['transfer'] : [])];
+        return ['rename', ...lv, ...lands, 'relink', 'remove'];
+      }
+      if (!isAdmin(viewer) || isOwner(row) || !joined(s, row)) return [];
+      return ['rename', ...(raisable(row) ? ['level'] : []), 'remove'];
+    })();
+    return offered.filter((a) => !mayPeople(viewer, row, a, s));
   };
   const peopleList = (s, viewer) => {
     const rows = s.people ?? [];
@@ -1526,11 +1543,27 @@ export function createGateway(opts = {}) {
       })),
     };
   };
-  // Why this viewer may not do this to this row, or null: the rules peopleActions draws from.
-  const mayNot = (viewer, row, action) => {
-    if (!isOwner(viewer)) return 'Only the box\'s owner can do this, for now.';
-    if (isOwner(row) && action === 'remove') return 'Nobody can remove the box\'s owner.';
-    if (isOwner(row) && action === 'revoke') return 'The box\'s owner has no link to revoke.';
+  // Step 9: why this viewer may not do this to this row (403 not-allowed, its sentence), or null. The
+  // rules peopleActions draws from (kit-253 spec §1). `self`: the row is the viewer's own.
+  const mayPeople = (viewer, row, action, s) => {
+    const no = (error) => ({ status: 403, code: 'not-allowed', error });
+    const self = viewer.id !== null && row.id === viewer.id;
+    if (isOwner(viewer)) {
+      if (action === 'remove' && isOwner(row)) return no('Nobody can remove the box\'s owner.');
+      if (action === 'revoke' && isOwner(row)) return no('The box\'s owner has no link to revoke.');
+      if (action === 'level' && roleOf(row) !== 'member') return no(isAdmin(row) ? 'An admin is always Full; take Admin away first' : 'The box\'s owner is always Full');
+      if (action === 'role' && (self || isOwner(row))) return no('The owner stops being the owner only by handing the box over');
+      if (action === 'transfer' && (self || isOwner(row))) return no('You already own this box');
+      return null;
+    }
+    if (!isAdmin(viewer)) return no('Only the owner and admins can change People.');
+    if (isOwner(row)) return no('Nobody but the owner changes the owner\'s row');
+    if (action === 'role') return no('Only the owner makes admins');
+    if (action === 'transfer') return no('Only the owner hands the box over');
+    if (action !== 'rename' && action !== 'remove' && action !== 'level') return no('Only the box\'s owner can do this, for now.');
+    if (action === 'level' && isAdmin(row)) return no(self ? 'An admin is always Full' : 'An admin is always Full; take Admin away first');
+    // R1: an invite not used yet is the owner's to change
+    if (!self && !joined(s, row)) return no('They haven\'t joined yet: only the owner changes an invite');
     return null;
   };
   // The guards, in the spec's order: role and fresh (before the body), the body, still held and still
@@ -1547,8 +1580,8 @@ export function createGateway(opts = {}) {
     if (!fresh(held.session)) return refuse(res, 403, 'fresh-sign-in', FRESH_AGAIN), null;
     const row = typeof body.id === 'string' ? (s.people ?? []).find((x) => x.id === body.id) : null;
     if (!row || body.rev !== row.rev) return refuse(res, 409, 'stale', STALE), null;
-    const no = mayNot(held.person, row, action);
-    if (no) return refuse(res, 403, 'not-allowed', no), null;
+    const no = mayPeople(held.person, row, action, s);
+    if (no) return refuse(res, no.status, no.code, no.error), null;
     return { s, person: held.person, row, body };
   };
   const renameRoute = async (req, res, who) => {
@@ -1575,17 +1608,49 @@ export function createGateway(opts = {}) {
   };
   // One write ends everything the row held (its methods and devices go with it), every session and
   // invite naming them; then the terminal and preview sockets they hold close. The owner's row is
-  // never removed (mayNot).
+  // never removed (mayPeople). Removing your own row is Leave: the answer clears your cookie too.
   const removeRoute = async (req, res, who) => {
     const g = await peopleGuard(req, res, who, 'remove');
     if (!g) return;
-    const { s, row } = g;
+    const { s, person, row } = g;
     store.save({ ...s, people: s.people.filter((x) => x.id !== row.id), peopleSessions: (s.peopleSessions ?? []).filter((x) => x.person !== row.id), invites: (s.invites ?? []).filter((x) => x.person !== row.id) });
     dropPerson(row.id);
-    log('a person was removed: their sessions, invites and open sockets ended');
-    return json(res, 200, { ok: true });
+    const left = person.id !== null && person.id === row.id;
+    log(left ? 'a person left the box: their sessions, invites and open sockets ended' : 'a person was removed: their sessions, invites and open sockets ended');
+    return json(res, 200, { ok: true }, left ? { 'set-cookie': cookie('', 0) } : undefined);
   };
-  const PEOPLE_POSTS = { rename: renameRoute, revoke: revokeRoute, remove: removeRoute };
+  // A move to Full (kit-250 adds View). Already Full: its rev, nothing written (R4).
+  const levelRoute = async (req, res, who) => {
+    const g = await peopleGuard(req, res, who, 'level');
+    if (!g) return;
+    const { s, row, body } = g;
+    if (body.level === 'view') return refuse(res, 400, 'view-not-yet', 'View arrives in a later release; keep them at Full for now');
+    if (body.level !== 'full') return refuse(res, 400, 'bad-request', 'a level is full');
+    if (row.level === 'full') return json(res, 200, { ok: true, rev: row.rev });
+    const rev = row.rev + 1;
+    store.save({ ...s, people: s.people.map((x) => (x.id === row.id ? { ...x, level: 'full', rev } : x)) });
+    log('a person was made full');
+    return json(res, 200, { ok: true, rev });
+  };
+  // Make admin (joined, no link out; a View member becomes Full too) or Take Admin away (they stay
+  // Full). Their sessions go on; their next People request is judged by the new role.
+  const roleRoute = async (req, res, who) => {
+    const g = await peopleGuard(req, res, who, 'role');
+    if (!g) return;
+    const { s, row, body } = g;
+    if (body.role !== 'admin' && body.role !== 'member') return refuse(res, 400, 'bad-request', 'a role is admin or member');
+    if (body.role === 'admin') {
+      if (!joined(s, row)) return refuse(res, 409, 'not-joined', 'They haven\'t joined yet');
+      if (linkOut(s, row.id)) return refuse(res, 409, 'link-outstanding', 'Revoke their link first');
+    }
+    if (roleOf(row) === body.role) return json(res, 200, { ok: true, rev: row.rev });
+    const rev = row.rev + 1;
+    const next = body.role === 'admin' ? { role: 'admin', level: 'full', rev } : { role: 'member', rev };
+    store.save({ ...s, people: s.people.map((x) => (x.id === row.id ? { ...x, ...next } : x)) });
+    log(body.role === 'admin' ? 'a person was made admin' : 'a person is no longer an admin');
+    return json(res, 200, { ok: true, rev });
+  };
+  const PEOPLE_POSTS = { rename: renameRoute, revoke: revokeRoute, remove: removeRoute, level: levelRoute, role: roleRoute };
 
   // Start, guards in the spec's order. `who`: the request's session (sessionOf), for an add.
   const startFlow = async (req, type, purpose, body, who) => {

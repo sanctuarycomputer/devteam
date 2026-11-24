@@ -236,6 +236,37 @@ const accepts = async (gw, cookie, action, body, what) => {
   return r;
 };
 const rev = (gw, id) => rowOf(gw.state(), id).rev;
+// Each stateStore.save renames a temp file onto state.json: one 'rename' of state.json per save.
+const savesDuring = async (gw, fn) => {
+  let n = 0;
+  const w = fs.watch(gw.dir, (ev, name) => { if (ev === 'rename' && name === 'state.json') n++; });
+  await new Promise((r) => setTimeout(r, 50));
+  try { await fn(); await new Promise((r) => setTimeout(r, 200)); } finally { w.close(); }
+  return n;
+};
+// A People post whose headers reach the gateway now and whose body waits for release(), on its own
+// connection (as kit-249's held rename in test/org-access.people-page.test.mjs, not imported):
+// ready resolves once the socket is connected and the gateway has had 100 ms to read the headers.
+const heldPost = (gw, cookie, action, body) => {
+  const data = JSON.stringify(body);
+  const host = new URL(gw.publicUrl).host;
+  let release;
+  let connected;
+  const ready = new Promise((r) => { connected = r; }).then(() => new Promise((r) => setTimeout(r, 100)));
+  const sent = new Promise((resolve, reject) => {
+    const r = http.request({ host: '127.0.0.1', port: gw.port, method: 'POST', path: `/auth/people/${action}`, agent: false,
+      headers: { host, origin: gw.publicUrl, 'content-type': 'application/json', 'content-length': Buffer.byteLength(data), cookie } }, (res) => {
+      let b = '';
+      res.on('data', (c) => { b += c; });
+      res.on('end', () => { let j = null; try { j = JSON.parse(b); } catch {} resolve({ status: res.statusCode, headers: res.headers, body: b, json: j }); });
+    });
+    r.on('error', reject);
+    r.on('socket', (s) => (s.connecting ? s.once('connect', connected) : connected()));
+    r.flushHeaders();
+    release = () => r.end(data);
+  });
+  return { ready, sent, release: () => release() };
+};
 
 // --- A15: what an admin may do ------------------------------------------------------------------
 test('org-access A15: an admin renames a member, another admin and themselves', async () => {
@@ -370,6 +401,41 @@ test('kit-253: the owner makes a joined member admin, a View one Full too, and t
   } finally { await gw.close(); }
 });
 
+// Review focus 2 (and kit-249 final-2b F2): the role is judged again once the body is in.
+test('kit-253: an admin\'s change whose body arrives after they lost Admin writes nothing', async () => {
+  const { gw, C, sam, ana } = await box('k-held');
+  const h = heldPost(gw, C.sam, 'rename', { id: ana.id, rev: rev(gw, ana.id), name: 'Ana Late' });
+  h.sent.catch(() => {});
+  try {
+    await h.ready;
+    await accepts(gw, C.owner, 'role', { id: sam.id, rev: rev(gw, sam.id), role: 'member' }, 'the owner takes Admin from Sam');
+    const before = durable(gw.state());
+    h.release();
+    const r = await h.sent;
+    assert.equal(r.status, 401, `Sam's rename, its body after he lost Admin: ${r.status} ${r.body}`);
+    assert.equal(r.json?.error, 'your session ended; sign in again');
+    assert.equal(durable(gw.state()), before, 'nothing written');
+    assert.equal(rowOf(gw.state(), ana.id).name, 'Ana Costa', 'Ana keeps her name');
+  } finally { h.release(); await h.sent.catch(() => {}); await gw.close(); }
+});
+
+// kit-249 final-2b F1: a rev is a number; "1" is not 1.
+test('kit-253: a rev sent as a string is refused stale, for every People change', async () => {
+  const { gw, C, ana, vic, kai } = await box('k-rev-string');
+  try {
+    const at = (row) => String(rev(gw, row.id));
+    for (const [cookie, action, row, extra, what] of [
+      [C.sam, 'rename', ana, { name: 'Ana S' }, 'an admin\'s rename'],
+      [C.sam, 'level', vic, { level: 'full' }, 'an admin\'s Make full'],
+      [C.owner, 'level', vic, { level: 'full' }, 'the owner\'s Make full'],
+      [C.owner, 'role', ana, { role: 'admin' }, 'Make admin'],
+      [C.owner, 'role', kai, { role: 'member' }, 'Take Admin away'],
+      [C.sam, 'remove', ana, {}, 'an admin\'s remove'],
+      [C.owner, 'transfer', ana, {}, 'Make owner'],
+    ]) await refuses(gw, cookie, action, { id: row.id, rev: at(row), ...extra }, 409, 'stale', `${what}, rev "${at(row)}"`);
+  } finally { await gw.close(); }
+});
+
 // --- A16: handing the box over -------------------------------------------------------------------
 test('org-access A16: only the owner transfers, signed in in the last five minutes', async () => {
   const { gw, C, owner, ana } = await box('a16-who');
@@ -418,9 +484,11 @@ test('kit-253: a change to what a row already is answers its rev and writes noth
       [C.owner, 'role', ana, { role: 'member' }, 'the owner takes Admin from member Ana'],
     ]) {
       const before = durable(gw.state());
-      const r = await accepts(gw, cookie, action, { id: row.id, rev: rev(gw, row.id), ...extra }, what);
+      let r;
+      const n = await savesDuring(gw, async () => { r = await accepts(gw, cookie, action, { id: row.id, rev: rev(gw, row.id), ...extra }, what); });
       assert.deepEqual(r.json, { ok: true, rev: rev(gw, row.id) }, `${what}: the row's rev`);
       assert.equal(durable(gw.state()), before, `${what}: nothing written`);
+      assert.equal(n, 0, `${what}: saves nothing`);
     }
   } finally { await gw.close(); }
 });
@@ -485,15 +553,6 @@ test('org-access A16: a transfer makes them a Full owner and the old owner a Ful
     assert.equal(s.peopleStamp, stampOf(s.passkeys.map((p) => p.id)), 'the stamp is the new owner\'s');
   } finally { await gw.close(); }
 });
-
-// Each stateStore.save renames a temp file onto state.json: one 'rename' of state.json per save.
-const savesDuring = async (gw, fn) => {
-  let n = 0;
-  const w = fs.watch(gw.dir, (ev, name) => { if (ev === 'rename' && name === 'state.json') n++; });
-  await new Promise((r) => setTimeout(r, 50));
-  try { await fn(); await new Promise((r) => setTimeout(r, 200)); } finally { w.close(); }
-  return n;
-};
 
 test('org-access A16: a transfer is one write', async () => {
   const { gw, C, vic } = await handover('a16-one-write');
