@@ -21761,7 +21761,10 @@ function safeUploadName(raw) {
   const ext = dot >= 0 && plain.length - dot <= 17 ? plain.slice(dot).toLowerCase().replace(/[^.a-z0-9]/g, '') : '';
   // the extension first: a name that's all replaced characters still comes out an image
   const stem = (ext ? plain.slice(0, dot) : plain).replace(/^[._-]+/, '').slice(0, UPLOAD_NAME).replace(/[.-]+$/, '');
-  return `${stem || 'file'}${ext.length > 1 ? ext : ''}`;
+  const name = `${stem || 'file'}${ext.length > 1 ? ext : ''}`;
+  // again until it settles, so a stored name is always the rule's own (x.Z._ gives x.Z, which gives x.z);
+  // each further pass only shortens or lower-cases it
+  return name === raw ? name : safeUploadName(name);
 }
 // These run in the terminal's page too (TERM_DROP has their source), and are tested here.
 // A stored path never needs the quotes; they're for whatever else this is ever handed.
@@ -23759,6 +23762,11 @@ const IMAGE_RUNS = {
     'operatorSubjectProblem', 'operatorLines', 'operatorThreads', 'operatorAppend', 'operatorLocked', 'tmuxAsk', 'OPERATOR_PANE_FORMAT', 'OPERATOR_MARK', 'operatorPaneRows', 'operatorPanes',
     'operatorStartFile', 'operatorStartNote', 'operatorStarting', 'operatorNoted', 'isShellPane', 'operatorSeat', 'operatorState', 'OPERATOR_OPENING', 'operatorStart', 'typeLine', 'OPERATOR_HELD',
     'operatorHeld', 'deliverToOperator', 'operatorDataFrame', 'operatorThreadUsage',
+    // the files their turns carry (kit-724): the naming rules and the quoting, the checks, and the hub's
+    // routes (a dashboard's too, from the project's own kit)
+    'UPLOAD_MAX', 'UPLOAD_TOTAL', 'UPLOAD_FREE', 'UPLOAD_KEEP_MS', 'UPLOAD_STALL_MS', 'UPLOAD_NAME', 'UPLOAD_PART', 'UPLOAD_FOLDER', 'safeUploadName', 'shellQuote', 'dropPaste',
+    'uploadsOnBox', 'laptopUploadsDir', 'uploadsRoot', 'droppedFileProblem', 'FILES_MAX', 'FILES_PATH_MAX', 'attachedFiles', 'UPLOAD_IMAGES', 'uploadType', 'serveLaptopUpload',
+    'UPLOAD_REQUEST_MS', 'UPLOAD_BODY_MS', 'uploadLimits', 'uploadRootOk', 'sweepLaptopUploads', 'uploadsReceiving', 'receiveLaptopUpload',
     // box-pins (installed runs in the image; verify, check and bump beside it)
     'firstVersion', 'BOX_TOOLS', 'BOX_ARCHES', 'pinForm', 'escapeRe', 'HOLD_LIKE', 'readPins', 'pinsFile', 'releaseFlag', 'pinsBase', 'timedOut', 'unreachable', 'upstreamJson', 'notRelease', 'latestOf', 'holdText',
     'checkPins', 'pinsCheckLine', 'assetSum', 'bumpPins', 'BOX_PINS_USAGE',
