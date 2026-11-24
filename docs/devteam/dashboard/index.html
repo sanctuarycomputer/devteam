@@ -7038,8 +7038,9 @@ function openArtifact(raw) {
   const m = /^artifact\/(main|wt\/([^/]+))\/([^/]+)$/.exec(raw);
   let at = null, slug = null;
   if (m) try { at = m[1] === 'main' ? 'main' : decodeURIComponent(m[2]); slug = decodeURIComponent(m[3]); } catch {}
-  const note = AV_NOTE;
+  const note = AV_NOTE, show = SHOW_NOTE;
   AV_NOTE = null;
+  SHOW_NOTE = null;
   if (!at || !/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(slug ?? '')) return void (location.hash = '#library');
   if (!AV) { AV_FROM = ROUTED; avFocus = document.activeElement; }
   const arts = DATA?.library?.artifacts ?? [];
@@ -7048,7 +7049,12 @@ function openArtifact(raw) {
   // stage, as one gone while it was shown is listed nowhere either
   const fresh = TS.kind !== 'artifact' || TS.slug !== slug || TS.at !== at;
   const fp = arts.find((x) => x.slug === slug && x.at === at)?.fp ?? (fresh && at !== 'main' && !String(at).startsWith('tree:') ? mainFp : null);
-  showArtifact(slug, at, { note, fp, mainFp });
+  // Show me (kit-145): the first load is the note's own page and view; another version shown in an open viewer is
+  // a move of the viewer's, counted for the close, which still lands where the viewer was opened over
+  const shown = show && TL.threads.find((x) => x.id === show.id), spot = shown && avStep.where(shown);
+  if (shown && AV) AV_NAVS++;
+  showArtifact(slug, at, { note, fp, mainFp, anchor: spot ? spot.file + (spot.vh ?? '') : '' });
+  if (shown) avStep.to(shown, { gone: show.gone });
   $('scrim').hidden = false;
   document.body.classList.add('overlay-open');
   // opened over the open panel, it is on top of it at 900px and below (final-1 F1)
@@ -7198,6 +7204,23 @@ window.addEventListener('keydown', (e) => {
   e.preventDefault();
   avStep(e.key === 'ArrowLeft' ? -1 : 1);
 });
+// The note Show me is opening ({ id, gone }), for the one open that follows: no head carries it, so a reload or
+// Back opens the artifact on its first page.
+let SHOW_NOTE = null;
+// Show me: a note to check on the copy its change is in (its source, the server's word), on its own page with its
+// card open; main, saying so, when that copy is gone. The version shown already: a step.
+function avShowMe(id) {
+  const t = TL.threads.find((x) => x.id === id);
+  if (!t || t.subject?.kind !== 'artifact') return;
+  const gone = !t.source, at = t.source?.at ?? 'main', slug = t.source?.slug ?? t.subject.slug;
+  if (at !== 'main' && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(at)) return;
+  if (AV && !AV.preview && AV.slug === slug && AV.at === at && !$('artifact-view').hidden) return void avStep.to(t, { gone });
+  // a viewer tab shows one version at an address of its own
+  if (VIEWER) return void location.assign(artViewer(slug, at));
+  SHOW_NOTE = { id, gone };
+  location.hash = artHref(slug, at);
+}
+document.addEventListener('click', (e) => { const b = e.target.closest?.('[data-tl-show]'); if (b) avShowMe(b.dataset.tlShow); });
 // A to-check note's picture (kit-147): its thumbnail with what it is of, or why there is none. small: a panel
 // row's, the thumbnail alone. Its address is made only of a thread's id and a stamp as the kit writes them; one the
 // server hasn't (tShot.missing) is said, never a broken image.

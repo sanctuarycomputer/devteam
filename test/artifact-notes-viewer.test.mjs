@@ -407,6 +407,8 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await openAt(W, AV_WT, 'plan-pricing');
     await W.p.ev(`tlOpen(${J(N.onMain)}, false); void 0`);
     await W.soon(`!!document.querySelector('#tl-card [data-tl-show]')`, 'the card has Show me');
+    // the picture isn't there: its words are in, so nothing moves under the press
+    await W.soon(`/Picture not on this machine/.test(${text('#tl-card')})`, 'the card at rest');
     const navs = await W.p.ev('AV_NAVS');
     await W.p.click('#tl-card [data-tl-show]');
     await W.soon(`TS.at === 'main' && TS.ready`, 'Show me opened main in the open viewer');
@@ -533,8 +535,8 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
       const len = await V.p.ev('history.length');
       await V.p.click(`[data-tl-show="${id}"]`);
       await V.soon(`location.hash === ${J(head)} && ${VIEWER_UP} && TS.ready`, `Show me lands on ${head}`);
-      assert.equal(await V.p.ev(`window.__loads.filter((l) => l.id === 'av-frame').length`), 1, 'one load');
-      assert.ok((await V.p.ev(`window.__loads.filter((l) => l.id === 'av-frame')[0].src`)).endsWith(`/pricing/${file}`), `the first load is ${file}`);
+      assert.equal(await V.p.ev(`window.__loads.filter((l) => l.id === 'av-frame' && l.src).length`), 1, 'one load');
+      assert.ok((await V.p.ev(`window.__loads.filter((l) => l.id === 'av-frame' && l.src)[0].src`)).endsWith(`/pricing/${file}`), `the first load is ${file}`);
       assert.equal(await V.p.ev('history.length'), len + 1, 'one entry');
       await V.soon(`TL.open === ${J(id)}`, 'its card open');
       assert.ok((await V.p.ev(text('#av-where'))).startsWith(where), `the version pill names ${where}`);
