@@ -1,5 +1,5 @@
 // The kit's own picture of an artifact note's spot (kit-147): what thread ready takes and records, who
-// may withdraw a mark, the page's frame, the /shot/ route, and which copy of the artifact is pictured.
+// may withdraw a mark, the page's frame, the /api/shot/ route, and which copy of the artifact is pictured.
 // Each test is named by its check in the ticket's spec. Real Chrome, over the kit's DevTools pipe: this
 // file never skips, and fails its first test when the machine has none.
 // Run: node --test test/artifact-note-shots.test.mjs
@@ -436,12 +436,12 @@ test('C12 the picture, the source and their freshness on the dashboard', async (
     assert.deepEqual(first.of(gone.id).source, { at: 'chore-artifact-gone', slug: 'gone' });
     // C12b
     const shot = (p, headers = {}) => new Promise((resolve, reject) => { const q = http.request({ host: '127.0.0.1', port, path: p, headers }, (res) => { const got = []; res.on('data', (b) => got.push(b)); res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(got) })); }); q.on('error', reject); q.end(); });
-    const ok = await shot(`/shot/${r.id}/${name}`);
+    const ok = await shot(`/api/shot/${r.id}/${name}`);
     assert.equal(ok.status, 200);
     assert.deepEqual([ok.headers['content-type'], ok.headers['cache-control'], ok.headers['x-content-type-options'], ok.headers['cross-origin-resource-policy']], ['image/png', 'no-store', 'nosniff', 'same-origin']);
     assert.equal(sha256(ok.body), r.line.shot.sum.light);
     // C12c
-    for (const [site, want] of [['cross-site', 403], ['same-site', 403], ['none', 403], ['same-origin', 200]]) assert.equal((await shot(`/shot/${r.id}/${name}`, { 'sec-fetch-site': site })).status, want, site);
+    for (const [site, want] of [['cross-site', 403], ['same-site', 403], ['none', 403], ['same-origin', 200]]) assert.equal((await shot(`/api/shot/${r.id}/${name}`, { 'sec-fetch-site': site })).status, want, site);
     // C12d
     const dir = path.join(k.shots, r.id);
     fs.symlinkSync(name, path.join(dir, '20990101-000000000-light.png'));
@@ -449,7 +449,7 @@ test('C12 the picture, the source and their freshness on the dashboard', async (
     fs.symlinkSync(dir, path.join(k.shots, linked));
     write(path.join(k.shots, 'x-1', name), 'x');
     write(path.join(dir, `${r.line.shot.stamp}-light.jpg`), 'x');
-    for (const p of [`/shot/${r.id}/../x/${name}`, `/shot/${r.id}%2F${name}`, `/shot/${r.id}/..%2F${r.id}%2F${name}`, `/shot/${r.id}/${r.line.shot.stamp}-light.jpg`, `/shot/x-1/${name}`, `/shot/${r.id}/20990101-000000000-light.png`, `/shot/${linked}/${name}`, `/shot/${r.id}/${r.line.shot.stamp}-dark.png`, `/shot/${r.id}/`]) assert.equal((await shot(p)).status, 404, p);
+    for (const p of [`/api/shot/${r.id}/../x/${name}`, `/api/shot/${r.id}%2F${name}`, `/api/shot/${r.id}/..%2F${r.id}%2F${name}`, `/api/shot/${r.id}/${r.line.shot.stamp}-light.jpg`, `/api/shot/x-1/${name}`, `/api/shot/${r.id}/20990101-000000000-light.png`, `/api/shot/${linked}/${name}`, `/api/shot/${r.id}/${r.line.shot.stamp}-dark.png`, `/api/shot/${r.id}/`]) assert.equal((await shot(p)).status, 404, p);
     for (const f of [path.join(dir, '20990101-000000000-light.png'), path.join(k.shots, linked), path.join(dir, `${r.line.shot.stamp}-light.jpg`)]) fs.unlinkSync(f);
     // C12e: no log line is written from here on
     const was = k.logBytes();

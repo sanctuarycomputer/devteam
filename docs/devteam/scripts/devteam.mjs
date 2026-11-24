@@ -25291,10 +25291,10 @@ function dashFreshSources({ views, body, key }, cache) {
   if (cache.digest !== digest || cache.key !== key) Object.assign(cache, { digest, key, body: JSON.stringify(views.map((v) => (now.has(v.id) ? { ...v, source: now.get(v.id) } : v))) });
   return { body: cache.body, digest };
 }
-// /shot/<thread>/<stamp>-<light|dark>.png: a picture of a note's spot, read only from that thread's own
+// /api/shot/<thread>/<stamp>-<light|dark>.png: a picture of a note's spot, read only from that thread's own
 // folder. False when the path isn't one.
 function dashShotRoute(req, res, rawPath) {
-  const m = req.method === 'GET' ? /^\/shot\/(t-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*)\/(\d{8}-\d{9}-(?:light|dark)\.png)$/.exec(rawPath) : null;
+  const m = req.method === 'GET' ? /^\/api\/shot\/(t-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*)\/(\d{8}-\d{9}-(?:light|dark)\.png)$/.exec(rawPath) : null;
   if (!m) return false;
   const site = req.headers['sec-fetch-site'];
   let bytes = null;

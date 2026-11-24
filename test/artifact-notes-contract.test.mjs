@@ -252,7 +252,7 @@ test('artifact-notes-contract A5: supervisor.md states the contract, and every e
   const end = heads[k + 2]?.at ?? doc.length;
   assert.equal(heads[k + 2]?.level, 2, 'and is the last part of its section');
   const sec = doc.slice(heads[k + 1].at, end);
-  for (const s of ['- `handed` `{to, at}`', '- `addressed` `{by, at, note, sha, draft}`', '- `check`:', '- `shot`:', '`noshot` is `\'no-change\'`', '- `unready` `{at, reason}`', '- `frame` `{w, h, hash}`', '- `source`:', "'owner'", "'supervisor'", "'session'", '`with` names `handed.to`', 'last word', '/shot/<t-id>/<stamp>-<light|dark>.png', 'is a 404', 'frame {w, h, hash}', 'thread-new', 'artifact-handoff {slug, at}', '{to, typed, count}', 'thread-accept-addressed {id, at}', 'The note changed; read it again', 'artifact notes <slug> --json'])
+  for (const s of ['- `handed` `{to, at}`', '- `addressed` `{by, at, note, sha, draft}`', '- `check`:', '- `shot`:', '`noshot` is `\'no-change\'`', '- `unready` `{at, reason}`', '- `frame` `{w, h, hash}`', '- `source`:', "'owner'", "'supervisor'", "'session'", '`with` names `handed.to`', 'last word', '/api/shot/<t-id>/<stamp>-<light|dark>.png', 'is a 404', 'frame {w, h, hash}', 'thread-new', 'artifact-handoff {slug, at}', '{to, typed, count}', 'thread-accept-addressed {id, at}', 'The note changed; read it again', 'artifact notes <slug> --json'])
     assert.ok(sec.includes(s), `the section names ${s}`);
   assert.match(sec, /^resolved; to check; with <session>; open$/m, 'the state order, as one line');
   assert.match(sec, /kit-144[^.]*kit-147[^.]*release|release[^.]*kit-144[^.]*kit-147/, 'the release rule');
