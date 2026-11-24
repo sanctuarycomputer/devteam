@@ -3,7 +3,7 @@
 // fake (test/fixtures/term-fake.mjs). One origin serves both: a small front server here sends /api/term/* to the
 // fake and everything else to the dashboard, logs every terminal request, and can slow or rewrite an answer, or
 // drop a header, as a test asks. Skipped where Chrome can't be driven, as the kit's other Chrome tests are.
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import http from 'node:http';
 import assert from 'node:assert/strict';
 import { threadsFixture, dashboardOnFreePort } from './lib/kit.mjs';
@@ -21,10 +21,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // rewritten to the server each request goes to, so the fake's own guards see a same-origin request; Sec-Fetch-Site
 // is passed as the browser sent it (or dropped, with hooks.noFetchSite). log: every /api/term/* request with its
 // start and end times and its body; hooks.delay(path) holds an answer that many ms; hooks.rewrite(path, json) changes
-// a JSON answer. /__hub (on localhost, another origin) is a page that frames the dashboard, as the hub does.
+// a JSON answer; hooks.answer(path) gives { status, json } to answer in the fake's place. /__hub (on localhost, another origin) is a page that frames the dashboard, as the hub does.
 async function front(dashPort, fake) {
   const log = [];
-  const hooks = { delay: () => 0, rewrite: null, noFetchSite: false };
+  const hooks = { delay: () => 0, rewrite: null, noFetchSite: false, answer: () => null };
   let port = 0;
   const server = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://x');
@@ -43,6 +43,8 @@ async function front(dashPort, fake) {
       const body = Buffer.concat(chunks);
       const entry = term ? { method: req.method, path: u.pathname, start: Date.now(), end: null, status: null, body: body.length ? body.toString('utf8') : null } : null;
       if (entry) log.push(entry);
+      const own = term ? hooks.answer(u.pathname) : null;
+      if (own) { entry.end = Date.now(); entry.status = own.status; res.writeHead(own.status, { 'content-type': 'application/json' }); return res.end(JSON.stringify(own.json)); }
       const up = http.request({ host: '127.0.0.1', port: to, path: req.url, method: req.method, headers }, async (r) => {
         const got = [];
         r.on('data', (c) => got.push(c));
@@ -85,19 +87,26 @@ const soonIn = (p, ms = 20000) => async (expr, what) => {
   }
 };
 
-// A fixture's dashboard, the fake, the front, and a Chrome tab at 1440x900 on hash (or a path), its page and threads read.
+// One fixture's dashboard and one Chrome for the file (each test reads only; a test's own front is its own origin,
+// so its storage is its own); each test gets its own fake, front and tab.
+let shared = null;
+const base = () => (shared ??= (async () => {
+  const F = threadsFixture('term');
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
+  const chrome = await openChrome();
+  return { F, dash, port, chrome };
+})());
+after(async () => { if (!shared) return; const s = await shared; await s.chrome.close(); await s.dash.stop(); s.F.done(); });
+
+// The fake, the front, and a Chrome tab at 1440x900 on hash (or a path), its page and threads read, and an open
+// panel done sliding (a click on a moving panel misses).
 async function open(t, { fake: fo = {}, hash = '#overview', path = '/', setup = null, size = [1440, 900], ready = true } = {}) {
   const later = cleanup(t);
-  const F = threadsFixture('term');
-  later(() => F.done());
-  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
-  later(() => dash.stop());
+  const { port, chrome } = await base();
   const fake = await startTermFake(fo);
   later(() => fake.close());
   const fr = await front(port, fake);
   later(() => fr.close());
-  const chrome = await openChrome();
-  later(() => chrome.close());
   const p = await chrome.newPage();
   later(() => p.close());
   await p.send('Page.enable');
@@ -108,6 +117,7 @@ async function open(t, { fake: fo = {}, hash = '#overview', path = '/', setup = 
   await p.send('Page.navigate', { url: `${fr.url}${path}${hash}` });
   const soon = soonIn(p);
   if (ready) await soon('document.readyState === "complete" && typeof DATA === "object" && DATA !== null && TL.have > 0', 'the page and its threads read');
+  if (ready && /[?&]th=/.test(hash)) await soon(PANEL_AT_REST, 'the panel open and at rest');
   const term = (re) => fr.log.filter((e) => re.test(e.path));
   const posts = (w = 'supervisor') => fr.log.filter((e) => e.method === 'POST' && e.path === `/api/term/${w}/keys`).map((e) => JSON.parse(e.body));
   return { p, fake, fr, soon, term, posts, url: fr.url };
@@ -176,6 +186,12 @@ test('terminal A11: at most one key post is in flight; queued keys merge up to 4
   await R.soon(`/busy/.test(document.querySelector('.term-box[data-term="supervisor"] .term-hint').textContent)`, 'the busy words');
   await sleep(1500);
   assert.equal(R.posts().length, before + 1, 'the refused post is sent once and never retried');
+  // a 500 carrying an exception's text: fixed words, the text never shown
+  R.fake.set({ busy: false });
+  R.fr.hooks.answer = (path) => (path.endsWith('/keys') ? { status: 500, json: { error: 'EACCES: permission denied, open /home/owner/.devteam/secret' } } : null);
+  await R.p.type('r');
+  await R.soon(`document.querySelector('.term-box[data-term="supervisor"] .term-hint').textContent.includes('had a problem')`, 'a 500: fixed words');
+  assert.ok(!(await R.p.ev(`document.querySelector('.term-box[data-term="supervisor"]').textContent.includes('EACCES')`)), "a 500's own text is never shown");
 });
 
 test('terminal A11: the screen polls only while the document is visible and its box is seen', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
@@ -197,7 +213,22 @@ test('terminal A11: the screen polls only while the document is visible and its 
   await polling('the box back');
 });
 
-test('terminal A11: the poll stops when another tab is chosen or the panel closes', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+const pollRig = (R) => {
+  const reads = () => R.term(/\/supervisor\/screen$/).length;
+  return {
+    polling: async (what) => { const a = reads(); await sleep(800); assert.ok(reads() - a >= 3, `${what}: polling (${reads() - a} reads in 800 ms)`); },
+    still: async (what) => { await sleep(400); const a = reads(); await sleep(1200); assert.equal(reads() - a, 0, `${what}: no reads`); },
+  };
+};
+test('terminal A11: the poll stops when the panel closes', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=supervisor' });
+  const { polling, still } = pollRig(R);
+  await R.soon(`!!document.querySelector('.term-box[data-term="supervisor"] .xterm')`, 'drawn');
+  await polling('the tab shown');
+  await R.p.click('#th-close');
+  await still('the panel closed');
+});
+test('terminal A11: the poll stops when another tab is chosen', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
   const R = await open(t, { hash: '#overview?th=supervisor' });
   const reads = () => R.term(/\/supervisor\/screen$/).length;
   const polling = async (what) => { const a = reads(); await sleep(800); assert.ok(reads() - a >= 3, `${what}: polling (${reads() - a} reads in 800 ms)`); };
@@ -209,9 +240,6 @@ test('terminal A11: the poll stops when another tab is chosen or the panel close
   await still('the Threads tab chosen');
   await R.p.click('#th-tabs [data-tab="supervisor"]');
   await polling('Supervisor again');
-  // the panel closed
-  await R.p.click('#th-close');
-  await still('the panel closed');
 });
 
 test("terminal A11: in the hub's frame, hub-visible false stops the poll and true starts it again", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
@@ -262,6 +290,10 @@ test("terminal A11b: a multi-line paste asks 'Paste N lines?'; confirmed, one pa
   await sleep(800);
   assert.equal(R.posts().length, 2, 'a one-line paste is sent without a question');
   assert.equal(R.posts()[1].paste, 'a\x1b[201~b', 'as it was pasted: the server drops bracket markers (terminal@1 §8)');
+  // the cap counts UTF-8 bytes: 60,000 characters of é are 120,000 bytes
+  await R.p.ev(pasteIn('é'.repeat(60000)));
+  await R.soon(`/too large/.test(document.querySelector('.term-box[data-term="supervisor"] .term-hint').textContent)`, 'too large in bytes');
+  assert.equal(R.posts().length, 2, 'nothing of it sent: the cap is in bytes');
   // too large for one post: refused here, whole
   await R.p.ev(pasteIn('"'.repeat(60000)));
   await R.soon(`/too large/.test(document.querySelector('.term-box[data-term="supervisor"] .term-hint').textContent)`, 'too large');
@@ -269,8 +301,10 @@ test("terminal A11b: a multi-line paste asks 'Paste N lines?'; confirmed, one pa
 });
 
 test("terminal A12: th=shell posts shell/open once and draws the shell; an ended shell shows 'The shell ended.' with Open a new shell", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
-  const R = await open(t, { hash: '#overview?th=shell', fake: { shell: false } });
+  const R = await open(t, { hash: '#overview?th=shell', fake: { shell: false, lines: ['SUPERVISOR-PANE-ONLY'] } });
   await R.soon(`!!document.querySelector('.term-box[data-term="shell"] .xterm')`, 'the shell drawn');
+  await sleep(400);
+  assert.ok(!(await R.p.ev(`${screenText('shell')}.includes('SUPERVISOR-PANE-ONLY')`)), "the Shell tab draws the shell's screen, never the supervisor's");
   await focusScreen(R, 'shell');
   await R.p.type('ls');
   await R.soon(`${screenText('shell')}.includes('ls')`, 'typed into the shell');
@@ -376,7 +410,8 @@ test('terminal A14: the font scales down to fit the columns, to a 9 px floor, th
   assert.ok(await R.p.ev(fits), 'and fits without scrolling');
   R.fake.set({ cols: 120, lines: ['x'.repeat(120)] });
   await R.soon(`${font} === 9`, 'the floor');
-  assert.equal(await R.p.ev(fits), false, 'the screen scrolls sideways');
+  assert.equal(await R.p.ev(fits), false, 'wider than the box');
+  assert.match(await R.p.ev(`getComputedStyle(document.querySelector('.term-box[data-term="supervisor"] .term-wrap')).overflowX`), /^(auto|scroll)$/, 'the screen scrolls sideways, not clipped');
 });
 
 test('terminal A14: Wide widens the panel to half the window on a terminal tab, is remembered, and moves a side peek with it', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
@@ -438,7 +473,10 @@ test("terminal A14b: the page asks GET /api/term/token once on load, before any 
   assert.equal(R.term(/\/token$/).length, 1, 'one token request on load');
   assert.equal(R.term(/\/screen$/).length, 0, 'and nothing else before a tab is pressed');
   for (const fo of [{ refuse: 'view' }, { gatewayView: true }]) {
-    const V = await open(t, { hash: '#overview?th=threads', fake: fo });
+    // the token's answer held 2 s: no terminal tab is ever drawn, before or after
+    const V = await open(t, { hash: '#overview?th=open', fake: fo, setup: (p, fr) => { fr.hooks.delay = (path) => (path.endsWith('/token') ? 2000 : 0); } });
+    await V.soon(`!!document.querySelector('#th-tabs [data-tab="threads"]')`, 'the bar drawn');
+    assert.deepEqual(await V.p.ev(`[...document.querySelectorAll('#th-tabs [role="tab"]')].map((b) => b.dataset.tab)`), ['inbox', 'threads'], `${JSON.stringify(fo)}: no terminal tab while the token is asked`);
     await V.soon(`!!document.querySelector('#th-tabs [data-tab="threads"]') && TERM.why === 'view'`, 'refused');
     assert.deepEqual(await V.p.ev(`[...document.querySelectorAll('#th-tabs [role="tab"]')].map((b) => b.dataset.tab)`), ['inbox', 'threads'], `${JSON.stringify(fo)}: both terminal tabs hidden`);
   }

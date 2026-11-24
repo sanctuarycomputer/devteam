@@ -10161,374 +10161,6 @@ threadsTabs.register({ id: 'threads', label: 'Threads', count: () => tCounts(TL.
 // The terminal tabs (kit-614, terminal@1): each pane is its tab's box, drawn by #term-js; disabled in the /view/ tab
 threadsTabs.register({ id: 'supervisor', label: 'Supervisor', disabled: !!VIEWER, render: (el) => termRender('supervisor', el) });
 threadsTabs.register({ id: 'shell', label: 'Shell', disabled: !!VIEWER, render: (el) => termRender('shell', el) });
-/* term-js start */
-// ---- the Supervisor and Shell tabs (kit-614; terminal@1, test/contracts/terminal.md) ----
-// A snapshot relay: the screen is read from GET /api/term/<which>/screen while its tab is on screen, drawn with
-// xterm.js (pinned, integrity-checked, loaded on the first open), and the keys go to POST …/keys, one post in
-// flight per tab, never retried. TERM: the page's token and why the tabs are off (a refusal's why), this page's
-// id (terminal@1 §8), whether the hub said its frame is hidden, and each tab's state (termTab).
-const TERM_LIB = {
-  js: 'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js', jsSri: 'sha384-M169f14mRZOXm3hD/v2Ti0ThIT/RnAQagXA9nlE15yHAtrW19gdePJh/HaTzUOe/',
-  css: 'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css', cssSri: 'sha384-8Xk9wy/gzEDUKrXtrmCFa2bBuK3BpjpDuL/p0SeKQX19Khl/M+lHOgD/CyYf7efP',
-};
-const TERM_IDS = ['supervisor', 'shell'];
-const isTermTab = (id) => TERM_IDS.includes(id);
-// The poll (design, Polling): 150 ms; a read over 300 ms doubles it up to 2 s, a fast one brings it back; 5 s while
-// the supervisor isn't running. A key post carries at most 4096 bytes; a body over 100 KB is refused here.
-const TERM_MS = { every: 150, slow: 300, most: 2000, gone: 5000 };
-const TERM_DATA_MAX = 4096, TERM_BODY_MAX = 102400;
-const TERM_WIDE_KEY = 'devteam.threads.wide';
-const termPageId = () => { const a = new Uint8Array(18); crypto.getRandomValues(a); return btoa(String.fromCharCode(...a)).replace(/\+/g, '-').replace(/\//g, '_'); };
-const TERM = { token: null, why: null, asked: 0, page: termPageId(), hubHidden: false, lib: null, shown: null, tabs: {} };
-// One tab's state: the last screen and its etag, the poll's interval and timer, the posts (seq, the one in flight,
-// the queue), whether this page's own last taken post left the owner's line open (own: 'open' | 'done' | null), the
-// last error, whether its box is on screen (seen), and Shell's open (opened: posted once; live: was ever live).
-function termTab(w) {
-  return (TERM.tabs[w] ??= { box: null, term: null, screen: null, etag: null, every: TERM_MS.every, timer: null, reading: false, seq: 0, inflight: false, queue: [], own: null, err: '', seen: false, opened: false, live: false, opening: false, ask: null });
-}
-// Off: a View person's refusal (why view) hides both tabs; the /view/ tab keeps them disabled (registered so).
-const termTabsOff = () => TERM.why === 'view';
-// The words for a refusal's why (terminal@1 §4, §5); the code itself is never shown.
-const TERM_WHY_WORDS = {
-  'not-loopback': "The terminal tabs only work on this machine's own address.",
-  'cross-site': "This browser can't use the terminal tabs: it doesn't say which page a request comes from. A current Chrome, Firefox or Safari does.",
-  host: "The terminal tabs only work on the dashboard's own page.",
-  relay: "The terminal tabs only work on the dashboard's own page.",
-};
-// The token, asked once on load (before any tab is pressed): a cross-site answer is asked once more; a second, or
-// any other why, stops the asking. why view hides both tabs at once.
-async function termToken() {
-  for (;;) {
-    TERM.asked++;
-    let r = null, j = null;
-    try { r = await fetch('/api/term/token', { cache: 'no-store' }); j = await r.json().catch(() => null); } catch { r = null; }
-    if (r?.ok && typeof j?.token === 'string') { TERM.token = j.token; TERM.why = null; break; }
-    const why = r?.status === 403 && typeof j?.why === 'string' ? j.why : null;
-    if (why === 'cross-site' && TERM.asked < 2) continue;
-    TERM.why = why ?? 'error';
-    break;
-  }
-  thDraw();
-  termRedraw();
-}
-// Hex of bytes, and UTF-8 bytes of a string.
-const termHex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
-const termBytes = (s) => new TextEncoder().encode(s);
-// What the screen may carry into xterm: SGR only. The server strips the rest (terminal@1 §6); this strips again, C1
-// controls too (U+0080-U+009F, the 8-bit CSI among them), so no line can make xterm answer a query (DSR, a mode
-// report) and type that answer into the pane without a key press.
-const TERM_ESC = /\x1b(?:\[([0-9;:]*)m|\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|[\]PX^_](?:[^\x07\x1b]|\x1b(?!\\))*(?:\x07|\x1b\\|$)|[\x20-\x2f]*[\s\S]?)/g;
-const termSafe = (l) => String(l ?? '').replace(TERM_ESC, (m, sgr) => (sgr === undefined ? '' : m)).replace(/[\x00-\x1a\x1c-\x1f\x7f-\x9f]/g, '');
-const termText = (l) => termSafe(l).replace(/\x1b\[[0-9;:]*m/g, '');
-// xterm.js and its CSS, once, on the first open: integrity-checked from jsdelivr. A failure (offline, blocked, a bad
-// hash) is remembered: the tabs show the plain screen with typing off.
-function termLib() {
-  if (TERM.lib) return TERM.lib;
-  TERM.lib = new Promise((ok, no) => {
-    const css = document.createElement('link');
-    css.rel = 'stylesheet'; css.href = TERM_LIB.css; css.integrity = TERM_LIB.cssSri; css.crossOrigin = 'anonymous';
-    document.head.append(css);
-    const s = document.createElement('script');
-    s.src = TERM_LIB.js; s.integrity = TERM_LIB.jsSri; s.crossOrigin = 'anonymous';
-    s.onload = () => (typeof globalThis.Terminal === 'function' ? ok(globalThis.Terminal) : no(new Error('no Terminal')));
-    s.onerror = () => no(new Error('the terminal library did not load'));
-    document.head.append(s);
-  });
-  TERM.lib.catch(() => {});
-  return TERM.lib;
-}
-// The tab's pane: its one box, made once and moved into the pane on every draw, so xterm keeps its screen.
-function termRender(w, el) {
-  const s = termTab(w);
-  if (!s.box) {
-    s.box = document.createElement('div');
-    s.box.className = 'term-box';
-    s.box.dataset.term = w;
-    s.box.innerHTML = `<div class="term-bar"><span class="where">${w === 'supervisor' ? "The supervisor's terminal" : "Shell at the project's root"}</span><span class="live off" data-term-live><i class="dot" aria-hidden="true"></i><span></span></span></div><div class="term-state" hidden></div><div class="term-wrap"><div class="term-screen"></div><pre class="term-plain" hidden></pre></div><div class="term-ask" hidden role="group" aria-label="Paste"></div><div class="term-hint small muted" aria-live="polite"></div>`;
-    s.box.addEventListener('click', (e) => termClick(w, e));
-    new IntersectionObserver((es) => { for (const e of es) s.seen = e.isIntersecting; termSync(); }).observe(s.box);
-  }
-  el.replaceChildren(s.box);
-  termPaint(w);
-}
-// Live: polled, typed into. Only the shown tab, only while the page is visible, its box on screen, and the hub hasn't
-// said its frame is hidden; never without a token or with the tabs refused.
-const termLive = (w) => !VIEWER && TERM.shown === w && document.visibilityState === 'visible' && termTab(w).seen && !TERM.hubHidden && !!TERM.token;
-// Which tab is shown (thDraw's, null for none): the + hidden and Wide shown on a terminal tab, the shown tab's poll
-// started, every other one stopped.
-function termSync(shown = TERM.shown) {
-  if (VIEWER) return;
-  TERM.shown = shown;
-  const root = document.documentElement;
-  root.classList.toggle('th-term', !!shown);
-  root.classList.toggle('th-wide', !!shown && termWide());
-  termWideButton();
-  for (const w of TERM_IDS) {
-    const s = termTab(w);
-    if (!termLive(w)) { clearTimeout(s.timer); s.timer = null; continue; }
-    if (w === 'shell' && !s.opened) { termOpen(); continue; }
-    if (!s.timer && !s.reading) termRead(w);
-  }
-}
-function termSchedule(w) {
-  const s = termTab(w);
-  clearTimeout(s.timer);
-  s.timer = termLive(w) ? setTimeout(() => { s.timer = null; termRead(w); }, s.screen?.state === 'gone' ? TERM_MS.gone : s.every) : null;
-}
-// One read of the screen: If-None-Match with the last etag (the gateway forces no-store, so the page keeps the
-// screen itself); a 304 keeps it. A read over 300 ms doubles the interval up to 2 s; a fast one brings it back.
-async function termRead(w) {
-  const s = termTab(w);
-  if (s.reading || !termLive(w)) return;
-  s.reading = true;
-  const t0 = performance.now();
-  let r = null;
-  try { r = await fetch(`/api/term/${w}/screen`, { cache: 'no-store', headers: s.etag ? { 'if-none-match': `"${s.etag}"` } : {} }); } catch { r = null; }
-  const took = performance.now() - t0;
-  let j = null;
-  if (r && r.status !== 304) j = await r.json().catch(() => null);
-  s.reading = false;
-  s.every = took > TERM_MS.slow ? Math.min(TERM_MS.most, Math.max(TERM_MS.slow, s.every * 2)) : TERM_MS.every;
-  if (r?.status === 403 && typeof j?.why === 'string') { TERM.why = j.why; TERM.token = null; thDraw(); return void termRedraw(); }
-  if (r?.ok && j?.v === 1) termScreen(w, j);
-  else if (!r || (r.status !== 304 && !r.ok)) { s.err = "The dashboard didn't answer; trying again."; termHint(w); }
-  termSchedule(w);
-}
-// A screen in hand (a read's, or a post's answer): kept with its etag and drawn. Shell's first live screen marks it
-// live; a gone one after that is a shell that ended.
-function termScreen(w, j) {
-  const s = termTab(w);
-  if (j.state === 'live') s.live = true;
-  s.screen = j;
-  s.etag = typeof j.etag === 'string' ? j.etag : null;
-  termPaint(w);
-}
-// Shell's open: posted once per page (and again from Open a new shell), with the panel's size at the largest font.
-async function termOpen() {
-  const s = termTab('shell');
-  if (s.opening || !TERM.token) return;
-  s.opening = true; s.opened = true; s.err = '';
-  const { cols, rows } = termFitSize(s);
-  let r = null, j = null;
-  try { r = await fetch('/api/term/shell/open', { method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ which: 'shell', page: TERM.page, token: TERM.token, cols, rows }) }); j = await r.json().catch(() => null); } catch { r = null; }
-  s.opening = false;
-  if (r?.ok && j?.v === 1) { s.live = false; termScreen('shell', j); }
-  else s.err = r?.status === 409 ? "The shell couldn't be opened: this project has no tmux session." : termWords(r, j);
-  termPaint('shell');
-  termSchedule('shell');
-}
-// The panel's size in cells at 12 px (the shell is made to fit it): terminal@1 §9's bounds.
-function termFitSize(s) {
-  const wrap = s.box?.querySelector('.term-wrap');
-  const w = Math.max(0, (wrap?.clientWidth ?? 348) - 2 * 16), h = Math.max(0, (wrap?.clientHeight ?? 600) - 16);
-  const cell = termCell(12);
-  return { cols: Math.min(500, Math.max(20, Math.floor(w / cell.w))), rows: Math.min(200, Math.max(5, Math.floor(h / cell.h))) };
-}
-// One cell of the mono font at px, measured once per size.
-const TERM_CELLS = new Map();
-function termCell(px) {
-  if (!TERM_CELLS.has(px)) {
-    const c = document.createElement('canvas').getContext('2d');
-    c.font = `${px}px ${getComputedStyle(document.documentElement).getPropertyValue('--mono') || 'monospace'}`;
-    TERM_CELLS.set(px, { w: c.measureText('W'.repeat(50)).width / 50 || px * 0.6, h: Math.ceil(px * 1.2) });
-  }
-  return TERM_CELLS.get(px);
-}
-// The font that fits the pane's columns in the box: 12 px down to a floor of 9; below that the screen scrolls sideways.
-function termFont(s) {
-  const wrap = s.box.querySelector('.term-wrap');
-  const room = wrap.clientWidth - parseFloat(getComputedStyle(wrap).paddingLeft) - parseFloat(getComputedStyle(wrap).paddingRight);
-  const cols = s.screen?.cols || 80;
-  for (let px = 12; px > 9; px--) if (termCell(px).w * cols <= room) return px;
-  return 9;
-}
-// The xterm theme from the page's tokens, in light and dark.
-function termTheme() {
-  const c = getComputedStyle(document.documentElement), v = (k) => c.getPropertyValue(k).trim();
-  return { background: v('--surface'), foreground: v('--fg'), cursor: v('--fg'), cursorAccent: v('--surface'), selectionBackground: 'rgba(82,168,255,.3)' };
-}
-// Draw the tab from what it has: a refusal's words, the supervisor not running, the shell ended, or the screen
-// (xterm, or the plain text when the library didn't load).
-function termPaint(w) {
-  const s = termTab(w);
-  if (!s.box) return;
-  const st = s.box.querySelector('.term-state'), wrap = s.box.querySelector('.term-wrap'), live = s.box.querySelector('[data-term-live]');
-  const state = (html, label) => { st.innerHTML = html; st.hidden = false; wrap.hidden = true; live.classList.add('off'); live.lastChild.textContent = label; termHint(w); };
-  if (TERM.why && TERM.why !== 'view') return void state(`<p>${esc(TERM_WHY_WORDS[TERM.why] ?? "The terminal tabs didn't answer. Reload the page to try again.")}</p>`, 'off');
-  const sc = s.screen;
-  if (w === 'shell' && sc?.state === 'gone' && s.live) return void state('<h3>The shell ended.</h3><button type="button" data-term-newshell>Open a new shell</button>', 'ended');
-  if (w === 'shell' && !sc && s.err) return void state(`<p>${esc(s.err)}</p><button type="button" data-term-newshell>Try again</button>`, 'not open');
-  if (w === 'supervisor' && sc?.state === 'gone') {
-    const box = hostHere(location, pageHello(location)?.name)?.box;
-    return void state(`<h3>The supervisor isn't running.</h3><p>To bring it back, run this in a terminal on this machine:</p><code>node docs/devteam/scripts/devteam.mjs recover</code>${box ? `<p><a class="linkish" data-term-terminal href="${esc(`${location.protocol}//${box}/#terminal`)}" target="_top">Open the Terminal page</a></p>` : ''}`, 'not running');
-  }
-  st.hidden = true; wrap.hidden = false;
-  live.classList.toggle('off', !sc || sc.state !== 'live');
-  live.lastChild.textContent = sc?.state === 'live' ? 'live' : 'reading…';
-  const plain = s.box.querySelector('.term-plain'), screen = s.box.querySelector('.term-screen');
-  if (!s.term && TERM.lib !== 'failed') {
-    termLib().then((Terminal) => { if (!s.term) termMake(w, Terminal); }, () => { TERM.lib = 'failed'; for (const x of TERM_IDS) termPaint(x); });
-  }
-  if (TERM.lib === 'failed') {
-    screen.hidden = true; plain.hidden = false;
-    plain.textContent = (sc?.lines ?? []).map(termText).join('\n');
-  } else if (s.term && sc?.state === 'live') {
-    if (s.term.cols !== sc.cols || s.term.rows !== sc.rows) s.term.resize(Math.max(1, sc.cols), Math.max(1, sc.rows));
-    const px = termFont(s);
-    if (s.term.options.fontSize !== px) s.term.options.fontSize = px;
-    const m = sc.modes ?? {};
-    s.term.write(`\x1b[?25l\x1b[H\x1b[2J\x1b[0m${sc.lines.map((l) => `${termSafe(l)}\x1b[0m`).join('\r\n')}\x1b[${(sc.cursor?.y ?? 0) + 1};${(sc.cursor?.x ?? 0) + 1}H${m.app_cursor ? '\x1b[?1h' : '\x1b[?1l'}${m.app_keypad ? '\x1b=' : '\x1b>'}${sc.cursor?.visible ? '\x1b[?25h' : ''}`);
-  }
-  termHint(w);
-}
-// The xterm for a tab, once: keys to the pane, Ctrl+] to leave, a paste asked about and sent whole.
-function termMake(w, Terminal) {
-  const s = termTab(w);
-  const screen = s.box.querySelector('.term-screen');
-  const sc = s.screen;
-  const term = new Terminal({ cols: sc?.cols || 80, rows: sc?.rows || 24, fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--mono'), fontSize: 12, theme: termTheme(), scrollback: 0, cursorBlink: false, allowProposedApi: false, disableStdin: false });
-  term.open(screen);
-  s.term = term;
-  term.attachCustomKeyEventHandler((e) => {
-    if (e.type === 'keydown' && e.ctrlKey && (e.key === ']' || e.code === 'BracketRight')) { term.blur(); document.querySelector('#th-tabs [role="tab"][aria-selected="true"]')?.focus(); return false; }
-    return true;
-  });
-  term.onData((d) => termKeys(w, termBytes(d)));
-  term.onBinary((d) => termKeys(w, Uint8Array.from(d, (c) => c.charCodeAt(0) & 255)));
-  // a paste: caught before xterm's own handler, asked about when it is more than one line, sent as one paste post
-  screen.addEventListener('paste', (e) => {
-    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
-    const text = e.clipboardData?.getData('text/plain') ?? '';
-    if (text) termPaste(w, text);
-  }, true);
-  termPaint(w);
-}
-const termKeysOn = (w) => !!termTab(w).term && TERM.lib !== 'failed' && !!TERM.token && termTab(w).screen?.state === 'live';
-// Keys: queued behind the post in flight; queued data merges up to 4096 bytes, never across a paste.
-function termKeys(w, bytes) {
-  const s = termTab(w);
-  if (!termKeysOn(w) || !bytes.length) return;
-  for (let i = 0; i < bytes.length; i += TERM_DATA_MAX) {
-    const part = bytes.subarray(i, i + TERM_DATA_MAX), last = s.queue[s.queue.length - 1];
-    if (last?.data && last.data.length + part.length <= TERM_DATA_MAX) { const m = new Uint8Array(last.data.length + part.length); m.set(last.data); m.set(part, last.data.length); last.data = m; }
-    else s.queue.push({ data: part });
-  }
-  termPump(w);
-}
-// A paste: more than one line asks "Paste N lines?" first; too large for one post is refused here, whole.
-function termPaste(w, text) {
-  const s = termTab(w);
-  if (!termKeysOn(w)) return;
-  if (JSON.stringify({ which: w, pane: s.screen.pane, page: TERM.page, seq: s.seq + 1, paste: text, token: TERM.token }).length > TERM_BODY_MAX) { s.err = 'That paste is too large to send in one piece, so nothing was sent.'; return void termHint(w); }
-  const n = text.split(/\r\n|\r|\n/).length;
-  if (n < 2) { s.queue.push({ paste: text }); return void termPump(w); }
-  s.ask = { text, n };
-  const ask = s.box.querySelector('.term-ask');
-  ask.innerHTML = `<span>Paste ${n} lines?</span><button type="button" data-term-paste="yes">Paste</button><button type="button" class="ghost" data-term-paste="no">Cancel</button>`;
-  ask.hidden = false;
-  ask.querySelector('[data-term-paste="yes"]').focus();
-}
-// One post in flight per tab: the next queued one when it is answered. Never retried: a failure shows its words and
-// drops the queue. A taken post records whether it left the owner's line open (the waiting note's rule).
-async function termPump(w) {
-  const s = termTab(w);
-  if (s.inflight || !s.queue.length) return;
-  const item = s.queue.shift();
-  s.inflight = true;
-  const body = { which: w, pane: s.screen?.pane, page: TERM.page, seq: ++s.seq, ...(item.data ? { data: termHex(item.data) } : { paste: item.paste }), token: TERM.token };
-  let r = null, j = null;
-  try { r = await fetch(`/api/term/${w}/keys`, { method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); j = await r.json().catch(() => null); } catch { r = null; }
-  s.inflight = false;
-  if (r?.ok && j?.v === 1) {
-    if (j.taken) { const b = item.data; s.own = b && (b[b.length - 1] === 0x0d || b[b.length - 1] === 0x03) ? 'done' : 'open'; }
-    s.err = '';
-    termScreen(w, j);
-    return void termPump(w);
-  }
-  s.queue = [];
-  s.err = termWords(r, j);
-  if (r?.status === 403 && j?.why) { TERM.why = j.why; TERM.token = null; thDraw(); termRedraw(); }
-  // the pane moved or went: read it again now
-  if (r?.status === 423 || r?.status === 409) { s.etag = null; clearTimeout(s.timer); s.timer = null; termRead(w); }
-  termHint(w);
-}
-// A refused post's words: the server's plain words (terminal@1 §4), else what happened.
-function termWords(r, j) {
-  if (!r) return "The dashboard didn't answer, so nothing more was sent.";
-  if (r.status === 503) return 'The terminal is busy. Try again in a moment.';
-  if (r.status === 413) return 'That is too large to send, so nothing was sent.';
-  return typeof j?.error === 'string' && j.error ? `${j.error[0].toUpperCase()}${j.error.slice(1)}.`.replace(/\.\.$/, '.') : `The dashboard answered ${r.status}, so nothing more was sent.`;
-}
-// The line under the screen: an error; the waiting note (held lines over 2 minutes behind this page's own open line,
-// supervisor ruling 2026-11-18: the count alone never shows it); typing off without the library; else how to leave.
-function termHint(w) {
-  const s = termTab(w);
-  const h = s.box?.querySelector('.term-hint');
-  if (!h) return;
-  const held = s.screen?.held;
-  let html;
-  if (s.err) html = `<span class="err">${esc(s.err)}</span>`;
-  else if (w === 'supervisor' && s.own === 'open' && held && held.count > 0 && held.oldest_ms >= 120000) html = `<span data-term-waiting>Messages for the supervisor are waiting until you send or clear your line.${held.prompt === 'unknown' ? ' Press Enter or Ctrl+C here to let them through.' : ''}</span>`;
-  else if (TERM.lib === 'failed') html = "<span>The terminal couldn't load, so typing is off. This is the screen as text.</span>";
-  else if (s.screen?.state === 'live') html = '<span>Click the screen to type.</span> <span><kbd>Ctrl</kbd> <kbd>]</kbd> to leave it.</span>';
-  else html = '';
-  if (h.innerHTML !== html) h.innerHTML = html;
-}
-function termRedraw() { for (const w of TERM_IDS) termPaint(w); termSync(); }
-// A press in a tab's box: the paste question, Open a new shell.
-function termClick(w, e) {
-  const s = termTab(w);
-  const p = e.target.closest('[data-term-paste]');
-  if (p && s.ask) {
-    const { text } = s.ask;
-    s.ask = null;
-    s.box.querySelector('.term-ask').hidden = true;
-    if (p.dataset.termPaste === 'yes') { s.queue.push({ paste: text }); termPump(w); }
-    s.term?.focus();
-    return;
-  }
-  if (e.target.closest('[data-term-newshell]') && w === 'shell') { s.screen = null; s.etag = null; s.live = false; termOpen(); }
-}
-// Wide (design, Size): a toggle in the panel's head, shown on a terminal tab, widening the panel to half the window
-// (html.th-wide, #term-css), remembered per browser.
-function termWide() { try { return localStorage.getItem(TERM_WIDE_KEY) === '1'; } catch { return false; } }
-function termWideButton() {
-  const end = document.querySelector('.threads-head .end');
-  if (!end) return;
-  let b = $('th-wide');
-  if (!b) {
-    b = document.createElement('button');
-    b.type = 'button'; b.id = 'th-wide'; b.className = 'ghost icon-btn';
-    b.setAttribute('aria-label', 'Wide'); b.title = 'Wide: the panel takes half the window';
-    b.innerHTML = '<i class="icon-panel-left-open" aria-hidden="true"></i>';
-    b.addEventListener('click', () => {
-      const on = !termWide();
-      try { localStorage.setItem(TERM_WIDE_KEY, on ? '1' : '0'); } catch {}
-      termSync();
-      setTimeout(() => { for (const w of TERM_IDS) termPaint(w); }, 0);
-    });
-    end.prepend(b);
-  }
-  b.hidden = !TERM.shown;
-  const on = String(termWide());
-  if (b.getAttribute('aria-pressed') !== on) b.setAttribute('aria-pressed', on);
-}
-if (!VIEWER) {
-  termToken();
-  document.addEventListener('visibilitychange', () => termSync());
-  // the hub's word that this frame is hidden or shown (dashboard-shell@3; kit-616 sends it): only from the hub,
-  // the parent on another origin, as the hub's other messages are taken
-  window.addEventListener('message', (ev) => {
-    if (window.parent === window || ev.source !== window.parent || ev.origin === location.origin || ev.origin === 'null') return;
-    const m = ev.data;
-    if (!m || typeof m !== 'object' || m.devteam !== 'hub-visible' || typeof m.visible !== 'boolean') return;
-    TERM.hubHidden = !m.visible;
-    termSync();
-  });
-  addEventListener('resize', () => { for (const w of TERM_IDS) if (termTab(w).term) termPaint(w); });
-  matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => { for (const w of TERM_IDS) if (termTab(w).term) termTab(w).term.options.theme = termTheme(); });
-}
-/* term-js end */
 // The button: its thread count (none with no open thread) and its words, each written only when it changed,
 // so a press on it survives every poll. #tt-peek copies its content, label and title.
 function thButton() {
@@ -11135,6 +10767,378 @@ window.addEventListener('message', (e) => {
   }
 });
 /* threads-layer end */
+/* term-js start */
+// ---- the Supervisor and Shell tabs (kit-614; terminal@1, test/contracts/terminal.md) ----
+// A snapshot relay: the screen is read from GET /api/term/<which>/screen while its tab is on screen, drawn with
+// xterm.js (pinned, integrity-checked, loaded on the first open), and the keys go to POST …/keys, one post in
+// flight per tab, never retried. TERM: the page's token and why the tabs are off (a refusal's why), this page's
+// id (terminal@1 §8), whether the hub said its frame is hidden, and each tab's state (termTab).
+const TERM_LIB = {
+  js: 'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js', jsSri: 'sha384-M169f14mRZOXm3hD/v2Ti0ThIT/RnAQagXA9nlE15yHAtrW19gdePJh/HaTzUOe/',
+  css: 'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css', cssSri: 'sha384-8Xk9wy/gzEDUKrXtrmCFa2bBuK3BpjpDuL/p0SeKQX19Khl/M+lHOgD/CyYf7efP',
+};
+const TERM_IDS = ['supervisor', 'shell'];
+const isTermTab = (id) => TERM_IDS.includes(id);
+// The poll (design, Polling): 150 ms; a read over 300 ms doubles it up to 2 s, a fast one brings it back; 5 s while
+// the supervisor isn't running. A key post carries at most 4096 bytes; a body over 100 KB is refused here.
+const TERM_MS = { every: 150, slow: 300, most: 2000, gone: 5000 };
+const TERM_DATA_MAX = 4096, TERM_BODY_MAX = 102400;
+const TERM_WIDE_KEY = 'devteam.threads.wide';
+const termPageId = () => { const a = new Uint8Array(18); crypto.getRandomValues(a); return btoa(String.fromCharCode(...a)).replace(/\+/g, '-').replace(/\//g, '_'); };
+const TERM = { token: null, why: null, pending: !VIEWER, asked: 0, page: termPageId(), hubHidden: false, lib: null, shown: null, tabs: {} };
+// One tab's state: the last screen and its etag, the poll's interval and timer, the posts (seq, the one in flight,
+// the queue), whether this page's own last taken post left the owner's line open (own: 'open' | 'done' | null), the
+// last error, whether its box is on screen (seen), and Shell's open (opened: posted once; live: was ever live).
+function termTab(w) {
+  return (TERM.tabs[w] ??= { box: null, term: null, screen: null, etag: null, every: TERM_MS.every, timer: null, reading: false, seq: 0, inflight: false, queue: [], own: null, err: '', seen: false, opened: false, live: false, opening: false, ask: null });
+}
+// Off: while the token is asked (so a View person never sees them), and on a View person's refusal (why view); the
+// /view/ tab asks nothing and keeps them disabled (registered so).
+const termTabsOff = () => TERM.pending || TERM.why === 'view';
+// The words for a refusal's why (terminal@1 §4, §5); the code itself is never shown.
+const TERM_WHY_WORDS = {
+  'not-loopback': "The terminal tabs only work on this machine's own address.",
+  'cross-site': "This browser can't use the terminal tabs: it doesn't say which page a request comes from. A current Chrome, Firefox or Safari does.",
+  host: "The terminal tabs only work on the dashboard's own page.",
+  relay: "The terminal tabs only work on the dashboard's own page.",
+};
+// The token, asked once on load (before any tab is pressed): a cross-site answer is asked once more; a second, or
+// any other why, stops the asking. why view hides both tabs at once.
+async function termToken() {
+  for (;;) {
+    TERM.asked++;
+    let r = null, j = null;
+    try { r = await fetch('/api/term/token', { cache: 'no-store' }); j = await r.json().catch(() => null); } catch { r = null; }
+    if (r?.ok && typeof j?.token === 'string') { TERM.token = j.token; TERM.why = null; break; }
+    const why = r?.status === 403 && typeof j?.why === 'string' ? j.why : null;
+    if (why === 'cross-site' && TERM.asked < 2) continue;
+    TERM.why = why ?? 'error';
+    break;
+  }
+  TERM.pending = false;
+  thDraw();
+  termRedraw();
+}
+// Hex of bytes, and UTF-8 bytes of a string.
+const termHex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+const termBytes = (s) => new TextEncoder().encode(s);
+// What the screen may carry into xterm: SGR only. The server strips the rest (terminal@1 §6); this strips again, C1
+// controls too (U+0080-U+009F, the 8-bit CSI among them), so no line can make xterm answer a query (DSR, a mode
+// report) and type that answer into the pane without a key press.
+const TERM_ESC = /\x1b(?:\[([0-9;:]*)m|\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|[\]PX^_](?:[^\x07\x1b]|\x1b(?!\\))*(?:\x07|\x1b\\|$)|[\x20-\x2f]*[\s\S]?)/g;
+const termSafe = (l) => String(l ?? '').replace(TERM_ESC, (m, sgr) => (sgr === undefined ? '' : m)).replace(/[\x00-\x1a\x1c-\x1f\x7f-\x9f]/g, '');
+const termText = (l) => termSafe(l).replace(/\x1b\[[0-9;:]*m/g, '');
+// xterm.js and its CSS, once, on the first open: integrity-checked from jsdelivr. A failure (offline, blocked, a bad
+// hash) is remembered: the tabs show the plain screen with typing off.
+function termLib() {
+  if (TERM.lib) return TERM.lib;
+  TERM.lib = new Promise((ok, no) => {
+    const css = document.createElement('link');
+    css.rel = 'stylesheet'; css.href = TERM_LIB.css; css.integrity = TERM_LIB.cssSri; css.crossOrigin = 'anonymous';
+    document.head.append(css);
+    const s = document.createElement('script');
+    s.src = TERM_LIB.js; s.integrity = TERM_LIB.jsSri; s.crossOrigin = 'anonymous';
+    s.onload = () => (typeof globalThis.Terminal === 'function' ? ok(globalThis.Terminal) : no(new Error('no Terminal')));
+    s.onerror = () => no(new Error('the terminal library did not load'));
+    document.head.append(s);
+  });
+  TERM.lib.catch(() => {});
+  return TERM.lib;
+}
+// The tab's pane: its one box, made once and moved into the pane on every draw, so xterm keeps its screen.
+function termRender(w, el) {
+  const s = termTab(w);
+  if (!s.box) {
+    s.box = document.createElement('div');
+    s.box.className = 'term-box';
+    s.box.dataset.term = w;
+    s.box.innerHTML = `<div class="term-bar"><span class="where">${w === 'supervisor' ? "The supervisor's terminal" : "Shell at the project's root"}</span><span class="live off" data-term-live><i class="dot" aria-hidden="true"></i><span></span></span></div><div class="term-state" hidden></div><div class="term-wrap"><div class="term-screen"></div><pre class="term-plain" hidden></pre></div><div class="term-ask" hidden role="group" aria-label="Paste"></div><div class="term-hint small muted" aria-live="polite"></div>`;
+    s.box.addEventListener('click', (e) => termClick(w, e));
+    new IntersectionObserver((es) => { for (const e of es) s.seen = e.isIntersecting; termSync(); }).observe(s.box);
+  }
+  el.replaceChildren(s.box);
+  termPaint(w);
+}
+// Live: polled, typed into. Only the shown tab, only while the page is visible, its box on screen, and the hub hasn't
+// said its frame is hidden; never without a token or with the tabs refused.
+const termLive = (w) => !VIEWER && TERM.shown === w && document.visibilityState === 'visible' && termTab(w).seen && !TERM.hubHidden && !!TERM.token;
+// Which tab is shown (thDraw's, null for none): the + hidden and Wide shown on a terminal tab, the shown tab's poll
+// started, every other one stopped.
+function termSync(shown = TERM.shown) {
+  if (VIEWER) return;
+  TERM.shown = shown;
+  const root = document.documentElement;
+  root.classList.toggle('th-term', !!shown);
+  root.classList.toggle('th-wide', !!shown && termWide());
+  termWideButton();
+  for (const w of TERM_IDS) {
+    const s = termTab(w);
+    if (!termLive(w)) { clearTimeout(s.timer); s.timer = null; continue; }
+    if (w === 'shell' && !s.opened) { termOpen(); continue; }
+    if (!s.timer && !s.reading) termRead(w);
+  }
+}
+function termSchedule(w) {
+  const s = termTab(w);
+  clearTimeout(s.timer);
+  s.timer = termLive(w) ? setTimeout(() => { s.timer = null; termRead(w); }, s.screen?.state === 'gone' ? TERM_MS.gone : s.every) : null;
+}
+// One read of the screen: If-None-Match with the last etag (the gateway forces no-store, so the page keeps the
+// screen itself); a 304 keeps it. A read over 300 ms doubles the interval up to 2 s; a fast one brings it back.
+async function termRead(w) {
+  const s = termTab(w);
+  if (s.reading || !termLive(w)) return;
+  s.reading = true;
+  const t0 = performance.now();
+  let r = null;
+  try { r = await fetch(`/api/term/${w}/screen`, { cache: 'no-store', headers: s.etag ? { 'if-none-match': `"${s.etag}"` } : {} }); } catch { r = null; }
+  const took = performance.now() - t0;
+  let j = null;
+  if (r && r.status !== 304) j = await r.json().catch(() => null);
+  s.reading = false;
+  s.every = took > TERM_MS.slow ? Math.min(TERM_MS.most, Math.max(TERM_MS.slow, s.every * 2)) : TERM_MS.every;
+  if (r?.status === 403 && typeof j?.why === 'string') { TERM.why = j.why; TERM.token = null; thDraw(); return void termRedraw(); }
+  if (r?.ok && j?.v === 1) termScreen(w, j);
+  else if (!r || (r.status !== 304 && !r.ok)) { s.err = "The dashboard didn't answer; trying again."; termHint(w); }
+  termSchedule(w);
+}
+// A screen in hand (a read's, or a post's answer): kept with its etag and drawn. Shell's first live screen marks it
+// live; a gone one after that is a shell that ended.
+function termScreen(w, j) {
+  const s = termTab(w);
+  if (j.state === 'live') s.live = true;
+  s.screen = j;
+  s.etag = typeof j.etag === 'string' ? j.etag : null;
+  termPaint(w);
+}
+// Shell's open: posted once per page (and again from Open a new shell), with the panel's size at the largest font.
+async function termOpen() {
+  const s = termTab('shell');
+  if (s.opening || !TERM.token) return;
+  s.opening = true; s.opened = true; s.err = '';
+  const { cols, rows } = termFitSize(s);
+  let r = null, j = null;
+  try { r = await fetch('/api/term/shell/open', { method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ which: 'shell', page: TERM.page, token: TERM.token, cols, rows }) }); j = await r.json().catch(() => null); } catch { r = null; }
+  s.opening = false;
+  if (r?.ok && j?.v === 1) { s.live = false; termScreen('shell', j); }
+  else s.err = r?.status === 409 ? "The shell couldn't be opened: this project has no tmux session." : termWords(r, j);
+  termPaint('shell');
+  termSchedule('shell');
+}
+// The panel's size in cells at 12 px (the shell is made to fit it): terminal@1 §9's bounds.
+function termFitSize(s) {
+  const wrap = s.box?.querySelector('.term-wrap');
+  const w = Math.max(0, (wrap?.clientWidth ?? 348) - 2 * 16), h = Math.max(0, (wrap?.clientHeight ?? 600) - 16);
+  const cell = termCell(12);
+  return { cols: Math.min(500, Math.max(20, Math.floor(w / cell.w))), rows: Math.min(200, Math.max(5, Math.floor(h / cell.h))) };
+}
+// One cell of the mono font at px, measured once per size.
+const TERM_CELLS = new Map();
+function termCell(px) {
+  if (!TERM_CELLS.has(px)) {
+    const c = document.createElement('canvas').getContext('2d');
+    c.font = `${px}px ${getComputedStyle(document.documentElement).getPropertyValue('--mono') || 'monospace'}`;
+    TERM_CELLS.set(px, { w: c.measureText('W'.repeat(50)).width / 50 || px * 0.6, h: Math.ceil(px * 1.2) });
+  }
+  return TERM_CELLS.get(px);
+}
+// The font that fits the pane's columns in the box: 12 px down to a floor of 9; below that the screen scrolls sideways.
+function termFont(s) {
+  const wrap = s.box.querySelector('.term-wrap');
+  const room = wrap.clientWidth - parseFloat(getComputedStyle(wrap).paddingLeft) - parseFloat(getComputedStyle(wrap).paddingRight);
+  const cols = s.screen?.cols || 80;
+  for (let px = 12; px > 9; px--) if (termCell(px).w * cols <= room) return px;
+  return 9;
+}
+// The xterm theme from the page's tokens, in light and dark.
+function termTheme() {
+  const c = getComputedStyle(document.documentElement), v = (k) => c.getPropertyValue(k).trim();
+  return { background: v('--surface'), foreground: v('--fg'), cursor: v('--fg'), cursorAccent: v('--surface'), selectionBackground: 'rgba(82,168,255,.3)' };
+}
+// Draw the tab from what it has: a refusal's words, the supervisor not running, the shell ended, or the screen
+// (xterm, or the plain text when the library didn't load).
+function termPaint(w) {
+  const s = termTab(w);
+  if (!s.box) return;
+  const st = s.box.querySelector('.term-state'), wrap = s.box.querySelector('.term-wrap'), live = s.box.querySelector('[data-term-live]');
+  const state = (html, label) => { st.innerHTML = html; st.hidden = false; wrap.hidden = true; live.classList.add('off'); live.lastChild.textContent = label; termHint(w); };
+  if (TERM.why && TERM.why !== 'view') return void state(`<p>${esc(TERM_WHY_WORDS[TERM.why] ?? "The terminal tabs didn't answer. Reload the page to try again.")}</p>`, 'off');
+  const sc = s.screen;
+  if (w === 'shell' && sc?.state === 'gone' && s.live) return void state('<h3>The shell ended.</h3><button type="button" data-term-newshell>Open a new shell</button>', 'ended');
+  if (w === 'shell' && !sc && s.err) return void state(`<p>${esc(s.err)}</p><button type="button" data-term-newshell>Try again</button>`, 'not open');
+  if (w === 'supervisor' && sc?.state === 'gone') {
+    const box = hostHere(location, pageHello(location)?.name)?.box;
+    return void state(`<h3>The supervisor isn't running.</h3><p>To bring it back, run this in a terminal on this machine:</p><code>node docs/devteam/scripts/devteam.mjs recover</code>${box ? `<p><a class="linkish" data-term-terminal href="${esc(`${location.protocol}//${box}/#terminal`)}" target="_top">Open the Terminal page</a></p>` : ''}`, 'not running');
+  }
+  st.hidden = true; wrap.hidden = false;
+  live.classList.toggle('off', !sc || sc.state !== 'live');
+  live.lastChild.textContent = sc?.state === 'live' ? 'live' : 'reading…';
+  const plain = s.box.querySelector('.term-plain'), screen = s.box.querySelector('.term-screen');
+  if (!s.term && TERM.lib !== 'failed') {
+    termLib().then((Terminal) => { if (!s.term) termMake(w, Terminal); }, () => { TERM.lib = 'failed'; for (const x of TERM_IDS) termPaint(x); });
+  }
+  if (TERM.lib === 'failed') {
+    screen.hidden = true; plain.hidden = false;
+    plain.textContent = (sc?.lines ?? []).map(termText).join('\n');
+  } else if (s.term && sc?.state === 'live') {
+    if (s.term.cols !== sc.cols || s.term.rows !== sc.rows) s.term.resize(Math.max(1, sc.cols), Math.max(1, sc.rows));
+    const px = termFont(s);
+    if (s.term.options.fontSize !== px) s.term.options.fontSize = px;
+    const m = sc.modes ?? {};
+    s.term.write(`\x1b[?25l\x1b[H\x1b[2J\x1b[0m${sc.lines.map((l) => `${termSafe(l)}\x1b[0m`).join('\r\n')}\x1b[${(sc.cursor?.y ?? 0) + 1};${(sc.cursor?.x ?? 0) + 1}H${m.app_cursor ? '\x1b[?1h' : '\x1b[?1l'}${m.app_keypad ? '\x1b=' : '\x1b>'}${sc.cursor?.visible ? '\x1b[?25h' : ''}`);
+  }
+  termHint(w);
+}
+// The xterm for a tab, once: keys to the pane, Ctrl+] to leave, a paste asked about and sent whole.
+function termMake(w, Terminal) {
+  const s = termTab(w);
+  const screen = s.box.querySelector('.term-screen');
+  const sc = s.screen;
+  const term = new Terminal({ cols: sc?.cols || 80, rows: sc?.rows || 24, fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--mono'), fontSize: 12, theme: termTheme(), scrollback: 0, cursorBlink: false, allowProposedApi: false, disableStdin: false });
+  term.open(screen);
+  s.term = term;
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type === 'keydown' && e.ctrlKey && (e.key === ']' || e.code === 'BracketRight')) { term.blur(); document.querySelector('#th-tabs [role="tab"][aria-selected="true"]')?.focus(); return false; }
+    return true;
+  });
+  term.onData((d) => termKeys(w, termBytes(d)));
+  term.onBinary((d) => termKeys(w, Uint8Array.from(d, (c) => c.charCodeAt(0) & 255)));
+  // a paste: caught before xterm's own handler, asked about when it is more than one line, sent as one paste post
+  screen.addEventListener('paste', (e) => {
+    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+    const text = e.clipboardData?.getData('text/plain') ?? '';
+    if (text) termPaste(w, text);
+  }, true);
+  termPaint(w);
+}
+const termKeysOn = (w) => !!termTab(w).term && TERM.lib !== 'failed' && !!TERM.token && termTab(w).screen?.state === 'live';
+// Keys: queued behind the post in flight; queued data merges up to 4096 bytes, never across a paste.
+function termKeys(w, bytes) {
+  const s = termTab(w);
+  if (!termKeysOn(w) || !bytes.length) return;
+  for (let i = 0; i < bytes.length; i += TERM_DATA_MAX) {
+    const part = bytes.subarray(i, i + TERM_DATA_MAX), last = s.queue[s.queue.length - 1];
+    if (last?.data && last.data.length + part.length <= TERM_DATA_MAX) { const m = new Uint8Array(last.data.length + part.length); m.set(last.data); m.set(part, last.data.length); last.data = m; }
+    else s.queue.push({ data: part });
+  }
+  termPump(w);
+}
+// A paste: more than one line asks "Paste N lines?" first; too large for one post is refused here, whole.
+function termPaste(w, text) {
+  const s = termTab(w);
+  if (!termKeysOn(w)) return;
+  if (termBytes(JSON.stringify({ which: w, pane: s.screen.pane, page: TERM.page, seq: s.seq + 1, paste: text, token: TERM.token })).length > TERM_BODY_MAX) { s.err = 'That paste is too large to send in one piece, so nothing was sent.'; return void termHint(w); }
+  const n = text.split(/\r\n|\r|\n/).length;
+  if (n < 2) { s.queue.push({ paste: text }); return void termPump(w); }
+  s.ask = { text, n };
+  const ask = s.box.querySelector('.term-ask');
+  ask.innerHTML = `<span>Paste ${n} lines?</span><button type="button" data-term-paste="yes">Paste</button><button type="button" class="ghost" data-term-paste="no">Cancel</button>`;
+  ask.hidden = false;
+  ask.querySelector('[data-term-paste="yes"]').focus();
+}
+// One post in flight per tab: the next queued one when it is answered. Never retried: a failure shows its words and
+// drops the queue. A taken post records whether it left the owner's line open (the waiting note's rule).
+async function termPump(w) {
+  const s = termTab(w);
+  if (s.inflight || !s.queue.length) return;
+  const item = s.queue.shift();
+  s.inflight = true;
+  const body = { which: w, pane: s.screen?.pane, page: TERM.page, seq: ++s.seq, ...(item.data ? { data: termHex(item.data) } : { paste: item.paste }), token: TERM.token };
+  let r = null, j = null;
+  try { r = await fetch(`/api/term/${w}/keys`, { method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); j = await r.json().catch(() => null); } catch { r = null; }
+  s.inflight = false;
+  if (r?.ok && j?.v === 1) {
+    if (j.taken) { const b = item.data; s.own = b && (b[b.length - 1] === 0x0d || b[b.length - 1] === 0x03) ? 'done' : 'open'; }
+    s.err = '';
+    termScreen(w, j);
+    return void termPump(w);
+  }
+  s.queue = [];
+  s.err = termWords(r, j);
+  if (r?.status === 403 && j?.why) { TERM.why = j.why; TERM.token = null; thDraw(); termRedraw(); }
+  // the pane moved or went: read it again now
+  if (r?.status === 423 || r?.status === 409) { s.etag = null; clearTimeout(s.timer); s.timer = null; termRead(w); }
+  termHint(w);
+}
+// A refused post's words: the server's plain words (terminal@1 §4), else what happened.
+function termWords(r, j) {
+  if (!r) return "The dashboard didn't answer, so nothing more was sent.";
+  if (r.status === 503) return 'The terminal is busy. Try again in a moment.';
+  if (r.status === 413) return 'That is too large to send, so nothing was sent.';
+  // the server's own words only for a refusal the contract names (4xx); a 5xx's text may be an exception's
+  if (r.status >= 500) return 'The dashboard had a problem, so nothing more was sent.';
+  return typeof j?.error === 'string' && j.error ? `${j.error[0].toUpperCase()}${j.error.slice(1)}.`.replace(/\.\.$/, '.') : `The dashboard answered ${r.status}, so nothing more was sent.`;
+}
+// The line under the screen: an error; the waiting note (held lines over 2 minutes behind this page's own open line,
+// supervisor ruling 2026-11-18: the count alone never shows it); typing off without the library; else how to leave.
+function termHint(w) {
+  const s = termTab(w);
+  const h = s.box?.querySelector('.term-hint');
+  if (!h) return;
+  const held = s.screen?.held;
+  let html;
+  if (s.err) html = `<span class="err">${esc(s.err)}</span>`;
+  else if (w === 'supervisor' && s.own === 'open' && held && held.count > 0 && held.oldest_ms >= 120000) html = `<span data-term-waiting>Messages for the supervisor are waiting until you send or clear your line.${held.prompt === 'unknown' ? ' Press Enter or Ctrl+C here to let them through.' : ''}</span>`;
+  else if (TERM.lib === 'failed') html = "<span>The terminal couldn't load, so typing is off. This is the screen as text.</span>";
+  else if (s.screen?.state === 'live') html = '<span>Click the screen to type.</span> <span><kbd>Ctrl</kbd> <kbd>]</kbd> to leave it.</span>';
+  else html = '';
+  if (h.innerHTML !== html) h.innerHTML = html;
+}
+function termRedraw() { for (const w of TERM_IDS) termPaint(w); termSync(); }
+// A press in a tab's box: the paste question, Open a new shell.
+function termClick(w, e) {
+  const s = termTab(w);
+  const p = e.target.closest('[data-term-paste]');
+  if (p && s.ask) {
+    const { text } = s.ask;
+    s.ask = null;
+    s.box.querySelector('.term-ask').hidden = true;
+    if (p.dataset.termPaste === 'yes') { s.queue.push({ paste: text }); termPump(w); }
+    s.term?.focus();
+    return;
+  }
+  if (e.target.closest('[data-term-newshell]') && w === 'shell') { s.screen = null; s.etag = null; s.live = false; termOpen(); }
+}
+// Wide (design, Size): a toggle in the panel's head, shown on a terminal tab, widening the panel to half the window
+// (html.th-wide, #term-css), remembered per browser.
+function termWide() { try { return localStorage.getItem(TERM_WIDE_KEY) === '1'; } catch { return false; } }
+function termWideButton() {
+  const end = document.querySelector('.threads-head .end');
+  if (!end) return;
+  let b = $('th-wide');
+  if (!b) {
+    b = document.createElement('button');
+    b.type = 'button'; b.id = 'th-wide'; b.className = 'ghost icon-btn';
+    b.setAttribute('aria-label', 'Wide'); b.title = 'Wide: the panel takes half the window';
+    b.innerHTML = '<i class="icon-panel-left-open" aria-hidden="true"></i>';
+    b.addEventListener('click', () => {
+      const on = !termWide();
+      try { localStorage.setItem(TERM_WIDE_KEY, on ? '1' : '0'); } catch {}
+      termSync();
+      setTimeout(() => { for (const w of TERM_IDS) termPaint(w); }, 0);
+    });
+    end.prepend(b);
+  }
+  b.hidden = !TERM.shown;
+  const on = String(termWide());
+  if (b.getAttribute('aria-pressed') !== on) b.setAttribute('aria-pressed', on);
+}
+if (!VIEWER) {
+  termToken();
+  document.addEventListener('visibilitychange', () => termSync());
+  // the hub's word that this frame is hidden or shown (dashboard-shell@3; kit-616 sends it): only from the hub,
+  // the parent on another origin, as the hub's other messages are taken
+  window.addEventListener('message', (ev) => {
+    if (window.parent === window || ev.source !== window.parent || ev.origin === location.origin || ev.origin === 'null') return;
+    const m = ev.data;
+    if (!m || typeof m !== 'object' || m.devteam !== 'hub-visible' || typeof m.visible !== 'boolean') return;
+    TERM.hubHidden = !m.visible;
+    termSync();
+  });
+  addEventListener('resize', () => { for (const w of TERM_IDS) if (termTab(w).term) termPaint(w); });
+  matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => { for (const w of TERM_IDS) if (termTab(w).term) termTab(w).term.options.theme = termTheme(); });
+}
+/* term-js end */
 
 // Not under someone mid-action: a redraw replaces the controls it draws, so typing, an IME
 // composition, an open select or file picker, a press not yet released (the click would land on
