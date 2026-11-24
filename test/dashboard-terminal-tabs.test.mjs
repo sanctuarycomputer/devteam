@@ -482,7 +482,7 @@ test("terminal A14b: the page asks GET /api/term/token once on load, before any 
   }
 });
 
-test('terminal A14b: held over 2 minutes on an unknown prompt adds the Enter hint; app_cursor makes ArrowUp ESC O A; a slow read backs off to 2 s and a fast one comes back', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+test('terminal A14b: held over 2 minutes on an unknown prompt adds the Enter hint; app_cursor makes ArrowUp ESC O A', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
   const R = await open(t, { hash: '#overview?th=supervisor' });
   const hint = `document.querySelector('.term-box[data-term="supervisor"] .term-hint').textContent`;
   await focusScreen(R);
@@ -503,7 +503,11 @@ test('terminal A14b: held over 2 minutes on an unknown prompt adds the Enter hin
   await arrowUp(R.p);
   await sleep(600);
   assert.equal(R.posts().at(-1).data, hex('\x1bOA'), 'app_cursor: ESC O A');
-  R.fr.hooks.rewrite = null;
+});
+
+test('terminal A14b: a slow read backs off to 2 s and a fast one comes back', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=supervisor' });
+  await R.soon(`!!document.querySelector('.term-box[data-term="supervisor"] .xterm')`, 'drawn');
   // back-off: reads held 400 ms each; the gap after each grows to 2 s
   const reads = () => R.term(/\/supervisor\/screen$/);
   R.fr.hooks.delay = (p) => (p.endsWith('/screen') ? 400 : 0);
