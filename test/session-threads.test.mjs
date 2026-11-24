@@ -283,6 +283,15 @@ test('kit-109 session-bound threads', { skip: NO_TMUX, timeout: 600000 }, async 
     const u = F.lineOf(r.out.split('\n')[0]);
     assert.deepEqual([u.by, u.file], [W, `${W}.jsonl`], r.err);
   });
+  await t.test("S3l: thread show names the session on its turn and on an owner turn routed to it, never as the supervisor's", () => {
+    const r = F.run(F.old, ['thread', 'reply', tw.T, '--refs', `ticket:${W}`, '--', 'The colour is done too'], WORKER(W));
+    assert.equal(r.status, 0, r.err);
+    const u = r.out.split('\n')[0];
+    const shown = F.sup(['thread', 'show', tw.T]);
+    assert.ok(shown.includes(`the agent on ${W} (${W}) (${u})`), `its turn: ${shown.slice(-600)}`);
+    assert.ok(!shown.includes(`supervisor (${u})`), 'never the supervisor\'s');
+    assert.match(shown, new RegExp(`owner \\(u-[^)]+\\)[^\\n]*, routed to the agent on ${W} \\(${W}\\)`), 'the routed owner turn names it');
+  });
   await t.test('S3b: another ticket writer is refused, writing nothing', () => {
     const before = F.logSizes();
     const r = F.run(F.old, ['thread', 'reply', tw.T, 'not mine'], WORKER(X));
@@ -674,6 +683,7 @@ for (const f of ['process/worker.md', 'process/planning.md']) {
   test(`S8b ${f}: plain words, no commands, flags or ids except as --refs (R2)`, () => assert.match(section(f, 'Threads bound to you'), /plain words[^\n]*no commands, flags or ids[^\n]*--refs/i));
   test(`S8c ${f}: stay within your ticket or plan; the owner's instruction binds only through the supervisor`, () => { const x = section(f, 'Threads bound to you'); assert.match(x, /within your (ticket|plan)/i); assert.match(x, /only through the supervisor/i); });
   test(`S8d ${f}: hand over the rest with send supervisor --kind handoff --thread`, () => assert.match(section(f, 'Threads bound to you'), /send supervisor "[^"]*" --kind handoff --thread/));
+  test(`S8h ${f}: an artifact thread is bound only for replying and handing over; its owner turns are never typed to you (a-20261123-042800922)`, () => { const x = section(f, 'Threads bound to you'); assert.match(x, /artifact drawn in your worktree is bound to you only for replying and handing over: its owner turns are never typed into your pane/); assert.doesNotMatch(x.split('\n').find((l) => /typed into your pane as/.test(l)).split('typed into your pane as')[0], /artifact/); });
 }
 test("S8e supervisor.md §13: a bound thread is the responder's when its session isn't live, has session-overdue open, or session_threads is off", () => {
   const x = section('process/supervisor.md', '13\\. The responder');

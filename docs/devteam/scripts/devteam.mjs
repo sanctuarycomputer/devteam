@@ -2587,9 +2587,13 @@ const byTime = (a, b) => a.created_at.localeCompare(b.created_at);
 // A message is handled when a reply cites it (--re), or when the supervisor routed it to the owner
 // as a question that cites it (ask --re): then it waits on the owner, which the question shows.
 // A handoff is closed only by the supervisor's re (kit-109, ruling a-20261123-051656528): a session's
-// hand-written line naming its own handoff closes nothing (handoffClosers, also openHandoffs').
-const handoffClosers = (xs, isHandoff) => new Set(xs.filter((x) => x.re && (!isHandoff(x.re) || x.created_by === 'supervisor')).map((x) => x.re));
-const handledMessages = () => { const msgs = logObjects('message'); const h = new Set(msgs.filter((m) => m.kind === 'handoff').map((m) => m.id)); return handoffClosers([...msgs, ...logObjects('question')], (id) => h.has(id)); };
+// hand-written line naming its own handoff closes nothing. From the log, or from a fold's objects
+// (openHandoffs), by one rule.
+const handledMessages = (objects = null) => {
+  const xs = objects ? [...objects.values()].filter((o) => o.type === 'message' || o.type === 'question') : [...logObjects('message'), ...logObjects('question')];
+  const handoffs = new Set(xs.filter((m) => m.type === 'message' && m.kind === 'handoff').map((m) => m.id));
+  return new Set(xs.filter((x) => x.re && (!handoffs.has(x.re) || x.created_by === 'supervisor')).map((x) => x.re));
+};
 
 // What the owner saw: the question with every field it was asked with (later lines may only add
 // the supervisor's status, reason and rating, and the owner's own fields). The rating (stake,
@@ -11260,7 +11264,7 @@ function cmdThread() {
     for (const u of v.turns) {
       // the responder's turns name it (the view keeps them on the supervisor's side); a pending one says so
       // an owner turn names its route (kit-104), so the responder can see which turns are the supervisor's
-      out(`${u.at} ${u.writer === 'responder' ? 'responder' : u.by} (${u.id})${lines.get(u.id)?.pending === true ? ' (pending)' : ''}${typeof lines.get(u.id)?.re === 'string' ? ` (following up ${lines.get(u.id).re})` : ''}${u.routed_to ? `, routed to the ${u.routed_to}` : ''}${u.question ? `, asking ${u.question}` : ''}${typeof lines.get(u.id)?.off_subject === 'string' ? `, off subject: ${quoteData(lines.get(u.id).off_subject)}` : ''}:`);
+      out(`${u.at} ${u.writer === 'responder' ? 'responder' : ['ticket', 'planner'].includes(writerClass(u.writer)) ? `${sessionWords(u.writer, lines)} (${u.writer})` : u.by} (${u.id})${lines.get(u.id)?.pending === true ? ' (pending)' : ''}${typeof lines.get(u.id)?.re === 'string' ? ` (following up ${lines.get(u.id).re})` : ''}${u.routed_to === 'session' && typeof u.routed_session === 'string' ? `, routed to ${sessionWords(u.routed_session, lines)} (${u.routed_session})` : u.routed_to ? `, routed to the ${u.routed_to}` : ''}${u.question ? `, asking ${u.question}` : ''}${typeof lines.get(u.id)?.off_subject === 'string' ? `, off subject: ${quoteData(lines.get(u.id).off_subject)}` : ''}:`);
       // its own line breaks, a tab as the space it stands for, and nothing else a terminal acts on
       // (an escape, a bidi override, a CR)
       out(u.text.replace(/\t/g, ' ').replace(UNSAFE_TEXT_ALL, (c) => (c === '\n' ? c : '')).split('\n').map((l) => `  ${l}`).join('\n'));
@@ -35547,7 +35551,7 @@ function responderOverdue(objects, now = Date.now(), byThread = turnsByThread(ob
 // it (settledByLanding) and named by no reply's re, the newest per thread (an older one when the
 // newest was answered). Map thread -> message id.
 function openHandoffs(objects = readLog().objects) {
-  const replied = handoffClosers([...objects.values()].filter((o) => o.type === 'message' || o.type === 'question'), (id) => objects.get(id)?.type === 'message' && objects.get(id).kind === 'handoff');
+  const replied = handledMessages(objects);
   const m = new Map();
   for (const o of [...objects.values()].filter((x) => x.type === 'message' && x.kind === 'handoff' && x.to === 'supervisor' && typeof x.thread === 'string').sort(byTime)) {
     if (!replied.has(o.id) && !settledByLanding(o)) m.set(o.thread, o.id);

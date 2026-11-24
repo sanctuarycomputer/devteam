@@ -108,7 +108,7 @@ The supervisor turns recurring observations into lessons, and accepted lessons r
 
 ### Threads bound to you
 
-A thread about your ticket (its subject is `ticket:<your id>`, a preview you offered, or an artifact drawn in your worktree) is bound to you. While you are at work, the owner's turns there are typed into your pane as `[devteam thread <t-id> from owner on …]`, and reach no one else.
+A thread about your ticket (its subject is `ticket:<your id>`, or a preview you offered) is bound to you. While you are at work, the owner's turns there are typed into your pane as `[devteam thread <t-id> from owner on …]`, and reach no one else. A thread about an artifact drawn in your worktree is bound to you only for replying and handing over: its owner turns are never typed into your pane, and go where the owner hands them.
 
 - Reply first, with `devteam.mjs thread reply <t-id> "…"`, to the turns routed to you; the reply prints the turns it answers (`answering <u-id>: "…"`), so read each one (`thread show <t-id>`). Add `--pending` when work follows, and follow it up with `--re <that reply's u-id>`.
 - Write in plain words, as to a person: no commands, flags or ids except as `--refs <type>:<id>` (`--refs ticket:<id>`, `--refs act:a-…`).
