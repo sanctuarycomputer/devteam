@@ -229,8 +229,9 @@ test('kit-109 session-bound threads', { skip: NO_TMUX, timeout: 600000 }, async 
     F.g(['checkout', '-q', 'main'], F.old);
     F.g(['merge', '-q', '--no-ff', '-m', `Merge pull request #9 from o/ticket/${M}`, `ticket/${M}`], F.old);
     F.g(['push', '-q', 'origin', 'main'], F.old);
-    // its merge act, as a real merge has: no high finding wakes wait (S5b, S5f)
-    F.sup(['act', '--class', 'merge-word', '--refs', M, '--', 'merged the fixture']);
+    // its merge act, as a real merge has, naming the ticket and the head it merged: no high finding
+    // wakes wait (S5b, S5f), nor once merged-without-merge's 2 minutes pass (kit-808)
+    F.sup(['act', '--class', 'merge-word', '--refs', M, '--', `merged the fixture at ${F.g(['rev-parse', `ticket/${M}`], F.old)}`]);
     const tm = F.newThread(item(`ticket:${M}`));
     const o = F.lineOf(tm.U);
     assert.ok(o.routed_to === 'responder' && o.routed_session === undefined, `fell through to the responder: ${o.routed_to}/${o.routed_session}`);
