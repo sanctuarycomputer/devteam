@@ -109,6 +109,13 @@ async function box(t, name, { real = null } = {}) {
   const host = `box.localhost:${port}`;
   const on = (label) => `${label}.${host}`;
   // A browser's request: Host, and for a write its page's own Origin, unless the test says otherwise.
+  // a post that sends `sent` bytes of a `whole`-byte body and then stalls: what the gateway answers, if it answers
+  const stall = (h, route, sent, whole, cookie, ms = 3000) => new Promise((resolve) => {
+    const r = http.request({ host: '127.0.0.1', port, method: 'POST', path: route, setHost: false, headers: { host: h, origin: `http://${h}`, 'content-type': 'application/json', 'content-length': whole, cookie, ...SAME } }, (res) => { res.resume(); res.on('end', () => { clearTimeout(timer); r.destroy(); resolve({ status: res.statusCode, connection: res.headers.connection }); }); });
+    const timer = setTimeout(() => { r.destroy(); resolve({ status: 'no answer' }); }, ms);
+    r.on('error', () => {});
+    r.write('x'.repeat(sent));
+  });
   const at = (h, method, route, { body, headers = {}, cookie = '' } = {}) => new Promise((resolve, reject) => {
     const data = body === undefined ? null : Buffer.isBuffer(body) || typeof body === 'string' ? Buffer.from(body) : Buffer.from(JSON.stringify(body));
     const hd = { host: h, ...(method !== 'GET' && method !== 'HEAD' ? { origin: `http://${h}`, 'content-type': 'application/json' } : {}), ...(cookie ? { cookie } : {}), ...headers };
@@ -146,7 +153,7 @@ async function box(t, name, { real = null } = {}) {
   await until(async () => (await at(on('rec'), 'GET', '/ready', { cookie: owner })).status === 200, 'rec through the gateway');
   rec.seen.length = 0;
   rec.arrived.length = 0;
-  return { g, dir, port, publicUrl, host, on, at, owner, view, rec: rec.seen, held: rec.held, app: app.seen, arrived: rec.arrived };
+  return { g, dir, port, publicUrl, host, on, at, stall, owner, view, rec: rec.seen, held: rec.held, app: app.seen, arrived: rec.arrived };
 }
 // What the gateway signed: the bytes of terminal@1 §3, from the headers an instance received.
 const signedBytes = (domain, port, which, h, body) => Buffer.from(`${domain}\n${port}\n${which}\n${h['x-devteam-gateway-ts']}\n${h['x-devteam-gateway-nonce']}\n${sha(body).toString('hex')}`);
@@ -299,6 +306,10 @@ test('terminal A9: a terminal post over 100 KB is refused 413 before it is forwa
     await new Promise((ok) => setTimeout(ok, 100));
     assert.equal(B.rec.length, 0, `${route} at 5 x 100 KB: nothing forwarded`);
     assert.deepEqual(B.arrived, [], `${route} at 5 x 100 KB: nothing reached the instance`);
+    // past four times over the gateway answers at once and closes, without waiting for the rest
+    const early = await B.stall(rec, route, 4 * CAP + 4096, 8 * CAP, B.owner);
+    assert.deepEqual(early, { status: 413, connection: 'close' }, `${route}: cut off past 4 x 100 KB, before the body ends`);
+    assert.deepEqual(B.arrived, [], `${route} cut off: nothing reached the instance`);
     B.rec.length = 0;
     const ok = await B.at(rec, 'POST', route, { cookie: B.owner, body: pad(CAP), headers: SAME });
     assert.equal(ok.status, 200, `${route} at exactly 100 KB: ${ok.text}`);
