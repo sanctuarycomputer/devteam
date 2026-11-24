@@ -5,6 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import vm from 'node:vm';
 import { kit, fleetFixture, write, json } from './lib/kit.mjs';
@@ -638,5 +639,43 @@ test('validate: a deep chain beside enough ready tickets is not serial, and name
     assert.equal(w.length, 1, w.join(' | '));
     assert.doesNotMatch(w[0], /only serialize/);
     assert.match(w[0], /find dependencies a contract ticket or a split could break/);
+  } finally { F.done(); }
+});
+
+test('validate --plan: a done-when quoting text a test at main asserts warns when the test is outside the ticket\'s touches', () => {
+  const F = partsProject('parts-tests-outside', []);
+  try {
+    fs.mkdirSync(path.join(F.old, 'test'), { recursive: true });
+    fs.mkdirSync(path.join(F.old, 'app'), { recursive: true });
+    fs.writeFileSync(path.join(F.old, 'app/banner.txt'), 'Saving changes\n');
+    // the command line sits in a test file too, so only the command exclusion keeps it out; and text
+    // a regex or a leading - would misread, for the fixed-string grep
+    fs.writeFileSync(path.join(F.old, 'test/banner.test.mjs'), "assert.match(page, /Saving changes/);\n// run: node test/run.mjs test/banner.test.mjs\nassert.ok(page.includes('Saved (1) [ok]*'));\nassert.ok(argv.includes('--keep-draft'));\nassert.ok(toast === 'Saved it');\n");
+    fs.writeFileSync(path.join(F.old, 'docs-note.md'), 'The banner says Saving changes.\n');
+    F.g(['add', '-A'], F.old);
+    F.g(['commit', '-qm', 'banner and its test'], F.old);
+    F.g(['push', '-q', 'origin', 'main'], F.old);
+    F.ticket('app-51-banner', ['app/banner.txt'], { done_when: ['the banner no longer says "Saving changes" (`node test/run.mjs test/banner.test.mjs` passes)'] });
+    const warns = (args = ['--plan', 'chores']) => { const r = F.run(F.old, ['validate', ...args], SUP); return `${r.out}\n${r.err}`.split('\n').filter((l) => l.includes('app-51-banner: its done-whens quote')); };
+    const w = warns();
+    assert.equal(w.length, 1, w.join(' | '));
+    assert.match(w[0], /^warning: app-51-banner: its done-whens quote text that tests at main assert, in files its touches don't cover: "Saving changes" in test\/banner\.test\.mjs\. If the ticket changes that text, add those tests to its touches \(D4\)$/);
+    assert.doesNotMatch(w[0], /docs-note\.md/, 'only test files count');
+    assert.doesNotMatch(w[0], /node test\/run/, 'a command line is not a quote');
+    assert.deepEqual(warns([]), [], 'off a plan branch and without --plan: not checked');
+    // a short quote can't pair with the next one's opening mark; regex characters and a leading -
+    // are matched as text; and from a subdirectory the grep still searches the whole repo
+    F.ok(F.old, ['ticket', 'set', 'app-51-banner', '--json', JSON.stringify({ done_when: ['the page reads "OK" and the toast says "Saved it"', 'the badge shows `Saved (1) [ok]*`', 'the flag `--keep-draft` is gone'] })], SUP);
+    const sub = (() => { const r = spawnSync(process.execPath, [path.join(F.old, 'docs/devteam/scripts/devteam.mjs'), 'validate', '--plan', 'chores'], { cwd: path.join(F.old, 'docs/devteam'), env: F.env(SUP), encoding: 'utf8' }); return `${r.stdout}\n${r.stderr}`.split('\n').filter((l) => l.includes('app-51-banner: its done-whens quote')); })();
+    assert.equal(sub.length, 1, sub.join(' | '));
+    assert.match(sub[0], /"Saved it" in test\/banner\.test\.mjs/);
+    assert.match(sub[0], /"Saved \(1\) \[ok\]\*" in test\/banner\.test\.mjs/);
+    assert.match(sub[0], /"--keep-draft" in test\/banner\.test\.mjs/);
+    assert.doesNotMatch(sub[0], /"and the toast says"/, 'quotes pair as written');
+    F.ok(F.old, ['ticket', 'set', 'app-51-banner', '--json', JSON.stringify({ done_when: ['the banner no longer says "Saving changes" (`node test/run.mjs test/banner.test.mjs` passes)'] })], SUP);
+    F.touches('app-51-banner', ['app/banner.txt', 'test/banner.test.mjs']);
+    assert.deepEqual(warns(), [], 'the test in its touches: no warning');
+    F.touches('app-51-banner', ['app/banner.txt', 'test/']);
+    assert.deepEqual(warns(), [], 'a folder covering the test: no warning');
   } finally { F.done(); }
 });
