@@ -19,11 +19,11 @@
 #
 # Render: New > Web Service > this repo (or a fork), Language: Docker, Dockerfile path:
 #   cloud/Dockerfile, build context: the repo root. Instance: Pro (4 GB) or larger; a free one
-#   sleeps, and sleeping stops every agent. Auto-Deploy: Off; the box deploys at each release
+#   sleeps, and sleeping stops every agent. Auto-Deploy: Off; the box deploys at each minor (vX.Y.0)
 #   instead (.github/workflows/box-deploy.yml, with the service's Deploy Hook as the secret
 #   RENDER_DEPLOY_HOOK of the GitHub environment "box", never a repo secret, and that environment
-#   accepting only v* tags, with no approval step: every release deploys by itself, the owner's
-#   choice; the README's "deploy gate" says why. Agents share the owner's gh
+#   accepting only v* tags, with no approval step: each minor deploys by itself, the owner's
+#   choice, and a patch lands in place; the README's "deploy gate" says why. Agents share the owner's gh
 #   login, so this raises the bar and isn't a hard boundary). A deploy restarts the box; each
 #   supervisor that was running comes back at boot (box-recover, ~/.box/recover.log), and brings back its
 #   fleet; the operator (window 0) checks it, and notes what couldn't start in ~/operator/NOTES.md. Disk: mounted at /data. Health check path: /healthz. Environment: DEVTEAM_PUBLIC_URL=https://box.example.com. Custom domains:
@@ -70,7 +70,7 @@ RUN curl -fsSL --retry 5 --retry-all-errors https://www.postgresql.org/media/key
  && rm -rf /var/lib/apt/lists/*
 
 # The box's tools, each pinned only in the ARGs just above the layer that installs it. Bumped by
-# `devteam.mjs box-pins bump` at each release (or by hand), and redeployed with it.
+# `devteam.mjs box-pins bump` at each minor (or by hand), and redeployed with it.
 #   Names: <TOOL>_VERSION, and for a downloaded binary <TOOL>_SHA256_X86_64 and <TOOL>_SHA256_AARCH64
 #   (the release's published sha256 for each arch). One ARG per line, the value unquoted, in that
 #   order, right above the tool's RUN; no version or sum is written anywhere else in this file.
@@ -151,8 +151,8 @@ RUN usermod -l dev -d /data/home node && groupmod -n dev node \
 RUN install -d -m 755 /opt/devteam
 COPY --chmod=644 cloud/gateway.mjs /opt/devteam/gateway.mjs
 COPY --chmod=644 docs/devteam/dashboard/hub.html /opt/devteam/hub.html
-# The kit, whole (it reads its schema beside it), as of the release this image was built for:
-# box-deploy.yml deploys every release, so a repo's kit can be newer than this one, or older. The box's
+# The kit, whole (it reads its schema beside it), as of the minor this image was built for:
+# box-deploy.yml deploys at each minor, so a repo's kit can be newer than this one, or older. The box's
 # own commands (box-status, box-tell, box-alert, box-thread, box-recover) run it against every repo, and need it
 # to be neither: what a repo says about itself comes from that repo's own kit (its help, hello,
 # questions, settings, recover), and this one only reads tmux and the plain files a kit leaves. A
