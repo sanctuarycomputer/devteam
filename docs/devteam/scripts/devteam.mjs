@@ -3970,6 +3970,40 @@ function partsAtMain(repoName, file) {
 const isSplitFile = (file, s = loadSettings()) => Array.isArray(s.split_files) && s.split_files.some((g) => typeof g === 'string' && pathMatches(g, file));
 // A file this long at main is big: a whole-file claim on it that orders two tickets warns (validate).
 const BIG_FILE_LINES = 1500;
+// A test file, by the usual layouts: a test/, tests/, spec/ or __tests__/ folder, or a name ending
+// .test.<ext>, .spec.<ext>, _test.<ext> or _spec.rb.
+const TEST_FILE_RE = /(^|\/)(test|tests|spec|__tests__)\/|[._](test|spec)\.[a-z0-9]+$|_spec\.rb$/;
+// The text a done-when quotes: `code` spans and "strings", 4 to 80 characters, not a path or a
+// command line (those name what runs, not what a test asserts).
+function doneWhenQuotes(t) {
+  const out = new Set();
+  for (const d of t.done_when ?? []) {
+    if (typeof d !== 'string') continue;
+    for (const m of d.matchAll(/`([^`\n]{4,80})`|"([^"\n]{4,80})"|\u201c([^\u201d\n]{4,80})\u201d/g)) {
+      const q = (m[1] ?? m[2] ?? m[3]).trim();
+      if (q.length < 4 || q.includes('/') || /^(node|npm|npx|git|bin\/|bundle|yarn|pnpm|make|cd|devteam)\b/.test(q)) continue;
+      out.add(q);
+      if (out.size >= 12) return [...out];
+    }
+  }
+  return [...out];
+}
+// [quote, test files at main that hold it and no touches entry of t covers], for each quote that has any.
+function testsOutsideTouches(t) {
+  const rn = repoOfTicketLink(t);
+  if (!repoReadable(rn)) return [];
+  const R = repo(rn);
+  const ref = R.mainRef();
+  if (!ref) return [];
+  const covered = (f) => (t.touches ?? []).some((g) => { const p = trimSlash(touchPath(g)); return pathMatches(p, f) || f.startsWith(`${p}/`); });
+  const out = [];
+  for (const q of doneWhenQuotes(t)) {
+    const hits = (R.git(['grep', '-l', '-F', '-e', q, ref, '--']) ?? '').split('\n').filter(Boolean).map((l) => l.slice(ref.length + 1));
+    const missed = hits.filter((f) => TEST_FILE_RE.test(f) && !covered(f));
+    if (missed.length) out.push([q, missed]);
+  }
+  return out;
+}
 // Whether two touches entries of tickets in one repo can collide (D4, ready). Paths that don't
 // overlap never do; a whole file or a glob overlaps as before. Two parts of one file: names that
 // exist at main collide when they cover a common leaf there; a name not there yet (path#+name, or
@@ -4941,6 +4975,15 @@ function cmdValidate() {
       if (big) ordered.push(`${a.id} depends on ${b.id}, and they share only ${[...big].map(([f, n]) => `${f} (${n} lines)`).join(', ')}, claimed whole`);
     }
     if (ordered.length) warnings.push(`a whole-file claim on a big file orders ${ordered.length} pair(s) of tickets: ${ordered.slice(0, 5).join('; ')}${ordered.length > 5 ? ` (+${ordered.length - 5} more)` : ''}. If a dependency is only there for D4, name the parts each changes (path#name; planning.md D4) so they can run at once`);
+    // D4's commonest miss in graph reviews: a done-when quotes text the ticket changes, and a test
+    // at main asserts that text, but the test isn't in the ticket's touches, so the build breaks a
+    // file it may not change. Checked for the feature being planned (its plan branch, or --plan),
+    // in a repo this machine reads: a warning, since the test may only mention the text.
+    if (planFeature) for (const t of live) {
+      if (t.feature !== planFeature) continue;
+      const missed = testsOutsideTouches(t);
+      if (missed.length) warnings.push(`${t.id}: its done-whens quote text that tests at main assert, in files its touches don't cover: ${missed.slice(0, 4).map(([q, fs_]) => `"${q}" in ${fs_.slice(0, 3).join(', ')}${fs_.length > 3 ? ` (+${fs_.length - 3})` : ''}`).join('; ')}${missed.length > 4 ? ` (+${missed.length - 4} more)` : ''}. If the ticket changes that text, add those tests to its touches (D4)`);
+    }
     const w = serialGraphWarning(live);
     if (w) warnings.push(scope ? `${w}; not ${scope}'s to fix` : w);
   }
