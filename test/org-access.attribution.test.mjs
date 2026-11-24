@@ -417,7 +417,9 @@ test('org-access A10: an owner session from before people sends no person header
     fs.writeFileSync(`${file}.tmp`, JSON.stringify(s), { mode: 0o600 });
     fs.renameSync(`${file}.tmp`, file);
     const q = ask('From before people?');
-    const r = await viaGateway('POST', '/api/answer', { on: label, cookie: cookies.owner, body: { id: q, answer: 'Yes' } });
+    // the browser's forged person and level ride along: with no person of the gateway's own to
+    // replace them, only their drop keeps them off the line (task-3 review F1)
+    const r = await viaGateway('POST', '/api/answer', { on: label, cookie: cookies.owner, body: { id: q, answer: 'Yes' }, headers: FORGED });
     assert.equal(r.status, 200, r.body);
     const a = ownerLines((l) => l.id === q && l.answer === 'Yes')[0];
     assert.deepEqual([!!a, a?.person], [true, undefined]);
