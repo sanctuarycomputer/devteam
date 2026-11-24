@@ -103,7 +103,9 @@ test('fast threads end to end (kit-107)', { skip: NO_TMUX, timeout: 290000 }, as
     w.exited = new Promise((resolve) => c.on('exit', () => resolve(true)));
     w.stop = () => { try { process.kill(-c.pid, 'SIGKILL'); } catch {} };
     for (let i = 0; i < 300 && looks() < 2 && c.exitCode === null; i++) await new Promise((resolve) => setTimeout(resolve, 100));
-    assert.ok(looks() >= 2 && c.exitCode === null, `wait is in its loop (${looks()} looks): ${w.out}`);
+    const up = looks() >= 2 && c.exitCode === null;
+    if (!up) w.stop();
+    assert.ok(up, `wait is in its loop (${looks()} looks): ${w.out}`);
     // woken within ms of real time, or false
     w.woke = (ms) => Promise.race([w.exited, new Promise((resolve) => setTimeout(() => resolve(false), ms))]);
     return w;
