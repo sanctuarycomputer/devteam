@@ -616,7 +616,9 @@ test("S7c: in Chrome a turn sent from the card into a live session's thread name
     }
     return last;
   };
-  assert.match(await send('Move the button', /\S/), new RegExp(`^Sent to the agent on ${W}\\.$`), 'typed into its pane');
+  // the turn can land (the page's refresh) before the send's own reply sets the line: wait for it
+  const sent = new RegExp(`^Sent to the agent on ${W}\\.$`);
+  assert.match(await send('Move the button', sent), sent, 'typed into its pane');
   F.kill(W);
   F.asking(W);
   assert.match(await send('and the colour', /^Held/), new RegExp(`^Held: the agent on ${W}'s terminal is asking something`), 'held');
