@@ -11190,7 +11190,7 @@ function cmdThread() {
       threadOpen(t.id, 'supervisor');
       appendLog({ type: 'thread', op: 'set', id: t.id, ready: { outcome, at: nowIso() }, shot: r.shot }, 'supervisor');
       written = true;
-      shotSweep(t.id, Date.now());
+      try { shotSweep(t.id, Date.now()); } catch (e) { warn(`old pictures not removed: ${e.message}`); }
       out(`proposed resolving ${t.id}: ${outcome}`);
       for (const l of r.lines) out(l);
       spoke(t);
@@ -13117,8 +13117,29 @@ function readySource(view, holds = shotHolds()) {
 }
 // The one way a mark gets its picture: { kind: 'ready' }, or { kind: 'addressed', by, draft }.
 const markShot = (view, mark) => noteShot(view, (mark.kind === 'ready' ? readySource(view) : noteSource({ ...view, check: 'addressed', shot: null, addressed: { by: mark.by, draft: mark.draft ?? null } }))?.at ?? null);
-// Old pictures removed (task 9).
-function shotSweep(id, now) {}
+// Old pictures removed, after a capture: in its thread all but the newest three stamps and the live
+// mark's; and the folder of any thread resolved over 14 days ago. Only names the kit writes, in folders
+// of threads the log knows, and never through a symlink.
+const SHOTS_KEPT = 3;
+const SHOTS_RESOLVED_MS = 14 * 86400000;
+const SHOT_NAME = /^(\d{8}-\d{9})-(?:light|dark)\.png(?:\.tmp)?$/;
+function shotSweep(id, now) {
+  logCache = null;
+  const { objects } = readLog();
+  const views = new Map(threadViews(objects).map((v) => [v.id, v]));
+  const dir = shotFolder(id);
+  if (dir) {
+    const named = fs.readdirSync(dir).map((f) => [f, SHOT_NAME.exec(f)?.[1]]).filter(([, stamp]) => stamp);
+    const kept = new Set([...[...new Set(named.map(([, stamp]) => stamp))].sort().slice(-SHOTS_KEPT), views.get(id)?.shot?.stamp]);
+    for (const [f, stamp] of named) if (!kept.has(stamp)) fs.rmSync(path.join(dir, f), { force: true });
+  }
+  for (const other of fs.readdirSync(shotsDir())) {
+    const v = other === id ? null : views.get(other);
+    if (!v || v.status !== 'resolved' || !shotFolder(other)) continue;
+    const closed = Date.parse(objects.get(other).updates.filter((u) => u.status !== undefined).pop()?.at ?? '');
+    if (now - closed > SHOTS_RESOLVED_MS) fs.rmSync(shotFolder(other), { recursive: true, force: true });
+  }
+}
 /* note-shots end */
 // An artifact's versions, newest first: its drafts (a worktree's copy that differs from main's), then
 // main's version (landed) and the ones before it (earlier), from the walk artifactTreeOk makes, so

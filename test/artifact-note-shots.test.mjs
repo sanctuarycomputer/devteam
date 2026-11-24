@@ -72,7 +72,16 @@ function shotKit() {
   let n = 0;
   const subject = (o = {}, anchor = {}) => ({ kind: 'artifact', slug: 'pricing', at: 'main', path: 'found.html', anchor: { selector: `#buy:not(.n${++n})`, tag: 'button', text: 'Start trial', rect: { x: 600, y: 400, w: 100, h: 60 }, ...anchor }, point: { x: 620, y: 420 }, ...o });
   const pointNote = (o = {}) => ({ kind: 'artifact', slug: 'pricing', at: 'main', path: 'found.html', point: { x: 40 + ++n / 1000, y: 20 }, ...o });
+  // a note as thread new leaves it, its two lines written by hand: a command saved on every test that
+  // only needs one to be there
+  let notes = 0;
   const note = async (s, { frame } = {}) => {
+    const ago = 900000 - ++notes * 1000;
+    const id = F.hand('owner', { type: 'thread', title: 'A note', ...(s ? { subject: s } : {}), ...(frame ? { frame } : {}) }, ago);
+    F.hand('owner', { type: 'turn', thread: id, text: 'Make it say Annual' }, ago - 500);
+    return id;
+  };
+  const noteByCommand = async (s, { frame } = {}) => {
     const r = await run(['thread', 'new', '--title', 'A note', ...(s ? [`--subject=${JSON.stringify(s)}`] : []), ...(frame ? [`--frame=${JSON.stringify(frame)}`] : []), '--', 'Make it say Annual']);
     assert.equal(r.status, 0, r.out);
     return /t-\d{8}-\d{9}-[a-z0-9-]+/.exec(r.stdout)[0];
@@ -85,7 +94,7 @@ function shotKit() {
   const light = (r) => png(fs.readFileSync(path.join(shots, r.id, `${r.line.shot.stamp}-light.png`)));
   const show = async (id) => JSON.parse((await run(['thread', 'show', id, '--json'], SUP)).stdout);
   const seen = (file) => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean) : []);
-  return (made = { F, DT, SUP, arts, shots, run, lines, last, logBytes, files, tree, subject, pointNote, note, ready, readyOn, light, show, seen, childEnv });
+  return (made = { F, DT, SUP, arts, shots, run, lines, last, logBytes, files, tree, subject, pointNote, note, noteByCommand, ready, readyOn, light, show, seen, childEnv });
 }
 
 // --- a PNG's pixels: every row filter undone (Chrome uses them all) ------------------------------------
@@ -168,7 +177,7 @@ test('C2a a pipe, no port, and a profile of its own that goes', async () => {
     assert.ok(a.find((x) => x.startsWith('--user-data-dir=')).slice(16).startsWith(`${TMP}${path.sep}`), 'a profile under the temp folder');
   }
   const profiles = [];
-  for (let i = 0; i < 2; i++) {
+  await Promise.all([0, 1].map(async () => {
     const wrap = fake('wrap-chrome.sh');
     const hook = seenFile();
     await k.readyOn(k.subject(), { CHROME_PATH: wrap.file, REAL_CHROME: chromePath, DEVTEAM_TEST_SHOT_SEEN: hook });
@@ -176,7 +185,7 @@ test('C2a a pipe, no port, and a profile of its own that goes', async () => {
     assert.ok(mine.length >= 1 && wrap.launches().length === mine.length, 'a launch line each launch');
     for (const p of mine) assert.ok(!fs.existsSync(p), `${p} is gone`);
     profiles.push(...mine);
-  }
+  }));
   assert.equal(new Set(profiles).size, profiles.length, 'no shared profile');
   assert.deepEqual(fs.readdirSync(TMP).filter((f) => /^dc|^devteam-shot-/.test(f)), [], 'no profile or temp folder is left');
 });
@@ -206,18 +215,6 @@ test('C8a no sandbox only when the operator says so, and only second', async () 
     assert.deepEqual(again.launches().map((a) => a.includes('--no-sandbox')), [false], String(v));
     assert.match(r2.out, /Chrome didn't start \(its sandbox may not be available here\); set DEVTEAM_CHROME_NO_SANDBOX=1 to allow one try without it/);
   }
-});
-
-test('C8a a Chrome that says nothing is killed with its children after 8 s', async () => {
-  const k = shotKit();
-  const hang = fake('hang-chrome.sh');
-  const started = Date.now();
-  const r = await k.readyOn(k.subject(), { CHROME_PATH: hang.file, DEVTEAM_CHROME_NO_SANDBOX: undefined });
-  const took = Date.now() - started;
-  assert.equal(r.status, 1);
-  assert.match(r.out, /Chrome didn't start/);
-  assert.ok(took >= 8000 && took < 16000, `${took} ms`);
-  await until(() => !spawnSync('ps', ['-eo', 'args'], { encoding: 'utf8' }).stdout.split('\n').includes('sleep 97531'), 'its child to be gone');
 });
 
 test('C8a a Chrome that dies once its page exists is not tried again', async () => {
@@ -263,13 +260,24 @@ test('C9 other threads: as before, no Chrome', async () => {
 
 const HOSTS = [.../const ARTIFACT_CDNS = (\[.*?\]);/.exec(SRC)[1].matchAll(/'https:\/\/([^']+)'/g), .../const ARTIFACT_FONT_HOSTS = (\[.*?\]);/.exec(SRC)[1].matchAll(/'https:\/\/([^']+)'/g)].map((m) => m[1]);
 
-test('C7a C7b C7c requests go to the capture and the allowed hosts alone', async () => {
+// The network checks' captures, taken together: what the hook said of each.
+let walls = null;
+const wall = (what) => (walls ??= (async () => {
   const k = shotKit();
-  const hook = seenFile();
   reached.length = 0;
-  await k.readyOn(k.subject({ path: 'requests.html' }), { DEVTEAM_TEST_SHOT_SEEN: hook, DEVTEAM_TEST_SHOT_NO_CSP: '1' });
+  const got = {};
+  await each([['requests', '1'], ['routes', '1'], ['leave', '1'], ['paths', '1'], ['assets', undefined]], async ([page, noCsp]) => {
+    const hook = seenFile();
+    await k.readyOn(k.subject({ path: `${page}.html` }), { DEVTEAM_TEST_SHOT_SEEN: hook, DEVTEAM_TEST_SHOT_NO_CSP: noCsp });
+    got[page] = k.seen(hook);
+  });
+  got.k = k;
+  return got;
+})()).then((got) => got[what]);
+
+test('C7a C7b C7c requests go to the capture and the allowed hosts alone', async () => {
+  const said = await wall('requests');
   assert.deepEqual(reached, [], 'the other server saw nothing');
-  const said = k.seen(hook);
   for (const u of [`${OTHER}/fetch`, `${OTHER}/img`, 'https://example.invalid/x', 'https://cdn.jsdelivr.net.evil.example/x']) assert.ok(said.includes(`fail ${u}`), `fail ${u}: ${said.join(' | ')}`);
   for (const u of ['https://cdn.jsdelivr.net/x', 'https://fonts.gstatic.com/x']) assert.ok(said.includes(`continue ${u}`), `continue ${u}`);
   assert.ok(said.some((l) => /^serve \/requests\.html csp=no$/.test(l)), 'the CSP is off, so the wall stands alone');
@@ -304,23 +312,18 @@ test('C7e the proxy flags: dead but for the capture and the allowed hosts', asyn
 });
 
 test('C7f no route to another server', async () => {
-  const k = shotKit();
-  const hook = seenFile();
-  reached.length = 0;
-  await k.readyOn(k.subject({ path: 'routes.html' }), { DEVTEAM_TEST_SHOT_SEEN: hook, DEVTEAM_TEST_SHOT_NO_CSP: '1' });
-  const said = k.seen(hook);
+  const said = await wall('routes');
   assert.deepEqual(reached, []);
   assert.ok(said.includes('serve /sw.js csp=no'), `the service worker was asked for: ${said.join(' | ')}`);
-  for (const t of ['ws', 'sw', 'rtc']) assert.ok(said.includes(`serve /tried-${t} csp=no`), `${t} was tried: ${said.join(' | ')}`);
+  for (const t of ['ws', 'sw', 'rtc', 'shared']) assert.ok(said.includes(`serve /tried-${t} csp=no`), `${t} was tried: ${said.join(' | ')}`);
   assert.ok(said.includes(`fail ${OTHER}/worker`), 'the worker fetched');
   assert.ok(said.includes(`fail ${OTHER}/moved`), 'the page tried to move');
 });
 
 test('C7f the page stays, and leaves no file', async () => {
-  const k = shotKit();
-  const hook = seenFile();
-  await k.readyOn(k.subject({ path: 'leave.html' }), { DEVTEAM_TEST_SHOT_SEEN: hook, DEVTEAM_TEST_SHOT_NO_CSP: '1' });
-  assert.ok(k.seen(hook).includes('fail https://unpkg.com/x.html'), k.seen(hook).join(' | '));
+  const k = await wall('k');
+  const said = await wall('leave');
+  assert.ok(said.includes('fail https://unpkg.com/x.html'), said.join(' | '));
   const left = [];
   const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.name.startsWith('left-behind')) left.push(path.join(d, e.name)); if (e.isDirectory()) walk(path.join(d, e.name)); } };
   for (const d of [k.F.home, TMP, k.F.old].filter((x) => fs.existsSync(x))) walk(d);
@@ -328,17 +331,12 @@ test('C7f the page stays, and leaves no file', async () => {
 });
 
 test('the capture serves the artifact\'s plain files and nothing else', async () => {
-  const k = shotKit();
-  const hook = seenFile();
-  await k.readyOn(k.subject({ path: 'paths.html' }), { DEVTEAM_TEST_SHOT_SEEN: hook, DEVTEAM_TEST_SHOT_NO_CSP: '1' });
-  assert.deepEqual(k.seen(hook).filter((l) => l.startsWith('serve /got-')), ['serve /got-plain csp=no']);
+  assert.deepEqual((await wall('paths')).filter((l) => l.startsWith('serve /got-')), ['serve /got-plain csp=no']);
 });
 
 test('C7g every file under the policy, and no hook outside tests', async () => {
-  const k = shotKit();
-  const hook = seenFile();
-  await k.readyOn(k.subject({ path: 'assets.html' }), { DEVTEAM_TEST_SHOT_SEEN: hook });
-  const served = k.seen(hook).filter((l) => l.startsWith('serve '));
+  const k = await wall('k');
+  const served = (await wall('assets')).filter((l) => l.startsWith('serve '));
   for (const f of ['/assets.html', '/app.js', '/app.css']) assert.ok(served.includes(`serve ${f} csp=yes`), `${f}: ${served.join(' | ')}`);
   assert.deepEqual(served.filter((l) => !l.endsWith(' csp=yes')), []);
   const off = seenFile();
@@ -347,17 +345,26 @@ test('C7g every file under the policy, and no hook outside tests', async () => {
   assert.ok(!/process\.env\.DEVTEAM_TEST/.test(region()), 'each hook read through browserTestEnv');
 });
 
-test('C8c a page that loops, and nothing to picture: refused, nothing written', async () => {
+test('C8a C8c a page that loops, a Chrome that says nothing, nothing to picture: refused, nothing written', async () => {
   const k = shotKit();
   const hook = seenFile();
   const id = await k.note(k.subject({ path: 'loop.html' }));
   const nowhere = await k.note(k.subject({ slug: 'nowhere' }));
+  const silent = await k.note(k.subject());
+  const hang = fake('hang-chrome.sh');
   const was = [k.logBytes(), k.tree()];
   const started = Date.now();
+  // the Chrome that says nothing, and its child, are killed after 8 s (beside the 20 s one)
+  const silenced = k.ready(silent, { CHROME_PATH: hang.file, DEVTEAM_CHROME_NO_SANDBOX: undefined }).then((r) => ({ ...r, took: Date.now() - started }));
   const r = await k.ready(id, { DEVTEAM_TEST_SHOT_SEEN: hook });
+  const h = await silenced;
+  assert.equal(h.status, 1);
+  assert.match(h.out, /Chrome didn't start/);
+  assert.ok(h.took >= 8000 && h.took < 16000, `${h.took} ms`);
+  await until(() => !spawnSync('ps', ['-eo', 'args'], { encoding: 'utf8' }).stdout.split('\n').includes('sleep 97531'), 'its child to be gone');
   assert.equal(r.status, 1);
   assert.match(r.out, /the picture took longer than 20 s \(a page that never settles, or a script that loops\); no mark written/);
-  assert.ok(Date.now() - started < 28000, 'it ended soon after 20 s');
+  assert.ok(Date.now() - started < 32000, 'it ended soon after 20 s');
   const ps = spawnSync('ps', ['-eo', 'args'], { encoding: 'utf8' }).stdout;
   const profiles = k.seen(hook).filter((l) => l.startsWith('launch ')).map((l) => / profile=(.*)$/.exec(l)[1]);
   assert.ok(profiles.length);
@@ -371,7 +378,7 @@ test('C8c a page that loops, and nothing to picture: refused, nothing written', 
 test('C10a C10c thread new --frame: recorded, and every bound held', async () => {
   const k = shotKit();
   const frame = { w: 900, h: 700, hash: '#tab2' };
-  const id = await k.note(k.subject(), { frame });
+  const id = await k.noteByCommand(k.subject(), { frame });
   const started = k.last((o) => o.type === 'thread' && o.op === 'new' && o.id === id);
   assert.deepEqual(started.frame, frame);
   assert.equal(started.by, 'owner');
@@ -385,13 +392,13 @@ test('C10a C10c thread new --frame: recorded, and every bound held', async () =>
   for (const [what, f] of [['w 319', { w: 319, h: 700, hash: '' }], ['w 3841', { w: 3841, h: 700, hash: '' }], ['w 900.5', { w: 900.5, h: 700, hash: '' }], ['w text', { w: '900', h: 700, hash: '' }], ['h 239', { w: 900, h: 239, hash: '' }], ['h 2161', { w: 900, h: 2161, hash: '' }], ['hash tab2', { w: 900, h: 700, hash: 'tab2' }], ['hash 201 bytes', { w: 900, h: 700, hash: `#${'x'.repeat(200)}` }], ['hash newline', { w: 900, h: 700, hash: '#a\nb' }], ['no hash', { w: 900, h: 700 }], ['an extra key', { w: 900, h: 700, hash: '', x: 1 }], ['a list', [900, 700, '']], ['null', null]]) await bad(what, JSON.stringify(f), k.subject(), /--frame/);
   await bad('not JSON', '{w:900}', k.subject(), /--frame/);
   await bad('an item subject', JSON.stringify(frame), { kind: 'item', ref: `goal:${k.F.goal}` }, /--frame goes with an artifact subject/);
-  for (const f of [{ w: 320, h: 240, hash: '' }, { w: 3840, h: 2160, hash: `#${'x'.repeat(199)}` }]) { const at = await k.note(k.subject(), { frame: f }); assert.deepEqual(k.last((o) => o.type === 'thread' && o.op === 'new' && o.id === at).frame, f); }
+  for (const f of [{ w: 320, h: 240, hash: '' }, { w: 3840, h: 2160, hash: `#${'x'.repeat(199)}` }]) { const at = await k.noteByCommand(k.subject(), { frame: f }); assert.deepEqual(k.last((o) => o.type === 'thread' && o.op === 'new' && o.id === at).frame, f); }
 });
 
 test('C5i a capability in frame.hash is cut', async () => {
   const k = shotKit();
   const cap = '/c/1763164800000.abcdefghijklmnop.abcdefghijklmnopqrstuv';
-  const id = await k.note(k.subject(), { frame: { w: 900, h: 700, hash: `#${cap}` } });
+  const id = await k.noteByCommand(k.subject(), { frame: { w: 900, h: 700, hash: `#${cap}` } });
   const { hash } = k.last((o) => o.type === 'thread' && o.op === 'new' && o.id === id).frame;
   assert.ok(hash.includes('[link removed]') && !hash.includes('abcdefghijklmnop'), hash);
 });
@@ -571,8 +578,6 @@ const pageNote = (k, o = {}) => k.subject({ path: 'index.html', ...o });
 let marks = 0;
 async function addressed(k, s, by, extra = {}) {
   const id = await k.note(s);
-  // after the note's own turn, which the hand-over must follow
-  await new Promise((r) => setTimeout(r, 100));
   k.F.hand('owner', { type: 'thread', op: 'set', id, handed: { to: by, at: new Date(Date.now() - 20).toISOString() } }, 20);
   const m = `m-20261123-${String(++marks).padStart(9, '0')}-${by}`;
   k.F.hand(by, { id: m, type: 'message', to: 'owner', kind: 'addressed', thread: id, text: 'The button now says Annual', ...extra }, 0);
@@ -753,4 +758,36 @@ test('C12 the picture, the source and their freshness on the dashboard', async (
     assert.deepEqual((await read({ 'if-none-match': after.tag })).of(lands.id).source, { at: 'main', slug: 'landing' });
     assert.equal(k.logBytes(), was);
   } finally { await dash.stop(); }
+});
+
+// --- retention ----------------------------------------------------------------------------------------
+test('C13 the newest three and the live mark\'s are kept, and an old resolved thread\'s go', async () => {
+  const k = shotKit();
+  const day = 86400000;
+  const plant = (id, stamp, ...names) => { for (const n of names.length ? names : [`${stamp}-light.png`]) write(path.join(k.shots, id, n), 'x'); };
+  const resolved = async (days) => { const id = await k.note(k.subject()); k.F.hand('owner', { type: 'thread', op: 'set', id, status: 'resolved', outcome: null }, days * day); plant(id, '20261101-000000000'); return id; };
+  const [old, recent, open] = [await resolved(15), await resolved(13), await k.note(k.subject())];
+  plant(open, '20250101-000000000');
+  // folders and files that aren't the kit's to remove
+  const stray = 't-20990101-000000000-nobody';
+  plant(stray, '20250101-000000000');
+  write(path.join(k.shots, 'notes', 'a.txt'), 'x');
+  write(path.join(k.shots, 'notes.txt'), 'x');
+  const id = await k.note(k.subject());
+  plant(id, '', 'notes.txt');
+  const stamps = [];
+  for (let i = 0; i < 4; i++) { const r = await k.ready(id); assert.equal(r.status, 0, said(r)); stamps.push(r.line.shot.stamp); }
+  assert.deepEqual(k.files(id), [...stamps.slice(1).map((s) => `${s}-light.png`), 'notes.txt']);
+  assert.ok(!fs.existsSync(path.join(k.shots, old)), 'resolved 15 days ago');
+  assert.deepEqual(k.files(recent), ['20261101-000000000-light.png'], 'resolved 13 days ago');
+  assert.deepEqual(k.files(open), ['20250101-000000000-light.png'], 'an open thread');
+  assert.deepEqual(k.files(stray), ['20250101-000000000-light.png'], 'not in the log');
+  assert.ok(fs.existsSync(path.join(k.shots, 'notes', 'a.txt')) && fs.existsSync(path.join(k.shots, 'notes.txt')));
+  // a mark's own picture stays, however old
+  const shot = { stamp: '20250601-000000000', w: 1400, h: 860, src: 'main', sha: 'a'.repeat(40), dirty: false, anchor: 'found', dark: true, sum: { light: 'b'.repeat(64), dark: 'c'.repeat(64) } };
+  const marked = await addressed(k, k.subject(), 'supervisor', { shot });
+  plant(marked, '', `${shot.stamp}-light.png`, `${shot.stamp}-dark.png`, '20250501-000000000-light.png');
+  for (let i = 0; i < 3; i++) assert.equal((await k.ready(marked)).status, 0);
+  assert.deepEqual(k.files(marked).slice(0, 2), [`${shot.stamp}-dark.png`, `${shot.stamp}-light.png`]);
+  assert.equal(k.files(marked).length, 5);
 });
