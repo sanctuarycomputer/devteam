@@ -2681,6 +2681,8 @@ function questionView(q) {
     default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, new_because: q.new_because ?? null, no_default: q.no_default ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched, hash, rewritten,
+    // which of the box's people answered (kit-252): only a well-formed one (personOk), else nobody named
+    answered_person: ans && personOk(ans.person) ? { id: ans.person.id, name: ans.person.name } : null,
     labels, choice, words, in_words: keyed ? choice === null : null, label, reading, read_by: reading ? 'supervisor' : null, agreed_by_owner: agreedByOwner,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, files: ans && Array.isArray(ans.files) ? ans.files.filter(isObj).map((f) => ({ name: String(f.name ?? ''), path: String(f.path ?? ''), bytes: Number.isInteger(f.bytes) ? f.bytes : 0 })) : [], said: ans?.said ?? null, turn: ans?.turn ?? null, said_at: ans?.said_at ?? null, answer_seen: ans?.answer_seen ?? null,
     about_turn: q.about_turn ?? null, seen: q.seen ?? null, owner_said_turn: q.owner_said_turn ?? null, owner_said_at: q.owner_said_at ?? null,
@@ -10418,7 +10420,8 @@ function threadViews(objects) {
 // supervisor out of it for good.
 function threadView(t, ts, qs, ms = []) {
   // by: the display side (owner or supervisor), as the card and first_reply_ms read it; writer: who wrote it (owner, supervisor, responder)
-  const turns = ts.map((u) => ({ id: u.id, by: u.created_by === 'owner' ? 'owner' : 'supervisor', writer: u.created_by, at: u.created_at, text: String(u.text ?? ''), refs: Array.isArray(u.refs) ? u.refs.filter((r) => typeof r === 'string') : [], question: typeof u.question === 'string' ? u.question : null, files: Array.isArray(u.files) ? u.files.filter(isObj).map((f) => ({ name: String(f.name ?? ''), path: String(f.path ?? ''), bytes: Number.isInteger(f.bytes) ? f.bytes : 0 })) : [], ...(u.created_by === 'owner' ? { routed_to: u.routed_to === 'supervisor' || u.routed_to === 'responder' ? u.routed_to : null, delivered: u.delivered === 'typed' || u.delivered === 'queued' ? u.delivered : null } : {}) }));
+  // person (kit-252): which of the box's people said an owner turn, when its line names a well-formed one
+  const turns = ts.map((u) => ({ id: u.id, by: u.created_by === 'owner' ? 'owner' : 'supervisor', writer: u.created_by, at: u.created_at, ...(u.created_by === 'owner' && personOk(u.person) ? { person: { id: u.person.id, name: u.person.name } } : {}), text: String(u.text ?? ''), refs: Array.isArray(u.refs) ? u.refs.filter((r) => typeof r === 'string') : [], question: typeof u.question === 'string' ? u.question : null, files: Array.isArray(u.files) ? u.files.filter(isObj).map((f) => ({ name: String(f.name ?? ''), path: String(f.path ?? ''), bytes: Number.isInteger(f.bytes) ? f.bytes : 0 })) : [], ...(u.created_by === 'owner' ? { routed_to: u.routed_to === 'supervisor' || u.routed_to === 'responder' ? u.routed_to : null, delivered: u.delivered === 'typed' || u.delivered === 'queued' ? u.delivered : null } : {}) }));
   // whose reply is owed (owedIn, kit-104): the supervisor's when a turn routed to it, or with no
   // route, is owed; else the responder's when one routed to it is; else the owner's move
   const owed = owedIn(ts, t);
@@ -21548,7 +21551,8 @@ function operatorThreads(lines = operatorLines()) {
     if (o.type === 'thread' && o.op === 'new' && !threads.has(o.id)) threads.set(o.id, { id: o.id, title: threadTitle(o.title), subject: operatorSubjectProblem(o.subject) ? null : o.subject, status: 'open', turns: [], created_at: o.at, closed_at: null, activity_at: o.at, ...(boxed ? { signed: signedThread(o) } : {}) });
     const t = threads.get(o.type === 'turn' ? o.thread : o.id);
     if (!t) continue;
-    if (o.type === 'turn') t.turns.push({ id: o.id, by: o.by, at: o.at, text: capBytes(o.text, TURN_MAX), ...(boxed && o.by === 'owner' ? { signed: signedTurn(o, t) } : {}) });
+    // person (kit-252): beside the proof, not in it; well-formed (personOk) or none
+    if (o.type === 'turn') t.turns.push({ id: o.id, by: o.by, at: o.at, text: capBytes(o.text, TURN_MAX), ...(boxed && o.by === 'owner' ? { signed: signedTurn(o, t) } : {}), ...(o.by === 'owner' && personOk(o.person) ? { person: { id: o.person.id, name: o.person.name } } : {}) });
     else if (o.op === 'set' && ['open', 'closed'].includes(o.status) && (!boxed || signedSet(o, t))) { t.status = o.status; t.closed_at = o.status === 'closed' ? o.at : null; }
     if (o.at > t.activity_at) t.activity_at = o.at;
   }
