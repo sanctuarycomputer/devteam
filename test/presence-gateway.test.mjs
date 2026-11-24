@@ -284,6 +284,33 @@ test('presence A11: a reclaim by another process closes every socket, and so doe
   B.write({ ...before, sessions: null, peopleSessions: null });
   await closes(e, 'with a state of the wrong shape', 2500);
 });
+test('presence A11: a save that ends nothing closes nothing, the terminal\'s socket included, and the owner from before people keeps theirs', async (t) => {
+  const B = await box(t);
+  const term = await new Promise((resolve) => {
+    const h = `term.${B.host}`;
+    const r = http.request({ host: '127.0.0.1', port: B.port, path: '/ws', headers: { host: h, origin: `http://${h}`, cookie: B.cookies.jo, connection: 'Upgrade', upgrade: 'websocket' } });
+    r.on('upgrade', (res, s) => { s.on('error', () => {}); resolve({ closed: new Promise((ok) => s.once('close', ok)) }); });
+    r.on('error', (e) => resolve({ error: e }));
+    r.end();
+  });
+  assert.ok(term.closed, 'the terminal opened');
+  const c = opened(await B.up('alpha', { as: 'jo' }), 'Jo');
+  const r = await B.post('owner', '/auth/people/rename', { id: 'p-jo', rev: B.row('p-jo').rev, name: 'Jo Two' });
+  assert.equal(r.status, 200, r.body);
+  await Promise.all([stays(c, 'Jo\'s presence'), stays(term, 'Jo\'s terminal')]);
+  c.destroy();
+  const { people, peopleSessions, peopleStamp, ...before } = B.state();
+  B.write(before);
+  await stays(opened(await B.up('alpha', { as: 'owner' }), 'the stand-in'), 'the stand-in');
+});
+test('presence A11: the watch for another process starts again after a time with none open', async (t) => {
+  const B = await box(t);
+  opened(await B.up('alpha', { as: 'jo' }), 'first').destroy();
+  await sleep(2300);
+  const c = opened(await B.up('alpha', { as: 'jo' }), 'second');
+  B.write({ ...B.state(), peopleSessions: [] });
+  await closes(c, 'after the idle time', 2500);
+});
 test('presence A11: a session that ends while the hub\'s list is read again never reaches the upstream', async (t) => {
   const B = await box(t);
   let go;
