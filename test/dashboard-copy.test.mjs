@@ -95,6 +95,8 @@ const NOT_EMPTY_STATES = [
   'Not public', 'Not yet', 'Not the published version: this is the one on main', 'Not the draft: this is the one on main',
   'No measured rate yet', 'Nothing measured: spend shows only what agents reported', 'No goal approved yet', 'No tickets planned yet',
   'No readings from … to …', 'No projects running',
+  // an artifact's notes (kit-145): a press's answer, where a note is, the composer's placeholder
+  'Nothing to hand over', 'Not on this view', 'Not yet? Say what is still wrong',
   // consequences, and where to act instead
   'Nothing is planned or built for it; any planning stops.',
   /^Nothing to click here\. With account rotation set up, the dashboard restarts it once an account has room; otherwise answer it in the terminal\.$/,
