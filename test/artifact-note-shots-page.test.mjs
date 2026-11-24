@@ -147,6 +147,9 @@ test('C3 the width the owner had, and the clip', async () => {
     ['a transform on html', { path: 'transform.html' }, undefined, (r, p) => assert.ok(ringAt(p, MIDDLE))],
     ['a zoom on html', { path: 'zoom.html' }, undefined, (r, p) => assert.ok(ringAt(p, MIDDLE))],
     ['a smooth scroll', { path: 'smooth.html' }, undefined, (r, p) => assert.ok(ringAt(p, MIDDLE))],
+    ...[0, 20, 60].map((ms) => [`a page that moves ${ms} ms after its load`, { path: 'stub.html' }, { w: 1400, h: 860, hash: `#${ms}` }, (r, p) => { assert.equal(r.line.shot.anchor, 'found'); assert.equal(r.line.shot.dark, false); assert.ok(ringAt(p, MIDDLE)); }]),
+    ['a page that moves between its light and its dark picture', { path: 'moves-dark.html' }, { w: 1400, h: 860 }, (r, p) => { assert.equal(r.line.shot.anchor, 'found'); assert.equal(r.line.shot.dark, false); assert.ok(ringAt(p, MIDDLE)); }],
+    ['a page with a default button and no dark styles', { path: 'plain.html' }, undefined, (r) => assert.equal(r.line.shot.dark, false)],
     ['C3h', { point: { x: 40, y: 20 }, path: 'scrolled.html', anchor: undefined }, undefined, (r, p) => { assert.ok(near(p.px(40, 20), [255, 0, 0]), String(p.px(40, 20))); assert.ok(near(p.px(40, 80), [0, 0, 255])); }],
     ['C3x a query string in path', { path: 'found.html?x=1' }, undefined, (r) => assert.equal(r.line.shot.anchor, 'found')],
     ['C5x a page whose script throws', { path: 'throws.html' }, undefined, (r) => assert.equal(r.line.shot.anchor, 'found')],
@@ -225,6 +228,30 @@ test('C15b each part of the page\'s answer is checked', () => {
   const good = { state: 'found', box: { x: 1, y: 2, w: 3, h: 4 }, text: 'a', innerWidth: 3840, innerHeight: 2160 };
   assert.equal(shotTrust(good).text, 'a');
   for (const bad of [{ state: 'ok' }, { state: ['found'] }, { box: null }, { box: { ...good.box, x: NaN } }, { box: { ...good.box, y: '2' } }, { box: { ...good.box, w: -1 } }, { box: { ...good.box, h: -1 } }, { box: { ...good.box, w: Infinity } }, { innerWidth: 3841 }, { innerHeight: 2161 }, { innerWidth: 0 }, { innerWidth: 900.5 }]) assert.throws(() => shotTrust({ ...good, ...bad }), /no answer/, JSON.stringify(bad));
+});
+
+test('C3 what was taken while the page moved is of two documents, and is not kept', async () => {
+  const { shotOfOne } = cut(['shotOfOne']);
+  const launch = { page: { moves: 3 } };
+  assert.equal(await shotOfOne(launch, async () => 'both'), 'both');
+  assert.equal(await shotOfOne(launch, async () => { launch.page.moves++; return 'both'; }), null);
+  assert.equal(await shotOfOne(launch, async () => { launch.page.moves++; throw new Error('its context is gone'); }), null);
+  await assert.rejects(shotOfOne(launch, async () => { throw new Error('a page that stays'); }), /a page that stays/);
+});
+
+test('a draft\'s file is read only when it is a plain one within the limit', () => {
+  const dir = fs.mkdtempSync(path.join(TMP, 'read'));
+  const { shotRead } = cut(['shotRead'], { fs, ARTIFACT_FILE_MAX: 10 });
+  const at = (n) => ({ abs: path.join(dir, n), read: () => assert.fail('the reader it had') });
+  fs.writeFileSync(path.join(dir, 'ten'), '0123456789');
+  fs.writeFileSync(path.join(dir, 'eleven'), '01234567890');
+  fs.symlinkSync('ten', path.join(dir, 'link'));
+  fs.mkdirSync(path.join(dir, 'folder'));
+  assert.equal(String(shotRead(at('ten'))), '0123456789');
+  assert.equal(shotRead(at('eleven')), null);
+  assert.equal(shotRead(at('folder')), null);
+  assert.throws(() => shotRead(at('link')), /ELOOP/);
+  assert.equal(shotRead({ read: () => 'main' }), 'main');
 });
 
 test('C3 the clip stays inside the frame at each edge', () => {

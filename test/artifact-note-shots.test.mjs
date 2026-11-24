@@ -363,6 +363,15 @@ test('C4 the order, and the copy\'s own commit and changes', () => {
   assert.ok(git.asked.includes('--no-optional-locks') && git.asked.includes('--untracked-files=normal'));
 });
 
+test('what a proposal answers: the owner\'s newest word, the hand-over, the mark, a resolve or a reopen', () => {
+  const { shotAnswers } = cut(['shotAnswers']);
+  const v = { turns: [{ id: 'u-1', by: 'owner' }], handed: null, addressed: null };
+  const t = { updates: [{ ready: null }] };
+  const was = shotAnswers(v, t);
+  assert.equal(shotAnswers({ ...v, turns: [...v.turns, { id: 'u-2', by: 'supervisor' }] }, { updates: [...t.updates, { ready: { outcome: 'x' } }] }), was, "the supervisor's own turn or proposal");
+  for (const [what, a, b] of [['an owner turn', { ...v, turns: [...v.turns, { id: 'u-2', by: 'owner' }] }, t], ['a hand-over', { ...v, handed: { to: 'x', at: '1' } }, t], ['a mark', { ...v, addressed: { by: 'x', at: '1' } }, t], ['resolved and reopened', v, { updates: [...t.updates, { status: 'resolved' }, { status: 'open' }] }]]) assert.notEqual(shotAnswers(a, b), was, what);
+});
+
 test('a hand-written note of the wrong shape stops no command', async () => {
   const k = shotKit();
   const wt = worktree(k, 'kit-2-racy', 'racy', 'Racy');

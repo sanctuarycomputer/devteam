@@ -11286,17 +11286,16 @@ function cmdThread() {
     if (Buffer.byteLength(outcome) > OUTCOME_MAX) die(`--outcome is at most ${OUTCOME_MAX} bytes`);
     // an artifact note's proposal carries the kit's picture of the spot: no picture, no line (kit-147)
     if (t.subject?.kind === 'artifact') return (async () => {
-      // what a proposal answers: the owner's newest word, the hand-over, the mark
-      const said = (v) => JSON.stringify([v.turns.filter((u) => u.by === 'owner').pop()?.id, v.handed, v.addressed]);
       const before = threadViewOf(t.id);
+      const answers = shotAnswers(before, t);
       const r = await markShot(before, { kind: 'ready' });
       // a refusal from here ends the process (die) or throws: either way the pictures go
       let written = false;
       process.once('exit', () => { if (!written) for (const f of r.files) fs.rmSync(f, { force: true }); });
       // the picture takes seconds: the owner may have closed the thread meanwhile
       logCache = null;
-      threadOpen(t.id, 'supervisor');
-      if (said(threadViewOf(t.id)) !== said(before)) die(`${t.id} changed while its picture was taken (a new turn of the owner's, a hand-over or a mark): read it, then propose again`);
+      const now = threadOpen(t.id, 'supervisor');
+      if (shotAnswers(threadViewOf(t.id), now) !== answers) die(`${t.id} changed while its picture was taken (a new turn of the owner's, a hand-over or a mark): read it, then propose again`);
       appendLog({ type: 'thread', op: 'set', id: t.id, ready: { outcome, at: nowIso() }, shot: r.shot }, 'supervisor');
       written = true;
       try { shotSweep(t.id, Date.now()); } catch (e) { warn(`old pictures not removed: ${e.message}`); }
@@ -12906,9 +12905,9 @@ async function shotLaunch({ noSandbox = false, extraArgs = [], cap }) {
   const child = launch.child = spawn(bin, [
     '--headless=new', '--remote-debugging-pipe', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync', '--hide-scrollbars',
-    // no dump of a page that crashed is kept
     // the artifact's frame in its page's own process, laid out and asked with it
     '--disable-features=IsolateSandboxedIframes',
+    // no dump of a page that crashed is kept
     '--disable-breakpad', '--disable-crash-reporter',
     '--renderer-process-limit=2', '--js-flags=--max-old-space-size=256', ...['', 'force-'].map((f) => `--${f}webrtc-ip-handling-policy=disable_non_proxied_udp`), '--disable-quic',
     ...extraArgs, ...(noSandbox ? ['--no-sandbox'] : []), 'about:blank',
@@ -13011,10 +13010,9 @@ async function shotServe(entries, { csp = true } = {}) {
   });
   const port = await shotListen(srv);
   origin = `http://127.0.0.1:${port}`;
-  // The kit's own page, which holds the artifact's in the sandboxed frame the viewer shows it in. It takes
-  // a dark scheme as a page of its own would, so the frame is told of it.
+  // The kit's own page, which holds the artifact's in the sandboxed frame the viewer shows it in.
   const framed = (url) => {
-    outer = `<!doctype html><meta name="color-scheme" content="light dark"><style>html,body{margin:0;height:100%;overflow:hidden}iframe{display:block;border:0;width:100vw;height:100vh}</style><iframe sandbox="allow-scripts allow-forms allow-modals allow-pointer-lock" referrerpolicy="no-referrer" src="${escHtml(url)}"></iframe>`;
+    outer = `<!doctype html><style>html,body{margin:0;height:100%;overflow:hidden}iframe{display:block;border:0;width:100vw;height:100vh}</style><iframe sandbox="allow-scripts allow-forms allow-modals allow-pointer-lock" referrerpolicy="no-referrer" src="${escHtml(url)}"></iframe>`;
     return `${origin}${top}`;
   };
   return { origin, port, framed, close() { srv.close(); srv.closeAllConnections?.(); } };
@@ -13040,8 +13038,13 @@ async function shotOpen(launch, url, { w, h }) {
   // the artifact's frame, and the context its scripts run in (a new one each time it loads)
   cdp.on('Runtime.executionContextCreated', (p, sid) => {
     const { frameId, isDefault } = p.context.auxData ?? {};
-    if (sid === sessionId && isDefault && frameId && frameId === launch.page.frame) launch.page.context = p.context.id;
+    if (sid === sessionId && isDefault && frameId && frameId === launch.page.frame) { launch.page.context = p.context.id; launch.page.moves++; }
   });
+  // what a move of its own looks like from here: asked for, under way, done
+  launch.page.moves = 0;
+  for (const event of ['Page.frameRequestedNavigation', 'Page.frameStartedLoading', 'Page.frameStoppedLoading']) {
+    cdp.on(event, (p, sid) => { if (sid === sessionId && p.frameId === launch.page.frame) launch.page.moves++; });
+  }
   cdp.on('Page.frameAttached', (p, sid) => { if (sid === sessionId && !launch.page.frame && p.parentFrameId === targetId) launch.page.frame = p.frameId; });
   await send('Page.enable');
   await send('Runtime.enable');
@@ -13052,7 +13055,18 @@ async function shotOpen(launch, url, { w, h }) {
   await send('Page.navigate', { url });
   await loaded;
   if (!launch.page.context) throw new Error('this Chrome keeps the page where the picture can\'t ask it; no mark written');
-  await shotEval(launch, `Promise.resolve(document.fonts && document.fonts.ready).then(() => ${SHOT_FRAMES})`);
+}
+// The frame's document and its fonts, SHOT_QUIET_MS after its load, so a move made at load is over. False when
+// it moved meanwhile; the limit ends a page that never stops.
+const SHOT_QUIET_MS = 250;
+async function shotSettled(launch) {
+  await new Promise((r) => setTimeout(r, SHOT_QUIET_MS));
+  return shotOfOne(launch, () => shotEval(launch, `Promise.resolve(document.fonts && document.fonts.ready).then(() => ${SHOT_FRAMES})`)).then((r) => r !== null);
+}
+// What fn answers, or null when the frame moved while it ran: then it was of two documents.
+async function shotOfOne(launch, fn) {
+  const { moves } = launch.page;
+  try { const r = await fn(); return launch.page.moves === moves ? r ?? true : null; } catch (e) { if (launch.page.moves !== moves) return null; throw e; }
 }
 const SHOT_FRAMES = 'new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(1))))';
 const shotScheme = (launch, value) => launch.cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value }] }, launch.page.sessionId);
@@ -13212,10 +13226,18 @@ async function noteShot(view, src, { now } = {}) {
             for (const x of processInfo) if (x.type === 'renderer') process.kill(x.id, 'SIGKILL');
           }
           await shotOpen(launch, srv.framed(url), frame);
-          const light = await take();
-          await shotScheme(launch, 'dark');
-          await shotEval(launch, SHOT_FRAMES);
-          return { light, dark: (await take()).png };
+          for (;;) {
+            if (cap.late) throw new Error(SHOT_LATE);
+            await shotScheme(launch, 'light');
+            if (!await shotSettled(launch)) continue;
+            const both = await shotOfOne(launch, async () => {
+              const light = await take();
+              await shotScheme(launch, 'dark');
+              await shotEval(launch, SHOT_FRAMES);
+              return { light, dark: (await take()).png };
+            });
+            if (both) return both;
+          }
         };
         return Promise.race([work(), launch.crashed]);
       });
@@ -13271,6 +13293,10 @@ function readySource(view, holds = shotHolds()) {
   const { slug } = view.subject;
   if (typeof slug !== 'string' || !LINK_ID.test(slug)) return null;
   return !view.addressed && holds('main', slug) ? { at: 'main', slug } : shotOrder(view, holds);
+}
+// What a proposal answers: the owner's newest word (a turn, a resolve or a reopen), the hand-over, the mark.
+function shotAnswers(v, t) {
+  return JSON.stringify([v.turns.filter((u) => u.by === 'owner').pop()?.id, t.updates.filter((u) => u.status !== undefined).length, v.handed, v.addressed]);
 }
 // The one way a mark gets its picture: { kind: 'ready' }, or { kind: 'addressed', by, draft }.
 const markShot = (view, mark) => noteShot(view, (mark.kind === 'ready' ? readySource(view) : noteSource({ ...view, check: 'addressed', shot: null, addressed: { by: mark.by, draft: mark.draft ?? null } }))?.at ?? null);
