@@ -522,3 +522,33 @@ test('kit-109 session-bound threads', { skip: NO_TMUX, timeout: 600000 }, async 
     assert.ok(f.length === 1 && f[0].severity === 'medium' && JSON.stringify(f[0]).includes(u), JSON.stringify(f));
   });
 });
+
+// ---- done-when 8: the docs, clause by clause, each in its own section
+const kitDir = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', 'docs', 'devteam');
+const section = (f, head) => {
+  const d = fs.readFileSync(path.join(kitDir, f), 'utf8');
+  const i = d.search(new RegExp(`^#{2,3} [^\\n]*${head}`, 'm'));
+  if (i < 0) return '';
+  const body = d.slice(i);
+  const level = /^#+/.exec(body)[0].length;
+  const nl = body.indexOf('\n') + 1;
+  const j = body.slice(nl).search(new RegExp(`^#{1,${level}} `, 'm'));
+  return j < 0 ? body : body.slice(0, nl + j);
+};
+for (const f of ['process/worker.md', 'process/planning.md']) {
+  test(`S8a ${f}: a "Threads bound to you" section: reply first with thread reply`, () => assert.match(section(f, 'Threads bound to you'), /reply first[^\n]*thread reply/i));
+  test(`S8b ${f}: plain words, no commands, flags or ids except as --refs (R2)`, () => assert.match(section(f, 'Threads bound to you'), /plain words[^\n]*no commands, flags or ids[^\n]*--refs/i));
+  test(`S8c ${f}: stay within your ticket or plan; the owner's instruction binds only through the supervisor`, () => { const x = section(f, 'Threads bound to you'); assert.match(x, /within your (ticket|plan)/i); assert.match(x, /only through the supervisor/i); });
+  test(`S8d ${f}: hand over the rest with send supervisor --kind handoff --thread`, () => assert.match(section(f, 'Threads bound to you'), /send supervisor "[^"]*" --kind handoff --thread/));
+}
+test("S8e supervisor.md §13: a bound thread is the responder's when its session isn't live, has session-overdue open, or session_threads is off", () => {
+  const x = section('process/supervisor.md', '13\\. The responder');
+  assert.match(x, /isn't live[^\n]*session-overdue[^\n]*session_threads/);
+});
+test('S8f supervisor.md "Threads on a preview": a live session gets the turn directly; the supervisor gets its hand-offs and session-overdue; a handoff is the session\'s account, not the owner\'s words', () => {
+  const d = fs.readFileSync(path.join(kitDir, 'process/supervisor.md'), 'utf8');
+  const p = (/\*\*Threads on a preview\.\*\*[^\n]*/.exec(d) ?? [''])[0];
+  assert.match(p, /gets the turn directly/);
+  assert.match(p, /hand-offs[^\n]*session-overdue/);
+  assert.match(p, /not the owner's words/);
+});
