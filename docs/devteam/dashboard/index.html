@@ -11067,7 +11067,7 @@ function termWords(r, j) {
   if (r.status === 413) return 'That is too large to send, so nothing was sent.';
   // the server's own words only for a refusal the contract names (4xx); a 5xx's text may be an exception's
   if (r.status >= 500) return 'The dashboard had a problem, so nothing more was sent.';
-  return typeof j?.error === 'string' && j.error ? `${j.error[0].toUpperCase()}${j.error.slice(1)}.`.replace(/\.\.$/, '.') : `The dashboard answered ${r.status}, so nothing more was sent.`;
+  return typeof j?.error === 'string' && j.error ? `${j.error[0].toUpperCase()}${j.error.slice(1)}.`.replace(/\.\.$/, '.') : 'The dashboard refused that, so nothing more was sent.';
 }
 // The line under the screen: an error; the waiting note (held lines over 2 minutes behind this page's own open line,
 // supervisor ruling 2026-11-18: the count alone never shows it); typing off without the library; else how to leave.
