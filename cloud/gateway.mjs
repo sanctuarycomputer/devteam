@@ -1136,6 +1136,8 @@ export function createGateway(opts = {}) {
   const isOwner = (person) => person?.role === 'owner';
   // 'owner', 'admin' or 'member': any other role in a row reads as a member's, the least it can be
   const roleOf = (person) => (isOwner(person) ? 'owner' : person?.role === 'admin' ? 'admin' : 'member');
+  // 'full' or 'view' (kit-250): only a row that says view is View; the stand-in and any other value are Full
+  const levelOf = (person) => (person?.level === 'view' ? 'view' : 'full');
   // A claimed file with no owner row (one restored from before people, read while running): its
   // top-level sessions are still the owner's, until the next start's upgrade writes the row.
   const STAND_IN = { id: null, role: 'owner', level: 'full', name: 'Owner' };
@@ -1478,9 +1480,7 @@ export function createGateway(opts = {}) {
     const got = await peopleBody(req, res, who.session);
     if (!got) return;
     const { s, body } = got;
-    if (body.level !== undefined && body.level !== 'full') {
-      return body.level === 'view' ? refuse(res, 400, 'view-not-yet', 'View arrives in a later release; invite at Full for now.') : refuse(res, 400, 'bad-request', 'a level is full');
-    }
+    if (body.level !== undefined && body.level !== 'full' && body.level !== 'view') return refuse(res, 400, 'bad-request', 'a level is full or view');
     // a file from before people gets its owner row here, stamped as start stamps it: a people list
     // with no stamp reads, at the next start, as an older gateway's change and is reset
     const base = s.people ? s : stamped(withOwner(s));
@@ -1490,7 +1490,7 @@ export function createGateway(opts = {}) {
     const open = liveInvites(base);
     if (open.length >= MAX_INVITES || base.people.length >= MAX_PEOPLE) return refuse(res, 409, 'too-many', `A box holds ${MAX_PEOPLE} people and ${MAX_INVITES} open invites; remove one first.`);
     const iso = new Date().toISOString();
-    const row = { id: newId('p-'), name, role: 'member', level: 'full', methods: [], pushSubs: [], added_at: iso, last_seen: null, notices: [], rev: 1 };
+    const row = { id: newId('p-'), name, role: 'member', level: body.level === 'view' ? 'view' : 'full', methods: [], pushSubs: [], added_at: iso, last_seen: null, notices: [], rev: 1 };
     const { link, invite } = newInvite(row.id);
     store.save({ ...base, people: [...base.people, row], invites: [...open, invite] });
     log(`invited "${name}"`);
@@ -1526,7 +1526,7 @@ export function createGateway(opts = {}) {
   const hasPasskey = (s, row) => ownMethods(s, row).some((m) => m.type === 'passkey');
   const isAdmin = (person) => roleOf(person) === 'admin';
   // A move to Full is offered only to a View member (an admin is always Full); kit-250 adds View.
-  const raisable = (row) => roleOf(row) === 'member' && row.level === 'view';
+  const movable = (row) => roleOf(row) === 'member';
   // The newest invite naming the row: a first invite for someone who never joined, else a new link.
   const linkOf = (s, row) => {
     const mine = (s.invites ?? []).filter((x) => x.person === row.id);
@@ -1546,12 +1546,12 @@ export function createGateway(opts = {}) {
         if (isOwner(row)) return ['rename'];
         const link = linkOf(s, row);
         if (!joined(s, row)) return link ? ['revoke'] : ['remove'];
-        const lv = raisable(row) ? ['level'] : [];
+        const lv = movable(row) ? ['level'] : [];
         if (link) return ['revoke', 'rename', ...lv, 'remove'];
         return ['rename', ...lv, 'role', ...(hasPasskey(s, row) && viewer.id !== null ? ['transfer'] : []), 'relink', 'remove'];
       }
       if (!isAdmin(viewer) || isOwner(row) || !joined(s, row)) return [];
-      return ['rename', ...(raisable(row) ? ['level'] : []), 'remove'];
+      return ['rename', ...(movable(row) ? ['level'] : []), 'remove'];
     })();
     return offered.filter((a) => !mayPeople(viewer, row, a, s));
   };
@@ -1576,6 +1576,7 @@ export function createGateway(opts = {}) {
       if (action === 'remove' && isOwner(row)) return no('Nobody can remove the box\'s owner.');
       if (action === 'revoke' && isOwner(row)) return no('The box\'s owner has no link to revoke.');
       if (action === 'level' && roleOf(row) !== 'member') return no(isAdmin(row) ? 'An admin is always Full; take Admin away first' : 'The box\'s owner is always Full');
+      if (action === 'level' && !joined(s, row)) return no('They haven\'t joined yet: their level is their invite\'s');
       if (action === 'role' && (self || isOwner(row))) return no('The owner stops being the owner only by handing the box over');
       if (action === 'transfer' && (self || isOwner(row))) return no('You already own this box');
       return null;
@@ -1643,17 +1644,20 @@ export function createGateway(opts = {}) {
     log(left ? 'a person left the box: their sessions, invites and open sockets ended' : 'a person was removed: their sessions, invites and open sockets ended');
     return json(res, 200, { ok: true }, left ? { 'set-cookie': cookie('', 0) } : undefined);
   };
-  // A move to Full (kit-250 adds View). Already Full: its rev, nothing written (R4).
+  // A move between Full and View (kit-250). Already there: its rev, nothing written (R4). A move to
+  // View drops their push subscriptions in the same write, then closes their terminal and preview
+  // sockets; their sessions go on, at View from their next request.
   const levelRoute = async (req, res, who) => {
     const g = await peopleGuard(req, res, who, 'level');
     if (!g) return;
     const { s, row, body } = g;
-    if (body.level === 'view') return refuse(res, 400, 'view-not-yet', 'View arrives in a later release; keep them at Full for now');
-    if (body.level !== 'full') return refuse(res, 400, 'bad-request', 'a level is full');
-    if (row.level === 'full') return json(res, 200, { ok: true, rev: row.rev });
+    if (body.level !== 'full' && body.level !== 'view') return refuse(res, 400, 'bad-request', 'a level is full or view');
+    if (levelOf(row) === body.level) return json(res, 200, { ok: true, rev: row.rev });
     const rev = row.rev + 1;
-    store.save({ ...s, people: s.people.map((x) => (x.id === row.id ? { ...x, level: 'full', rev } : x)) });
-    log('a person was made full');
+    const next = body.level === 'view' ? { level: 'view', pushSubs: [], rev } : { level: 'full', rev };
+    store.save({ ...s, people: s.people.map((x) => (x.id === row.id ? { ...x, ...next } : x)) });
+    if (body.level === 'view') dropPerson(row.id);
+    log(body.level === 'view' ? 'a person was made view only: their terminal and preview sockets closed' : 'a person was made full');
     return json(res, 200, { ok: true, rev });
   };
   // Make admin (joined, no link out; a View member becomes Full too) or Take Admin away (they stay
@@ -1905,8 +1909,9 @@ export function createGateway(opts = {}) {
   };
   // viewer: null, or for the viewer's page whether the wrapper's grant holds (viewerAncestors)
   // person: the session's x-devteam-person (personHeader), on a dashboard's request alone
-  const proxy = (req, res, { port, path: p, publicOrigin, cap, extra = null, viewer = null, person = null }) => {
-    const up = http.request({ host: '127.0.0.1', port, method: req.method, path: p, headers: { ...upstreamHeaders(req, port, publicOrigin), ...(person ? { 'x-devteam-person': person } : {}) } }, (ur) => {
+  // level: the session's, sent beside the person (kit-250), never the browser's
+  const proxy = (req, res, { port, path: p, publicOrigin, cap, extra = null, viewer = null, person = null, level = 'full' }) => {
+    const up = http.request({ host: '127.0.0.1', port, method: req.method, path: p, headers: { ...upstreamHeaders(req, port, publicOrigin), ...(person ? { 'x-devteam-person': person, 'x-devteam-level': level } : {}) } }, (ur) => {
       // Never kept: a page an agent served once on this name must not come back from the browser's
       // cache after a real dashboard has taken its port.
       const head = downstreamHeaders(ur.headers, cap, publicOrigin);
@@ -1929,7 +1934,7 @@ export function createGateway(opts = {}) {
   // The body is read whole (it is small) so its hash is what is signed; whatever signature headers
   // the browser sent are replaced.
   const SIGNED_POSTS = { '/api/pane-answer': paneSignature, '/api/owner-setting': ownerSettingSignature };
-  const signedPost = (req, res, port, publicOrigin, route, signer, person = null) => {
+  const signedPost = (req, res, port, publicOrigin, route, signer, person = null, level = 'full') => {
     const chunks = [];
     let size = 0;
     req.on('data', (c) => { size += c.length; if (size <= 20000) chunks.push(c); else chunks.length = 0; });
@@ -1937,7 +1942,7 @@ export function createGateway(opts = {}) {
     req.on('end', () => {
       if (size > 20000) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
       const data = Buffer.concat(chunks);
-      const up = http.request({ host: '127.0.0.1', port, method: 'POST', path: route, headers: { ...upstreamHeaders(req, port, publicOrigin), ...(person ? { 'x-devteam-person': person } : {}), 'content-length': data.length, ...signer(threadKey(store).privateKey, port, data) } }, (ur) => {
+      const up = http.request({ host: '127.0.0.1', port, method: 'POST', path: route, headers: { ...upstreamHeaders(req, port, publicOrigin), ...(person ? { 'x-devteam-person': person, 'x-devteam-level': level } : {}), 'content-length': data.length, ...signer(threadKey(store).privateKey, port, data) } }, (ur) => {
         res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, undefined, publicOrigin), 'cache-control': 'no-store' });
         pipeline(ur, res, () => {});
       });
@@ -2278,6 +2283,44 @@ export function createGateway(opts = {}) {
   };
 
   const navigating = (req) => req.method === 'GET' && (req.headers['sec-fetch-mode'] === 'navigate' || (!req.headers['sec-fetch-mode'] && String(req.headers.accept ?? '').includes('text/html')));
+  // View only (kit-250): a View session reads and changes nothing. One check, run once the name is
+  // resolved and before any route or body; the sockets refuse View on their own (upgrade). null, or
+  // the 403's type and body. project: the name is a dashboard's (not a preview's); p: the pathname.
+  const VIEW_ANY = 'View only: you can look at everything here, but not change anything.';
+  const VIEW_TERM = 'View only: there is no terminal for view-only people.';
+  // Is this a dashboard's terminal route, as terminal@1 §3 reads a path (parsed as a URL,
+  // percent-decoded, dot segments resolved, repeated slashes folded)? Readings differ on where a
+  // decoded / or . counts, so every plausible one is taken and any that lands under /api/term/ is
+  // refused: refusing a View session too much costs nothing, too little reaches the terminal.
+  const dots = (d) => {
+    const out = [];
+    const segs = d.replace(/\/+/g, '/').split('/').slice(1);
+    segs.forEach((seg, i) => {
+      if (seg === '..') out.pop();
+      else if (seg !== '.') out.push(seg);
+      if ((seg === '.' || seg === '..') && i === segs.length - 1) out.push('');
+    });
+    return `/${out.join('/')}`;
+  };
+  const decoded = (x) => { try { return decodeURIComponent(x); } catch { return x; } };
+  const isTermRoute = (raw) => {
+    let parsed = raw;
+    try { parsed = new URL(raw.replace(/^\/+/, '/'), 'http://x').pathname; } catch {}
+    // the raw path resolved first (as the dashboard parses it), then decoded; decoded first; neither
+    return [dots(decoded(parsed)), dots(decoded(raw)), dots(raw), dots(parsed)].some((p) => p.startsWith('/api/term/'));
+  };
+  const VIEW_EXEMPT = (p, method) => (method === 'POST' && p === '/auth/logout') || p.startsWith('/auth/method/') || p === '/auth/passkeys' || p.startsWith('/auth/passkeys/');
+  const viewRefusal = (req, person, { isBox, isTerm, project, p }) => {
+    if (person?.level !== 'view') return null;
+    // 0: a dashboard's terminal routes answer as the dashboard's own View deny does (terminal@1 §4)
+    if (project && isTermRoute(req.url.split('?')[0])) return { type: 'json', body: '{"why":"view"}' };
+    const no = (sentence) => (navigating(req) ? { type: 'text', body: sentence } : { type: 'json', body: JSON.stringify({ error: sentence, code: 'view-only' }) });
+    if (isTerm) return no(VIEW_TERM);
+    if (isBox && (p === '/public' || p.startsWith('/public/'))) return no(VIEW_ANY);
+    if (req.method === 'GET' || req.method === 'HEAD') return null;
+    if (isBox && VIEW_EXEMPT(p, req.method)) return null;
+    return no(VIEW_ANY);
+  };
   // The cookie is SameSite=None, so a page elsewhere (another site, or another name of the box)
   // could make the browser send it with an <img> or <script>, or navigate a frame to the API. Such
   // a request is refused, but for a link to a page and for what a sandboxed review page loads (its
@@ -3132,6 +3175,8 @@ export function createGateway(opts = {}) {
         port = found.port ?? null;
         pv = found.preview ?? null;
       }
+      const viewNo = viewRefusal(req, person, { isBox, isTerm, project: Boolean(port && !pv), p });
+      if (viewNo) return send(res, 403, viewNo.type === 'text' ? 'text/plain; charset=utf-8' : 'application/json', viewNo.body);
       if (pv && !isOwner(person) && ownerOnlyPreview(pv)) return send(res, 403, 'text/plain; charset=utf-8', 'Only the box\'s owner can open the supervisor\'s browser.');
       // A preview's lens: the gateway's own page, after the session check, never the app's (spec §7).
       // Static, so it asks the hub nothing; any other method or path there is the app's, as before.
@@ -3147,10 +3192,10 @@ export function createGateway(opts = {}) {
         if (['GET', 'HEAD'].includes(req.method) && rawPath.startsWith('/upload/')) return await serveUpload(req, res, rawPath);
         const prefix = req.method === 'GET' && ['iframe', 'document'].includes(req.headers['sec-fetch-dest']) && ['same-origin', 'none'].includes(req.headers['sec-fetch-site']) ? ARTIFACT.exec(rawPath)?.[0] : null;
         if (prefix) return redirect(res, `${capFor(port, prefix, session)}${req.url}`);
-        if (req.method === 'POST' && Object.hasOwn(SIGNED_POSTS, rawPath)) return signedPost(req, res, port, own, rawPath, SIGNED_POSTS[rawPath], personH);
+        if (req.method === 'POST' && Object.hasOwn(SIGNED_POSTS, rawPath)) return signedPost(req, res, port, own, rawPath, SIGNED_POSTS[rawPath], personH, levelOf(person));
         // the viewer, by its path as the kit resolves it: the box may frame it only under the wrapper's grant
         const viewer = VIEWER.test(p) || VIEWER.test(rawPath) ? { granted: wrapGranted(label, rawPath, url) } : null;
-        return proxy(req, res, { port, path: req.url, publicOrigin: own, viewer, person: personH, extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
+        return proxy(req, res, { port, path: req.url, publicOrigin: own, viewer, person: personH, level: levelOf(person), extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
       }
       // The terminal: the gateway's copy of ttyd's page. Only its socket reaches ttyd (see upgrade).
       if (isTerm) {
@@ -3226,7 +3271,7 @@ export function createGateway(opts = {}) {
       // set (a laptop, an older image). Versions only. An additive change keeps box: 2.
       // role is the signed-in person's ('owner', 'admin' or 'member'); people, where the People list
       // is, for the owner and admins only, so the hub draws People for them alone.
-      if (req.method === 'GET' && p === '/box.json') return json(res, 200, { box: 2, terminal: `${TERM}/`, project: `${pubUrl.protocol}//{project}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, previews: `${PUB}/dev/`, push: vapid().publicKey, image: BOX_IMAGE, role: roleOf(person), ...(roleOf(person) === 'member' ? {} : { people: `${PUB}/auth/people/list` }) });
+      if (['GET', 'HEAD'].includes(req.method) && p === '/box.json') return json(res, 200, { box: 2, terminal: `${TERM}/`, project: `${pubUrl.protocol}//{project}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, previews: `${PUB}/dev/`, push: vapid().publicKey, image: BOX_IMAGE, role: roleOf(person), level: levelOf(person), ...(roleOf(person) === 'member' ? {} : { people: `${PUB}/auth/people/list` }) });
       if (req.method === 'GET' && p === '/instances.json') return instances(req, res);
       if (req.method === 'GET' && p === '/memory.json') return memory(req, res, url.searchParams);
       if (req.method === 'GET' && p === '/operator/threads') return operatorThreads(req, res, null, personH);
@@ -3437,6 +3482,7 @@ export function createGateway(opts = {}) {
     let who = null;
     try { who = store.load().passkeys.length ? sessionOf(req) : null; } catch { return refuse(503, 'Service Unavailable'); }
     if (!who) return refuse(401, 'Unauthorized');
+    if (who.person?.level === 'view') return refuse(403, 'Forbidden');
     if (!isOwner(who.person) && ownerOnlyPreview(name)) return refuse(403, 'Forbidden');
     holdSocket(socket, who.person);
     if (!req.url.startsWith('/') || req.url.startsWith('//')) return refuse(400, 'Bad Request');
@@ -3497,6 +3543,7 @@ export function createGateway(opts = {}) {
     let who = null;
     try { who = store.load().passkeys.length ? sessionOf(req) : null; } catch { return refuse(503, 'Service Unavailable'); }
     if (!who) return refuse(401, 'Unauthorized');
+    if (who.person?.level === 'view') return refuse(403, 'Forbidden');
     holdSocket(socket, who.person);
     let p;
     try { p = new URL(req.url, PUB); } catch { return refuse(400, 'Bad Request'); }
@@ -3629,7 +3676,7 @@ if (!token) location.replace('/auth/login');
 else post('/auth/claim/invite', { token }).then((i) => {
   again = i.again === true;
   if (again) { el('h').textContent = 'Add a sign-in method to your account'; el('who').textContent = 'This link adds a sign-in method (a passkey) to ' + i.name + '\\'s account on ' + host + '. Your other sign-in methods keep working.'; el('how').textContent = ''; el('go').textContent = 'Create passkey'; }
-  else el('who').textContent = 'You\\'re invited to ' + host + ', ' + i.name + ', as ' + (i.level === 'full' ? 'Full: you can do everything on the box except manage people.' : String(i.level) + '.');
+  else el('who').textContent = 'You\\'re invited to ' + host + ', ' + i.name + ', as ' + (i.level === 'view' ? 'view only: you can see the hub, dashboards, artifacts, boards and goals, and change nothing. One exception: opening a running preview can set off what that app does when a page opens.' : 'Full: you can do everything on the box except manage people.');
 }, (e) => (/expired or was used/.test(e.message) ? dead() : err(e.message + ' Reload to try again.')));
 el('go').onclick = run(async () => {
   try { await create('/auth/method/passkey/start', '/auth/method/passkey/finish', { purpose: 'invite', token, name: el('name').value }); }

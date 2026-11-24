@@ -308,7 +308,7 @@ test('org-access A16: in Chrome, the owner\'s Make admin, Take Admin away, Make 
   await toasted(p, 'Vic is now full');
   assert.equal(rowOf(gw.state(), vic.id).level, 'full', 'Vic is Full');
   await p.until('Vic\'s badge', `${textOf(`${personSel(vic.id)} .badge`)} === 'Full'`);
-  assert.deepEqual(await menuOf(p, ana.id), ['Rename', 'Make admin', 'Make owner', 'Send a new link', 'Remove'], 'Ana (Full)');
+  assert.deepEqual(await menuOf(p, ana.id), ['Rename', 'Make view only', 'Make admin', 'Make owner', 'Send a new link', 'Remove'], 'Ana (Full)');
   await pick(p, 'Make admin');
   await confirmed(p, 'Make Ana an admin? They can then move members between Full and View only, and rename or remove members and other admins. They can\'t invite, make admins, or touch your row.', 'Make admin');
   await toasted(p, 'Ana is now an admin');
