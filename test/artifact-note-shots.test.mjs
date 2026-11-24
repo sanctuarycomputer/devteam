@@ -10,7 +10,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { chromePath } from './lib/chrome.mjs';
-import { dashboardOnFreePort, testDir, until, write } from './lib/kit.mjs';
+import { dashboardOnFreePort, kit, testDir, until, write } from './lib/kit.mjs';
 import { LENS, MARKERS, SRC, TMP, addressed, body, count, cut, each, fake, pageNote, png, region, said, seenFile, sha256, shotKit, worktree } from './fixtures/artifact-shots/kit.mjs';
 
 test('C1c every test runs, and the file fails with no Chrome', () => {
@@ -500,4 +500,16 @@ test('C13 the newest three and the live mark\'s are kept, and an old resolved th
   for (let i = 0; i < 3; i++) assert.equal((await k.ready(marked)).status, 0);
   assert.deepEqual(k.files(marked).slice(0, 2), [`${shot.stamp}-dark.png`, `${shot.stamp}-light.png`]);
   assert.equal(k.files(marked).length, 5);
+});
+
+// --- what the supervisor reads -------------------------------------------------------------------------
+test('C15c the supervisor\'s guide and the help name thread unready', async () => {
+  const k = shotKit();
+  const doc = fs.readFileSync(path.join(kit, 'process', 'supervisor.md'), 'utf8');
+  const part = /\n### Artifact notes\n([\s\S]*?)\n## /.exec(doc)?.[1] ?? '';
+  assert.ok(part.includes('thread unready <t-id> --reason'), 'the command');
+  assert.match(part, /look at the picture `thread ready` prints/);
+  assert.match(part, /`shot\.w` and `shot\.h` are the width and height the page laid out at/);
+  assert.ok(!part.includes('writes none of them') && !part.includes('null in this kit'), 'no longer what it was before the pictures');
+  assert.match((await k.run(['help', 'decide'])).stdout + (await k.run(['help'])).stdout, /thread unready <t-id> --reason "<line>"/);
 });
