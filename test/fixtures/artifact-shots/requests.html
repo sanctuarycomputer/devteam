@@ -1,0 +1,8 @@
+<!doctype html><title>Requests</title>
+<button id="buy">Start trial</button>
+<script>
+// the capture waits for the fonts: held long enough for each request to be asked for
+Object.defineProperty(document, 'fonts', { value: { ready: new Promise((r) => setTimeout(r, 800)) } });
+for (const u of ['__OTHER__/fetch', 'https://example.invalid/x', 'https://cdn.jsdelivr.net/x', 'https://fonts.gstatic.com/x']) fetch(u, { mode: 'no-cors' }).catch(() => {});
+</script>
+<img src="__OTHER__/img" alt="">

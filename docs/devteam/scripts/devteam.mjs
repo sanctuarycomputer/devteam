@@ -11363,8 +11363,9 @@ const ARTIFACT_TYPES = Object.assign(Object.create(null), { html: 'text/html; ch
 // holds only what was committed with it, which is why a CDN's logs seeing a request is acceptable.
 const artifactCsp = (origin, self) => {
   const cdns = ARTIFACT_CDNS.join(' ');
+  const [fontCss, fontFiles] = ARTIFACT_FONT_HOSTS;
   return [
-    "default-src 'none'", `script-src 'unsafe-inline' 'unsafe-eval' ${self} ${cdns}`, `style-src 'unsafe-inline' ${self} ${cdns} https://fonts.googleapis.com`, `font-src ${self} ${cdns} https://fonts.gstatic.com data:`,
+    "default-src 'none'", `script-src 'unsafe-inline' 'unsafe-eval' ${self} ${cdns}`, `style-src 'unsafe-inline' ${self} ${cdns} ${fontCss}`, `font-src ${self} ${cdns} ${fontFiles} data:`,
     `img-src ${self} data: blob:`, `media-src ${self} data: blob:`, `connect-src ${self} ${cdns}`, `worker-src ${self} blob:`, "frame-src 'none'", "form-action 'none'", "base-uri 'none'",
     `frame-ancestors ${origin} http://127.0.0.1:${HUB_PORT}`, 'sandbox allow-scripts allow-forms allow-modals allow-pointer-lock',
   ].join('; ');
@@ -12755,7 +12756,7 @@ async function shotLaunch({ noSandbox = false, extraArgs = [], cap }) {
     '--headless=new', '--remote-debugging-pipe', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync', '--hide-scrollbars',
     '--renderer-process-limit=2', '--js-flags=--max-old-space-size=256', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--disable-quic',
-    ...(process.platform === 'linux' ? ['--password-store=basic'] : []), ...extraArgs, ...(noSandbox ? ['--no-sandbox'] : []), 'about:blank',
+    ...extraArgs, ...(noSandbox ? ['--no-sandbox'] : []), 'about:blank',
   ], { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'], env: { ...process.env, TMPDIR: t.tmpdir } });
   launch.gone = new Promise((resolve) => { child.once('exit', resolve); child.once('error', resolve); });
   // a child that never spawned has no pipe that closes
@@ -12813,13 +12814,91 @@ async function shotWithin(fn) {
   const limit = new Promise((_, reject) => { timer = setTimeout(() => { cap.late = true; cap.launch?.kill(); reject(new Error(SHOT_LATE)); }, SHOT_LIMIT_MS); });
   try { return await Promise.race([fn(cap), limit]); } finally { clearTimeout(timer); await shotDone(cap.launch); }
 }
+// What an artifact's file is served with, by the dashboard and by the capture server alike.
+const artifactHeaders = (rel, origin, self) => ({
+  'content-type': ARTIFACT_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store',
+  'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': artifactCsp(origin, self),
+});
+// What the page may ask for: the capture server and the hosts an artifact may load from, nothing else.
+function shotRequestAllowed(url, origin) {
+  try { return [origin, ...ARTIFACT_CDNS, ...ARTIFACT_FONT_HOSTS].includes(new URL(url).origin); } catch { return false; }
+}
+const shotListen = (srv) => new Promise((resolve, reject) => { srv.once('error', reject); srv.listen(0, '127.0.0.1', () => resolve(srv.address().port)); });
+// One artifact's files on a loopback port, each path found as the dashboard's artifact route finds it
+// (no query, never decoded) and answered with its headers.
+async function shotServe(entries, { csp = true } = {}) {
+  const files = new Map(entries.filter((e) => e.mode !== '120000' && artifactPathOk(e.path)).map((e) => [e.path, e]));
+  let origin = null;
+  const srv = http.createServer((req, res) => {
+    const raw = req.url.split('?')[0];
+    const rel = raw === '/' ? 'index.html' : raw.slice(1);
+    let bytes = null;
+    try { bytes = files.get(rel)?.read() ?? null; } catch {}
+    const h = artifactHeaders(bytes ? rel : 'none.txt', origin, `${origin}/`);
+    if (!csp) delete h['content-security-policy'];
+    shotHook(`serve ${raw} csp=${h['content-security-policy'] ? 'yes' : 'no'}`);
+    res.writeHead(bytes ? 200 : 404, h);
+    res.end(bytes ?? 'not found');
+  });
+  const port = await shotListen(srv);
+  origin = `http://127.0.0.1:${port}`;
+  return { origin, port, close() { srv.close(); srv.closeAllConnections?.(); } };
+}
+// The proxy every other connection goes to, from any target of the browser's: it drops them all.
+async function shotDeadProxy() {
+  const srv = net.createServer((c) => c.destroy());
+  return { port: await shotListen(srv), close() { srv.close(); } };
+}
+// The page at url, laid out w by h, light, and settled: its load, its fonts, two frames. Its requests
+// are filtered and its dialogs dismissed (the policy allows them, and one would block its script).
+async function shotOpen(launch, url, { w, h }) {
+  const { cdp, page: { sessionId } } = launch;
+  const send = (m, p = {}) => cdp.send(m, p, sessionId);
+  const origin = new URL(url).origin;
+  cdp.on('Fetch.requestPaused', (p, sid) => {
+    const ok = shotRequestAllowed(p.request.url, origin);
+    shotHook(`${ok ? 'continue' : 'fail'} ${p.request.url}`);
+    (ok ? cdp.send('Fetch.continueRequest', { requestId: p.requestId }, sid) : cdp.send('Fetch.failRequest', { requestId: p.requestId, errorReason: 'BlockedByClient' }, sid)).catch(() => {});
+  });
+  cdp.on('Page.javascriptDialogOpening', (p, sid) => { cdp.send('Page.handleJavaScriptDialog', { accept: false }, sid).catch(() => {}); });
+  await send('Page.enable');
+  await send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
+  await send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile: false });
+  await shotScheme(launch, 'light');
+  const loaded = new Promise((resolve) => cdp.on('Page.loadEventFired', (p, sid) => { if (sid === sessionId) resolve(); }));
+  await send('Page.navigate', { url });
+  await loaded;
+  await shotEval(launch, `Promise.resolve(document.fonts && document.fonts.ready).then(() => ${SHOT_FRAMES})`);
+}
+const SHOT_FRAMES = 'new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(1))))';
+const shotScheme = (launch, value) => launch.cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value }] }, launch.page.sessionId);
+// What the page answers is its own word; a script that throws there is no answer.
+async function shotEval(launch, expression) {
+  const r = await launch.cdp.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, launch.page.sessionId);
+  if (r.exceptionDetails) throw new Error(SHOT_ANSWER);
+  return r.result?.value;
+}
 // The one way a mark gets its picture: of the copy Show me will open once the mark is written.
 async function markShot(view, mark) {
-  return shotWithin(async (cap) => {
-    const launch = await shotChrome({ cap });
-    if (browserTestEnv('DEVTEAM_TEST_SHOT_CRASH')) await Promise.race([launch.cdp.send('Page.crash', {}, launch.page.sessionId), launch.crashed]);
-    throw new Error(SHOT_ANSWER);
-  });
+  const { slug } = view.subject;
+  const src = 'main';
+  const at = artifactAt(src, slug);
+  if (!at) throw new Error(`nothing to picture: ${slug} isn't on main or in a draft`);
+  const srv = await shotServe(at.entries, { csp: !browserTestEnv('DEVTEAM_TEST_SHOT_NO_CSP') });
+  const dead = await shotDeadProxy();
+  const hosts = [...ARTIFACT_CDNS, ...ARTIFACT_FONT_HOSTS].map((h) => new URL(h).host);
+  const extraArgs = [`--proxy-server=http://127.0.0.1:${dead.port}`, `--proxy-bypass-list=${['<-loopback>', `127.0.0.1:${srv.port}`, ...hosts].join(';')}`];
+  try {
+    return await shotWithin(async (cap) => {
+      const launch = await shotChrome({ extraArgs, cap });
+      const work = async () => {
+        if (browserTestEnv('DEVTEAM_TEST_SHOT_CRASH')) await launch.cdp.send('Page.crash', {}, launch.page.sessionId);
+        await shotOpen(launch, `${srv.origin}/${(view.subject.path ?? '').replace(/#.*$/s, '').replace(/^\/+/, '')}`, { w: 1400, h: 860 });
+        throw new Error(SHOT_ANSWER);
+      };
+      return Promise.race([work(), launch.crashed]);
+    });
+  } finally { srv.close(); dead.close(); }
 }
 // Old pictures removed (task 9).
 function shotSweep(id, now) {}
@@ -25105,7 +25184,7 @@ async function dashRoutesArtifacts(D, req, res, q) {
     // loopback fetch for a publish get the bytes as committed. Vary says so to anything that keeps
     // an answer, though no-store already keeps none.
     const framed = req.headers['sec-fetch-dest'] === 'iframe' && rel.toLowerCase().endsWith('.html');
-    res.writeHead(200, { 'content-type': ARTIFACT_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store', vary: 'sec-fetch-dest', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': artifactCsp(base, `${base}${rawPath.slice(0, rawPath.length - tail.length)}/`) });
+    res.writeHead(200, { ...artifactHeaders(rel, base, `${base}${rawPath.slice(0, rawPath.length - tail.length)}/`), vary: 'sec-fetch-dest' });
     return res.end(framed ? withArtifactLens(bytes) : bytes);
   }
   return DASH_NEXT;

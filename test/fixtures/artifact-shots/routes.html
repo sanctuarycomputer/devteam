@@ -1,0 +1,11 @@
+<!doctype html><title>Routes</title>
+<button id="buy">Start trial</button>
+<script>
+Object.defineProperty(document, 'fonts', { value: { ready: new Promise((r) => setTimeout(r, 2500)) } });
+const tried = (f) => { try { Promise.resolve(f()).catch(() => {}); } catch (e) { /* refused here */ } };
+tried(() => new WebSocket('__OTHER__/ws'.replace('http', 'ws')));
+tried(() => window.open('__OTHER__/popup'));
+tried(() => new Worker(URL.createObjectURL(new Blob(["fetch('__OTHER__/worker', { mode: 'no-cors' }).catch(() => {})"]))));
+tried(() => navigator.serviceWorker.register('sw.js'));
+setTimeout(() => tried(() => { location.href = '__OTHER__/moved'; }), 1800);
+</script>

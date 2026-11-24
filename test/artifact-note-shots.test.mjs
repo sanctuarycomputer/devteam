@@ -25,13 +25,21 @@ const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
 // --- the fixture: one project for the file, its artifact pricing on main ------------------------------
 // Chrome's singleton socket path is capped, so its TMPDIR is short and this file's own.
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'ks'));
+// Another server on this machine, which a page under a capture must never reach; the fixtures name it
+// as __OTHER__.
+const reached = [];
+const other = http.createServer((q, s) => { reached.push(q.url); s.end('x'); });
+other.on('upgrade', (q, sock) => { reached.push(`upgrade ${q.url}`); sock.destroy(); });
+await new Promise((r) => other.listen(0, '127.0.0.1', r));
+const OTHER = `http://127.0.0.1:${other.address().port}`;
 let made = null;
-after(() => { made?.F.done(); fs.rmSync(TMP, { recursive: true, force: true }); });
+after(() => { other.closeAllConnections?.(); other.close(); made?.F.done(); fs.rmSync(TMP, { recursive: true, force: true }); });
 function shotKit() {
   if (made) return made;
   const F = threadsFixture('shots');
   const arts = path.join(F.old, 'docs/devteam/project/artifacts');
   fs.cpSync(FIXTURES, path.join(arts, 'pricing'), { recursive: true, filter: (f) => !f.endsWith('.sh') });
+  for (const f of fs.readdirSync(path.join(arts, 'pricing')).filter((x) => /\.(html|js)$/.test(x))) { const at = path.join(arts, 'pricing', f); fs.writeFileSync(at, fs.readFileSync(at, 'utf8').replaceAll('__OTHER__', OTHER)); }
   F.g(['add', '-A'], F.old);
   F.g(['commit', '-qm', 'pricing'], F.old);
   F.g(['push', '-q', 'origin', 'main'], F.old);
@@ -221,4 +229,89 @@ test('C9 other threads: as before, no Chrome', async () => {
     assert.equal(r.status, 0, `${s?.kind ?? 'no subject'}: ${r.out}`);
     assert.ok(r.line && !('shot' in r.line), `${s?.kind ?? 'no subject'}: a ready line, no shot`);
   }
+});
+
+const HOSTS = [.../const ARTIFACT_CDNS = (\[.*?\]);/.exec(SRC)[1].matchAll(/'https:\/\/([^']+)'/g), .../const ARTIFACT_FONT_HOSTS = (\[.*?\]);/.exec(SRC)[1].matchAll(/'https:\/\/([^']+)'/g)].map((m) => m[1]);
+
+test('C7a C7b C7c requests go to the capture and the allowed hosts alone', async () => {
+  const k = shotKit();
+  const hook = seenFile();
+  reached.length = 0;
+  await k.readyOn(k.subject({ path: 'requests.html' }), { DEVTEAM_TEST_SHOT_SEEN: hook, DEVTEAM_TEST_SHOT_NO_CSP: '1' });
+  assert.deepEqual(reached, [], 'the other server saw nothing');
+  const said = k.seen(hook);
+  for (const u of [`${OTHER}/fetch`, `${OTHER}/img`, 'https://example.invalid/x']) assert.ok(said.includes(`fail ${u}`), `fail ${u}: ${said.join(' | ')}`);
+  for (const u of ['https://cdn.jsdelivr.net/x', 'https://fonts.gstatic.com/x']) assert.ok(said.includes(`continue ${u}`), `continue ${u}`);
+  assert.ok(said.some((l) => /^serve \/requests\.html csp=no$/.test(l)), 'the CSP is off, so the wall stands alone');
+});
+
+test('C7d one list of hosts, one set of headers', () => {
+  const csp = /const artifactCsp = [\s\S]*?\n};/.exec(SRC)[0];
+  assert.ok(csp.includes('ARTIFACT_FONT_HOSTS') && !csp.includes('https://fonts.'));
+  for (const h of ['https://fonts.googleapis.com', 'https://fonts.gstatic.com']) assert.equal(count(SRC.slice(SRC.indexOf('const ARTIFACT_CDNS')), `'${h}'`) , 1, `${h} written once`);
+  const allowed = body('shotRequestAllowed');
+  assert.ok(allowed.includes('ARTIFACT_CDNS') && allowed.includes('ARTIFACT_FONT_HOSTS'));
+  assert.ok(body('shotServe').includes('artifactHeaders('), 'the capture server');
+  const route = SRC.slice(SRC.indexOf("rawPath.startsWith('/artifact/')"));
+  assert.ok(route.slice(0, route.indexOf('return DASH_NEXT')).includes('artifactHeaders('), 'the dashboard');
+});
+
+test('C7e the proxy flags: dead but for the capture and the allowed hosts', async () => {
+  const k = shotKit();
+  const dies = fake('fake-chrome.sh');
+  await k.readyOn(k.subject(), { CHROME_PATH: dies.file });
+  assert.ok(dies.launches().length >= 1);
+  for (const a of dies.launches()) {
+    assert.ok(a.some((x) => /^--proxy-server=http:\/\/127\.0\.0\.1:\d+$/.test(x)), a.join(' '));
+    const bypass = a.find((x) => x.startsWith('--proxy-bypass-list=')).slice(20).split(';');
+    assert.equal(bypass[0], '<-loopback>');
+    assert.match(bypass[1], /^127\.0\.0\.1:\d+$/);
+    assert.deepEqual(bypass.slice(2), HOSTS);
+    assert.ok(!a.some((x) => x === `--proxy-server=http://${bypass[1]}`), 'the dead proxy is not the capture server');
+  }
+});
+
+test('C7f no route to another server', async () => {
+  const k = shotKit();
+  const hook = seenFile();
+  reached.length = 0;
+  await k.readyOn(k.subject({ path: 'routes.html' }), { DEVTEAM_TEST_SHOT_SEEN: hook, DEVTEAM_TEST_SHOT_NO_CSP: '1' });
+  const said = k.seen(hook);
+  assert.deepEqual(reached, []);
+  assert.ok(said.includes('serve /sw.js csp=no'), `the service worker was asked for: ${said.join(' | ')}`);
+  assert.ok(said.includes(`fail ${OTHER}/worker`), 'the worker fetched');
+  assert.ok(said.includes(`fail ${OTHER}/moved`), 'the page tried to move');
+});
+
+test('C7g every file under the policy, and no hook outside tests', async () => {
+  const k = shotKit();
+  const hook = seenFile();
+  await k.readyOn(k.subject({ path: 'assets.html' }), { DEVTEAM_TEST_SHOT_SEEN: hook });
+  const served = k.seen(hook).filter((l) => l.startsWith('serve '));
+  for (const f of ['/assets.html', '/app.js', '/app.css']) assert.ok(served.includes(`serve ${f} csp=yes`), `${f}: ${served.join(' | ')}`);
+  assert.deepEqual(served.filter((l) => !l.endsWith(' csp=yes')), []);
+  const off = seenFile();
+  await k.readyOn(k.subject({ path: 'assets.html' }), { DEVTEAM_TEST: undefined, DEVTEAM_TEST_SHOT_SEEN: off, DEVTEAM_TEST_SHOT_NO_CSP: '1' });
+  assert.ok(!fs.existsSync(off), 'no hook file');
+});
+
+test('C8c a page that loops, and nothing to picture: refused, nothing written', async () => {
+  const k = shotKit();
+  const hook = seenFile();
+  const id = await k.note(k.subject({ path: 'loop.html' }));
+  const nowhere = await k.note(k.subject({ slug: 'nowhere' }));
+  const was = [k.logBytes(), k.tree()];
+  const started = Date.now();
+  const r = await k.ready(id, { DEVTEAM_TEST_SHOT_SEEN: hook });
+  assert.equal(r.status, 1);
+  assert.match(r.out, /the picture took longer than 20 s \(a page that never settles, or a script that loops\); no mark written/);
+  assert.ok(Date.now() - started < 28000, 'it ended soon after 20 s');
+  const ps = spawnSync('ps', ['-eo', 'args'], { encoding: 'utf8' }).stdout;
+  const profiles = k.seen(hook).filter((l) => l.startsWith('launch ')).map((l) => / profile=(.*)$/.exec(l)[1]);
+  assert.ok(profiles.length);
+  for (const p of profiles) assert.ok(!ps.includes(p) && !fs.existsSync(p), `nothing of ${p} is left`);
+  const r2 = await k.ready(nowhere);
+  assert.equal(r2.status, 1);
+  assert.match(r2.out, /nothing to picture: nowhere isn't on main or in a draft/);
+  assert.deepEqual([k.logBytes(), k.tree()], was);
 });
