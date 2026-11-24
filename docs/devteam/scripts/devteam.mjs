@@ -11931,8 +11931,11 @@ function previewName(project, session, label) {
 }
 // true, or why not. A dashboard's or the hub's port has a name of its own, and a link to the
 // gateway's or the terminal's would have the gateway relay itself. own: the gateway's port, which
-// a box's agents see as the platform's PORT.
+// a box's agents see as the platform's PORT. Only the browser's daemon has a PORT that is its own
+// view port, always one of PREVIEW_PICK; browserIsDaemon is set by browser serve alone, so no
+// environment makes another command exempt.
 function previewPortOk(port, own = process.env.DEVTEAM_PUBLIC_URL ? Number(process.env.PORT) : null) {
+  if (browserIsDaemon && PREVIEW_PICK.includes(own)) own = null;
   if (!Number.isInteger(port)) return 'a port is an integer';
   if (port < 1024) return 'ports below 1024 are not offered';
   if (port > 65535) return 'a port is at most 65535';
