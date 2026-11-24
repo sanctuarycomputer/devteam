@@ -699,3 +699,58 @@ test('C11c each refusal of thread unready, and no line', async () => {
     assert.equal(k.logBytes(), was, what);
   }
 });
+
+// --- the dashboard ------------------------------------------------------------------------------------
+test('C12 the picture, the source and their freshness on the dashboard', async () => {
+  const k = shotKit();
+  const r = await k.readyOn(k.subject());
+  const wt = worktree(k, 'chore-artifact-gone', 'gone', 'Chore');
+  const landing = worktree(k, 'chore-artifact-landing', 'landing', 'Chore');
+  const gone = await k.readyOn(pageNote(k, { slug: 'gone', at: 'chore-artifact-gone' }));
+  const lands = await k.readyOn(pageNote(k, { slug: 'landing', at: 'chore-artifact-landing' }));
+  for (const x of [r, gone, lands]) assert.equal(x.status, 0, said(x));
+  const name = `${r.line.shot.stamp}-light.png`;
+  const { dash, port } = await dashboardOnFreePort(k.F.old, k.childEnv());
+  try {
+    const at = `http://127.0.0.1:${port}`;
+    const read = async (headers = {}) => { const a = await fetch(`${at}/api/threads`, { headers }); const b = a.status === 200 ? (await a.json()).threads : null; return { status: a.status, tag: a.headers.get('etag'), of: (id) => b.find((x) => x.id === id) }; };
+    // C12a
+    const first = await read();
+    assert.deepEqual(first.of(r.id).source, { at: 'main', slug: 'pricing' });
+    assert.deepEqual(first.of(r.id).shot, r.line.shot);
+    assert.deepEqual(first.of(gone.id).source, { at: 'chore-artifact-gone', slug: 'gone' });
+    // C12b
+    const shot = (p, headers = {}) => new Promise((resolve, reject) => { const q = http.request({ host: '127.0.0.1', port, path: p, headers }, (res) => { const got = []; res.on('data', (b) => got.push(b)); res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(got) })); }); q.on('error', reject); q.end(); });
+    const ok = await shot(`/shot/${r.id}/${name}`);
+    assert.equal(ok.status, 200);
+    assert.deepEqual([ok.headers['content-type'], ok.headers['cache-control'], ok.headers['x-content-type-options'], ok.headers['cross-origin-resource-policy']], ['image/png', 'no-store', 'nosniff', 'same-origin']);
+    assert.equal(sha256(ok.body), r.line.shot.sum.light);
+    // C12c
+    for (const [site, want] of [['cross-site', 403], ['same-site', 403], ['none', 403], ['same-origin', 200]]) assert.equal((await shot(`/shot/${r.id}/${name}`, { 'sec-fetch-site': site })).status, want, site);
+    // C12d
+    const dir = path.join(k.shots, r.id);
+    fs.symlinkSync(name, path.join(dir, '20990101-000000000-light.png'));
+    const linked = await k.note(k.subject());
+    fs.symlinkSync(dir, path.join(k.shots, linked));
+    write(path.join(k.shots, 'x-1', name), 'x');
+    write(path.join(dir, `${r.line.shot.stamp}-light.jpg`), 'x');
+    for (const p of [`/shot/${r.id}/../x/${name}`, `/shot/${r.id}%2F${name}`, `/shot/${r.id}/..%2F${r.id}%2F${name}`, `/shot/${r.id}/${r.line.shot.stamp}-light.jpg`, `/shot/x-1/${name}`, `/shot/${r.id}/20990101-000000000-light.png`, `/shot/${linked}/${name}`, `/shot/${r.id}/${r.line.shot.stamp}-dark.png`, `/shot/${r.id}/`]) assert.equal((await shot(p)).status, 404, p);
+    for (const f of [path.join(dir, '20990101-000000000-light.png'), path.join(k.shots, linked), path.join(dir, `${r.line.shot.stamp}-light.jpg`)]) fs.unlinkSync(f);
+    // C12e: no log line is written from here on
+    const was = k.logBytes();
+    const held = await read();
+    assert.equal((await read({ 'if-none-match': held.tag })).status, 304, 'nothing changed');
+    wt.remove();
+    const after = await read({ 'if-none-match': held.tag });
+    assert.equal(after.status, 200, 'a removed worktree is seen');
+    assert.equal(after.of(gone.id).source, null);
+    fs.cpSync(landing.dir, path.join(k.arts, 'landing'), { recursive: true });
+    k.F.g(['add', '-A'], k.F.old);
+    k.F.g(['commit', '-qm', 'landing lands'], k.F.old);
+    k.F.g(['push', '-q', 'origin', 'main'], k.F.old);
+    assert.equal((await read()).of(lands.id).source.at, 'chore-artifact-landing');
+    landing.remove();
+    assert.deepEqual((await read({ 'if-none-match': after.tag })).of(lands.id).source, { at: 'main', slug: 'landing' });
+    assert.equal(k.logBytes(), was);
+  } finally { await dash.stop(); }
+});

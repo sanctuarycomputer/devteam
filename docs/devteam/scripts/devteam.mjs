@@ -25209,6 +25209,35 @@ async function dashRoutesViewer(D, req, res, q) {
   }
   return DASH_NEXT;
 }
+// What noteSource found for main, kept by its commit, and the last body it changed.
+const shotSources = { commit: null, held: new Map(), digest: null, key: null, body: null };
+// threadsRead's threads with each note to check's source as it is now, and a digest of those sources.
+// One git rev-parse a read while there is such a note, and one git ls-tree an artifact a commit.
+function dashFreshSources({ views, body, key }, cache) {
+  const notes = views.filter(noteToCheck);
+  if (!notes.length) return { body, digest: '' };
+  const ref = mainRef();
+  const commit = ref ? git(['rev-parse', ref], mainRoot) : null;
+  if (cache.commit !== commit) { cache.commit = commit; cache.held = new Map(); }
+  const holds = shotHolds((slug) => cache.held.get(slug) ?? cache.held.set(slug, !!commit && !!git(['ls-tree', commit, '--', `${ARTIFACTS_REL}/${slug}/`], mainRoot)).get(slug));
+  const now = new Map(notes.map((v) => [v.id, noteSource(v, holds)]));
+  const digest = JSON.stringify([...now]);
+  if (cache.digest !== digest || cache.key !== key) Object.assign(cache, { digest, key, body: JSON.stringify(views.map((v) => (now.has(v.id) ? { ...v, source: now.get(v.id) } : v))) });
+  return { body: cache.body, digest };
+}
+// /shot/<thread>/<stamp>-<light|dark>.png: a picture of a note's spot, read only from that thread's own
+// folder. False when the path isn't one.
+function dashShotRoute(req, res, rawPath) {
+  const m = req.method === 'GET' ? /^\/shot\/(t-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*)\/(\d{8}-\d{9}-(?:light|dark)\.png)$/.exec(rawPath) : null;
+  if (!m) return false;
+  const site = req.headers['sec-fetch-site'];
+  let bytes = null;
+  const refused = site !== undefined && site !== 'same-origin';
+  try { const dir = refused ? null : shotFolder(m[1]); if (dir && fs.lstatSync(path.join(dir, m[2])).isFile()) bytes = fs.readFileSync(path.join(dir, m[2])); } catch {}
+  res.writeHead(refused ? 403 : bytes ? 200 : 404, bytes ? { 'content-type': 'image/png', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'cross-origin-resource-policy': 'same-origin' } : { 'content-type': 'text/plain' });
+  res.end(bytes ?? (refused ? "not for another site's page" : 'not found'));
+  return true;
+}
 // /api/threads
 async function dashRoutesThreads(D, req, res, q) {
   const { u } = q;
@@ -25220,6 +25249,8 @@ async function dashRoutesThreads(D, req, res, q) {
     if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
     let r;
     try { r = threadsRead(); } catch (e) { return send(res, 500, 'application/json', JSON.stringify({ error: e.message })); }
+    // where each note to check shows now, which no log line says (kit-147): a worktree goes, main moves
+    const fresh = dashFreshSources(r, shotSources);
     const pane = supervisorPane();
     const asks = supervisorAsks();
     const prompts = sessionPrompts();
@@ -25235,11 +25266,11 @@ async function dashRoutesThreads(D, req, res, q) {
     // this process's work is saved.
     // the token for an answer goes only to this page's own read, said so by the browser
     if (asks?.kind === 'menu' && site === 'same-origin') asks.token = paneToken(asks.digest);
-    const tag = `"${sha256(`${r.key}|${pane}|${asks?.kind ?? ''}|${asks?.digest ?? ''}|${asks?.token ? 1 : 0}|${checked ?? ''}|${undelivered.join(',')}|${JSON.stringify(working)}|${JSON.stringify(prompts)}`).slice(0, 20)}"`;
+    const tag = `"${sha256(`${r.key}|${fresh.digest}|${pane}|${asks?.kind ?? ''}|${asks?.digest ?? ''}|${asks?.token ? 1 : 0}|${checked ?? ''}|${undelivered.join(',')}|${JSON.stringify(working)}|${JSON.stringify(prompts)}`).slice(0, 20)}"`;
     const head = { etag: tag, 'cache-control': 'private, no-cache', ...(r.cached ? { 'x-devteam-threads': 'cached' } : {}) };
     if (req.headers['if-none-match'] === tag) { res.writeHead(304, head); return res.end(); }
     res.writeHead(200, { 'content-type': 'application/json', ...head });
-    return res.end(`{"supervisor":${JSON.stringify({ pane, question: asks, ...(prompts.length ? { prompts } : {}), checked, undelivered })},"working":${JSON.stringify(working)},"threads":${r.body}}`);
+    return res.end(`{"supervisor":${JSON.stringify({ pane, question: asks, ...(prompts.length ? { prompts } : {}), checked, undelivered })},"working":${JSON.stringify(working)},"threads":${fresh.body}}`);
   }
   return DASH_NEXT;
 }
@@ -25349,6 +25380,7 @@ async function dashRoutesArtifacts(D, req, res, q) {
     const r = await run(['artifact', 'manifest', slug, '--json'], { timeout: 12000 });
     return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, r.code === 2 ? 409 : 404, 'application/json', JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
   }
+  if (dashShotRoute(req, res, rawPath)) return;
   if (req.method === 'GET' && rawPath.startsWith('/artifact/')) {
     // A draft from another machine (kit-750): a fetched branch's folder, by the tree id that passed
     // the artifact checks (artifactRemoteRefs' resolve), its files as blobs of that tree, so a fetch
@@ -26053,7 +26085,7 @@ async function cmdDashboard() {
     const stat = (p) => { try { const s = fs.statSync(p); return `${s.size}:${s.mtimeMs}`; } catch { return '-'; } };
     const keyed = [...names].sort().map((f) => [f, `${stat(path.join(liveLogDir(), f))}/${stat(path.join(durableLogDir(), f))}`]);
     const key = keyed.map(([f, k]) => `${f}=${k}`).join('|');
-    if (threadsMemo.key === key) return { body: threadsMemo.body, cached: true, key };
+    if (threadsMemo.key === key) return { body: threadsMemo.body, cached: true, key, views: threadsMemo.views };
     for (const f of [...threadFiles.keys()]) if (!names.has(f)) threadFiles.delete(f);
     for (const [f, k] of keyed) {
       if (threadFiles.get(f)?.k === k) continue;
@@ -26064,9 +26096,10 @@ async function cmdDashboard() {
     }
     const all = [...threadFiles.values()].flatMap((x) => x.lines);
     const asked = new Set(all.filter((l) => l.type === 'question' && l.op === 'new' && typeof l.thread === 'string').map((l) => l.id));
-    const body = JSON.stringify(threadViews(fold(all.filter((l) => l.type !== 'question' || asked.has(l.id))).objects));
-    threadsMemo = { key, body };
-    return { body, cached: false, key };
+    const views = threadViews(fold(all.filter((l) => l.type !== 'question' || asked.has(l.id))).objects);
+    const body = JSON.stringify(views);
+    threadsMemo = { key, body, views };
+    return { body, cached: false, key, views };
   };
   // Whether the supervisor has a pane the kit can type into, for the card's "hasn't replied yet": what
   // the 10 s hello child found (hello --pane), so a read never waits on tmux.
