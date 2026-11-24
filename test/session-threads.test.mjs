@@ -8,7 +8,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import vm from 'node:vm';
 import { dashboardOnFreePort, hasTmux, line, threadsFixture, write } from './lib/kit.mjs';
+import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
 const W = 'web-09-live';
@@ -521,6 +523,106 @@ test('kit-109 session-bound threads', { skip: NO_TMUX, timeout: 600000 }, async 
     const f = F.findings('thread-turn-unbound');
     assert.ok(f.length === 1 && f[0].severity === 'medium' && JSON.stringify(f[0]).includes(u), JSON.stringify(f));
   });
+});
+
+// ---- done-when 7: the card, in Chrome
+test("S7b: in Chrome the card labels a session's turn with its writer", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
+  const later = cleanup(t);
+  const F = threadsFixture('session-card');
+  later(() => F.done());
+  F.sup(['feature', 'add', 'olap', '--json', JSON.stringify({ title: 'Overlap', goals: [F.goal], stories: [{ id: 'OL-S1', text: 'a story', release: 'v1.0.0' }] })]);
+  F.sup(['ticket', 'add', W, '--json', JSON.stringify({ title: W, feature: 'olap', component: 'web', kind: 'build', size: 'S', risk: 'normal', serves: ['OL-S1'], depends_on: [], touches: ['src/**'], done_when: ['its test passes in CI'] })]);
+  const T = F.owner(['thread', 'new', '--title', 'Button', '--subject', item(`ticket:${W}`), '--', 'Move the button']).split('\n')[0];
+  const T2 = F.owner(['thread', 'new', '--title', 'Plan', '--subject', item(`planner:${FEAT}`), '--', 'Two tiers?']).split('\n')[0];
+  F.hand(W, { type: 'turn', thread: T, text: 'Moved it' }, 0, `${W}.jsonl`);
+  F.hand(P, { type: 'turn', thread: T2, text: 'Two tiers it is' }, 0, `${P}-${month()}.jsonl`);
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
+  later(() => dash.stop());
+  const chrome = await openChrome();
+  later(() => chrome.close());
+  const p = await chrome.newPage();
+  later(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  const label = async (id) => {
+    await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#talk/${id}` });
+    for (let i = 0; i < 300; i++) {
+      const s = await p.ev(`[...document.querySelectorAll('#tl-c-turns .tl-turn .meta')].map((e) => e.textContent).join('|')`).catch(() => '');
+      if (s && s.split('|').length >= 2) return s;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return '';
+  };
+  assert.match(await label(T), new RegExp(`\\|The agent on ${W} · `), "the worker's turn names its session in plain words");
+  assert.match(await label(T2), new RegExp(`\\|The planner for ${FEAT} · `), "the planner's turn names it");
+});
+
+test("S7c: in Chrome a turn sent from the card into a live session's thread names that session, typed or held, never the supervisor", { skip: canDrive && !NO_TMUX ? false : 'needs Chrome, a Node with WebSocket, and tmux', timeout: 240000 }, async (t) => {
+  const later = cleanup(t);
+  const F = fixture('session-card-send');
+  later(() => F.done());
+  F.ticket(W);
+  F.phase(W, 'build');
+  // a second window keeps the fleet's session up when W's is replaced by an asking one
+  F.pane('spare');
+  F.pane(W);
+  const { T } = F.newThread(item(`ticket:${W}`), 'first words');
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env(F.OWN));
+  later(() => dash.stop());
+  const chrome = await openChrome();
+  later(() => chrome.close());
+  const p = await chrome.newPage();
+  later(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#talk/${T}` });
+  for (let i = 0; i < 300 && !(await p.ev(`!document.getElementById('tl-card').hidden && TL.open === '${T}'`).catch(() => false)); i++) await new Promise((r) => setTimeout(r, 100));
+  const seen = [];
+  // send from the card, then read the line under the turns until it says want: every line it showed is kept
+  const send = async (words, want) => {
+    await p.ev(`(() => { const ta = document.getElementById('tl-c-text'); ta.value = ${JSON.stringify(words)}; ta.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('[data-tl-send]').click(); return true; })()`);
+    let last = '';
+    for (let i = 0; i < 200; i++) {
+      last = await p.ev(`document.getElementById('tl-c-state')?.textContent ?? ''`).catch(() => '');
+      if (last) seen.push(last);
+      if (want.test(last) && (await p.ev(`TL.threads.find((x) => x.id === '${T}')?.turns.some((u) => u.text === ${JSON.stringify(words)} && /^u-/.test(u.id))`).catch(() => false))) return last;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return last;
+  };
+  assert.match(await send('Move the button', /\S/), new RegExp(`^Sent to the agent on ${W}\\.$`), 'typed into its pane');
+  F.kill(W);
+  F.asking(W);
+  assert.match(await send('and the colour', /^Held/), new RegExp(`^Held: the agent on ${W}'s terminal is asking something`), 'held');
+  assert.ok(!seen.some((x) => /Not delivered|supervisor/.test(x)), `the card never named the supervisor or "Not delivered": ${[...new Set(seen)].join(' | ')}`);
+});
+
+test("S7d: the card's line for a turn routed to a session: typed, held, not typed, a reload, and 10 minutes on; never the supervisor's words", () => {
+  const html = fs.readFileSync(new URL('../docs/devteam/dashboard/index.html', import.meta.url), 'utf8');
+  const src = html.slice(html.indexOf('/* threads-core start */'), html.indexOf('/* threads-core end */'));
+  const c = vm.createContext({ TextEncoder, URL });
+  vm.runInContext(`${src}\n;globalThis.api = { tCardState };`, c);
+  const card = c.api.tCardState;
+  const turn = (minAgo, more = {}) => ({ turns: [{ by: 'owner', at: new Date(Date.now() - minAgo * MIN).toISOString(), text: 'hi', ...more }] });
+  const landed = (minAgo) => turn(minAgo, { id: 'u-20261124-000000000-owner', routed_to: 'session', routed_session: W });
+  const pend = turn(0, { id: undefined });
+  const who = `the agent on ${W}`;
+  const got = [
+    card(pend, Date.now(), { session: 'typed', who }, true, null),
+    card(pend, Date.now(), { session: 'held', who }, true, null),
+    card(pend, Date.now(), { session: 'missed', who }, true, null),
+    card(landed(0), Date.now(), undefined, true, { checked: null, undelivered: ['u-20261124-000000000-owner'] }),
+    card(landed(11), Date.now(), { session: 'typed', who }, true, null),
+    card(turn(0, { id: 'u-20261124-000000001-owner', routed_to: 'session', routed_session: P }), Date.now(), undefined, false, null),
+  ];
+  assert.deepEqual(got, [
+    `Sent to ${who}.`,
+    `Held: ${who}'s terminal is asking something, and these words must not answer it. They reach it once it is answered.`,
+    `Still with ${who}: its terminal didn't take it, and the supervisor is told if there's no reply in 5 minutes.`,
+    `Sent to ${who}; it replies here.`,
+    `The agent on ${W} hasn't replied yet; the supervisor has been told.`,
+    `Sent to the planner for ${FEAT}; it replies here.`,
+  ]);
 });
 
 // ---- done-when 8: the docs, clause by clause, each in its own section

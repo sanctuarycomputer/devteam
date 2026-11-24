@@ -8903,13 +8903,27 @@ function tCardState(t, now, typed, pane, sup = typeof TL !== 'undefined' ? TL.su
     // plain words for who: ticket ids have no fixed shape, so any other name is a session on it
     const b = w.by;
     const plan = typeof b === 'string' ? /^plan-(.+)$/.exec(b) : null;
-    const who = typeof b !== 'string' || !b ? 'A session' : b === 'supervisor' ? 'The supervisor' : b === 'responder' ? 'The responder' : plan ? `The planner for ${plan[1]}` : `The session on ${b}`;
-    return w.stage === 'responding' ? `${who} is responding…` : `${who} picked it up.`;
+    const named = typeof b === 'string' && b && !plan && typeof who === 'function' ? who(b) : '';
+    const who2 = typeof b !== 'string' || !b ? 'A session' : b === 'supervisor' ? 'The supervisor' : b === 'responder' ? 'The responder' : plan ? `The planner for ${plan[1]}` : named && named !== b ? `${named.charAt(0).toUpperCase()}${named.slice(1)}` : `The session on ${b}`;
+    return w.stage === 'responding' ? `${who2} is responding…` : `${who2} picked it up.`;
   }
   // a turn routed to the responder (kit-104): the landed turn's route says so (a turn in the log is
   // the server's record's to say), else the page's own send; the responder's hold or failed typing
   // stays late until a reply. Never "Not delivered" nor the supervisor's hold for it.
   const landed = /^u-/.test(last.id ?? '');
+  // a turn routed to a session (kit-109): the landed turn's route names it, else the page's own send
+  // ({ session, who }, from the send's words); the card names that session, never the supervisor, and
+  // never says "Not delivered" for it (its turn is never in the undelivered list)
+  const sName = (x) => { const n = typeof who === 'function' ? who(x) : ''; return n && n !== x ? n : /^plan-/.test(x) ? `the planner for ${x.slice(5)}` : `the agent on ${x}`; };
+  const mine = typed && typeof typed === 'object' && typeof typed.session === 'string' && typeof typed.who === 'string' ? typed : null;
+  const sess = landed ? (last.routed_to === 'session' && typeof last.routed_session === 'string' ? { who: sName(last.routed_session), state: mine?.session ?? null } : null) : mine ? { who: mine.who, state: mine.session } : null;
+  if (sess) {
+    const s = sess.who;
+    if (now - Date.parse(last.at) > T_WAIT_MS) return `${s.charAt(0).toUpperCase()}${s.slice(1)} hasn't replied yet; the supervisor has been told.`;
+    if (sess.state === 'held') return `Held: ${s}'s terminal is asking something, and these words must not answer it. They reach it once it is answered.`;
+    if (sess.state === 'missed') return `Still with ${s}: its terminal didn't take it, and the supervisor is told if there's no reply in 5 minutes.`;
+    return sess.state === 'typed' ? `Sent to ${s}.` : `Sent to ${s}; it replies here.`;
+  }
   const r = landed ? (last.routed_to === 'responder' ? (typed === 'responder-late' ? 'responder-late' : last.delivered === 'queued' ? 'queued' : 'responder') : null)
     : typed === 'responder' || typed === 'queued' || typed === 'responder-late' ? typed : null;
   if (r) {
@@ -9538,7 +9552,9 @@ function tlTurnBody(u, t) {
 // kit recorded for them, pending or posted.
 function tlTurns(t) {
   // an owner turn a person on the box gave names them (kit-252); older lines, a laptop and a pending turn say You
-  return t.turns.map((u) => `<div class="tl-turn ${u.by}"><div class="meta">${u.by === 'owner' ? (u.person ? esc(u.person.name) : 'You') : 'The supervisor'} · ${esc(when(u.at))}</div>${tlTurnBody(isFilled(u.text, u.files) ? { ...u, text: '' } : u, t)}${chipsHtml(u.files ?? [])}${u.refs.length ? `<div class="tl-refs">${u.refs.map(tlRef).join('')}</div>` : ''}</div>`).join('');
+  // a ticket's or planner's turn names its session (kit-109): who()'s words, capitalised
+  const label = (w) => { const n = who(w); return esc(`${n.charAt(0).toUpperCase()}${n.slice(1)}`); };
+  return t.turns.map((u) => `<div class="tl-turn ${u.by}"><div class="meta">${u.by === 'owner' ? (u.person ? esc(u.person.name) : 'You') : typeof u.writer === 'string' && (ticketMap().has(u.writer) || /^plan-[a-z0-9]/.test(u.writer)) ? label(u.writer) : 'The supervisor'} · ${esc(when(u.at))}</div>${tlTurnBody(isFilled(u.text, u.files) ? { ...u, text: '' } : u, t)}${chipsHtml(u.files ?? [])}${u.refs.length ? `<div class="tl-refs">${u.refs.map(tlRef).join('')}</div>` : ''}</div>`).join('');
 }
 // The card's body, redrawn only when what it shows changed and never under the owner's hands (a
 // focused control in its turns, a question card mid-answer), so a pick or a note survives a poll.
@@ -9935,7 +9951,12 @@ function tlSend() {
       if (!p.real) p.real = String(out.out || '').split('\n')[0].trim();
       // files dropped while the thread was being started go on with it, under its id (the box's key too)
       if (p.real && p.real !== p.thread) moveAttach(`tl:${p.thread}`, `tl:${p.real}`);
-      TL.typed[p.real] = /(^|\n)(recorded and held: the responder's|not delivered to the responder)/.test(out.out || '') ? 'responder-late' : /(^|\n)sent to the responder/.test(out.out || '') ? 'responder' : /(^|\n)the responder is busy/.test(out.out || '') ? 'queued' : /(^|\n)recorded and held/.test(out.out || '') ? 'held' : /supervisor's pane/.test(out.out || '');
+      // a session's (kit-109): sent to, held, or not typed, naming it
+      const said = String(out.out || '');
+      const sm = /(^|\n)sent to ((?:the agent on|the planner for) [^\n]+)/.exec(said);
+      const hm = /(^|\n)recorded and held: [^\n]*?((?:the agent on|the planner for) [^\n]*?)'s terminal/.exec(said);
+      const nm = /(^|\n)not delivered: ((?:the agent on|the planner for) [^\n]*?)'s terminal didn't take it/.exec(said);
+      TL.typed[p.real] = sm ? { session: 'typed', who: sm[2] } : hm ? { session: 'held', who: hm[2] } : nm ? { session: 'missed', who: nm[2] } : /(^|\n)(recorded and held: the responder's|not delivered to the responder)/.test(out.out || '') ? 'responder-late' : /(^|\n)sent to the responder/.test(out.out || '') ? 'responder' : /(^|\n)the responder is busy/.test(out.out || '') ? 'queued' : /(^|\n)recorded and held/.test(out.out || '') ? 'held' : /supervisor's pane/.test(out.out || '');
       if (TL.open === p.thread && p.real !== p.thread) {
         TL.open = p.real;
         // the card is this thread's under its id now, as it is: words typed since Send (kept under the pending

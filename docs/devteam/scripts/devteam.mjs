@@ -10817,7 +10817,8 @@ function cmdThread() {
       const who = sessionWords(route.session);
       const typed = deliverOwnerTurn(t, words, files, tmuxTarget(route.session));
       if (typed === true) return `sent to ${who}`;
-      if (typed) return heldWords(typed, `${who}'s`);
+      // every hold names whose terminal it is, so the card can say which session has the turn
+      if (typed) { const h = heldWords(typed, `${who}'s`); return h.includes(`${who}'s terminal`) ? h : `${h} (${who}'s terminal)`; }
       return `not delivered: ${who}'s terminal didn't take it; the turn stays with it, and the supervisor gets it if there's no reply in ${SESSION_OVERDUE_MS / 60000} minutes`;
     }
     if (route.to === 'responder') {
