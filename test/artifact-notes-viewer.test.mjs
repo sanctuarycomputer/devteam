@@ -432,9 +432,11 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await has(V, '#av-next', 'the stepper');
     await V.p.click('#av-next');
     await V.soon(`TL.open === ${J(N.hiddenQ)} && TS.path === 'faq.html' && !document.getElementById('tl-card').hidden`, 'its card open');
+    // the lens says where the anchor is a frame or two after the page is ready: the words come with it, then the place
+    assert.ok(await V.settle(`/Not on this view/.test(${text('#tl-card .tl-nview')})`, 4000), 'the words');
+    await V.p.ev(FRAMES);
     const box = await V.p.ev(`(() => { const c = document.getElementById('tl-card').getBoundingClientRect(), s = document.getElementById('av-stage').getBoundingClientRect(); return { right: s.right - c.right, top: c.top - s.top }; })()`);
     assert.ok(Math.abs(box.right - 8) <= 2 && Math.abs(box.top - 8) <= 2, `at the stage's top right, 8px in (${J(box)})`);
-    assert.match(await V.p.ev(text('#tl-card')), /Not on this view/, 'the words');
   });
 
   async function cardOf(V, id) {
@@ -480,6 +482,29 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await V.p.click('#tl-card [data-tl-accept]');
     await V.soon(`window.__posts.some((x) => x.action === 'thread-accept-addressed')`, 'armed: Resolve posts');
     assert.deepEqual(await V.p.ev(`window.__posts.filter((x) => x.action === 'thread-accept-addressed').map((x) => x.body)`), [{ id: N.trial, at: NEWER }], 'the note shown');
+  });
+
+  await sub('A12b: Resolve is armed again after a step opens the card', async () => {
+    const V = await tabOf({ [N.trial]: withFrame(ROW.C12(), '') });
+    await openAt(V, AV_WT, 'plan-pricing');
+    await cardOf(V, N.trial);
+    await holdPoll(V);
+    await new Promise((r) => setTimeout(r, ARMED));
+    await V.p.ev(`(window.__replies['thread-accept-addressed'] = { body: { ok: true, out: '' } }, true)`);
+    const posts = () => V.p.ev(`window.__posts.filter((x) => x.action === 'thread-accept-addressed').map((x) => x.body.id)`);
+    // armed, then opened again by a step (the list's only note)
+    assert.ok(await V.settle(`document.querySelector('#tl-card [data-tl-accept]').disabled === false`, 3000), 'setup: armed');
+    const k = await V.p.ev('window.__tsPosts.length');
+    await V.p.click('#av-next');
+    await V.soon(`window.__tsPosts.slice(${k}).some((m) => m.type === 'scroll-to')`, 'setup: stepped');
+    // the click itself, however the button looks
+    await V.p.ev(`(document.querySelector('#tl-card [data-tl-accept]').disabled = false, document.querySelector('#tl-card [data-tl-accept]').click(), true)`);
+    await V.p.ev(FRAMES);
+    assert.deepEqual(await posts(), [], 'a click right after a step posts nothing');
+    await new Promise((r) => setTimeout(r, ARMED));
+    await V.p.click('#tl-card [data-tl-accept]');
+    await V.soon(`window.__posts.some((x) => x.action === 'thread-accept-addressed')`, 'armed: Resolve posts');
+    assert.deepEqual(await posts(), [N.trial], 'the note shown');
   });
 
   await sub('A13: a ready artifact card shows the outcome; Resolve sends thread-accept with its at', async () => {

@@ -1150,6 +1150,11 @@ try {
   .viewer #tt-peek { display: inline-flex; top: calc(var(--bar-h) / 2); right: var(--header-pad); transform: translateY(-50%); z-index: 24; }
   .viewer .shell:not(.threads-open) #tt-peek { visibility: visible; opacity: 1; pointer-events: auto; transition: opacity var(--dur) var(--ease), visibility 0s; }
   .viewer .threads { z-index: 23; }
+  /* a note on an artifact (kit-145): what there is to check, a mark withdrawn, where a step landed */
+  .tl-addr { margin: 6px 0; padding: 6px 8px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--surface)); font-size: 12px; }
+  .tl-addr .by { color: var(--muted); }
+  .tl-addr .tx, .tl-wd .tx { overflow-wrap: anywhere; }
+  .tl-wd, .tl-nview { margin: 6px 0; font-size: 12px; color: var(--muted); }
   .tl-ready { margin: 6px 0; padding: 6px 8px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--surface)); font-size: 12px; }
   .tl-ready input { width: 100%; padding: 4px 8px; margin-top: 4px; }
   /* what the supervisor's terminal asks: its words as the terminal has them, one button an option */
@@ -7157,6 +7162,8 @@ avStep.land = (late = false) => {
   if (selector && there) tsPost({ type: 'scroll-to', anchor: { selector, tag, text, rect } });
   // by a step: placed at the stage's top right when the note has no pin there, and (gone) what version this is
   avStep.off = { id: t.id, gone: want.gone };
+  // opened under the owner's hand, so Resolve waits its second again
+  TL.armAt = null;
   tlOpen(t.id, false);
 };
 // A note a step opened whose element the lens says isn't showing on this view.
@@ -9792,7 +9799,7 @@ function tlCardBody(t) {
   const acts = t ? (t.status === 'resolved' ? '<button type="button" class="ghost" data-tl-reopen>Reopen</button>' : '<button type="button" class="ghost" data-tl-resolve>Resolve</button>') : '';
   if (acts !== TL.acts) { TL.acts = acts; tlEl('tl-c-acts').innerHTML = acts; }
   // the banner or the resolve form, redrawn only when it changes, so a half-typed outcome stays
-  const rk = !t ? '' : TL.resolving ? `form:${t.id}:${t.questions.filter((q) => q.status === 'open').length}` : t.ready ? `ready:${t.id}:${t.ready.at}:${t.questions.filter((q) => q.status === 'open').length}` : '';
+  const rk = !t ? '' : TL.resolving ? `form:${t.id}:${t.questions.filter((q) => q.status === 'open').length}` : t.ready && !(t.check && s?.kind === 'artifact') ? `ready:${t.id}:${t.ready.at}:${t.questions.filter((q) => q.status === 'open').length}` : '';
   if (rk !== TL.readyKey) {
     // a question answered meanwhile changes the warning, never the words being typed or the caret
     const was = tlEl('tl-outcome'), kept = was?.value ?? '', focused = document.activeElement === was, caret = was?.selectionStart ?? 0;
@@ -9800,6 +9807,29 @@ function tlCardBody(t) {
     tlEl('tl-c-ready').innerHTML = !rk ? '' : TL.resolving ? tlResolveForm(t) : tlReady(t);
     const now = tlEl('tl-outcome');
     if (now && kept) { now.value = kept; if (focused) { now.focus(); now.setSelectionRange(caret, caret); } }
+  }
+  // a note on an artifact (kit-145): what there is to check (a session's mark or the supervisor's proposal, as
+  // text), a mark withdrawn, and where the step that opened it landed; redrawn only when it changes. Resolve
+  // sends the mark's time as drawn (TL.drawnAt), and only once this note has been drawn unchanged for a second
+  // (TL.armAt): one that swaps in under the pointer isn't accepted by a click meant for the last one.
+  let box0 = document.getElementById('tl-c-note');
+  if (!box0) { box0 = document.createElement('div'); box0.id = 'tl-c-note'; tlEl('tl-c-ready').after(box0); }
+  const check = t?.status === 'open' && s?.kind === 'artifact' && !TL.resolving && (t.check === 'addressed' ? t.addressed : t.check === 'ready' ? t.ready : null);
+  const off = avStep.off?.id === t?.id ? avStep.off : null;
+  const sha = check && t.check === 'addressed' && /^[0-9a-f]{7,40}$/.test(check.sha ?? '') ? ` · ${check.sha.slice(0, 7)}` : '';
+  const says = [
+    off?.gone && '<div class="tl-nview">Showing main: the version with the change is gone.</div>',
+    t && avStep.unseen(t) && '<div class="tl-nview">Not on this view</div>',
+    t?.unready && s?.kind === 'artifact' && t.status === 'open' && `<div class="tl-wd"><div class="tx">The supervisor withdrew a mark: ${esc(t.unready.reason)}</div></div>`,
+    check && `<div class="tl-addr"><div class="by">${t.check === 'addressed' ? `Addressed by ${esc(check.by)}${sha}` : 'Proposed by the supervisor'}</div><div class="tx">${esc(t.check === 'addressed' ? check.note : check.outcome)}</div>${tlOpenWarn(t)}<div class="row-inline"><button type="button" class="ghost" data-tl-show="${esc(t.id)}">Show me</button><button type="button" data-tl-accept disabled>Resolve</button></div></div>`,
+  ].filter(Boolean).join('');
+  if (box0.dataset.for !== t?.id || box0.said !== says) { box0.dataset.for = t?.id ?? ''; box0.said = says; box0.innerHTML = says; }
+  if (check) {
+    (TL.drawnAt ??= {})[t.id] = check.at;
+    if (TL.armAt?.id !== t.id || TL.armAt.at !== check.at) { TL.armAt = { id: t.id, at: check.at, since: Date.now() }; setTimeout(tlDraw, ASK_ARM_MS + 20); }
+    const go = box0.querySelector('[data-tl-accept]'), wait = Date.now() - TL.armAt.since < ASK_ARM_MS;
+    if (go && go.disabled !== wait) go.disabled = wait;
+    if (go) go.title = wait ? 'Read it first' : '';
   }
   // seen only when the owner can see it: a reply landing in a hidden tab still gets its dot
   if (t && document.visibilityState === 'visible') tlSeen(t);
@@ -9816,7 +9846,7 @@ function tlCardBody(t) {
     if (was) tlEl('tl-c-ctx').querySelector('details').open = true;
     turns.innerHTML = t ? tlTurns(t) : '';
     const box = tlEl('tl-c-text');
-    if (box) box.placeholder = t?.turns?.length ? 'Reply' : 'Message';
+    if (box) box.placeholder = check ? 'Not yet? Say what is still wrong' : t?.turns?.length ? 'Reply' : 'Message';
     turns.scrollTop = turns.scrollHeight;
   }
   const line = !t ? '' : t.status === 'resolved' ? `Resolved${t.outcome ? `: ${t.outcome}` : ''}. Writing reopens it.` : tCardState(t, Date.now(), TL.typed[t.id] === 'held' && !askShown() ? true : TL.typed[t.id], TL.pane) ?? '';
@@ -10227,7 +10257,9 @@ document.addEventListener('click', (e) => {
   if (e.target.closest('[data-tl-resolve]')) { TL.resolving = true; return void tlDraw(); }
   if (e.target.closest('[data-tl-resolve-cancel]')) { TL.resolving = false; return void tlDraw(); }
   if (t && e.target.closest('[data-tl-resolve-go]')) return void tlAct('thread-resolve', { id: t.id, outcome: tlEl('tl-outcome')?.value.trim() || undefined });
-  if (t && e.target.closest('[data-tl-accept]')) return void tlAct('thread-accept', { id: t.id, at: t.ready?.at });
+  const accept = t && e.target.closest('[data-tl-accept]');
+  if (accept && accept.closest('.tl-addr')) return void (TL.armAt?.id === t.id && Date.now() - TL.armAt.since >= ASK_ARM_MS && tlAct(t.check === 'addressed' ? 'thread-accept-addressed' : 'thread-accept', { id: t.id, at: TL.drawnAt[t.id] }));
+  if (accept) return void tlAct('thread-accept', { id: t.id, at: t.ready?.at });
   if (t && e.target.closest('[data-tl-notyet]')) return void tlAct('thread-say', { id: t.id, text: 'Not yet' });
   if (t && e.target.closest('[data-tl-reopen]')) return void tlAct('thread-reopen', { id: t.id });
   const pin = e.target.closest('[data-tl-pin]');
@@ -10758,7 +10790,7 @@ function tlAct(action, body) {
   const err = tlEl('e-tl');
   const t = TL.threads.find((x) => x.id === body.id);
   // Not yet is a turn like any other; resolve, accept and reopen change the thread's status
-  const status = { 'thread-resolve': 'resolved', 'thread-accept': 'resolved', 'thread-reopen': 'open' }[action] ?? null;
+  const status = { 'thread-resolve': 'resolved', 'thread-accept': 'resolved', 'thread-accept-addressed': 'resolved', 'thread-reopen': 'open' }[action] ?? null;
   const p = status ? { thread: body.id, real: body.id, status, confirmed: false } : { thread: body.id, real: body.id, turn: tPendingTurn(body.text, new Date().toISOString()), had: t ? tHad(t, body.text) : 0, confirmed: false };
   const wasOpen = TL.open;
   // a thread still being started has no name to act on yet
@@ -10782,6 +10814,8 @@ function tlAct(action, body) {
     },
     undo: () => { TL.pend = TL.pend.filter((x) => x !== p); if (status === 'resolved') TL.open = wasOpen; tlRelay(); tlDraw(); },
     onOk: () => { p.confirmed = true; tlRefresh(); },
+    // refused (the note changed): read again, so the card shows the note as it is now; the words stay
+    restore: () => { if (action.startsWith('thread-accept')) tlRefresh(); },
     errId: 'tl',
   });
 }
