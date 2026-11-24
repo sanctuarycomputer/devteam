@@ -450,9 +450,9 @@ To check is `check` set, with a session is `handed` set. A resolved note has non
 
 **Before Hand over.** An owner's line on an artifact note goes to nobody's pane and nobody owes it a reply. It waits on the owner until Hand over: ack its lines in `unread` (`unread ack`), with no reply, relay or work. Ack the hand-over's own owner lines too.
 
-**Whose note it is.** A note handed to a session is that session's: no reply and no relay from you. A note handed to you is your work from the Hand over.
+**Whose note it is.** A note handed to a session is that session's: no reply and no relay from you. A note handed to you is your work from the Hand over; until your first reply it reads as waiting on you (`thread-waiting` after 10 minutes), so for work that takes longer, reply "On it" first.
 
-**Working a hand-over.** Read the notes with `artifact notes <slug> --at <at>` (the hand-over message gives it), change the draft, commit, then mark each note with `artifact addressed <t-id> --note "<what changed>"` and look at the picture it prints. Send nothing more unless something is blocked. A landed artifact you change in `devteam.mjs chore start artifact-<slug>`, so Show me finds `chore-artifact-<slug>`; a change you draw elsewhere is named with `--draft <worktree>`.
+**Working a hand-over.** Read the notes with `artifact notes <slug> --at <at>` (the hand-over message gives it), change the draft, commit, then mark each note with `artifact addressed <t-id> --note "<what changed>"` and look at the picture it prints. Beyond that, send nothing more unless something is blocked. A landed artifact you change in `devteam.mjs chore start artifact-<slug>`, so Show me finds `chore-artifact-<slug>`; a change you draw elsewhere is named with `--draft <worktree>`.
 
 **What a mark says.** A mark's `--note`, and a `thread ready --outcome` on an artifact note, says what changed for that note ("the Start trial button is primary; the line under it says the trial ends after 14 days"), never "done" or "see the artifact".
 

@@ -421,7 +421,7 @@ test('C11b the session whose mark is withdrawn is told; the supervisor is not', 
   const told = toldOf(k, theirs);
   assert.equal(told.length, 1);
   assert.deepEqual([told[0].by, told[0].to], ['supervisor', 'plan-pricing']);
-  assert.equal(told[0].text, `Your mark on ${theirs} was withdrawn: ${REASON}. Fix it and mark it again: devteam.mjs artifact notes pricing.`);
+  assert.equal(told[0].text, `Your mark on ${theirs} was withdrawn: ${REASON}. Fix it and mark it again: devteam.mjs artifact notes pricing --at ${k.subject().at}.`);
   assert.match(r.stdout, /plan-pricing/);
   assert.equal((await k.show(theirs)).check, null);
   const own = await addressed(k, k.subject(), 'supervisor');

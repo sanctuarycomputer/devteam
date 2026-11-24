@@ -10605,7 +10605,7 @@ function threadQuestion(q) {
   return { id: q.id, kind: q.kind, question: String(q.question ?? ''), status, answer: counts ? ans.answer : status === 'defaulted' ? q.default : null, channel: counts ? ans.channel ?? null : null, answered_at: counts ? ans.at : null };
 }
 // Every thread as the card, the dock and the CLI show it, from a fold's objects: the whole log's
-// (readLog) or the dashboard's reader's, which holds only threads, turns and their questions.
+// (readLog) or the dashboard's reader's, which holds only threads, turns, their questions and marks.
 function threadViews(objects) {
   const turns = new Map();
   const asked = new Map();
@@ -11350,7 +11350,7 @@ function cmdThread() {
     if (!v.check) die(`${t.id} has nothing to check: ${v.subject?.kind === 'artifact' ? 'no proposal or addressed mark stands' : "only an artifact note's mark is withdrawn"}`);
     appendLog({ type: 'thread', op: 'set', id: t.id, ready: null, unready: { at: nowIso(), reason } }, 'supervisor');
     if (v.check === 'addressed' && v.addressed.by !== 'supervisor') {
-      sendLine({ to: v.addressed.by, kind: 'info', thread: t.id, from: 'supervisor', text: `Your mark on ${t.id} was withdrawn: ${reason}. Fix it and mark it again: devteam.mjs artifact notes ${LINK_ID.test(String(v.subject?.slug)) ? v.subject.slug : '<slug>'}.` });
+      sendLine({ to: v.addressed.by, kind: 'info', thread: t.id, from: 'supervisor', text: `Your mark on ${t.id} was withdrawn: ${reason}. Fix it and mark it again: devteam.mjs artifact notes ${LINK_ID.test(String(v.subject?.slug)) ? v.subject.slug : '<slug>'}${ARTIFACT_AT.test(String(v.subject?.at)) ? ` --at ${v.subject.at}` : ''}.` });
       out(`withdrew ${v.addressed.by}'s mark on ${t.id}, and told ${v.addressed.by}`);
     } else out(`withdrew your own mark on ${t.id}`);
     spoke(t);
@@ -13730,7 +13730,8 @@ async function artifactAddressedCmd(id) {
     if (!holds(draft)) die('--draft is a worktree under .worktrees/ that holds this artifact (never main, a published tree, a reviewer\'s or a scratch one); leave it out when the change is on main');
   } else if (realPath(path.dirname(repoRoot)) === realPath(path.join(mainRoot, '.worktrees')) && holds(path.basename(repoRoot))) draft = path.basename(repoRoot);
   const answers = shotAnswers(v, t);
-  const r = await markShot(v, { kind: 'addressed', by, draft });
+  // Chrome missing: the shooter names thread ready, whose picture it was built for
+  const r = await markShot(v, { kind: 'addressed', by, draft }).catch((e) => die(e.message.replace(/^thread ready on an artifact note/, 'artifact addressed')));
   // a refusal from here ends the process (die) or throws: either way the pictures go
   let written = false;
   process.once('exit', () => { if (!written) for (const f of r.files) fs.rmSync(f, { force: true }); });
@@ -13743,6 +13744,7 @@ async function artifactAddressedCmd(id) {
   try { shotSweep(t.id, Date.now()); } catch (e) { warn(`old pictures not removed: ${e.message}`); }
   out(`marked ${t.id} addressed`);
   for (const l of r.lines) out(l);
+  if (by !== 'supervisor') out('Only the supervisor withdraws a mark: if the picture doesn\'t show the change, fix the page and run artifact addressed again, and the newer mark replaces this one.');
 }
 /* artifactAddressed end */
 // artifact new <slug> --title --summary [--for '[…]'] [--kind mock|diagram|docs]: scaffold a page in this worktree.

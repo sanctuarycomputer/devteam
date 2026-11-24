@@ -159,6 +159,23 @@ test('C1d no pane: the message stays logged, and the supervisor is nudged with t
   assert.equal(typed.trim(), `[devteam info ${m.id} from owner] ${m.text}`);
 }));
 
+test('C1d a line held for the session is said so, counts as typed, and nudges nobody', fresh(async () => {
+  const w = win('plan-pricing');
+  const pane = F.standIn();
+  try {
+    // the owner has a line open in that terminal
+    const floor = spawnSync('tmux', ['set-option', '-p', '-t', `=${SESSION}:plan-pricing`, '@devteam-owner-floor', `${Date.now()} open`], { env: F.env({}), encoding: 'utf8' });
+    assert.equal(floor.status, 0, floor.stderr);
+    const P = { DEVTEAM_SUPERVISOR: pane.target };
+    note('plan-pricing');
+    assert.match(ok(cli(handoff('--at', 'plan-pricing'), P)), /^handed 1 note on artifact pricing to plan-pricing\nheld for plan-pricing's pane: recorded and held: /);
+    note('plan-pricing');
+    assert.deepEqual(JSON.parse(ok(cli(handoff('--at', 'plan-pricing', '--json'), P))), { to: 'plan-pricing', typed: true, count: 1 });
+    await new Promise((r) => setTimeout(r, 500));
+    assert.deepEqual([w.typed(), pane.typed()], ['', '']);
+  } finally { w.close(); }
+}));
+
 test('C1e the supervisor as recipient, with no pane', fresh(() => {
   note('main');
   assert.equal(ok(cli(handoff())), 'handed 1 note on artifact pricing to supervisor\nnot typed: the supervisor has no pane; it stays in its messages and unread');
@@ -258,6 +275,11 @@ test("C4a a session's mark: one message, its own draft, its picture printed", fr
   assert.ok(fs.existsSync(picture(out)), out);
   assert.match(out, /Look at it before you send this mark/);
   assert.deepEqual([show(id).check, show(id).addressed.by, show(id).shot.src], ['addressed', 'plan-pricing', 'plan-pricing']);
+  assert.match(out, /Only the supervisor withdraws a mark/);
+  // withdrawn: the command the message names lists the note, back with the session
+  ok(cli(['thread', 'unready', id, '--reason', 'the button is still grey'], F.SUP));
+  const cmd = /devteam\.mjs (artifact notes .*)\.$/.exec(lines().filter((l) => l.type === 'message' && l.to === 'plan-pricing' && l.by === 'supervisor').pop().text)[1];
+  assert.ok(ok(asIn('plan-pricing', cmd.split(' '), PLAN)).startsWith(`${id} · with plan-pricing`), cmd);
 }));
 
 test("C4b the supervisor's mark: no draft, the note's own copy; an explicit draft wins", fresh(() => {
@@ -315,7 +337,7 @@ test("C4d a draft the kit can't open there is refused", fresh(() => {
 
 test('C4e no picture, no mark', fresh(() => {
   const id = note('plan-pricing', h1); handed(id, 'plan-pricing');
-  refusedQuietly(() => asIn('plan-pricing', addressed(id), { ...PLAN, CHROME_PATH: '/nonexistent' }), /Chrome|CHROME_PATH/);
+  refusedQuietly(() => asIn('plan-pricing', addressed(id), { ...PLAN, CHROME_PATH: '/nonexistent' }), /^(?!.*thread ready).*(Chrome|CHROME_PATH)/);
   assert.ok(!fs.existsSync(path.join(F.old, 'docs/devteam/run/shots', id)), 'no picture left');
 }));
 
