@@ -1970,7 +1970,7 @@ export function createGateway(opts = {}) {
   };
   // The terminal's two posts (terminal@1 §3): keys, for the supervisor or the shell, and the shell's
   // open, each signed under its own domain with the path's own which. Matched on the path as the
-  // dashboard routes it (url.pathname: dot segments resolved, nothing decoded), so what is signed is
+  // dashboard routes it (url.pathname: dot segments resolved, %2e among them, nothing else decoded), so what is signed is
   // what it routes; any other POST under /api/term/ goes on unsigned and the dashboard refuses it,
   // and its reads (token, screen, history) go on unsigned as any GET does.
   // Their bodies are capped at 100 KB, as the dashboard caps them: over it is a 413, with nothing

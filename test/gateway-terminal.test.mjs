@@ -68,23 +68,25 @@ const listen = (srv, port) => new Promise((resolve, reject) => { srv.once('error
 const closeAll = (srv) => new Promise((r) => { srv.closeAllConnections?.(); srv.close(() => r()); });
 // A request carrying x-test-hold is never answered: it is kept in held, with closed set once the
 // gateway's side of it goes away before an answer.
-function recorder() {
+function recorder(only = null) {
   const seen = [];
   const held = [];
   const arrived = [];
+  const stray = [];
   const srv = http.createServer((q, s) => {
+    if (only && q.headers.host !== only) { stray.push(`${q.method} ${q.url} ${q.headers.host}`); q.resume(); s.writeHead(404); s.end(); return; }
     arrived.push(`${q.method} ${q.url}`);
     if (q.headers['x-test-hold']) { const x = { url: q.url, closed: false }; held.push(x); s.on('close', () => { x.closed = true; }); q.resume(); return; }
     const parts = [];
     q.on('data', (c) => parts.push(c));
     q.on('end', () => { seen.push({ method: q.method, url: q.url, h: q.headers, body: Buffer.concat(parts) }); s.writeHead(200, { 'content-type': 'application/json' }); s.end('{"ok":true}'); });
   });
-  return { srv, seen, held, arrived };
+  return { srv, seen, held, arrived, stray };
 }
 
 // --- the box: a stand-in hub listing alpha (the real dashboard), rec (the recorder) and a preview --
 async function box(t, name, { real = null } = {}) {
-  const rec = recorder();
+  const rec = recorder(`127.0.0.1:${REC}`);
   await listen(rec.srv, REC);
   const app = recorder();
   const appPort = await listen(app.srv, 0);
@@ -116,9 +118,15 @@ async function box(t, name, { real = null } = {}) {
     r.on('error', () => {});
     r.write('x'.repeat(sent));
   });
+  const scan = () => new Promise((resolve) => {
+    const r = http.request({ host: '127.0.0.1', port: REC, method: 'HEAD', path: '/', setHost: false, agent: false, headers: { host: 'devteam-scan.onrender.com', 'user-agent': 'Go-http-client/1.1' } }, (res) => { res.resume(); res.on('end', resolve); });
+    r.on('error', resolve);
+    r.end();
+  });
   const at = (h, method, route, { body, headers = {}, cookie = '' } = {}) => new Promise((resolve, reject) => {
     const data = body === undefined ? null : Buffer.isBuffer(body) || typeof body === 'string' ? Buffer.from(body) : Buffer.from(JSON.stringify(body));
     const hd = { host: h, ...(method !== 'GET' && method !== 'HEAD' ? { origin: `http://${h}`, 'content-type': 'application/json' } : {}), ...(cookie ? { cookie } : {}), ...headers };
+    for (const k of Object.keys(hd)) if (hd[k] === null) delete hd[k];
     const r = http.request({ host: '127.0.0.1', port, method, path: route, headers: hd, setHost: false }, (res) => {
       const parts = [];
       res.on('data', (c) => parts.push(c));
@@ -153,7 +161,7 @@ async function box(t, name, { real = null } = {}) {
   await until(async () => (await at(on('rec'), 'GET', '/ready', { cookie: owner })).status === 200, 'rec through the gateway');
   rec.seen.length = 0;
   rec.arrived.length = 0;
-  return { g, dir, port, publicUrl, host, on, at, stall, owner, view, rec: rec.seen, held: rec.held, app: app.seen, arrived: rec.arrived };
+  return { g, dir, port, publicUrl, host, on, at, stall, scan, owner, view, rec: rec.seen, held: rec.held, app: app.seen, arrived: rec.arrived };
 }
 // What the gateway signed: the bytes of terminal@1 §3, from the headers an instance received.
 const signedBytes = (domain, port, which, h, body) => Buffer.from(`${domain}\n${port}\n${which}\n${h['x-devteam-gateway-ts']}\n${h['x-devteam-gateway-nonce']}\n${sha(body).toString('hex')}`);
@@ -291,10 +299,11 @@ test('terminal A9: a terminal post over 100 KB is refused 413 before it is forwa
       B.arrived.length = 0;
       const r = await B.at(rec, 'POST', route, { cookie: B.owner, body: pad(size), headers: SAME });
       assert.equal(r.status, 413, `${route} at ${size}: ${r.status} ${r.text.slice(0, 200)}`);
-      assert.match(String(r.headers['content-type']), /^application\/json\b/, `${route}: JSON`);
+      assert.equal(r.headers['content-type'], 'application/json', `${route}: exactly application/json`);
       assert.equal(typeof r.json?.error, 'string', `${route}: { error }`);
       assert.deepEqual(Object.keys(r.json), ['error'], `${route}: only error`);
       await new Promise((ok) => setTimeout(ok, 100));
+      await B.scan();
       assert.equal(B.rec.length, 0, `${route} at ${size}: nothing forwarded`);
       assert.deepEqual(B.arrived, [], `${route} at ${size}: nothing reached the instance, not even its headers`);
     }
@@ -304,6 +313,7 @@ test('terminal A9: a terminal post over 100 KB is refused 413 before it is forwa
     const cut = await B.at(rec, 'POST', route, { cookie: B.owner, body: pad(5 * CAP), headers: SAME }).catch((e) => ({ status: e.code }));
     assert.ok([413, 'ECONNRESET', 'EPIPE'].includes(cut.status), `${route} at 5 x 100 KB: ${cut.status}`);
     await new Promise((ok) => setTimeout(ok, 100));
+    await B.scan();
     assert.equal(B.rec.length, 0, `${route} at 5 x 100 KB: nothing forwarded`);
     assert.deepEqual(B.arrived, [], `${route} at 5 x 100 KB: nothing reached the instance`);
     // past four times over the gateway answers at once and closes, without waiting for the rest
@@ -374,7 +384,8 @@ test("terminal A10: another site's request to /api/term/* is refused, signed in 
   const B = await box(t, 'a10-site');
   const rec = B.on('rec');
   const posts = ['/api/term/supervisor/keys', '/api/term/shell/keys', '/api/term/shell/open'];
-  for (const origin of ['https://evil.example', `http://${B.on('alpha')}`, `http://${B.on('sib')}`, B.publicUrl, `http://term.${B.host}`, 'null']) {
+  const other = `rec.box.localhost:${B.port + 1}`;
+  for (const origin of [null, 'https://evil.example', `http://${B.on('alpha')}`, `http://${B.on('sib')}`, B.publicUrl, `http://term.${B.host}`, 'null', `https://${rec}`, `http://${other}`, `http://${rec}.evil.example`, `http://${rec}0`, `http://${rec}/`, `http://${B.on('cool-tiger')}`]) {
     for (const route of posts) {
       const r = await B.at(rec, 'POST', route, { cookie: B.owner, body: '{}', headers: { ...SAME, origin } });
       assert.equal(r.status, 403, `${route} from ${origin}: ${r.status} ${r.text}`);
@@ -386,6 +397,7 @@ test("terminal A10: another site's request to /api/term/* is refused, signed in 
       assert.equal(r.status, 403, `${route} ${site}: ${r.status} ${r.text}`);
     }
   }
+  await B.scan();
   assert.deepEqual(B.rec.map((x) => `${x.method} ${x.url}`), [], 'nothing reached the instance');
 });
 
@@ -401,7 +413,7 @@ test("terminal A10b: the gateway's View refusal of /api/term/* is 403 applicatio
   for (const [method, route] of routes) {
     const r = await B.at(rec, method, route, { cookie: B.view, headers: SAME, ...(method === 'POST' ? { body: '{}' } : {}) });
     assert.equal(r.status, 403, `${method} ${route}: ${r.status} ${r.text}`);
-    assert.match(String(r.headers['content-type']), /^application\/json\b/, `${method} ${route}: JSON`);
+    assert.equal(r.headers['content-type'], 'application/json', `${method} ${route}: exactly application/json`);
     assert.equal(r.text, VIEW, `${method} ${route}: exactly the view refusal`);
   }
   assert.deepEqual(B.rec.map((x) => `${x.method} ${x.url}`), [], 'nothing reached the instance');
