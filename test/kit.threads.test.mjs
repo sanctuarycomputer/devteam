@@ -91,7 +91,7 @@ test('threads: records and the thread commands', async (t) => {
     assert.match(F.fails(['thread', 'say', T, 'x'], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'demo-01-x' }), /owner commands don't run in an agent session/);
     // say is the owner's and reply the supervisor's: neither falls through to the other's
     assert.match(F.fails(['thread', 'say', T, 'x'], F.SUP), /owner commands don't run in an agent session/);
-    assert.match(F.fails(['thread', 'reply', T, 'x'], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'demo-01-x' }), /thread reply: the supervisor does this/);
+    assert.match(F.fails(['thread', 'reply', T, 'x'], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'demo-01-x' }), /this thread isn't about your work; send supervisor instead/);
     assert.match(F.fails(['thread', 'say', T, 'x', '--refs', 'goal:x']), /--refs are on the supervisor's turns/);
     assert.match(F.fails(['thread', 'reply', T, 'x', '--refs', 'not a ref'], F.SUP), /each is <type>:<id>/);
     // with no role, in the main checkout, a reply is the supervisor's (as ask is), never the owner's
