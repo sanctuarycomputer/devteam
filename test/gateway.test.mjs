@@ -1220,7 +1220,7 @@ test('public.<box> serves artifacts with the kit\'s own type map, CDN list and p
   assert.ok(at > 0, 'the kit defines artifactCsp');
   const cspSrc = src.slice(at, src.indexOf('\n};\n', at) + 3);
   const ctx = vm.createContext({ HUB_PORT: 4320 });
-  vm.runInContext(`ARTIFACT_TYPES = ${one('ARTIFACT_TYPES')}; ARTIFACT_CDNS = ${one('ARTIFACT_CDNS')};\n${cspSrc}\nglobalThis.artifactCsp = artifactCsp;`, ctx);
+  vm.runInContext(`ARTIFACT_TYPES = ${one('ARTIFACT_TYPES')}; ARTIFACT_CDNS = ${one('ARTIFACT_CDNS')}; ARTIFACT_FONT_HOSTS = ${one('ARTIFACT_FONT_HOSTS')};\n${cspSrc}\nglobalThis.artifactCsp = artifactCsp;`, ctx);
   assert.deepEqual({ ...G.PUBLIC_TYPES }, { ...ctx.ARTIFACT_TYPES }, 'the type map');
   assert.deepEqual([...G.PUBLIC_CDNS], [...ctx.ARTIFACT_CDNS], 'the CDN list');
   const self = 'https://public.box.example.com/alpha/hello/';

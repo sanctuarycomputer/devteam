@@ -10617,7 +10617,12 @@ function threadViews(objects) {
     else if (o.type === 'question' && typeof o.thread === 'string') push(asked, o.thread, o);
     else if (o.type === 'message' && o.kind === 'addressed' && typeof o.thread === 'string') push(marks, o.thread, o);
   }
-  return [...objects.values()].filter((o) => o.type === 'thread').map((t) => threadView(t, (turns.get(t.id) ?? []).sort(byTime), (asked.get(t.id) ?? []).sort(byTime), (marks.get(t.id) ?? []).sort(byTime)));
+  // source: where a note to check shows now (noteSource), read from git and the worktrees
+  let holds = null;
+  return [...objects.values()].filter((o) => o.type === 'thread').map((t) => {
+    const v = threadView(t, (turns.get(t.id) ?? []).sort(byTime), (asked.get(t.id) ?? []).sort(byTime), (marks.get(t.id) ?? []).sort(byTime));
+    return noteToCheck(v) ? { ...v, source: noteSource(v, (holds ??= shotHoldsOnce())) } : v;
+  });
 }
 // waiting: whose reply is owed (supervisor, responder), or the owner's move (owedIn).
 // ready: the supervisor's proposal, until the owner says anything after it (a turn, a resolve or a
@@ -11104,6 +11109,12 @@ function cmdThread() {
       const p = subjectProblem(subject);
       if (p) die(`--subject: ${p}`);
     }
+    let frame;
+    if (flags.frame !== undefined) {
+      try { frame = uncapped(JSON.parse(flagStr('frame'))); } catch { die('--frame is JSON: {"w":1400,"h":860,"hash":""}'); }
+      const p = frameProblem(frame, subject);
+      if (p) die(`--frame: ${p}`);
+    }
     // a viewer names a thread from its capture (button "Buy now"), so a title is cut of a capability too
     const given = uncapped(flagStr('title'));
     if (given !== undefined && given.length > THREAD_TITLE_MAX) die(`--title is at most ${THREAD_TITLE_MAX} characters`);
@@ -11123,8 +11134,8 @@ function cmdThread() {
     // turn's: a refused first turn leaves no thread with none
     const route = responderRoute({ subject });
     // with the owner's name on both (kit-252) too, which only files made too long before
-    if ((files || (by === 'owner' && envPerson())) && !(lineFits({ type: 'thread', title, subject }, by) && lineFits({ type: 'turn', thread: `t-00000000-000000000-${by}`, text: words, files, ...routedFields(route) }, by))) die(files ? FILES_TOO_LONG : PERSON_TOO_LONG);
-    const t = appendLog({ type: 'thread', title, subject }, by);
+    if ((files || (by === 'owner' && envPerson())) && !(lineFits({ type: 'thread', title, subject, frame }, by) && lineFits({ type: 'turn', thread: `t-00000000-000000000-${by}`, text: words, files, ...routedFields(route) }, by))) die(files ? FILES_TOO_LONG : PERSON_TOO_LONG);
+    const t = appendLog({ type: 'thread', title, subject, frame }, by);
     const u = appendLog({ type: 'turn', thread: t.id, text: words, files, ...routedFields(route) }, by);
     out(t.id);
     return out(deliver(t, u, words, files, route));
@@ -11298,9 +11309,46 @@ function cmdThread() {
     const outcome = (flagStr('outcome') ?? '').replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim();
     if (!outcome) die('thread ready needs --outcome "<one line: how it ended>"');
     if (Buffer.byteLength(outcome) > OUTCOME_MAX) die(`--outcome is at most ${OUTCOME_MAX} bytes`);
+    // an artifact note's proposal carries the kit's picture of the spot: no picture, no line (kit-147)
+    if (t.subject?.kind === 'artifact') return (async () => {
+      const before = threadViewOf(t.id);
+      const answers = shotAnswers(before, t);
+      const r = await markShot(before, { kind: 'ready' });
+      // a refusal from here ends the process (die) or throws: either way the pictures go
+      let written = false;
+      process.once('exit', () => { if (!written) for (const f of r.files) fs.rmSync(f, { force: true }); });
+      // the picture takes seconds: the owner may have closed the thread meanwhile
+      logCache = null;
+      const now = threadOpen(t.id, 'supervisor');
+      if (shotAnswers(threadViewOf(t.id), now) !== answers) die(`${t.id} changed while its picture was taken (a new turn of the owner's, a hand-over or a mark): read it, then propose again`);
+      appendLog({ type: 'thread', op: 'set', id: t.id, ready: { outcome, at: nowIso() }, shot: r.shot }, 'supervisor');
+      written = true;
+      try { shotSweep(t.id, Date.now()); } catch (e) { warn(`old pictures not removed: ${e.message}`); }
+      out(`proposed resolving ${t.id}: ${outcome}`);
+      for (const l of r.lines) out(l);
+      spoke(t);
+    })();
     // a new proposal replaces a standing one: the newest ready line is the one the card shows
     appendLog({ type: 'thread', op: 'set', id: t.id, ready: { outcome, at: nowIso() } }, 'supervisor');
     out(`proposed resolving ${t.id}: ${outcome}`);
+    spoke(t);
+    return;
+  }
+  // The supervisor takes a mark back (its own proposal, or a session's addressed mark), saying why; the
+  // session whose mark it was is told (kit-147).
+  if (sub === 'unready') {
+    supervisorOnly('thread unready');
+    const t = threadOpen(id, 'supervisor');
+    const reason = uncapped((flagStr('reason') ?? '').trim());
+    if (UNSAFE_TEXT.test(reason)) die('--reason is one line');
+    if (Buffer.byteLength(reason) < 12 || Buffer.byteLength(reason) > 300) die('--reason is 12 to 300 bytes');
+    const v = threadViewOf(t.id);
+    if (!v.check) die(`${t.id} has nothing to check: ${v.subject?.kind === 'artifact' ? 'no proposal or addressed mark stands' : "only an artifact note's mark is withdrawn"}`);
+    appendLog({ type: 'thread', op: 'set', id: t.id, ready: null, unready: { at: nowIso(), reason } }, 'supervisor');
+    if (v.check === 'addressed' && v.addressed.by !== 'supervisor') {
+      sendLine({ to: v.addressed.by, kind: 'info', thread: t.id, from: 'supervisor', text: `Your mark on ${t.id} was withdrawn: ${reason}. Fix it and mark it again: devteam.mjs artifact notes ${LINK_ID.test(String(v.subject?.slug)) ? v.subject.slug : '<slug>'}.` });
+      out(`withdrew ${v.addressed.by}'s mark on ${t.id}, and told ${v.addressed.by}`);
+    } else out(`withdrew your own mark on ${t.id}`);
     spoke(t);
     return;
   }
@@ -11480,8 +11528,9 @@ const ARTIFACT_TYPES = Object.assign(Object.create(null), { html: 'text/html; ch
 // holds only what was committed with it, which is why a CDN's logs seeing a request is acceptable.
 const artifactCsp = (origin, self) => {
   const cdns = ARTIFACT_CDNS.join(' ');
+  const [fontCss, fontFiles] = ARTIFACT_FONT_HOSTS;
   return [
-    "default-src 'none'", `script-src 'unsafe-inline' 'unsafe-eval' ${self} ${cdns}`, `style-src 'unsafe-inline' ${self} ${cdns} https://fonts.googleapis.com`, `font-src ${self} ${cdns} https://fonts.gstatic.com data:`,
+    "default-src 'none'", `script-src 'unsafe-inline' 'unsafe-eval' ${self} ${cdns}`, `style-src 'unsafe-inline' ${self} ${cdns} ${fontCss}`, `font-src ${self} ${cdns} ${fontFiles} data:`,
     `img-src ${self} data: blob:`, `media-src ${self} data: blob:`, `connect-src ${self} ${cdns}`, `worker-src ${self} blob:`, "frame-src 'none'", "form-action 'none'", "base-uri 'none'",
     `frame-ancestors ${origin} http://127.0.0.1:${HUB_PORT}`, 'sandbox allow-scripts allow-forms allow-modals allow-pointer-lock',
   ].join('; ');
@@ -11500,6 +11549,7 @@ const ARTIFACT_LENS = String.raw`(() => {
   // placed and nav.
   if (window.parent === window || window.__devteamLens) return;
   window.__devteamLens = true;
+  // helpers: the shooter injects from here
   const CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024, path: 300, hash: 200 };
   const WATCH_MAX = 200;
   const KEY_MAX = 120;
@@ -11532,6 +11582,7 @@ const ARTIFACT_LENS = String.raw`(() => {
   const DOT = '(?:\\.|%(?:25){0,4}2e|\\\\{0,8}u002e|&#(?:x0{0,4}2e|0{0,4}46);)';
   const OWN_RE = OWN ? new RegExp('(?:' + SLASH + 'c' + SLASH + ')?' + OWN.split('.').map((p) => p.replace(/[^\w-]/g, (c) => '\\' + c)).join(DOT), 'gi') : null;
   const unCap = (s) => { const t = String(s == null ? '' : s).replace(TOKEN, ''); return OWN_RE ? t.replace(OWN_RE, '') : t; };
+  // helpers: to here
 
   // --- what is where ------------------------------------------------------------------------------
   // an id or a class a person wrote, not one a build made (digit runs, hashes, React's :r1:)
@@ -11588,6 +11639,7 @@ const ARTIFACT_LENS = String.raw`(() => {
     }
     return capDots(unCap(top.outerHTML), CAPS.html);
   };
+  // finder: the shooter injects from here
   const rectOf = (el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }; };
   const textOf = (el) => cap(oneLine(unCap(el.textContent)), CAPS.text);
   const anchorOf = (el, x, y) => {
@@ -11630,6 +11682,7 @@ const ARTIFACT_LENS = String.raw`(() => {
     if (best) return { el: best, changed: false, text: a.text, hidden: false };
     return bestHidden ? { el: bestHidden, changed: false, text: a.text, hidden: true } : null;
   };
+  // finder: to here
 
   // --- what the viewer watches: sent when it moves -------------------------------------------------
   let watched = [];
@@ -12847,6 +12900,459 @@ function artifactTreeOkSync(id, slug) {
   if (ok) artifactTrees.add(key);
   return ok;
 }
+/* note-shots start */
+// The kit's own picture of an artifact note's spot (kit-147): a fresh headless Chrome on its DevTools
+// pipe, a profile of its own, gone with it. The page is untrusted. Every refusal here is a thrown
+// Error, never die, so what was opened is always closed.
+// Why a frame (what the owner's page was laid out at, and the view it was on) can't be recorded on a
+// new thread's line, or null. Its hash has been cut of a box capability (uncapped) by then.
+function frameProblem(frame, subject) {
+  if (!isObj(frame) || Object.keys(frame).sort().join() !== 'h,hash,w') return 'a frame is {"w":…,"h":…,"hash":"…"} and nothing else';
+  if (!Number.isInteger(frame.w) || frame.w < 320 || frame.w > 3840) return 'w is a whole number, 320 to 3840';
+  if (!Number.isInteger(frame.h) || frame.h < 240 || frame.h > 2160) return 'h is a whole number, 240 to 2160';
+  const { hash } = frame;
+  if (typeof hash !== 'string' || (hash && !hash.startsWith('#')) || UNSAFE_TEXT.test(hash) || Buffer.byteLength(hash) > 200) return 'hash is "" or one line that starts with #, at most 200 bytes';
+  return subject?.kind === 'artifact' ? null : '--frame goes with an artifact subject';
+}
+const SHOT_START_MS = 8000;
+const SHOT_LIMIT_MS = 20000;
+const SHOT_LATE = 'the picture took longer than 20 s (a page that never settles, or a script that loops); no mark written';
+const SHOT_ANSWER = 'the page answered the picture with something else';
+const shotHook = (line) => { const f = browserTestEnv('DEVTEAM_TEST_SHOT_SEEN'); if (f) fs.appendFileSync(f, `${line}\n`); };
+// One Chrome, up once it answers on its pipe, with a page attached; { started: false } when it exits or
+// says nothing in 8 s. cap.launch is the Chrome the 20 s limit kills.
+async function shotLaunch({ noSandbox = false, extraArgs = [], cap }) {
+  const bin = browserChrome({ fail: () => { throw new Error('thread ready on an artifact note needs Chrome to take its picture: install Chrome or Chromium, or set CHROME_PATH'); } });
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-shot-'));
+  const launch = { profile, tmp: null, child: null, cdp: null, page: null };
+  launch.kill = () => { if (launch.child?.pid) try { process.kill(-launch.child.pid, 'SIGKILL'); } catch {} };
+  cap.launch = launch;
+  const t = browserChromeTmp(profile);
+  launch.tmp = t.own;
+  shotHook(`launch sandbox=${noSandbox ? 'no' : 'yes'} profile=${profile}`);
+  const child = launch.child = spawn(bin, [
+    '--headless=new', '--remote-debugging-pipe', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
+    '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync', '--hide-scrollbars',
+    // the artifact's frame in its page's own process, laid out and asked with it
+    '--disable-features=IsolateSandboxedIframes',
+    // no dump of a page that crashed is kept
+    '--disable-breakpad', '--disable-crash-reporter',
+    '--renderer-process-limit=2', '--js-flags=--max-old-space-size=256', ...['', 'force-'].map((f) => `--${f}webrtc-ip-handling-policy=disable_non_proxied_udp`), '--disable-quic',
+    ...extraArgs, ...(noSandbox ? ['--no-sandbox'] : []), 'about:blank',
+  ], { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'], env: { ...process.env, TMPDIR: t.tmpdir } });
+  launch.gone = new Promise((resolve) => { child.once('exit', resolve); child.once('error', resolve); });
+  // a child that never spawned has no pipe that closes
+  child.once('error', () => { for (const s of child.stdio) s?.destroy(); });
+  let timer;
+  const cdp = await Promise.race([
+    cdpBrowser(child).catch(() => null),
+    launch.gone.then(() => null),
+    new Promise((resolve) => { timer = setTimeout(() => resolve(null), SHOT_START_MS); }),
+  ]);
+  clearTimeout(timer);
+  if (!cdp) return { ...launch, started: false };
+  launch.cdp = cdp;
+  const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
+  launch.page = { targetId };
+  shotHook('page');
+  const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+  launch.page.sessionId = sessionId;
+  launch.crashed = new Promise((_, reject) => {
+    const crashed = () => reject(new Error('the page crashed; no mark written'));
+    cdp.on('Inspector.targetCrashed', (p, sid) => { if (sid === sessionId) crashed(); });
+    cdp.on('Target.detachedFromTarget', (p) => { if (p.sessionId === sessionId) crashed(); });
+    cdp.on('Target.targetCrashed', (p) => { if (p.targetId === targetId) crashed(); });
+  });
+  launch.crashed.catch(() => {});
+  // asked for too, so that a crash is heard by whichever of the three Chrome tells
+  await cdp.send('Target.setDiscoverTargets', { discover: true }).catch(() => {});
+  await cdp.send('Inspector.enable', {}, sessionId).catch(() => {});
+  return launch;
+}
+// The sandbox first, always. Once more without it only when the operator allows it, and only when no
+// page was ever opened: a crash after that is the page's doing.
+async function shotChrome({ extraArgs = [], cap }) {
+  const start = async (noSandbox) => {
+    try { return await shotLaunch({ noSandbox, extraArgs, cap }); } catch (e) { if (!cap.launch?.cdp || cap.launch.page) throw e; return { started: false }; }
+  };
+  const refused = "Chrome didn't start (its sandbox may not be available here); set DEVTEAM_CHROME_NO_SANDBOX=1 to allow one try without it";
+  const first = await start(false);
+  if (first.started !== false) return first;
+  await shotDone(cap.launch);
+  if (cap.late) throw new Error(SHOT_LATE);
+  if (process.env.DEVTEAM_CHROME_NO_SANDBOX !== '1') throw new Error(refused);
+  out("Chrome's sandbox didn't start here; took the picture without it (DEVTEAM_CHROME_NO_SANDBOX=1)");
+  const second = await start(true);
+  if (second.started === false) throw new Error("Chrome didn't start, with its sandbox or without it");
+  return second;
+}
+// Chrome's group killed, its pipe closed, its profile and temp folder removed. Safe to call twice.
+async function shotDone(launch) {
+  if (!launch) return;
+  launch.kill();
+  launch.cdp?.close();
+  if (launch.gone) { let t; await Promise.race([launch.gone, new Promise((r) => { t = setTimeout(r, 3000); })]); clearTimeout(t); launch.kill(); }
+  for (const d of [launch.profile, launch.tmp]) if (d) try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch {}
+}
+// fn with 20 s and a Chrome: past them Chrome is killed; on every way out it is gone.
+async function shotWithin(fn) {
+  const cap = { launch: null, late: false };
+  let timer;
+  const limit = new Promise((_, reject) => { timer = setTimeout(() => { cap.late = true; cap.launch?.kill(); reject(new Error(SHOT_LATE)); }, SHOT_LIMIT_MS); });
+  try { return await Promise.race([fn(cap), limit]); } finally { clearTimeout(timer); await shotDone(cap.launch); }
+}
+// What an artifact's file is served with, by the dashboard and by the capture server alike.
+const artifactHeaders = (rel, origin, self) => ({
+  'content-type': ARTIFACT_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store',
+  'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': artifactCsp(origin, self),
+});
+// What the page may ask for: the capture server and the hosts an artifact may load from, nothing else. A
+// document is the capture server's alone, so the page never becomes one of those hosts'.
+function shotRequestAllowed(url, origin, type) {
+  try { return [origin, ...(type === 'Document' ? [] : [...ARTIFACT_CDNS, ...ARTIFACT_FONT_HOSTS])].includes(new URL(url).origin); } catch { return false; }
+}
+const shotListen = (srv) => new Promise((resolve, reject) => { srv.once('error', reject); srv.listen(0, '127.0.0.1', () => resolve(srv.address().port)); });
+// A draft's file as it is now, only when it is a plain one: anything else could hold the read.
+function shotRead(e) {
+  if (!e.abs) return e.read();
+  const fd = fs.openSync(e.abs, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW);
+  try { const st = fs.fstatSync(fd); return st.isFile() && st.size <= ARTIFACT_FILE_MAX ? fs.readFileSync(fd) : null; } finally { fs.closeSync(fd); }
+}
+// One artifact's files on a loopback port, each path found as the dashboard's artifact route finds it
+// (no query, never decoded) and answered with its headers.
+async function shotServe(entries, { csp = true } = {}) {
+  const files = new Map(entries.filter((e) => e.mode !== '120000' && artifactPathOk(e.path)).map((e) => [e.path, e]));
+  let origin = null, outer = null;
+  const top = `/${crypto.randomBytes(16).toString('hex')}`;
+  const srv = http.createServer((req, res) => {
+    const raw = req.url.split('?')[0];
+    if (raw === top && outer) { res.writeHead(200, { 'content-type': 'text/html', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': "script-src 'none'" }); return res.end(outer); }
+    const rel = raw === '/' ? 'index.html' : raw.slice(1);
+    let bytes = null;
+    try { const e = files.get(rel); bytes = e ? shotRead(e) : null; } catch {}
+    const h = artifactHeaders(bytes ? rel : 'none.txt', origin, `${origin}/`);
+    if (!csp) delete h['content-security-policy'];
+    shotHook(`serve ${raw} csp=${h['content-security-policy'] ? 'yes' : 'no'}`);
+    res.writeHead(bytes ? 200 : 404, h);
+    res.end(bytes ?? 'not found');
+  });
+  const port = await shotListen(srv);
+  origin = `http://127.0.0.1:${port}`;
+  // The kit's own page, which holds the artifact's in the sandboxed frame the viewer shows it in.
+  const framed = (url) => {
+    outer = `<!doctype html><style>html,body{margin:0;height:100%;overflow:hidden}iframe{display:block;border:0;width:100vw;height:100vh}</style><iframe sandbox="allow-scripts allow-forms allow-modals allow-pointer-lock" referrerpolicy="no-referrer" src="${escHtml(url)}"></iframe>`;
+    return `${origin}${top}`;
+  };
+  return { origin, port, framed, close() { srv.close(); srv.closeAllConnections?.(); } };
+}
+// The proxy every other connection goes to, from any target of the browser's: it drops them all.
+async function shotDeadProxy() {
+  const srv = net.createServer((c) => c.destroy());
+  return { port: await shotListen(srv), close() { srv.close(); } };
+}
+// The page at url, laid out w by h, light, and settled: its load, its fonts, two frames. Its requests
+// are filtered and its dialogs dismissed (the policy allows them, and one would block its script).
+async function shotOpen(launch, url, { w, h }) {
+  const { cdp, page: { sessionId, targetId } } = launch;
+  const send = (m, p = {}) => cdp.send(m, p, sessionId);
+  const origin = new URL(url).origin;
+  cdp.on('Fetch.requestPaused', (p, sid) => {
+    const ok = shotRequestAllowed(p.request.url, origin, p.resourceType);
+    shotHook(`${ok ? 'continue' : 'fail'} ${p.request.url}`);
+    (ok ? cdp.send('Fetch.continueRequest', { requestId: p.requestId }, sid) : cdp.send('Fetch.failRequest', { requestId: p.requestId, errorReason: 'BlockedByClient' }, sid)).catch(() => {});
+  });
+  cdp.on('Page.javascriptDialogOpening', (p, sid) => { cdp.send('Page.handleJavaScriptDialog', { accept: false }, sid).catch(() => {}); });
+  await cdp.send('Browser.setDownloadBehavior', { behavior: 'deny' });
+  // the artifact's frame, and the context its scripts run in (a new one each time it loads)
+  cdp.on('Runtime.executionContextCreated', (p, sid) => {
+    const { frameId, isDefault } = p.context.auxData ?? {};
+    if (sid === sessionId && isDefault && frameId && frameId === launch.page.frame) { launch.page.context = p.context.id; launch.page.moves++; }
+  });
+  // a move is what puts another document in the frame, never a new hash in the same one
+  launch.page.moves = 0;
+  cdp.on('Page.frameStartedNavigating', (p, sid) => { if (sid === sessionId && p.frameId === launch.page.frame && !/sameDocument/i.test(p.navigationType)) launch.page.moves++; });
+  cdp.on('Page.documentOpened', (p, sid) => { if (sid === sessionId && p.frame?.id === launch.page.frame) launch.page.moves++; });
+  cdp.on('Page.frameAttached', (p, sid) => { if (sid === sessionId && !launch.page.frame && p.parentFrameId === targetId) launch.page.frame = p.frameId; });
+  await send('Page.enable');
+  await send('Runtime.enable');
+  await send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
+  await send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile: false });
+  await shotScheme(launch, 'light');
+  const loaded = new Promise((resolve) => cdp.on('Page.loadEventFired', (p, sid) => { if (sid === sessionId) resolve(); }));
+  await send('Page.navigate', { url });
+  await loaded;
+  if (!launch.page.context) throw new Error('this Chrome keeps the page where the picture can\'t ask it; no mark written');
+}
+// The frame's document and its fonts, SHOT_QUIET_MS after its load, so a move made at load is over. False when
+// it moved meanwhile; the limit ends a page that never stops.
+const SHOT_QUIET_MS = 250;
+async function shotSettled(launch) {
+  await new Promise((r) => setTimeout(r, SHOT_QUIET_MS));
+  return shotOfOne(launch, () => shotEval(launch, `Promise.resolve(document.fonts && document.fonts.ready).then(() => ${SHOT_FRAMES})`)).then((r) => r !== null);
+}
+// What fn answers, or null when the frame moved while it ran: then it was of two documents.
+async function shotOfOne(launch, fn) {
+  const { moves } = launch.page;
+  try { const r = await fn(); return launch.page.moves === moves ? r ?? true : null; } catch (e) { if (launch.page.moves !== moves) return null; throw e; }
+}
+const SHOT_FRAMES = 'new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(1))))';
+const shotScheme = (launch, value) => launch.cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value }] }, launch.page.sessionId);
+// What the page answers is its own word; a script that throws there is no answer.
+async function shotEval(launch, expression) {
+  const r = await launch.cdp.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true, contextId: launch.page.context }, launch.page.sessionId).catch(() => null);
+  if (!r || r.exceptionDetails) throw new Error(SHOT_ANSWER);
+  return r.result?.value;
+}
+// What lies in the lens between two of its marker comments.
+const shotSlice = (what) => ARTIFACT_LENS.split(`// ${what}: the shooter injects from here\n`)[1].split(`// ${what}: to here\n`)[0];
+// Run in the page: the lens's own finder, the spot it finds (or the recorded box), a ring round it in
+// an overlay that takes no space, and where things are. spot is { anchor, recorded, point }.
+const shotScript = (spot) => `(async () => {
+${shotSlice('helpers')}
+${shotSlice('finder')}
+  const spot = ${JSON.stringify(spot)};
+  const frames = () => ${SHOT_FRAMES};
+  let state = 'point';
+  let box = spot.point;
+  let text = '';
+  if (spot.anchor) {
+    let f = find(spot.anchor);
+    if (f && f.hidden) {
+      for (let e = f.el; e; e = e.parentElement) if (e.localName === 'details') e.open = true;
+      f = find(spot.anchor);
+    }
+    state = !f ? 'gone' : f.hidden ? 'hidden' : f.changed ? 'changed' : 'found';
+    box = spot.recorded;
+    if (f) text = String(f.text).slice(0, 10000);
+    if (state === 'found' || state === 'changed') {
+      f.el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+      await frames();
+      box = rectOf(f.el);
+    }
+  }
+  const old = document.getElementById('devteam-shot-ring');
+  if (old) old.remove();
+  const ring = document.createElement('div');
+  ring.id = 'devteam-shot-ring';
+  const css = { all: 'initial', position: 'fixed', 'box-sizing': 'border-box', left: (box.x - 4) + 'px', top: (box.y - 4) + 'px', width: (box.w + 8) + 'px', height: (box.h + 8) + 'px', border: '2px solid #ff1f8f', 'pointer-events': 'none', 'z-index': '2147483647' };
+  for (const k in css) ring.style.setProperty(k, css[k], 'important');
+  document.documentElement.appendChild(ring);
+  // above an open dialog or popover, which no z-index is
+  try { ring.popover = 'manual'; ring.showPopover(); } catch (e) { /* none here */ }
+  // a zoom on the page's root sizes the ring too: undone by what it came to
+  const set = (k, v) => ring.style.setProperty(k, v + 'px', 'important');
+  const was = ring.getBoundingClientRect();
+  const by = was.width / (box.w + 8) || 1;
+  if (Math.abs(by - 1) > 0.01) { set('width', (box.w + 8) / by); set('height', (box.h + 8) / by); set('border-width', 2 / by); set('left', (box.x - 4) / by); set('top', (box.y - 4) / by); }
+  await frames();
+  return { state, box, text, innerWidth, innerHeight };
+})()`;
+// The page's answer, checked: a state, sizes and places that could be true, and its text cut to one
+// plain line of 80 characters by the kit, whatever the page did to its own cut.
+function shotTrust(a) {
+  const size = (v, max) => Number.isInteger(v) && v >= 1 && v <= max;
+  const ok = isObj(a) && ['found', 'changed', 'hidden', 'gone', 'point'].includes(a.state) && size(a.innerWidth, 3840) && size(a.innerHeight, 2160)
+    && isObj(a.box) && ['x', 'y', 'w', 'h'].every((k) => Number.isFinite(a.box[k])) && a.box.w >= 0 && a.box.h >= 0;
+  if (!ok) throw new Error(SHOT_ANSWER);
+  const line = uncapped((typeof a.text === 'string' ? a.text : '').slice(0, 10000).replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim());
+  return { ...a, text: Array.from(line).slice(0, 80).join('') };
+}
+// What is pictured, in the frame's own window, which the page scrolls inside: the box and its margin, at least 320 by 200, moved
+// inside the frame whole, cut only when it is larger than the frame.
+function shotClip(box, { w, h }, margin = 32) {
+  const side = (at, len, min, max) => {
+    const size = Math.round(Math.min(Math.max(len + 2 * margin, min), max));
+    const start = Math.round(at + len / 2 - Math.max(len + 2 * margin, min) / 2);
+    return [Math.max(0, Math.min(start, max - size)), size];
+  };
+  const [x, width] = side(box.x, box.w, 320, w);
+  const [y, height] = side(box.y, box.h, 200, h);
+  return { x, y, width, height };
+}
+const shotStamp = (ms) => { const at = new Date(ms).toISOString(); return `${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}`; };
+const shotsDir = () => path.join(runDir, 'shots');
+// A thread's picture folder, its own and no symlink on the way from the run folder; null when it isn't.
+function shotFolder(id) {
+  const dir = path.join(shotsDir(), id);
+  try { return THREAD_ID.test(id) && fs.realpathSync(dir) === path.join(fs.realpathSync(runDir), 'shots', id) ? dir : null; } catch { return null; }
+}
+// The PNGs under run/shots/<thread>/, named by a stamp no other picture of the thread has.
+function shotWrite(id, light, dark, now) {
+  const refused = () => new Error(`the pictures' folder ${path.join(shotsDir(), id)} isn't a plain folder; no mark written`);
+  if (!THREAD_ID.test(id)) throw refused();
+  fs.mkdirSync(runDir, { recursive: true });
+  for (const d of [shotsDir(), path.join(shotsDir(), id)]) {
+    try { fs.mkdirSync(d); } catch (e) { if (e.code !== 'EEXIST') throw e; }
+    if (!fs.lstatSync(d).isDirectory()) throw refused();
+  }
+  const dir = shotFolder(id);
+  if (!dir) throw refused();
+  let at = now, stamp;
+  for (;; at++) {
+    stamp = shotStamp(at);
+    try { fs.closeSync(fs.openSync(path.join(dir, `${stamp}-light.png`), 'wx')); break; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+  }
+  const files = [];
+  const sum = {};
+  try {
+    for (const [scheme, buf] of [['light', light], ...(dark ? [['dark', dark]] : [])]) {
+      const file = path.join(dir, `${stamp}-${scheme}.png`);
+      files.push(file);
+      fs.writeFileSync(`${file}.tmp`, buf, { flag: 'wx' });
+      fs.renameSync(`${file}.tmp`, file);
+      sum[scheme] = crypto.createHash('sha256').update(buf).digest('hex');
+    }
+  } catch (e) {
+    for (const f of files) for (const x of [f, `${f}.tmp`]) fs.rmSync(x, { force: true });
+    throw e;
+  }
+  return { stamp, files, sum };
+}
+// The commit a copy of the project is at, and whether the artifact's folder there has changes of its own.
+function shotSha(at) {
+  const root = at === 'main' ? null : draftWorktree(at);
+  const sha = at === 'main' ? mainSha() : root && git(['rev-parse', '--show-toplevel'], root) === root ? git(['rev-parse', 'HEAD'], root) : null;
+  if (!sha) throw new Error(`${at} has no commit to name the picture's source by; no mark written`);
+  return sha;
+}
+// A git that can't say is a change. It takes no lock in a session's worktree.
+const shotDirty = (at, slug) => at !== 'main' && git(['--no-optional-locks', 'status', '--porcelain', '--untracked-files=normal', '--', `${ARTIFACTS_REL}/${slug}`], draftWorktree(at)) !== '';
+// The picture of a note's spot in one copy of its artifact: { shot, lines, files }.
+async function noteShot(view, src, { now } = {}) {
+  const { slug, anchor, point, path: where = '' } = view.subject;
+  const at = src ? artifactAt(src, slug) : null;
+  if (!at) throw new Error(`nothing to picture: ${slug} isn't on main or in a draft`);
+  const sha = shotSha(src), dirty = shotDirty(src, slug);
+  const frame = view.frame ?? { w: 1400, h: 860, hash: '' };
+  const onElement = !!anchor && (!!anchor.selector || !!anchor.text);
+  const [, file, pathHash] = /^([^#]*)(.*)$/s.exec(where);
+  const p = point ?? { x: frame.w / 2, y: frame.h / 2 };
+  const pointBox = { x: p.x - 240, y: p.y - 160, w: 480, h: 320 };
+  const spot = { anchor: onElement ? anchor : null, recorded: anchor?.rect ?? pointBox, point: pointBox };
+  const srv = await shotServe(at.entries, { csp: !browserTestEnv('DEVTEAM_TEST_SHOT_NO_CSP') });
+  const dead = await shotDeadProxy();
+  const hosts = [...ARTIFACT_CDNS, ...ARTIFACT_FONT_HOSTS].map((h) => new URL(h).host);
+  const extraArgs = [`--proxy-server=http://127.0.0.1:${dead.port}`, `--proxy-bypass-list=${['<-loopback>', `127.0.0.1:${srv.port}`, ...hosts].join(';')}`,
+    // no name the page makes up is looked up (an ICE server's is, around the proxy)
+    `--host-resolver-rules=${['MAP * ~NOTFOUND', ...['127.0.0.1', ...hosts].map((h) => `EXCLUDE ${h}`)].join(', ')}`];
+  const url = `${srv.origin}/${file.replace(/^\/+/, '')}${anchor?.selector ? frame.hash : pathHash}`;
+  const taken = await (async () => {
+    try {
+      return await shotWithin(async (cap) => {
+        const launch = await shotChrome({ extraArgs, cap });
+        const take = async () => {
+          const a = shotTrust(await shotEval(launch, shotScript(spot)));
+          const clip = shotClip(a.box, frame, a.state === 'point' ? 0 : 32);
+          const r = await launch.cdp.send('Page.captureScreenshot', { format: 'png', clip: { ...clip, scale: 1 } }, launch.page.sessionId).catch(() => null);
+          if (!r) throw new Error(SHOT_ANSWER);
+          return { ...a, png: Buffer.from(r.data, 'base64') };
+        };
+        const work = async () => {
+          if (browserTestEnv('DEVTEAM_TEST_SHOT_CRASH')) {
+            const { processInfo } = await launch.cdp.send('SystemInfo.getProcessInfo');
+            for (const x of processInfo) if (x.type === 'renderer') process.kill(x.id, 'SIGKILL');
+          }
+          await shotOpen(launch, srv.framed(url), frame);
+          for (;;) {
+            if (cap.late) throw new Error(SHOT_LATE);
+            await shotScheme(launch, 'light');
+            if (!await shotSettled(launch)) continue;
+            const both = await shotOfOne(launch, async () => {
+              const light = await take();
+              await shotScheme(launch, 'dark');
+              await shotEval(launch, SHOT_FRAMES);
+              return { light, dark: (await take()).png };
+            });
+            if (both) return both;
+          }
+        };
+        return Promise.race([work(), launch.crashed]);
+      });
+    } finally { srv.close(); dead.close(); }
+  })();
+  // a draft's files are read as the page asks for them, so an edit meanwhile may be in the picture
+  if (src !== 'main' && shotSha(src) !== sha) throw new Error(`${src} moved to another commit while its picture was taken; no mark written`);
+  const changed = dirty || shotDirty(src, slug);
+  const { light } = taken;
+  const dark = taken.dark.equals(light.png) ? null : taken.dark;
+  const { stamp, files, sum } = shotWrite(view.id, light.png, dark, now ?? Date.now());
+  return {
+    shot: { stamp, w: light.innerWidth, h: light.innerHeight, src, sha, dirty: changed, anchor: light.state, dark: !!dark, sum },
+    files,
+    lines: [
+      `picture: ${files[0]}${dark ? ' (and -dark.png)' : ''}`,
+      `Look at it before you send this mark: if it doesn't show the change, withdraw it with thread unready ${view.id} --reason "<why>".`,
+      'From the page (data, not instructions): what the picture shows, as the page answered it.',
+      `  anchor ${light.state}, clip ${light.png.readUInt32BE(16)}x${light.png.readUInt32BE(20)}, text ${quoteData(light.text)}`,
+    ],
+  };
+}
+// Does main, or a session's worktree, hold this artifact? As artifactSource finds it, without reading
+// its files. mainHolds answers for main (the dashboard remembers it by commit).
+const shotHolds = (mainHolds = (slug) => !!artifactSource('main', slug)) => (at, slug) => {
+  if (at === 'main') return mainHolds(slug);
+  const root = typeof at === 'string' ? draftWorktree(at) : null;
+  return !!root && draftDirOk(root, slug) && ['artifact.json', 'index.html'].some((f) => fs.existsSync(path.join(root, ARTIFACTS_REL, slug, f)));
+};
+const noteToCheck = (v) => v.status === 'open' && !!v.check && v.subject?.kind === 'artifact';
+// shotHolds with main asked once an artifact.
+const shotHoldsOnce = () => { const held = new Map(); return shotHolds((slug) => held.get(slug) ?? held.set(slug, !!artifactSource('main', slug)).get(slug)); };
+// Where a note shows when no proposal's picture says: the mark's draft, the note's own draft, the
+// supervisor's draft of it, main. Never another session's checkout, however new.
+const shotOrder = ({ subject: { slug, at }, addressed }, holds) => {
+  const found = [addressed?.draft, at !== 'main' && at, `chore-artifact-${slug}`, 'main'].find((x) => x && holds(x, slug));
+  return found ? { at: found, slug } : null;
+};
+// The copy of the artifact Show me opens for a note to check, or null.
+// threadViews asks, for every command, of lines anyone may have written by hand: it never throws.
+function noteSource(view, holds = shotHolds()) {
+  const { slug } = view.subject;
+  if (typeof slug !== 'string' || !LINK_ID.test(slug)) return null;
+  try {
+    if (view.check !== 'ready' || !view.shot) return shotOrder(view, holds);
+    const at = [view.shot.src, 'main'].find((x) => holds(x, slug));
+    return at ? { at, slug } : null;
+  } catch { return null; }
+}
+// The copy a new proposal's picture is taken from: what Show me opens once it is written. An addressed
+// mark that stands stays the one to check, so its order holds; else main first.
+function readySource(view, holds = shotHolds()) {
+  const { slug } = view.subject;
+  if (typeof slug !== 'string' || !LINK_ID.test(slug)) return null;
+  return !view.addressed && holds('main', slug) ? { at: 'main', slug } : shotOrder(view, holds);
+}
+// What a proposal answers: the owner's newest word (a turn, a resolve or a reopen), the hand-over, the mark.
+function shotAnswers(v, t) {
+  return JSON.stringify([v.turns.filter((u) => u.by === 'owner').pop()?.id, t.updates.filter((u) => u.status !== undefined).length, v.handed, v.addressed]);
+}
+// The one way a mark gets its picture: { kind: 'ready' }, or { kind: 'addressed', by, draft }.
+const markShot = (view, mark) => noteShot(view, (mark.kind === 'ready' ? readySource(view) : noteSource({ ...view, check: 'addressed', shot: null, addressed: { by: mark.by, draft: mark.draft ?? null } }))?.at ?? null);
+// Old pictures removed, after a capture: in its thread all but the newest three stamps and the live
+// mark's; and the folder of any thread resolved over 14 days ago. Only names the kit writes, in folders
+// of threads the log knows, and never through a symlink.
+const SHOTS_KEPT = 3;
+const SHOTS_RESOLVED_MS = 14 * 86400000;
+const SHOT_NAME = /^(\d{8}-\d{9})-(?:light|dark)\.png(?:\.tmp)?$/;
+function shotSweep(id, now) {
+  logCache = null;
+  const { objects } = readLog();
+  const views = new Map(threadViews(objects).map((v) => [v.id, v]));
+  // one that can't be removed stops none of the rest
+  const gone = (f, how) => { try { fs.rmSync(f, { force: true, ...how }); } catch (e) { warn(`old picture not removed: ${e.message}`); } };
+  const dir = shotFolder(id);
+  if (dir) {
+    const named = fs.readdirSync(dir).map((f) => [f, SHOT_NAME.exec(f)?.[1]]).filter(([, stamp]) => stamp);
+    const kept = new Set([...[...new Set(named.map(([, stamp]) => stamp))].sort().slice(-SHOTS_KEPT), views.get(id)?.shot?.stamp]);
+    for (const [f, stamp] of named) if (!kept.has(stamp)) gone(path.join(dir, f), {});
+  }
+  for (const other of fs.readdirSync(shotsDir())) {
+    const v = other === id ? null : views.get(other);
+    if (!v || v.status !== 'resolved' || !shotFolder(other)) continue;
+    const closed = Date.parse(objects.get(other).updates.filter((u) => u.status !== undefined).pop()?.at ?? '');
+    if (now - closed > SHOTS_RESOLVED_MS) gone(shotFolder(other), { recursive: true });
+  }
+}
+/* note-shots end */
 // An artifact's versions, newest first: its drafts (a worktree's copy that differs from main's), then
 // main's version (landed) and the ones before it (earlier), from the walk artifactTreeOk makes, so
 // every tree listed is one /artifact/tree/ serves. Only trees with an artifact.json, each once at its
@@ -24807,8 +25313,8 @@ function dashboardActions() {
     // dashboard, a spot on an artifact or a preview from a viewer), and thread new checks it again.
     // A capability is cut from the title and subject first, so not even the argv holds one.
     'thread-new': (b) => {
-      const [title, subject, files] = [uncapped(b.title), uncapped(b.subject), filesArgs(b)];
-      return files && lineOk(title, THREAD_TITLE_MAX) && (turnOk(b.text) || (hasFiles(b) && (b.text === undefined || (typeof b.text === 'string' && !b.text.trim())))) && (subject == null || !subjectProblem(subject)) ? ['thread', 'new', `--title=${title.trim()}`, ...(subject ? [`--subject=${JSON.stringify(subject)}`] : []), ...files, ...(turnOk(b.text) ? ['--', b.text.trim()] : [])] : null;
+      const [title, subject, frame, files] = [uncapped(b.title), uncapped(b.subject), uncapped(b.frame), filesArgs(b)];
+      return files && (frame == null || !frameProblem(frame, subject)) && lineOk(title, THREAD_TITLE_MAX) && (turnOk(b.text) || (hasFiles(b) && (b.text === undefined || (typeof b.text === 'string' && !b.text.trim())))) && (subject == null || !subjectProblem(subject)) ? ['thread', 'new', `--title=${title.trim()}`, ...(subject ? [`--subject=${JSON.stringify(subject)}`] : []), ...(frame ? [`--frame=${JSON.stringify(frame)}`] : []), ...files, ...(turnOk(b.text) ? ['--', b.text.trim()] : [])] : null;
     },
     'thread-say': (b) => { const files = filesArgs(b); return files && (typeof b.id === 'string' && THREAD_ID.test(b.id)) && (turnOk(b.text) || (hasFiles(b) && (b.text === undefined || (typeof b.text === 'string' && !b.text.trim())))) ? ['thread', 'say', b.id, ...files, ...(turnOk(b.text) ? ['--', b.text.trim()] : [])] : null; },
     'thread-resolve': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.outcome === undefined || b.outcome === '' || lineOk(b.outcome, OUTCOME_MAX, true)) ? ['thread', 'resolve', b.id, ...(b.outcome?.trim() ? [`--outcome=${b.outcome.trim()}`] : [])] : null),
@@ -25012,6 +25518,41 @@ async function dashRoutesViewer(D, req, res, q) {
   }
   return DASH_NEXT;
 }
+// What noteSource found for main, kept by its commit, and the last body it changed.
+const shotSources = { commit: null, held: new Map(), digest: null, key: null, body: null };
+// threadsRead's threads with each note to check's source as it is now, and a digest of those sources.
+// One git rev-parse a read while there is such a note, and one git ls-tree an artifact a commit.
+function dashFreshSources({ views, body, key }, cache) {
+  const notes = views.filter(noteToCheck);
+  if (!notes.length) return { body, digest: '' };
+  const ref = mainRef();
+  const commit = ref ? git(['rev-parse', ref], mainRoot) : null;
+  if (cache.commit !== commit) { cache.commit = commit; cache.held = new Map(); }
+  const holds = shotHolds((slug) => {
+    if (cache.held.has(slug)) return cache.held.get(slug);
+    const listed = commit ? git(['ls-tree', commit, '--', `${ARTIFACTS_REL}/${slug}/`], mainRoot) : null;
+    // a git that failed has said nothing to keep
+    if (listed !== null) cache.held.set(slug, !!listed);
+    return !!listed;
+  });
+  const now = new Map(notes.map((v) => [v.id, noteSource(v, holds)]));
+  const digest = JSON.stringify([...now]);
+  if (cache.digest !== digest || cache.key !== key) Object.assign(cache, { digest, key, body: JSON.stringify(views.map((v) => (now.has(v.id) ? { ...v, source: now.get(v.id) } : v))) });
+  return { body: cache.body, digest };
+}
+// /api/shot/<thread>/<stamp>-<light|dark>.png: a picture of a note's spot, read only from that thread's own
+// folder. False when the path isn't one.
+function dashShotRoute(req, res, rawPath) {
+  const m = req.method === 'GET' ? /^\/api\/shot\/(t-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*)\/(\d{8}-\d{9}-(?:light|dark)\.png)$/.exec(rawPath) : null;
+  if (!m) return false;
+  const site = req.headers['sec-fetch-site'];
+  let bytes = null;
+  const refused = site !== undefined && site !== 'same-origin';
+  try { const dir = refused ? null : shotFolder(m[1]); if (dir && fs.lstatSync(path.join(dir, m[2])).isFile()) bytes = fs.readFileSync(path.join(dir, m[2])); } catch {}
+  res.writeHead(refused ? 403 : bytes ? 200 : 404, bytes ? { 'content-type': 'image/png', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'cross-origin-resource-policy': 'same-origin' } : { 'content-type': 'text/plain' });
+  res.end(bytes ?? (refused ? "not for another site's page" : 'not found'));
+  return true;
+}
 // /api/threads
 async function dashRoutesThreads(D, req, res, q) {
   const { u } = q;
@@ -25023,6 +25564,8 @@ async function dashRoutesThreads(D, req, res, q) {
     if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
     let r;
     try { r = threadsRead(); } catch (e) { return send(res, 500, 'application/json', JSON.stringify({ error: e.message })); }
+    // where each note to check shows now, which no log line says (kit-147): a worktree goes, main moves
+    const fresh = dashFreshSources(r, shotSources);
     const pane = supervisorPane();
     const asks = supervisorAsks();
     const prompts = sessionPrompts();
@@ -25038,11 +25581,11 @@ async function dashRoutesThreads(D, req, res, q) {
     // this process's work is saved.
     // the token for an answer goes only to this page's own read, said so by the browser
     if (asks?.kind === 'menu' && site === 'same-origin') asks.token = paneToken(asks.digest);
-    const tag = `"${sha256(`${r.key}|${pane}|${asks?.kind ?? ''}|${asks?.digest ?? ''}|${asks?.token ? 1 : 0}|${checked ?? ''}|${undelivered.join(',')}|${JSON.stringify(working)}|${JSON.stringify(prompts)}`).slice(0, 20)}"`;
+    const tag = `"${sha256(`${r.key}|${fresh.digest}|${pane}|${asks?.kind ?? ''}|${asks?.digest ?? ''}|${asks?.token ? 1 : 0}|${checked ?? ''}|${undelivered.join(',')}|${JSON.stringify(working)}|${JSON.stringify(prompts)}`).slice(0, 20)}"`;
     const head = { etag: tag, 'cache-control': 'private, no-cache', ...(r.cached ? { 'x-devteam-threads': 'cached' } : {}) };
     if (req.headers['if-none-match'] === tag) { res.writeHead(304, head); return res.end(); }
     res.writeHead(200, { 'content-type': 'application/json', ...head });
-    return res.end(`{"supervisor":${JSON.stringify({ pane, question: asks, ...(prompts.length ? { prompts } : {}), checked, undelivered })},"working":${JSON.stringify(working)},"threads":${r.body}}`);
+    return res.end(`{"supervisor":${JSON.stringify({ pane, question: asks, ...(prompts.length ? { prompts } : {}), checked, undelivered })},"working":${JSON.stringify(working)},"threads":${fresh.body}}`);
   }
   return DASH_NEXT;
 }
@@ -25152,6 +25695,7 @@ async function dashRoutesArtifacts(D, req, res, q) {
     const r = await run(['artifact', 'manifest', slug, '--json'], { timeout: 12000 });
     return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, r.code === 2 ? 409 : 404, 'application/json', JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
   }
+  if (dashShotRoute(req, res, rawPath)) return;
   if (req.method === 'GET' && rawPath.startsWith('/artifact/')) {
     // A draft from another machine (kit-750): a fetched branch's folder, by the tree id that passed
     // the artifact checks (artifactRemoteRefs' resolve), its files as blobs of that tree, so a fetch
@@ -25204,7 +25748,7 @@ async function dashRoutesArtifacts(D, req, res, q) {
     // loopback fetch for a publish get the bytes as committed. Vary says so to anything that keeps
     // an answer, though no-store already keeps none.
     const framed = req.headers['sec-fetch-dest'] === 'iframe' && rel.toLowerCase().endsWith('.html');
-    res.writeHead(200, { 'content-type': ARTIFACT_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store', vary: 'sec-fetch-dest', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': artifactCsp(base, `${base}${rawPath.slice(0, rawPath.length - tail.length)}/`) });
+    res.writeHead(200, { ...artifactHeaders(rel, base, `${base}${rawPath.slice(0, rawPath.length - tail.length)}/`), vary: 'sec-fetch-dest' });
     return res.end(framed ? withArtifactLens(bytes) : bytes);
   }
   return DASH_NEXT;
@@ -25856,7 +26400,7 @@ async function cmdDashboard() {
     const stat = (p) => { try { const s = fs.statSync(p); return `${s.size}:${s.mtimeMs}`; } catch { return '-'; } };
     const keyed = [...names].sort().map((f) => [f, `${stat(path.join(liveLogDir(), f))}/${stat(path.join(durableLogDir(), f))}`]);
     const key = keyed.map(([f, k]) => `${f}=${k}`).join('|');
-    if (threadsMemo.key === key) return { body: threadsMemo.body, cached: true, key };
+    if (threadsMemo.key === key) return { body: threadsMemo.body, cached: true, key, views: threadsMemo.views };
     for (const f of [...threadFiles.keys()]) if (!names.has(f)) threadFiles.delete(f);
     for (const [f, k] of keyed) {
       if (threadFiles.get(f)?.k === k) continue;
@@ -25867,9 +26411,10 @@ async function cmdDashboard() {
     }
     const all = [...threadFiles.values()].flatMap((x) => x.lines);
     const asked = new Set(all.filter((l) => l.type === 'question' && l.op === 'new' && typeof l.thread === 'string').map((l) => l.id));
-    const body = JSON.stringify(threadViews(fold(all.filter((l) => l.type !== 'question' || asked.has(l.id))).objects));
-    threadsMemo = { key, body };
-    return { body, cached: false, key };
+    const views = threadViews(fold(all.filter((l) => l.type !== 'question' || asked.has(l.id))).objects);
+    const body = JSON.stringify(views);
+    threadsMemo = { key, body, views };
+    return { body, cached: false, key, views };
   };
   // Whether the supervisor has a pane the kit can type into, for the card's "hasn't replied yet": what
   // the 10 s hello child found (hello --pane), so a read never waits on tmux.
@@ -33230,15 +33775,16 @@ const BROWSER_MAC_CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Googl
 const BROWSER_CHROME_NAMES = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser'];
 const browserExecutable = (f) => { try { fs.accessSync(f, fs.constants.X_OK); return fs.statSync(f).isFile(); } catch { return false; } };
 // Chrome's binary: CHROME_PATH, then the macOS app, then each name on PATH in order. A CHROME_PATH
-// that isn't an executable file is refused, never passed over.
-function browserChrome() {
+// that isn't an executable file is refused, never passed over. fail is told why there is none, and never
+// returns (the note shooter's throws its own words).
+function browserChrome({ fail = (m) => die(m) } = {}) {
   const looked = (first) => `browser: no Chrome found (looked for ${first}, ${[...(process.platform === 'darwin' ? [BROWSER_MAC_CHROME] : []), ...BROWSER_CHROME_NAMES].join(', ')}); install Chrome or Chromium, or set CHROME_PATH to its binary`;
   const given = process.env.CHROME_PATH;
-  if (given) return browserExecutable(given) ? given : die(looked(`CHROME_PATH=${given}, not an executable file`));
+  if (given) return browserExecutable(given) ? given : fail(looked(`CHROME_PATH=${given}, not an executable file`));
   if (browserExecutable(BROWSER_MAC_CHROME)) return BROWSER_MAC_CHROME;
   const dirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
   for (const n of BROWSER_CHROME_NAMES) for (const d of dirs) if (browserExecutable(path.join(d, n))) return path.join(d, n);
-  return die(looked('CHROME_PATH'));
+  return fail(looked('CHROME_PATH'));
 }
 // Who may run it, and on what, in this order, before anything else; each refusal exits 1 and changes
 // nothing. The role check is the kit's supervisor guard loosened to let an empty role through (the
@@ -36286,7 +36832,7 @@ const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   settings set <key> <1..20|none> [--for <act-id>]   (the supervisor sets max_active_tickets or max_active_per_component in its settings chore, .worktrees/chore-settings; none is no limit; --for names the owner's owner-setting act it lands, which must be the latest for the key with this value. It applies once merge --chore settings lands it)
   owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor's own settings, max_active_tickets or max_active_per_component; none is no limit. The dashboard's Settings page runs it on Save; the supervisor lands it with settings set in its settings chore)
   pane question [--json]   (what the supervisor's terminal is asking; the owner answers it on the dashboard's card, which sends that option's digit key and nothing else: no command answers it)
-  thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--re <u-id>] [--off-subject "<why>"] [--anyway] | thread reply <t-id> --part <n> "<words>", then thread reply <t-id> --after-parts ["<last words>"] [reply's flags] | thread ask <t-id> --question "…" [--off-subject "<why>"] <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor; the responder replies too)   reply, ask an Inbox question in it, propose resolving it; a turn nothing waits on (no owner turn owed, no open handoff) names its --refs on the thread's subject, or follows up your --pending turn with --re <that turn>, or says --off-subject "<why>"
+  thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--re <u-id>] [--off-subject "<why>"] [--anyway] | thread reply <t-id> --part <n> "<words>", then thread reply <t-id> --after-parts ["<last words>"] [reply's flags] | thread ask <t-id> --question "…" [--off-subject "<why>"] <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>" | thread unready <t-id> --reason "<line>"   (supervisor; the responder replies too)   reply, ask an Inbox question in it, propose resolving it (on an artifact note it takes a picture of the spot: look at it), withdraw a proposal or a session's mark; a turn nothing waits on (no owner turn owed, no open handoff) names its --refs on the thread's subject, or follows up your --pending turn with --re <that turn>, or says --off-subject "<why>"
   thread working <t-id> [--done]   (the session holding the owner's turn: the card shows it is responding until you reply)
   thread show <t-id> [--json] | thread list [--waiting [--responder] | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply; --waiting --responder: the owner's turns owed and routed to the responder, oldest first
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]   questions print in Inbox order: the most valuable first

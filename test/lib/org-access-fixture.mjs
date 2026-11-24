@@ -43,6 +43,8 @@ const REQUESTS = (F) => ({
   // the result as TSV only once the owner answered: this question has none yet, so `review result` says so
   'dash /api/review': [[200, `/api/review?id=${F.review}`], [404, `/api/review?id=${F.review}&format=tsv`]],
   'dash /public-manifest/*': [[200, `/public-manifest/${F.slug}`]],
+  // a note's picture (kit-147): there is none here, so a 404, and another site's page is refused
+  'dash re:^\\/api\\/shot\\/(t-\\d{8}-\\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*)\\/(\\d{8}-\\d{9}-(?:light|dark)\\.png)$': [[404, '/api/shot/t-20260101-000000000-owner/20260101-000000000-light.png'], [403, '/api/shot/t-20260101-000000000-owner/20260101-000000000-light.png', { 'sec-fetch-site': 'cross-site' }]],
   'dash /artifact/*': [[200, `/artifact/main/${F.slug}/`], [301, `/artifact/main/${F.slug}`], [200, `/artifact/wt/${F.wt}/${F.slug}/`], [404, `/artifact/origin/ticket%2Fnone/${F.slug}/`]],
   'dash re:^\\/review\\/([^/]+)\\/([^/]*)$': [[200, `/review/${F.review}/`, FRAME], [200, `/review/preview/?path=docs/devteam/project/artifacts/${F.slug}/index.html&ref=main`, FRAME], [200, '/review/preview/devteam-ui.css']],
   // a socket: a plain request gets its guard's status
@@ -68,7 +70,7 @@ const REQUESTS = (F) => ({
 const LAPTOP_PARTS = [
   ['dash /upload/*', 'dash /api/hello', 'dash /', 'dash /index.html', 'dash /api/data*', 'dash re:^\\/view\\/artifact\\/([^/]+)$', 'dash re:^\\/view\\/preview\\/([^/]+)$', 'dash /api/artifact-fp', 'dash /api/view', 'dash /api/artifact-versions', 'dash /api/artifact-remote', 'dash /api/threads'],
   ['dash /api/fleet', 'dash /api/record', 'dash /api/peek', 'dash /api/sensor', 'dash /api/schema', 'dash /api/timeline', 'dash /api/governance', 'dash /api/file', 'dash /api/review', 'dash /public-manifest/*'],
-  ['dash /artifact/*', 'dash re:^\\/review\\/([^/]+)\\/([^/]*)$', 'dash /presence', 'dash /presence?*', 'term /api/term/token', 'term re:^\\/api\\/term\\/(supervisor|shell)\\/(screen|history|keys)$', 'hub /presence', 'hub /presence?*', 'hub /', 'hub /instances.json', 'hub /upload/*', 'hub /memory.json', 'hub /memory.json?*', 'hub /operator/threads'],
+  ['dash re:^\\/api\\/shot\\/(t-\\d{8}-\\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*)\\/(\\d{8}-\\d{9}-(?:light|dark)\\.png)$', 'dash /artifact/*', 'dash re:^\\/review\\/([^/]+)\\/([^/]*)$', 'dash /presence', 'dash /presence?*', 'term /api/term/token', 'term re:^\\/api\\/term\\/(supervisor|shell)\\/(screen|history|keys)$', 'hub /presence', 'hub /presence?*', 'hub /', 'hub /instances.json', 'hub /upload/*', 'hub /memory.json', 'hub /memory.json?*', 'hub /operator/threads'],
 ];
 const PARTS = { laptop: LAPTOP_PARTS, box: [LAPTOP_PARTS.flat()] };
 
