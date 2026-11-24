@@ -1136,6 +1136,8 @@ export function createGateway(opts = {}) {
   const isOwner = (person) => person?.role === 'owner';
   // 'owner', 'admin' or 'member': any other role in a row reads as a member's, the least it can be
   const roleOf = (person) => (isOwner(person) ? 'owner' : person?.role === 'admin' ? 'admin' : 'member');
+  // 'full' or 'view' (kit-250): only a row that says view is View; the stand-in and any other value are Full
+  const levelOf = (person) => (person?.level === 'view' ? 'view' : 'full');
   // A claimed file with no owner row (one restored from before people, read while running): its
   // top-level sessions are still the owner's, until the next start's upgrade writes the row.
   const STAND_IN = { id: null, role: 'owner', level: 'full', name: 'Owner' };
@@ -1905,8 +1907,9 @@ export function createGateway(opts = {}) {
   };
   // viewer: null, or for the viewer's page whether the wrapper's grant holds (viewerAncestors)
   // person: the session's x-devteam-person (personHeader), on a dashboard's request alone
-  const proxy = (req, res, { port, path: p, publicOrigin, cap, extra = null, viewer = null, person = null }) => {
-    const up = http.request({ host: '127.0.0.1', port, method: req.method, path: p, headers: { ...upstreamHeaders(req, port, publicOrigin), ...(person ? { 'x-devteam-person': person } : {}) } }, (ur) => {
+  // level: the session's, sent beside the person (kit-250), never the browser's
+  const proxy = (req, res, { port, path: p, publicOrigin, cap, extra = null, viewer = null, person = null, level = 'full' }) => {
+    const up = http.request({ host: '127.0.0.1', port, method: req.method, path: p, headers: { ...upstreamHeaders(req, port, publicOrigin), ...(person ? { 'x-devteam-person': person, 'x-devteam-level': level } : {}) } }, (ur) => {
       // Never kept: a page an agent served once on this name must not come back from the browser's
       // cache after a real dashboard has taken its port.
       const head = downstreamHeaders(ur.headers, cap, publicOrigin);
@@ -1929,7 +1932,7 @@ export function createGateway(opts = {}) {
   // The body is read whole (it is small) so its hash is what is signed; whatever signature headers
   // the browser sent are replaced.
   const SIGNED_POSTS = { '/api/pane-answer': paneSignature, '/api/owner-setting': ownerSettingSignature };
-  const signedPost = (req, res, port, publicOrigin, route, signer, person = null) => {
+  const signedPost = (req, res, port, publicOrigin, route, signer, person = null, level = 'full') => {
     const chunks = [];
     let size = 0;
     req.on('data', (c) => { size += c.length; if (size <= 20000) chunks.push(c); else chunks.length = 0; });
@@ -1937,7 +1940,7 @@ export function createGateway(opts = {}) {
     req.on('end', () => {
       if (size > 20000) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
       const data = Buffer.concat(chunks);
-      const up = http.request({ host: '127.0.0.1', port, method: 'POST', path: route, headers: { ...upstreamHeaders(req, port, publicOrigin), ...(person ? { 'x-devteam-person': person } : {}), 'content-length': data.length, ...signer(threadKey(store).privateKey, port, data) } }, (ur) => {
+      const up = http.request({ host: '127.0.0.1', port, method: 'POST', path: route, headers: { ...upstreamHeaders(req, port, publicOrigin), ...(person ? { 'x-devteam-person': person, 'x-devteam-level': level } : {}), 'content-length': data.length, ...signer(threadKey(store).privateKey, port, data) } }, (ur) => {
         res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, undefined, publicOrigin), 'cache-control': 'no-store' });
         pipeline(ur, res, () => {});
       });
@@ -2278,6 +2281,25 @@ export function createGateway(opts = {}) {
   };
 
   const navigating = (req) => req.method === 'GET' && (req.headers['sec-fetch-mode'] === 'navigate' || (!req.headers['sec-fetch-mode'] && String(req.headers.accept ?? '').includes('text/html')));
+  // View only (kit-250): a View session reads and changes nothing. One check, run once the name is
+  // resolved and before any route or body; the sockets refuse View on their own (upgrade). null, or
+  // the 403's type and body. project: the name is a dashboard's (not a preview's); p: the pathname.
+  const VIEW_ANY = 'View only: you can look at everything here, but not change anything.';
+  const VIEW_TERM = 'View only: there is no terminal for view-only people.';
+  // terminal@1 §3's reading of a path: percent-decoded, repeated slashes folded (raw if it won't decode)
+  const termPath = (raw) => { let d = raw; try { d = decodeURIComponent(raw); } catch {} return d.replace(/\/+/g, '/'); };
+  const VIEW_EXEMPT = (p, method) => (method === 'POST' && p === '/auth/logout') || p.startsWith('/auth/method/') || p === '/auth/passkeys' || p.startsWith('/auth/passkeys/');
+  const viewRefusal = (req, person, { isBox, isTerm, project, p }) => {
+    if (person?.level !== 'view') return null;
+    // 0: a dashboard's terminal routes answer as the dashboard's own View deny does (terminal@1 §4)
+    if (project && termPath(req.url.split('?')[0]).startsWith('/api/term/')) return { type: 'json', body: '{"why":"view"}' };
+    const no = (sentence) => (navigating(req) ? { type: 'text', body: sentence } : { type: 'json', body: JSON.stringify({ error: sentence, code: 'view-only' }) });
+    if (isTerm) return no(VIEW_TERM);
+    if (isBox && (p === '/public' || p.startsWith('/public/'))) return no(VIEW_ANY);
+    if (req.method === 'GET' || req.method === 'HEAD') return null;
+    if (isBox && VIEW_EXEMPT(p, req.method)) return null;
+    return no(VIEW_ANY);
+  };
   // The cookie is SameSite=None, so a page elsewhere (another site, or another name of the box)
   // could make the browser send it with an <img> or <script>, or navigate a frame to the API. Such
   // a request is refused, but for a link to a page and for what a sandboxed review page loads (its
@@ -3132,6 +3154,8 @@ export function createGateway(opts = {}) {
         port = found.port ?? null;
         pv = found.preview ?? null;
       }
+      const viewNo = viewRefusal(req, person, { isBox, isTerm, project: Boolean(port && !pv), p });
+      if (viewNo) return send(res, 403, viewNo.type === 'text' ? 'text/plain; charset=utf-8' : 'application/json', viewNo.body);
       if (pv && !isOwner(person) && ownerOnlyPreview(pv)) return send(res, 403, 'text/plain; charset=utf-8', 'Only the box\'s owner can open the supervisor\'s browser.');
       // A preview's lens: the gateway's own page, after the session check, never the app's (spec §7).
       // Static, so it asks the hub nothing; any other method or path there is the app's, as before.
@@ -3147,10 +3171,10 @@ export function createGateway(opts = {}) {
         if (['GET', 'HEAD'].includes(req.method) && rawPath.startsWith('/upload/')) return await serveUpload(req, res, rawPath);
         const prefix = req.method === 'GET' && ['iframe', 'document'].includes(req.headers['sec-fetch-dest']) && ['same-origin', 'none'].includes(req.headers['sec-fetch-site']) ? ARTIFACT.exec(rawPath)?.[0] : null;
         if (prefix) return redirect(res, `${capFor(port, prefix, session)}${req.url}`);
-        if (req.method === 'POST' && Object.hasOwn(SIGNED_POSTS, rawPath)) return signedPost(req, res, port, own, rawPath, SIGNED_POSTS[rawPath], personH);
+        if (req.method === 'POST' && Object.hasOwn(SIGNED_POSTS, rawPath)) return signedPost(req, res, port, own, rawPath, SIGNED_POSTS[rawPath], personH, levelOf(person));
         // the viewer, by its path as the kit resolves it: the box may frame it only under the wrapper's grant
         const viewer = VIEWER.test(p) || VIEWER.test(rawPath) ? { granted: wrapGranted(label, rawPath, url) } : null;
-        return proxy(req, res, { port, path: req.url, publicOrigin: own, viewer, person: personH, extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
+        return proxy(req, res, { port, path: req.url, publicOrigin: own, viewer, person: personH, level: levelOf(person), extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
       }
       // The terminal: the gateway's copy of ttyd's page. Only its socket reaches ttyd (see upgrade).
       if (isTerm) {
@@ -3226,7 +3250,7 @@ export function createGateway(opts = {}) {
       // set (a laptop, an older image). Versions only. An additive change keeps box: 2.
       // role is the signed-in person's ('owner', 'admin' or 'member'); people, where the People list
       // is, for the owner and admins only, so the hub draws People for them alone.
-      if (req.method === 'GET' && p === '/box.json') return json(res, 200, { box: 2, terminal: `${TERM}/`, project: `${pubUrl.protocol}//{project}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, previews: `${PUB}/dev/`, push: vapid().publicKey, image: BOX_IMAGE, role: roleOf(person), ...(roleOf(person) === 'member' ? {} : { people: `${PUB}/auth/people/list` }) });
+      if (['GET', 'HEAD'].includes(req.method) && p === '/box.json') return json(res, 200, { box: 2, terminal: `${TERM}/`, project: `${pubUrl.protocol}//{project}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, previews: `${PUB}/dev/`, push: vapid().publicKey, image: BOX_IMAGE, role: roleOf(person), level: levelOf(person), ...(roleOf(person) === 'member' ? {} : { people: `${PUB}/auth/people/list` }) });
       if (req.method === 'GET' && p === '/instances.json') return instances(req, res);
       if (req.method === 'GET' && p === '/memory.json') return memory(req, res, url.searchParams);
       if (req.method === 'GET' && p === '/operator/threads') return operatorThreads(req, res, null, personH);
@@ -3437,6 +3461,7 @@ export function createGateway(opts = {}) {
     let who = null;
     try { who = store.load().passkeys.length ? sessionOf(req) : null; } catch { return refuse(503, 'Service Unavailable'); }
     if (!who) return refuse(401, 'Unauthorized');
+    if (who.person?.level === 'view') return refuse(403, 'Forbidden');
     if (!isOwner(who.person) && ownerOnlyPreview(name)) return refuse(403, 'Forbidden');
     holdSocket(socket, who.person);
     if (!req.url.startsWith('/') || req.url.startsWith('//')) return refuse(400, 'Bad Request');
@@ -3497,6 +3522,7 @@ export function createGateway(opts = {}) {
     let who = null;
     try { who = store.load().passkeys.length ? sessionOf(req) : null; } catch { return refuse(503, 'Service Unavailable'); }
     if (!who) return refuse(401, 'Unauthorized');
+    if (who.person?.level === 'view') return refuse(403, 'Forbidden');
     holdSocket(socket, who.person);
     let p;
     try { p = new URL(req.url, PUB); } catch { return refuse(400, 'Bad Request'); }
