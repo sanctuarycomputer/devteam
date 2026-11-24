@@ -24,6 +24,7 @@ const P = `plan-${FEAT}`;
 const WORKER = (id = W) => ({ DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: id });
 const PLANNER = (f = FEAT) => ({ DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: f });
 const NO_TMUX = !hasTmux && 'no tmux';
+const MIN = 60000;
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const item = (ref) => JSON.stringify({ kind: 'item', ref });
 const month = () => new Date().toISOString().slice(0, 7);
@@ -455,5 +456,69 @@ test('kit-109 session-bound threads', { skip: NO_TMUX, timeout: 600000 }, async 
     const woke = gone || await Promise.race([new Promise((res) => w.on('close', () => res(true))), new Promise((res) => setTimeout(() => res(false), 30000))]);
     w.kill();
     assert.equal(woke && o.includes(U), false, `wait stayed asleep on ${U}: ${o.slice(0, 200)}`);
+  });
+
+  // ---- done-when 6: session-overdue and thread-turn-unbound
+  // Y's ticket thread is S6h's; this one binds to Y through a preview it offered
+  const overdue = (w) => F.findings('session-overdue').filter((x) => x.subject === w);
+  F.preview('slow-heron', Y);
+  const ty = F.newThread(JSON.stringify({ kind: 'preview', name: 'slow-heron' }), 'y, the slow one');
+  await t.test('S6a2: an owner turn routed to Y and owed 4 min raises no session-overdue', () => {
+    F.hand('owner', { type: 'turn', thread: ty.T, text: 'four minutes ago', routed_to: 'session', routed_session: Y }, 4 * MIN);
+    assert.deepEqual(overdue(Y), []);
+  });
+  let u6 = null;
+  await t.test('S6a: session-overdue (high), one per session, subject Y, naming the turn owed past 5 min', () => {
+    u6 = F.hand('owner', { type: 'turn', thread: ty.T, text: 'still there?', routed_to: 'session', routed_session: Y }, 6 * MIN);
+    const f = overdue(Y);
+    assert.ok(f.length === 1 && f[0].severity === 'high' && JSON.stringify(f[0]).includes(u6), JSON.stringify(f));
+  });
+  await t.test('S6k: a merged session with a turn routed to it owed 6 min: the finding still names the turn (liveness not required)', () => {
+    const tm = JSON.parse(F.sup(['thread', 'list', '--json'])).find((x) => x.subject?.ref === `ticket:${M}`);
+    const u = F.hand('owner', { type: 'turn', thread: tm.id, text: 'did it land?', routed_to: 'session', routed_session: M }, 6 * MIN);
+    assert.ok(overdue(M).some((x) => JSON.stringify(x).includes(u)), JSON.stringify(overdue(M)));
+  });
+  let tpend = null;
+  let pend6 = null;
+  await t.test("S6b: the planner's pending turn, the last in its thread, with nothing after it for 10 min", () => {
+    F.preview('calm-finch', P);
+    tpend = F.hand('owner', { type: 'thread', title: 'pricing page', subject: { kind: 'preview', name: 'calm-finch' } }, 13 * MIN);
+    // its owner turn answered by the planner's own pending reply, so only the pending rule can fire
+    F.hand('owner', { type: 'turn', thread: tpend, text: 'the pricing page?', routed_to: 'session', routed_session: P }, 12 * MIN);
+    const pend = pend6 = F.hand(P, { type: 'turn', thread: tpend, text: 'on it', pending: true }, 11 * MIN, `${P}-${month()}.jsonl`);
+    const turns = JSON.parse(F.sup(['thread', 'show', tpend, '--json'])).turns;
+    assert.equal(turns[turns.length - 1]?.id, pend, 'the pending turn is the last in its thread');
+    assert.ok(overdue(P).some((x) => JSON.stringify(x).includes(pend)), `session-overdue names the pending turn: ${JSON.stringify(overdue(P))}`);
+  });
+  await t.test("S2f: while the planner's session-overdue is open, its planner thread goes to the responder", () => {
+    const o = F.lineOf(F.say(tp.T, 'and the tiers?'));
+    assert.deepEqual([o.routed_to, o.routed_session], ['responder', undefined]);
+  });
+  await t.test("S6c: while Y's is open, Y's threads go to the responder", () => {
+    assert.equal(F.lineOf(F.say(ty.T, 'any news?')).routed_to, 'responder');
+  });
+  await t.test("S6d: while open, another session's threads still go to it", () => {
+    assert.equal(F.lineOf(F.say(tw.T, 'and W?')).routed_session, W);
+  });
+  await t.test("S6e: the supervisor's reply clears Y's, and Y's next owner turn routes to Y again", () => {
+    F.sup(['thread', 'reply', ty.T, 'The worker is busy; it ships today']);
+    assert.deepEqual(overdue(Y), []);
+    assert.equal(F.lineOf(F.say(ty.T, 'thanks, Y?')).routed_session, Y);
+  });
+  await t.test("S6f: the planner's own reply clears its finding", () => {
+    const r = F.run(F.old, ['thread', 'reply', tpend, 'Two tiers, done', '--re', pend6], PLANNER());
+    assert.match(r.out, /^u-/, r.err);
+    assert.deepEqual(overdue(P), []);
+  });
+  await t.test("S6g: resolving the thread clears it", () => {
+    const tm = JSON.parse(F.sup(['thread', 'list', '--json'])).find((x) => x.subject?.ref === `ticket:${M}`);
+    F.owner(['thread', 'resolve', tm.id], F.OWN);
+    assert.deepEqual(overdue(M), []);
+  });
+  await t.test('S6i: thread-turn-unbound (medium) flags a hand-written session turn in an unbound thread', () => {
+    assert.deepEqual(F.findings('thread-turn-unbound'), [], 'none before');
+    const u = F.hand(W, { type: 'turn', thread: tg.T, text: 'hand-written' }, MIN, `${W}.jsonl`);
+    const f = F.findings('thread-turn-unbound');
+    assert.ok(f.length === 1 && f[0].severity === 'medium' && JSON.stringify(f[0]).includes(u), JSON.stringify(f));
   });
 });

@@ -18454,6 +18454,16 @@ function collectMetrics(since, reviewsSince = 0) {
   // pending turn not followed up past RESPONDER_PENDING_MS (pendingOpen); high, so wait brings the supervisor,
   // which takes it (and every turn routes to it until it is answered). From the log alone, so an
   // answer or a resolve clears it. By id only.
+  // A session's (kit-109): one high finding per session, naming its overdue turns; while it is open
+  // sessionRoute skips the session, so its threads go to the responder or the supervisor
+  for (const [w, os] of sessionsOverdue(logNow, now, turnsNow)) add('high', 'session-overdue', w, `${sessionWords(w, logNow)} has ${os.length === 1 ? 'a turn' : `${os.length} turns`} with no reply: ${os.map((o) => (o.why === 'owed' ? `the owner's turn ${o.turn} in ${o.thread}, ${o.min} min` : `its pending reply ${o.turn} in ${o.thread}, ${o.min} min with nothing after it`)).join('; ')}`, `answer each in its thread (thread show <t>, then thread reply <t>), and look at ${w}'s window; its threads go to the responder until then`);
+  // A session's turn in a thread that doesn't bind to it: only a hand-written line makes one (a preview
+  // whose record is gone can't be checked, so it isn't flagged)
+  for (const [id, ts] of turnsNow) {
+    const t = logNow.get(id);
+    if (t?.type !== 'thread' || (isObj(t.subject) && t.subject.kind === 'preview' && !readPreviews().some((r) => r.name === t.subject.name))) continue;
+    for (const u of ts) if (['ticket', 'planner'].includes(writerClass(u.created_by)) && boundWriter(t.subject, logNow) !== u.created_by) add('medium', 'thread-turn-unbound', u.id, `${u.created_by} wrote turn ${u.id} in ${id}, a thread not about its work`, `read it (thread show ${id}); a session replies only in threads bound to it, so this line was written by hand`);
+  }
   for (const o of responderOverdue(logNow, now, turnsNow)) add('high', 'responder-overdue', o.thread, o.why === 'owed' ? `the owner's turn ${o.turn} went to the responder ${o.min} min ago and has no answer` : `the responder's pending reply ${o.turn} has had no follow-up for ${o.min} min`, `answer it in the thread (thread show ${o.thread}, then thread reply ${o.thread}), then look at the responder (responder --resume)`);
   // Down or stuck: only while settings.responder is on, the fleet's session is up and the fleet is
   // neither parked nor draining (a park stops it on purpose; a drain refuses its start), so a project
@@ -35823,9 +35833,30 @@ function sessionLive(w) {
   } else return 'not a session';
   return resolvePane(tmuxTarget(w)).problem ?? null;
 }
-// The turns that make w overdue (kit-109 task 6 fills this in); none, so far
+// Every session's overdue turns, by writer (spec item 6), in open threads only and whether or not the
+// session is live: an owner turn routed to it still owed (owedIn: answered by it or the supervisor)
+// past SESSION_OVERDUE_MS; or its newest turn in a thread, pending and the thread's last, past
+// SESSION_PENDING_MS. From the log alone, so an answer or a resolve clears it. Map w -> [{ thread,
+// turn, why, min }].
+function sessionsOverdue(objects = readLog().objects, now = Date.now(), byThread = turnsByThread(objects)) {
+  const m = new Map();
+  const add = (w, o) => (m.get(w) ?? m.set(w, []).get(w)).push(o);
+  for (const [id, ts] of byThread) {
+    const t = objects.get(id);
+    if (t?.type !== 'thread' || t.status === 'resolved') continue;
+    for (const u of owedIn(ts, t)) {
+      const age = now - Date.parse(u.created_at);
+      if (u.routed_to === 'session' && typeof u.routed_session === 'string' && age > SESSION_OVERDUE_MS) add(u.routed_session, { thread: id, turn: u.id, why: 'owed', min: Math.floor(age / 60000) });
+    }
+    const last = ts[ts.length - 1];
+    const age = last ? now - Date.parse(last.created_at) : 0;
+    if (last?.pending === true && ['ticket', 'planner'].includes(writerClass(last.created_by)) && age > SESSION_PENDING_MS) add(last.created_by, { thread: id, turn: last.id, why: 'pending', min: Math.floor(age / 60000) });
+  }
+  return m;
+}
+// The turns that make w overdue: while there are any, sessionRoute skips w
 function sessionOverdue(w, objects = readLog().objects, now = Date.now()) {
-  return [];
+  return sessionsOverdue(objects, now).get(w) ?? [];
 }
 // The session the owner's next turn in t goes to, or null: the setting on (anything but false), a
 // subject that binds (an artifact never routes: its notes are handed over, kit-144), the session live
