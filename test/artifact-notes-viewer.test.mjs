@@ -345,7 +345,8 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await stepTo(V, N.trial);
     await V.soon(`TS.hash === ''`, 'setup: back on the default view');
     const k2 = await V.p.ev('window.__tsPosts.length');
-    await stepTo(V, N.pointAnnual);
+    // straight to it, past the annual price's own #annual
+    await V.p.ev(`(avStep.to(TL.threads.find((t) => t.id === ${J(N.pointAnnual)})), true)`);
     await V.soon(`window.__tsPosts.slice(${k2}).some((m) => m.type === 'go' && m.hash === '#annual')`, "the point note's hash, read from its path: go #annual");
   });
 
@@ -509,7 +510,7 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await openAt(V, AV_WT, 'plan-pricing');
     await has(V, '#av-next', 'the stepper');
     // a new note with no card open: the draft alone says so
-    await V.p.ev(`(avStep.sent = null, tlClose(), avStep.want = { id: ${J(N.cancel)}, av: AV, open: null, draft: null }, tlStart({ subject: tsSubject(null, 700, 500), title: 'x', x: 700, y: 500 }), avStep.land('late'), true)`);
+    await V.p.ev(`(avStep.sent = null, tlClose(), avStep.want = { id: ${J(N.cancel)}, av: AV, open: null, draft: null }, tlStart({ subject: tsSubject(null, 700, 500), title: 'x', x: 700, y: 500 }), document.activeElement?.blur?.(), avStep.land('late'), true)`);
     assert.deepEqual(await V.p.ev('[TL.open, !!TL.draft, avStep.want]'), [null, true, null], 'dropped by a draft alone');
     await V.p.ev('(tlClose(), true)');
     for (const [what, act, undo] of [
@@ -554,16 +555,16 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await has(V, '#av-next', 'the stepper');
     const cancel = `TL.threads.find((t) => t.id === ${J(N.cancel)})`;
     // sent, and the stage is ready elsewhere (a link the owner followed): late opens the card and sends nothing
-    await V.p.ev(`(window.__sets = 0, new MutationObserver((l) => { window.__sets += l.length; }).observe(tsFrame(), { attributes: true, attributeFilter: ['src'] }), tlOpen(${J(N.trial)}, false), document.activeElement?.blur?.(), avStep.sent = { av: AV, file: 'faq.html', vh: '', load: true, until: Date.now() - 1 }, avStep.want = { id: ${J(N.cancel)}, av: AV, open: TL.open, draft: TL.draft }, window.__k = window.__tsPosts.length, avStep.land('late'), true)`);
+    await V.p.ev(`(window.__sets = 0, new MutationObserver((l) => { window.__sets += l.length; }).observe(tsFrame(), { attributes: true, attributeFilter: ['src'] }), tlOpen(${J(N.trial)}, false), document.activeElement?.blur?.(), avStep.sent = { av: AV, file: 'faq.html', vh: '', load: true, until: Date.now() - 1 }, avStep.want = { id: ${J(N.cancel)}, av: AV, open: TL.open, draft: TL.draft }, window.__k = window.__tsPosts.length, avStep.land('late'), window.__left = avStep.want, true)`);
     await V.p.ev(FRAMES);
-    assert.deepEqual(await V.p.ev(`[window.__sets, TL.open, avStep.sent?.scroll]`), [0, N.cancel, N.cancel], 'nothing sent again');
+    assert.deepEqual(await V.p.ev(`[window.__sets, TL.open, avStep.sent?.scroll, window.__left]`), [0, N.cancel, N.cancel, null], 'nothing sent again, the step over');
     // the page comes: scrolled to
     await V.p.ev(`(TS.path = 'faq.html', avStep.land('ready'), true)`);
     assert.equal(await V.p.ev(`window.__tsPosts.slice(window.__k).filter((m) => m.type === 'scroll-to' && m.anchor.selector === '#q-cancel').length`), 1, 'scrolled when it came');
-    // a move that never said so
-    await V.p.ev(`(TS.path = 'index.html', tlOpen(${J(N.trial)}, false), avStep.sent = { av: AV, file: 'x.html', vh: '', load: true, until: Date.now() - 1 }, avStep.to(${cancel}), true)`);
-    assert.equal(await V.p.ev('window.__sets'), 0 + 1, 'the next step sends the frame at once');
-    assert.equal(await V.p.ev(`avStep.sent?.file`), 'faq.html', 'and waits for its own page');
+    // a move that never said so, and a note on the page that is there: landed at once, no load
+    await V.p.ev(`(TS.path = 'index.html', TS.hash = '', TS.ready = true, tlOpen(${J(N.cancel)}, false), document.activeElement?.blur?.(), window.__sets = 0, avStep.sent = { av: AV, file: 'x.html', vh: '', load: true, until: Date.now() - 1 }, avStep.to(TL.threads.find((t) => t.id === ${J(N.trial)})), true)`);
+    await V.p.ev(FRAMES);
+    assert.deepEqual(await V.p.ev('[window.__sets, TL.open, avStep.sent]'), [0, N.trial, null], 'a forgotten move holds nothing');
     // a page not ready that is this file already is never loaded again
     await V.p.ev(`(avStep.sent = null, avStep.want = null, TS.ready = false, tsFrame().setAttribute('src', artSrc(AV.slug, AV.at)), true)`);
     await V.p.ev(FRAMES);
@@ -603,11 +604,14 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     const changed = ROW.C12({ addressed: ADDR({ at: NEWER, note: 'Now the button is green too', sha: null }) });
     await V.p.ev(`(window.__replies['thread-accept-addressed'] = { status: 400, body: { error: 'The note changed; read it again' }, notes: { [${J(N.trial)}]: ${J(changed)} } }, true)`);
     await new Promise((r) => setTimeout(r, ARMED));
+    // the panel's own poll reads the threads too: the refusal's read is told by its caller
+    await V.p.ev(`(window.__reread = 0, window.__real = tlRefresh, tlRefresh = (...a) => { if (/restore/.test(new Error().stack)) window.__reread++; return window.__real(...a); }, true)`);
     await V.p.click('#tl-card [data-tl-accept]');
     await V.soon(`window.__posts.some((x) => x.action === 'thread-accept-addressed')`, 'Resolve posted');
     assert.deepEqual(await V.p.ev(`window.__posts.filter((x) => x.action === 'thread-accept-addressed').map((x) => x.body)`), [{ id: N.trial, at: AT }], 'the at as drawn');
     assert.ok(await V.settle(`${text('#e-tl')} === 'Not saved: The note changed; read it again'`, 4000), 'the refusal shown');
     assert.ok(await V.settle(`${text('#tl-card .tl-addr .tx')} === 'Now the button is green too'`, 3000), 'the card re-read and redrawn with the new note');
+    assert.equal(await V.p.ev('window.__reread'), 1, 'the card re-read and redrawn: the refusal reads the threads');
   });
 
   await sub('A12b: Resolve is armed only once the note has sat still', async () => {
@@ -620,7 +624,9 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await V.rows({ [N.trial]: ROW.C12({ addressed: ADDR({ at: NEWER, note: 'Swapped in', sha: null }) }) });
     await V.soon(`${text('#tl-card .tl-addr .tx')} === 'Swapped in'`, 'the new note drawn');
     await V.p.ev(`(window.__replies['thread-accept-addressed'] = { body: { ok: true, out: '' } }, true)`);
-    await V.p.click('#tl-card [data-tl-accept]');
+    assert.equal(await V.p.ev(`document.querySelector('#tl-card [data-tl-accept]').disabled`), true, 'disabled within the arm time');
+    // the click itself, however the button looks
+    await V.p.ev(`(document.querySelector('#tl-card [data-tl-accept]').disabled = false, document.querySelector('#tl-card [data-tl-accept]').click(), true)`);
     await V.p.ev(FRAMES);
     assert.equal(await V.p.ev(`window.__posts.filter((x) => x.action === 'thread-accept-addressed').length`), 0, 'a click within the arm time posts nothing');
     await new Promise((r) => setTimeout(r, ARMED));
