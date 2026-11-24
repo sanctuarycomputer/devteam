@@ -1,10 +1,11 @@
 // Admins and handing the box over (cloud/gateway.mjs, design Component 3b): what an admin may do on
 // People, and the owner's transfer. Tests for the org-access goal's measure are named 'org-access A<n>: …'.
 // People are seeded by writing the state file, as test/org-access.people-state.test.mjs does.
+// Its two Chrome tests are in test/org-access.admins.chrome.test.mjs (kit-798).
 // Run: node --test test/org-access.admins.test.mjs
-import { after, test } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -14,7 +15,6 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 // the suite's shared env scrub and tmux shim
 import './lib/kit.mjs';
-import { canDrive, openChrome } from './lib/chrome.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..');
@@ -689,154 +689,4 @@ test('org-access A16: afterwards the old owner\'s open session works as an admin
     assert.equal(v.json.viewer.role, 'owner', 'Vic\'s session is the owner\'s');
     await accepts(gw, C.vic, 'role', { id: owner.id, rev: rev(gw, owner.id), role: 'member' }, 'Vic takes Admin from the old owner');
   } finally { await gw.close(); }
-});
-
-// --- the hub's People, in Chrome, on a real gateway (kit-249's harness, copied, not imported) -----
-// The hub page asks the hub for its projects; a stand-in on HUB answers, started with the first page.
-let hubStandIn = null;
-const standInHub = () => {
-  if (hubStandIn) return hubStandIn;
-  const srv = http.createServer((req, res) => {
-    req.resume();
-    req.on('end', () => {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      if (req.url.startsWith('/operator/')) return res.end(JSON.stringify(req.method === 'GET' ? { operator: { state: 'ready' }, threads: [] } : { ok: true, out: 'ot-1' }));
-      res.end(JSON.stringify({ hub: 1, kit: 'v0.0.0', instances: [] }));
-    });
-  });
-  hubStandIn = new Promise((resolve, reject) => { srv.once('error', reject); srv.listen(HUB, '127.0.0.1', () => resolve(srv)); });
-  after(async () => { const s = await hubStandIn; s.closeAllConnections?.(); s.close(); });
-  return hubStandIn;
-};
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const CHROME = { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 };
-async function hubAs(t, gw, cookie, { width = 1280, height = 900 } = {}) {
-  await standInHub();
-  const chrome = await openChrome();
-  t.after(() => chrome.close());
-  const p = await chrome.newPage();
-  await p.send('Runtime.enable');
-  await p.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: width < 600 });
-  const [name, value] = cookie.split('=');
-  await p.send('Network.enable');
-  await p.send('Network.setCookie', { name, value, domain: 'box.localhost', path: '/', httpOnly: true });
-  await p.send('Page.navigate', { url: `${gw.publicUrl}/#settings` });
-  let loaded = false;
-  for (let i = 0; i < 100 && !loaded; i++) { loaded = (await p.ev('document.title').catch(() => '')) === 'devteam'; if (!loaded) await sleep(100); }
-  assert.ok(loaded, 'the hub loads from the gateway');
-  // each evaluate gets 5 s: one that never answers (a page mid-navigation) can't hold the wait past its deadline
-  const evSoon = (expr) => Promise.race([p.ev(expr).catch(() => false), sleep(5000).then(() => false)]);
-  const until = async (what, expr, ms = 15000) => { const end = Date.now() + ms; while (Date.now() < end) { if (await evSoon(expr)) return; await sleep(100); } assert.fail(`waited for ${what}: ${expr}`); };
-  return { ...p, until };
-}
-const personSel = (id) => `#hub-settings .person[data-id=${JSON.stringify(id)}]`;
-const groups = `[...document.querySelectorAll('#hub-settings .sec > .lbl')].map((x) => x.textContent)`;
-const toastNow = `(document.querySelector('.oa-toast.on')?.textContent ?? '')`;
-const textOf = (sel) => `(document.querySelector(${JSON.stringify(sel)})?.textContent ?? null)`;
-// the menu's red items: Remove, Leave this box, Revoke the link; nothing else
-const redItems = (p) => p.ev(`[...document.querySelectorAll('.oa-menu button.red')].map((b) => b.textContent)`);
-const menuOf = async (p, id) => {
-  await p.ev(`document.querySelector('.oa-menu') && document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
-  await p.until('its ⋯', `Boolean(document.querySelector(${JSON.stringify(`${personSel(id)} .menu-btn`)}))`);
-  await p.ev(`document.querySelector(${JSON.stringify(`${personSel(id)} .menu-btn`)}).click()`);
-  await p.until('its menu', `Boolean(document.querySelector('.oa-menu'))`);
-  return p.ev(`[...document.querySelectorAll('.oa-menu button')].map((b) => b.textContent)`);
-};
-const pick = (p, words) => p.ev(`[...document.querySelectorAll('.oa-menu button')].find((b) => b.textContent === ${JSON.stringify(words)}).click()`);
-// the confirmation's words and its yes button, then yes
-const confirmed = async (p, words, yes) => {
-  await p.until('the confirmation', `Boolean(document.querySelector('#oa-confirm'))`);
-  assert.equal(await p.ev(textOf('#oa-confirm p')), words, 'the confirmation, in the mock\'s words');
-  assert.equal(await p.ev(`document.querySelector('#oa-confirm .acts button').textContent`), yes, 'its yes button');
-  assert.equal(await p.ev(`document.querySelector('#oa-confirm .acts button').classList.contains('danger')`), yes === 'Remove' || yes === 'Leave', `${yes}: red only for Remove and Leave`);
-  await p.ev(`document.querySelector('#oa-confirm .acts button').click()`);
-};
-const toasted = (p, words) => p.until(`the toast "${words}"`, `${toastNow} === ${JSON.stringify(words)}`);
-const peopleShown = (p, n) => p.until('People', `document.querySelectorAll('#hub-settings .person').length === ${n}`);
-
-test('org-access A16: in Chrome, the owner\'s Make admin, Take Admin away, Make full and Make owner work as the mock does', CHROME, async (t) => {
-  const { gw, C, kai, ana, vic, bea } = await box('a16-hub');
-  t.after(() => gw.close());
-  invite(gw, kai.id, Date.now() - 1);
-  const p = await hubAs(t, gw, C.owner);
-  await peopleShown(p, 7);
-  // an expired new link still shows, and offers Revoke, until it is revoked (R3)
-  assert.ok((await p.ev(textOf(`${personSel(kai.id)} .pmeta`))).endsWith(' · a new link expired'), 'Kai\'s line names his expired link');
-  assert.deepEqual(await menuOf(p, kai.id), ['Revoke the link', 'Rename', 'Remove'], 'Kai, an expired link: Revoke first, no Make admin or Make owner');
-  assert.deepEqual(await menuOf(p, vic.id), ['Rename', 'Make full', 'Make admin', 'Make owner', 'Send a new link', 'Remove'], 'Vic (View): the mock\'s order');
-  assert.deepEqual(await redItems(p), ['Remove'], 'only Remove is red');
-  await pick(p, 'Make admin');
-  await p.until('the confirmation', `Boolean(document.querySelector('#oa-confirm'))`);
-  assert.equal(await p.ev(textOf('#oa-confirm p')), 'Make Vic an admin? They can then move members between Full and View only, and rename or remove members and other admins. They can\'t invite, make admins, or touch your row. They become Full too.', 'a View member: Full too');
-  await p.ev(`[...document.querySelectorAll('#oa-confirm button')].find((b) => b.textContent === 'Cancel').click()`);
-  await menuOf(p, vic.id);
-  await pick(p, 'Make full');
-  await confirmed(p, 'Make Vic full? They can then change anything except People, and open the terminal, which reaches every repo and the box\'s GitHub and AI logins.', 'Make full');
-  await toasted(p, 'Vic is now full');
-  assert.equal(rowOf(gw.state(), vic.id).level, 'full', 'Vic is Full');
-  await p.until('Vic\'s badge', `${textOf(`${personSel(vic.id)} .badge`)} === 'Full'`);
-  assert.deepEqual(await menuOf(p, ana.id), ['Rename', 'Make admin', 'Make owner', 'Send a new link', 'Remove'], 'Ana (Full)');
-  await pick(p, 'Make admin');
-  await confirmed(p, 'Make Ana an admin? They can then move members between Full and View only, and rename or remove members and other admins. They can\'t invite, make admins, or touch your row.', 'Make admin');
-  await toasted(p, 'Ana is now an admin');
-  assert.deepEqual([rowOf(gw.state(), ana.id).role, rowOf(gw.state(), ana.id).level], ['admin', 'full'], 'Ana is an admin');
-  await p.until('Ana\'s badge', `${textOf(`${personSel(ana.id)} .badge`)} === 'Admin'`);
-  assert.deepEqual(await menuOf(p, ana.id), ['Rename', 'Take Admin away', 'Make owner', 'Send a new link', 'Remove'], 'Ana (admin)');
-  await pick(p, 'Take Admin away');
-  await confirmed(p, 'Take Admin away from Ana? They stay Full, and can no longer manage people.', 'Take Admin away');
-  await toasted(p, 'Ana is no longer an admin');
-  assert.deepEqual([rowOf(gw.state(), ana.id).role, rowOf(gw.state(), ana.id).level], ['member', 'full'], 'Ana is a Full member');
-  const beaMenu = await menuOf(p, bea.id);
-  assert.ok(!beaMenu.includes('Make admin') && !beaMenu.includes('Make owner'), `Bea: no Make admin or Make owner with a link out: ${beaMenu}`);
-  await menuOf(p, vic.id);
-  await pick(p, 'Make owner');
-  await confirmed(p, 'Make Vic the owner of this box? Vic can then invite, make admins and hand it over again. You become an admin. Only Vic can undo this.', 'Make Vic the owner');
-  await toasted(p, 'Vic is now the owner. You are an admin');
-  assert.deepEqual(ownerOf(gw.state()).map((x) => x.id), [vic.id], 'Vic is the owner');
-  await p.until('the admin\'s intro', `${textOf('#oa-people .oa-intro')}?.startsWith("You're an admin")`);
-  assert.equal(await p.ev(`[...document.querySelectorAll('#oa-people button')].some((b) => b.textContent === 'Invite someone')`), false, 'no Invite someone');
-  await p.until('Your sign-in without the owner\'s words', `![...document.querySelectorAll('#hub-settings .oa-intro')].some((x) => x.textContent.includes('as the owner, at least one passkey'))`);
-});
-
-test('org-access A15: in Chrome, an admin\'s Rename, Make full, Remove and Leave work as the mock does', CHROME, async (t) => {
-  const { gw, C, owner, sam, kai, ana, vic, lee } = await box('a15-hub');
-  t.after(() => gw.close());
-  const p = await hubAs(t, gw, C.sam);
-  await peopleShown(p, 7);
-  assert.deepEqual(await menuOf(p, vic.id), ['Rename', 'Make full', 'Remove'], 'Vic (View)');
-  assert.deepEqual(await menuOf(p, kai.id), ['Rename', 'Remove'], 'Kai (admin)');
-  await p.ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
-  for (const [row, what] of [[owner, 'the owner\'s row'], [lee, 'Lee\'s (never joined)']]) assert.equal(await p.ev(`document.querySelectorAll(${JSON.stringify(`${personSel(row.id)} .menu-btn`)}).length`), 0, `no ⋯ on ${what}`);
-  await menuOf(p, ana.id);
-  await pick(p, 'Rename');
-  await p.until('the rename box', `Boolean(document.querySelector('#oa-rename input'))`);
-  await p.ev(`(() => { const i = document.querySelector('#oa-rename input'); i.value = 'Ana Costa-Ruiz'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
-  await p.ev(`[...document.querySelectorAll('#oa-rename button')].find((b) => b.textContent === 'Save').click()`);
-  await toasted(p, 'Renamed to Ana Costa-Ruiz');
-  assert.equal(rowOf(gw.state(), ana.id).name, 'Ana Costa-Ruiz', 'renamed');
-  await menuOf(p, vic.id);
-  await pick(p, 'Make full');
-  await confirmed(p, 'Make Vic full? They can then change anything except People, and open the terminal, which reaches every repo and the box\'s GitHub and AI logins.', 'Make full');
-  await toasted(p, 'Vic is now full');
-  assert.equal(rowOf(gw.state(), vic.id).level, 'full', 'Vic is Full');
-  await menuOf(p, ana.id);
-  await pick(p, 'Remove');
-  await confirmed(p, 'Remove Ana? They are signed out everywhere now, and their sign-in methods stop working. What they did with the terminal stays, such as a program left running or a login copied; if that matters, change the box\'s logins.', 'Remove');
-  await toasted(p, 'Ana was removed and signed out');
-  assert.equal(rowOf(gw.state(), ana.id), undefined, 'Ana\'s row is gone');
-  await peopleShown(p, 6);
-  assert.deepEqual(await menuOf(p, sam.id), ['Rename', 'Leave this box'], 'his own row');
-  assert.deepEqual(await redItems(p), ['Leave this box'], 'Leave is red');
-  await pick(p, 'Leave this box');
-  await p.until('the confirmation', `Boolean(document.querySelector('#oa-confirm'))`);
-  assert.ok(await p.ev(`document.querySelector('#oa-confirm .acts button').classList.contains('danger')`), 'Leave is red');
-  await confirmed(p, 'Leave this box? You are signed out everywhere now, and your sign-in methods stop working. Only the owner can invite you back.', 'Leave');
-  // straight there, not by a repaint whose next request finds the session gone (that reload carries ?next=)
-  await p.until('the sign-in page', `location.pathname === '/auth/login' && location.search === ''`, 5000);
-  assert.equal(rowOf(gw.state(), sam.id), undefined, 'Sam\'s row is gone');
-  // Kai's Settings is open when the owner takes his Admin away: at his next list fetch, People goes
-  const k = await hubAs(t, gw, C.kai);
-  await k.until('Kai\'s People', `${groups}.includes('People')`);
-  await accepts(gw, C.owner, 'role', { id: kai.id, rev: rev(gw, kai.id), role: 'member' }, 'the owner takes Admin from Kai');
-  await k.until('Kai\'s Settings has no People', `!${groups}.includes('People')`, 30000);
 });
