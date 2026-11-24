@@ -797,7 +797,33 @@ test('org-access A3: in Chrome, the owner\'s People work as the mock does', CHRO
   // an action this hub doesn't know (a newer gateway's) is left out, never a blank item
   await p.ev(`OA.list.people.find((x) => x.id === ${JSON.stringify(B.ownerRow.id)}).actions.push('level'); oaDrawPeople(); true`);
   assert.deepEqual(await menuOf(p, B.ownerRow.id), ['Rename'], 'no blank item');
-  await p.ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); true`);
+  // focus going nowhere (a mouse press on an item in Safari or Firefox) leaves it open
+  await p.ev(`document.activeElement.blur(); true`);
+  await sleep(200);
+  assert.equal(await p.ev(`Boolean(document.querySelector('.oa-menu'))`), true, 'a blur to nothing keeps the menu');
+  // Tab out of it closes it
+  await p.ev(`document.querySelector('.oa-menu button').focus(); true`);
+  await p.key('Tab');
+  await p.until('Tab closes it', `!document.querySelector('.oa-menu')`);
+  // its ⋯ again closes it (a real click: pointerdown, focus, then click)
+  await menuOf(p, B.ownerRow.id);
+  await p.click(`${personSel(B.ownerRow.id)} .menu-btn`);
+  await sleep(300);
+  assert.equal(await p.ev(`Boolean(document.querySelector('.oa-menu'))`), false, 'the ⋯ toggles it closed');
+  // a row offered only actions this hub doesn't know gets no ⋯
+  await p.ev(`OA.list.people.find((x) => x.id === ${JSON.stringify(B.lee.id)}).actions = ['level']; oaDrawPeople(); true`);
+  assert.equal(await p.ev(`Boolean(document.querySelector(${JSON.stringify(`${personSel(B.lee.id)} .menu-btn`)}))`), false, 'no ⋯ for unknown actions only');
+  await p.ev(`oaLoad().then(() => true)`);
+  await p.until('Lee\'s ⋯ back', `Boolean(document.querySelector(${JSON.stringify(`${personSel(B.lee.id)} .menu-btn`)}))`);
+  // a not-allowed answer: its sentence, the box closed, the list asked again
+  await menuOf(p, B.ownerRow.id);
+  await pick(p, 'Rename');
+  await p.until('the rename box', `Boolean(document.querySelector('#oa-rename input'))`);
+  const lists = await p.ev(sent('auth/people/list'));
+  await p.ev(`(() => { const f = window.fetch; window.fetch = (u, o) => (String(u).includes('people/rename') ? (window.fetch = f, Promise.resolve(new Response(JSON.stringify({ code: 'not-allowed', error: 'Only the box\\'s owner can do this, for now.' }), { status: 403 }))) : f(u, o)); return true; })()`);
+  await p.ev(clickText('#oa-rename button', 'Save'));
+  await p.until('the not-allowed toast', `${toast} === "Only the box's owner can do this, for now."`);
+  await p.until('the box closed and the list asked again', `!document.querySelector('#oa-rename') && ${sent('auth/people/list')} > ${lists}`);
 
   // Ana's menu; Rename
   assert.deepEqual(await menuOf(p, B.ana.id), ['Rename', 'Send a new link', 'Remove']);

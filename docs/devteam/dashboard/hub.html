@@ -2002,7 +2002,12 @@ function oaOpenMenu(btn, x) {
     b.onclick = () => { oaCloseMenu(); OA.open = { id: x.id, kind: a }; OA.openNode = null; OA.panel = null; OA.panelNode = null; oaDrawPeople(); SEC.people.querySelector('#oa-rename input, #oa-confirm button')?.focus({ preventScroll: true }); };
     m.append(b);
   }
-  m.addEventListener('focusout', (e) => { if (!m.contains(e.relatedTarget) && e.relatedTarget !== btn) oaCloseMenu(); });
+  // Tab out of it closes it. Only when focus lands somewhere named: a mouse press in Safari or
+  // Firefox focuses nothing (relatedTarget null), and a click outside is the pointerdown's to close.
+  m.addEventListener('focusout', (e) => { if (e.relatedTarget && !m.contains(e.relatedTarget) && e.relatedTarget !== btn) oaCloseMenu(); });
+  // Tab in it: closed, the keyboard back on its ⋯, and the browser's Tab goes on from there (the
+  // menu is the body's last child, so from it Tab would leave the page)
+  m.addEventListener('keydown', (e) => { if (e.key === 'Tab') oaCloseMenu(true); });
   document.body.append(m);
   OA.menu = m;
   const r = btn.getBoundingClientRect();
