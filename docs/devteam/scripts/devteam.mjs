@@ -2088,12 +2088,46 @@ const GRAPH_TYPES = ['feature', 'ticket'];
 const logFileFor = (by, type) => (by === 'owner' || by === 'supervisor' || (writerClass(by) === 'planner' && !GRAPH_TYPES.includes(type)) ? `${by}-${nowIso().slice(0, 7)}.jsonl` : `${by}.jsonl`);
 const isPlanFile = (name) => name.startsWith('plan-') && !MONTHLY.test(name.replace(/\.jsonl$/, ''));
 
+// The ticket/ or plan/ branch of the cwd's own checkout, as the caller can't steer it: every GIT_*
+// variable of theirs is dropped, so GIT_DIR can't make a ticket/ checkout read as home's main, and no
+// system or global config is read (a HOME or GIT_CONFIG_* of theirs with a bad value would make git
+// fail, and a failed read finds no branch); any owner's checkout reads (safe.directory=*). That lets
+// git read a checkout another user owns, whose own config could name programs (core.fsmonitor and
+// the like); rev-parse and symbolic-ref run none, and every session runs as the same user as the
+// owner, so this opens nothing new. The full ref: a short name gains a prefix when another ref has
+// it too, and a branch with no commit yet has none (a HEAD set on refs/ticket/… or
+// refs/tags/ticket/… by hand counts too). The name may hold any character and is kept whole:
+// branch is kind/name; kind is null on any other branch, detached, or where there is no checkout.
+// failed: git could not read a checkout that is there (a .git, up to the file system's edge, as git
+// looks for one), which is not the same as no branch. own: git in that same environment.
+function sessionBranch() {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_')));
+  Object.assign(env, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: os.devNull });
+  const cwd = process.cwd();
+  const run = (args) => spawnSync('git', ['-c', 'safe.directory=*', ...args], { cwd, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  const own = (args) => { const r = run(args); return r.status === 0 ? r.stdout.replace(/\n$/, '') : null; };
+  const r = run(['symbolic-ref', '-q', 'HEAD']);
+  const ref = r.status === 0 ? r.stdout.replace(/\n$/, '') : '';
+  // ticket first, for a ref set by hand that holds both
+  const [, kind = null, name = null] = ref.match(/^refs\/(?:[^/]+\/)?(ticket)\/(.+)$/s) ?? ref.match(/^refs\/(?:[^/]+\/)?(plan)\/(.+)$/s) ?? [];
+  // 1 is git's answer for a detached HEAD
+  const failed = ![0, 1].includes(r.status) && (() => {
+    try {
+      for (let d = realPath(cwd), dev = fs.statSync(d).dev; fs.statSync(d).dev === dev; d = path.dirname(d)) {
+        if (fs.existsSync(path.join(d, '.git'))) return true;
+        if (path.dirname(d) === d) return false;
+      }
+    } catch {}
+    return false;
+  })();
+  return { kind, name, branch: kind && `${kind}/${name}`, failed, own };
+}
 function currentTicketId() {
-  if (process.env.DEVTEAM_TICKET) return process.env.DEVTEAM_TICKET;
-  // the full ref: a short name gains a prefix when another ref has it too, and a branch with no
-  // commit yet has none (a HEAD set on refs/ticket/… or refs/tags/ticket/… by hand counts too)
-  const ref = cwdGit(['symbolic-ref', '-q', 'HEAD']);
-  return ref?.match(/^refs\/(?:[^/]+\/)?ticket\/(.+)$/)?.[1] ?? null;
+  const { kind, name } = process.env.DEVTEAM_TICKET ? { kind: 'ticket', name: process.env.DEVTEAM_TICKET } : sessionBranch();
+  if (kind !== 'ticket') return null;
+  // a ticket of this name would write as someone it is not
+  if (['supervisor', 'owner', 'responder', 'operator'].includes(name)) die(`"${name}" is no ticket: the name is reserved, so nothing is written as it; ${process.env.DEVTEAM_TICKET ? 'unset DEVTEAM_TICKET' : 'rename this checkout\'s branch'}`);
+  return name;
 }
 // Who this process writes the log as: the responder (its role wins over a ticket, a feature or a
 // branch), a ticket id, plan-<feature>, or supervisor. Never the owner.
@@ -2102,9 +2136,10 @@ function logWriter() {
   const t = currentTicketId();
   if (t) return t;
   if (process.env.DEVTEAM_FEATURE) return `plan-${process.env.DEVTEAM_FEATURE}`;
-  // the full ref, as currentTicketId reads it
-  const f = cwdGit(['symbolic-ref', '-q', 'HEAD'])?.match(/^refs\/(?:[^/]+\/)?plan\/(.+)$/)?.[1];
-  if (f) return `plan-${f}`;
+  const { kind, name } = sessionBranch();
+  if (kind === 'plan' && ['supervisor', 'owner', 'responder', 'operator'].includes(name)) die(`"${name}" is no feature: the name is reserved, so nothing is written from branch plan/${name}; rename this checkout's branch`);
+  // a failed read counts as no branch here: recover and the like run from a damaged checkout
+  if (kind === 'plan') return `plan-${name}`;
   return 'supervisor';
 }
 // Owner commands run from the owner's terminal or the dashboard, never an agent session. A
@@ -2124,26 +2159,16 @@ function ownerWriter(hint, { heard = false } = {}) {
   // folder under a .worktrees folder (every session's worktree, a detached one or another repo's
   // included; home's .worktrees by its real path too, for one that is a link), even with every
   // variable cleared, or DEVTEAM_HOME set (every worker, planner and responder has it) in a folder
-  // that is no checkout of home's. git reads the cwd's own checkout here, as the caller can't steer
-  // it: every GIT_* variable of theirs is dropped, so GIT_DIR can't make a ticket/ checkout read as
-  // home's main, and no system or global config is read (a HOME or GIT_CONFIG_* of theirs with a bad
-  // value would make git fail, and a failed read finds no branch); any owner's checkout reads
-  // (safe.directory=*, for a read of the branch and the common dir only).
+  // that is no checkout of home's. git reads the cwd's own checkout (sessionBranch); where a checkout
+  // is there and git can't read it, nothing says it is no session's.
   const session = (() => {
     for (const k of ['DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) if (process.env[k] !== undefined) return `${k}=${JSON.stringify(process.env[k])}`;
-    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_')));
-    Object.assign(env, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: os.devNull });
-    // safe.directory=* lets git read a checkout another user owns, whose own config could name
-    // programs (core.fsmonitor and the like); rev-parse and symbolic-ref run none, and every session runs as the
-    // same user as the owner, so this opens nothing new
-    const own = (args) => { try { return execFileSync('git', ['-c', 'safe.directory=*', ...args], { cwd: process.cwd(), env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; } };
-    // the full ref: --abbrev-ref's short name gains a prefix when another ref has it too, and it
-    // fails on a branch with no commit yet
-    const b = own(['symbolic-ref', '-q', 'HEAD'])?.match(/^refs\/(?:[^/]+\/)?((?:ticket|plan)\/.+)$/)?.[1];
+    const { branch: b, failed, own } = sessionBranch();
     if (b) return `this checkout is on ${b}`;
     const cwd = realPath(process.cwd());
     const homeWt = realPath(path.join(mainRoot, '.worktrees'));
     if (cwd.split(path.sep).includes('.worktrees') || cwd.startsWith(`${homeWt}${path.sep}`)) return `${cwd} is under a .worktrees folder, where sessions work`;
+    if (failed) return `git can't read the checkout at ${cwd}, so its branch isn't known; run git status there to see why`;
     if (process.env.DEVTEAM_HOME === undefined) return null;
     const common = own(['rev-parse', '--path-format=absolute', '--git-common-dir']);
     return common && commonDir && realPath(common) === realPath(commonDir) ? null : `DEVTEAM_HOME is set, and ${cwd} is no checkout of home's; in your own terminal, unset DEVTEAM_HOME or run this from home's main checkout`;
@@ -18697,6 +18722,10 @@ function collectMetrics(since, reviewsSince = 0) {
       // every sha a merge act names: a records-in-home ticket's act names its records merge's head too
       const heads = new Set(acts.flatMap((a) => [...String(a.what ?? '').matchAll(/\bat ([0-9a-f]{40})\b/g)].map((x) => x[1])));
       const worded = new Set(acts.filter((a) => a.class === 'merge-word').flatMap((a) => a.refs ?? []));
+      // merge's act is logged seconds after the forge lands the merge (kit-808), so a merge raises nothing
+      // in its first 2 minutes. Read now, not collectMetrics' now: one that lands while it runs would be
+      // later than that. A commit time in the future is raised at once, so a date can't hide a merge.
+      const justMerged = (at) => { const age = Date.now() - at; return age >= 0 && age < 120000; };
       const seen = new Set();
       for (const t of ts.values()) {
         const at = mergedAt(t.id);
@@ -18704,6 +18733,7 @@ function collectMetrics(since, reviewsSince = 0) {
         const sha = mergeShaFor(t.id);
         const name = repoOfTicketLink(t);
         seen.add(sha);
+        if (justMerged(at)) continue;
         add('high', 'merged-without-merge', t.id, `${t.id} reached ${name === 'home' ? '' : `${name}'s `}main at ${sha.slice(0, 12)} with no merge act: no gates, reviews or checks ran on it`, `check it now (check-pr${name === 'home' ? '' : ` --repo ${name}`} at that sha, its records, its gates); a revert is a ticket of its own; then find how it landed (a push to main, the forge's button) and close that path`, { sev: 3 });
       }
       for (const name of ['home', ...Object.entries(settings.links ?? {}).filter(([, l]) => LINK_KINDS[l?.kind]?.hostsComponents).map(([id]) => id)]) {
@@ -18713,7 +18743,7 @@ function collectMetrics(since, reviewsSince = 0) {
         if (!ref) continue;
         for (const row of (R.git(['log', ref, '--first-parent', '--merges', `--since=${Math.floor(since / 1000)}`, '--format=%H %ct %P']) ?? '').split('\n').filter(Boolean)) {
           const [sha, ct, , p2] = row.split(' ');
-          if (Number(ct) * 1000 < since || seen.has(sha) || heads.has(p2)) continue;
+          if (Number(ct) * 1000 < since || seen.has(sha) || heads.has(p2) || justMerged(Number(ct) * 1000)) continue;
           add('high', 'merged-without-merge', `${name}:${sha.slice(0, 12)}`, `${name === 'home' ? '' : `${name}'s `}main has merge ${sha.slice(0, 12)} (of ${p2.slice(0, 12)}) that no merge act made: no gates, reviews or checks ran on it`, 'find what it merged and check it now; merges go through devteam.mjs merge, never the forge\'s button or a push to main', { sev: 3 });
         }
       }

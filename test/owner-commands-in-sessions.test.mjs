@@ -409,3 +409,121 @@ test('a ticket/ or plan/ checkout is a session by its full branch ref, and a det
     assert.match(runAt(loose, OWN).err, /the owner runs them in their own terminal from home's main checkout/, "M: the owner's refusal is as before");
   } finally { F.done(); }
 });
+
+// kit-809: what the caller's git environment, a branch's name or a failed read can't do. Every
+// checkout is outside any .worktrees, so only the branch tells.
+test('the session check reads the branch past the caller\'s git environment, takes no reserved name, and any name counts', async () => {
+  const F = fleetFixture('owner-leftovers');
+  const { old, g } = F;
+  try {
+    const SUP = { DEVTEAM_ROLE: 'supervisor' };
+    const kitDT = path.join(old, 'docs/devteam/scripts/devteam.mjs');
+    const envOf = (extra) => {
+      const e = F.env({});
+      for (const k of Object.keys(e)) if (/^(DEVTEAM_|GIT_)/.test(k) || ['TMUX', 'TMUX_PANE'].includes(k)) delete e[k];
+      return { ...e, ...extra };
+    };
+    const runAt = (cwd, args, env = {}) => { const r = spawnSync(process.execPath, [kitDT, ...args], { cwd, env: envOf(env), encoding: 'utf8', input: '', timeout: 120000 }); return { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() }; };
+    const okAt = (cwd, args, env) => { const r = runAt(cwd, args, env); assert.equal(r.status, 0, `${args.join(' ')}: ${r.err || r.out}`); return r.out; };
+    const logDir = path.join(old, 'docs/devteam/run/log');
+    const snap = () => Object.fromEntries((fs.existsSync(logDir) ? fs.readdirSync(logDir) : []).sort().map((f) => [f, fs.readFileSync(path.join(logDir, f), 'utf8')]));
+    const added = (before, after) => Object.keys(after).flatMap((f) => after[f].slice((before[f] ?? '').length).split('\n').filter(Boolean).map((l) => JSON.parse(l)));
+    const co = (name, ref) => { const d = path.join(F.base, name); g(['worktree', 'add', '-q', '--detach', d], old); if (ref) g(['symbolic-ref', 'HEAD', `refs/heads/${ref}`], d); return d; };
+    const OWN = ['observe', '--owner', '--subject', 'kit', '--kind', 'note', '--detail', 'd'];
+    const CHAT = ['answer', 'q-20260101-000000001-supervisor', 'yes', '--from-chat', '--said', 'yes'];
+    const PROBLEM = ['problem', 'add', '--title', 'p', '--severity', '2'];
+    const ticket = co('a-ticket', 'ticket/web-1');
+    const plan = co('a-plan', 'plan/f');
+
+    // E: the caller's git variables and config
+    const badConfig = path.join(F.base, 'bad.gitconfig');
+    fs.writeFileSync(badConfig, '[broken\n');
+    const badHome = path.join(F.base, 'bad-home');
+    fs.mkdirSync(badHome);
+    fs.copyFileSync(badConfig, path.join(badHome, '.gitconfig'));
+    const steers = { GIT_DIR: { GIT_DIR: path.join(old, '.git') }, config: { GIT_CONFIG_COUNT: 'x' }, global: { GIT_CONFIG_GLOBAL: badConfig }, HOME: { HOME: badHome, XDG_CONFIG_HOME: badHome } };
+    for (const [how, env] of Object.entries(steers)) {
+      for (const [name, cwd, writer] of [['ticket', ticket, 'web-1'], ['plan', plan, 'plan-f']]) {
+        const who = runAt(cwd, ['whoami'], env);
+        assert.match(who.out, new RegExp(`^# writer=${writer} `, 'm'), `E: ${name} with ${how} writes as ${writer}: ${who.out || who.err}`);
+        if (name === 'ticket') assert.match(who.out, /^DEVTEAM_TICKET=web-1$/m, `E: ${how} names the ticket`);
+        const before = snap();
+        const p = runAt(cwd, PROBLEM, { ...env, ...SUP });
+        assert.match(p.err, /problem: the supervisor does this/, `E: problem add in ${name} with ${how}: refused: ${p.err || p.out}`);
+        const own = runAt(cwd, OWN, env);
+        assert.match(own.err, REFUSED, `E: observe --owner in ${name} with ${how}: refused: ${own.err || own.out}`);
+        assert.deepEqual(added(before, snap()), [], `E: nothing logged in ${name} with ${how}`);
+      }
+    }
+
+    // R: a reserved writer's name is no ticket's or feature's
+    const taken = /the name is reserved/;
+    for (const who of ['supervisor', 'owner', 'responder', 'operator']) {
+      for (const kind of ['ticket', 'plan']) {
+        const d = co(`r-${kind}-${who}`, `${kind}/${who}`);
+        const before = snap();
+        for (const [args, env] of [[['whoami'], {}], [PROBLEM, SUP], [['observe', '--subject', 'kit', '--kind', 'note', '--detail', 'd'], {}], [['phase', 'build'], {}]]) {
+          const r = runAt(d, args, env);
+          assert.match(r.err, taken, `R: ${args[0]} on ${kind}/${who}: refused: ${r.err || r.out}`);
+          assert.notEqual(r.status, 0, `R: ${args[0]} on ${kind}/${who} exits non-zero`);
+        }
+        assert.deepEqual(added(before, snap()), [], `R: nothing logged on ${kind}/${who}`);
+      }
+      for (const args of [['observe', '--subject', 'kit', '--kind', 'note', '--detail', 'd'], ['phase', 'build']]) {
+        const before = snap();
+        const env = runAt(old, args, { DEVTEAM_TICKET: who });
+        assert.match(env.err, /the name is reserved.*unset DEVTEAM_TICKET/, `R: ${args[0]} with DEVTEAM_TICKET=${who}: refused: ${env.err || env.out}`);
+        assert.deepEqual(added(before, snap()), [], `R: nothing logged with DEVTEAM_TICKET=${who}`);
+      }
+    }
+    // a name that only begins like one, and a planner's own variable, are as before
+    assert.match(okAt(co('r-near', 'ticket/owner-1'), ['whoami']), /^# writer=owner-1 /m, 'R: owner-1 is a ticket');
+    assert.match(okAt(old, ['whoami'], { DEVTEAM_FEATURE: 'operator' }), /^# writer=plan-operator /m, 'R: a feature named operator still plans');
+
+    const both = co('both');
+    g(['symbolic-ref', 'HEAD', 'refs/ticket/plan/x'], both);
+    assert.match(okAt(both, ['whoami']), /^# writer=plan\/x /m, 'W: a hand-set refs/ticket/plan/x is a ticket first');
+
+    // U: any name counts
+    for (const [i, odd] of ['a\u2028b', '\u00a0', '\u2029'].entries()) {
+      for (const kind of ['ticket', 'plan']) {
+        const d = co(`u-${kind}-${i}`, `${kind}/${odd}`);
+        const label = `${kind}/${JSON.stringify(odd)}#${i}`;
+        const before = snap();
+        const own = runAt(d, OWN);
+        assert.match(own.err, REFUSED, `U: observe --owner on ${label}: refused: ${own.err || own.out}`);
+        const who = runAt(d, ['whoami']);
+        assert.doesNotMatch(who.out, /^# writer=supervisor /m, `U: ${label} is not the supervisor`);
+        const p = runAt(d, PROBLEM, SUP);
+        assert.match(p.err, /problem: the supervisor does this/, `U: problem add on ${label}: refused: ${p.err || p.out}`);
+        assert.deepEqual(added(before, snap()), [], `U: nothing logged on ${label}`);
+      }
+    }
+
+    // F: a checkout git can't read is no owner's place; the supervisor's own writes there are as before
+    const broken = co('broken', 'ticket/web-7');
+    fs.writeFileSync(path.join(g(['rev-parse', '--absolute-git-dir'], broken).trim(), 'HEAD'), 'junk\n');
+    fs.mkdirSync(path.join(broken, 'sub'));
+    // each caller's own choice on a failed read: currentTicketId names no ticket, logWriter the supervisor
+    const who = okAt(broken, ['whoami']);
+    assert.match(who, /^DEVTEAM_TICKET=$/m, 'F: no ticket is named');
+    assert.match(who, /^# writer=supervisor /m, 'F: the writer is as before');
+    const kept = snap();
+    okAt(broken, PROBLEM, SUP);
+    assert.ok(added(kept, snap()).some((x) => x.by === 'supervisor' && x.type === 'problem'), 'F: the supervisor-only commands read it as no branch');
+    for (const [cwd, args, env] of [[broken, OWN, {}], [path.join(broken, 'sub'), OWN, {}], [broken, CHAT, SUP]]) {
+      const before = snap();
+      const r = runAt(cwd, args, env);
+      assert.match(r.err, /git can't read the checkout at /, `F: ${args.join(' ')} in a damaged checkout: refused: ${r.err || r.out}`);
+      assert.deepEqual(added(before, snap()), [], 'F: nothing logged there');
+    }
+    // no checkout at all is not a failed one
+    const nowhere = path.join(F.base, 'no-checkout');
+    fs.mkdirSync(nowhere);
+    for (const cwd of [nowhere, old, co('loose')]) {
+      const before = snap();
+      okAt(cwd, OWN);
+      assert.ok(added(before, snap()).some((x) => x.by === 'owner'), `F: observe --owner in ${path.basename(cwd)} writes an owner line`);
+    }
+  } finally { F.done(); }
+});
