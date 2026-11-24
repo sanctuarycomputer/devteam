@@ -701,8 +701,10 @@ test('org-access A14: /api/data\'s viewer echoes the gateway\'s level, and nothi
 test('org-access A14: the stale answer gets the viewer too, and the kept data stays as it was', { timeout: 120000 }, async () => {
   const R = await realDashboard('c16b', { DEVTEAM_DATA_WAIT_MS: '0', DEVTEAM_DATA_REUSE_MS: '0' });
   try {
-    const first = await getWith(R.port, '/api/data', []);
+    // the fresh read is a View one: a splice kept from it (in D.lastData) would show in the plain stale read below
+    const first = await getWith(R.port, '/api/data', [['x-devteam-level', 'view']]);
     assert.equal(first.status, 200, first.body.slice(0, 200));
+    assert.equal(first.headers['x-devteam-stale'], undefined, 'the first read is fresh');
     const stale = async (lines) => {
       for (let i = 0; i < 40; i++) {
         const r = await getWith(R.port, '/api/data', lines);

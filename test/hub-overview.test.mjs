@@ -991,11 +991,21 @@ test('org-access A14: People offers View', CHROME, async (t) => {
   await p.until('the invite card', `Boolean(document.querySelector('#oa-invite input'))`);
   assert.deepEqual(await p.ev(`[...document.querySelectorAll('#oa-invite .lvl-opt b')].map((b) => b.textContent)`), ['Full', 'View only']);
   assert.equal(await p.ev(`[...document.querySelectorAll('#oa-invite .lvl-opt')][1].querySelector('span span').textContent`), 'Sees everything here: the hub, dashboards, artifacts, boards, goals and what agents print. Changes nothing and has no terminal. One exception: opening a running preview can set off what that app does when a page opens.');
+  // the default, left as it is: Full, posted as full and said as full
+  await p.ev(`(() => { const i = document.querySelector('#oa-invite input'); i.value = 'Pat Lee'; i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+  await p.ev(`[...document.querySelectorAll('#oa-invite button')].find((b) => b.textContent === 'Make the invite link').click()`);
+  await p.until('the link card', `Boolean(document.querySelector('#oa-link'))`);
+  assert.equal(await p.ev(`document.querySelector('#oa-link p').textContent`), 'It works once, for 24 hours. Whoever opens it first makes a passkey and joins as full.');
+  assert.deepEqual(posted('/auth/people/invite'), [{ name: 'Pat Lee', level: 'full' }], 'the default invite posts full');
+  await p.ev(`[...document.querySelectorAll('#oa-link button')].find((b) => b.textContent === 'Done').click()`);
+  await p.until('the link card closed', `!document.querySelector('#oa-link')`);
+  await p.ev(`[...document.querySelectorAll('#oa-people button')].find((b) => b.textContent === 'Invite someone').click()`);
+  await p.until('the invite card again', `Boolean(document.querySelector('#oa-invite input'))`);
   await p.ev(`(() => { const i = document.querySelector('#oa-invite input'); i.value = 'Sam Rivera'; i.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('#oa-invite input[value="view"]').click(); return true; })()`);
   await p.ev(`[...document.querySelectorAll('#oa-invite button')].find((b) => b.textContent === 'Make the invite link').click()`);
   await p.until('the link card', `Boolean(document.querySelector('#oa-link'))`);
   assert.equal(await p.ev(`document.querySelector('#oa-link p').textContent`), 'It works once, for 24 hours. Whoever opens it first makes a passkey and joins as view only.');
-  assert.deepEqual(posted('/auth/people/invite'), [{ name: 'Sam Rivera', level: 'view' }], 'the invite posts the level chosen');
+  assert.deepEqual(posted('/auth/people/invite'), [{ name: 'Pat Lee', level: 'full' }, { name: 'Sam Rivera', level: 'view' }], 'the invite posts the level chosen');
 });
 
 // The hub at View (kit-250): the Terminal tab is there but disabled and opens nothing; a "View only"
