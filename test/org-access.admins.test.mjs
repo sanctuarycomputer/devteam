@@ -724,13 +724,17 @@ async function hubAs(t, gw, cookie, { width = 1280, height = 900 } = {}) {
   let loaded = false;
   for (let i = 0; i < 100 && !loaded; i++) { loaded = (await p.ev('document.title').catch(() => '')) === 'devteam'; if (!loaded) await sleep(100); }
   assert.ok(loaded, 'the hub loads from the gateway');
-  const until = async (what, expr, ms = 15000) => { const end = Date.now() + ms; while (Date.now() < end) { if (await p.ev(expr).catch(() => false)) return; await sleep(100); } assert.fail(`waited for ${what}: ${expr}`); };
+  // each evaluate gets 5 s: one that never answers (a page mid-navigation) can't hold the wait past its deadline
+  const evSoon = (expr) => Promise.race([p.ev(expr).catch(() => false), sleep(5000).then(() => false)]);
+  const until = async (what, expr, ms = 15000) => { const end = Date.now() + ms; while (Date.now() < end) { if (await evSoon(expr)) return; await sleep(100); } assert.fail(`waited for ${what}: ${expr}`); };
   return { ...p, until };
 }
 const personSel = (id) => `#hub-settings .person[data-id=${JSON.stringify(id)}]`;
 const groups = `[...document.querySelectorAll('#hub-settings .sec > .lbl')].map((x) => x.textContent)`;
 const toastNow = `(document.querySelector('.oa-toast.on')?.textContent ?? '')`;
 const textOf = (sel) => `(document.querySelector(${JSON.stringify(sel)})?.textContent ?? null)`;
+// the menu's red items: Remove, Leave this box, Revoke the link; nothing else
+const redItems = (p) => p.ev(`[...document.querySelectorAll('.oa-menu button.red')].map((b) => b.textContent)`);
 const menuOf = async (p, id) => {
   await p.ev(`document.querySelector('.oa-menu') && document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
   await p.until('its ⋯', `Boolean(document.querySelector(${JSON.stringify(`${personSel(id)} .menu-btn`)}))`);
@@ -744,6 +748,7 @@ const confirmed = async (p, words, yes) => {
   await p.until('the confirmation', `Boolean(document.querySelector('#oa-confirm'))`);
   assert.equal(await p.ev(textOf('#oa-confirm p')), words, 'the confirmation, in the mock\'s words');
   assert.equal(await p.ev(`document.querySelector('#oa-confirm .acts button').textContent`), yes, 'its yes button');
+  assert.equal(await p.ev(`document.querySelector('#oa-confirm .acts button').classList.contains('danger')`), yes === 'Remove' || yes === 'Leave', `${yes}: red only for Remove and Leave`);
   await p.ev(`document.querySelector('#oa-confirm .acts button').click()`);
 };
 const toasted = (p, words) => p.until(`the toast "${words}"`, `${toastNow} === ${JSON.stringify(words)}`);
@@ -759,6 +764,7 @@ test('org-access A16: in Chrome, the owner\'s Make admin, Take Admin away, Make 
   assert.ok((await p.ev(textOf(`${personSel(kai.id)} .pmeta`))).endsWith(' · a new link expired'), 'Kai\'s line names his expired link');
   assert.deepEqual(await menuOf(p, kai.id), ['Revoke the link', 'Rename', 'Remove'], 'Kai, an expired link: Revoke first, no Make admin or Make owner');
   assert.deepEqual(await menuOf(p, vic.id), ['Rename', 'Make full', 'Make admin', 'Make owner', 'Send a new link', 'Remove'], 'Vic (View): the mock\'s order');
+  assert.deepEqual(await redItems(p), ['Remove'], 'only Remove is red');
   await pick(p, 'Make admin');
   await p.until('the confirmation', `Boolean(document.querySelector('#oa-confirm'))`);
   assert.equal(await p.ev(textOf('#oa-confirm p')), 'Make Vic an admin? They can then move members between Full and View only, and rename or remove members and other admins. They can\'t invite, make admins, or touch your row. They become Full too.', 'a View member: Full too');
@@ -820,6 +826,7 @@ test('org-access A15: in Chrome, an admin\'s Rename, Make full, Remove and Leave
   assert.equal(rowOf(gw.state(), ana.id), undefined, 'Ana\'s row is gone');
   await peopleShown(p, 6);
   assert.deepEqual(await menuOf(p, sam.id), ['Rename', 'Leave this box'], 'his own row');
+  assert.deepEqual(await redItems(p), ['Leave this box'], 'Leave is red');
   await pick(p, 'Leave this box');
   await p.until('the confirmation', `Boolean(document.querySelector('#oa-confirm'))`);
   assert.ok(await p.ev(`document.querySelector('#oa-confirm .acts button').classList.contains('danger')`), 'Leave is red');
