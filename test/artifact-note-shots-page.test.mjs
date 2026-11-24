@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { chromePath } from './lib/chrome.mjs';
-import { HOSTS, MIDDLE, NINE, OTHER, SRC, TMP, body, count, cut, each, fake, lit, near, png, reached, region, ringAt, said, seenFile, sha256, shotKit } from './fixtures/artifact-shots/kit.mjs';
+import { HOSTS, MIDDLE, NINE, OTHER, SRC, TMP, body, count, cut, each, fake, openers, lit, near, png, reached, region, ringAt, said, seenFile, sha256, shotKit } from './fixtures/artifact-shots/kit.mjs';
 
 test('C1c the page file fails with no Chrome', () => {
   assert.ok(chromePath, 'no Chrome: install Chrome or Chromium, or set CHROME_PATH');
@@ -69,8 +69,7 @@ test('C7e the proxy flags: dead but for the capture and the allowed hosts', asyn
 test('C7f no route to another server', async () => {
   const said = await wall('routes');
   assert.deepEqual(reached, []);
-  assert.ok(said.includes('serve /sw.js csp=no'), `the service worker was asked for: ${said.join(' | ')}`);
-  for (const t of ['ws', 'sw', 'rtc', 'shared']) assert.ok(said.includes(`serve /tried-${t} csp=no`), `${t} was tried: ${said.join(' | ')}`);
+  for (const t of ['ws', 'sw', 'rtc', 'peer', 'shared']) assert.ok(said.includes(`serve /tried-${t} csp=no`), `${t} was tried: ${said.join(' | ')}`);
   assert.ok(said.includes(`fail ${OTHER}/worker`), 'the worker fetched');
   assert.ok(said.includes(`fail ${OTHER}/moved`), 'the page tried to move');
 });
@@ -83,6 +82,17 @@ test('C7f the page stays, and leaves no file', async () => {
   const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.name.startsWith('left-behind')) left.push(path.join(d, e.name)); if (e.isDirectory()) walk(path.join(d, e.name)); } };
   for (const d of [k.F.home, TMP, k.F.old].filter((x) => fs.existsSync(x))) walk(d);
   assert.deepEqual(left, []);
+});
+
+test('C7h nothing outside Chrome is started for a page', async () => {
+  const k = shotKit();
+  await each(['#move', '#click'].flatMap((hash) => ['1', undefined].map((noCsp) => [hash, noCsp])), async ([hash, noCsp]) => {
+    const o = openers();
+    const r = await k.readyOn(k.subject({ path: 'stays.html' }), { frame: { w: 1400, h: 860, hash }, PATH: o.path, DEVTEAM_TEST_SHOT_NO_CSP: noCsp });
+    assert.equal(o.started(), '', `${hash} csp=${noCsp ? 'off' : 'on'}`);
+    assert.equal(r.status, 0, said(r));
+    assert.equal(r.line.shot.anchor, 'found');
+  });
 });
 
 test('the capture serves the artifact\'s plain files and nothing else', async () => {
@@ -212,20 +222,19 @@ test('C5y two captures at once', async () => {
 
 test('C15b each part of the page\'s answer is checked', () => {
   const { shotTrust } = cut(['shotTrust'], { isObj: (o) => !!o && typeof o === 'object' && !Array.isArray(o), uncapped: (x) => x, UNSAFE_TEXT_ALL: /[\x00-\x1f]/g, SHOT_ANSWER: 'no answer' });
-  const good = { state: 'found', box: { x: 1, y: 2, w: 3, h: 4 }, text: 'a', innerWidth: 3840, innerHeight: 2160, scrollX: 0, scrollY: 0 };
+  const good = { state: 'found', box: { x: 1, y: 2, w: 3, h: 4 }, text: 'a', innerWidth: 3840, innerHeight: 2160 };
   assert.equal(shotTrust(good).text, 'a');
-  for (const bad of [{ state: 'ok' }, { state: ['found'] }, { box: null }, { box: { ...good.box, x: NaN } }, { box: { ...good.box, y: '2' } }, { box: { ...good.box, w: -1 } }, { box: { ...good.box, h: -1 } }, { box: { ...good.box, w: Infinity } }, { innerWidth: 3841 }, { innerHeight: 2161 }, { innerWidth: 0 }, { innerWidth: 900.5 }, { scrollX: NaN }, { scrollY: Infinity }, { scrollX: undefined }]) assert.throws(() => shotTrust({ ...good, ...bad }), /no answer/, JSON.stringify(bad));
+  for (const bad of [{ state: 'ok' }, { state: ['found'] }, { box: null }, { box: { ...good.box, x: NaN } }, { box: { ...good.box, y: '2' } }, { box: { ...good.box, w: -1 } }, { box: { ...good.box, h: -1 } }, { box: { ...good.box, w: Infinity } }, { innerWidth: 3841 }, { innerHeight: 2161 }, { innerWidth: 0 }, { innerWidth: 900.5 }]) assert.throws(() => shotTrust({ ...good, ...bad }), /no answer/, JSON.stringify(bad));
 });
 
 test('C3 the clip stays inside the frame at each edge', () => {
   const { shotClip } = cut(['shotClip']);
-  const at = (x, y, w = 40, h = 20) => Object.values(shotClip({ x, y, w, h }, { w: 900, h: 700 }, { x: 0, y: 0 }));
+  const at = (x, y, w = 40, h = 20) => Object.values(shotClip({ x, y, w, h }, { w: 900, h: 700 }));
   assert.deepEqual(at(12, 12), [0, 0, 320, 200]);
   assert.deepEqual(at(850, 670), [580, 500, 320, 200]);
   assert.deepEqual(at(5000, 5000), [580, 500, 320, 200]);
   assert.deepEqual(at(-5000, -5000), [0, 0, 320, 200]);
   assert.deepEqual(at(400, 300, 5000, 5000), [0, 0, 900, 700]);
-  assert.deepEqual(Object.values(shotClip({ x: 850, y: 670, w: 40, h: 20 }, { w: 900, h: 700 }, { x: 10, y: 1000 })), [590, 1500, 320, 200]);
 });
 
 test('a picture\'s stamp is its thread\'s own, and shots itself may be no symlink', () => {

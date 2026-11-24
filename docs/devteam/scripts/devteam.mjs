@@ -11286,13 +11286,17 @@ function cmdThread() {
     if (Buffer.byteLength(outcome) > OUTCOME_MAX) die(`--outcome is at most ${OUTCOME_MAX} bytes`);
     // an artifact note's proposal carries the kit's picture of the spot: no picture, no line (kit-147)
     if (t.subject?.kind === 'artifact') return (async () => {
-      const r = await markShot(threadViewOf(t.id), { kind: 'ready' });
+      // what a proposal answers: the owner's newest word, the hand-over, the mark
+      const said = (v) => JSON.stringify([v.turns.filter((u) => u.by === 'owner').pop()?.id, v.handed, v.addressed]);
+      const before = threadViewOf(t.id);
+      const r = await markShot(before, { kind: 'ready' });
       // a refusal from here ends the process (die) or throws: either way the pictures go
       let written = false;
       process.once('exit', () => { if (!written) for (const f of r.files) fs.rmSync(f, { force: true }); });
       // the picture takes seconds: the owner may have closed the thread meanwhile
       logCache = null;
       threadOpen(t.id, 'supervisor');
+      if (said(threadViewOf(t.id)) !== said(before)) die(`${t.id} changed while its picture was taken (a new turn of the owner's, a hand-over or a mark): read it, then propose again`);
       appendLog({ type: 'thread', op: 'set', id: t.id, ready: { outcome, at: nowIso() }, shot: r.shot }, 'supervisor');
       written = true;
       try { shotSweep(t.id, Date.now()); } catch (e) { warn(`old pictures not removed: ${e.message}`); }
@@ -12928,7 +12932,8 @@ async function shotLaunch({ noSandbox = false, extraArgs = [], cap }) {
     const crashed = () => reject(new Error('the page crashed; no mark written'));
     cdp.on('Inspector.targetCrashed', (p, sid) => { if (sid === sessionId) crashed(); });
     cdp.on('Target.detachedFromTarget', (p) => { if (p.sessionId === sessionId) crashed(); });
-    cdp.on('Target.targetCrashed', (p) => { if (p.targetId === targetId) crashed(); });
+    cdp.on('Target.targetCrashed', (p) => { if (p.targetId === targetId || p.targetId === launch.page.frameTarget) crashed(); });
+    cdp.on('Inspector.targetCrashed', (p, sid) => { if (sid === launch.page.frame) crashed(); });
   });
   launch.crashed.catch(() => {});
   // asked for too, so that a crash is heard by whichever of the three Chrome tells
@@ -12979,16 +12984,24 @@ function shotRequestAllowed(url, origin, type) {
   try { return [origin, ...(type === 'Document' ? [] : [...ARTIFACT_CDNS, ...ARTIFACT_FONT_HOSTS])].includes(new URL(url).origin); } catch { return false; }
 }
 const shotListen = (srv) => new Promise((resolve, reject) => { srv.once('error', reject); srv.listen(0, '127.0.0.1', () => resolve(srv.address().port)); });
+// A draft's file as it is now, only when it is a plain one: anything else could hold the read.
+function shotRead(e) {
+  if (!e.abs) return e.read();
+  const fd = fs.openSync(e.abs, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW);
+  try { const st = fs.fstatSync(fd); return st.isFile() && st.size <= ARTIFACT_FILE_MAX ? fs.readFileSync(fd) : null; } finally { fs.closeSync(fd); }
+}
 // One artifact's files on a loopback port, each path found as the dashboard's artifact route finds it
 // (no query, never decoded) and answered with its headers.
 async function shotServe(entries, { csp = true } = {}) {
   const files = new Map(entries.filter((e) => e.mode !== '120000' && artifactPathOk(e.path)).map((e) => [e.path, e]));
-  let origin = null;
+  let origin = null, outer = null;
+  const top = `/${crypto.randomBytes(16).toString('hex')}`;
   const srv = http.createServer((req, res) => {
     const raw = req.url.split('?')[0];
+    if (raw === top && outer) { res.writeHead(200, { 'content-type': 'text/html', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': `default-src 'none'; style-src 'unsafe-inline'; frame-src ${origin}` }); return res.end(outer); }
     const rel = raw === '/' ? 'index.html' : raw.slice(1);
     let bytes = null;
-    try { bytes = files.get(rel)?.read() ?? null; } catch {}
+    try { const e = files.get(rel); bytes = e ? shotRead(e) : null; } catch {}
     const h = artifactHeaders(bytes ? rel : 'none.txt', origin, `${origin}/`);
     if (!csp) delete h['content-security-policy'];
     shotHook(`serve ${raw} csp=${h['content-security-policy'] ? 'yes' : 'no'}`);
@@ -12997,7 +13010,13 @@ async function shotServe(entries, { csp = true } = {}) {
   });
   const port = await shotListen(srv);
   origin = `http://127.0.0.1:${port}`;
-  return { origin, port, close() { srv.close(); srv.closeAllConnections?.(); } };
+  // The kit's own page, which holds the artifact's in the sandboxed frame the viewer shows it in. It takes
+  // a dark scheme as a page of its own would, so the frame is told of it.
+  const framed = (url) => {
+    outer = `<!doctype html><meta name="color-scheme" content="light dark"><style>html,body{margin:0;height:100%;overflow:hidden}iframe{display:block;border:0;width:100vw;height:100vh}</style><iframe sandbox="allow-scripts allow-forms allow-modals allow-pointer-lock" referrerpolicy="no-referrer" src="${escHtml(url)}"></iframe>`;
+    return `${origin}${top}`;
+  };
+  return { origin, port, framed, close() { srv.close(); srv.closeAllConnections?.(); } };
 }
 // The proxy every other connection goes to, from any target of the browser's: it drops them all.
 async function shotDeadProxy() {
@@ -13017,20 +13036,33 @@ async function shotOpen(launch, url, { w, h }) {
   });
   cdp.on('Page.javascriptDialogOpening', (p, sid) => { cdp.send('Page.handleJavaScriptDialog', { accept: false }, sid).catch(() => {}); });
   await cdp.send('Browser.setDownloadBehavior', { behavior: 'deny' });
-  await send('Page.enable');
-  await send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
+  const wall = async (sid) => {
+    await cdp.send('Page.enable', {}, sid);
+    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] }, sid);
+    await cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true, filter: [{ type: 'iframe' }] }, sid);
+  };
+  // A frame in a process of its own waits for the same walls before it runs. The first is the artifact's.
+  cdp.on('Target.attachedToTarget', (p, sid) => {
+    const id = p.sessionId;
+    if (p.targetInfo.type !== 'iframe') return;
+    if (sid === sessionId) Object.assign(launch.page, { frame: id, frameTarget: p.targetInfo.targetId });
+    (async () => { await wall(id); await cdp.send('Inspector.enable', {}, id).catch(() => {}); await cdp.send('Runtime.runIfWaitingForDebugger', {}, id); })().catch(() => {});
+  });
+  await wall(sessionId);
   await send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile: false });
   await shotScheme(launch, 'light');
   const loaded = new Promise((resolve) => cdp.on('Page.loadEventFired', (p, sid) => { if (sid === sessionId) resolve(); }));
   await send('Page.navigate', { url });
   await loaded;
+  if (!launch.page.frame) throw new Error("this Chrome doesn't give a sandboxed frame a process of its own (update it); no mark written");
+  await shotScheme(launch, 'light');
   await shotEval(launch, `Promise.resolve(document.fonts && document.fonts.ready).then(() => ${SHOT_FRAMES})`);
 }
 const SHOT_FRAMES = 'new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(1))))';
-const shotScheme = (launch, value) => launch.cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value }] }, launch.page.sessionId);
+const shotScheme = async (launch, value) => { for (const sid of [launch.page.sessionId, launch.page.frame]) if (sid) await launch.cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value }] }, sid); };
 // What the page answers is its own word; a script that throws there is no answer.
 async function shotEval(launch, expression) {
-  const r = await launch.cdp.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, launch.page.sessionId).catch(() => null);
+  const r = await launch.cdp.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, launch.page.frame).catch(() => null);
   if (!r || r.exceptionDetails) throw new Error(SHOT_ANSWER);
   return r.result?.value;
 }
@@ -13076,21 +13108,21 @@ ${shotSlice('finder')}
   const by = was.width / (box.w + 8) || 1;
   if (Math.abs(by - 1) > 0.01) { set('width', (box.w + 8) / by); set('height', (box.h + 8) / by); set('border-width', 2 / by); set('left', (box.x - 4) / by); set('top', (box.y - 4) / by); }
   await frames();
-  return { state, box, text, innerWidth, innerHeight, scrollX, scrollY };
+  return { state, box, text, innerWidth, innerHeight };
 })()`;
 // The page's answer, checked: a state, sizes and places that could be true, and its text cut to one
 // plain line of 80 characters by the kit, whatever the page did to its own cut.
 function shotTrust(a) {
   const size = (v, max) => Number.isInteger(v) && v >= 1 && v <= max;
   const ok = isObj(a) && ['found', 'changed', 'hidden', 'gone', 'point'].includes(a.state) && size(a.innerWidth, 3840) && size(a.innerHeight, 2160)
-    && isObj(a.box) && ['x', 'y', 'w', 'h'].every((k) => Number.isFinite(a.box[k])) && a.box.w >= 0 && a.box.h >= 0 && Number.isFinite(a.scrollX) && Number.isFinite(a.scrollY);
+    && isObj(a.box) && ['x', 'y', 'w', 'h'].every((k) => Number.isFinite(a.box[k])) && a.box.w >= 0 && a.box.h >= 0;
   if (!ok) throw new Error(SHOT_ANSWER);
   const line = uncapped((typeof a.text === 'string' ? a.text : '').slice(0, 10000).replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim());
   return { ...a, text: Array.from(line).slice(0, 80).join('') };
 }
-// What is pictured, in the page's own coordinates: the box and its margin, at least 320 by 200, moved
-// inside the frame whole, cut only when it is larger than the frame, then moved by the page's scroll.
-function shotClip(box, { w, h }, scroll, margin = 32) {
+// What is pictured, in the frame's own window, which the page scrolls inside: the box and its margin, at least 320 by 200, moved
+// inside the frame whole, cut only when it is larger than the frame.
+function shotClip(box, { w, h }, margin = 32) {
   const side = (at, len, min, max) => {
     const size = Math.round(Math.min(Math.max(len + 2 * margin, min), max));
     const start = Math.round(at + len / 2 - Math.max(len + 2 * margin, min) / 2);
@@ -13098,7 +13130,7 @@ function shotClip(box, { w, h }, scroll, margin = 32) {
   };
   const [x, width] = side(box.x, box.w, 320, w);
   const [y, height] = side(box.y, box.h, 200, h);
-  return { x: x + scroll.x, y: y + scroll.y, width, height };
+  return { x, y, width, height };
 }
 const shotStamp = (ms) => { const at = new Date(ms).toISOString(); return `${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}`; };
 const shotsDir = () => path.join(runDir, 'shots');
@@ -13173,7 +13205,7 @@ async function noteShot(view, src, { now } = {}) {
         const launch = await shotChrome({ extraArgs, cap });
         const take = async () => {
           const a = shotTrust(await shotEval(launch, shotScript(spot)));
-          const clip = shotClip(a.box, frame, { x: a.scrollX, y: a.scrollY }, a.state === 'point' ? 0 : 32);
+          const clip = shotClip(a.box, frame, a.state === 'point' ? 0 : 32);
           const r = await launch.cdp.send('Page.captureScreenshot', { format: 'png', clip: { ...clip, scale: 1 } }, launch.page.sessionId).catch(() => null);
           if (!r) throw new Error(SHOT_ANSWER);
           return { ...a, png: Buffer.from(r.data, 'base64') };
@@ -13183,7 +13215,7 @@ async function noteShot(view, src, { now } = {}) {
             const { processInfo } = await launch.cdp.send('SystemInfo.getProcessInfo');
             for (const x of processInfo) if (x.type === 'renderer') process.kill(x.id, 'SIGKILL');
           }
-          await shotOpen(launch, url, frame);
+          await shotOpen(launch, srv.framed(url), frame);
           const light = await take();
           await shotScheme(launch, 'dark');
           await shotEval(launch, SHOT_FRAMES);

@@ -133,6 +133,36 @@ test('C9 other threads: as before, no Chrome', async () => {
   }
 });
 
+test('a note the owner wrote on while its picture is taken gets no proposal', async () => {
+  const k = shotKit();
+  const id = await k.note(k.subject({ path: 'slow.html' }));
+  const hook = seenFile();
+  const going = k.ready(id, { DEVTEAM_TEST_SHOT_SEEN: hook });
+  await until(() => k.seen(hook).includes('page'), 'the picture to have begun');
+  assert.equal((await k.run(['thread', 'say', id, '--', 'Wait, not yet'])).status, 0);
+  const r = await going;
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /changed while its picture was taken/);
+  assert.equal(r.line, undefined);
+  assert.deepEqual(k.files(id), []);
+});
+
+test('a named pipe in a draft is not read', async () => {
+  const k = shotKit();
+  const wt = worktree(k, 'chore-artifact-piped', 'piped', 'Chore');
+  try {
+    assert.equal(spawnSync('mkfifo', [path.join(wt.dir, 'pipe.js')]).status, 0);
+    write(path.join(wt.dir, 'index.html'), '<!doctype html><button id="buy">Chore</button><script src="pipe.js"></script>\n');
+    const started = Date.now();
+    const r = await Promise.race([k.readyOn(pageNote(k, { slug: 'piped', at: 'chore-artifact-piped' })), new Promise((x) => setTimeout(() => x(null), 30000).unref())]);
+    // a reader that waits is let go, so the run ends
+    if (!r) fs.closeSync(fs.openSync(path.join(wt.dir, 'pipe.js'), fs.constants.O_RDWR));
+    assert.ok(r, 'it waited on the pipe');
+    assert.equal(r.status, 0, said(r));
+    assert.ok(Date.now() - started < 25000);
+  } finally { wt.remove(); }
+});
+
 test('C8a C8c a page that loops, a Chrome that says nothing, nothing to picture: refused, nothing written', async () => {
   const k = shotKit();
   const hook = seenFile();

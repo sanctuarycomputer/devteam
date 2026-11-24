@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import dgram from 'node:dgram';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
@@ -37,14 +38,17 @@ await new Promise((r) => udp.bind(0, '127.0.0.1', r));
 // The machine's first Chrome reads all of it from disk, which a busy CI runner takes longer over than
 // the 8 s a capture gives a start: one is run here, whatever it says.
 if (chromePath) { const at = fs.mkdtempSync(path.join(TMP, 'w')); spawnSync(chromePath, ['--headless=new', '--no-sandbox', `--user-data-dir=${at}`, '--dump-dom', 'about:blank'], { stdio: 'ignore', timeout: 60000, killSignal: 'SIGKILL', env: { ...process.env, HOME: TMP, TMPDIR: TMP } }); fs.rmSync(at, { recursive: true, force: true, maxRetries: 5 }); }
+// A bare TCP listener: what a page's own connection says is no HTTP (a scan of new ports says GET).
+export const tcp = net.createServer((c) => { c.on('error', () => {}); c.on('data', (b) => { if (!/^[A-Z]{3,7} /.test(b.toString('latin1'))) reached.push('tcp'); c.destroy(); }); });
+await new Promise((r) => tcp.listen(0, '127.0.0.1', r));
 let made = null;
-after(() => { udp.close(); other.closeAllConnections?.(); other.close(); made?.F.done(); fs.rmSync(TMP, { recursive: true, force: true }); });
+after(() => { udp.close(); tcp.close(); other.closeAllConnections?.(); other.close(); made?.F.done(); fs.rmSync(TMP, { recursive: true, force: true }); });
 export function shotKit() {
   if (made) return made;
   const F = threadsFixture('shots');
   const arts = path.join(F.old, 'docs/devteam/project/artifacts');
   fs.cpSync(FIXTURES, path.join(arts, 'pricing'), { recursive: true, filter: (f) => !/\.(?:sh|mjs)$/.test(f) });
-  for (const f of fs.readdirSync(path.join(arts, 'pricing')).filter((x) => /\.(html|js)$/.test(x))) { const at = path.join(arts, 'pricing', f); fs.writeFileSync(at, fs.readFileSync(at, 'utf8').replaceAll('__OTHER__', OTHER).replaceAll('__UDP__', String(udp.address().port))); }
+  for (const f of fs.readdirSync(path.join(arts, 'pricing')).filter((x) => /\.(html|js)$/.test(x))) { const at = path.join(arts, 'pricing', f); fs.writeFileSync(at, fs.readFileSync(at, 'utf8').replaceAll('__OTHER__', OTHER).replaceAll('__UDP__', String(udp.address().port)).replaceAll('__TCP__', String(tcp.address().port))); }
   fs.symlinkSync('app.js', path.join(arts, 'pricing', 'link.js'));
   write(path.join(arts, 'pricing', '.secret.js'), '// never served\n');
   F.g(['add', '-A'], F.old);
@@ -126,6 +130,12 @@ export function ringAt(p, { x, y, w, h }) {
 
 // a stand-in Chrome from the fixtures, and the arguments of each launch of it
 let fakes = 0;
+export function openers() {
+  const dir = fs.mkdtempSync(path.join(TMP, 'o'));
+  const log = path.join(dir, 'log');
+  for (const n of ['xdg-open', 'xdg-email', 'gio', 'open']) fs.writeFileSync(path.join(dir, n), `#!/bin/sh\necho ${n} >> '${log}'\n`, { mode: 0o755 });
+  return { path: `${dir}${path.delimiter}${process.env.PATH}`, started: () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim() : '') };
+}
 export function fake(name, as = name) {
   const file = path.join(TMP, `f${++fakes}`, as);
   fs.mkdirSync(path.dirname(file));
