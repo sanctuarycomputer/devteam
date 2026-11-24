@@ -201,6 +201,9 @@ test('the supervisor\'s records of the owner\'s words refuse in a session too, a
     // git config the caller gives, through the environment or a HOME of theirs, with a value git
     // dies on: a read with it would find no branch
     const badConfig = { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.bare', GIT_CONFIG_VALUE_0: 'notabool' };
+    // another repo's checkout
+    const sibling = path.join(F.base, 'sibling');
+    g(['init', '-q', sibling], F.base);
     const badHome = path.join(F.base, 'bad-home');
     fs.mkdirSync(badHome);
     fs.writeFileSync(path.join(badHome, '.gitconfig'), '[core]\n\tbare = notabool\n');
@@ -220,7 +223,7 @@ test('the supervisor\'s records of the owner\'s words refuse in a session too, a
     ];
     const OWN = ['observe', '--owner', '--subject', 'kit', '--kind', 'note', '--detail', 'd'];
     // each session, as the supervisor's role claims it (H1-H8), and the plain owner command where the
-    // check itself changed (H6, H8): refused, and nothing logged
+    // check itself changed (OWNER_TOO, below): refused, and nothing logged
     const SESSIONS = {
       emptyTicket: [old, { ...SUP, DEVTEAM_TICKET: '' }],
       emptyFeature: [old, { ...SUP, DEVTEAM_FEATURE: '' }],
@@ -232,7 +235,7 @@ test('the supervisor\'s records of the owner\'s words refuse in a session too, a
       plainHome: [plain, { ...SUP, DEVTEAM_HOME: old }],
       configEnv: [ticketCo, { ...SUP, ...badConfig }],
     };
-    const OWNER_TOO = { gitDir: [ticketCo, mainGit], plainHome: [plain, { DEVTEAM_HOME: old }], plainGitDir: [plain, { DEVTEAM_HOME: old, ...mainGit }], configEnv: [ticketCo, badConfig], configHome: [ticketCo, { HOME: badHome }] };
+    const OWNER_TOO = { gitDir: [ticketCo, mainGit], plainHome: [plain, { DEVTEAM_HOME: old }], plainGitDir: [plain, { DEVTEAM_HOME: old, ...mainGit }], configEnv: [ticketCo, badConfig], configHome: [ticketCo, { HOME: badHome }], emptyHome: [plain, { DEVTEAM_HOME: '' }], siblingHome: [sibling, { DEVTEAM_HOME: old }] };
     // a refused run writes nothing, so a session's runs go a few at a time
     const runLater = (cwd, args, env) => new Promise((resolve) => {
       const c = spawn(process.execPath, [kitDT, ...args], { cwd, env: envOf(env), stdio: ['ignore', 'pipe', 'pipe'], timeout: 120000 });
@@ -262,6 +265,8 @@ test('the supervisor\'s records of the owner\'s words refuse in a session too, a
     assert.match(runAt(plain, OWN, { DEVTEAM_HOME: old }).err, /DEVTEAM_HOME/, 'R: the refusal names DEVTEAM_HOME');
     // O: the supervisor in home's main checkout records each, as the owner's line; and a folder that
     // is no checkout, with no DEVTEAM_HOME (the box's hub runs there), still writes the owner's own
+    // the supervisor's own pane, by every sign ownerWriter reads (no tmux server answers on this socket)
+    const PANE = { ...SUP, TMUX: `${path.join(F.base, 'no-tmux')},1,0`, TMUX_PANE: '%7', DEVTEAM_SUPERVISOR: '%7' };
     const goal = okAt(old, ['goal', 'add', '--title', 'G', '--outcome', 'o', '--measure', 'm', '--target', '1', '--unit', 'u', '--direction', 'up', '--source', 'owner'], SUP);
     const wrote = (args, env, what) => {
       const before = snap();
@@ -270,14 +275,14 @@ test('the supervisor\'s records of the owner\'s words refuse in a session too, a
       assert.ok(lines.some((x) => x.by === 'owner'), `O: ${what} writes an owner line: ${JSON.stringify(lines)}`);
     };
     const asked = okAt(old, ['ask', '--question', 'Ship it?', '--recommendation', 'yes'], SUP);
-    wrote(['answer', asked, 'yes', '--from-chat', '--said', 'yes, ship it'], SUP, 'answer --from-chat');
+    wrote(['answer', asked, 'yes', '--from-chat', '--said', 'yes, ship it'], PANE, 'answer --from-chat');
     const T = okAt(old, ['thread', 'new', '--title', 't', '--', 'hello'], {}).split('\n')[0];
     const Qt = okAt(old, ['thread', 'ask', T, '--question', 'Tell the team?', '--recommendation', 'Yes', '--goal', goal, '--stake', '1', '--urgency', '1'], SUP).split('\n')[0];
     const Ut = okAt(old, ['thread', 'say', T, '--', 'Yes'], {}).split('\n')[0];
     wrote(['answer', Qt, 'Yes', '--from-turn', Ut], SUP, 'answer --from-turn');
     const act = `a-${new Date().toISOString().replace(/\D/g, '').slice(0, 8)}-${new Date().toISOString().replace(/\D/g, '').slice(8, 17)}-supervisor`;
     fs.appendFileSync(path.join(logDir, `supervisor-${new Date().toISOString().slice(0, 7)}.jsonl`), `${JSON.stringify({ v: 1, op: 'new', type: 'act', id: act, at: new Date().toISOString(), by: 'supervisor', class: 'replan-within-feature', what: 'held a ticket', refs: [], reversible: true })}\n`);
-    wrote(['correct', act, '--from-chat', '--said', 'that was the wrong call'], SUP, 'correct --from-chat');
+    wrote(['correct', act, '--from-chat', '--said', 'that was the wrong call'], PANE, 'correct --from-chat');
     // a goal ready for the owner's decision on its design, as approvals.test.mjs makes one
     const Gd = okAt(old, ['goal', 'add', '--title', 'Floor', '--outcome', 'the floor holds', '--measure', 'gaps', '--target', '0', '--unit', 'gaps', '--direction', 'down', '--source', 'repo', '--check', 'echo 3', '--non-goals', 'none', '--preconditions', 'a'], SUP);
     okAt(old, ['goal', 'reading', Gd, '--run'], SUP);
@@ -288,7 +293,8 @@ test('the supervisor\'s records of the owner\'s words refuse in a session too, a
     g(['commit', '-qm', 'design'], old);
     g(['push', '-q', 'origin', 'main'], old);
     okAt(old, ['ask', '--kind', 'goal-approval', '--goal', Gd, '--question', 'Approve the floor?', '--links', JSON.stringify([{ title: 'design', path: 'docs/devteam/project/designs/floor.md', ref: 'main' }])], SUP);
-    wrote(['goal', 'decide', Gd, 'refine', '--notes', 'smaller', '--from-chat', '--said', 'make it smaller'], SUP, 'goal decide --from-chat');
+    wrote(['goal', 'decide', Gd, 'refine', '--notes', 'smaller', '--from-chat', '--said', 'make it smaller'], PANE, 'goal decide --from-chat');
+    wrote(OWN, { DEVTEAM_HOME: old }, "observe --owner in home's main checkout with DEVTEAM_HOME set");
     const before = snap();
     okAt(plain, OWN, {});
     assert.ok(added(before, snap()).some((x) => x.by === 'owner'), 'O: observe --owner from a folder that is no checkout, no DEVTEAM_HOME, writes');

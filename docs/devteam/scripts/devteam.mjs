@@ -2110,9 +2110,10 @@ function logWriter() {
 // supervisor recorded (rememberSupervisorPane), or the one DEVTEAM_SUPERVISOR names. The dashboard's
 // children run with no TMUX_PANE, wherever it was started. hint: what the supervisor does instead,
 // for the command at hand. heard: the supervisor records the owner's words (answer, goal decide and
-// correct with --from-chat or --from-turn): its role is expected there and its own gate checks it,
-// but the session check below is the same.
+// correct with --from-chat or --from-turn): its role is needed there, and the session check below is
+// the same.
 function ownerWriter(hint, { heard = false } = {}) {
+  if (heard && (process.env.DEVTEAM_ROLE !== 'supervisor' || logWriter() !== 'supervisor')) die('the supervisor records what the owner said in a thread or in its session; in your own terminal, run the command without --from-chat or --from-turn');
   if (!heard && process.env.DEVTEAM_ROLE) die(`owner commands don't run in an agent session (DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE})`);
   if (inResponderWorktree()) die("owner commands don't run in the responder's worktree");
   // A worker's or planner's session, whatever DEVTEAM_ROLE says: DEVTEAM_TICKET or DEVTEAM_FEATURE
