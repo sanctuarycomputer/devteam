@@ -1,0 +1,2 @@
+{"v":1,"id":"t-20261120-100022000-owner","type":"thread","op":"set","ready":{"outcome":"The trial button reads Start free trial.","at":"2026-11-20T10:01:22.000Z"},"at":"2026-11-20T10:01:22.000Z","by":"supervisor"}
+{"v":1,"id":"t-20261120-100022000-owner","type":"thread","op":"set","ready":null,"unready":{"at":"2026-11-20T10:02:22.000Z","reason":"The mark no longer matches the page."},"at":"2026-11-20T10:02:22.000Z","by":"supervisor"}

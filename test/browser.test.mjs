@@ -691,8 +691,10 @@ test('S1 help and prompt', opts, async () => {
   assert.match(line, /password or one-time code goes in on stdin/);
   const p = run('prompt', 'supervisor');
   assert.equal(p.status, 0, p.stderr);
-  assert.ok(p.stdout.includes('browser type <ref> --stdin'), 'the supervisor prompt says to pipe a secret in');
-  assert.ok(p.stdout.includes('pipe it in from a variable or a 0600 file') && p.stdout.includes('never as an argument or a literal in the command'), 'the supervisor prompt says where the piped secret comes from (final-1b S2)');
+  // kit-789: the prompt hands the browser over for a login instead of typing the owner's secret
+  for (const gone of ['browser type <ref> --stdin', 'When you type a password or one-time code', 'pipe it in from a variable']) assert.ok(!p.stdout.includes(gone), `the supervisor prompt no longer says: ${gone}`);
+  assert.ok(p.stdout.includes('For any login, 2FA or captcha in devteam.mjs browser, hand the browser to the owner with browser handover'), 'the supervisor prompt says to hand the browser over');
+  assert.ok(p.stdout.includes('never type a password or one-time code yourself (supervisor.md, The browser: outside websites)'), 'the supervisor prompt says never to type one, citing the section');
 });
 
 test('B4 the dashboard is refused', opts, async () => {

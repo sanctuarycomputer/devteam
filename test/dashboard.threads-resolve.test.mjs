@@ -203,7 +203,7 @@ test("threads on the dashboard page: Shift and point, the card, the pins and the
     const last = () => p.ev(`TL.threads.find((x) => x.id === '${T}').turns.at(-1)`);
     await p.ev(`Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' }); void 0`);
     try {
-      F.sup(['thread', 'reply', T, 'While you were away.']);
+      F.sup(['thread', 'reply', T, 'While you were away.', '--off-subject', 'a note that lands while the tab is hidden']);
       await p.ev('tlRefresh()');
       await soon(`TL.threads.find((x) => x.id === '${T}').turns.at(-1).text === 'While you were away.'`, 'read in');
       assert.notEqual(await p.ev(`tlSeenAt('${T}')`), (await last()).at, 'not seen while hidden');

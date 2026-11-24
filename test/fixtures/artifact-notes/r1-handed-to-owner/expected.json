@@ -1,0 +1,14 @@
+{
+ "about": "a hand-written handed naming the owner: no hand-over",
+ "thread": "t-20261120-100024000-owner",
+ "view": {
+  "handed": null,
+  "addressed": null,
+  "check": null,
+  "shot": null,
+  "noshot": null,
+  "unready": null,
+  "frame": null,
+  "waiting": "owner"
+ }
+}

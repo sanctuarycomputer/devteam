@@ -299,7 +299,8 @@ test('responder-contract A3: the handoff, sent, open and settled; writer on thre
         ['a resolved thread', ['send', 'supervisor', 'x', '--kind', 'handoff', '--thread', Tc], RESPONDER, /the owner closed it.*reopen.*--kind info/],
         ['--thread with --kind info', ['send', 'supervisor', 'x', '--kind', 'info', '--thread', Topen], RESPONDER, /--thread goes with --kind handoff/],
         ['a handoff from the supervisor', ['send', 'supervisor', 'x', '--kind', 'handoff', '--thread', Topen], F.SUP, /the responder hands threads to the supervisor/],
-        ['a handoff from a worker', ['send', 'supervisor', 'x', '--kind', 'handoff', '--thread', Topen], worker, /the responder hands threads to the supervisor/],
+        // kit-109: a worker hands over only in a thread about its own ticket (Topen is about nothing)
+        ['a handoff from a worker', ['send', 'supervisor', 'x', '--kind', 'handoff', '--thread', Topen], worker, /this thread isn't about your work; hand over only in a thread about your ticket or plan/],
         ['a handoff to a ticket', ['send', 'kit-9-probe', 'x', '--kind', 'handoff', '--thread', Topen], RESPONDER, /the responder hands threads to the supervisor/],
         // cmdSend's own words (task-4 T4-2): integrity's refusal starts the same way, so match what only send says
         ["the responder's info with --re", ['send', 'supervisor', 'x', '--re', M], RESPONDER, /the responder replies to no message \(re\): a reply would close what it names/],

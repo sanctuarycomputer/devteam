@@ -20,9 +20,16 @@ const refused = (r, pattern, m) => { assert.notEqual(r.status, 0, `${m}: exits n
 // a disk that ignores case (macOS, Windows) makes a twin the file itself; CI's disk doesn't
 const caseBlind = fs.existsSync(path.join(KIT, 'SCHEMA'));
 const re = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+// file k's draft: its words, and for self.md a valid self@1 block too (kit-139 holds a draft that breaks
+// the contract), its one part named by name, its path one the fixture has, no capitalised word in it;
+// for exterior.md a valid exterior@1 block (kit-135 holds one that breaks it), no entity, drawn from
+// main's strategy.md and self.md (world() lands a self.md, as exterior.md's draft needs one)
+let mainBlobs = null;
+const draft = (k, words, name) => `# ${k}\n\n${words}\n${k === 'self' ? `\n\`\`\`self\n${JSON.stringify({ self: 1, what: 'a project the owner approves drafts of.', makes: 'the drafts these tests land.', parts: [{ id: 'project', name, what: 'the project folder.', code: ['docs/devteam/project/'] }], controls: ['its code'], not: [] }, null, 2)}\n\`\`\`\n` : k === 'exterior' ? `\n\`\`\`exterior\n${JSON.stringify({ exterior: 1, strategy_blob: mainBlobs.strategy, self_blob: mainBlobs.self, entities: [] }, null, 2)}\n\`\`\`\n` : ''}`;
 
 // A fixture with a chore per draft, the owner's answers and the two gates (merge --dry-run, check-pr).
-function world(name) {
+// selfOnMain: false keeps kit-138's self.md track on a main with no self.md (a chore adds the first)
+function world(name, { selfOnMain = true } = {}) {
   const F = fixture(name);
   const { old, ok, run, g } = F;
   const wts = new Map();
@@ -65,6 +72,9 @@ function world(name) {
   // a release-scope or classless question, answered yes
   const other = (cls) => { const q = ok(old, ['ask', '--question', `Something else (${++n})?`, '--recommendation', 'yes', '--stake', '1', '--urgency', '1', '--new-because', 'the test asks again', ...(cls ? ['--class', cls, '--reasons', 'below-rung', '--no-default', 'the test waits'] : [])], SUP).trim(); ok(old, ['answer', q, 'yes']); return q; };
   const onMain = (rel, text) => { write(path.join(old, rel), text); g(['add', '-A'], old); g(['commit', '-qm', `main: ${rel}`], old); g(['push', '-q', 'origin', 'main'], old); };
+  // a minimal valid self.md on main, which an exterior.md draft is drawn from
+  if (selfOnMain) onMain(FILES.self.rel, draft('self', 'The approved self.', 'approved self'));
+  mainBlobs = { strategy: g(['rev-parse', `origin/main:${FILES.strategy.rel}`], old), self: selfOnMain ? g(['rev-parse', `origin/main:${FILES.self.rel}`], old) : null };
   const supLine = (o) => fs.appendFileSync(path.join(old, 'docs/devteam/run/log', `supervisor-${new Date().toISOString().slice(0, 7)}.jsonl`), line({ at: new Date().toISOString(), by: 'supervisor', ...o }));
   // check-pr's exit on a chore that changes only a project note: what a warning must leave it at
   const baseline = () => { const sha = chore('notes-only', (w) => write(path.join(w, `${P}/designs/notes.md`), 'n\n')); const r = checkPr('chore-notes-only', sha); assert.equal(r.status, 0, `check-pr passes a chore that changes only a project note\n${r.text}`); return r.status; };
@@ -77,11 +87,11 @@ for (const k of ['self', 'exterior']) {
   const twinRel = rel.replace(`${k}.md`, `${k.toUpperCase()}.md`);
 
   test(`${rel} is the owner's: check-pr and merge land a change only under an answered ${cls} question pinned to the text`, () => {
-    const W = world(`wa-${k}`);
+    const W = world(`wa-${k}`, { selfOnMain: k !== 'self' });
     const { chore, merge, checkPr, answered, other, supLine } = W;
     try {
       // a first draft, in a chore: refused with no answer, at merge and at check-pr
-      const sha = chore('a', (w) => write(path.join(w, rel), `# ${k}\n\nDraft A.\n`));
+      const sha = chore('a', (w) => write(path.join(w, rel), draft(k, 'Draft A.', 'draft a')));
       const none = merge('a');
       assert.notEqual(none.status, 0);
       assert.match(none.text, new RegExp(`changes ${re(rel)}: .*the owner's answer is needed: ask --class ${cls}`), 'DW1 no answer, merge');
@@ -123,7 +133,7 @@ for (const k of ['self', 'exterior']) {
       const G = W.goal('Billing', 1);
       W.feature('billing', G);
       W.ticket('billing-01-a', 'billing');
-      const draftA = (w) => write(path.join(w, rel), `# ${k}\n\nDraft A.\n`);
+      const draftA = (w) => write(path.join(w, rel), draft(k, 'Draft A.', 'draft a'));
       const planSha = W.branchOf('plan/billing', draftA);
       const ticketSha = W.branchOf('ticket/billing-01-a', draftA);
       refused(checkPr('plan/billing', planSha, yes), new RegExp(`${yes} approves chore-a, not plan-billing`), 'DW1 plan PR, check-pr');
@@ -137,7 +147,7 @@ for (const k of ['self', 'exterior']) {
       refused(checkPr('plan/billing', planSha, planQ), new RegExp(`${planQ} approves plan-billing, not plan-billing: a change to ${re(rel)} lands only in the chore`), 'DW1 a hand-written line naming the plan, check-pr');
       refused(said(W.run(W.old, ['merge', 'billing-01-a', '--dry-run', '--approved', yes], SUP)), new RegExp(`${yes} approves chore-a, not billing-01-a: a change to ${re(rel)}`), 'DW1 ticket PR, merge');
       // amended after the answer: the owner never saw it
-      const sha2 = chore('a', (w) => write(path.join(w, rel), `# ${k}\n\nDraft B, never seen.\n`), { amend: true });
+      const sha2 = chore('a', (w) => write(path.join(w, rel), draft(k, 'Draft B, never seen.', 'draft b')), { amend: true });
       refused(merge('a', yes), new RegExp(`${re(rel)} at the head is not the text ${yes} asked the owner about`), 'DW1 amended, merge');
       refused(checkPr('chore-a', sha2, yes), new RegExp(`${re(rel)} at the head is not the text ${yes} asked the owner about`), 'DW1 amended, check-pr');
       // a case-twin of the file
@@ -154,19 +164,20 @@ for (const k of ['self', 'exterior']) {
   });
 
   test(`${rel} on main: emptying it needs the owner's answer like any change, and deleting it is never approved`, () => {
-    const W = world(`wa-${k}-main`);
+    const W = world(`wa-${k}-main`, { selfOnMain: k !== 'self' });
     const { chore, merge, answered, onMain } = W;
     try {
       onMain(rel, `# ${k}\n\nThe approved version.\n`);
       chore('empty', (w) => write(path.join(w, rel), ''));
       refused(merge('empty'), new RegExp(`changes ${re(rel)}: .*ask --class ${cls}`), 'DW1 emptied');
-      assert.equal(merge('empty', answered(k, 'empty')).status, 0, 'an empty version the owner saw and approved lands');
+      // an empty self.md or exterior.md breaks its contract (it is no deletion), so even the owner's yes doesn't land it
+      refused(merge('empty', answered(k, 'empty')), new RegExp(`breaks ${k}@1`), `an empty ${k}.md breaks the contract, answered or not`);
       // changed: a new text needs its own answer
-      chore('edit', (w) => write(path.join(w, rel), `# ${k}\n\nThe next version.\n`));
+      chore('edit', (w) => write(path.join(w, rel), draft(k, 'The next version.', 'next version')));
       refused(merge('edit'), new RegExp(`changes ${re(rel)}: .*ask --class ${cls}`), 'DW1 changed, no answer');
       assert.equal(merge('edit', answered(k, 'edit')).status, 0, 'DW1 changed, the owner\'s yes lands it');
       // deleted: no draft to pin (ask refuses), and an answer from before the deletion pins a text the head lacks
-      chore('gone', (w) => write(path.join(w, rel), `# ${k}\n\nA last version.\n`));
+      chore('gone', (w) => write(path.join(w, rel), draft(k, 'A last version.', 'last version')));
       const q = answered(k, 'gone');
       const goneSha = chore('gone', (w) => fs.rmSync(path.join(w, rel)), { amend: true });
       refused(merge('gone'), new RegExp(`changes ${re(rel)}: .*ask --class ${cls}`), 'DW1 deleted, no answer');

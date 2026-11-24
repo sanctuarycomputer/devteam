@@ -50,7 +50,9 @@ async function openThreadsPage(t, name) {
   const shown = (id) => `!document.getElementById('${id}').hidden`;
   // the peek slid in (kit-88): shown, and at rest, so a point read on it stays where it is
   const slid = () => `${shown('drawer')} && getComputedStyle(document.getElementById('drawer')).transform === 'none'`;
-  await soon(`!!document.querySelector('${goalSel}')`, 'the goal card');
+  // and loaded (kit-784): until the load event, Chrome makes a script's hash change with no user gesture (every
+  // p.ev here) replace the entry rather than add one, so a Back or a close after it would land off the page
+  await soon(`document.readyState === 'complete' && !!document.querySelector('${goalSel}')`, 'the goal card');
   const threads = () => JSON.parse(F.owner(['thread', 'list', '--all', '--json']));
   // An Enter keyDown as a keyboard sends it, with its '\r' (p.key sends none), so a newline lands
   // unless the page cancels the key. It can be sent with Shift, Ctrl, Alt or Meta, as a key repeat, or as 229
@@ -89,7 +91,7 @@ test("threads on the dashboard page: Shift and point, the card, the pins and the
   await t.test('reads of the threads slower than the 2 s poll: a reply still shows, and the owner can still send twice', async () => {
     await p.ev('window.__threadsDelay = 2500');
     try {
-      F.sup(['thread', 'reply', T, 'Slow box: still here.']);
+      F.sup(['thread', 'reply', T, 'Slow box: still here.', '--off-subject', 'a note while the reads are slow']);
       await soon(`[...document.querySelectorAll('#tl-c-turns .tl-turn.supervisor')].some((e) => e.textContent.includes('Slow box'))`, 'the reply through slow reads');
       for (const w of ['First on a slow box', 'Second on a slow box']) {
         await p.ev("document.getElementById('tl-c-text').focus()");
@@ -225,9 +227,11 @@ test("threads on the dashboard page: Shift and point, the card, the pins and the
   });
 
   await t.test('a press on a pin across a read that adds a pin still opens its card', async () => {
+    // the page places its pins when the slide's transitionend runs (a task after the frame that ends it, late on a loaded runner); a listener added after the page's own says that has run. The panel-closed term keeps a late end of subtest 7's opening slide from counting.
+    await p.ev(`window.__slid = false; document.querySelector('.main').addEventListener('transitionend', (e) => { if (e.target === e.currentTarget && e.propertyName === 'margin-right' && !document.body.classList.contains('threads-open')) window.__slid = true; }); void 0`);
     await click('#th-close');
     // closed, and the page back at rest (its margin slides over --dur), so the pin stays where it is found
-    await soon(`!document.body.classList.contains('threads-open') && getComputedStyle(document.querySelector('.main')).marginRight === '0px'`, 'the panel closed, the page at rest');
+    await soon(`!document.body.classList.contains('threads-open') && getComputedStyle(document.querySelector('.main')).marginRight === '0px' && window.__slid`, 'the panel closed, the page at rest, its pins placed');
     // still from finding the pin to pressing it; the reads then land under the press
     const at = await still(async () => {
       const xy = await p.at('.tl-pin');

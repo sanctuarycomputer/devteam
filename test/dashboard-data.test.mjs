@@ -341,8 +341,8 @@ test('the governance listing, read-only, with what changed here', { timeout: 300
   const A = govFixture('gov-sync', 'v0.1.0');
   const before = logAt(A.root);
   let files = gov(A);
-  assert.deepEqual(files.map((r) => r.path), [...kitFiles('governance'), ...kitFiles('process'), 'docs/devteam/project/strategy.md', 'docs/devteam/project/exterior.md'], 'every file, in its group, by name');
-  assert.deepEqual(files.map((r) => r.group), [...kitFiles('governance').map(() => 'governance'), ...kitFiles('process').map(() => 'process'), 'project', 'project']);
+  assert.deepEqual(files.map((r) => r.path), [...kitFiles('governance'), ...kitFiles('process'), 'docs/devteam/project/strategy.md', 'docs/devteam/project/self.md', 'docs/devteam/project/exterior.md'], 'every file, in its group, by name');
+  assert.deepEqual(files.map((r) => r.group), [...kitFiles('governance').map(() => 'governance'), ...kitFiles('process').map(() => 'process'), 'project', 'project', 'project']);
   const con = row(files, 'docs/devteam/governance/constitution.md');
   assert.equal(con.title, 'Constitution');
   assert.equal(con.differs, false, 'untouched since the sync');
@@ -401,7 +401,7 @@ test('the governance listing, read-only, with what changed here', { timeout: 300
   const B = govFixture('gov-none', null, 'docs/elsewhere');
   const beforeB = logAt(B.root);
   files = gov(B);
-  assert.deepEqual(files.map((r) => r.path), [...kitFiles('governance'), ...kitFiles('process'), 'docs/elsewhere/strategy.md', 'docs/elsewhere/exterior.md']);
+  assert.deepEqual(files.map((r) => r.path), [...kitFiles('governance'), ...kitFiles('process'), 'docs/elsewhere/strategy.md', 'docs/elsewhere/self.md', 'docs/elsewhere/exterior.md']);
   for (const r of files.filter((x) => x.group !== 'project')) {
     assert.equal(r.differs, null, `${r.path}: no sync commit`);
     assert.equal(r.state, null);
@@ -480,7 +480,7 @@ test('every kit setting, grouped, named, with no secret shown', { timeout: 30000
     'sensor_scrub',
   ]);
   // kit-162 moved `recurring` out of SETTINGS_DEFAULTS into project/recurring.json: one fewer than main's count
-  assert.equal(union.size, 51, 'every setting the kit reads, 51 today (kit-103: responder, responder_command)');
+  assert.equal(union.size, 54, 'every setting the kit reads, 54 today (kit-103: responder, responder_command; kit-288: next_move_owed_minutes, next_move_stall_hours; kit-109: session_threads)');
   // every direct read names a key in the union (spec §6, F3-3: its reach)
   const reads = [...src.matchAll(/loadSettings\(\)\.([a-z_]+)/g), ...src.matchAll(/settingsAt\([^)]*\)\??\.([a-z_]+)/g)].map((m) => m[1]);
   assert.ok(reads.length > 50, `the read sites found (${reads.length})`);
@@ -537,7 +537,7 @@ test('every kit setting, grouped, named, with no secret shown', { timeout: 30000
   const all = data(F).settings_all;
   assert.ok(Array.isArray(all), 'settings_all');
   // keys
-  assert.equal(all.length, 51);
+  assert.equal(all.length, 54);
   assert.deepEqual(new Set(all.map((e) => e.key)), union);
   // order: each group once, in the page's order
   const groups = all.map((e) => e.group).filter((g, i, a) => g !== a[i - 1]);
@@ -545,7 +545,7 @@ test('every kit setting, grouped, named, with no secret shown', { timeout: 30000
   // the show kinds (F3-4)
   const kinds = {};
   for (const e of all) kinds[e.shown] = (kinds[e.shown] ?? 0) + 1;
-  assert.deepEqual(kinds, { value: 34, hidden: 7, names: 7, count: 3 }); // kit-162: recurring left SETTINGS_DEFAULTS (it was a names kind)
+  assert.deepEqual(kinds, { value: 37, hidden: 7, names: 7, count: 3 }); // kit-162: recurring left SETTINGS_DEFAULTS (it was a names kind)
   for (const e of all) {
     for (const f of ['key', 'group', 'name', 'description', 'shown', 'value', 'set', 'default', 'owner_only']) assert.ok(f in e, `${e.key} has ${f}`);
     assert.equal(e.set, mainKeys.has(e.key), `${e.key}: set is whether main's file has it`);
