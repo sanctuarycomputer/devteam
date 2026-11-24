@@ -11171,9 +11171,12 @@ function cmdThread() {
     // an artifact note's proposal carries the kit's picture of the spot: no picture, no line (kit-147)
     if (t.subject?.kind === 'artifact') return (async () => {
       const r = await markShot(threadViewOf(t.id), { kind: 'ready' });
-      // a line refused ends the process (die) or throws: either way its pictures go
+      // a refusal from here ends the process (die) or throws: either way the pictures go
       let written = false;
       process.once('exit', () => { if (!written) for (const f of r.files) fs.rmSync(f, { force: true }); });
+      // the picture takes seconds: the owner may have closed the thread meanwhile
+      logCache = null;
+      threadOpen(t.id, 'supervisor');
       appendLog({ type: 'thread', op: 'set', id: t.id, ready: { outcome, at: nowIso() }, shot: r.shot }, 'supervisor');
       written = true;
       shotSweep(t.id, Date.now());
@@ -12771,22 +12774,23 @@ async function shotLaunch({ noSandbox = false, extraArgs = [], cap }) {
   if (!cdp) return { ...launch, started: false };
   launch.cdp = cdp;
   const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
+  launch.page = { targetId };
+  shotHook('page');
   const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
-  launch.page = { sessionId, targetId };
+  launch.page.sessionId = sessionId;
   launch.crashed = new Promise((_, reject) => {
     const crashed = () => reject(new Error('the page crashed; no mark written'));
     cdp.on('Inspector.targetCrashed', (p, sid) => { if (sid === sessionId) crashed(); });
     cdp.on('Target.detachedFromTarget', (p) => { if (p.sessionId === sessionId) crashed(); });
   });
   launch.crashed.catch(() => {});
-  shotHook('page');
   return launch;
 }
 // The sandbox first, always. Once more without it only when the operator allows it, and only when no
 // page was ever opened: a crash after that is the page's doing.
 async function shotChrome({ extraArgs = [], cap }) {
   const start = async (noSandbox) => {
-    try { return await shotLaunch({ noSandbox, extraArgs, cap }); } catch (e) { if (!cap.launch?.child || !cap.launch.cdp || cap.launch.page) throw e; return { started: false }; }
+    try { return await shotLaunch({ noSandbox, extraArgs, cap }); } catch (e) { if (!cap.launch?.cdp || cap.launch.page) throw e; return { started: false }; }
   };
   const refused = "Chrome didn't start (its sandbox may not be available here); set DEVTEAM_CHROME_NO_SANDBOX=1 to allow one try without it";
   const first = await start(false);
@@ -12874,8 +12878,8 @@ const SHOT_FRAMES = 'new Promise((r) => requestAnimationFrame(() => requestAnima
 const shotScheme = (launch, value) => launch.cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value }] }, launch.page.sessionId);
 // What the page answers is its own word; a script that throws there is no answer.
 async function shotEval(launch, expression) {
-  const r = await launch.cdp.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, launch.page.sessionId);
-  if (r.exceptionDetails) throw new Error(SHOT_ANSWER);
+  const r = await launch.cdp.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, launch.page.sessionId).catch(() => null);
+  if (!r || r.exceptionDetails) throw new Error(SHOT_ANSWER);
   return r.result?.value;
 }
 // The one way a mark gets its picture: of the copy Show me will open once the mark is written.

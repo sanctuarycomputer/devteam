@@ -13,7 +13,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { spawn, spawnSync } from 'node:child_process';
 import { chromePath } from './lib/chrome.mjs';
-import { dashboardOnFreePort, kit, testDir, threadsFixture, write } from './lib/kit.mjs';
+import { dashboardOnFreePort, kit, testDir, threadsFixture, until, write } from './lib/kit.mjs';
 
 const SRC = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
 const LENS = /const ARTIFACT_LENS = String\.raw`([^`]*)`;/.exec(SRC)[1];
@@ -191,11 +191,33 @@ test('C8a no sandbox only when the operator says so, and only second', async () 
   assert.equal(r.line, undefined);
   assert.deepEqual(dies.launches().map((a) => a.includes('--no-sandbox')), [false, true]);
   assert.match(r.out, /Chrome's sandbox didn't start here; took the picture without it \(DEVTEAM_CHROME_NO_SANDBOX=1\)/);
-  const again = fake('fake-chrome.sh');
-  const r2 = await k.readyOn(k.subject(), { CHROME_PATH: again.file, DEVTEAM_CHROME_NO_SANDBOX: undefined });
-  assert.equal(r2.status, 1);
-  assert.deepEqual(again.launches().map((a) => a.includes('--no-sandbox')), [false]);
-  assert.match(r2.out, /Chrome didn't start \(its sandbox may not be available here\); set DEVTEAM_CHROME_NO_SANDBOX=1 to allow one try without it/);
+  for (const v of [undefined, '0']) {
+    const again = fake('fake-chrome.sh');
+    const r2 = await k.readyOn(k.subject(), { CHROME_PATH: again.file, DEVTEAM_CHROME_NO_SANDBOX: v });
+    assert.equal(r2.status, 1);
+    assert.deepEqual(again.launches().map((a) => a.includes('--no-sandbox')), [false], String(v));
+    assert.match(r2.out, /Chrome didn't start \(its sandbox may not be available here\); set DEVTEAM_CHROME_NO_SANDBOX=1 to allow one try without it/);
+  }
+});
+
+test('C8a a Chrome that says nothing is killed with its children after 8 s', async () => {
+  const k = shotKit();
+  const hang = fake('hang-chrome.sh');
+  const started = Date.now();
+  const r = await k.readyOn(k.subject(), { CHROME_PATH: hang.file, DEVTEAM_CHROME_NO_SANDBOX: undefined });
+  const took = Date.now() - started;
+  assert.equal(r.status, 1);
+  assert.match(r.out, /Chrome didn't start/);
+  assert.ok(took >= 8000 && took < 16000, `${took} ms`);
+  await until(() => !spawnSync('ps', ['-eo', 'args'], { encoding: 'utf8' }).stdout.includes('sleep 97531'), 'its child to be gone');
+});
+
+test('C8a a Chrome that dies once its page exists is not tried again', async () => {
+  const k = shotKit();
+  const wrap = fake('fake-pipe.sh');
+  const r = await k.readyOn(k.subject(), { CHROME_PATH: wrap.file, FAKE_NODE: process.execPath });
+  assert.equal(r.status, 1);
+  assert.deepEqual(wrap.launches().map((a) => a.includes('--no-sandbox')), [false]);
 });
 
 test('C8b a crash after the page opened is never tried again', async () => {
