@@ -10493,7 +10493,11 @@ function threadView(t, ts, qs, ms = []) {
   // whose reply is owed (owedIn, kit-104): the supervisor's when a turn routed to it, or with no
   // route, is owed; else the responder's when one routed to it is; else the owner's move
   const owed = owedIn(ts, t);
-  let waiting = owed.some((u) => u.routed_to !== 'responder') ? 'supervisor' : owed.length ? 'responder' : 'owner';
+  // kit-109: else, when the oldest owed turn is routed to a session, that session's (waiting 'session',
+  // with: W, kit-143's values)
+  const supOwes = owed.some((u) => u.routed_to !== 'responder' && u.routed_to !== 'session');
+  const routedWith = !supOwes && owed[0]?.routed_to === 'session' && typeof owed[0].routed_session === 'string' ? owed[0].routed_session : null;
+  let waiting = supOwes ? 'supervisor' : routedWith ? 'session' : owed.length ? 'responder' : 'owner';
   const status = t.status === 'resolved' ? 'resolved' : 'open';
   const proposed = t.updates.filter((u) => u.ready !== undefined).pop() ?? null;
   const ownerSince = !!proposed && (turns.some((u) => u.by === 'owner' && u.at > proposed.at) || t.updates.some((u) => u.status !== undefined && u.at > proposed.at));
@@ -10522,7 +10526,7 @@ function threadView(t, ts, qs, ms = []) {
   // <session>; open): to check or open, the owner's; with a session, that session's; with the
   // supervisor, the supervisor's until its first turn after the hand-over (D5: any non-owner turn).
   if (open && art) waiting = check || !handed ? 'owner' : handed.to === 'supervisor' && !turns.some((u) => u.by !== 'owner' && u.at > handed.at) ? 'supervisor' : 'session';
-  const withSession = open && art && !check && handed ? handed.to : null;
+  const withSession = open && art && !check && handed ? handed.to : open && !art && waiting === 'session' ? routedWith : null;
   const firstOwner = turns.find((u) => u.by === 'owner');
   const firstReply = firstOwner ? turns.find((u) => u.by === 'supervisor' && u.at > firstOwner.at) : null;
   return {
@@ -10894,7 +10898,7 @@ function cmdThread() {
   // question of its own (thread ask), which is what it names
   // implied, when given, gets the --re a responder's follow-up of its open promise carries unnamed
   const askedFor = (t, by, objects, { refs = [], re, off, goal, asks = false, implied } = {}) => {
-    if (owedTurns(t.id, objects).length) return;
+    if (owedTurns(t.id, objects).some((o) => !['ticket', 'planner'].includes(writerClass(by)) || answersTurn(o, by))) return;
     // the responder's open promise there (pendingOpen, kit-104): the supervisor's to take over; the
     // responder's to keep, as a follow-up of that turn, held to the subject as a --re one is (task-3 F1)
     const promise = by === 'owner' ? null : pendingOpen(logTurns(t.id, objects), t);
@@ -11283,11 +11287,11 @@ function cmdThread() {
       const late = new Set(responderOverdue(objects).map((o) => o.thread));
       const open = vs.filter((x) => x.status === 'open');
       const mine = open.filter((x) => x.waiting === 'supervisor' || handoffs.has(x.id));
-      const theirs = open.filter((x) => x.waiting === 'responder' && !handoffs.has(x.id));
+      const theirs = open.filter((x) => (x.waiting === 'responder' || (x.waiting === 'session' && x.subject?.kind !== 'artifact' && typeof x.with === 'string')) && !handoffs.has(x.id));
       if (flags.json) return json(mine.map((x) => ({ ...x, handoff: handoffs.get(x.id) ?? null })));
       if (!mine.length) out('no thread is waiting on the supervisor');
       for (const x of mine) out(row(x, `waiting on the supervisor${handoffs.has(x.id) ? ` · handoff ${handoffs.get(x.id)}` : ''}`));
-      for (const x of theirs) out(row(x, waitingWords(x, late.has(x.id))));
+      for (const x of theirs) out(row(x, x.waiting === 'session' ? `${sessionWords(x.with, objects)} has it` : waitingWords(x, late.has(x.id))));
       return;
     }
     if (!flags.all) vs = vs.filter((x) => x.status === 'open');
@@ -35397,9 +35401,11 @@ function responderWindowRefusal(w) {
 const logTurns = (threadId, objects = readLog().objects) => [...objects.values()].filter((o) => o.type === 'turn' && o.thread === threadId).sort(byTime);
 // Whether a reply written by `by` answers the owner's turn u (the spine's Answered rule, kit-104):
 // a turn routed to the supervisor only by the supervisor; one routed to the responder by the
-// responder or the supervisor; one with no route (an older kit's) by any non-owner, as before.
+// responder or the supervisor; one routed to a session (kit-109) by that session (routed_session) or
+// the supervisor; one with no route (an older kit's) by any non-owner but a session, which answers
+// only what was routed to it (contract-1 F3).
 // Every "the owner said it" here is a line's writer (created_by), never its text.
-const answersTurn = (u, by) => by !== 'owner' && (!u.routed_to || by === 'supervisor' || by === u.routed_to);
+const answersTurn = (u, by) => by !== 'owner' && (by === 'supervisor' || (u.routed_to === 'session' ? by === u.routed_session : !u.routed_to ? !['ticket', 'planner'].includes(writerClass(by)) : by === u.routed_to));
 // The owner's turns still owed an answer, from a thread's turns (log lines, oldest first) and the
 // thread: an owner turn is answered by a turn in the thread at or after it (a tie answers) whose
 // writer answers it (answersTurn), and a resolve of the thread after it leaves it owed nothing, by

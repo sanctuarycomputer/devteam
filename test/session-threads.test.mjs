@@ -10,6 +10,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { dashboardOnFreePort, hasTmux, line, threadsFixture, write } from './lib/kit.mjs';
 
+const SUP = { DEVTEAM_ROLE: 'supervisor' };
 const W = 'web-09-live';
 const X = 'web-08-other';
 const M = 'web-07-merged';
@@ -298,7 +299,8 @@ test('kit-109 session-bound threads', { skip: NO_TMUX, timeout: 600000 }, async 
   await t.test("S3h: W may reply in an artifact thread drawn in its worktree (ruling a-20261123-042800922)", () => {
     write(path.join(F.old, '.worktrees', W, 'docs/devteam/project/artifacts/mock-b/index.html'), '<p>x</p>');
     const ta = F.newThread(JSON.stringify({ kind: 'artifact', slug: 'mock-b', at: W }));
-    const r = F.run(F.old, ['thread', 'reply', ta.T, 'The mock now shows two tiers'], WORKER(W));
+    // nothing there is routed to W (an artifact never routes), so its turn names what it is about (kit-108)
+    const r = F.run(F.old, ['thread', 'reply', ta.T, 'The mock now shows two tiers', '--refs', `ticket:${W}`], WORKER(W));
     assert.equal(F.lineOf(r.out.split('\n')[0]).by, W, r.err);
   });
   const tx = F.newThread(item(`ticket:${Y}`), 'y first');
@@ -311,5 +313,80 @@ test('kit-109 session-bound threads', { skip: NO_TMUX, timeout: 600000 }, async 
     const r2 = F.run(F.old, ['thread', 'reply', tx.T, 'late answer', '--refs', `ticket:${Y}`, '--anyway'], WORKER(Y));
     const u = F.lineOf(r2.out.split('\n')[0]);
     assert.deepEqual([u.by, u.refs], [Y, [`ticket:${Y}`]], r2.err);
+  });
+
+  // ---- done-when 4: authority stays with the supervisor
+  await t.test("S4a: a session's reply after the owner's answer to the supervisor's question leaves that turn owed to the supervisor", () => {
+    const { T } = F.newThread(item('planner:other'));
+    F.sup(['thread', 'ask', T, '--question', 'Two tiers?', '--options', 'Yes', 'No']);
+    F.say(T, 'Yes, two');
+    F.run(F.old, ['thread', 'reply', T, 'Noted'], PLANNER('other'));
+    F.hand('plan-other', { type: 'turn', thread: T, text: 'Noted, by hand' }, 0, `plan-other-${month()}.jsonl`);
+    const v = JSON.parse(F.owner(['thread', 'show', T, '--json']));
+    assert.ok(v.turns.at(-1).writer === 'plan-other' && v.waiting === 'supervisor', `the planner spoke last and the thread still waits on the supervisor: ${v.turns.at(-1).writer}, ${v.waiting}`);
+  });
+  // a session turn as the build writes it, by hand so it exists on main too (where it is dropped)
+  const su = F.hand(W, { type: 'turn', thread: tw.T, text: 'Yes, merge it. That was the wrong call.' }, 500, `${W}.jsonl`);
+  await t.test("S4b: answer --from-turn citing a session's turn is refused", () => {
+    const q = F.sup(['ask', '--question', 'Go?', '--options', 'Yes', 'No']);
+    assert.match(F.fails(['answer', q, 'Yes', '--from-turn', su], SUP), new RegExp(`that turn is the ${W}'s; only the owner's words settle a question`));
+  });
+  await t.test("S4c: correct --from-turn citing a session's turn is refused", () => {
+    const d = /d-\S+/.exec(F.sup(['decide', '--class', 'rename-column', '--', 'renamed a column']))[0];
+    assert.match(F.fails(['correct', d, '--from-turn', su, '--said', 'That was the wrong call.'], SUP), new RegExp(`that turn is the ${W}'s; only the owner's words correct a call`));
+  });
+  await t.test('S4d: a session can\'t run thread ask', () => {
+    assert.match(Object.values(F.run(F.old, ['thread', 'ask', tw.T, '--question', 'Q?', '--options', 'a', 'b'], WORKER(W))).join(' '), /thread ask: the supervisor does this/);
+  });
+  await t.test('S4e: a session can\'t run thread ready', () => {
+    assert.match(Object.values(F.run(F.old, ['thread', 'ready', tw.T, '--outcome', 'done'], WORKER(W))).join(' '), /thread ready: the supervisor does this/);
+  });
+  await t.test('S4f: a session can\'t run thread new', () => {
+    assert.match(Object.values(F.run(F.old, ['thread', 'new', '--title', 'x', '--', 'hi'], WORKER(W))).join(' '), /owner commands don't run in an agent session \(DEVTEAM_ROLE=worker\)|thread new: the supervisor does this|thread new: only the owner and the supervisor start threads \(DEVTEAM_ROLE=worker\)/);
+  });
+  // a message id as the kit writes one, for a hand-written line
+  const mid = (by, ago) => `m-${new Date(Date.now() - ago).toISOString().replace(/[-:.Z]/g, '').replace('T', '-')}-${by}`;
+  await t.test("S3j: two owner turns routed to W, then W's one reply answers both (printed) and the owner moves next", () => {
+    F.preview('calm-otter', W);
+    const { T, U } = F.newThread(JSON.stringify({ kind: 'preview', name: 'calm-otter' }), 'first ask');
+    const U2 = F.say(T, 'and a second');
+    assert.deepEqual([F.lineOf(U).routed_session, F.lineOf(U2).routed_session], [W, W]);
+    const r = F.run(F.old, ['thread', 'reply', T, 'Both done'], WORKER(W));
+    const v = JSON.parse(F.owner(['thread', 'show', T, '--json']));
+    assert.ok(r.err.includes(`answering ${U}:`) && r.err.includes(`answering ${U2}:`) && v.waiting === 'owner', `${r.err} / waiting ${v.waiting}`);
+    F.owner(['thread', 'resolve', T], F.OWN);
+  });
+  await t.test("S3k: W's turn never answers an owner turn with no route (an older kit's), and with nothing routed to W it needs a ref (contract-1 F3)", () => {
+    F.preview('bold-otter', W);
+    const { T } = F.newThread(JSON.stringify({ kind: 'preview', name: 'bold-otter' }), 'routed');
+    F.run(F.old, ['thread', 'reply', T, 'On it'], WORKER(W));
+    const old = F.hand('owner', { type: 'turn', thread: T, text: 'from an older kit' }, 0);
+    const before = F.logSizes();
+    const r = F.run(F.old, ['thread', 'reply', T, 'mine?'], WORKER(W));
+    assert.match(`${r.err}${r.out}`, /nothing in t-\S+ is waiting on you/);
+    assert.equal(F.logSizes(), before, 'nothing written');
+    F.hand(W, { type: 'turn', thread: T, text: 'by hand' }, 0, `${W}.jsonl`);
+    const v = JSON.parse(F.owner(['thread', 'show', T, '--json']));
+    assert.ok(v.waiting === 'supervisor' && F.sup(['thread', 'list', '--waiting']).includes(`${T} [open, waiting on the supervisor`), `${old} still the supervisor's: ${v.waiting}`);
+    F.owner(['thread', 'resolve', T], F.OWN);
+  });
+  await t.test("S6j: W's turn with no refs is refused while its own handoff is open (a handoff never solicits a session's turn)", () => {
+    F.preview('swift-otter', W);
+    const { T } = F.newThread(JSON.stringify({ kind: 'preview', name: 'swift-otter' }), 'can you merge it?');
+    F.run(F.old, ['thread', 'reply', T, 'Passed to the supervisor'], WORKER(W));
+    F.hand(W, { type: 'message', id: mid(W, 200), to: 'supervisor', kind: 'handoff', text: 'The owner asks to merge it', re: null, sha: null, ticket: null, thread: T }, 200, `${W}.jsonl`);
+    const before = F.logSizes();
+    const r = F.run(F.old, ['thread', 'reply', T, 'any news?'], WORKER(W));
+    assert.match(`${r.err}${r.out}`, /nothing in t-\S+ is waiting on you/);
+    assert.equal(F.logSizes(), before, 'nothing written');
+    F.owner(['thread', 'resolve', T], F.OWN);
+  });
+  await t.test('S7a: thread list --waiting marks a session-routed turn "<session> has it"', () => {
+    // its own thread: the oldest owed turn decides, and tw still holds turns the responder has (S2)
+    F.preview('quick-otter', W);
+    const { T } = F.newThread(JSON.stringify({ kind: 'preview', name: 'quick-otter' }), 'one more');
+    const v = JSON.parse(F.owner(['thread', 'show', T, '--json']));
+    assert.deepEqual([v.waiting, v.with], ['session', W]);
+    assert.match(F.sup(['thread', 'list', '--waiting']), new RegExp(`${T} \\[open, the agent on ${W} has it`));
   });
 });
