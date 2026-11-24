@@ -10273,11 +10273,20 @@ function cmdAnswer() {
 // the answer is already written, and it stands.
 function resolveQuestionThreads(qid, answer, by, { turn = null } = {}) {
   const ell = '…';
-  // a claim link's token goes first (appendLog takes it out too): cut inside one, it would grow past OUTCOME_MAX there
-  const cut = (s) => { const x = redactClaimLinks(String(s ?? '')).replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim(); return Buffer.byteLength(x) <= OUTCOME_MAX ? x : `${capBytes(x, OUTCOME_MAX - Buffer.byteLength(ell))}${ell}`; };
+  const flat = (s) => redactClaimLinks(String(s ?? '')).replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim();
+  // a cut can make a claim link match again, and appendLog's own redaction would then take it past
+  // OUTCOME_MAX: redact and cut until neither changes it, so what is printed is what is logged
+  const cut = (s) => {
+    let x = flat(s);
+    for (let i = 0; i < 8; i++) {
+      const y = Buffer.byteLength(x) <= OUTCOME_MAX ? x : `${capBytes(x, OUTCOME_MAX - Buffer.byteLength(ell))}${ell}`;
+      if ((x = flat(y)) === y) break;
+    }
+    return x;
+  };
   // a line as appendLog would write it, refused here instead of there (checkLine, LINE_MAX)
   const refusal = (fields, w) => {
-    const text = `${JSON.stringify(logLineFor(fields, w, `${SCHEMA['x-id'].prefix[fields.type]}-00000000-000000000-${w}`))}\n`;
+    const text = `${JSON.stringify(logLineFor(redactClaimLinks(fields), w, `${SCHEMA['x-id'].prefix[fields.type]}-00000000-000000000-${w}`))}\n`;
     const errs = checkLine(JSON.parse(text), logFileFor(w, fields.type));
     if (Buffer.byteLength(text) > LINE_MAX) errs.push(`the line is over ${LINE_MAX} bytes`);
     return errs.length ? errs.join('; ') : null;

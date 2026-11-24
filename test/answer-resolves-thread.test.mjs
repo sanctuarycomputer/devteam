@@ -295,4 +295,26 @@ test('answer stands: a thread whose lines the log would refuse stays open with a
   assert.equal(r3.status, 0, r3.err || r3.out);
   X.resolvedBy(T3, Q3, `Answered: ${lead}…`);
   assert.doesNotMatch(r3.out, /token/, 'the link\'s token is not printed either');
+
+  // and a cut that leaves a "%23" of the link's query as its fragment, which matches again: redacted
+  // again, so the line fits, the thread resolves, and nothing of the link is past it
+  const Q4 = X.ask();
+  const T4 = X.about(Q4);
+  const r4 = F.run(F.old, ['answer', Q4, `${'x'.repeat(258)} /auth/claim?next=%2Fhome%23top#tokentokentoken tail`]);
+  assert.equal(r4.status, 0, r4.err || r4.out);
+  assert.equal(X.show(T4).status, 'resolved', 'the thread resolves with a link cut in its query');
+  X.resolvedBy(T4, Q4, X.show(T4).outcome);
+  assert.ok(r4.out.split('\n').includes(`resolved ${T4}: ${X.show(T4).outcome}`), 'the outcome printed is the one logged');
+  assert.match(X.show(T4).outcome, /^Answered: x{258} \/auth\/claim\?next=%2F[^#]*…$/);
+  assert.doesNotMatch(X.show(T4).outcome, /token/);
+
+  // the supervisor's proposal too is written after the answer line
+  const Q5 = X.ask();
+  const T5 = X.about(Q5, 'Why?');
+  F.sup(['thread', 'reply', T5, 'Because. Ship it?', '--refs', `question:${Q5}`]);
+  const U5 = F.owner(['thread', 'say', T5, 'Yes']).split('\n')[0];
+  F.sup(['answer', Q5, 'Yes', '--from-turn', U5]);
+  const ready = X.setsOn(T5).filter((l) => l.ready !== undefined);
+  assert.equal(ready.length, 1, 'one proposal');
+  assert.ok(ready[0].at > X.answerLine(Q5).at, 'the proposal is written after the answer line');
 });
