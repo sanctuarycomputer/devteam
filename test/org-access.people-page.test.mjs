@@ -805,6 +805,7 @@ test('org-access A3: in Chrome, the owner\'s People work as the mock does', CHRO
   await p.ev(`document.querySelector('.oa-menu button').focus(); true`);
   await p.key('Tab');
   await p.until('Tab closes it', `!document.querySelector('.oa-menu')`);
+  assert.equal(await p.ev(`document.activeElement?.dataset.k ?? null`), `settings:menu:${B.sam.id}`, 'Tab went on from its ⋯ to the next one, not off the page');
   // its ⋯ again closes it (a real click: pointerdown, focus, then click)
   await menuOf(p, B.ownerRow.id);
   await p.click(`${personSel(B.ownerRow.id)} .menu-btn`);
