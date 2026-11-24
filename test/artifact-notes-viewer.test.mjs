@@ -260,6 +260,13 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await V.p.ev(`(window.__replies['artifact-handoff'] = { status: 400, body: { error: 'x' } }, true)`);
     await V.p.click('#av-handover');
     assert.ok(await V.settle(`${text('#e-avn')} === 'Not saved: x'`, 4000), 'a refusal shows Not saved');
+    // a refusal that comes once another version is shown is not said there
+    await V.rows({ [N.trial]: ROW.C20(), [N.onMain]: ROW.C20() });
+    await V.p.ev(`(window.__replies['artifact-handoff'] = { status: 400, body: { error: 'late' }, wait: 800 }, true)`);
+    await V.p.click('#av-handover');
+    await V.p.ev(`showArtifact('pricing', 'main', { picked: true }); void 0`);
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.deepEqual(await V.p.ev(`[AV.at, ${text('#e-avn')}]`), ['main', ''], "another version's refusal");
   });
 
   await sub('A3: the filter starts on To check once any exist, Open and All on choice, kept in localStorage', async () => {
@@ -496,6 +503,51 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await new Promise((r) => setTimeout(r, 300));
     assert.equal(await V.p.ev('TL.open'), next, "the owner's own card kept");
   });
+  await sub('A8c: a step under way is dropped by a new note, pin mode, or words in the card', async () => {
+    const V = await tabOf({ [N.trial]: withFrame(ROW.C12(), ''), [N.cancel]: withFrame(ROW.C12(), '') });
+    await openAt(V, AV_WT, 'plan-pricing');
+    await has(V, '#av-next', 'the stepper');
+    for (const [what, act, undo] of [
+      ['a new note', `tlStart({ subject: tsSubject(null, 700, 500), title: 'x', x: 700, y: 500 })`, 'tlClose()'],
+      ['pin mode', 'tlPinMode(true)', 'tlPinMode(false)'],
+      ['words in the card', `document.getElementById('tl-c-text').focus()`, 'document.activeElement.blur()'],
+      ['the picture', `document.getElementById('av-stage').insertAdjacentHTML('beforeend', '<div id="av-shot"></div>')`, `document.getElementById('av-shot')?.remove()`],
+    ]) {
+      await V.p.ev(`(avStep.sent = null, avStep.want = null, tlOpen(${J(N.trial)}, false), document.activeElement?.blur?.(), true)`);
+      await V.soon(`TL.open === ${J(N.trial)} && !document.getElementById('tl-card').hidden`, `setup: the card (${what})`);
+      await V.p.ev(`(avStep.want = { id: ${J(N.cancel)}, av: AV, open: TL.open, draft: TL.draft }, ${act}, avStep.land('late'), true)`);
+      assert.equal(await V.p.ev(`TL.open === ${J(N.cancel)}`), false, `dropped by ${what}`);
+      assert.equal(await V.p.ev('avStep.want'), null, `nothing left of it (${what})`);
+      await V.p.ev(`(${undo}, true)`);
+    }
+    // and not dropped with none of them
+    await V.p.ev(`(avStep.sent = null, tlOpen(${J(N.trial)}, false), document.activeElement?.blur?.(), avStep.want = { id: ${J(N.cancel)}, av: AV, open: TL.open, draft: TL.draft }, avStep.land('late'), true)`);
+    await V.soon(`TL.open === ${J(N.cancel)}`, 'the late landing opens its card');
+  });
+  await sub('A8d: a page that is slow or changes its own view is loaded once; nothing of the step outlives its card', async () => {
+    const V = await tabOf({ [N.trial]: withFrame(ROW.C12(), ''), [N.cancel]: withFrame(ROW.C12(), '#own') });
+    await openAt(V, AV_WT, 'plan-pricing');
+    await has(V, '#av-next', 'the stepper');
+    // a lens that says nothing for the while: the step goes late
+    await V.p.ev(`(window.__sets = 0, new MutationObserver((l) => { window.__sets += l.length; }).observe(tsFrame(), { attributes: true, attributeFilter: ['src'] }), tlOpen(${J(N.trial)}, false), avStep(1), TS.ready = false, true)`);
+    await V.p.ev(`(avStep.land('late'), true)`);
+    await V.soon(`TL.open === ${J(N.cancel)}`, 'late: its card');
+    await V.p.ev(`(avStep.land('late'), avStep.land('late'), true)`);
+    assert.deepEqual(await V.p.ev('[window.__sets, avStep.want]'), [1, null], 'sent once, the step over');
+    // the owner opens another: next steps from it
+    await V.soon(`TS.ready && TS.path === 'faq.html'`, 'the page came');
+    await V.p.ev(`(tlOpen(${J(N.trial)}, false), avStep(1), true)`);
+    await V.soon(`TL.open === ${J(N.cancel)}`, 'the next step goes from the open card');
+    assert.equal(await V.p.ev('window.__sets'), 1, 'no load: it is on that page');
+  });
+  await sub('A6b: where a note is: a path with no view and no frame, or a bare #, says nothing of the view', async () => {
+    const V = await tabOf({});
+    const vh = (t) => V.p.ev(`avStep.where(${J(t)}).vh`);
+    assert.equal(await vh({ subject: { path: 'index.html', point: { x: 1, y: 1 } } }), null, 'an old point note');
+    assert.equal(await vh({ subject: { path: 'index.html#', point: { x: 1, y: 1 } } }), null, 'a bare #');
+    assert.equal(await vh({ subject: { path: 'index.html', point: { x: 1, y: 1 } }, frame: { hash: '' } }), '', 'a framed one with no view');
+    assert.equal(await vh({ subject: { path: 'index.html#a', point: { x: 1, y: 1 } } }), '#a', "its path's");
+  });
   await sub('A12c: Resolve waits its second again when its block comes back', async () => {
     const V = await tabOf({ [N.trial]: withFrame(ROW.C12(), '') });
     await openAt(V, AV_WT, 'plan-pricing');
@@ -589,6 +641,13 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await V.p.ev(`(avShowMe(${J(N.onMain)}), true)`);
     await V.soon(`TS.at === 'main' && TS.ready && TL.open === ${J(N.onMain)}`, 'main shown, its card open');
     assert.equal(await V.p.ev('SHOW_NOTE'), null, 'nothing left for the next open');
+    // a leftover says nothing of another artifact
+    await V.close('x');
+    await V.closedOn('#library', 'closed');
+    await V.p.ev(`(tlClose(), SHOW_NOTE = { id: ${J(N.onMain)}, gone: false, head: ${J(AV_MAIN)} }, location.hash = '#artifact/main/viewer-a', true)`);
+    await V.soon(`${VIEWER_UP} && TS.slug === 'viewer-a' && TS.ready`, 'another artifact');
+    await new Promise((r) => setTimeout(r, 300));
+    assert.deepEqual(await V.p.ev(`[SHOW_NOTE, TL.open, AV_NAVS, /\\/viewer-a\\/$/.test(tsFrame().getAttribute('src'))]`), [null, null, 0, true], 'plainly opened');
   });
   await sub('A14: Show me from the Threads panel opens the source, the note\'s own file first, its card open', async () => {
     const cases = [
@@ -617,7 +676,15 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     const W = await tabOf({ [N.trial]: withFrame(ROW.C12({ source: null }), '') }, '#library?th=open');
     await W.p.click(`[data-tl-show="${N.trial}"]`);
     await W.soon(`location.hash === ${J(AV_MAIN)} && ${VIEWER_UP} && TS.ready`, 'source null: main');
-    assert.match(await W.p.ev(text('#tl-card')), /Showing main: the version with the change is gone\./, 'the card says so');
+    assert.ok(await W.settle(`/Showing main: the version with the change is gone\\./.test(${text('#tl-card')})`, 4000), 'the card says so');
+    await W.p.ev(`(tlClose(), tlOpen(${J(N.trial)}, false), true)`);
+    await W.p.ev(FRAMES);
+    assert.doesNotMatch(await W.p.ev(text('#tl-card')), /Showing main/, 'opened again, it does not');
+    // the panel's thread route open on another thread: Show me still lands its card
+    const X = await tabOf({ [N.trial]: withFrame(ROW.C12(), '') , [N.plans]: withFrame(ROW.C12(), '') }, '#library?th=open');
+    await X.soon(`!!document.querySelector('[data-tl-show="${N.trial}"]')`, 'the rows');
+    await X.p.ev(`(tlOpen(${J(N.plans)}, false), avShowMe(${J(N.trial)}), true)`);
+    await X.soon(`TL.open === ${J(N.trial)} && TS.ready && TS.at === 'plan-pricing'`, "another card open: Show me's own card lands");
   });
 
   await sub('A15: the picture: a 160px thumbnail from /api/shot/, its caption, full size with Light and Dark', async () => {

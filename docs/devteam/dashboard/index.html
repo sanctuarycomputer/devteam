@@ -1028,7 +1028,7 @@ try {
   /* a note's picture, full size over the stage (kit-145) */
   #av-shot { position: absolute; inset: 0; z-index: 4; display: flex; align-items: center; justify-content: center; padding: 16px; background: color-mix(in srgb, var(--bg) 70%, transparent); }
   /* the card gives way to the picture, so its Close is never under it */
-  body:has(#av-shot) #tl-card { visibility: hidden; }
+  body:has(#artifact-view:not([hidden]) #av-shot) #tl-card { visibility: hidden; }
   .av-shot-in { display: flex; flex-direction: column; max-width: 100%; max-height: 100%; min-height: 0; padding: 8px; gap: 8px; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.18); }
   .av-shot-bar { display: flex; align-items: center; gap: 6px; flex: none; }
   .av-shot-bar button { margin: 0; }
@@ -7063,7 +7063,7 @@ function openArtifact(raw) {
   const shown = show && show.head === artHref(slug, at) && TL.threads.find((x) => x.id === show.id), spot = shown && avStep.where(shown);
   if (shown && AV) AV_NAVS++;
   showArtifact(slug, at, { note, fp, mainFp, anchor: spot ? spot.file + (spot.vh ?? '') : '' });
-  if (shown) avStep.to(shown, { gone: show.gone });
+  if (shown) avStep.to(shown, { gone: show.gone, opening: true });
   $('scrim').hidden = false;
   document.body.classList.add('overlay-open');
   // opened over the open panel, it is on top of it at 900px and below (final-1 F1)
@@ -7100,7 +7100,7 @@ avNotes.draw = () => {
   // what a step said of its card, the second Resolve waits, and the picture go with the card, the version, the viewer
   if (avStep.off && (avStep.off.av !== AV || TL.open !== avStep.off.id)) avStep.off = null;
   if (!TL.open) TL.armAt = null;
-  if (!AV || AV.preview) tShot.close(false);
+  if (!AV || AV.preview || TS.kind !== 'artifact') tShot.close(false);
   if (avNotes.av !== AV) { avNotes.av = AV; $('e-avn').textContent = ''; }
   const said = AV?.handed;
   if (said && (Date.now() > said.until || notes.some((t) => said.ids.includes(t.id) && tNoteState(t) !== 'open'))) AV.handed = null;
@@ -7172,51 +7172,56 @@ avStep.where = (t) => {
   const spot = i >= 0 && p.length > i + 1 ? p.slice(i) : seen === '' ? '' : null;
   return { file: (i < 0 ? p : p.slice(0, i)) || 'index.html', vh: t.subject.anchor?.selector ? seen : spot };
 };
-avStep.to = (t, { gone = false } = {}) => {
+avStep.to = (t, { gone = false, opening = false } = {}) => {
   avStep.off = null;
-  const want = avStep.want = { id: t.id, gone, av: AV, open: TL.open, draft: TL.draft, carded: false };
-  // a page whose lens never says it is there (an older one, a page that changes its own hash): the card all the same
+  const want = avStep.want = { id: t.id, gone, av: AV, open: TL.open, draft: TL.draft };
+  // Show me's open is already loading the note's page; what the route opens as it ends is its own, not the owner's
+  if (opening) { avStep.sent = { av: AV, ...avStep.where(t), load: true, until: Date.now() + 3000 }; setTimeout(() => { want.open = TL.open; want.draft = TL.draft; }, 0); }
+  // a page whose lens never says it is there (an older one, one that changes its own hash, a slow one): the card all the same
   clearTimeout(avStep.timer);
   avStep.timer = setTimeout(() => { if (avStep.want === want) avStep.land('late'); }, 3000);
   avStep.land();
 };
 // The step under way carried on, as often as the lens says something (from 'ready' or 'nav'): the frame sent where
-// the note is (only if it isn't there and isn't on its way there: another file loads, another view of this one
-// goes without a load, a page with a view goes back to its plain file by loading it), then, once it is there,
-// scrolled to and its card opened. Late (3 s), the card opens anyway and the scroll waits for the page.
+// the note is, once (only if it isn't there and isn't on its way there: another file loads, another view of this
+// one goes without a load, a page with a view goes back to its plain file by loading it), then, once it is there,
+// scrolled to and its card opened. Late (3 s), the card opens anyway: the step is over, and a page still on its
+// way is scrolled when it comes, if that card is still the open one.
 avStep.land = (from = '') => {
-  const want = avStep.want, sent = avStep.sent?.av === AV ? avStep.sent : (avStep.sent = null);
-  // where the frame was sent, until its lens says so: what it says of the page being left is not this step's
   const is = (d) => TS.ready && TS.path === d.file && (d.vh === null || TS.hash === d.vh);
-  if (sent && is(sent)) avStep.sent = null;
-  else if (sent && from === 'late') avStep.sent = null;
+  const scroll = (t) => { const { selector, tag, text, rect } = t.subject.anchor ?? {}; if (selector) tsPost({ type: 'scroll-to', anchor: { selector, tag, text, rect } }); };
+  // where the frame was sent, until its lens says so (a page loaded for it has come, whatever view it then shows);
+  // what the page being left says is none of it. A move that never said so is forgotten once the stage is ready.
+  let sent = avStep.sent, came = null;
+  if (sent && sent.av !== AV) sent = null;
+  else if (sent && (is(sent) || (from === 'ready' && sent.load && TS.path === sent.file))) { came = sent; sent = null; }
+  else if (sent && TS.ready && Date.now() >= sent.until) sent = null;
+  avStep.sent = sent;
+  const then = came?.scroll && TL.open === came.scroll && TL.threads.find((x) => x.id === came.scroll);
+  if (then) scroll(then);
+  const want = avStep.want;
   if (!want) return;
   const t = TL.threads.find((x) => x.id === want.id), on = document.activeElement;
-  // the owner has moved on since: another card, a new note, pin mode, words in the card
-  const left = want.carded ? TL.open !== want.id : TL.open !== want.open || TL.draft !== want.draft || TL.pin || (on?.closest?.('#tl-card') && typingIn(on));
+  // the owner has moved on since: another card, a new note, pin mode, words in the card, the picture
+  const left = TL.open !== want.open || TL.draft !== want.draft || TL.pin || document.getElementById('av-shot') || (on?.closest?.('#tl-card') && typingIn(on));
   if (!t || want.av !== AV || TS.kind !== 'artifact' || left) { avStep.want = null; return; }
-  const to = avStep.where(t), late = from === 'late', way = avStep.sent;
-  const there = !way && is(to);
-  const sameWay = way && way.file === to.file && (to.vh === null || way.vh === to.vh);
-  // sent again once when the page that came isn't it (a live reload's fresh frame dropped the move)
-  const again = from === 'ready' && sameWay && way.load && !way.again;
-  if (!there && !want.carded && (TS.ready || late) && (!sameWay || again)) {
-    const go = TS.path === to.file && !!to.vh && !way?.load && TS.ready;
-    avStep.sent = { av: AV, ...to, load: !go, again };
+  const to = avStep.where(t), late = from === 'late';
+  const same = (d) => !!d && d.file === to.file && (to.vh === null || d.vh === to.vh);
+  const there = same(came) || (!sent && is(to));
+  if (!there && !same(sent) && (TS.ready || late)) {
+    const go = TS.ready && TS.path === to.file && !!to.vh && !sent?.load, f = tsFrame(), page = artSrc(AV.slug, AV.at) + to.file, src = page + (to.vh ?? '');
+    avStep.sent = { av: AV, ...to, load: !go, until: Date.now() + 3000 };
     if (go) tsPost({ type: 'go', hash: to.vh });
-    else {
+    // (a page not ready yet that is this one already is left to come)
+    else if (TS.ready || f.getAttribute('src') !== src) {
       // opened: without the view, so a live reload puts back the view the lens names (kit-142)
-      const f = tsFrame();
-      f.dataset.opened = artSrc(AV.slug, AV.at) + to.file;
-      f.src = f.dataset.opened + (to.vh ?? '');
+      f.dataset.opened = page;
+      f.src = src;
     }
   }
   if (!there && !late) return;
-  const { selector, tag, text, rect } = t.subject.anchor ?? {};
-  if (selector && there) tsPost({ type: 'scroll-to', anchor: { selector, tag, text, rect } });
-  if (there) avStep.want = null;
-  if (want.carded) return;
-  want.carded = true;
+  avStep.want = null;
+  if (there) scroll(t); else if (avStep.sent) avStep.sent.scroll = t.id;
   // by a step: placed at the stage's top right when the note has no pin there, and (gone) what version this is
   avStep.off = { id: t.id, gone: want.gone, av: AV };
   // opened under the owner's hand, so Resolve waits its second again
