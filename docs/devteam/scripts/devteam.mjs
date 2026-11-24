@@ -26878,11 +26878,15 @@ function makeSession(role) {
     // what origin holds, by sha: main, and the branch if it was pushed (a moved fleet continues from
     // it, never from main). Every local ref is any session's to write without a push (kit-790).
     const at = fetchLinkMain(R, 'refusing to start a ticket on a stale main', { start: branch });
+    // a symbolic branch would move whatever branch it names
+    const names = R.git(['symbolic-ref', '--quiet', `refs/heads/${branch}`], R.root);
+    if (names !== null) die(`${branch} here is a symbolic ref to ${names}, so nothing was started: delete it (git symbolic-ref --delete refs/heads/${branch})`);
     const local = R.resolveCommit(`refs/heads/${branch}`);
     const base = at.branch ?? at.main;
     // no grafts file or commit-graph a session wrote counts as a commit's history
     const history = (args) => responderGit(['-c', 'core.commitGraph=false', ...args], R.root, { GIT_GRAFT_FILE: '/dev/null' });
-    const anc = (a, b) => history(['merge-base', '--is-ancestor', a, b]).status === 0;
+    const cannot = (r) => die(`git could not compare ${branch} with origin's: ${redactUrl(firstLine(r.stderr).replace(/^fatal: /, '')) || `exit ${r.status}`}; nothing was started`);
+    const anc = (a, b) => { const r = history(['merge-base', '--is-ancestor', a, b]); return r.status === 0 || (r.status === 1 ? false : cannot(r)); };
     // Only a session that ran here has commits of its own origin may lack (worker --remove keeps the
     // branch). Any phase line but starting says so too: a ran ticket's fresh resume stopped before it
     // ran is not ranBefore.
@@ -26898,14 +26902,17 @@ function makeSession(role) {
       die(`${branch} here is at ${short(local)}, but origin's is at ${short(at.branch)} and neither holds the other, so nothing was started: merge one into the other and push it, or delete the local branch (git branch -D ${branch})`);
     } else if (local) {
       sha = local;
-      const n = history(['rev-list', '--count', `${base}..${local}`]).stdout.trim();
+      const counted = history(['rev-list', '--count', `${base}..${local}`]);
+      if (counted.status !== 0) cannot(counted);
+      const n = counted.stdout.trim();
       const commits = `${n} commit${n === '1' ? '' : 's'} origin doesn't hold yet`;
       warn(`${branch} starts at ${short(local)}, ${commits}: this ${role === 'worker' ? 'ticket' : 'plan'} ran here, and its unpushed work is kept`);
       keptWords = `, at ${short(local)}: ${commits}`;
     }
     // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
-    R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-B', branch, wt, sha], R.root);
-    // -B sets the branch and then checks it out by name, so a session moving it in between would
+    // -B only over a branch that was read: -b refuses one a failed read called missing
+    R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', local ? '-B' : '-b', branch, wt, sha], R.root);
+    // The add sets the branch and then checks it out by name, so a session moving it in between would
     // win: what landed is read back, and undone if it isn't the sha chosen, on the branch (its full
     // name: a tag of the same name makes git print a longer short one). The branch goes back to where
     // it was before the add, unless it moves again after this read.
@@ -26914,14 +26921,14 @@ function makeSession(role) {
     const head = read(['rev-parse', '--verify', '--quiet', 'HEAD'], wt);
     if (head !== sha || read(['symbolic-ref', 'HEAD'], wt) !== `refs/heads/${branch}`) {
       R.git(['worktree', 'remove', '--force', wt], R.root);
-      if (local) R.git(['update-ref', `refs/heads/${branch}`, local, seen ?? '0'.repeat(local.length)], R.root);
-      else if (seen) R.git(['update-ref', '-d', `refs/heads/${branch}`, seen], R.root);
+      if (local) R.git(['update-ref', '--no-deref', `refs/heads/${branch}`, local, seen ?? '0'.repeat(local.length)], R.root);
+      else if (seen) R.git(['update-ref', '--no-deref', '-d', `refs/heads/${branch}`, seen], R.root);
       die(`the new worktree ${head === sha ? `isn't on ${branch}` : `holds ${head ? short(head) : 'no commit'}, not ${short(sha)}`}: something moved ${branch} while it was checked out, so nothing was started; try again`);
     }
     const stale = at.branch ? null : R.resolveCommit(`refs/remotes/origin/${branch}`);
     if (stale) {
       warn(`origin has no ${branch}: its tracking ref here (${short(stale)}) is ignored and removed${sha === at.main ? `, and the branch starts from origin's ${mb} (${short(at.main)})` : ''}`);
-      R.gitOrDie(['update-ref', '-d', `refs/remotes/origin/${branch}`], R.root);
+      R.gitOrDie(['update-ref', '--no-deref', '-d', `refs/remotes/origin/${branch}`], R.root);
     }
     // set by config: --track fails where the checkout's fetch refspec is blank
     if (R.git(['config', '--get', `branch.${branch}.merge`], R.root) === null) {

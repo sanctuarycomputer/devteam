@@ -235,6 +235,67 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
       assert.ok(!fs.existsSync(wt('ch-17-q')), 'H5: no worktree');
       assert.ok(!hasRef(old, 'refs/heads/ticket/ch-17-q'), 'H5: the branch this launch made is gone');
     });
+    // a ticket that ran, its worktree gone and one unpushed commit on its branch
+    const ranWithWork = (id) => {
+      ticket(id);
+      ok(old, ['worker', id], SUP);
+      git(['commit', '-q', '--allow-empty', '-m', 'unpushed work'], wt(id));
+      const head = git(['rev-parse', 'HEAD'], wt(id));
+      ok(old, ['worker', id, '--remove', '--force'], SUP);
+      return head;
+    };
+    // a git on PATH that fails every call whose words match
+    const failing = (name, words) => {
+      const bin = path.join(F.base, name);
+      const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+      write(path.join(bin, 'git'), `#!/bin/sh\ncase " $* " in ${words}) echo 'fatal: failed by the test' >&2; exit 128 ;; esac\nexec '${realGit}' "$@"\n`);
+      fs.chmodSync(path.join(bin, 'git'), 0o755);
+      return { ...SUP, PATH: `${bin}${path.delimiter}${process.env.PATH}` };
+    };
+    await t.test('H6: a local branch git fails to read is never reset', tmux, () => {
+      const head = ranWithWork('ch-18-r');
+      const r = run(old, ['worker', 'ch-18-r', '--resume'], failing('git-no-read', `*' rev-parse '*'refs/heads/ticket/ch-18-r'*`));
+      assert.notEqual(r.status, 0, `H6: refused, not started: ${r.out}`);
+      assert.equal(git(['rev-parse', 'refs/heads/ticket/ch-18-r'], old), head, 'H6: the branch keeps its commit');
+    });
+    await t.test('H7: a history git fails to compare is refused as that, not judged', tmux, () => {
+      const head = ranWithWork('ch-19-s');
+      const r = run(old, ['worker', 'ch-19-s', '--resume'], failing('git-no-compare', `*' merge-base '*`));
+      assert.notEqual(r.status, 0, `H7: refused, not started: ${r.out}`);
+      assert.match(r.err, /git could not compare ticket\/ch-19-s with origin's: failed by the test; nothing was started/, 'H7');
+      assert.equal(git(['rev-parse', 'refs/heads/ticket/ch-19-s'], old), head, 'H7: the branch keeps its commit');
+    });
+    await t.test('B12: a symbolic tracking ref is removed, not the branch it names', tmux, () => {
+      ticket('ch-20-t');
+      git(['branch', 'bystander', real], old);
+      git(['symbolic-ref', 'refs/remotes/origin/ticket/ch-20-t', 'refs/heads/bystander'], old);
+      const r = run(old, ['worker', 'ch-20-t'], SUP);
+      assert.equal(r.status, 0, r.err);
+      assert.ok(hasRef(old, 'refs/heads/bystander'), 'B12: the bystander branch is still there');
+      assert.ok(!hasRef(old, 'refs/remotes/origin/ticket/ch-20-t'), 'B12: the tracking ref is gone');
+    });
+    await t.test('B13: a symbolic local branch is refused', tmux, () => {
+      ticket('ch-21-u');
+      git(['branch', 'bystander-2', real], old);
+      git(['symbolic-ref', 'refs/heads/ticket/ch-21-u', 'refs/heads/bystander-2'], old);
+      const r = run(old, ['worker', 'ch-21-u'], SUP);
+      assert.notEqual(r.status, 0, `B13: refused, not started: ${r.out}`);
+      assert.match(r.err, /ticket\/ch-21-u here is a symbolic ref to refs\/heads\/bystander-2, so nothing was started/, 'B13');
+      assert.equal(git(['rev-parse', 'refs/heads/bystander-2'], old), real, 'B13: the branch it names is unmoved');
+    });
+    await t.test('B14: a grafts file doesn\'t make a planted commit part of origin\'s history', tmux, () => {
+      ticket('ch-22-v');
+      const main = git(['rev-parse', 'HEAD'], old);
+      const mine = planted(old, main);
+      git(['branch', 'ticket/ch-22-v', mine], old);
+      const grafts = path.join(old, '.git/info/grafts');
+      write(grafts, `${main} ${mine}\n${mine}\n`);
+      try {
+        const r = run(old, ['worker', 'ch-22-v'], SUP);
+        assert.notEqual(r.status, 0, `B14: refused, not started: ${r.out}`);
+        assert.match(r.err, /origin has no ticket\/ch-22-v, so nothing was started/, 'B14');
+      } finally { fs.rmSync(grafts); }
+    });
   } finally { F.done(); }
 });
 
