@@ -26869,6 +26869,7 @@ function makeSession(role) {
   // it, and one that numbered tickets before blocks existed gets none (nothing to check it against).
   const block = role === 'planner' && !idBlockFor(id) && !inFlightPlanTickets(branch).length ? reserveIdBlock(id, blockSize) : null;
   let madeWorktree = false;
+  let keptWords = ''; // commits origin lacks that this start keeps, for its act
   // A worker's worktree is a checkout of its ticket's repo, under home's .worktrees;
   // a planner's is home's. s stays home's for the session, the agent and its policy.
   const R = role === 'worker' ? repoOfTicket(tickets().get(id)) : repo('home');
@@ -26878,23 +26879,48 @@ function makeSession(role) {
     // it, never from main). Every local ref is any session's to write without a push (kit-790).
     const at = fetchLinkMain(R, 'refusing to start a ticket on a stale main', { start: branch });
     const local = R.resolveCommit(`refs/heads/${branch}`);
+    const base = at.branch ?? at.main;
+    // no grafts file or commit-graph a session wrote counts as a commit's history
+    const history = (args) => responderGit(['-c', 'core.commitGraph=false', ...args], R.root, { GIT_GRAFT_FILE: '/dev/null' });
+    const anc = (a, b) => history(['merge-base', '--is-ancestor', a, b]).status === 0;
+    // Only a session that ran here has commits of its own origin may lack (worker --remove keeps the
+    // branch). Any phase line but starting says so too: a ran ticket's fresh resume stopped before it
+    // ran is not ranBefore.
+    const kept = role === 'worker' ? ranBefore || logObjects('phase').some((p) => p.created_by === id && p.to !== 'starting') : started;
+    const short = (c) => c.slice(0, 8);
+    let sha = base;
+    if (local && anc(local, base)) {
+      // nothing beyond origin's: a stopped launch's own branch, or one behind
+      if (local !== base) warn(`${branch} here (${short(local)}) holds nothing origin's ${at.branch ? branch : mb} doesn't, so it starts at origin's (${short(base)})`);
+    } else if (local && !kept) {
+      die(`${branch} here is at ${short(local)}, but ${at.branch ? `origin's is at ${short(at.branch)}` : `origin has no ${branch}`}, so nothing was started: a ticket that hasn't run starts from origin, and a local branch is any session's to make. Push it if it is real work, or delete it (git branch -D ${branch})`);
+    } else if (local && at.branch && !anc(at.branch, local)) {
+      die(`${branch} here is at ${short(local)}, but origin's is at ${short(at.branch)} and neither holds the other, so nothing was started: merge one into the other and push it, or delete the local branch (git branch -D ${branch})`);
+    } else if (local) {
+      sha = local;
+      const n = history(['rev-list', '--count', `${base}..${local}`]).stdout.trim();
+      const commits = `${n} commit${n === '1' ? '' : 's'} origin doesn't hold yet`;
+      warn(`${branch} starts at ${short(local)}, ${commits}: this ${role === 'worker' ? 'ticket' : 'plan'} ran here, and its unpushed work is kept`);
+      keptWords = `, at ${short(local)}: ${commits}`;
+    }
     // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
-    if (local) R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', wt, branch], R.root);
-    else {
-      const sha = at.branch ?? at.main;
-      R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-B', branch, wt, sha], R.root);
-      // -B sets the branch and then checks it out by name, so a session moving it in between would
-      // win: what landed is read back, and undone if it isn't the sha chosen. The branch goes back to
-      // where it was before the add, and only from where the add left it.
-      const read = (args, cwd) => { const r = responderGit(args, cwd); return r.status === 0 ? r.stdout.trim() : null; };
-      const seen = read(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], R.root);
-      const head = read(['rev-parse', '--verify', '--quiet', 'HEAD'], wt);
-      if (head !== sha || read(['symbolic-ref', '--short', 'HEAD'], wt) !== branch) {
-        R.git(['worktree', 'remove', '--force', wt], R.root);
-        if (local) R.git(['update-ref', `refs/heads/${branch}`, local, seen ?? '0'.repeat(local.length)], R.root);
-        else if (seen) R.git(['update-ref', '-d', `refs/heads/${branch}`, seen], R.root);
-        die(`the new worktree holds ${head ? head.slice(0, 8) : 'no commit'}, not ${sha.slice(0, 8)}: something moved ${branch} while it was checked out, so nothing was started; try again`);
-      }
+    R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-B', branch, wt, sha], R.root);
+    // -B sets the branch and then checks it out by name, so a session moving it in between would
+    // win: what landed is read back, and undone if it isn't the sha chosen. The branch goes back to
+    // where it was before the add, and only from where the add left it.
+    const read = (args, cwd) => { const r = responderGit(args, cwd); return r.status === 0 ? r.stdout.trim() : null; };
+    const seen = read(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], R.root);
+    const head = read(['rev-parse', '--verify', '--quiet', 'HEAD'], wt);
+    if (head !== sha || read(['symbolic-ref', '--short', 'HEAD'], wt) !== branch) {
+      R.git(['worktree', 'remove', '--force', wt], R.root);
+      if (local) R.git(['update-ref', `refs/heads/${branch}`, local, seen ?? '0'.repeat(local.length)], R.root);
+      else if (seen) R.git(['update-ref', '-d', `refs/heads/${branch}`, seen], R.root);
+      die(`the new worktree holds ${head ? short(head) : 'no commit'}, not ${short(sha)}: something moved ${branch} while it was checked out, so nothing was started; try again`);
+    }
+    const stale = at.branch ? null : R.resolveCommit(`refs/remotes/origin/${branch}`);
+    if (stale) {
+      warn(`origin has no ${branch}: its tracking ref here (${short(stale)}) is ignored and removed${sha === at.main ? `, and the branch starts from origin's ${mb} (${short(at.main)})` : ''}`);
+      R.gitOrDie(['update-ref', '-d', `refs/remotes/origin/${branch}`], R.root);
     }
     // set by config: --track fails where the checkout's fetch refspec is blank
     if (R.git(['config', '--get', `branch.${branch}.merge`], R.root) === null) {
@@ -26983,7 +27009,7 @@ function makeSession(role) {
     if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${shown}` }, id);
     // a planner parked by a park is running again
     if (role === 'planner' && lastPhaseOf(name)?.to === 'parked') appendLog({ type: 'phase', from: 'parked', to: 'starting', note: `started in ${shown}` }, name);
-    appendLog({ type: 'act', decision: citing(), class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused || memFull ? ` while ${[refused && `its goal is ${holdWords(mode)}`, memFull?.words].filter(Boolean).join(' and ')}, with --force` : memNow && !resume ? `, a resume that started fresh while ${memNow.words}` : ''}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined, knowledge: given.length ? given : undefined }, 'supervisor');
+    appendLog({ type: 'act', decision: citing(), class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused || memFull ? ` while ${[refused && `its goal is ${holdWords(mode)}`, memFull?.words].filter(Boolean).join(' and ')}, with --force` : memNow && !resume ? `, a resume that started fresh while ${memNow.words}` : ''}${keptWords}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined, knowledge: given.length ? given : undefined }, 'supervisor');
     out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown} at ${wt}${block ? `; ticket numbers ${padNN(block.from)}-${padNN(block.to)} reserved` : ''}`);
     });
   } catch (e) {

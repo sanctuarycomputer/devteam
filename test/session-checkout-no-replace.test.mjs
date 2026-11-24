@@ -71,6 +71,8 @@ test('home: every checkout of a planted main holds the real tree', async (t) => 
       assert.equal(marker(wt('ch-01-a')), 'real\n', 'A1');
     });
     await t.test('A2: a worker whose local branch exists (makeSession)', tmux, () => {
+      // at origin's commit: a ticket that hasn't run takes no local branch origin doesn't hold (kit-790)
+      git(['push', '-q', 'origin', `${real}:refs/heads/ticket/ch-02-b`], old);
       git(['branch', 'ticket/ch-02-b', real], old);
       ok(old, ['worker', 'ch-02-b'], SUP);
       assert.equal(marker(wt('ch-02-b')), 'real\n', 'A2');
