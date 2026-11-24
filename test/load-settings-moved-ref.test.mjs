@@ -184,6 +184,9 @@ test('a launch reads the owner\'s settings from origin, never from a local ref a
       F.reset();
       const r = F.run(['operator-thread', 'new', 'first words'], LAPTOP);
       assert.equal(r.status, 0, r.err);
+      // wait for its agent's one mark: an agent still starting can outlive kill-session, and the mark it
+      // writes after the reset reads as a start the case made (kit-803)
+      assert.deepEqual(F.started(), { own: true, evil: false, setup: false }, r.err);
       F.reset();
       return r.out.split('\n')[0];
     };
