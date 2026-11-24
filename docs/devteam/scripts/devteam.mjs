@@ -2130,9 +2130,9 @@ function ownerWriter(hint, { heard = false } = {}) {
     for (const k of ['DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) if (process.env[k] !== undefined) return `${k}=${JSON.stringify(process.env[k])}`;
     const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_')));
     Object.assign(env, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: os.devNull });
-    // safe.directory=* lets git read a checkout another user owns, and that checkout's own config
-    // (core.fsmonitor and the like) would then run; every session runs as the same user as the
-    // owner, so this opens nothing new
+    // safe.directory=* lets git read a checkout another user owns, whose own config could name
+    // programs (core.fsmonitor and the like); rev-parse runs none, and every session runs as the
+    // same user as the owner, so this opens nothing new
     const own = (args) => { try { return execFileSync('git', ['-c', 'safe.directory=*', ...args], { cwd: process.cwd(), env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; } };
     const b = own(['rev-parse', '--abbrev-ref', 'HEAD']);
     if (b && /^(ticket|plan)\//.test(b)) return `this checkout is on ${b}`;
