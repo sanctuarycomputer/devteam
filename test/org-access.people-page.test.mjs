@@ -817,9 +817,14 @@ test('org-access A3: in Chrome, the owner\'s People work as the mock does', CHRO
   await p.key('Tab');
   await p.until('Tab closes it', `!document.querySelector('.oa-menu')`);
   assert.equal(await p.ev(`document.activeElement?.dataset.k ?? null`), `settings:menu:${B.sam.id}`, 'Tab went on from its ⋯ to the next one, not off the page');
-  // its ⋯ again closes it (a real click: pointerdown, focus, then click)
+  // its ⋯ again closes it (a real click: pointerdown, focus, then click). p.click centres its target
+  // first; centred already, so that scroll moves nothing (Settings scrolling would close the menu).
+  await p.ev(`document.querySelector(${JSON.stringify(`${personSel(B.ownerRow.id)} .menu-btn`)}).scrollIntoView({ block: 'center' }); true`);
+  await sleep(200);
   await menuOf(p, B.ownerRow.id);
+  const top = await p.ev(`document.getElementById('settings-view').scrollTop`);
   await p.click(`${personSel(B.ownerRow.id)} .menu-btn`);
+  assert.equal(await p.ev(`document.getElementById('settings-view').scrollTop`), top, 'the click scrolled nothing');
   await sleep(300);
   assert.equal(await p.ev(`Boolean(document.querySelector('.oa-menu'))`), false, 'the ⋯ toggles it closed');
   // a row offered only actions this hub doesn't know gets no ⋯
