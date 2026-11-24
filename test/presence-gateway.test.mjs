@@ -127,6 +127,8 @@ async function box(t, opts = {}) {
   return { stop, held, alpha, shaped, hub, listed, file, up, post, state, write, row, hashes, host, port, cookies };
 }
 const opened = (c, what) => { assert.equal(c.status, 101, `${what}: opened (${c.status})`); assert.ok(c.you, `${what}: welcomed`); return c; };
+const closes = async (c, what, ms = 1500) => assert.ok(await Promise.race([c.closed.then(() => true), sleep(ms).then(() => false)]), `${what}: still open after ${ms} ms`);
+const stays = async (c, what) => assert.ok(await Promise.race([c.closed.then(() => false), sleep(1300).then(() => true)]), `${what}: closed`);
 const only = (raw, name) => raw.filter((v, i) => i % 2 === 0 && v.toLowerCase() === name).length;
 const FORGED = { 'x-devteam-person': 'p-owner;name=Boss', 'x-devteam-level': 'full' };
 
@@ -192,6 +194,108 @@ test('presence A10: a View session holds presence and still can\'t upgrade the t
   assert.equal((await B.up('term', { as: 'ana', route: '/ws' })).status, 403, 'the terminal socket');
   assert.equal((await B.up('term', { as: 'ana' })).status, 403, 'nor /presence on the terminal\'s name');
   assert.equal((await B.up('cool-tiger', { as: 'ana' })).status, 403, 'nor a preview\'s socket');
+});
+test('presence A10: a listed preview\'s own /presence stays its app\'s: Full in with no person header, View refused', async (t) => {
+  const B = await box(t);
+  const warned = [];
+  const warn = (w) => warned.push(w.name);
+  process.on('warning', warn);
+  t.after(() => process.off('warning', warn));
+  const pv = { name: 'cool-tiger', port: 0, project: 'alpha', session: 's', label: 'app', at: '2026-11-10', up: true, run: false };
+  const seen = [];
+  const held = new Set();
+  const app = http.createServer((q, r) => r.end('app'));
+  app.on('connection', (c) => { held.add(c); });
+  app.on('upgrade', (q, s) => { s.on('error', () => {}); seen.push(q); s.write('HTTP/1.1 101 Switching Protocols\r\nconnection: Upgrade\r\nupgrade: websocket\r\n\r\n'); });
+  pv.port = await listen(app, 0);
+  B.listed[0].previews.push(pv);
+  const ask = (as) => new Promise((resolve) => {
+    const h = `cool-tiger.${B.host}`;
+    const r = http.request({ host: '127.0.0.1', port: B.port, path: '/presence', headers: { host: h, origin: `http://${h}`, cookie: B.cookies[as], connection: 'Upgrade', upgrade: 'websocket', 'x-devteam-person': 'p-owner;name=A' } });
+    r.on('upgrade', (res, s) => { s.destroy(); resolve(101); });
+    r.on('response', (res) => { res.resume(); resolve(res.statusCode); });
+    r.on('error', () => resolve('error'));
+    r.end();
+  });
+  try {
+    assert.equal(await ask('jo'), 101, 'Full is the app\'s');
+    assert.equal(seen[0].headers['x-devteam-person'], undefined, 'a preview is told no person');
+    assert.equal(await ask('ana'), 403, 'View');
+    assert.equal(seen.length, 1);
+    const c = opened(await B.up('alpha', { as: 'jo' }), 'alpha');
+    await sleep(50);
+    c.destroy();
+    assert.deepEqual(warned.filter((w) => w === 'MaxListenersExceededWarning'), [], 'no listener warning');
+  } finally { for (const c of held) c.destroy(); await new Promise((r) => app.close(r)); }
+});
+test('presence A11: signing out closes that session\'s sockets and no other', async (t) => {
+  const B = await box(t);
+  const [a, h, other, ana] = [opened(await B.up('alpha', { as: 'jo' }), 'alpha'), opened(await B.up(null, { as: 'jo' }), 'hub'), opened(await B.up('alpha', { as: 'jo2' }), 'Jo\'s other session'), opened(await B.up('alpha', { as: 'ana' }), 'Ana')];
+  assert.equal((await B.post('jo', '/auth/logout')).status, 200);
+  await Promise.all([closes(a, 'alpha', 400), closes(h, 'hub', 400)]);
+  await Promise.all([stays(other, 'Jo\'s other session'), stays(ana, 'Ana')]);
+  assert.equal((await B.up('alpha', { as: 'jo' })).status, 401, 'and it can\'t come back');
+});
+test('presence A11: a session that expires closes its sockets then', async (t) => {
+  const B = await box(t);
+  const s = B.state();
+  B.write({ ...s, peopleSessions: s.peopleSessions.map((x) => (x.hash === B.hashes.jo ? { ...x, expires: Date.now() + 1200 } : x)) });
+  const c = opened(await B.up('alpha', { as: 'jo' }), 'alpha');
+  const other = opened(await B.up('alpha', { as: 'jo2' }), 'Jo\'s other session');
+  await closes(c, 'the expired session', 1600);
+  await stays(other, 'Jo\'s other session');
+});
+test('presence A11: removing the person closes every session of theirs', async (t) => {
+  const B = await box(t);
+  const [a, b, ana] = [opened(await B.up('alpha', { as: 'jo' }), 'one'), opened(await B.up(null, { as: 'jo2' }), 'two'), opened(await B.up('alpha', { as: 'ana' }), 'Ana')];
+  const r = await B.post('owner', '/auth/people/remove', { id: 'p-jo', rev: B.row('p-jo').rev });
+  assert.equal(r.status, 200, r.body);
+  await Promise.all([closes(a, 'one', 400), closes(b, 'two', 400)]);
+  await stays(ana, 'Ana');
+});
+test('presence A11: a level change either way, and Make admin, close the person\'s sockets; they come back at the new level', async (t) => {
+  const B = await box(t);
+  const owner = opened(await B.up('alpha', { as: 'owner' }), 'the owner');
+  for (const [as, id, route, body, level] of [['jo', 'p-jo', 'level', { level: 'view' }, 'view'], ['jo', 'p-jo', 'level', { level: 'full' }, 'full'], ['ana', 'p-ana', 'role', { role: 'admin' }, 'full']]) {
+    const c = opened(await B.up('alpha', { as }), `${as} to ${level}`);
+    const r = await B.post('owner', `/auth/people/${route}`, { id, rev: B.row(id).rev, ...body });
+    assert.equal(r.status, 200, r.body);
+    await closes(c, `${as} to ${level}`, 400);
+    const again = opened(await B.up('alpha', { as }), `${as} again`);
+    assert.equal(B.alpha.ups.at(-1).h['x-devteam-level'], level);
+    again.destroy();
+  }
+  await stays(owner, 'the owner');
+});
+test('presence A11: a reclaim by another process closes every socket, and so does a state that can\'t be read', async (t) => {
+  const B = await box(t);
+  const before = B.state();
+  const c = opened(await B.up('alpha', { as: 'owner' }), 'the owner');
+  B.write({ ...before, passkeys: [], sessions: [], peopleSessions: [], invites: [], peopleStamp: u(sha('devteam-people-stamp-v1\n')) });
+  await closes(c, 'after a reclaim', 2500);
+  B.write(before);
+  const d = opened(await B.up('alpha', { as: 'owner' }), 'the owner again');
+  fs.writeFileSync(`${B.file}.b`, '{');
+  fs.renameSync(`${B.file}.b`, B.file);
+  await closes(d, 'with the state unreadable', 2500);
+  assert.equal((await B.up('alpha', { as: 'owner' })).status, 503, 'and none opens');
+  B.write(before);
+  const e = opened(await B.up('alpha', { as: 'jo' }), 'Jo');
+  B.write({ ...before, sessions: null, peopleSessions: null });
+  await closes(e, 'with a state of the wrong shape', 2500);
+});
+test('presence A11: a session that ends while the hub\'s list is read again never reaches the upstream', async (t) => {
+  const B = await box(t);
+  let go;
+  B.hub.gate(new Promise((r) => { go = r; }));
+  const waiting = B.up('alpha', { as: 'jo' });
+  await sleep(150);
+  assert.equal((await B.post('jo', '/auth/logout')).status, 200);
+  go();
+  const c = await waiting;
+  await sleep(200);
+  assert.equal(B.alpha.ups.length, 0, 'no upgrade went on');
+  assert.notEqual(c.status, 101, 'and none opened');
 });
 test('presence: an upstream that answers anything but 101 is a refusal, and nothing more of the browser\'s reaches it', async (t) => {
   const B = await box(t);
@@ -328,6 +432,15 @@ test('presence: a person the header can\'t carry is 500, a shared name 421, an u
   B.write({ ...s, passkeys: [], peopleStamp: u(sha('devteam-people-stamp-v1\n')) });
   assert.equal((await B.up('alpha', { as: 'owner' })).status, 401, 'unclaimed');
   assert.equal(B.alpha.ups.length, 0, 'none went on');
+});
+test('presence A11: a session that ends while its upgrade waits on the upstream closes it', async (t) => {
+  const B = await box(t);
+  B.alpha.hush(true);
+  const waiting = B.up('alpha', { as: 'jo' });
+  for (let i = 0; i < 100 && !B.alpha.ups.length; i++) await sleep(20);
+  assert.equal(B.alpha.ups.length, 1, 'the upgrade reached the upstream');
+  assert.equal((await B.post('jo', '/auth/logout')).status, 200);
+  assert.equal(await Promise.race([waiting.then((c) => c.status), sleep(1000).then(() => 'open')]), undefined, 'closed with no answer');
 });
 test('presence: any other path is still 421 on a project\'s name and the box\'s, and no reading of it but the exact one passes', async (t) => {
   const B = await box(t);

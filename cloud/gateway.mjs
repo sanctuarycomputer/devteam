@@ -1099,7 +1099,10 @@ export function createGateway(opts = {}) {
   const COOKIE = 'devteam_session';
   const dir = opts.dir ?? gatewayDir();
   const ttydPort = Number(opts.ttydPort ?? env.DEVTEAM_TTYD_PORT ?? 7681);
-  const store = stateStore(dir);
+  const stored = stateStore(dir);
+  // every write is followed by a look at the open presence sockets (endPresence), in the same turn
+  let afterSave = () => {};
+  const store = { load: stored.load, save: (s) => { stored.save(s); afterSave(); } };
   const firstFile = (...c) => c.find((f) => f && fs.existsSync(f));
   const hubPage = fs.readFileSync(firstFile(opts.hubPage, env.DEVTEAM_HUB_PAGE, path.join(here, 'hub.html'), path.join(here, '..', 'docs', 'devteam', 'dashboard', 'hub.html')));
   const ttydPage = () => fs.readFileSync(opts.ttydPage ?? env.DEVTEAM_TTYD_PAGE ?? path.join(here, 'ttyd.html'));
@@ -3513,10 +3516,37 @@ export function createGateway(opts = {}) {
   // passes, before anything is awaited, so a removal at any point after closes it.
   const heldSockets = new Map();
   const holdSocket = (socket, person) => {
-    heldSockets.set(socket, person?.id ?? null);
+    heldSockets.set(socket, { person: person?.id ?? null });
     socket.once('close', () => heldSockets.delete(socket));
   };
-  const dropPerson = (id) => { for (const [sock, holder] of heldSockets) if (holder === id) sock.destroy(); };
+  const dropPerson = (id) => { for (const [sock, holder] of heldSockets) if (holder.person === id) sock.destroy(); };
+  // A /presence socket (presence@1 §2) lives no longer than its session, at the level it opened with.
+  // Looked at after every write (sign-out, removal, a level or role change), at the session's own end,
+  // and each second while any is open, for a write by another process (devteam-reclaim). A state that
+  // can't be read ends them all: the page tries again.
+  const PRESENCE_POLL_MS = 1000;
+  let presencePoll = null;
+  const presenceOpen = () => [...heldSockets].filter(([, h]) => h.session);
+  const endPresence = () => {
+    const open = presenceOpen();
+    if (!open.length) { clearInterval(presencePoll); presencePoll = null; return; }
+    let s = null;
+    try { s = store.load(); } catch {}
+    for (const [sock, h] of open) {
+      let now = null;
+      try { now = s ? stillHeld(s, h.session) : null; } catch {}
+      if (!now || (now.person.id ?? null) !== h.person || levelOf(now.person) !== h.level) sock.destroy();
+    }
+  };
+  afterSave = endPresence;
+  const holdPresence = (socket, { session, person }) => {
+    holdSocket(socket, person);
+    heldSockets.set(socket, { person: person?.id ?? null, session, level: levelOf(person) });
+    const end = setTimeout(endPresence, Math.min(Math.max(session.expires - Date.now(), 0) + 1, 2 ** 31 - 1));
+    end.unref();
+    socket.once('close', () => clearTimeout(end));
+    if (!presencePoll) { presencePoll = setInterval(endPresence, PRESENCE_POLL_MS); presencePoll.unref(); }
+  };
   // The supervisor's browser view (the preview the hub labels so): whoever opens it drives the
   // owner's signed-in browser, so it is the owner's alone, under any name its port is listed by.
   const ownerOnlyPreview = (name) => {
@@ -3538,6 +3568,8 @@ export function createGateway(opts = {}) {
   // its status alone and both sides end, and nothing of the browser's goes on before a 101: a server
   // with no such socket (an older kit) would read what came next as requests the gateway never saw.
   const relayUpgrade = (req, socket, head, { port, host, own, loopbackHost, extra = null, answerMs = 0, only101 = false }) => {
+    // each side's pipe listens to both: more than Node's 10 without any leak
+    socket.setMaxListeners(20);
     const up = net.connect(port, host);
     const late = answerMs ? setTimeout(() => socket.destroy(), answerMs) : null;
     late?.unref();
@@ -3622,7 +3654,7 @@ export function createGateway(opts = {}) {
     if (!who) return refuse(401, 'Unauthorized');
     const person = personHeader(who.person);
     if (person === false) return refuse(500, 'Internal Server Error');
-    holdSocket(socket, who.person);
+    holdPresence(socket, who);
     socket.on('error', () => socket.destroy());
     let port = HUB_PORT;
     if (label) {
