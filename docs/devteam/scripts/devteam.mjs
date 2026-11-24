@@ -19226,6 +19226,9 @@ function envPerson() {
 }
 // An owner action's env with its request's person, for that child alone.
 const personEnv = (env, person) => (person ? { ...env, DEVTEAM_PERSON: JSON.stringify({ id: person.id, name: person.name }) } : env);
+// Checked now, as the script loads: a command handed a bad one does nothing at all (a secret posted
+// to its sink and then refused at its log line would be one done and not recorded).
+envPerson();
 /* personHeader end */
 // An owner action a server runs (a dashboard's, or the hub's for the operator's threads): replied to
 // as soon as the child says it is done (its reply pipe, fd 3), before it types into a pane; what it
@@ -24734,10 +24737,10 @@ async function dashRoutesOwner(D, req, res, q) {
         for (const [n, at] of paneNonces) if (now - at > 2 * OPERATOR_PROOF_MS) paneNonces.delete(n);
         paneNonces.set(proof.nonce, now);
       }
-      // before any key is sent: a malformed person types nothing
+      if (D.paneAnswering) return send(res, 409, 'application/json', JSON.stringify({ error: 'another answer is on its way to the terminal; wait for it' }));
+      // after every check above and before any key is sent: a malformed person types nothing
       const person = personOr400();
       if (person === false) return;
-      if (D.paneAnswering) return send(res, 409, 'application/json', JSON.stringify({ error: 'another answer is on its way to the terminal; wait for it' }));
       D.paneAnswering = true;
       paneAnswer({ digest: parsed.digest, option: parsed.option, escape: parsed.escape === true, proof, person }).then((a) => a, (e) => ({ status: 500, body: { error: `nothing more was done: ${e?.message ?? e}` } })).then((a) => { D.paneAnswering = false; if (!res.headersSent) send(res, a.status, 'application/json', JSON.stringify(a.body)); });
     }));
