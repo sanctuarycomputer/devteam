@@ -1023,6 +1023,13 @@ try {
   #av-frame[hidden], #pv-frame[hidden] { display: none; }
   @media (max-width: 600px) { #artifact-view:not([hidden]) { inset: 8px; } }
   #av-stage { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
+  /* a note's picture, full size over the stage (kit-145) */
+  #av-shot { position: absolute; inset: 0; z-index: 4; display: flex; align-items: center; justify-content: center; padding: 16px; background: color-mix(in srgb, var(--bg) 70%, transparent); }
+  .av-shot-in { display: flex; flex-direction: column; max-width: 100%; max-height: 100%; min-height: 0; padding: 8px; gap: 8px; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.18); }
+  .av-shot-bar { display: flex; align-items: center; gap: 6px; flex: none; }
+  .av-shot-bar button { margin: 0; }
+  .av-shot-bar [aria-pressed="true"] { background: var(--hover); font-weight: 600; }
+  .av-shot-in img { min-height: 0; max-width: 100%; object-fit: contain; }
   /* over the frame, under the layer's cursor and chip: Shift raises it, so a click is the layer's */
   .av-over { position: absolute; inset: 0; z-index: 2; touch-action: none; }
   .av-pins { position: absolute; inset: 0; z-index: 1; overflow: hidden; pointer-events: none; }
@@ -1154,6 +1161,13 @@ try {
   .tl-addr { margin: 6px 0; padding: 6px 8px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--surface)); font-size: 12px; }
   .tl-addr .by { color: var(--muted); }
   .tl-addr .tx, .tl-wd .tx { overflow-wrap: anywhere; }
+  button.tl-shot { display: block; width: auto; height: auto; margin: 6px 0 2px; padding: 0; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .tl-shot img { display: block; width: 160px; height: auto; }
+  .tl-shot-cap { font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
+  .th-check { display: flex; align-items: center; gap: 6px; padding: 0 6px 8px 26px; }
+  .th-check .badge, .th-check button { margin: 0; flex: none; }
+  .th-check button.th-shot { width: auto; height: auto; padding: 0; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  .th-shot img { display: block; width: 48px; height: auto; max-height: 36px; object-fit: cover; }
   .tl-wd, .tl-nview { margin: 6px 0; font-size: 12px; color: var(--muted); }
   .tl-ready { margin: 6px 0; padding: 6px 8px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--surface)); font-size: 12px; }
   .tl-ready input { width: 100%; padding: 4px 8px; margin-top: 4px; }
@@ -6809,6 +6823,7 @@ function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp =
   if ($('av-frame').getAttribute('src') !== src) { const f = avFreshFrame('av-frame'); f.dataset.opened = src; f.src = src; }
   $('artifact-view').hidden = false;
   avHint();
+  tShot.close(false);
   avNotes.draw();
 }
 // The reload button says when main's artifact on the stage changed since its frame loaded it (the
@@ -7183,6 +7198,67 @@ window.addEventListener('keydown', (e) => {
   e.preventDefault();
   avStep(e.key === 'ArrowLeft' ? -1 : 1);
 });
+// A to-check note's picture (kit-147): its thumbnail with what it is of, or why there is none. small: a panel
+// row's, the thumbnail alone. Its address is made only of a thread's id and a stamp as the kit writes them; one the
+// server hasn't (tShot.missing) is said, never a broken image.
+function tShot(t, small = false) {
+  const shot = t.shot;
+  if (!shot) return small ? '' : `<div class="tl-shot-cap">${t.noshot === 'no-change' ? 'Nothing to picture: proposed with no change' : 'No picture (marked before pictures)'}</div>`;
+  const ok = /^t-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(t.id) && /^\d{8}-\d{9}$/.test(shot.stamp ?? '');
+  const src = ok ? `/api/shot/${t.id}/${shot.stamp}-light.png` : null;
+  const got = src && !tShot.missing.has(src);
+  if (small) return got ? `<button type="button" class="ghost th-shot" data-tl-show="${esc(t.id)}" aria-label="Show me"><img src="${src}" width="48" alt=""></button>` : '';
+  const anchor = { gone: 'The noted element is gone; this is where it was.', hidden: 'The noted element is on the page but hidden on this view; this is where it was.', changed: 'Its text has changed since the note.' };
+  const sha = /^[0-9a-f]{7,40}$/.test(shot.sha ?? '') ? ` · ${shot.sha.slice(0, 7)}` : '';
+  const cap = `${shot.src === 'main' ? 'From main' : `From ${esc(shot.src)}'s draft`}${sha}${shot.dirty ? ' + uncommitted changes' : ''}${Number.isFinite(shot.w) ? ` · ${shot.w}px wide` : ''}`;
+  const said = Object.hasOwn(anchor, shot.anchor) ? `<div class="tl-shot-cap">${anchor[shot.anchor]}</div>` : '';
+  if (!got) return '<div class="tl-shot-cap">Picture not on this machine</div><div class="tl-shot-cap">The mark stands; Show me still opens the spot.</div>';
+  return `<button type="button" class="ghost tl-shot" data-shot-of="${esc(t.id)}" aria-label="Open the picture"><img src="${src}" width="160" alt="The noted spot"></button><div class="tl-shot-cap">${cap}</div>${said}`;
+}
+tShot.missing = new Set();
+// The picture full size, over the stage: X, Escape and a click outside it close it and nothing else. With no
+// viewer up there is no stage to show it on: Show me first.
+tShot.open = (id) => {
+  const t = TL.threads.find((x) => x.id === id);
+  if (!t?.shot) return;
+  if ($('artifact-view').hidden) return void avShowMe(id);
+  tShot.close(false);
+  const base = `/api/shot/${t.id}/${t.shot.stamp}`;
+  const el = document.createElement('div');
+  el.id = 'av-shot';
+  el.setAttribute('role', 'dialog');
+  el.setAttribute('aria-label', 'The picture');
+  const tones = t.shot.dark ? '<button type="button" class="ghost av-pill" data-shot="light" aria-pressed="true">Light</button><button type="button" class="ghost av-pill" data-shot="dark" aria-pressed="false">Dark</button>' : '';
+  el.innerHTML = `<div class="av-shot-in"><div class="av-shot-bar">${tones}<span class="grow"></span><button type="button" class="ghost icon-btn" data-shot-close aria-label="Close the picture"><i class="icon-x" aria-hidden="true"></i></button></div><img src="${base}-light.png" alt="The noted spot"></div>`;
+  el.addEventListener('click', (e) => {
+    const tone = e.target.closest('[data-shot]')?.dataset.shot;
+    if (!tone) return;
+    el.querySelector('img').src = `${base}-${tone}.png`;
+    for (const b of el.querySelectorAll('[data-shot]')) b.setAttribute('aria-pressed', String(b.dataset.shot === tone));
+  });
+  $('av-stage').append(el);
+  tShot.of = id;
+  el.querySelector('[data-shot-close]').focus();
+};
+tShot.close = (focus = true) => {
+  const el = document.getElementById('av-shot');
+  if (!el) return false;
+  el.remove();
+  if (focus) document.querySelector(`#tl-card .tl-shot[data-shot-of="${tShot.of}"]`)?.focus();
+  return true;
+};
+// before every other listener of these (the card's and the viewer's Escape): the picture alone closes
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && tShot.close()) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
+document.addEventListener('click', (e) => {
+  if (document.getElementById('av-shot') && (e.target.closest('[data-shot-close]') || !e.target.closest('.av-shot-in'))) { tShot.close(); if (e.target.id === 'av-shot' || e.target.closest('[data-shot-close]')) return; }
+  const pic = e.target.closest?.('.tl-shot');
+  if (pic) tShot.open(pic.dataset.shotOf);
+});
+document.addEventListener('error', (e) => {
+  if (e.target?.tagName !== 'IMG' || !e.target.closest('.tl-shot, .th-shot')) return;
+  tShot.missing.add(e.target.getAttribute('src'));
+  tlDraw();
+}, true);
 function closeArtifact() {
   if (!AV) return false;
   AV = null;
@@ -9821,7 +9897,7 @@ function tlCardBody(t) {
     off?.gone && '<div class="tl-nview">Showing main: the version with the change is gone.</div>',
     t && avStep.unseen(t) && '<div class="tl-nview">Not on this view</div>',
     t?.unready && s?.kind === 'artifact' && t.status === 'open' && `<div class="tl-wd"><div class="tx">The supervisor withdrew a mark: ${esc(t.unready.reason)}</div></div>`,
-    check && `<div class="tl-addr"><div class="by">${t.check === 'addressed' ? `Addressed by ${esc(check.by)}${sha}` : 'Proposed by the supervisor'}</div><div class="tx">${esc(t.check === 'addressed' ? check.note : check.outcome)}</div>${tlOpenWarn(t)}<div class="row-inline"><button type="button" class="ghost" data-tl-show="${esc(t.id)}">Show me</button><button type="button" data-tl-accept disabled>Resolve</button></div></div>`,
+    check && `<div class="tl-addr"><div class="by">${t.check === 'addressed' ? `Addressed by ${esc(check.by)}${sha}` : 'Proposed by the supervisor'}</div><div class="tx">${esc(t.check === 'addressed' ? check.note : check.outcome)}</div>${tlOpenWarn(t)}${tShot(t)}<div class="row-inline"><button type="button" class="ghost" data-tl-show="${esc(t.id)}">Show me</button><button type="button" data-tl-accept disabled>Resolve</button></div></div>`,
   ].filter(Boolean).join('');
   if (box0.dataset.for !== t?.id || box0.said !== says) { box0.dataset.for = t?.id ?? ''; box0.said = says; box0.innerHTML = says; }
   if (check) {
@@ -10388,7 +10464,9 @@ function thRow(t, nums) {
   // a thread the supervisor started (kit-108) says so first
   const where = [t.started_by === 'supervisor' ? 'From the supervisor' : '', t.subject ? `${tWhere(t.subject)}${gone ? ' · subject gone' : ''}` : ''].filter(Boolean).join(' · ');
   const on = TL.open === t.id;
-  return `<li><button type="button" class="th-row${st ? ` st-${st}` : ''}${on ? ' on' : ''}" data-tl-open="${esc(t.id)}"${on ? ' aria-current="true"' : ''}>${mark}<span class="th-s">${n ? `<span class="pinchip">${n}</span>` : ''}<span class="th-where">${esc(where)}</span></span><span class="th-tm">${esc(thAgo(t.activity_at))}</span><span class="th-w">${esc(t.title)}</span></button></li>`;
+  // a note on an artifact to check (kit-145): what it waits for, its picture and Show me, beside the row's button
+  const toCheck = t.status === 'open' && t.check && t.subject?.kind === 'artifact' ? `<div class="th-check"><span class="badge">to check</span><span class="grow"></span>${tShot(t, true)}<button type="button" class="ghost" data-tl-show="${esc(t.id)}">Show me</button></div>` : '';
+  return `<li><button type="button" class="th-row${st ? ` st-${st}` : ''}${on ? ' on' : ''}" data-tl-open="${esc(t.id)}"${on ? ' aria-current="true"' : ''}>${mark}<span class="th-s">${n ? `<span class="pinchip">${n}</span>` : ''}<span class="th-where">${esc(where)}</span></span><span class="th-tm">${esc(thAgo(t.activity_at))}</span><span class="th-w">${esc(t.title)}</span></button>${toCheck}</li>`;
 }
 // The Threads pane: what the terminal asks (#ask-threads, askDraw's), Open / Resolved, then the list: every
 // open thread, newest activity first, or the last 50 resolved, newest first.
@@ -10995,6 +11073,8 @@ window.addEventListener('message', (e) => {
     if (document.activeElement !== tsFrame()) return;
     if (m.key === 'Escape') {
       if (m.up) return;
+      // the picture over the stage first, and only it (kit-145)
+      if (tShot.close()) return;
       if (TL.pin) tlPinMode(false);
       else if (TS.raised || tlShowing()) {}
       else if (AV_FRAME_ESC) {}
