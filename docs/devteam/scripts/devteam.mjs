@@ -10258,6 +10258,49 @@ function cmdAnswer() {
   out(`${decline ? 'sent back' : 'answered'} ${id}${fromChat ? ' (from chat; listed on the dashboard for the owner to check)' : turn ? ` (from ${turn.turn}; listed on the dashboard for the owner to check)` : reviewFields.result ? `: ${reviewFields.answer} (result sha256 ${reviewFields.result.sha256.slice(0, 12)})` : ''}`);
   if (metNote) out(metNote);
   if (settledNote && (fromChat || turn)) out(settledNote);
+  // the owner's own answer resolves the question's thread; the supervisor's record of the owner's
+  // turn there proposes it; chat, a default and a review sent back leave it open (kit-720)
+  if (turn) resolveQuestionThreads(id, null, 'supervisor', { turn: { id: turn.turn, thread: logGet(turn.turn)?.thread, said: turn.said } });
+  else if (!fromChat && !decline) resolveQuestionThreads(id, setLine.answer, by);
+}
+// Answering a question resolves its thread (kit-720, question-threads D2): each open thread whose
+// subject is the question (question:<qid>, "Ask about this") ends with the answer. The owner's own
+// answer resolves it with the owner's thread set and thread-resolved observation, as thread resolve
+// writes them. The supervisor's record of the owner's words from a turn in that thread (turn: its
+// id, thread and the words the answer recorded) only proposes it (thread ready), since resolving is
+// the owner's alone (threadOwner): the owner's Accept resolves it. Every line is checked before
+// anything is written, and a thread whose lines the log would refuse is left open with a warning:
+// the answer is already written, and it stands.
+function resolveQuestionThreads(qid, answer, by, { turn = null } = {}) {
+  const ell = '…';
+  // a claim link's token goes first (appendLog takes it out too): cut inside one, it would grow past OUTCOME_MAX there
+  const cut = (s) => { const x = redactClaimLinks(String(s ?? '')).replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim(); return Buffer.byteLength(x) <= OUTCOME_MAX ? x : `${capBytes(x, OUTCOME_MAX - Buffer.byteLength(ell))}${ell}`; };
+  // a line as appendLog would write it, refused here instead of there (checkLine, LINE_MAX)
+  const refusal = (fields, w) => {
+    const text = `${JSON.stringify(logLineFor(fields, w, `${SCHEMA['x-id'].prefix[fields.type]}-00000000-000000000-${w}`))}\n`;
+    const errs = checkLine(JSON.parse(text), logFileFor(w, fields.type));
+    if (Buffer.byteLength(text) > LINE_MAX) errs.push(`the line is over ${LINE_MAX} bytes`);
+    return errs.length ? errs.join('; ') : null;
+  };
+  logCache = null;
+  const ref = `question:${qid}`;
+  const open = threadViews(readLog().objects).filter((v) => v.status === 'open' && v.subject?.kind === 'item' && v.subject.ref === ref && (!turn || v.id === turn.thread));
+  for (const v of open) {
+    // an answer that already says Answered (a review's result) isn't said twice
+    const outcome = cut(turn ? `Answered in thread: ${turn.said}` : /^Answered: /.test(String(answer)) ? String(answer) : `Answered: ${answer}`);
+    const lines = turn ? [[{ type: 'thread', op: 'set', id: v.id, ready: { outcome, at: nowIso() } }, 'supervisor']]
+      : [[{ type: 'thread', op: 'set', id: v.id, status: 'resolved', outcome: outcome || null }, by], [{ type: 'observation', source: 'owner', subject: `thread:${v.id}`, kind: 'thread-resolved', detail: outcome || 'resolved', refs: [v.id, ...subjectIds(v.subject)] }, by]];
+    const why = (UNSAFE_TEXT.test(outcome) ? 'the outcome is not one line of plain text' : Buffer.byteLength(outcome) > OUTCOME_MAX ? `the outcome is over ${OUTCOME_MAX} bytes` : null) ?? lines.map(([f, w]) => refusal(f, w)).find(Boolean);
+    if (why) { warn(`${v.id} stays open (${why}); ${qid} is answered, so ${turn ? 'propose it yourself (thread ready)' : 'resolve it by hand (thread resolve)'}`); continue; }
+    // still open as it is written: a resolve since the read is the owner's, and stands
+    logCache = null;
+    if (logGet(v.id)?.status === 'resolved') continue;
+    // a thrown file error (die exits, and isn't caught) is a warning too: the answer stands
+    try { for (const [f, w] of lines) appendLog(f, w); } catch (e) { warn(`${v.id}: its lines were not all written (${e.code ?? e.message}); ${qid} is answered, so check the thread (thread show ${v.id}) and ${turn ? 'propose it yourself (thread ready)' : 'resolve it by hand (thread resolve)'}`); continue; }
+    // the thread's turn is settled, as thread resolve and thread ready clear it (spoke)
+    try { markThreadWorking(v.id, null); } catch {}
+    out(turn ? `proposed resolving ${v.id}: ${outcome} (the owner's Accept resolves it)` : `resolved ${v.id}: ${outcome}`);
+  }
 }
 function cmdWithdraw() {
   const [id] = positional;
@@ -14047,7 +14090,11 @@ function cmdSecret() {
     logCache = null;
     const now = openQuestion(id).secrets_posted ?? [];
     if (now.length !== posted.length) die(`${id} changed while you were posting; nothing was posted from this run. Look again and post what is still open`);
-    return postSecretsNow(id, v, declared, posted, todo, values, by);
+    postSecretsNow(id, v, declared, posted, todo, values, by);
+    // the post that completes it answers the question, and that resolves its thread (kit-720)
+    logCache = null;
+    const after = questionView(logGet(id));
+    if (after.status === 'answered') resolveQuestionThreads(id, after.answer, by);
   });
 }
 function postSecretsNow(id, v, declared, posted, todo, values, by) {
@@ -16520,7 +16567,11 @@ function cmdGoal() {
     appendLog({ type: 'goal', op: 'set', id, status, decision: { verdict, notes, question: ask?.id }, ...chat }, by);
     if (ask?.status === 'open') appendLog({ type: 'question', op: 'set', id: ask.id, answer: `${{ approve: 'Approve', refine: 'Refine', 'let-go': 'Let go' }[verdict]}${notes ? ` — ${notes}` : ''}`, ...chat, ...(said ? { said } : turn ? { said: turn.said, turn: turn.turn } : {}) }, by);
     if (!said && !turn) nudgeSupervisor(`[devteam goal ${verdict} ${id} from owner] read it with: devteam.mjs goal show ${id}${verdict === 'let-go' ? `; its sessions park: goal park-sessions ${id}` : ''}`);
-    return out(`${id}: ${verdict}${status ? ` (${status})` : ''}${verdict === 'let-go' ? '; its sessions park and its questions leave the inbox (goal decide restore undoes it)' : ''}`);
+    out(`${id}: ${verdict}${status ? ` (${status})` : ''}${verdict === 'let-go' ? '; its sessions park and its questions leave the inbox (goal decide restore undoes it)' : ''}`);
+    // its answer resolves the question's thread, as answer's does (kit-720)
+    if (ask?.status === 'open' && turn) resolveQuestionThreads(ask.id, null, 'supervisor', { turn: { id: turn.turn, thread: logGet(turn.turn)?.thread, said: turn.said } });
+    else if (ask?.status === 'open' && !said) resolveQuestionThreads(ask.id, `${{ approve: 'Approve', refine: 'Refine', 'let-go': 'Let go' }[verdict]}${notes ? ` — ${notes}` : ''}`, by);
+    return;
   }
   // The goal's toggle (planning.md §1, holds): run, drain or park. The owner sets any; the
   // supervisor drains a running goal (with a reason) and releases only its own drain.
@@ -16592,7 +16643,9 @@ function cmdGoal() {
     const ask = to === 'met' ? questions().find((q) => q.class === 'goal-met' && q.goal === id && q.status === 'open') : null;
     appendLog({ type: 'goal', op: 'set', id, status: to, ...(to === 'met' ? { decision: { verdict: 'met', ...(ask ? { question: ask.id } : {}) } } : {}) }, by);
     if (ask) appendLog({ type: 'question', op: 'set', id: ask.id, answer: GOAL_MET_CHOICES[0].label }, by);
-    return out(`${id} is ${to}${ask ? ` (and ${ask.id} is answered Yes)` : ''}`);
+    out(`${id} is ${to}${ask ? ` (and ${ask.id} is answered Yes)` : ''}`);
+    if (ask) resolveQuestionThreads(ask.id, GOAL_MET_CHOICES[0].label, by);
+    return;
   }
   if (sub === 'forecast') {
     const g = logGet(id)?.type === 'goal' ? logGet(id) : die('usage: goal forecast <g-id>');
