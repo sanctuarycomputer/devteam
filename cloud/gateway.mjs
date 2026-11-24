@@ -1270,6 +1270,30 @@ export function createGateway(opts = {}) {
   // a method's { key, data, label, added_at, last_used }, both ways.
   const topToMethod = (p) => ({ key: p.id, data: { userId: p.userId, jwk: p.jwk, alg: p.alg, signCount: p.signCount, rp: p.rp }, label: p.name, added_at: p.createdAt, last_used: p.usedAt ?? null });
   const methodToTop = (m) => ({ id: m.key, userId: m.data.userId, jwk: m.data.jwk, alg: m.data.alg, signCount: m.data.signCount, name: m.label, rp: m.data.rp, createdAt: m.added_at });
+  // Hand the box from `from` (the owner's row) to `to` (joined, no link out, a passkey): the next
+  // state, which the caller saves in one write (kit-253 spec §2). The top-level fields, all an older
+  // gateway reads, become `to`'s alone; `from`'s passkeys, sessions and devices move into their row,
+  // each moved session naming the new id of the passkey it named, or none. The stamp follows.
+  const transferTo = (s, from, to) => {
+    const pk = (to.methods ?? []).filter((m) => m.type === 'passkey');
+    const keyOf = new Map(pk.map((m) => [m.id, m.key]));
+    const idOf = new Map(s.passkeys.map((p) => [p.id, newId('m-')]));
+    const moved = s.passkeys.map((p) => ({ id: idOf.get(p.id), type: 'passkey', ...topToMethod(p) }));
+    const theirs = (s.peopleSessions ?? []).filter((x) => x.person === to.id);
+    return stamped({
+      ...s,
+      passkeys: pk.map((m) => ({ ...methodToTop(m), ...(m.last_used ? { usedAt: m.last_used } : {}) })),
+      sessions: theirs.map(({ person, ...x }) => ({ ...x, method: keyOf.get(x.method) ?? x.method ?? null })),
+      pushSubs: to.pushSubs ?? [],
+      people: s.people.map((p) => {
+        if (p.id === to.id) return { ...p, role: 'owner', level: 'full', methods: (p.methods ?? []).filter((m) => m.type !== 'passkey'), pushSubs: [], rev: p.rev + 1 };
+        if (p.id === from.id) return { ...p, role: 'admin', level: 'full', methods: [...(p.methods ?? []), ...moved], pushSubs: (s.pushSubs ?? []).slice(-PUSH_DEVICES), rev: p.rev + 1 };
+        return p;
+      }),
+      peopleSessions: [...(s.peopleSessions ?? []).filter((x) => x.person !== to.id), ...s.sessions.map((x) => ({ ...x, person: from.id, method: idOf.get(x.method) ?? null }))],
+      invites: (s.invites ?? []).filter((x) => x.person !== from.id && x.person !== to.id),
+    });
+  };
   // Who holds (type, key) on the box: the owner's top-level passkeys, else anyone's row.
   const holderOf = (s, type, key) => {
     const pk = type === 'passkey' ? s.passkeys.find((p) => p.id === key) : null;
@@ -1650,7 +1674,21 @@ export function createGateway(opts = {}) {
     log(body.role === 'admin' ? 'a person was made admin' : 'a person is no longer an admin');
     return json(res, 200, { ok: true, rev });
   };
-  const PEOPLE_POSTS = { rename: renameRoute, revoke: revokeRoute, remove: removeRoute, level: levelRoute, role: roleRoute };
+  // Make owner: the owner (never the stand-in: its row is written at the next start) hands the box to
+  // a joined person with no link out who holds a passkey, and stays on as a Full admin. One write.
+  const transferRoute = async (req, res, who) => {
+    const g = await peopleGuard(req, res, who, 'transfer');
+    if (!g) return;
+    const { s, person, row } = g;
+    if (person.id === null) return refuse(res, 409, 'restart-first', 'Restart the box first, then try again');
+    if (!joined(s, row)) return refuse(res, 409, 'not-joined', 'They haven\'t joined yet');
+    if (linkOut(s, row.id)) return refuse(res, 409, 'link-outstanding', 'Revoke their link first');
+    if (!hasPasskey(s, row)) return refuse(res, 409, 'no-passkey', 'They need a passkey first: the box\'s owner always has one');
+    store.save(transferTo(s, person, row));
+    log('the box was handed to another person; the old owner is an admin');
+    return json(res, 200, { ok: true });
+  };
+  const PEOPLE_POSTS = { rename: renameRoute, revoke: revokeRoute, remove: removeRoute, level: levelRoute, role: roleRoute, transfer: transferRoute };
 
   // Start, guards in the spec's order. `who`: the request's session (sessionOf), for an add.
   const startFlow = async (req, type, purpose, body, who) => {

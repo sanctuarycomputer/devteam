@@ -617,6 +617,44 @@ test('org-access A16: afterwards an older gateway admits only the new owner', as
   } finally { await old.close(); }
 });
 
+// Review focus 3: the second tab's session is an admin's by the time its body lands.
+test('kit-253: two owner tabs: the second transfer is refused', async () => {
+  const { gw, C, owner, ana, vic } = await box('k-two-tabs');
+  const tab2 = mint(gw, owner);
+  const h = heldPost(gw, tab2, 'transfer', { id: vic.id, rev: rev(gw, vic.id) });
+  h.sent.catch(() => {});
+  try {
+    await h.ready;
+    await accepts(gw, C.owner, 'transfer', { id: ana.id, rev: rev(gw, ana.id) }, 'the first tab hands the box to Ana');
+    const before = durable(gw.state());
+    h.release();
+    const r = await h.sent;
+    assert.equal(r.status, 403, `the second tab's transfer to Vic: ${r.status} ${r.body}`);
+    assert.equal(r.json?.code, 'not-allowed', r.body);
+    assert.equal(durable(gw.state()), before, 'nothing written');
+    assert.deepEqual(ownerOf(gw.state()).map((p) => p.id), [ana.id], 'Ana is the owner');
+  } finally { h.release(); await h.sent.catch(() => {}); await gw.close(); }
+});
+
+// Review focus 4: a session the new owner opened with a method that isn't a passkey.
+test('kit-253: a session the new owner opened with another method stays theirs, at top level', async () => {
+  const { gw, C, vic, stub } = await handover('k-stub-session');
+  try {
+    const tok = crypto.randomBytes(32);
+    const hash = u(sha(tok));
+    const s = gw.state();
+    gw.write({ ...s, peopleSessions: [...s.peopleSessions, { hash, person: vic.id, method: stub.id, at: Date.now(), expires: Date.now() + 86400e3 }] });
+    await accepts(gw, C.owner, 'transfer', { id: vic.id, rev: rev(gw, vic.id) }, 'to Vic');
+    const t = gw.state();
+    const top = t.sessions.find((x) => x.hash === hash);
+    assert.ok(top, 'the stub session is at top level');
+    assert.equal(top.method, stub.id, 'naming the stub\'s id, which stays in her row');
+    assert.ok(!t.peopleSessions.some((x) => x.hash === hash), 'and not in peopleSessions');
+    const b = await gw.req('GET', '/box.json', { cookie: `devteam_session=${u(tok)}` });
+    assert.deepEqual([b.status, b.json?.role], [200, 'owner'], 'it signs her in as the owner');
+  } finally { await gw.close(); }
+});
+
 test('org-access A16: afterwards the old owner\'s open session works as an admin', async () => {
   const { gw, C, owner, vic, ana } = await handover('a16-old-owner');
   try {
