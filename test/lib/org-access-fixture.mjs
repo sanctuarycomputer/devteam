@@ -272,8 +272,8 @@ const request = (method, port, p, headers = {}, out = {}) => new Promise((resolv
   r.end();
 });
 // The recorded commands. A command appends its line while this reads, so only whole lines count: what
-// follows the last newline is still being written (settled waits for its end). A
-// whole line that isn't JSON still throws.
+// follows the last newline is still being written (settled waits for its end). A whole line that isn't
+// JSON still throws.
 const cmdsText = (F) => (fs.existsSync(F.cmds) ? fs.readFileSync(F.cmds, 'utf8') : '');
 const readCmds = (F, text = cmdsText(F)) => text.slice(0, text.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map((l) => JSON.parse(l));
 // the instance at rest: nothing of its process groups running but their leaders, and no command
