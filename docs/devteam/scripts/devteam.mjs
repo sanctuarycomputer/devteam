@@ -2440,7 +2440,8 @@ function fetchLinkMain(R, refusing = 'refusing to judge against a stale main', {
     return;
   }
   // git fetches from the first of several urls, and repo() checks the last
-  const urls = (R.git(['config', '-z', '--get-all', 'remote.origin.url'], R.root) ?? '').split('\0').filter(Boolean);
+  const urls = start && R.git(['config', '-z', '--get-all', 'remote.origin.url'], R.root)?.split('\0').filter(Boolean);
+  if (start && !urls) no('git could not read its origin urls');
   if (start && urls.length > 1) no(`its origin has ${urls.length} urls (git config --get-all remote.origin.url), and only one can be the repo checked; keep one`);
   if (!start) {
     const fr = gitRun(['fetch', '--quiet', 'origin', `+refs/heads/${rb}:refs/remotes/origin/${rb}`], R.root);

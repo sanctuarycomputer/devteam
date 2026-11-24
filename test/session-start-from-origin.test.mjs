@@ -612,6 +612,14 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
       assert.equal(git(['rev-parse', 'HEAD'], wt('ch-41-l')), pushed, 'S1: from origin\'s branch');
       assert.equal(git(['rev-parse', 'refs/remotes/origin/ticket/ch-41-l'], old), pushed, 'S1: the tracking ref is origin\'s');
     });
+    await t.test('S4: a tracking ref git can\'t set is refused', tmux, () => {
+      ticket('ch-58-c');
+      git(['push', '-q', 'origin', `${real}:refs/heads/ticket/ch-58-c`], old);
+      const r = run(old, ['worker', 'ch-58-c'], refusing('git-no-tracking', `*' update-ref --no-deref refs/remotes/origin/ticket/ch-58-c '*`));
+      assert.notEqual(r.status, 0, `S4: refused, not started: ${r.out}`);
+      assert.match(r.err, /could not fetch origin main in home: .*refused by the test/, 'S4: in git\'s words');
+      assert.ok(!fs.existsSync(wt('ch-58-c')), 'S4: no worktree');
+    });
     await t.test('A1: a commit origin named that the fetch doesn\'t bring is refused', tmux, () => {
       ticket('ch-42-m');
       const main = git(['rev-parse', 'origin/main'], old);
