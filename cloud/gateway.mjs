@@ -2286,12 +2286,11 @@ export function createGateway(opts = {}) {
   // the 403's type and body. project: the name is a dashboard's (not a preview's); p: the pathname.
   const VIEW_ANY = 'View only: you can look at everything here, but not change anything.';
   const VIEW_TERM = 'View only: there is no terminal for view-only people.';
-  // terminal@1 §3's reading of a path, as the dashboard routes it: percent-decoded (kept as it is if
-  // it won't decode), repeated slashes folded, dot segments resolved. By hand, never by parsing the
-  // decoded path as a URL again: a decoded ? or # would end it there.
-  const termPath = (raw) => {
-    let d = raw;
-    try { d = decodeURIComponent(raw); } catch {}
+  // Is this a dashboard's terminal route, as terminal@1 §3 reads a path (parsed as a URL,
+  // percent-decoded, dot segments resolved, repeated slashes folded)? Readings differ on where a
+  // decoded / or . counts, so every plausible one is taken and any that lands under /api/term/ is
+  // refused: refusing a View session too much costs nothing, too little reaches the terminal.
+  const dots = (d) => {
     const out = [];
     const segs = d.replace(/\/+/g, '/').split('/').slice(1);
     segs.forEach((seg, i) => {
@@ -2301,11 +2300,18 @@ export function createGateway(opts = {}) {
     });
     return `/${out.join('/')}`;
   };
+  const decoded = (x) => { try { return decodeURIComponent(x); } catch { return x; } };
+  const isTermRoute = (raw) => {
+    let parsed = raw;
+    try { parsed = new URL(raw.replace(/^\/+/, '/'), 'http://x').pathname; } catch {}
+    // the raw path resolved first (as the dashboard parses it), then decoded; decoded first; neither
+    return [dots(decoded(parsed)), dots(decoded(raw)), dots(raw), dots(parsed)].some((p) => p.startsWith('/api/term/'));
+  };
   const VIEW_EXEMPT = (p, method) => (method === 'POST' && p === '/auth/logout') || p.startsWith('/auth/method/') || p === '/auth/passkeys' || p.startsWith('/auth/passkeys/');
   const viewRefusal = (req, person, { isBox, isTerm, project, p }) => {
     if (person?.level !== 'view') return null;
     // 0: a dashboard's terminal routes answer as the dashboard's own View deny does (terminal@1 §4)
-    if (project && termPath(req.url.split('?')[0]).startsWith('/api/term/')) return { type: 'json', body: '{"why":"view"}' };
+    if (project && isTermRoute(req.url.split('?')[0])) return { type: 'json', body: '{"why":"view"}' };
     const no = (sentence) => (navigating(req) ? { type: 'text', body: sentence } : { type: 'json', body: JSON.stringify({ error: sentence, code: 'view-only' }) });
     if (isTerm) return no(VIEW_TERM);
     if (isBox && (p === '/public' || p.startsWith('/public/'))) return no(VIEW_ANY);
