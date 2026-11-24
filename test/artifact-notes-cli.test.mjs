@@ -390,6 +390,10 @@ test('C5a C5b C5c the owner accepts the mark they read', fresh(() => {
   const was = show(gone).addressed.at;
   ok(cli(['thread', 'unready', gone, '--reason', 'the button is still grey'], F.SUP));
   refusedQuietly(() => cli(['thread', 'resolve', gone, '--accept-addressed', '--at', was]), /The note changed; read it again/);
+  const again = note('plan-pricing'); handed(again, 'plan-pricing'); mark(again, 'plan-pricing', NOTE, 2 * MIN);
+  const first = show(again).addressed.at;
+  handed(again, 'plan-pricing', MIN);
+  refusedQuietly(() => cli(['thread', 'resolve', again, '--accept-addressed', '--at', first]), /The note changed; read it again/);
   const wrote = note('plan-pricing'); handed(wrote, 'plan-pricing'); mark(wrote, 'plan-pricing', NOTE, 2 * MIN);
   const then = show(wrote).addressed.at;
   F.hand('owner', { type: 'turn', thread: wrote, text: 'Wait, green' }, MIN);
