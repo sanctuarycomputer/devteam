@@ -8,7 +8,9 @@ tried(() => { const ws = new WebSocket('__OTHER__/ws'.replace('http', 'ws')); ws
 tried(() => window.open('__OTHER__/popup'));
 const blob = (js) => URL.createObjectURL(new Blob([js]));
 tried(() => new Worker(blob("fetch('__OTHER__/worker', { mode: 'no-cors' }).catch(() => {})")));
-tried(() => new SharedWorker(blob("fetch('__OTHER__/shared', { mode: 'no-cors' }).catch(() => fetch(location.origin + '/tried-shared'))")));
+const home = location.href.replace(/[^/]*$/, '');
+const told = () => fetch(home + 'tried-shared', { mode: 'no-cors' }).catch(() => {});
+tried(() => { try { new SharedWorker(blob("fetch('__OTHER__/shared', { mode: 'no-cors' }).catch(() => fetch('" + home + "tried-shared', { mode: 'no-cors' }))")).onerror = told; } catch (e) { told(); } });
 // refused where the page has no origin of its own
 tried(() => { try { navigator.serviceWorker.register('sw.js').catch(() => fetch('tried-sw').catch(() => {})); } catch (e) { fetch('tried-sw').catch(() => {}); } });
 tried(async () => {

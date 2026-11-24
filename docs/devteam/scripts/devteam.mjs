@@ -12907,6 +12907,8 @@ async function shotLaunch({ noSandbox = false, extraArgs = [], cap }) {
     '--headless=new', '--remote-debugging-pipe', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync', '--hide-scrollbars',
     // no dump of a page that crashed is kept
+    // the artifact's frame in its page's own process, laid out and asked with it
+    '--disable-features=IsolateSandboxedIframes',
     '--disable-breakpad', '--disable-crash-reporter',
     '--renderer-process-limit=2', '--js-flags=--max-old-space-size=256', ...['', 'force-'].map((f) => `--${f}webrtc-ip-handling-policy=disable_non_proxied_udp`), '--disable-quic',
     ...extraArgs, ...(noSandbox ? ['--no-sandbox'] : []), 'about:blank',
@@ -12932,8 +12934,7 @@ async function shotLaunch({ noSandbox = false, extraArgs = [], cap }) {
     const crashed = () => reject(new Error('the page crashed; no mark written'));
     cdp.on('Inspector.targetCrashed', (p, sid) => { if (sid === sessionId) crashed(); });
     cdp.on('Target.detachedFromTarget', (p) => { if (p.sessionId === sessionId) crashed(); });
-    cdp.on('Target.targetCrashed', (p) => { if (p.targetId === targetId || p.targetId === launch.page.frameTarget) crashed(); });
-    cdp.on('Inspector.targetCrashed', (p, sid) => { if (sid === launch.page.frame) crashed(); });
+    cdp.on('Target.targetCrashed', (p) => { if (p.targetId === targetId) crashed(); });
   });
   launch.crashed.catch(() => {});
   // asked for too, so that a crash is heard by whichever of the three Chrome tells
@@ -12998,7 +12999,7 @@ async function shotServe(entries, { csp = true } = {}) {
   const top = `/${crypto.randomBytes(16).toString('hex')}`;
   const srv = http.createServer((req, res) => {
     const raw = req.url.split('?')[0];
-    if (raw === top && outer) { res.writeHead(200, { 'content-type': 'text/html', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': `default-src 'none'; style-src 'unsafe-inline'; frame-src ${origin}` }); return res.end(outer); }
+    if (raw === top && outer) { res.writeHead(200, { 'content-type': 'text/html', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': "script-src 'none'" }); return res.end(outer); }
     const rel = raw === '/' ? 'index.html' : raw.slice(1);
     let bytes = null;
     try { const e = files.get(rel); bytes = e ? shotRead(e) : null; } catch {}
@@ -13026,7 +13027,7 @@ async function shotDeadProxy() {
 // The page at url, laid out w by h, light, and settled: its load, its fonts, two frames. Its requests
 // are filtered and its dialogs dismissed (the policy allows them, and one would block its script).
 async function shotOpen(launch, url, { w, h }) {
-  const { cdp, page: { sessionId } } = launch;
+  const { cdp, page: { sessionId, targetId } } = launch;
   const send = (m, p = {}) => cdp.send(m, p, sessionId);
   const origin = new URL(url).origin;
   cdp.on('Fetch.requestPaused', (p, sid) => {
@@ -13036,33 +13037,28 @@ async function shotOpen(launch, url, { w, h }) {
   });
   cdp.on('Page.javascriptDialogOpening', (p, sid) => { cdp.send('Page.handleJavaScriptDialog', { accept: false }, sid).catch(() => {}); });
   await cdp.send('Browser.setDownloadBehavior', { behavior: 'deny' });
-  const wall = async (sid) => {
-    await cdp.send('Page.enable', {}, sid);
-    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] }, sid);
-    await cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true, filter: [{ type: 'iframe' }] }, sid);
-  };
-  // A frame in a process of its own waits for the same walls before it runs. The first is the artifact's.
-  cdp.on('Target.attachedToTarget', (p, sid) => {
-    const id = p.sessionId;
-    if (p.targetInfo.type !== 'iframe') return;
-    if (sid === sessionId) Object.assign(launch.page, { frame: id, frameTarget: p.targetInfo.targetId });
-    (async () => { await wall(id); await cdp.send('Inspector.enable', {}, id).catch(() => {}); await cdp.send('Runtime.runIfWaitingForDebugger', {}, id); })().catch(() => {});
+  // the artifact's frame, and the context its scripts run in (a new one each time it loads)
+  cdp.on('Runtime.executionContextCreated', (p, sid) => {
+    const { frameId, isDefault } = p.context.auxData ?? {};
+    if (sid === sessionId && isDefault && frameId && frameId === launch.page.frame) launch.page.context = p.context.id;
   });
-  await wall(sessionId);
+  cdp.on('Page.frameAttached', (p, sid) => { if (sid === sessionId && !launch.page.frame && p.parentFrameId === targetId) launch.page.frame = p.frameId; });
+  await send('Page.enable');
+  await send('Runtime.enable');
+  await send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
   await send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile: false });
   await shotScheme(launch, 'light');
   const loaded = new Promise((resolve) => cdp.on('Page.loadEventFired', (p, sid) => { if (sid === sessionId) resolve(); }));
   await send('Page.navigate', { url });
   await loaded;
-  if (!launch.page.frame) throw new Error("this Chrome doesn't give a sandboxed frame a process of its own (update it); no mark written");
-  await shotScheme(launch, 'light');
+  if (!launch.page.context) throw new Error('this Chrome keeps the page where the picture can\'t ask it; no mark written');
   await shotEval(launch, `Promise.resolve(document.fonts && document.fonts.ready).then(() => ${SHOT_FRAMES})`);
 }
 const SHOT_FRAMES = 'new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(1))))';
-const shotScheme = async (launch, value) => { for (const sid of [launch.page.sessionId, launch.page.frame]) if (sid) await launch.cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value }] }, sid); };
+const shotScheme = (launch, value) => launch.cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value }] }, launch.page.sessionId);
 // What the page answers is its own word; a script that throws there is no answer.
 async function shotEval(launch, expression) {
-  const r = await launch.cdp.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, launch.page.frame).catch(() => null);
+  const r = await launch.cdp.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true, contextId: launch.page.context }, launch.page.sessionId).catch(() => null);
   if (!r || r.exceptionDetails) throw new Error(SHOT_ANSWER);
   return r.result?.value;
 }
