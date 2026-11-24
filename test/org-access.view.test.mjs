@@ -409,6 +409,16 @@ onBox('org-access A12: a view session\'s PUT, PATCH and DELETE are refused every
   assert.equal((await at(view, alpha, 'HEAD', '/')).status, 200, 'HEAD dashboard');
   assert.equal((await view.req('HEAD', '/box.json')).status, 200, 'HEAD box.json');
 });
+// rule 3's exemption is exactly sign-out and its own methods: People's posts are refused as View
+// before People's own role guards (final-1 F2)
+test('org-access A12: a view session\'s People posts are refused view-only', async () => {
+  const { gw, view, ana } = await viewSetup('c10p');
+  try {
+    for (const a of ['invite', 'relink', 'rename', 'revoke', 'remove', 'level', 'role', 'transfer']) {
+      isView(await view.post(`/auth/people/${a}`, { id: ana?.id ?? 'x', name: 'Bea', level: 'full' }), `POST /auth/people/${a}`);
+    }
+  } finally { await gw.close(); }
+});
 test('org-access A12: a view session signs out', async () => {
   const { gw, view } = await viewSetup('c10');
   try {
@@ -468,7 +478,7 @@ onBox('org-access A14: a dashboard request carries the session\'s level, never t
   assert.equal(devSeen.at(-1)?.h['x-devteam-level'], undefined, 'a preview request carries no level');
 });
 onBox('org-access A12: a view session\'s /api/term/* on a dashboard is 403 {why:view}', async ({ view, at, alpha, seen }) => {
-  for (const [m, r] of [['GET', '/api/term/token'], ['GET', '/api/term/supervisor/screen'], ['POST', '/api/term/shell/keys'], ['GET', '/api//term/token'], ['GET', '/api/%74erm/token'], ['GET', '/api/x/../term/token'], ['GET', '/api/%2e%2e/api/term/token'], ['GET', '/api/x%3F/..%2Fterm/token'], ['GET', '/api/x%23/..%2Fterm/token'], ['GET', '/api/term/x%2F../../token'], ['GET', '/api/term/x%2f../../supervisor/screen']]) {
+  for (const [m, r] of [['GET', '/api/term/token'], ['GET', '/api/term/supervisor/screen'], ['POST', '/api/term/shell/keys'], ['GET', '/api//term/token'], ['GET', '/api/%74erm/token'], ['GET', '/api/x/../term/token'], ['GET', '/api/term//../token'], ['GET', '/api/%2e%2e/api/term/token'], ['GET', '/api/x%3F/..%2Fterm/token'], ['GET', '/api/x%23/..%2Fterm/token'], ['GET', '/api/term/x%2F../../token'], ['GET', '/api/term/x%2f../../supervisor/screen']]) {
     const x = await at(view, alpha, m, r, { body: m === 'POST' ? {} : undefined });
     assert.equal(x.status, 403, `${m} ${r}: ${x.status}`);
     assert.equal(x.body, '{"why":"view"}', `${m} ${r}`);
