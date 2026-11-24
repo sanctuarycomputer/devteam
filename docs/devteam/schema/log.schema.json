@@ -799,7 +799,7 @@
             "type": "string"
           },
           "kind": {
-            "description": "What sort of message: a question for a review or go-ahead, a merge request, blocked, a design change, a ruling, a relayed answer, info, or (responder-1) a handoff: the responder passing the supervisor what an owner's thread turn needs that it can't do. artifact-notes-1: or addressed, a session's mark that it addressed an artifact note handed to it, to the owner with the note's thread, which like info awaits no reply.",
+            "description": "What sort of message: a question for a review or go-ahead, a merge request, blocked, a design change, a ruling, a relayed answer, info, or (responder-1) a handoff: the responder passing the supervisor what an owner's thread turn needs that it can't do (responder-2: or the worker or planner the thread is bound to; only the supervisor's reply or its turn in the thread closes one). artifact-notes-1: or addressed, a session's mark that it addressed an artifact note handed to it, to the owner with the note's thread, which like info awaits no reply.",
             "enum": [
               "design-change",
               "merge-request",
@@ -2624,7 +2624,7 @@
         "x-set-only": ["status", "outcome", "ready", "handed", "shot", "noshot", "unready"]
       },
       "turn": {
-        "description": "One message in a thread: the owner's words to the supervisor, which carry the weight of the owner's words in its session and are already verbatim here, or a reply by the supervisor or (responder-1) the responder, which answers the owner's turns quickly and hands the rest to the supervisor; a responder turn never asks a question and is never the owner's words. Never changed. A turn on a thread that doesn't exist or is resolved is refused by thread say (the owner's) and thread reply (the supervisor's).",
+        "description": "One message in a thread: the owner's words to the supervisor, which carry the weight of the owner's words in its session and are already verbatim here, or a reply by the supervisor or (responder-1) the responder, which answers the owner's turns quickly and hands the rest to the supervisor; a responder turn never asks a question and is never the owner's words; or (responder-2) a reply by the worker or planner a thread is bound to (its ticket, its plan, a preview it offered, an artifact drawn in its worktree), which never asks a question, is never the owner's words, and answers only the owner's turns routed to it. Never changed. A turn on a thread that doesn't exist or is resolved is refused by thread say (the owner's) and thread reply (the supervisor's).",
         "type": "object",
         "properties": {
           "person": {
@@ -2665,9 +2665,16 @@
             "x-tip": "The question it asks you."
           },
           "routed_to": {
-            "description": "responder-1. On the owner's turn only: who owes the reply, decided once when the turn was written and never recomputed: the supervisor, or the responder.",
-            "enum": ["supervisor", "responder"],
+            "description": "responder-1. On the owner's turn only: who owes the reply, decided once when the turn was written and never recomputed: the supervisor, or the responder; or (responder-2) session: the live worker or planner whose work the thread is about, named in routed_session.",
+            "enum": ["supervisor", "responder", "session"],
             "x-tip": "Who it went to."
+          },
+          "routed_session": {
+            "description": "responder-2. On the owner's turn routed_to session only, and required there: the ticket (its id) or planner (plan-<feature>) it was typed to, which owes the reply with the supervisor. Never on a session's own turn: its writer already names it.",
+            "type": "string",
+            "maxLength": 120,
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+            "x-tip": "The session it went to."
           },
           "delivered": {
             "description": "responder-1. On the owner's turn routed to the responder only: typed into the responder's pane, or queued in the log while it was busy.",
@@ -3200,13 +3207,15 @@
         "ticket",
         "observation",
         "message",
-        "phase"
+        "phase",
+        "turn"
       ],
       "ticket": [
         "phase",
         "gate",
         "observation",
-        "message"
+        "message",
+        "turn"
       ],
       "responder": [
         "turn",

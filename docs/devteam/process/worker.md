@@ -106,6 +106,18 @@ The supervisor turns recurring observations into lessons, and accepted lessons r
 5. Apply exactly it. Apply the rows as the owner decided them, no more and no fewer, write what you applied as `[{ "id", "values", "evidence" }]`, and `devteam.mjs review verify <qid> --applied <file>` must exit 0.
 6. Commit it. `devteam.mjs review result <qid> --commit` copies the owner's result into your ticket folder (`questions/<qid>/result.json`) after both hashes verify, and prints the `git add`. Commit it with the work that applied it. `check-pr` refuses a result whose bytes are not the owner's, and any change to a page, data or schema a question pinned, so never edit any of them by hand.
 
+### Threads bound to you
+
+A thread about your ticket (its subject is `ticket:<your id>`, or a preview you offered) is bound to you. While you are at work, the owner's turns there are typed into your pane as `[devteam thread <t-id> from owner on …]`, and reach no one else. A thread about an artifact drawn in your worktree is bound to you only for replying and handing over: its owner turns are never typed into your pane, and go where the owner hands them.
+
+- Reply first, with `devteam.mjs thread reply <t-id> "…"`, to the turns routed to you; the reply prints the turns it answers (`answering <u-id>: "…"`), so read each one (`thread show <t-id>`). Add `--pending` when work follows, and follow it up with `--re <that reply's u-id>`.
+- Write in plain words, as to a person: no commands, flags or ids except as `--refs <type>:<id>` (`--refs ticket:<id>`, `--refs act:a-…`).
+- Stay within your ticket. The owner's words there are their request about your work; they bind beyond it only through the supervisor, which records them (`thread ask --turn`).
+- Hand over anything else (a question for the owner, a decision, a merge, a change to your ticket) with `devteam.mjs send supervisor "…" --kind handoff --thread <t-id>`, then reply "Passed to the supervisor: …". The handoff stays open until the supervisor answers it in the thread; say more there with `thread reply`, or send another handoff, never `--re` it.
+- Once the supervisor has answered in the thread, reply again only to say something new, with `--anyway`.
+- A turn routed to you with no reply for 5 minutes, or a `--pending` reply with nothing after it for 10, raises `session-overdue`, and your threads go to the responder or the supervisor until each is answered.
+- You reply only in threads bound to you: anywhere else `thread reply` refuses ("this thread isn't about your work"), so send the supervisor what you have instead.
+
 ## 8. Finishing
 
 1. Merge `origin/main` into your branch; resolve conflicts; re-run the gates; check every ruling is in your spec or plan.

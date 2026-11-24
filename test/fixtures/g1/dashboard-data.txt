@@ -2167,6 +2167,17 @@ exit 0
       "owner_only": null
     },
     {
+      "key": "session_threads",
+      "group": "Agents and sessions",
+      "name": "Threads to sessions",
+      "description": "a thread about a live worker's or planner's work goes straight to it; off sends those to the responder",
+      "shown": "value",
+      "value": true,
+      "set": false,
+      "default": true,
+      "owner_only": null
+    },
+    {
       "key": "responder_command",
       "group": "Agents and sessions",
       "name": "Responder command",
