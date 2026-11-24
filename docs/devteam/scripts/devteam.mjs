@@ -26906,16 +26906,17 @@ function makeSession(role) {
     // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
     R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-B', branch, wt, sha], R.root);
     // -B sets the branch and then checks it out by name, so a session moving it in between would
-    // win: what landed is read back, and undone if it isn't the sha chosen. The branch goes back to
-    // where it was before the add, and only from where the add left it.
+    // win: what landed is read back, and undone if it isn't the sha chosen, on the branch (its full
+    // name: a tag of the same name makes git print a longer short one). The branch goes back to where
+    // it was before the add, unless it moves again after this read.
     const read = (args, cwd) => { const r = responderGit(args, cwd); return r.status === 0 ? r.stdout.trim() : null; };
     const seen = read(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], R.root);
     const head = read(['rev-parse', '--verify', '--quiet', 'HEAD'], wt);
-    if (head !== sha || read(['symbolic-ref', '--short', 'HEAD'], wt) !== branch) {
+    if (head !== sha || read(['symbolic-ref', 'HEAD'], wt) !== `refs/heads/${branch}`) {
       R.git(['worktree', 'remove', '--force', wt], R.root);
       if (local) R.git(['update-ref', `refs/heads/${branch}`, local, seen ?? '0'.repeat(local.length)], R.root);
       else if (seen) R.git(['update-ref', '-d', `refs/heads/${branch}`, seen], R.root);
-      die(`the new worktree holds ${head ? short(head) : 'no commit'}, not ${short(sha)}: something moved ${branch} while it was checked out, so nothing was started; try again`);
+      die(`the new worktree ${head === sha ? `isn't on ${branch}` : `holds ${head ? short(head) : 'no commit'}, not ${short(sha)}`}: something moved ${branch} while it was checked out, so nothing was started; try again`);
     }
     const stale = at.branch ? null : R.resolveCommit(`refs/remotes/origin/${branch}`);
     if (stale) {

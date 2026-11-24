@@ -108,6 +108,7 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
       ok(old, ['worker', 'ch-08-h'], SUP);
       assert.equal(git(['rev-parse', 'HEAD'], wt('ch-08-h')), real, 'B7');
       assert.equal(upstream(old, 'ticket/ch-08-h'), 'origin/main', 'B7: tracks main');
+      git(['push', '-q', 'origin', ':refs/heads/x/refs/heads/main', ':refs/heads/x/refs/heads/ticket/ch-08-h'], old);
     });
     await t.test('H1: a new branch is based on origin\'s main by sha, not on origin/main read again', tmux, () => {
       ticket('ch-07-g');
@@ -214,12 +215,32 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
       assert.ok(hasRef(old, 'refs/heads/ticket/ch-15-o'), 'H4: the branch is still there');
       assert.equal(git(['rev-parse', 'refs/heads/ticket/ch-15-o'], old), head, 'H4: the branch is back on its own commit');
     });
+    await t.test('B11: a tag with the branch\'s name doesn\'t make a right checkout read as a wrong one', tmux, () => {
+      ticket('ch-16-p');
+      git(['tag', 'ticket/ch-16-p', real], old);
+      const r = run(old, ['worker', 'ch-16-p'], SUP);
+      assert.equal(r.status, 0, `B11: started: ${r.err}`);
+      assert.equal(git(['symbolic-ref', 'HEAD'], wt('ch-16-p')), 'refs/heads/ticket/ch-16-p', 'B11: on the branch');
+    });
+    await t.test('H5: a checkout of the right commit that isn\'t on the branch is undone and refused', tmux, () => {
+      ticket('ch-17-q');
+      const bin = path.join(F.base, 'git-detaches');
+      const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+      // the add makes the branch, then leaves the worktree's HEAD detached at the same commit
+      write(path.join(bin, 'git'), `#!${process.execPath}\nconst { spawnSync } = require('child_process');\nconst a = process.argv.slice(2);\nconst i = a.indexOf('worktree');\nconst r = spawnSync('${realGit}', a, { stdio: 'inherit' });\nif (i >= 0 && a[i + 1] === 'add') spawnSync('${realGit}', ['checkout', '-q', '--detach'], { cwd: a.at(-2), stdio: 'inherit' });\nprocess.exit(r.status ?? 1);\n`);
+      fs.chmodSync(path.join(bin, 'git'), 0o755);
+      const r = run(old, ['worker', 'ch-17-q'], { ...SUP, PATH: `${bin}${path.delimiter}${process.env.PATH}` });
+      assert.notEqual(r.status, 0, `H5: refused, not started: ${r.out}`);
+      assert.match(r.err, /the new worktree isn't on ticket\/ch-17-q: .*so nothing was started/, 'H5');
+      assert.ok(!fs.existsSync(wt('ch-17-q')), 'H5: no worktree');
+      assert.ok(!hasRef(old, 'refs/heads/ticket/ch-17-q'), 'H5: the branch this launch made is gone');
+    });
   } finally { F.done(); }
 });
 
 test('a linked repo: the worker\'s base is its origin\'s main whatever the checkout\'s remote config says', async (t) => {
   const F = multiFixture('start-from-origin-link');
-  const { old, runIn, ticket } = F;
+  const { old, runIn, okIn, ticket } = F;
   const wt = (id) => path.join(old, '.worktrees', id);
   try {
     const real = markReal(F.console, 'trunk');
@@ -231,6 +252,11 @@ test('a linked repo: the worker\'s base is its origin\'s main whatever the check
       const r = runIn(old, ['worker', 'console-01-a'], SUP);
       assert.equal(r.status, 0, r.err);
       assert.equal(git(['rev-parse', 'HEAD'], wt('console-01-a')), real, 'L1: origin\'s trunk');
+    });
+    await t.test('L3: the link\'s other reads of main (a measure) aren\'t left on a moved origin/trunk either', () => {
+      git(['update-ref', 'refs/remotes/origin/trunk', moved], F.console);
+      const G = okIn(old, ['goal', 'add', '--title', 'Real', '--outcome', 'real', '--measure', 'real markers', '--target', '1', '--unit', 'markers', '--direction', 'up', '--source', 'repo', '--link', 'console', '--check', 'grep -c real marker.txt || true', '--non-goals', 'none', '--preconditions', 'a'], SUP).trim();
+      assert.match(okIn(old, ['goal', 'reading', G, '--run'], SUP), /^recorded 1 for /, 'L3: read on origin\'s trunk');
     });
     await t.test('L2: an unset remote.origin.url and a moved origin/trunk', tmux, () => {
       ticket('console-02-b');
