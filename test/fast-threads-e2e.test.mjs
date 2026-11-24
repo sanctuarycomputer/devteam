@@ -106,8 +106,11 @@ test('fast threads end to end (kit-107)', { skip: NO_TMUX, timeout: 290000 }, as
     const up = looks() >= 2 && c.exitCode === null;
     if (!up) w.stop();
     assert.ok(up, `wait is in its loop (${looks()} looks): ${w.out}`);
-    // woken within ms of real time, or false
-    w.woke = (ms) => Promise.race([w.exited, new Promise((resolve) => setTimeout(() => resolve(false), ms))]);
+    // woken within ms of real time, or false; its timer is cleared, or it would hold the file open after the last case
+    w.woke = (ms) => new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), ms);
+      w.exited.then(() => { clearTimeout(timer); resolve(true); });
+    });
     return w;
   };
 
