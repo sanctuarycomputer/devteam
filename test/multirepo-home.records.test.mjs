@@ -7,6 +7,9 @@ import path from 'node:path';
 import { json, multiFixture, review, write } from './lib/kit.mjs';
 import { homeRecords, readyInHome, recordsFixture, SUP, tryCommit, VERIF } from './lib/multirepo-home-fixture.mjs';
 
+// metrics 3 minutes on: past the grace merged-without-merge gives a merge just made (kit-808)
+const LATE = { NODE_OPTIONS: `--import=data:text/javascript,${encodeURIComponent('const now = Date.now; Date.now = () => now() + 180000;')}` };
+
 test('records in home: the setting (repo by default, home or refused), and approve-plan reads the plan from home', () => {
   const F = multiFixture('records-setting');
   const { old, okIn, runIn, ticket } = F;
@@ -146,7 +149,7 @@ test('records in home: merge checks the records at one pinned sha and lands them
     const fromSub = JSON.parse(execFileSync(process.execPath, [path.join(old, 'docs/devteam/scripts/devteam.mjs'), 'status', '--json'], { cwd: sub, env: F.env({}), encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }));
     assert.equal(fromSub.tickets.find((x) => x.id === id).records_landed, true, 'from a subfolder');
     assert.match(okIn(old, ['status']), new RegExp(`${id}.*records in home, code not merged: run merge ${id} again`));
-    const findings = () => json(okIn(old, ['metrics', '--json'])).findings;
+    const findings = () => json(okIn(old, ['metrics', '--json'], {}, LATE)).findings;
     assert.ok(findings().some((x) => x.kind === 'records-without-code' && x.subject === id), 'the finding that names the fix');
     assert.ok(!findings().some((x) => x.kind === 'merged-without-merge'), 'the records merge is named by its own act, logged as it landed');
     const recAct = json(okIn(old, ['log', '--type', 'act', '--json'])).find((a) => a.class === 'merge-word' && String(a.what).startsWith(`merged home's ticket/${id} at ${r.head}`));
