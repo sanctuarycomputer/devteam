@@ -275,6 +275,55 @@ test('next-moves A16: chore records: start --what --for, adopt, drop, and a star
       assert.equal(originTip(F, 'r1'), tip, "origin keeps its newer commit");
     });
 
+    await t.test("chore pr refuses to push over commits only origin has, when chore start couldn't reach origin", () => {
+      const tip = branchWith(F, 's1', 1, { push: true });
+      g(['branch', '-q', '-D', 'chore-s1'], old);
+      g(['update-ref', '-d', 'refs/remotes/origin/chore-s1'], old);
+      const url = g(['remote', 'get-url', 'origin'], old);
+      g(['remote', 'set-url', 'origin', path.join(F.base, 'no-such-origin')], old);
+      let wt;
+      try { wt = ok(old, ['chore', 'start', 's1'], SUP).trim(); } finally { g(['remote', 'set-url', 'origin', url], old); }
+      assert.equal(g(['rev-parse', 'HEAD'], wt), main(), 'with origin out of reach the branch reads as new, so it starts from main');
+      fs.writeFileSync(path.join(wt, 's1-new.md'), 's1 new\n');
+      refused(F, ['chore', 'pr', 's1', '--title', 's1 over origin'], new RegExp(`chore-s1 on origin is at ${tip}, with commits this head .* lacks`));
+      assert.equal(originTip(F, 's1'), tip, "origin's commit stays");
+      assert.equal(g(['rev-parse', 'HEAD'], wt), main(), "the refused run's commit is undone");
+      assert.match(g(['status', '--porcelain'], wt), /s1-new\.md/, 'what was written stays in the worktree');
+    });
+
+    await t.test('chore pr from a worktree origin has moved past refuses, and origin keeps its commit', () => {
+      branchWith(F, 's2', 1, { push: true });
+      const wt = ok(old, ['chore', 'start', 's2'], SUP).trim();
+      const tip = commitOn(F, 's2', 's2-origin', { origin: true });
+      refused(F, ['chore', 'pr', 's2', '--title', 's2 behind'], /chore-s2 on origin is at .*bring them in first/);
+      assert.equal(originTip(F, 's2'), tip, "origin's newer commit stays");
+      g(['pull', '-q', '--rebase', 'origin', 'chore-s2'], wt);
+      ok(old, ['chore', 'pr', 's2', '--title', 's2 caught up'], SUP);
+      assert.equal(originTip(F, 's2'), tip, 'once brought in, chore pr pushes');
+    });
+
+    await t.test('chore start on a chore whose commit was cherry-picked onto main, with no merge-chore act, starts from main', () => {
+      const tip = branchWith(F, 's3', 1, { push: true });
+      const cp = path.join(F.base, 'pick-s3');
+      g(['worktree', 'add', '-q', '--detach', cp, 'origin/main'], old);
+      g(['cherry-pick', tip], cp);
+      g(['push', '-q', 'origin', 'HEAD:main'], cp);
+      g(['worktree', 'remove', '--force', cp], old);
+      const wt = ok(old, ['chore', 'start', 's3'], SUP).trim();
+      assert.equal(g(['rev-parse', 'HEAD'], wt), main(), 'git cherry finds its patch in main, so it starts from main');
+    });
+
+    await t.test("chore start on a branch origin no longer has reads the local tip, not origin's stale copy", () => {
+      branchWith(F, 's4', 2, { push: true });
+      const stale = tipOf(F, 'refs/remotes/origin/chore-s4');
+      g(['branch', '-q', '-f', 'chore-s4', `${stale}~1`], old);
+      const local = tipOf(F, 'chore-s4');
+      g(['--git-dir', g(['remote', 'get-url', 'origin'], old), 'branch', '-q', '-D', 'chore-s4'], old);
+      assert.equal(tipOf(F, 'refs/remotes/origin/chore-s4'), stale, 'the stale copy is still here');
+      const wt = ok(old, ['chore', 'start', 's4'], SUP).trim();
+      assert.equal(g(['rev-parse', 'HEAD'], wt), local, 'the local tip, since origin has no such branch');
+    });
+
     await t.test('CLASS_WORDS has chore-start and chore-drop', () => {
       const src = fs.readFileSync(path.join(kit, 'scripts/devteam.mjs'), 'utf8');
       const words = src.match(/const CLASS_WORDS = Object\.freeze\(\{([\s\S]*?)\}\);/)[1];

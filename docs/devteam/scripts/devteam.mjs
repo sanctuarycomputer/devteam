@@ -16866,6 +16866,14 @@ function cmdChore() {
     if (committed) gitOrDie(['reset', '--quiet', '--soft', 'HEAD~1'], wt);
     die(choreDropWords(slugName, head, dropped, true));
   }
+  // the push is forced: origin's tip as it is now, with commits this head lacks, is open work it would
+  // overwrite (a start that couldn't reach origin, or a push from elsewhere), unless it is merged or
+  // a drop holds it (the --fresh case)
+  const there = choreBranch(slugName).origin;
+  if (there && there !== head && ancestorOf(there, head) !== true && !choreTipMerged(slugName, there) && !choreDropHolding(slugName, there)) {
+    if (committed) gitOrDie(['reset', '--quiet', '--soft', 'HEAD~1'], wt);
+    die(`chore-${slugName} on origin is at ${there}, with commits this head (${head}) lacks: bring them in first (git -C .worktrees/chore-${slugName} pull --rebase origin chore-${slugName}), or chore drop ${slugName} to replace them; chore pr changed nothing`);
+  }
   const base = mainRef() ? git(['merge-base', mainRef(), head]) : null;
   // and again over every version since main, after the commit and before the push (kit-135)
   const exRange = exteriorChoreLines(wt, 'range', { base, checkedWords: named0 });
