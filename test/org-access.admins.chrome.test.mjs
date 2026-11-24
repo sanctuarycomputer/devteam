@@ -150,7 +150,8 @@ async function gateway(name, extra = {}) {
   const state = () => JSON.parse(fs.readFileSync(file, 'utf8'));
   const write = (s) => { const t = `${file}.test.tmp`; fs.writeFileSync(t, JSON.stringify(s, null, 2), { mode: 0o600 }); fs.renameSync(t, file); };
   const seed = (people) => { const { state: s, rows } = seedPeople(state(), people); write(s); return rows; };
-  return { g, port, publicUrl, inst, term, logs, token, dir, file, req, claim, login, state, write, seed, jar: () => jar, flow: () => flowJar, setJar: (v) => { jar = v; }, // a socket a browser opened ahead and never sent on would hold server.close (kit-798)
+  return { g, port, publicUrl, inst, term, logs, token, dir, file, req, claim, login, state, write, seed, jar: () => jar, flow: () => flowJar, setJar: (v) => { jar = v; },
+    // a socket a browser opened ahead and never sent on would hold server.close (kit-798)
     close: () => new Promise((r) => { g.server.close(r); g.server.closeAllConnections(); }) };
 }
 
