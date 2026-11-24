@@ -11726,10 +11726,10 @@ const ARTIFACT_LENS = String.raw`(() => {
   // and only for a key the page let pass, so it is decided once the event has run (a page's own handler may
   // take it, and the capture listener below comes before those)
   const onArrow = (e) => {
-    if (!heard || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return;
+    if (!heard || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') || e.repeat || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return;
     setTimeout(() => {
       const on = document.activeElement;
-      if (!e.defaultPrevented && (!on || on === document.body || on === document.documentElement)) tell({ type: 'key', key: e.key, shift: false });
+      if (!e.defaultPrevented && (!on || ((on === document.body || on === document.documentElement) && !typingIn(on)))) tell({ type: 'key', key: e.key, shift: false });
     }, 0);
   };
   const onBlur = () => { if (heard && shiftDown) { shiftDown = false; tell({ type: 'key', key: 'Shift', shift: false }); } };

@@ -242,11 +242,14 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     const V = await tabOf({ [N.trial]: ROW.C20(), [N.plans]: ROW.C20() });
     await openAt(V, AV_WT, 'plan-pricing');
     await has(V, '#av-handover', 'the pill');
-    await V.p.ev(`(window.__replies['artifact-handoff'] = { body: { to: 'plan-pricing', typed: true, count: 2 }, wait: 300 }, true)`);
+    await V.p.ev(`(window.__replies['artifact-handoff'] = { body: { to: 'plan-pricing', typed: true, count: 2 }, wait: 1500 }, true)`);
     await V.p.click('#av-handover');
-    await V.p.click('#av-handover').catch(() => {});
+    await V.p.ev(`(addEventListener('click', (e) => { if (e.target.id === 'av-handover') window.__again = true; }, true), 0)`);
+    await V.p.click('#av-handover');
+    assert.equal(await V.p.ev('window.__again === true'), true, 'setup: the second press reached the pill');
     await V.soon(`window.__posts.some((x) => x.action === 'artifact-handoff')`, 'the press posted');
-    await V.p.ev(FRAMES);
+    assert.ok(await V.settle(`${text('#av-with')} === 'With plan-pricing'`, 4000), 'the first answer');
+    await new Promise((r) => setTimeout(r, 300));
     assert.deepEqual(await V.p.ev(`window.__posts.filter((x) => x.action === 'artifact-handoff')`), [{ action: 'artifact-handoff', body: { slug: 'pricing', at: 'plan-pricing' } }], 'one post, {slug, at}');
     assert.ok(await V.settle(`${text('#av-with')} === 'With plan-pricing' && !${shown('#av-handover')}`, 4000), `the bar says With plan-pricing (it says ${J(await V.p.ev(text('#av-with')))})`);
     await V.rows({ [N.trial]: ROW.C20(), [N.plans]: ROW.C1() });
@@ -407,10 +410,10 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await has(V, '#av-next', 'the stepper');
     await V.p.click('#av-next');
     await V.soon('TL.open !== null', 'setup: first step');
-    const loads = await V.p.ev('[window.__loads.length, AV_LOADS.get(tsFrame())]');
+    const loads = await V.p.ev('[window.__loads.length, AV_LOADS.get(tsFrame())]'), one = await V.p.ev('TL.open');
     await V.p.click('#av-next');
-    await V.soon('TL.open !== null', 'second step');
-    await V.p.ev(FRAMES);
+    await V.soon(`TL.open !== null && TL.open !== ${J(one)}`, 'second step');
+    await new Promise((r) => setTimeout(r, 400));
     assert.deepEqual(await V.p.ev('[window.__loads.length, AV_LOADS.get(tsFrame())]'), loads, 'no load');
   });
 
@@ -444,10 +447,13 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await V.soon(`!!document.querySelector('[data-tl-show="${N.trial}"]')`, 'the row has Show me');
     await V.p.click(`[data-tl-show="${N.trial}"]`);
     await V.soon(`${VIEWER_UP} && TS.ready && TS.at === 'plan-pricing'`, 'up');
-    assert.equal(await V.p.ev('AV_NAVS'), 0, 'the first load not counted');
-    await V.p.ev('window.__backs = 0');
+    await V.soon(`TL.open === ${J(N.trial)}`, 'its card');
+    await new Promise((r) => setTimeout(r, 300));
+    assert.deepEqual(await V.p.ev('[AV_NAVS, AV_RET]'), [0, '#library?th=open'], 'the first load not counted');
+    await V.p.ev('window.__backs = 0, 0');
     await V.close('x');
     await V.closedOn('#library?th=open', 'after Show me');
+    assert.equal(await V.p.ev('window.__backs'), 1, 'one step back');
   });
 
   await sub('A11: a step to a note whose anchor is hidden opens its card at the stage\'s top right, Not on this view', async () => {
@@ -471,6 +477,36 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
   // the card's own 2 s poll held, so the card changes only when the test reads the threads (spec-1 F6)
   const holdPoll = (V) => V.p.ev('(TL.polled = true, true)');
   const ARMED = 1100;
+  await sub('A8b: steps while one is under way: the last wins; the owner moving on drops it', async () => {
+    const V = await tabOf({ [N.trial]: withFrame(ROW.C12(), ''), [N.cancel]: withFrame(ROW.C12(), ''), [N.plans]: withFrame(ROW.C12(), '') });
+    await openAt(V, AV_WT, 'plan-pricing');
+    await has(V, '#av-next', 'the stepper');
+    const ids = await V.p.ev('avStep.list().map((t) => t.id)');
+    const i = ids.indexOf(N.cancel), next = ids[(i + 1) % 3], prev = ids[(i + 2) % 3];
+    // from the note before: faq.html's, and at once the one after, on index.html
+    await V.p.ev(`tlOpen(${J(prev)}, false); void 0`);
+    await V.p.ev('(avStep(1), avStep(1), true)');
+    assert.notEqual(await V.p.ev('TL.open'), next, 'not landed on the page being left');
+    await V.soon(`TL.open === ${J(next)} && TS.ready && TS.path === 'index.html'`, 'the last step landed on its own page');
+    await new Promise((r) => setTimeout(r, 600));
+    assert.deepEqual(await V.p.ev('[TL.open, TS.path]'), [next, 'index.html'], 'the frame stays under its card');
+    // under way to faq.html, the owner opens another note
+    await V.p.ev(`(tlOpen(${J(prev)}, false), avStep(1), tlOpen(${J(next)}, false), true)`);
+    await V.soon(`TS.ready && TS.path === 'faq.html'`, 'the frame came');
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(await V.p.ev('TL.open'), next, "the owner's own card kept");
+  });
+  await sub('A12c: Resolve waits its second again when its block comes back', async () => {
+    const V = await tabOf({ [N.trial]: withFrame(ROW.C12(), '') });
+    await openAt(V, AV_WT, 'plan-pricing');
+    await cardOf(V, N.trial);
+    await V.soon(`document.querySelector('#tl-card .tl-addr [data-tl-accept]')?.disabled === false`, 'setup: armed');
+    for (const [off, on] of [['TL.resolving = true', 'TL.resolving = false'], ['tlClose()', `tlOpen(${J(N.trial)}, false)`]]) {
+      await V.p.ev(`(${off}, tlDraw(), ${on}, tlDraw(), true)`);
+      assert.equal(await V.p.ev(`document.querySelector('#tl-card .tl-addr [data-tl-accept]').disabled`), true, `waiting again after ${off}`);
+      await V.soon(`document.querySelector('#tl-card .tl-addr [data-tl-accept]')?.disabled === false`, 'armed again');
+    }
+  });
   await sub('A12: an addressed card says who and what; Resolve sends the at as drawn; a changed note is refused and redrawn', async () => {
     const V = await tabOf({ [N.trial]: ROW.C12() });
     await openAt(V, AV_WT, 'plan-pricing');
@@ -544,6 +580,16 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     assert.deepEqual(await V.p.ev(`window.__posts.filter((x) => x.action === 'thread-accept').map((x) => x.body)`), [{ id: N.onMain, at: READY_AT }], 'thread-accept {id, at}');
   });
 
+  await sub('A14b: Show me works when the head stands already, and says nothing of another artifact', async () => {
+    const V = await tabOf({ [N.onMain]: withFrame(ROW.C11(), '') });
+    await openAt(V, AV_MAIN, 'main');
+    // another version shown in place, the head unchanged
+    await V.p.ev(`showArtifact('pricing', 'plan-pricing', { picked: true }); void 0`);
+    await V.soon(`TS.at === 'plan-pricing' && TS.ready`, 'setup: another version in place');
+    await V.p.ev(`(avShowMe(${J(N.onMain)}), true)`);
+    await V.soon(`TS.at === 'main' && TS.ready && TL.open === ${J(N.onMain)}`, 'main shown, its card open');
+    assert.equal(await V.p.ev('SHOW_NOTE'), null, 'nothing left for the next open');
+  });
   await sub('A14: Show me from the Threads panel opens the source, the note\'s own file first, its card open', async () => {
     const cases = [
       [N.trial, { at: 'plan-pricing', slug: 'pricing' }, '#artifact/wt/plan-pricing/pricing', 'index.html', 'Draft · live in plan-pricing'],
@@ -561,6 +607,8 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
       assert.ok((await V.p.ev(`window.__loads.filter((l) => l.id === 'av-frame' && l.src)[0].src`)).endsWith(`/pricing/${file}`), `the first load is ${file}`);
       assert.equal(await V.p.ev('history.length'), len + 1, 'one entry');
       await V.soon(`TL.open === ${J(id)}`, 'its card open');
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal(await V.p.ev(`window.__loads.filter((l) => l.id === 'av-frame' && l.src).length`), 1, 'still one load');
       assert.ok((await V.p.ev(text('#av-where'))).startsWith(where), `the version pill names ${where}`);
     }
     const V = await tabOf({ [N.annual]: withFrame(ROW.C12(), '#annual') }, '#library?th=open');
@@ -583,6 +631,7 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     assert.equal(await V.p.ev(text('#tl-card .tl-shot-cap')), "From plan-pricing's draft · 3f7c2a9 + uncommitted changes · 1400px wide", 'the caption');
     await V.p.click('#tl-card .tl-shot');
     await has(V, '#av-shot', 'the full-size view');
+    assert.ok((await V.p.ev(`document.querySelector('#av-shot img').getAttribute('src')`)).endsWith('-light.png'), 'light first');
     await V.p.click('#av-shot [data-shot="dark"]');
     assert.ok((await V.p.ev(`document.querySelector('#av-shot img').getAttribute('src')`)).endsWith('-dark.png'), 'Dark');
     await V.p.key('Escape');
@@ -591,7 +640,27 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await has(V, '#av-shot', 'the full-size view again');
     await V.frameEscape();
     assert.ok(await V.settle(`!${shown('#av-shot')} && !document.getElementById('tl-card').hidden && ${VIEWER_UP}`, 3000), "the frame's Escape closes the picture only");
+    // X; a press outside (the stage's corner); neither closes the card
+    for (const how of ['x', 'outside']) {
+      await V.p.click('#tl-card .tl-shot');
+      await has(V, '#av-shot', `the view (${how})`);
+      if (how === 'x') await V.p.click('#av-shot [data-shot-close]');
+      else { const at = await V.p.ev(`(() => { const r = document.getElementById('av-shot').getBoundingClientRect(); return { x: r.left + 5, y: r.bottom - 5 }; })()`); await V.p.clickAt(at.x, at.y); }
+      assert.ok(await V.settle(`!document.getElementById('av-shot') && !document.getElementById('tl-card').hidden && ${VIEWER_UP}`, 3000), `${how} closes the picture only`);
+    }
+    // the viewer closed under the picture: nothing of it is left to take a key
+    await V.p.click('#tl-card .tl-shot');
+    await has(V, '#av-shot', 'the view, then Back');
+    await V.p.ev('history.back(); void 0');
+    await V.soon(CLOSED, 'Back closed the viewer');
+    assert.ok(await V.settle(`!document.getElementById('av-shot')`, 3000), 'the picture went with it');
+    await openAt(V, AV_WT, 'plan-pricing');
+    await cardOf(V, N.trial);
     await V.rows({ [N.trial]: ROW.C12({ shot: SHOT({ src: 'main' }) }) });
+    await V.p.click('#tl-card .tl-shot');
+    await has(V, '#av-shot', 'a picture with no dark one');
+    assert.equal(await V.p.ev(`document.querySelectorAll('#av-shot [data-shot]').length`), 0, 'no switch');
+    await V.p.key('Escape');
     assert.ok(await V.settle(`${text('#tl-card .tl-shot-cap')} === 'From main · 3f7c2a9 · 1400px wide'`, 3000), 'From main');
   });
 
@@ -661,6 +730,11 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await openAt(V, AV_WT, 'plan-pricing');
     await V.soon(`!!document.querySelector('#av-pins [data-tl-pin="${N.trial}"]') && !!document.querySelector('#av-pins [data-tl-pin="${N.plans}"]')`, 'setup: both pins');
     assert.deepEqual(await V.p.ev(`[document.querySelector('#av-pins [data-tl-pin="${N.trial}"]').classList.contains('handed'), document.querySelector('#av-pins [data-tl-pin="${N.plans}"]').classList.contains('check')]`), [true, true], 'ring and check');
+    const look = await V.p.ev(`(() => { const p = (id) => document.querySelector('#av-pins [data-tl-pin="' + id + '"]'), h = getComputedStyle(p(${J(N.trial)})); return [h.backgroundColor, h.borderTopStyle, h.borderTopWidth, getComputedStyle(p(${J(N.plans)}), '::after').content]; })()`);
+    assert.deepEqual(look.slice(0, 3), ['rgba(0, 0, 0, 0)', 'solid', '2px'], 'handed: a hollow ring');
+    assert.match(look[3], /[^\s"]/, 'check: a mark');
+    assert.deepEqual(await V.p.ev(`tButton(tCounts(TL.threads)).cls`), 'ok', 'the button counts it ready');
+    assert.equal(await V.p.ev(`!!document.querySelector('[data-tl-open="${N.plans}"] .th-st.ok.icon-check') && document.querySelector('[data-tl-open="${N.plans}"]').closest('li').querySelector('.badge')?.textContent === 'to check'`), true, 'the green mark and the badge');
     assert.equal(await V.p.ev(`tState(TL.threads.find((t) => t.id === ${J(N.plans)}))`), 'ready', 'to check counts as ready');
     assert.match(await V.p.ev(`document.querySelector('[data-tl-open="${N.plans}"]')?.closest('li')?.textContent ?? ''`), /to check/, 'the row says to check');
   });
@@ -671,6 +745,7 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await has(V, '#av-handover', 'Hand over');
     const g = await V.p.ev(`(() => { const r = (id) => document.getElementById(id).getBoundingClientRect(); return { h: [r('av-handover').height, r('av-with').height, r('av-next').height], ver: r('av-ver').right, reload: r('av-reload').left, left: Math.min(r('av-handover').left, r('av-step').left), right: Math.max(r('av-handover').right, r('av-with').right, r('av-step').right) }; })()`);
     assert.deepEqual(g.h, [20, 20, 20], '20px');
+    assert.deepEqual(await V.p.ev(`['av-prev', 'av-step', 'av-filter'].map((id) => document.getElementById(id).getBoundingClientRect().height)`), [20, 20, 20], '20px, the stepper');
     assert.ok(g.left >= g.ver && g.right <= g.reload, `between the version pill and Reload (${J(g)})`);
   });
 
@@ -681,6 +756,12 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await has(V, '#tl-card .tl-addr .tx', 'the note');
     const mw = (sel) => `getComputedStyle(document.querySelector(${J(sel)})).maxWidth`;
     assert.deepEqual(await V.p.ev(`[${mw('#tl-card .tl-addr .tx')}, ${mw('#tl-card .tl-turn .tl-text')}]`), ['560px', '560px'], 'the note and the turns');
+    // (the withdrawn mark's card, opened by a step onto a note this view doesn't show)
+    await V.p.ev(`tlOpen(${J(N.hiddenQ)}, false); void 0`);
+    await has(V, '#tl-card .tl-wd .tx', 'the withdrawn mark');
+    await V.p.ev(`document.querySelector('#tl-c-note').firstElementChild.insertAdjacentHTML('beforeend', '<div class="tl-nview">x</div><span class="badge">x</span>'); void 0`);
+    assert.deepEqual(await V.p.ev(`[${mw('#tl-card .tl-wd .tx')}, ${mw('#tl-card .tl-nview')}]`), ['560px', '560px'], 'the withdrawn mark and the view line');
+    assert.deepEqual(await V.p.ev(`['#av-step', '#av-next', '#av-filter', '#tl-card .badge'].map((q) => getComputedStyle(document.querySelector(q)).maxWidth)`), ['none', 'none', 'none', 'none'], 'the controls uncapped');
     assert.deepEqual(await V.p.ev(`[${mw('#av-notes')}, ${mw('#av-handover')}, ${mw('#tl-c-title')}, ${mw('#artifact-view')}]`), ['none', 'none', 'none', 'none'], 'the bar and the viewer uncapped');
   });
 });

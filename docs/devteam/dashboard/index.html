@@ -1027,6 +1027,8 @@ try {
   #av-stage { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
   /* a note's picture, full size over the stage (kit-145) */
   #av-shot { position: absolute; inset: 0; z-index: 4; display: flex; align-items: center; justify-content: center; padding: 16px; background: color-mix(in srgb, var(--bg) 70%, transparent); }
+  /* the card gives way to the picture, so its Close is never under it */
+  body:has(#av-shot) #tl-card { visibility: hidden; }
   .av-shot-in { display: flex; flex-direction: column; max-width: 100%; max-height: 100%; min-height: 0; padding: 8px; gap: 8px; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.18); }
   .av-shot-bar { display: flex; align-items: center; gap: 6px; flex: none; }
   .av-shot-bar button { margin: 0; }
@@ -1074,7 +1076,7 @@ try {
   .tl-pins { position: absolute; left: 0; top: 0; width: 0; height: 0; }
   .tl-pin { position: absolute; z-index: 10; width: 22px; height: 22px; padding: 0; margin: 0; border-radius: 50%; border: 2px solid #fff; background: var(--blue); color: #fff; font: 600 11px/18px var(--sans); text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
   .tl-pin.on { outline: 2px solid var(--blue); outline-offset: 2px; }
-  .tl-pin.handed { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--blue); }
+  .tl-pin.handed { background: transparent; border: 2px solid var(--blue); color: var(--blue); }
   .tl-pin.check::after { content: '\2713'; position: absolute; right: -7px; bottom: -6px; width: 13px; height: 13px; border-radius: 50%; background: var(--green); color: #fff; font: 700 9px/13px var(--sans); }
   .tl-pin sup { font-size: 9px; margin-left: 1px; }
   /* the in-panel thread (kit-89 spec §2.4): the one card, moved into #th-card-slot, static, the slot's width,
@@ -6829,6 +6831,7 @@ function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp =
   $('artifact-view').hidden = false;
   avHint();
   tShot.close(false);
+  tShot.missing.clear();
   avNotes.draw();
 }
 // The reload button says when main's artifact on the stage changed since its frame loaded it (the
@@ -6979,6 +6982,7 @@ function showPreview(name, info) {
   AV = { preview: name };
   // an artifact's notes are none of a preview's
   $('av-notes').hidden = true;
+  tShot.close(false);
   // a dropped image the stage showed gone, the bar's controls back (kit-171); Reload as every preview has it
   avUploadOff();
   $('av-reload').hidden = false;
@@ -7056,7 +7060,7 @@ function openArtifact(raw) {
   const fp = arts.find((x) => x.slug === slug && x.at === at)?.fp ?? (fresh && at !== 'main' && !String(at).startsWith('tree:') ? mainFp : null);
   // Show me (kit-145): the first load is the note's own page and view; another version shown in an open viewer is
   // a move of the viewer's, counted for the close, which still lands where the viewer was opened over
-  const shown = show && TL.threads.find((x) => x.id === show.id), spot = shown && avStep.where(shown);
+  const shown = show && show.head === artHref(slug, at) && TL.threads.find((x) => x.id === show.id), spot = shown && avStep.where(shown);
   if (shown && AV) AV_NAVS++;
   showArtifact(slug, at, { note, fp, mainFp, anchor: spot ? spot.file + (spot.vh ?? '') : '' });
   if (shown) avStep.to(shown, { gone: show.gone });
@@ -7073,7 +7077,8 @@ function openArtifact(raw) {
 // One note's state, from what the threads read says of it (kit-143's fields) and nothing else: to check,
 // with a session, or open; a resolved thread is no note.
 function tNoteState(t) {
-  return t.status !== 'open' ? 'resolved' : t.check ? 'check' : t.handed ? 'with' : 'open';
+  // a reply of the owner's on its way has reopened a note to check, as the server will say
+  return t.status !== 'open' ? 'resolved' : t.check && !t.turns?.some((u) => u.pending && u.by === 'owner') ? 'check' : t.handed ? 'with' : 'open';
 }
 // The shown version's open notes, as their pins are numbered: those placed on it; on main also a published
 // tree's, and a worktree's the Library lists no more; and on any version the notes to check whose change is
@@ -7081,8 +7086,8 @@ function tNoteState(t) {
 function avNotes() {
   if (!AV || AV.preview || TS.kind !== 'artifact') return [];
   const listed = DATA?.library?.artifacts ?? null;
-  const here = (s, t) => (t.check && t.source?.slug === AV.slug && t.source.at === AV.at)
-    || (s.slug === AV.slug && (s.at === AV.at || (AV.at === 'main' && (String(s.at).startsWith('tree:') || (!!listed && !listed.some((a) => a.slug === s.slug && a.at === s.at))))));
+  const here = (s, t) => (tNoteState(t) === 'check' && t.source?.slug === AV.slug && t.source.at === AV.at)
+    || (s.slug === AV.slug && (s.at === AV.at || (AV.at === 'main' && (String(s.at).startsWith('tree:') || (!!listed && !String(s.at).startsWith('origin:') && !listed.some((a) => a.slug === s.slug && a.at === s.at))))));
   const at = new Map(tPins(TL.threads).flatMap((g) => g.ids).map((id, i) => [id, i]));
   return TL.threads.filter((t) => t.subject?.kind === 'artifact' && tNoteState(t) !== 'resolved' && here(t.subject, t))
     .sort((a, b) => (at.get(a.id) ?? Infinity) - (at.get(b.id) ?? Infinity));
@@ -7092,6 +7097,10 @@ function avNotes() {
 // that session. What was said of a version goes when another is shown.
 avNotes.draw = () => {
   const notes = avNotes();
+  // what a step said of its card, the second Resolve waits, and the picture go with the card, the version, the viewer
+  if (avStep.off && (avStep.off.av !== AV || TL.open !== avStep.off.id)) avStep.off = null;
+  if (!TL.open) TL.armAt = null;
+  if (!AV || AV.preview) tShot.close(false);
   if (avNotes.av !== AV) { avNotes.av = AV; $('e-avn').textContent = ''; }
   const said = AV?.handed;
   if (said && (Date.now() > said.until || notes.some((t) => said.ids.includes(t.id) && tNoteState(t) !== 'open'))) AV.handed = null;
@@ -7121,15 +7130,19 @@ async function avHandOver() {
       build: () => ({ action: 'artifact-handoff', body: { slug: av.slug, at: av.at } }),
       apply: () => { $('e-avn').textContent = ''; av.handed = null; },
       onOk: (out) => { if (out.count > 0) say(`With ${out.to}`, ids); else say('Nothing to hand over', []); tlRefresh(); },
-      errId: 'avn',
+      // a refusal too is said only of the version it was pressed on
+      onError: (error) => { if (AV === av) $('e-avn').textContent = `Not saved: ${error}`; },
     });
   } finally { av.notesBusy = false; }
 }
 /* avStep start */
 // The stepper: one note back (-1) or on (1) in the filter's list, from the note a step is on its way to, else
-// the open card's, else from the list's end. want: the step (or Show me) under way: its note, whether the frame
-// was sent there, and whether it came from a version gone (the card says main is shown).
+// the open card's, else from the list's end. want: the step (or Show me) under way: its note, whether it came from
+// a version gone (the card says main is shown), what was open when it began (the owner moving on drops it), and
+// sent: where the frame was last sent, until its lens says it is there.
 function avStep(by) {
+  // under the picture nothing steps
+  if (document.getElementById('av-shot')) return;
   const list = avStep.list();
   if (!list.length) return;
   const i = list.findIndex((t) => t.id === (avStep.want?.id ?? TL.open));
@@ -7154,44 +7167,64 @@ avStep.draw = (notes) => {
 // Where a note is: its file, and the view it was placed on. A spot with no element keeps its view in its path;
 // an element's note, in the frame the owner saw; one with no frame says nothing of it (null: left as it is).
 avStep.where = (t) => {
-  const p = t.subject.path || 'index.html', i = p.indexOf('#');
-  return { file: (i < 0 ? p : p.slice(0, i)) || 'index.html', vh: !t.subject.anchor?.selector ? (i < 0 ? '' : p.slice(i)) : typeof t.frame?.hash === 'string' ? t.frame.hash : null };
+  const p = t.subject.path || 'index.html', i = p.indexOf('#'), seen = typeof t.frame?.hash === 'string' ? t.frame.hash : null;
+  // a spot's path with no view is its page's plain view when the frame it was made in had none, else it says nothing
+  const spot = i >= 0 && p.length > i + 1 ? p.slice(i) : seen === '' ? '' : null;
+  return { file: (i < 0 ? p : p.slice(0, i)) || 'index.html', vh: t.subject.anchor?.selector ? seen : spot };
 };
 avStep.to = (t, { gone = false } = {}) => {
   avStep.off = null;
-  const want = avStep.want = { id: t.id, gone, moved: false, av: AV };
+  const want = avStep.want = { id: t.id, gone, av: AV, open: TL.open, draft: TL.draft, carded: false };
   // a page whose lens never says it is there (an older one, a page that changes its own hash): the card all the same
-  setTimeout(() => { if (avStep.want === want) avStep.land(true); }, 3000);
+  clearTimeout(avStep.timer);
+  avStep.timer = setTimeout(() => { if (avStep.want === want) avStep.land('late'); }, 3000);
   avStep.land();
 };
-// The step under way carried on, as often as the lens says something: the frame sent where the note is (once,
-// and only if it isn't there: another file loads, another view of this one goes without a load, a page with a
-// view goes back to its plain file by loading it), then, once it is there, scrolled to and its card opened.
-avStep.land = (late = false) => {
-  const want = avStep.want;
+// The step under way carried on, as often as the lens says something (from 'ready' or 'nav'): the frame sent where
+// the note is (only if it isn't there and isn't on its way there: another file loads, another view of this one
+// goes without a load, a page with a view goes back to its plain file by loading it), then, once it is there,
+// scrolled to and its card opened. Late (3 s), the card opens anyway and the scroll waits for the page.
+avStep.land = (from = '') => {
+  const want = avStep.want, sent = avStep.sent?.av === AV ? avStep.sent : (avStep.sent = null);
+  // where the frame was sent, until its lens says so: what it says of the page being left is not this step's
+  const is = (d) => TS.ready && TS.path === d.file && (d.vh === null || TS.hash === d.vh);
+  if (sent && is(sent)) avStep.sent = null;
+  else if (sent && from === 'late') avStep.sent = null;
   if (!want) return;
-  const t = TL.threads.find((x) => x.id === want.id);
-  if (!t || want.av !== AV || TS.kind !== 'artifact') { avStep.want = null; return; }
-  if (!TS.ready && !late) return;
-  const { file, vh } = avStep.where(t);
-  const there = TS.ready && TS.path === file && (vh === null || TS.hash === vh);
-  if (!there && TS.ready && !want.moved) {
-    want.moved = true;
-    if (TS.path === file && vh) return tsPost({ type: 'go', hash: vh });
-    const f = tsFrame();
-    f.dataset.opened = f.src = artSrc(AV.slug, AV.at) + file + (vh ?? '');
-    return;
+  const t = TL.threads.find((x) => x.id === want.id), on = document.activeElement;
+  // the owner has moved on since: another card, a new note, pin mode, words in the card
+  const left = want.carded ? TL.open !== want.id : TL.open !== want.open || TL.draft !== want.draft || TL.pin || (on?.closest?.('#tl-card') && typingIn(on));
+  if (!t || want.av !== AV || TS.kind !== 'artifact' || left) { avStep.want = null; return; }
+  const to = avStep.where(t), late = from === 'late', way = avStep.sent;
+  const there = !way && is(to);
+  const sameWay = way && way.file === to.file && (to.vh === null || way.vh === to.vh);
+  // sent again once when the page that came isn't it (a live reload's fresh frame dropped the move)
+  const again = from === 'ready' && sameWay && way.load && !way.again;
+  if (!there && !want.carded && (TS.ready || late) && (!sameWay || again)) {
+    const go = TS.path === to.file && !!to.vh && !way?.load && TS.ready;
+    avStep.sent = { av: AV, ...to, load: !go, again };
+    if (go) tsPost({ type: 'go', hash: to.vh });
+    else {
+      // opened: without the view, so a live reload puts back the view the lens names (kit-142)
+      const f = tsFrame();
+      f.dataset.opened = artSrc(AV.slug, AV.at) + to.file;
+      f.src = f.dataset.opened + (to.vh ?? '');
+    }
   }
   if (!there && !late) return;
-  avStep.want = null;
   const { selector, tag, text, rect } = t.subject.anchor ?? {};
   if (selector && there) tsPost({ type: 'scroll-to', anchor: { selector, tag, text, rect } });
+  if (there) avStep.want = null;
+  if (want.carded) return;
+  want.carded = true;
   // by a step: placed at the stage's top right when the note has no pin there, and (gone) what version this is
-  avStep.off = { id: t.id, gone: want.gone };
+  avStep.off = { id: t.id, gone: want.gone, av: AV };
   // opened under the owner's hand, so Resolve waits its second again
   TL.armAt = null;
   tlOpen(t.id, false);
 };
+// A step asked by the page's lens: at most one a frame, however many it says
+avStep.soon = (by) => { avStep.due ??= requestAnimationFrame(() => { avStep.due = null; avStep(by); }); };
 // A note a step opened whose element the lens says isn't showing on this view.
 avStep.unseen = (t) => {
   if (!t || avStep.off?.id !== t.id || !tsOn() || !TS.ready) return false;
@@ -7220,15 +7253,22 @@ let SHOW_NOTE = null;
 // card open; main, saying so, when that copy is gone. The version shown already: a step.
 function avShowMe(id) {
   const t = TL.threads.find((x) => x.id === id);
-  if (!t || t.subject?.kind !== 'artifact') return;
-  const gone = !t.source, at = t.source?.at ?? 'main', slug = t.source?.slug ?? t.subject.slug;
-  if (at !== 'main' && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(at)) return;
+  const go = t && avShowMe.to(t);
+  if (!go) return;
+  const { gone, at, slug } = go;
   if (AV && !AV.preview && AV.slug === slug && AV.at === at && !$('artifact-view').hidden) return void avStep.to(t, { gone });
   // a viewer tab shows one version at an address of its own
   if (VIEWER) return void location.assign(artViewer(slug, at));
-  SHOW_NOTE = { id, gone };
-  location.hash = artHref(slug, at);
+  const head = artHref(slug, at);
+  SHOW_NOTE = { id, gone, head };
+  // the head may stand already (another version picked in the bar): no hashchange comes then
+  if (location.hash === head) route(); else location.hash = head;
 }
+// Where a note's Show me goes ({ slug, at, gone }), or null for a source that is no version's name (no button then).
+avShowMe.to = (t) => {
+  const gone = !t.source, at = t.source?.at ?? 'main', slug = t.source?.slug ?? t.subject?.slug;
+  return t.subject?.kind === 'artifact' && (at === 'main' || /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(at)) && /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(slug ?? '') ? { gone, at, slug } : null;
+};
 document.addEventListener('click', (e) => { const b = e.target.closest?.('[data-tl-show]'); if (b) avShowMe(b.dataset.tlShow); });
 /* avShowMe end */
 /* tShot start */
@@ -7238,10 +7278,9 @@ document.addEventListener('click', (e) => { const b = e.target.closest?.('[data-
 function tShot(t, small = false) {
   const shot = t.shot;
   if (!shot) return small ? '' : `<div class="tl-shot-cap">${t.noshot === 'no-change' ? 'Nothing to picture: proposed with no change' : 'No picture (marked before pictures)'}</div>`;
-  const ok = /^t-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(t.id) && /^\d{8}-\d{9}$/.test(shot.stamp ?? '');
-  const src = ok ? `/api/shot/${t.id}/${shot.stamp}-light.png` : null;
+  const src = tShot.src(t);
   const got = src && !tShot.missing.has(src);
-  if (small) return got ? `<button type="button" class="ghost th-shot" data-tl-show="${esc(t.id)}" aria-label="Show me"><img src="${src}" width="48" alt=""></button>` : '';
+  if (small) return got ? `<button type="button" class="ghost th-shot" data-shot-of="${esc(t.id)}" aria-label="Open the picture"><img src="${src}" width="48" alt=""></button>` : '';
   const anchor = { gone: 'The noted element is gone; this is where it was.', hidden: 'The noted element is on the page but hidden on this view; this is where it was.', changed: 'Its text has changed since the note.' };
   const sha = /^[0-9a-f]{7,40}$/.test(shot.sha ?? '') ? ` · ${shot.sha.slice(0, 7)}` : '';
   const cap = `${shot.src === 'main' ? 'From main' : `From ${esc(shot.src)}'s draft`}${sha}${shot.dirty ? ' + uncommitted changes' : ''}${Number.isFinite(shot.w) ? ` · ${shot.w}px wide` : ''}`;
@@ -7250,24 +7289,27 @@ function tShot(t, small = false) {
   return `<button type="button" class="ghost tl-shot" data-shot-of="${esc(t.id)}" aria-label="Open the picture"><img src="${src}" width="160" alt="The noted spot"></button><div class="tl-shot-cap">${cap}</div>${said}`;
 }
 tShot.missing = new Set();
+tShot.src = (t, tone = 'light') => (/^t-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(t.id) && /^\d{8}-\d{9}$/.test(t.shot?.stamp ?? '') ? `/api/shot/${t.id}/${t.shot.stamp}-${tone}.png` : null);
 // The picture full size, over the stage: X, Escape and a click outside it close it and nothing else. With no
 // viewer up there is no stage to show it on: Show me first.
 tShot.open = (id) => {
   const t = TL.threads.find((x) => x.id === id);
-  if (!t?.shot) return;
+  if (!t || !tShot.src(t)) return;
   if ($('artifact-view').hidden) return void avShowMe(id);
   tShot.close(false);
-  const base = `/api/shot/${t.id}/${t.shot.stamp}`;
   const el = document.createElement('div');
   el.id = 'av-shot';
   el.setAttribute('role', 'dialog');
   el.setAttribute('aria-label', 'The picture');
   const tones = t.shot.dark ? '<button type="button" class="ghost av-pill" data-shot="light" aria-pressed="true">Light</button><button type="button" class="ghost av-pill" data-shot="dark" aria-pressed="false">Dark</button>' : '';
-  el.innerHTML = `<div class="av-shot-in"><div class="av-shot-bar">${tones}<span class="grow"></span><button type="button" class="ghost icon-btn" data-shot-close aria-label="Close the picture"><i class="icon-x" aria-hidden="true"></i></button></div><img src="${base}-light.png" alt="The noted spot"></div>`;
+  el.innerHTML = `<div class="av-shot-in"><div class="av-shot-bar">${tones}<span class="grow"></span><button type="button" class="ghost icon-btn" data-shot-close aria-label="Close the picture"><i class="icon-x" aria-hidden="true"></i></button></div><img src="${tShot.src(t)}" alt="The noted spot"><div class="tl-shot-cap" hidden>Picture not on this machine</div></div>`;
+  el.querySelector('img').addEventListener('error', (e) => { e.target.hidden = true; el.querySelector('.tl-shot-cap').hidden = false; });
   el.addEventListener('click', (e) => {
     const tone = e.target.closest('[data-shot]')?.dataset.shot;
     if (!tone) return;
-    el.querySelector('img').src = `${base}-${tone}.png`;
+    el.querySelector('.tl-shot-cap').hidden = true;
+    el.querySelector('img').hidden = false;
+    el.querySelector('img').src = tShot.src(t, tone);
     for (const b of el.querySelectorAll('[data-shot]')) b.setAttribute('aria-pressed', String(b.dataset.shot === tone));
   });
   $('av-stage').append(el);
@@ -7278,14 +7320,16 @@ tShot.close = (focus = true) => {
   const el = document.getElementById('av-shot');
   if (!el) return false;
   el.remove();
-  if (focus) document.querySelector(`#tl-card .tl-shot[data-shot-of="${tShot.of}"]`)?.focus();
+  // left behind by a viewer closed under it, it took nobody's key
+  if ($('artifact-view').hidden) return false;
+  if (focus) (document.querySelector(`#tl-card .tl-shot[data-shot-of="${tShot.of}"]`) ?? document.querySelector(`.th-shot[data-shot-of="${tShot.of}"]`))?.focus();
   return true;
 };
 // before every other listener of these (the card's and the viewer's Escape): the picture alone closes
 window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && tShot.close()) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
 document.addEventListener('click', (e) => {
   if (document.getElementById('av-shot') && (e.target.closest('[data-shot-close]') || !e.target.closest('.av-shot-in'))) { tShot.close(); if (e.target.id === 'av-shot' || e.target.closest('[data-shot-close]')) return; }
-  const pic = e.target.closest?.('.tl-shot');
+  const pic = e.target.closest?.('.tl-shot, .th-shot');
   if (pic) tShot.open(pic.dataset.shotOf);
 });
 document.addEventListener('error', (e) => {
@@ -9927,24 +9971,32 @@ function tlCardBody(t) {
   // sends the mark's time as drawn (TL.drawnAt), and only once this note has been drawn unchanged for a second
   // (TL.armAt): one that swaps in under the pointer isn't accepted by a click meant for the last one.
   let box0 = document.getElementById('tl-c-note');
-  if (!box0) { box0 = document.createElement('div'); box0.id = 'tl-c-note'; tlEl('tl-c-ready').after(box0); }
-  const check = t?.status === 'open' && s?.kind === 'artifact' && !TL.resolving && (t.check === 'addressed' ? t.addressed : t.check === 'ready' ? t.ready : null);
-  const off = avStep.off?.id === t?.id ? avStep.off : null;
+  if (!box0) {
+    box0 = document.createElement('div');
+    box0.id = 'tl-c-note';
+    box0.innerHTML = '<div></div><div></div>';
+    tlEl('tl-c-ready').after(box0);
+  }
+  const check = s?.kind === 'artifact' && !!t && tNoteState(t) === 'check' && !TL.resolving && (t.check === 'addressed' ? t.addressed : t.check === 'ready' ? t.ready : null);
+  const off = avStep.off && avStep.off.id === t?.id && avStep.off.av === AV ? avStep.off : null;
   const sha = check && t.check === 'addressed' && /^[0-9a-f]{7,40}$/.test(check.sha ?? '') ? ` · ${check.sha.slice(0, 7)}` : '';
-  const says = [
-    off?.gone && '<div class="tl-nview">Showing main: the version with the change is gone.</div>',
+  // each part redrawn on its own, so where a step landed (the page's word) never takes a press from Resolve
+  const draw = (el, html) => { if (el && el.said !== html) { el.said = html; el.innerHTML = html; } };
+  draw(box0.children[0], [
+    off?.gone && AV?.at === 'main' && '<div class="tl-nview">Showing main: the version with the change is gone.</div>',
     t && avStep.unseen(t) && '<div class="tl-nview">Not on this view</div>',
     t?.unready && s?.kind === 'artifact' && t.status === 'open' && `<div class="tl-wd"><div class="tx">The supervisor withdrew a mark: ${esc(t.unready.reason)}</div></div>`,
-    check && `<div class="tl-addr"><div class="by">${t.check === 'addressed' ? `Addressed by ${esc(check.by)}${sha}` : 'Proposed by the supervisor'}</div><div class="tx">${esc(t.check === 'addressed' ? check.note : check.outcome)}</div>${tlOpenWarn(t)}${tShot(t)}<div class="row-inline"><button type="button" class="ghost" data-tl-show="${esc(t.id)}">Show me</button><button type="button" data-tl-accept disabled>Resolve</button></div></div>`,
-  ].filter(Boolean).join('');
-  if (box0.dataset.for !== t?.id || box0.said !== says) { box0.dataset.for = t?.id ?? ''; box0.said = says; box0.innerHTML = says; }
+  ].filter(Boolean).join(''));
+  // (named by note and mark: another's block is always a new one, never this one under the pointer)
+  draw(box0.children[1], !check ? '' : `<div class="tl-addr" data-for="${esc(`${t.id} ${check.at}`)}"><div class="by">${t.check === 'addressed' ? `Addressed by ${esc(check.by)}${sha}` : 'Proposed by the supervisor'}</div><div class="tx">${esc(t.check === 'addressed' ? check.note : check.outcome)}</div>${tlOpenWarn(t)}<div class="tl-pic"></div><div class="row-inline">${avShowMe.to(t) ? `<button type="button" class="ghost" data-tl-show="${esc(t.id)}">Show me</button>` : ''}<button type="button" data-tl-accept disabled>Resolve</button></div></div>`);
   if (check) {
+    draw(box0.querySelector('.tl-pic'), tShot(t));
     (TL.drawnAt ??= {})[t.id] = check.at;
     if (TL.armAt?.id !== t.id || TL.armAt.at !== check.at) { TL.armAt = { id: t.id, at: check.at, since: Date.now() }; setTimeout(tlDraw, ASK_ARM_MS + 20); }
     const go = box0.querySelector('[data-tl-accept]'), wait = Date.now() - TL.armAt.since < ASK_ARM_MS;
     if (go && go.disabled !== wait) go.disabled = wait;
     if (go) go.title = wait ? 'Read it first' : '';
-  }
+  } else TL.armAt = null;
   // seen only when the owner can see it: a reply landing in a hidden tab still gets its dot
   if (t && document.visibilityState === 'visible') tlSeen(t);
   const turns = tlEl('tl-c-turns');
@@ -10283,7 +10335,7 @@ function tlSend() {
   const p = { thread: t ? t.id : `pending-${++tlFresh}`, real: named ? t.id : null, turn: tPendingTurn(words, new Date().toISOString(), files), had: t ? tHad(t, words) : 0, fresh: t ? null : { title: draft?.title || tLine(text || files[0].name, T_TITLE_MAX), subject: draft?.subject || null }, confirmed: false };
   if (t && !named) p.firstOf = TL.pend.find((x) => x.fresh && tPendId(x) === t.id);
   // a new note on the artifact shown goes with the frame it was made in (kit-145), within the server's bounds (kit-147)
-  const on = p.fresh?.subject, f = on?.kind === 'artifact' && TS.kind === 'artifact' && TS.slug === on.slug && TS.at === on.at ? tsFrame() : null;
+  const on = p.fresh?.subject, f = on?.kind === 'artifact' && TS.kind === 'artifact' && TS.slug === on.slug && TS.at === on.at && TS.path === (on.path || 'index.html').split('#')[0] ? tsFrame() : null;
   const within = (n, lo, hi) => Math.min(hi, Math.max(lo, Math.round(n)));
   const frame = f ? { frame: { w: within(f.clientWidth, 320, 3840), h: within(f.clientHeight, 240, 2160), hash: TS.hash ?? '' } } : {};
   let taken = null;
@@ -10473,7 +10525,7 @@ const TH_TITLES = { supervisor: "The supervisor's terminal: the follow-on goal",
 // An open thread's one state, by kit-84's rule (the hub's threads: { you, waiting, ready }), so the button
 // here and the hub's tab agree: ready to accept, else your move (the supervisor spoke last, or no turns),
 // else waiting on the supervisor. The owner's pending presses are laid over TL.threads, so a send moves it.
-const tState = (t) => (t.ready || t.check ? 'ready' : t.waiting === 'owner' ? 'you' : 'wait');
+const tState = (t) => (t.ready || tNoteState(t) === 'check' ? 'ready' : t.waiting === 'owner' ? 'you' : 'wait');
 function tCounts(threads) {
   const c = { open: 0, you: 0, ready: 0, wait: 0 };
   for (const t of threads) if (t.status === 'open') { c.open++; c[tState(t)]++; }
@@ -10507,7 +10559,7 @@ function thRow(t, nums) {
   const where = [t.started_by === 'supervisor' ? 'From the supervisor' : '', t.subject ? `${tWhere(t.subject)}${gone ? ' · subject gone' : ''}` : ''].filter(Boolean).join(' · ');
   const on = TL.open === t.id;
   // a note on an artifact to check (kit-145): what it waits for, its picture and Show me, beside the row's button
-  const toCheck = t.status === 'open' && t.check && t.subject?.kind === 'artifact' ? `<div class="th-check"><span class="badge">to check</span><span class="grow"></span>${tShot(t, true)}<button type="button" class="ghost" data-tl-show="${esc(t.id)}">Show me</button></div>` : '';
+  const toCheck = t.subject?.kind === 'artifact' && tNoteState(t) === 'check' ? `<div class="th-check"><span class="badge">to check</span><span class="grow"></span>${tShot(t, true)}${avShowMe.to(t) ? `<button type="button" class="ghost" data-tl-show="${esc(t.id)}">Show me</button>` : ''}</div>` : '';
   return `<li><button type="button" class="th-row${st ? ` st-${st}` : ''}${on ? ' on' : ''}" data-tl-open="${esc(t.id)}"${on ? ' aria-current="true"' : ''}>${mark}<span class="th-s">${n ? `<span class="pinchip">${n}</span>` : ''}<span class="th-where">${esc(where)}</span></span><span class="th-tm">${esc(thAgo(t.activity_at))}</span><span class="th-w">${esc(t.title)}</span></button>${toCheck}</li>`;
 }
 // The Threads pane: what the terminal asks (#ask-threads, askDraw's), Open / Resolved, then the list: every
@@ -11080,7 +11132,7 @@ window.addEventListener('message', (e) => {
   // and once it has, what it watches for the pins is asked of it afresh. Once a load (the frame's
   // load lets it go): a page that says ready again and again would otherwise have every one redraw
   // and ask its lens to watch again, and a loop of them would hold the owner's tab.
-  if (m.type === 'ready') { if (TS.ready) return; TS.ready = true; if (TS.kind === 'artifact') { TS.path = tArtPath(m.path, TS.slug); TS.hash = m.hash ?? ''; } TS.watch = ''; tsDrawSoon(); avStep.land(); return; }
+  if (m.type === 'ready') { if (TS.ready) return; TS.ready = true; if (TS.kind === 'artifact') { TS.path = tArtPath(m.path, TS.slug); TS.hash = m.hash ?? ''; } TS.watch = ''; tsDrawSoon(); avStep.land('ready'); return; }
   // a move inside an artifact's page (a #hash, pushState) after its ready (one before it, a redirect
   // while it loads, is dropped: ready gives the page): another view, so another set of pins, asked of
   // the lens afresh. Taken only when it changes something, drawn once a frame, so a page saying moves
@@ -11091,7 +11143,7 @@ window.addEventListener('message', (e) => {
     const path = tArtPath(m.path, TS.slug);
     if (path === TS.path && m.hash === TS.hash) return;
     AV_NAVS++; TS.path = path; TS.hash = m.hash; TS.rects.clear(); TS.watch = ''; tsDrawSoon();
-    avStep.land();
+    avStep.land('nav');
     return;
   }
   // where each watched anchor is now, for only the anchors asked about (a Set: no key a page makes
@@ -11125,7 +11177,7 @@ window.addEventListener('message', (e) => {
     } else if (m.key === 'ArrowLeft' || m.key === 'ArrowRight') {
       // the stepper's keys, told by the lens with nothing of the page focused (kit-145); a page that fakes
       // one can only step its own viewer's card
-      if (!m.up && TS.kind === 'artifact') avStep(m.key === 'ArrowLeft' ? -1 : 1);
+      if (!m.up && TS.kind === 'artifact') avStep.soon(m.key === 'ArrowLeft' ? -1 : 1);
     } else if (m.shift) tsRaise(true);
     return;
   }
