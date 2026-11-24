@@ -64,12 +64,12 @@ async function idle(pid) {
 // when given, is written to stdin. A list is written chunk by chunk, each once the client has gone
 // idle on the one before and 200 ms more, so each arrives as a read of its own. stdin is then ended
 // unless keepOpen (then it ends when the child closes); a client that exits before reading it all
-// must not crash this process (EPIPE).
-function cli(P, args, extraEnv = {}, cwd = P.old, { input, keepOpen } = {}) {
+// must not crash this process (EPIPE). command: another devteam.mjs command than browser.
+function cli(P, args, extraEnv = {}, cwd = P.old, { input, keepOpen, command = 'browser' } = {}) {
   return new Promise((resolve, reject) => {
     const env = { ...P.env, ...extraEnv };
     for (const [k, v] of Object.entries(env)) if (v === undefined) delete env[k];
-    const child = spawn(process.execPath, [path.join(P.old, 'docs/devteam/scripts/devteam.mjs'), 'browser', ...args], { cwd, env, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [path.join(P.old, 'docs/devteam/scripts/devteam.mjs'), command, ...args], { cwd, env, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
     if (input !== undefined) {
       child.stdin.on('error', () => {});
       (async () => {
@@ -573,6 +573,64 @@ test('D4 a copied checkout is refused', opts, async () => {
     assert.equal(fs.readFileSync(rj, 'utf8'), '{');
     assert.deepEqual(devWindows(e), []);
   } finally { if (had) fs.writeFileSync(rj, had); else fs.rmSync(rj, { force: true }); }
+});
+
+// kit-811: on a box every shell has DEVTEAM_PUBLIC_URL and the gateway's port as PORT, and the daemon's
+// window has its own view port as PORT.
+const GATEWAY = 'box.example.test';
+const onBox = (port, extra = {}) => ({ DEVTEAM_PUBLIC_URL: `https://${GATEWAY}`, PORT: String(port), ...extra });
+// A listener on 127.0.0.1 standing in for the gateway: it holds its port, so nothing else binds it.
+function gatewayPort() {
+  const server = http.createServer((req, res) => res.end('gateway'));
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ port: server.address().port, close: () => new Promise((r) => { server.closeAllConnections?.(); server.close(() => r()); }) })));
+}
+// A browser preview record of P's supervisor on port, as browserEnsure writes it.
+function plantRecord(P, name, port) {
+  const dir = path.join(P.old, 'docs', 'devteam', 'run', 'previews');
+  fs.mkdirSync(dir, { recursive: true });
+  const at = new Date().toISOString();
+  fs.writeFileSync(path.join(dir, `${name}.json`), JSON.stringify({ v: 1, name, project: P.name, session: 'supervisor', label: 'browser', port, cwd: P.old, run: { cmd: 'node devteam.mjs browser serve', window: null, env: {} }, at, expires: new Date(Date.now() + 86400000).toISOString() }));
+}
+
+test('kit-811 a box: the daemon finds its own record, and its guard refuses the gateway', opts, async () => {
+  const P = project('brw-box', newHome());
+  const box = onBox(8080);
+  try {
+    await started(P, box);
+    const s = readState(P);
+    const env = fs.existsSync('/proc') ? fs.readFileSync(`/proc/${s.daemon_pid}/environ`, 'utf8').split('\0') : null;
+    if (env) {
+      assert.ok(env.includes(`DEVTEAM_PUBLIC_URL=${box.DEVTEAM_PUBLIC_URL}`), 'the daemon has the box\'s address');
+      assert.ok(env.includes(`PORT=${s.view_port}`), 'the daemon\'s PORT is its view port');
+    }
+    assert.equal(previewRec(P, s.preview).port, s.view_port);
+    const r = await cli(P, ['open', `http://${GATEWAY}/`], box);
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out + r.err, /the browser's guard refused box\.example\.test/);
+  } finally { await cli(P, ['stop'], box); }
+});
+
+test('kit-811 outside the daemon a record on the gateway\'s port is refused, whatever the flag says', opts, async () => {
+  const P = project('brw-own', newHome());
+  // 4450 is a port the daemon could have: only not being the daemon refuses it
+  plantRecord(P, 'amber-fox', 4450);
+  const list = async (port, extra) => { const r = await cli(P, ['list'], onBox(port, extra), P.old, { command: 'preview' }); assert.equal(r.status, 0, r.err); return r.out; };
+  assert.match(await list(8080), /amber-fox/, 'the control: the record holds together');
+  assert.doesNotMatch(await list(4450), /amber-fox/);
+  assert.doesNotMatch(await list(4450, { DEVTEAM_BROWSER_SERVE: '1' }), /amber-fox/, 'the flag alone');
+});
+
+test('kit-811 browser serve run by hand on the gateway\'s port finds no record', opts, async () => {
+  const P = project('brw-hand', newHome());
+  const gw = await gatewayPort();
+  try {
+    assert.ok(gw.port < 4400 || gw.port > 4499, `${gw.port} is outside the view ports`);
+    plantRecord(P, 'amber-fox', gw.port);
+    const r = await cli(P, ['serve'], onBox(gw.port, { DEVTEAM_BROWSER_SERVE: '1' }));
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.err, new RegExp(`no browser preview record on port ${gw.port}\\b`));
+    assert.equal(fs.existsSync(P.profile), false, 'no profile made');
+  } finally { await gw.close(); }
 });
 
 test('T1-5 verbs that talk to a daemon make no profile', opts, async () => {
