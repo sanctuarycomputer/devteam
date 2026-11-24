@@ -9951,12 +9951,8 @@ function tlSend() {
       if (!p.real) p.real = String(out.out || '').split('\n')[0].trim();
       // files dropped while the thread was being started go on with it, under its id (the box's key too)
       if (p.real && p.real !== p.thread) moveAttach(`tl:${p.thread}`, `tl:${p.real}`);
-      // a session's (kit-109): sent to, held, or not typed, naming it
-      const said = String(out.out || '');
-      const sm = /(^|\n)sent to ((?:the agent on|the planner for) [^\n]+)/.exec(said);
-      const hm = /(^|\n)recorded and held: [^\n]*?((?:the agent on|the planner for) [^\n]*?)'s terminal/.exec(said);
-      const nm = /(^|\n)not delivered: ((?:the agent on|the planner for) [^\n]*?)'s terminal didn't take it/.exec(said);
-      TL.typed[p.real] = sm ? { session: 'typed', who: sm[2] } : hm ? { session: 'held', who: hm[2] } : nm ? { session: 'missed', who: nm[2] } : /(^|\n)(recorded and held: the responder's|not delivered to the responder)/.test(out.out || '') ? 'responder-late' : /(^|\n)sent to the responder/.test(out.out || '') ? 'responder' : /(^|\n)the responder is busy/.test(out.out || '') ? 'queued' : /(^|\n)recorded and held/.test(out.out || '') ? 'held' : /supervisor's pane/.test(out.out || '');
+      // a session's (kit-109) first: sent to, held, or not typed, naming it; one expression, as kit-104's reads it
+      TL.typed[p.real] = ((said, m) => ((m = /(^|\n)sent to ((?:the agent on|the planner for) [^\n]+)/.exec(said)) ? { session: 'typed', who: m[2] } : (m = /(^|\n)recorded and held: [^\n]*?((?:the agent on|the planner for) [^\n]*?)'s terminal/.exec(said)) ? { session: 'held', who: m[2] } : (m = /(^|\n)not delivered: ((?:the agent on|the planner for) [^\n]*?)'s terminal didn't take it/.exec(said)) ? { session: 'missed', who: m[2] } : null))(String(out.out || '')) ?? (/(^|\n)(recorded and held: the responder's|not delivered to the responder)/.test(out.out || '') ? 'responder-late' : /(^|\n)sent to the responder/.test(out.out || '') ? 'responder' : /(^|\n)the responder is busy/.test(out.out || '') ? 'queued' : /(^|\n)recorded and held/.test(out.out || '') ? 'held' : /supervisor's pane/.test(out.out || ''));
       if (TL.open === p.thread && p.real !== p.thread) {
         TL.open = p.real;
         // the card is this thread's under its id now, as it is: words typed since Send (kept under the pending

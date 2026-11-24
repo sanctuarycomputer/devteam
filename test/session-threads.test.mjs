@@ -254,9 +254,21 @@ test('kit-109 session-bound threads', { skip: NO_TMUX, timeout: 600000 }, async 
     const typed = wp.typed();
     assert.ok(typed.includes(`long ${'L'.repeat(295)}…`) && !typed.includes('L'.repeat(296)) && typed.includes(`thread show ${tw.T}`), typed.slice(-500));
   });
-  await t.test('S2k: a malformed session_threads ("no") keeps routing on', () => {
-    F.setting('session_threads', 'no');
-    try { assert.equal(F.lineOf(F.say(tw.T, 'still yours?')).routed_session, W); } finally { F.setting('session_threads', true); }
+  await t.test("S1j: an owner turn with a dropped file, routed to W: its path is pasted into W's pane, not the supervisor's", () => {
+    // a dropped-files root of the fixture's own (the box's form, DEVTEAM_UPLOADS_DIR), never the machine's
+    const root = path.join(F.base, 'uploads');
+    const file = path.join(root, `2026-11-24-${'a'.repeat(24)}`, 'shot.png');
+    write(file, 'png');
+    const env = { ...F.OWN, DEVTEAM_GATEWAY: '1', DEVTEAM_UPLOADS_DIR: root };
+    const U = F.owner(['thread', 'say', tw.T, '--files', JSON.stringify([{ name: 'shot.png', path: file, bytes: 3 }]), '--', 'see this'], env).split('\n')[0];
+    assert.equal(F.lineOf(U).routed_session, W);
+    assert.ok(wp.typed().includes(fs.realpathSync(file)) && !F.supPane.typed().includes(fs.realpathSync(file)), `in W's pane only: ${wp.typed().slice(-300)}`);
+  });
+  await t.test('S2k: a malformed session_threads ("no", 0) keeps routing on', () => {
+    for (const v of ['no', 0]) {
+      F.setting('session_threads', v);
+      try { assert.equal(F.lineOf(F.say(tw.T, `still yours? ${v}`)).routed_session, W, String(v)); } finally { F.setting('session_threads', true); }
+    }
   });
   await t.test("S2i: a chore-* artifact is never bound, even when a ticket of that name is live: its reply there is refused", () => {
     write(path.join(F.old, '.worktrees', CH, 'docs/devteam/project/artifacts/mock-c/index.html'), '<p>x</p>');
@@ -622,6 +634,26 @@ test("S7d: the card's line for a turn routed to a session: typed, held, not type
     `Sent to ${who}; it replies here.`,
     `The agent on ${W} hasn't replied yet; the supervisor has been told.`,
     `Sent to the planner for ${FEAT}; it replies here.`,
+  ]);
+});
+
+test("S7e: tlSend reads a session's send from its words (typed, held, not typed) and leaves the others as they were", () => {
+  const html = fs.readFileSync(new URL('../docs/devteam/dashboard/index.html', import.meta.url), 'utf8');
+  const fn = html.slice(html.indexOf('function tlSend('), html.indexOf('\n}\n', html.indexOf('function tlSend(')));
+  const at = fn.indexOf('TL.typed[p.real] =');
+  const rhs = fn.slice(at + 'TL.typed[p.real] ='.length, fn.indexOf(';\n', at));
+  const typed = (said) => vm.runInNewContext(`(${rhs})`, { out: { out: `t-x\n${said}\n` } });
+  const who = `the agent on ${W}`;
+  assert.deepEqual(JSON.parse(JSON.stringify([
+    typed(`sent to ${who}`),
+    typed(`recorded and held: ${who}'s terminal is asking a question, and typing now would answer it.`),
+    typed(`recorded and held: the owner is typing a line in that terminal, and typing now would join it. It is typed once they send or clear their line (${who}'s terminal)`),
+    typed(`not delivered: ${who}'s terminal didn't take it; the turn stays with it`),
+    typed(`sent to the planner for ${FEAT}`),
+    typed('sent to the responder'), typed("sent to the supervisor's pane"), typed("recorded and held: the supervisor's terminal is asking a question"),
+  ])), [
+    { session: 'typed', who }, { session: 'held', who }, { session: 'held', who }, { session: 'missed', who }, { session: 'typed', who: `the planner for ${FEAT}` },
+    'responder', true, 'held',
   ]);
 });
 
