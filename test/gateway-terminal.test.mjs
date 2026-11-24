@@ -71,13 +71,15 @@ const closeAll = (srv) => new Promise((r) => { srv.closeAllConnections?.(); srv.
 function recorder() {
   const seen = [];
   const held = [];
+  const arrived = [];
   const srv = http.createServer((q, s) => {
+    arrived.push(`${q.method} ${q.url}`);
     if (q.headers['x-test-hold']) { const x = { url: q.url, closed: false }; held.push(x); s.on('close', () => { x.closed = true; }); q.resume(); return; }
     const parts = [];
     q.on('data', (c) => parts.push(c));
     q.on('end', () => { seen.push({ method: q.method, url: q.url, h: q.headers, body: Buffer.concat(parts) }); s.writeHead(200, { 'content-type': 'application/json' }); s.end('{"ok":true}'); });
   });
-  return { srv, seen, held };
+  return { srv, seen, held, arrived };
 }
 
 // --- the box: a stand-in hub listing alpha (the real dashboard), rec (the recorder) and a preview --
@@ -88,6 +90,7 @@ async function box(t, name, { real = null } = {}) {
   const appPort = await listen(app.srv, 0);
   const list = [
     ...(real ? [{ devteam: 1, name: 'alpha', root: real.root, port: DASH }] : []),
+    { devteam: 1, name: 'sib', root: '/srv/sib', port: PORTS + 52 },
     { devteam: 1, name: 'rec', root: '/srv/rec', port: REC, previews: [{ name: 'cool-tiger', port: appPort, project: 'rec', session: 'api-01-x', label: 'app', at: '2026-11-10', up: true, run: false }] },
   ];
   const hub = http.createServer((q, s) => { q.resume(); s.writeHead(200, { 'content-type': 'application/json' }); s.end(JSON.stringify({ hub: 1, instances: list })); });
@@ -142,7 +145,8 @@ async function box(t, name, { real = null } = {}) {
   // until the gateway has the list: the recorder answers on rec's name
   await until(async () => (await at(on('rec'), 'GET', '/ready', { cookie: owner })).status === 200, 'rec through the gateway');
   rec.seen.length = 0;
-  return { g, dir, port, publicUrl, host, on, at, owner, view, rec: rec.seen, held: rec.held, app: app.seen };
+  rec.arrived.length = 0;
+  return { g, dir, port, publicUrl, host, on, at, owner, view, rec: rec.seen, held: rec.held, app: app.seen, arrived: rec.arrived };
 }
 // What the gateway signed: the bytes of terminal@1 §3, from the headers an instance received.
 const signedBytes = (domain, port, which, h, body) => Buffer.from(`${domain}\n${port}\n${which}\n${h['x-devteam-gateway-ts']}\n${h['x-devteam-gateway-nonce']}\n${sha(body).toString('hex')}`);
@@ -229,7 +233,10 @@ test("terminal A9: each terminal post is signed under its own domain, which and 
   for (const [method, route] of [['GET', '/api/term/token'], ['GET', '/api/term/supervisor/screen'], ['POST', '/api/term/other/keys'], ['POST', '/api/term/supervisor/open'], ['POST', '/api/term/supervisor/screen'], ['POST', '/api/term/%73hell/keys'], ['POST', '/api/term/supervisor/keys/']]) {
     const r = await B.at(rec, method, route, { cookie: B.owner, headers: SAME, ...(method === 'POST' ? { body: '{}' } : {}) });
     assert.equal(r.status, 200, `${method} ${route}: ${r.text}`);
-    assert.equal(B.rec.at(-1).h['x-devteam-gateway-sig'], undefined, `${method} ${route}: not signed`);
+    assert.equal(B.rec.length, 1, `${method} ${route}: forwarded once`);
+    assert.equal(`${B.rec[0].method} ${B.rec[0].url}`, `${method} ${route}`, `${method} ${route}: the request just sent`);
+    assert.equal(B.rec[0].h['x-devteam-gateway-sig'], undefined, `${method} ${route}: not signed`);
+    B.rec.length = 0;
   }
   const pv = await B.at(B.on('cool-tiger'), 'POST', '/api/term/supervisor/keys', { cookie: B.owner, body: '{}', headers: SAME });
   assert.equal(pv.status, 200, pv.text);
@@ -274,18 +281,24 @@ test('terminal A9: a terminal post over 100 KB is refused 413 before it is forwa
   for (const route of ['/api/term/supervisor/keys', '/api/term/shell/keys', '/api/term/shell/open']) {
     for (const size of [CAP + 1, 4 * CAP]) {
       B.rec.length = 0;
+      B.arrived.length = 0;
       const r = await B.at(rec, 'POST', route, { cookie: B.owner, body: pad(size), headers: SAME });
       assert.equal(r.status, 413, `${route} at ${size}: ${r.status} ${r.text.slice(0, 200)}`);
       assert.match(String(r.headers['content-type']), /^application\/json\b/, `${route}: JSON`);
       assert.equal(typeof r.json?.error, 'string', `${route}: { error }`);
       assert.deepEqual(Object.keys(r.json), ['error'], `${route}: only error`);
+      await new Promise((ok) => setTimeout(ok, 100));
       assert.equal(B.rec.length, 0, `${route} at ${size}: nothing forwarded`);
+      assert.deepEqual(B.arrived, [], `${route} at ${size}: nothing reached the instance, not even its headers`);
     }
     // more than four times over: a 413 or the connection cut, and still nothing forwarded
     B.rec.length = 0;
+    B.arrived.length = 0;
     const cut = await B.at(rec, 'POST', route, { cookie: B.owner, body: pad(5 * CAP), headers: SAME }).catch((e) => ({ status: e.code }));
     assert.ok([413, 'ECONNRESET', 'EPIPE'].includes(cut.status), `${route} at 5 x 100 KB: ${cut.status}`);
+    await new Promise((ok) => setTimeout(ok, 100));
     assert.equal(B.rec.length, 0, `${route} at 5 x 100 KB: nothing forwarded`);
+    assert.deepEqual(B.arrived, [], `${route} at 5 x 100 KB: nothing reached the instance`);
     B.rec.length = 0;
     const ok = await B.at(rec, 'POST', route, { cookie: B.owner, body: pad(CAP), headers: SAME });
     assert.equal(ok.status, 200, `${route} at exactly 100 KB: ${ok.text}`);
@@ -350,7 +363,7 @@ test("terminal A10: another site's request to /api/term/* is refused, signed in 
   const B = await box(t, 'a10-site');
   const rec = B.on('rec');
   const posts = ['/api/term/supervisor/keys', '/api/term/shell/keys', '/api/term/shell/open'];
-  for (const origin of ['https://evil.example', `http://${B.on('alpha')}`, B.publicUrl, `http://term.${B.host}`, 'null']) {
+  for (const origin of ['https://evil.example', `http://${B.on('alpha')}`, `http://${B.on('sib')}`, B.publicUrl, `http://term.${B.host}`, 'null']) {
     for (const route of posts) {
       const r = await B.at(rec, 'POST', route, { cookie: B.owner, body: '{}', headers: { ...SAME, origin } });
       assert.equal(r.status, 403, `${route} from ${origin}: ${r.status} ${r.text}`);
