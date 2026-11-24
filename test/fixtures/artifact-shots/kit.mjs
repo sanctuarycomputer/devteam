@@ -9,7 +9,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { chromePath } from '../../lib/chrome.mjs';
 import { kit, testDir, threadsFixture, write } from '../../lib/kit.mjs';
 
@@ -34,6 +34,9 @@ export const OTHER = `http://127.0.0.1:${other.address().port}`;
 export const udp = dgram.createSocket('udp4');
 udp.on('message', () => { reached.push('udp'); });
 await new Promise((r) => udp.bind(0, '127.0.0.1', r));
+// The machine's first Chrome reads all of it from disk, which a busy CI runner takes longer over than
+// the 8 s a capture gives a start: one is run here, whatever it says.
+if (chromePath) { const at = fs.mkdtempSync(path.join(TMP, 'w')); spawnSync(chromePath, ['--headless=new', '--no-sandbox', `--user-data-dir=${at}`, '--dump-dom', 'about:blank'], { stdio: 'ignore', timeout: 60000, killSignal: 'SIGKILL', env: { ...process.env, HOME: TMP, TMPDIR: TMP } }); fs.rmSync(at, { recursive: true, force: true, maxRetries: 5 }); }
 let made = null;
 after(() => { udp.close(); other.closeAllConnections?.(); other.close(); made?.F.done(); fs.rmSync(TMP, { recursive: true, force: true }); });
 export function shotKit() {
@@ -138,8 +141,8 @@ export const region = () => /\/\* note-shots start \*\/([\s\S]*?)\/\* note-shots
 
 export const HOSTS = [.../const ARTIFACT_CDNS = (\[.*?\]);/.exec(SRC)[1].matchAll(/'https:\/\/([^']+)'/g), .../const ARTIFACT_FONT_HOSTS = (\[.*?\]);/.exec(SRC)[1].matchAll(/'https:\/\/([^']+)'/g)].map((m) => m[1]);
 
-// a capture is mostly waiting: three at a time
-export async function each(list, fn) { const at = [...list]; await Promise.all([0, 1, 2].map(async () => { while (at.length) await fn(at.shift()); })); }
+// a capture is mostly waiting: two at a time
+export async function each(list, fn) { const at = [...list]; await Promise.all([0, 1].map(async () => { while (at.length) await fn(at.shift()); })); }
 export const NINE = { w: 900, h: 700, hash: '' };
 // where found.html's button is in its 320x200 picture
 export const MIDDLE = { x: 110, y: 70, w: 100, h: 60 };

@@ -12839,8 +12839,12 @@ async function shotLaunch({ noSandbox = false, extraArgs = [], cap }) {
     const crashed = () => reject(new Error('the page crashed; no mark written'));
     cdp.on('Inspector.targetCrashed', (p, sid) => { if (sid === sessionId) crashed(); });
     cdp.on('Target.detachedFromTarget', (p) => { if (p.sessionId === sessionId) crashed(); });
+    cdp.on('Target.targetCrashed', (p) => { if (p.targetId === targetId) crashed(); });
   });
   launch.crashed.catch(() => {});
+  // a Chrome that tells one of these and not another says so only to who asked
+  await cdp.send('Target.setDiscoverTargets', { discover: true }).catch(() => {});
+  await cdp.send('Inspector.enable', {}, sessionId).catch(() => {});
   return launch;
 }
 // The sandbox first, always. Once more without it only when the operator allows it, and only when no
