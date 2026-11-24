@@ -22266,7 +22266,6 @@ function cmdOperatorThread() {
   };
   const locked = (fn) => { const r = operatorLocked(fn); if (r.problem) die(r.problem); return r; };
   const full = () => { const n = operatorThreads().filter((x) => x.status === 'open').length; return n >= THREAD_OPEN_MAX ? { problem: `${n} threads with the operator are open, the most it keeps: close some first (operator-thread list --open)` } : null; };
-  // typed, the owner has their answer, and then a lost Enter is pressed again (as machine tell does)
   // The files a turn carries: dropped on the hub, checked as a dashboard's are (attachedFiles) against the
   // hub's folder. On a box each is kept as the gateway signed it, so its path and size must be the file's own.
   if (flags.files !== undefined && !['new', 'say'].includes(sub)) die('--files go with new and say');
@@ -22278,6 +22277,7 @@ function cmdOperatorThread() {
     if (proof) { const asked = JSON.parse(given); for (const [i, f] of files.entries()) if (f.path !== asked[i].path || f.bytes !== asked[i].bytes) die(`refused: ${asked[i].path} is not the path and size the box keeps that file under`); }
     return files.map((f) => ({ ...f, name: redactClaimLinks(f.name) }));
   };
+  // typed, the owner has their answer, and then a lost Enter is pressed again (as machine tell does)
   const said = (t, text, files) => { const d = deliverToOperator(t, text, files); out(d.words); replyNow(); if (d.typed && !enterLanded(d.pane)) warn(`the line for ${t.id} is still in the operator's input (pane ${d.pane})`); };
   if (sub === 'new') {
     owner();
