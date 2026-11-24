@@ -256,6 +256,25 @@ test('next-moves A16: chore records: start --what --for, adopt, drop, and a star
       assert.equal(g(['rev-parse', 'HEAD'], wt), keep, 'a drop of chore-k1-more is not a drop of chore-k1');
     });
 
+    await t.test('chore start on a branch only on origin checks out its tip, and chore pr leaves origin as it was', () => {
+      const tip = branchWith(F, 'q1', 1, { push: true });
+      g(['branch', '-q', '-D', 'chore-q1'], old);
+      assert.equal(tipOf(F, 'chore-q1'), null, 'no local branch');
+      const wt = ok(old, ['chore', 'start', 'q1'], SUP).trim();
+      assert.equal(g(['rev-parse', 'HEAD'], wt), tip, "the worktree starts at origin's tip, not main");
+      ok(old, ['chore', 'pr', 'q1', '--title', 'q1 from origin'], SUP);
+      assert.equal(originTip(F, 'q1'), tip, "origin's commit stays");
+    });
+
+    await t.test("chore start on a branch origin has moved past checks out origin's tip, and chore pr keeps origin's commit", () => {
+      branchWith(F, 'r1', 1, { push: true });
+      const tip = commitOn(F, 'r1', 'r1-origin', { origin: true });
+      const wt = ok(old, ['chore', 'start', 'r1'], SUP).trim();
+      assert.equal(g(['rev-parse', 'HEAD'], wt), tip, "the worktree starts at origin's newer tip, not the older local one");
+      ok(old, ['chore', 'pr', 'r1', '--title', 'r1 from origin'], SUP);
+      assert.equal(originTip(F, 'r1'), tip, "origin keeps its newer commit");
+    });
+
     await t.test('CLASS_WORDS has chore-start and chore-drop', () => {
       const src = fs.readFileSync(path.join(kit, 'scripts/devteam.mjs'), 'utf8');
       const words = src.match(/const CLASS_WORDS = Object\.freeze\(\{([\s\S]*?)\}\);/)[1];
