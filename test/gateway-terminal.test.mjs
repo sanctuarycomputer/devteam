@@ -107,7 +107,6 @@ async function box(t, name, { real = null } = {}) {
   const dir = path.join(scratch, name);
   const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, log: (m) => logs.push(m) });
   await listen(g.server, port);
-  t.after(async () => { for (const x of [g.server, hub, rec.srv, app.srv]) await closeAll(x); });
   const host = `box.localhost:${port}`;
   const on = (label) => `${label}.${host}`;
   // A browser's request: Host, and for a write its page's own Origin, unless the test says otherwise.
@@ -123,6 +122,17 @@ async function box(t, name, { real = null } = {}) {
     r.on('error', resolve);
     r.end();
   });
+  // Settle, scan, then check what the recorder set aside for a Host not the gateway's: every forward
+  // the gateway sends carries 127.0.0.1:<REC>, so only a scanner's HEAD / (scan()'s own among them)
+  // may be there. A request the gateway sent on with the browser's Host would be here, never in rec.
+  const quiet = async (label) => {
+    await new Promise((ok) => setTimeout(ok, 100));
+    await scan();
+    assert.deepEqual(rec.stray.filter((x) => !x.startsWith('HEAD / ')), [], `${label}: nothing set aside but a scanner's HEAD /`);
+  };
+  // and once more after the test's last request, before the servers close: so every request the
+  // recorder set aside, in every test on a box, is checked (a failed after hook fails its test)
+  t.after(async () => { try { await quiet('after the last request'); } finally { for (const x of [g.server, hub, rec.srv, app.srv]) await closeAll(x); } });
   const at = (h, method, route, { body, headers = {}, cookie = '' } = {}) => new Promise((resolve, reject) => {
     const data = body === undefined ? null : Buffer.isBuffer(body) || typeof body === 'string' ? Buffer.from(body) : Buffer.from(JSON.stringify(body));
     const hd = { host: h, ...(method !== 'GET' && method !== 'HEAD' ? { origin: `http://${h}`, 'content-type': 'application/json' } : {}), ...(cookie ? { cookie } : {}), ...headers };
@@ -161,7 +171,7 @@ async function box(t, name, { real = null } = {}) {
   await until(async () => (await at(on('rec'), 'GET', '/ready', { cookie: owner })).status === 200, 'rec through the gateway');
   rec.seen.length = 0;
   rec.arrived.length = 0;
-  return { g, dir, port, publicUrl, host, on, at, stall, scan, owner, view, rec: rec.seen, held: rec.held, app: app.seen, arrived: rec.arrived };
+  return { g, dir, port, publicUrl, host, on, at, stall, scan, quiet, owner, view, rec: rec.seen, held: rec.held, app: app.seen, arrived: rec.arrived };
 }
 // What the gateway signed: the bytes of terminal@1 §3, from the headers an instance received.
 const signedBytes = (domain, port, which, h, body) => Buffer.from(`${domain}\n${port}\n${which}\n${h['x-devteam-gateway-ts']}\n${h['x-devteam-gateway-nonce']}\n${sha(body).toString('hex')}`);
@@ -302,8 +312,7 @@ test('terminal A9: a terminal post over 100 KB is refused 413 before it is forwa
       assert.equal(r.headers['content-type'], 'application/json', `${route}: exactly application/json`);
       assert.equal(typeof r.json?.error, 'string', `${route}: { error }`);
       assert.deepEqual(Object.keys(r.json), ['error'], `${route}: only error`);
-      await new Promise((ok) => setTimeout(ok, 100));
-      await B.scan();
+      await B.quiet(`${route} at ${size}`);
       assert.equal(B.rec.length, 0, `${route} at ${size}: nothing forwarded`);
       assert.deepEqual(B.arrived, [], `${route} at ${size}: nothing reached the instance, not even its headers`);
     }
@@ -312,13 +321,13 @@ test('terminal A9: a terminal post over 100 KB is refused 413 before it is forwa
     B.arrived.length = 0;
     const cut = await B.at(rec, 'POST', route, { cookie: B.owner, body: pad(5 * CAP), headers: SAME }).catch((e) => ({ status: e.code }));
     assert.ok([413, 'ECONNRESET', 'EPIPE'].includes(cut.status), `${route} at 5 x 100 KB: ${cut.status}`);
-    await new Promise((ok) => setTimeout(ok, 100));
-    await B.scan();
+    await B.quiet(`${route} at 5 x 100 KB`);
     assert.equal(B.rec.length, 0, `${route} at 5 x 100 KB: nothing forwarded`);
     assert.deepEqual(B.arrived, [], `${route} at 5 x 100 KB: nothing reached the instance`);
     // past four times over the gateway answers at once and closes, without waiting for the rest
     const early = await B.stall(rec, route, 4 * CAP + 4096, 8 * CAP, B.owner);
     assert.deepEqual(early, { status: 413, connection: 'close' }, `${route}: cut off past 4 x 100 KB, before the body ends`);
+    await B.quiet(`${route} cut off`);
     assert.deepEqual(B.arrived, [], `${route} cut off: nothing reached the instance`);
     B.rec.length = 0;
     const ok = await B.at(rec, 'POST', route, { cookie: B.owner, body: pad(CAP), headers: SAME });
@@ -342,6 +351,7 @@ test("gateway: the pane answer and the owner's Save are signed as before, under 
     const big = await B.at(rec, 'POST', route, { cookie: B.owner, body: 'x'.repeat(20001), headers: SAME });
     assert.equal(big.status, 400, `${route} at 20001 bytes: ${big.status} ${big.text}`);
     assert.equal(big.text, '{"error":"missing or invalid fields"}', `${route}: today's refusal`);
+    await B.quiet(`${route} at 20001 bytes`);
     assert.equal(B.rec.length, 0, `${route} at 20001 bytes: nothing forwarded`);
   }
 });
@@ -360,6 +370,7 @@ test("terminal A10: a View session's GET and POST to /api/term/* on an instance'
   const big = await B.at(rec, 'POST', '/api/term/supervisor/keys', { cookie: B.view, headers: SAME, body: 'x'.repeat(CAP + 1) });
   assert.equal(big.status, 403, `an oversized View post: ${big.status} ${big.text.slice(0, 120)}`);
   assert.equal(big.text, VIEW, 'an oversized View post: exactly the view refusal');
+  await B.quiet('View');
   assert.deepEqual(B.rec.map((x) => `${x.method} ${x.url}`), [], 'nothing reached the instance');
 });
 
@@ -377,6 +388,7 @@ test('terminal A10: a signed-out request to /api/term/* is sent to sign in, and 
   // a session that has ended is signed out too
   const ended = await B.at(rec, 'GET', '/api/term/token', { cookie: `devteam_session=${u(crypto.randomBytes(32))}`, headers: SAME });
   assert.equal(ended.status, 401, ended.text);
+  await B.quiet('signed out');
   assert.deepEqual(B.rec.map((x) => `${x.method} ${x.url}`), [], 'nothing reached the instance');
 });
 
@@ -397,7 +409,7 @@ test("terminal A10: another site's request to /api/term/* is refused, signed in 
       assert.equal(r.status, 403, `${route} ${site}: ${r.status} ${r.text}`);
     }
   }
-  await B.scan();
+  await B.quiet('another site');
   assert.deepEqual(B.rec.map((x) => `${x.method} ${x.url}`), [], 'nothing reached the instance');
 });
 
@@ -406,7 +418,7 @@ test("terminal A10b: the gateway's View refusal of /api/term/* is 403 applicatio
   const rec = B.on('rec');
   const routes = [
     ['GET', '/api/term/token'], ['GET', '/api/term/supervisor/screen'], ['GET', '/api/term/supervisor/history?before=0&count=1'],
-    ['POST', '/api/term/supervisor/keys'], ['POST', '/api/term/shell/open'], ['GET', '/api/term/nothing-here'],
+    ['HEAD', '/api/term/token'], ['POST', '/api/term/supervisor/keys'], ['POST', '/api/term/shell/open'], ['GET', '/api/term/nothing-here'],
     // as the dashboard routes it: percent-decoded, dot segments resolved, repeated slashes folded
     ['GET', '/api/%74erm/token'], ['GET', '/api/x/../term/token'], ['GET', '/api/./term/token'], ['GET', '/api//term/token'], ['GET', '/api/term//supervisor/screen'],
   ];
@@ -414,7 +426,8 @@ test("terminal A10b: the gateway's View refusal of /api/term/* is 403 applicatio
     const r = await B.at(rec, method, route, { cookie: B.view, headers: SAME, ...(method === 'POST' ? { body: '{}' } : {}) });
     assert.equal(r.status, 403, `${method} ${route}: ${r.status} ${r.text}`);
     assert.equal(r.headers['content-type'], 'application/json', `${method} ${route}: exactly application/json`);
-    assert.equal(r.text, VIEW, `${method} ${route}: exactly the view refusal`);
+    assert.equal(r.text, method === 'HEAD' ? '' : VIEW, `${method} ${route}: exactly the view refusal${method === 'HEAD' ? ', with no body' : ''}`);
   }
+  await B.quiet('View, every spelling');
   assert.deepEqual(B.rec.map((x) => `${x.method} ${x.url}`), [], 'nothing reached the instance');
 });
