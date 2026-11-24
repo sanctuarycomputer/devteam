@@ -178,7 +178,7 @@ test('terminal A11: at most one key post is in flight; queued keys merge up to 4
   assert.equal(R.posts().length, before + 1, 'the refused post is sent once and never retried');
 });
 
-test('terminal A11: the screen polls only while the document is visible, its box is seen and no hub-visible false came; it stops on another tab or a closed panel', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+test('terminal A11: the screen polls only while the document is visible and its box is seen', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
   const R = await open(t, { hash: '#overview?th=supervisor' });
   const reads = () => R.term(/\/supervisor\/screen$/).length;
   const polling = async (what) => { const a = reads(); await sleep(800); assert.ok(reads() - a >= 3, `${what}: polling (${reads() - a} reads in 800 ms)`); };
@@ -195,6 +195,15 @@ test('terminal A11: the screen polls only while the document is visible, its box
   await still('the box off screen');
   await R.p.ev(`document.querySelector('.term-box[data-term="supervisor"]').style.cssText = ''; true`);
   await polling('the box back');
+});
+
+test('terminal A11: the poll stops when another tab is chosen or the panel closes', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=supervisor' });
+  const reads = () => R.term(/\/supervisor\/screen$/).length;
+  const polling = async (what) => { const a = reads(); await sleep(800); assert.ok(reads() - a >= 3, `${what}: polling (${reads() - a} reads in 800 ms)`); };
+  const still = async (what) => { await sleep(400); const a = reads(); await sleep(1200); assert.equal(reads() - a, 0, `${what}: no reads`); };
+  await R.soon(`!!document.querySelector('.term-box[data-term="supervisor"] .xterm')`, 'drawn');
+  await polling('the tab shown');
   // another tab
   await R.p.click('#th-tabs [data-tab="threads"]');
   await still('the Threads tab chosen');
@@ -413,8 +422,14 @@ test('terminal A14: Ctrl+] releases focus; Escape goes to the pane; the + button
 
 test('terminal measure: the measure check passes at 1440, 720 and 390 px with a terminal tab open', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
   const R = await open(t, { hash: '#overview?th=supervisor', fake: { lines: ['a line of the supervisor\'s screen, wider than half the grid would ever let running text be, as code is'] } });
-  const res = await measureAt(R.p, `${R.url}/#overview?th=supervisor`, { ready: `${PANEL_AT_REST} && !!document.querySelector('.term-box[data-term="supervisor"] .xterm-rows')`, view: '#no-such-view', inbox: '#no-such-inbox', ignore: '.term-screen' });
-  for (const [size, fails] of Object.entries(res)) assert.deepEqual(fails, [], `${size}: ${fails.join('; ')}`);
+  const o = { view: '#no-such-view', inbox: '#no-such-inbox', ignore: '.term-screen' };
+  const res = await measureAt(R.p, `${R.url}/#overview?th=supervisor`, { ready: `${PANEL_AT_REST} && !!document.querySelector('.term-box[data-term="supervisor"] .xterm-rows')`, ...o });
+  for (const [size, fails] of Object.entries(res)) assert.deepEqual(fails, [], `the screen, ${size}: ${fails.join('; ')}`);
+  // the tab's running text at its widest: Wide on, the supervisor not running
+  await R.p.ev(`localStorage.setItem('devteam.threads.wide', '1'); true`);
+  R.fake.set({ supervisor: 'gone' });
+  const gone = await measureAt(R.p, `${R.url}/#overview?th=supervisor`, { ready: `${PANEL_AT_REST} && !!document.querySelector('.term-box[data-term="supervisor"] .term-state:not([hidden]) code')`, ...o });
+  for (const [size, fails] of Object.entries(gone)) assert.deepEqual(fails, [], `not running, Wide, ${size}: ${fails.join('; ')}`);
 });
 
 test("terminal A14b: the page asks GET /api/term/token once on load, before any tab is pressed; why view hides both tabs", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
