@@ -10275,7 +10275,8 @@ function resolveQuestionThreads(qid, answer, by, { turn = null } = {}) {
   const ell = '…';
   const flat = (s) => redactClaimLinks(String(s ?? '')).replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim();
   // a cut can make a claim link match again, and appendLog's own redaction would then take it past
-  // OUTCOME_MAX: redact and cut until neither changes it, so what is printed is what is logged
+  // OUTCOME_MAX: redact and cut until neither changes it, up to eight rounds (a link with more "%23"
+  // than that is for the check below, and may be printed less redacted than it is logged)
   const cut = (s) => {
     let x = flat(s);
     for (let i = 0; i < 8; i++) {
@@ -14094,16 +14095,20 @@ function cmdSecret() {
     const missing = names.filter((n) => !values.has(n));
     if (missing.length && missing.length < names.length) die(`${file} takes all of this question's secrets in one post: add ${missing.join(', ')} too. Nothing was posted`);
   }
+  // a completing post's own line: the owner's, with the posted names and the answer in one
+  const ownPost = (u) => writerClass(u.by) === 'owner' && u.secrets_posted !== undefined && u.answer !== undefined;
   // one post per question at a time, from reading what is posted through the log line
   return sopsQuestionLock(id, () => {
     logCache = null;
     const now = openQuestion(id).secrets_posted ?? [];
     if (now.length !== posted.length) die(`${id} changed while you were posting; nothing was posted from this run. Look again and post what is still open`);
+    const had = logGet(id).updates.filter(ownPost).length;
     postSecretsNow(id, v, declared, posted, todo, values, by);
-    // the post that completes it answers the question, and that resolves its thread (kit-720)
+    // the post that completes it answers the question, and that resolves its thread (kit-720): by this
+    // post's own line, never an answer that came in meanwhile (a chat answer while a sink ran)
     logCache = null;
-    const after = questionView(logGet(id));
-    if (after.status === 'answered') resolveQuestionThreads(id, after.answer, by);
+    const mine = logGet(id).updates.filter(ownPost)[had];
+    if (mine) resolveQuestionThreads(id, mine.answer, by);
   });
 }
 function postSecretsNow(id, v, declared, posted, todo, values, by) {

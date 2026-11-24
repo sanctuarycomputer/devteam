@@ -254,6 +254,42 @@ test('answer leaves threads: chat, a default, a turn in another thread, a withdr
   F.fails(['answer', Qs, 'Yes'], SUP);
   F.fails(['answer', Qs, 'Yes'], { DEVTEAM_ROLE: 'responder' });
   X.stillOpen(Ts, 'an answer by the supervisor or the responder');
+
+  // a secret post that doesn't complete the question, with the supervisor's record of the owner's
+  // words landing while its sink runs: the post resolves nothing. The sink is a command that runs
+  // the supervisor's command as given in a file.
+  const during = path.join(F.base, 'during.mjs');
+  const given = path.join(F.base, 'during.json');
+  write(during, `import fs from 'node:fs';\nimport { spawnSync } from 'node:child_process';\nfs.readFileSync(0);\nconst r = spawnSync(process.execPath, ['${path.join(F.old, 'docs/devteam/scripts/devteam.mjs')}', ...JSON.parse(fs.readFileSync('${given}', 'utf8'))], { cwd: '${F.old}', env: { ...process.env, DEVTEAM_ROLE: 'supervisor' }, encoding: 'utf8' });\nprocess.stdout.write(r.stdout + r.stderr);\nprocess.exit(r.status ?? 1);\n`);
+  const sf = path.join(F.old, 'docs/devteam/project/settings.md');
+  const sink = `${process.execPath} ${during}`;
+  fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"gates": {}', `"gates": {}, "secret_commands": [${JSON.stringify(sink)}]`));
+  write(path.join(F.old, '.gitignore'), `${fs.readFileSync(path.join(F.old, '.gitignore'), 'utf8')}secrets/\n`);
+  F.g(['add', '-A'], F.old);
+  F.g(['commit', '-qm', 'a sink that answers'], F.old);
+  F.g(['push', '-q', 'origin', 'main'], F.old);
+  const posts = (words) => firstId(F.sup(['ask', '--kind', 'owner-action', '--question', words, '--secrets', JSON.stringify([{ name: 'SLOW', sink: `stdin:${sink}` }, { name: 'LATER', sink: 'file:secrets/later.txt' }]), ...RATE]));
+  const post = (q, args, values) => { write(given, JSON.stringify(args)); return F.ok(F.old, ['secret', 'post', q, '--json'], {}, JSON.stringify(values)); };
+  const Qp = posts('Post the keys for the mail server');
+  const Tp = X.about(Qp);
+  assert.doesNotMatch(post(Qp, ['answer', Qp, 'SUPWORDS skip them', '--from-chat', '--said', 'skip them'], { SLOW: 'one' }), /is answered/);
+  assert.equal(X.answerLine(Qp).channel, 'chat', 'the chat answer landed during the post');
+  X.stillOpen(Tp, 'a chat answer during a partial post');
+
+  const Qq = posts('Hand over the tokens for the search index');
+  const Tq = X.about(Qq, 'Do we need these?');
+  F.sup(['thread', 'reply', Tq, 'No. Skip them?', '--refs', `question:${Qq}`]);
+  const Uq = F.owner(['thread', 'say', Tq, 'Skip them']).split('\n')[0];
+  post(Qq, ['answer', Qq, 'SUPWORDS skip', '--from-turn', Uq], { SLOW: 'one' });
+  assert.equal(X.answerLine(Qq).channel, 'thread', 'the answer from the turn landed during the post');
+  assert.deepEqual([X.show(Tq).status, X.show(Tq).ready?.outcome], ['open', 'Answered in thread: Skip them'], 'proposed by the answer, not resolved by the post');
+  assert.equal(X.resolvedObs(Tq).length, 0, 'no observation from the post');
+
+  // the same, but the post completes the question: it resolves, with the post's own words
+  const Qv = posts('Share the passwords of the staging database');
+  const Tv = X.about(Qv);
+  post(Qv, ['answer', Qv, 'SUPWORDS skip them', '--from-chat', '--said', 'skip them'], { SLOW: 'one', LATER: 'two' });
+  X.resolvedBy(Tv, Qv, 'Answered: Posted 2 secrets');
 });
 
 test('answer stands: a thread whose lines the log would refuse stays open with a warning, the answer recorded and the command exiting 0', (t) => {
@@ -317,4 +353,13 @@ test('answer stands: a thread whose lines the log would refuse stays open with a
   const ready = X.setsOn(T5).filter((l) => l.ready !== undefined);
   assert.equal(ready.length, 1, 'one proposal');
   assert.ok(ready[0].at > X.answerLine(Q5).at, 'the proposal is written after the answer line');
+
+  // a link the redaction doesn't settle in (each ")" ends one more token, two bytes longer each time):
+  // the pre-check reads the line as the log would redact it, so the thread stays open with a warning
+  const Q6 = X.ask();
+  const T6 = X.about(Q6);
+  const r6 = F.run(F.old, ['answer', Q6, `${'x'.repeat(158)} /auth/claim?${'%23a)'.repeat(20)}`]);
+  assert.equal(r6.status, 0, r6.err || r6.out);
+  assert.match(r6.err, new RegExp(`warning: ${T6} stays open \\(.*outcome`), 'a warning naming the thread whose link does not settle');
+  X.stillOpen(T6, 'a line the log would refuse once redacted');
 });
