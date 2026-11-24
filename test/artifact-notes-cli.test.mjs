@@ -352,3 +352,199 @@ test("C10a C10b list --with: the notes a session has, and no others", fresh(() =
   for (const text of [cli(['thread']).err, cli(['help']).out]) for (const s of ['--accept-addressed --at', 'thread list [--waiting [--responder] | --with <session>']) assert.ok(text.includes(s), s);
   for (const s of ['artifact handoff <slug>', 'artifact notes <slug>', 'artifact addressed <t-id>']) assert.ok(cli(['help']).out.includes(s), s);
 }));
+
+// ---- Task 7: the dashboard
+const dashboard = async (supervisor, fn) => {
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({ ...SHOT, DEVTEAM_SUPERVISOR: supervisor }));
+  const B = `http://127.0.0.1:${port}`;
+  const post = async (name, body, origin = B) => {
+    const r = await fetch(`${B}/api/${name}`, { method: 'POST', headers: { 'content-type': 'application/json', origin, 'sec-fetch-site': origin === B ? 'same-origin' : 'cross-site' }, body: JSON.stringify(body) });
+    const text = await r.text();
+    let said = text;
+    try { said = JSON.parse(text); } catch {}
+    return { status: r.status, said };
+  };
+  const get = async (p) => (await fetch(`${B}${p}`, { headers: { 'sec-fetch-site': 'same-origin' } })).json();
+  try { await fn({ post, get }); } finally { await dash.stop(); }
+};
+
+test('C3b C3c the page hands over, and reads where it went; a second press hands over nothing', fresh(async () => {
+  const pane = F.standIn();
+  const w = win('plan-pricing');
+  try {
+    await dashboard(pane.target, async ({ post }) => {
+      const id = note('plan-pricing');
+      const body = { slug: 'pricing', at: 'plan-pricing' };
+      assert.deepEqual(await post('artifact-handoff', body), { status: 200, said: { to: 'plan-pricing', typed: true, count: 1 } });
+      assert.equal(lines().find((l) => l.id === id && l.handed).by, 'owner');
+      await until(() => w.typed().includes('1 note on artifact pricing is yours'), 'the line in the session');
+      assert.deepEqual(await post('artifact-handoff', body), { status: 200, said: { to: 'plan-pricing', typed: false, count: 0 } });
+      assert.equal(ownerMessages().length, 1, 'a second press sends nothing');
+      w.close();
+      note('plan-pricing'); note('plan-pricing');
+      assert.deepEqual(await post('artifact-handoff', body), { status: 200, said: { to: 'plan-pricing', typed: false, count: 2 } });
+      const m = ownerMessages().find((x) => x.text.startsWith('2 notes'));
+      const typed = await until(() => pane.typed().includes(m.id) && pane.typed(), "the same line in the supervisor's pane");
+      assert.ok(typed.includes(`[devteam info ${m.id} from owner] ${m.text}`), typed);
+      for (const bad of [{ slug: 'Not A Slug', at: 'main' }, { slug: 'pricing' }, { slug: 'pricing', at: 'a/../b' }, { slug: ['pricing'], at: 'main' }, { slug: 'pricing', at: 7 }]) {
+        const r = await post('artifact-handoff', bad);
+        assert.equal(r.status, 400, JSON.stringify(bad));
+        assert.equal(typeof r.said.error, 'string');
+      }
+      const was = bytes();
+      note('plan-pricing');
+      const now = bytes();
+      assert.notEqual(now, was);
+      assert.equal((await post('artifact-handoff', body, 'http://evil.example')).status, 403);
+      assert.equal(bytes(), now, 'another origin hands over nothing');
+    });
+  } finally { w.close(); }
+}));
+
+test('C6a C6b the page accepts the mark it showed', fresh(async () => {
+  await dashboard('no-such-session:0', async ({ post }) => {
+    const id = note('plan-pricing'); handed(id, 'plan-pricing');
+    const bare = note('plan-pricing');
+    mark(id, 'plan-pricing', 'The older mark of the two', 2 * MIN);
+    const old = show(id).addressed.at;
+    mark(id, 'plan-pricing');
+    const { at } = show(id).addressed;
+    const go = (b, ...o) => post('thread-accept-addressed', b, ...o);
+    assert.equal((await go({ id, at }, 'http://evil.example')).status, 403);
+    for (const bad of [{ id }, { id, at: 'now' }, { id: 'x', at }, { id, at: [at] }]) assert.equal((await go(bad)).status, 400, JSON.stringify(bad));
+    assert.deepEqual(await go({ id, at: old }), { status: 400, said: { error: 'The note changed; read it again' } });
+    const r = await go({ id: bare, at });
+    assert.equal(r.status, 400);
+    assert.match(r.said.error, /has no addressed note to accept/);
+    assert.deepEqual([show(id).status, show(bare).status], ['open', 'open']);
+    assert.equal((await go({ id, at })).status, 200);
+    assert.deepEqual([show(id).status, show(id).outcome], ['resolved', NOTE]);
+  });
+}));
+
+test('C11a /api/threads carries the mark, as thread show does', fresh(async () => {
+  const id = note('plan-pricing', h1); handed(id, 'plan-pricing');
+  await dashboard('no-such-session:0', async ({ get }) => {
+    const api = async () => (await get('/api/threads')).threads.find((x) => x.id === id);
+    assert.equal((await api()).addressed, null);
+    mark(id, 'plan-pricing', NOTE, MIN, { draft: 'plan-pricing' });
+    const v = await api();
+    assert.deepEqual([v.addressed?.by, v.check], ['plan-pricing', 'addressed']);
+    const s = show(id);
+    for (const k of ['addressed', 'check', 'shot', 'source', 'handed', 'waiting']) assert.deepEqual(v[k], s[k], k);
+  });
+}));
+
+// ---- Task 8: an owner turn on a note goes to nobody until Hand over
+const KEPT = 'kept with the note: Hand over sends it to the session drawing it';
+const undelivered = path.join(F.old, 'docs/devteam/run/undelivered-turns.json');
+const undeliveredNow = () => (fs.existsSync(undelivered) ? fs.readFileSync(undelivered, 'utf8') : '');
+test('C11b C11c C11d C11e an owner turn on a note: typed nowhere, routed to nobody, owed by no one', fresh(async () => {
+  const pane = F.standIn();
+  const w = win('plan-pricing');
+  try {
+    const P = { DEVTEAM_SUPERVISOR: pane.target };
+    const made = ok(cli(['thread', 'new', 'Make it bold', '--title', 'Price', '--subject', JSON.stringify(subject())], P)).split('\n');
+    const [T] = made;
+    const turns = [made, ok(cli(['thread', 'say', T, 'and green'], P)).split('\n'), ok(cli(['thread', 'say', T, 'and wide'])).split('\n')];
+    assert.deepEqual(turns.map((x) => x[1]), [KEPT, KEPT, KEPT]);
+    ok(cli(['thread', 'resolve', T], P));
+    assert.equal(ok(cli(['thread', 'reopen', T, '--', 'once more'], P)).split('\n')[1], KEPT);
+    await new Promise((r) => setTimeout(r, 500));
+    assert.doesNotMatch(pane.typed(), new RegExp(`${T} from owner`), 'the supervisor is typed no turn');
+    assert.equal(w.typed(), '', 'nor is the session');
+    assert.ok(!undeliveredNow().includes(T), undeliveredNow());
+    const mine = lines().filter((l) => l.type === 'turn' && l.thread === T);
+    assert.equal(mine.length, 4);
+    for (const l of mine) for (const k of ['routed_to', 'routed_session', 'delivered']) assert.ok(!(k in l), `${k} on ${l.id}`);
+    assert.ok(!ok(cli(['thread', 'list', '--waiting', '--responder'], F.SUP)).includes(mine[0].id));
+    assert.ok(!ok(cli(['thread', 'list', '--waiting'], F.SUP)).includes(T));
+    const late = F.hand('owner', { type: 'thread', title: 'Old note', subject: subject() }, 11 * MIN);
+    F.hand('owner', { type: 'turn', thread: late, text: 'bigger please' }, 11 * MIN - 1);
+    const found = JSON.parse(ok(cli(['metrics', '--json'], F.SUP))).findings.filter((f) => [T, late].includes(f.subject)).map((f) => f.kind);
+    assert.deepEqual(found.filter((k) => /^thread-/.test(k)), []);
+    // a thread that is no note is delivered as before
+    const [plain, saidPlain] = ok(cli(['thread', 'new', 'A plain thread'], P)).split('\n');
+    assert.equal(saidPlain, "sent to the supervisor's pane");
+    await until(() => pane.typed().includes(plain), 'the plain thread typed');
+  } finally { w.close(); }
+}));
+
+test("C11f wait isn't woken by an owner turn on a note, and is by a hand-over to the supervisor", fresh(async () => {
+  const T = note('main', { ago: MIN });
+  const wait = async (act) => {
+    await new Promise((r) => setTimeout(r, 50));
+    fs.writeFileSync(path.join(F.old, 'docs/devteam/run/wait-since'), `${Date.now()}\n`);
+    await new Promise((r) => setTimeout(r, 50));
+    const p = spawn(process.execPath, [path.join(F.old, 'docs/devteam/scripts/devteam.mjs'), 'wait', '--minutes', '1'], { cwd: F.old, env: F.env({ ...F.SUP, DEVTEAM_SUPERVISOR: 'no-such-session:0', DEVTEAM_TEST_WAIT_CYCLE_MS: '200' }), stdio: ['ignore', 'pipe', 'pipe'] });
+    let o = '';
+    p.stdout.on('data', (b) => { o += b; });
+    const ids = act();
+    await new Promise((r) => p.on('close', r));
+    return { ids, owner: o.split('\n').filter((l) => l.includes('new line(s) from the owner')).join('\n'), o };
+  };
+  // the plain thread after the note's lines is what wakes it, so the wait is over as soon as it has looked
+  const a = await wait(() => {
+    const kept = [ok(cli(['thread', 'say', T, 'one more thing'])).split('\n')[0], ok(cli(['thread', 'new', 'A new note', '--title', 'x', '--subject', JSON.stringify(subject('main'))])).split('\n')[0]];
+    return { kept, plain: ok(cli(['thread', 'new', 'A plain thread'])).split('\n')[0] };
+  });
+  assert.ok(a.owner.includes(a.ids.plain), `woken by the plain thread: ${a.o}`);
+  for (const id of a.ids.kept) assert.ok(!a.owner.includes(id), `not by ${id}: ${a.owner}`);
+  const b = await wait(() => { ok(cli(handoff())); return ownerMessages().pop().id; });
+  assert.ok(b.owner.includes(b.ids), `the hand-over wakes it: ${b.o}`);
+}));
+
+// ---- Task 9: a mark awaits no reply
+test('C12a C12b C12c no reader of open messages counts a mark', fresh(async () => {
+  const id = note('plan-pricing'); handed(id, 'plan-pricing', 120 * MIN);
+  const m = mark(id, 'plan-pricing');
+  assert.ok(!ok(cli(['messages', '--open', '--to', 'owner', '--json'], F.SUP)).includes(m), 'messages --open');
+  const { still_open, expecting_reply } = JSON.parse(ok(cli(['metrics', '--json'], F.SUP))).messages;
+  assert.equal(still_open, 0, 'still_open');
+  assert.equal(expecting_reply, 0, 'expecting_reply');
+  // a ticket blocked behind an unmerged dependency, its only message a mark
+  F.sup(['ticket', 'add', 'w-03-behind', '--json', JSON.stringify({ title: 'w-03-behind', feature: 'notes', component: 'web', kind: 'build', size: 'S', risk: 'normal', serves: ['NT-S1'], depends_on: ['w-01-first'], touches: ['src/w-03/**'], done_when: ['its test passes'] })]);
+  const stamp = (d) => `${d.toISOString().slice(0, 10).replace(/-/g, '')}-${d.toISOString().slice(11, 23).replace(/[:.]/g, '')}`;
+  const phase = (from, to, ago) => F.hand('w-03-behind', { id: `h-${stamp(new Date(Date.now() - ago))}-w-03-behind`, type: 'phase', from, to }, ago, 'w-03-behind.jsonl');
+  phase(null, 'starting', 180 * MIN); phase('starting', 'blocked', 120 * MIN);
+  F.hand('w-03-behind', { id: `m-${stamp(new Date(Date.now() - 90 * MIN))}-w-03-behind`, type: 'message', kind: 'addressed', to: 'owner', thread: id, text: NOTE }, 90 * MIN, 'w-03-behind.jsonl');
+  const row = ok(cli(['status'], F.SUP)).split('\n').find((l) => /\sw-03-behind(\s|$)/.test(l)) ?? '';
+  assert.match(row, /WAITING ON w-01-first TO MERGE/);
+  assert.doesNotMatch(row, /SUPERVISOR/);
+  await dashboard('no-such-session:0', async ({ get }) => {
+    const d = await get('/api/data');
+    assert.ok(Array.isArray(d.open_messages));
+    assert.ok(!JSON.stringify(d.open_messages).includes(m), 'open_messages');
+    const p = d.planners.find((x) => x.feature === 'pricing');
+    assert.ok(p, 'the planner is listed');
+    assert.deepEqual(p.waiting_on_supervisor, []);
+  });
+  // a mark is no request to the supervisor: a ticket that stops having sent only one is told so
+  F.hand('x-01-y', { id: `m-${stamp(new Date(Date.now() - 80 * MIN))}-x-01-y`, type: 'message', kind: 'addressed', to: 'owner', thread: id, text: NOTE }, 80 * MIN, 'x-01-y.jsonl');
+  const r = cli(['phase', 'blocked'], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'x-01-y' });
+  assert.match(r.err, /no open request to the supervisor/, said(r));
+}));
+
+// ---- Task 10: the docs
+const doc = (f) => fs.readFileSync(path.join(kit, 'process', f), 'utf8');
+// a section: from its heading to the next of its level or above
+const section = (text, heading) => {
+  const all = text.split('\n');
+  const from = all.indexOf(heading);
+  assert.notEqual(from, -1, heading);
+  const level = heading.indexOf(' ');
+  const len = all.slice(from + 1).findIndex((l) => { const m = /^(#+) /.exec(l); return m && m[1].length <= level; });
+  return all.slice(from, len === -1 ? undefined : from + 1 + len).join('\n');
+};
+const has = (text, ...ss) => { for (const s of ss) assert.ok(text.includes(s), s); };
+test('C8 C9 C10b the docs say whose a note is, how it is worked, and what a mark says', () => {
+  const sup = doc('supervisor.md');
+  const notesDoc = section(sup, '### Artifact notes');
+  has(notesDoc, 'what changed for that note', '`thread ready --outcome`', '`devteam.mjs chore start artifact-<slug>`', 'Show me', '`artifact notes <slug> --at <at>`', 'artifact addressed <t-id> --note', 'never "done"');
+  has(notesDoc, 'waits on the owner until Hand over', '`unread ack`', 'no reply, relay or work', "A note handed to a session is that session's", 'A note handed to you is your work', 'thread list --with supervisor');
+  assert.ok(!/as it does today|kit-144 replaces this paragraph|until kit-144|none of them is a command to run/.test(notesDoc), 'the rule from before Hand over is gone');
+  has(section(sup, '## 3. The tick').split('\n').find((l) => l.startsWith('5. ')), 'thread list --with supervisor');
+  has(section(sup, '## 11. Recovery'), 'thread list --with supervisor');
+  has(section(doc('worker.md'), '## 7. Talking to the supervisor'), 'artifact notes', 'artifact addressed', 'what changed', 'picture', 'withdrawn', 'thread list --with <');
+  has(section(doc('planning.md'), '## 2. The design'), '### Artifact notes', 'artifact notes', 'thread list --with <');
+});

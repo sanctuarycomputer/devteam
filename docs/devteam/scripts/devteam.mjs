@@ -4791,7 +4791,7 @@ function plannersNow() {
     const { target, problem } = resolvePane(tmuxTarget(by));
     const msgs = lines.filter((l) => l.type === 'message');
     const replied = handledMessages();
-    const asking = msgs.filter((m) => m.by === by && !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id));
+    const asking = msgs.filter((m) => m.by === by && !['info', 'ruling', 'answer', 'addressed'].includes(m.kind) && !replied.has(m.id));
     // Before its feature line exists (while designing), a planner's goal is the one its questions
     // name: a question whose links point at this plan branch.
     const refQs = questions().filter((q) => (q.links ?? []).some((l) => l.ref === b || l.ref === `refs/heads/${b}`));
@@ -10609,7 +10609,7 @@ function threadQuestion(q) {
 function threadViews(objects) {
   const turns = new Map();
   const asked = new Map();
-  // artifact-notes-1: a session's marks on a note (the dashboard's reader folds no messages, so none there until kit-144)
+  // artifact-notes-1: a session's marks on a note
   const marks = new Map();
   const push = (m, k, v) => (m.get(k) ?? m.set(k, []).get(k)).push(v);
   for (const o of objects.values()) {
@@ -10697,8 +10697,11 @@ const subjectIds = (s) => (!isObj(s) ? [] : s.kind === 'item' && SUBJECT_REF.tes
 // An owner turn, typed into the supervisor's pane when it has one (as nudgeSupervisor does), or into
 // the pane given (the responder's, kit-104), as one
 // line: a newline typed with send-keys -l would press Enter mid-message, and a control character
-// would reach the agent's terminal. The first 300 bytes of the words, then …. True once typed.
+// would reach the agent's terminal. The first 300 bytes of the words, then …. True once typed; 'kept' on an
+// artifact note.
 function deliverOwnerTurn(t, text, files, pane = supervisorTarget()) {
+  // on an artifact note it goes to nobody: Hand over is how it reaches a session
+  if (t.subject?.kind === 'artifact') return 'kept';
   const { target, problem } = resolvePane(pane);
   if (problem) return false;
   const flat = text.replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim();
@@ -10969,6 +10972,7 @@ function cmdThread() {
       return `not delivered to the responder: ${resolvePane(pane).problem ?? 'the typing failed'}; it stays owed, and the supervisor takes it once it is ${RESPONDER_OVERDUE_MS / 60000} minutes old`;
     }
     const typed = deliverOwnerTurn(t, words, files);
+    if (typed === 'kept') return 'kept with the note: Hand over sends it to the session drawing it';
     if (typed === false) withLock(UNDELIVERED_FILE, () => {
       const m = undeliveredTurns(Date.now(), { entries: true });
       for (const [k, v] of Object.entries(m)) if (!(Date.now() - Date.parse(v?.at) <= 7 * 86400000)) delete m[k];
@@ -18792,7 +18796,7 @@ function collectMetrics(since, reviewsSince = 0) {
   const msgs = logObjects('message').filter((m) => Date.parse(m.created_at) >= since).sort(byTime);
   const replies = new Map();
   for (const m of [...msgs, ...logObjects('question')].sort(byTime)) if (m.re && !replies.has(m.re)) replies.set(m.re, Date.parse(m.created_at));
-  const expecting = msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind));
+  const expecting = msgs.filter((m) => !['info', 'ruling', 'answer', 'addressed'].includes(m.kind));
   const openMsgs = expecting.filter((m) => !replies.has(m.id) && !settledByLanding(m));
   const msgWaits = expecting.filter((m) => replies.has(m.id)).map((m) => replies.get(m.id) - Date.parse(m.created_at));
   const qs = questions().filter((q) => Date.parse(q.asked_at) >= since);
@@ -25454,10 +25458,14 @@ function dashboardActions() {
     'thread-reopen': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.text === undefined || b.text === '' || turnOk(b.text)) ? ['thread', 'reopen', b.id, ...(b.text?.trim() ? ['--', b.text.trim()] : [])] : null),
     // bound to the proposal the card showed: a newer one is refused, so the owner reads it first
     'thread-accept': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && typeof b.at === 'string' && READY_AT.test(b.at) ? ['thread', 'resolve', b.id, '--accept', `--at=${b.at}`] : null),
+    'thread-accept-addressed': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && typeof b.at === 'string' && READY_AT.test(b.at) ? ['thread', 'resolve', b.id, '--accept-addressed', `--at=${b.at}`] : null),
+    'artifact-handoff': (b) => (typeof b.slug === 'string' && LINK_ID.test(b.slug) && typeof b.at === 'string' && ARTIFACT_AT.test(b.at) ? ['artifact', 'handoff', b.slug, `--at=${b.at}`, '--json'] : null),
   };
   // An action whose caller has a deadline of its own: the gateway gives the whole answer 15 s.
   const ACTION_MS = { 'artifact-publish': 12000 };
-  return { ID, text, autonomyArgs, turnOk, lineOk, filesArgs, ACTIONS, ACTION_MS };
+  // An action whose reply is what its command printed, a JSON object, and nothing else.
+  const ACTION_JSON = new Set(['artifact-handoff']);
+  return { ID, text, autonomyArgs, turnOk, lineOk, filesArgs, ACTIONS, ACTION_MS, ACTION_JSON };
 }
 // POST /upload; GET/HEAD /upload/…
 async function dashRoutesUpload(D, req, res, q) {
@@ -25936,7 +25944,7 @@ async function dashRoutesReviewPage(D, req, res, q) {
 // every POST /api/<name> (pane-answer, owner-setting, secret, review-draft and review-answer, fleet-check, the ACTIONS), and the 404 for everything else
 async function dashRoutesOwner(D, req, res, q) {
   const { u } = q;
-  const { log, run, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, send, refreshHello, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer } = D;
+  const { log, run, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, ACTION_JSON, send, refreshHello, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer } = D;
   const name = req.method === 'POST' && u.pathname.startsWith('/api/') ? u.pathname.slice(5) : null;
   const isSecret = name === 'secret';
   const isReview = name === 'review-draft' || name === 'review-answer';
@@ -26113,6 +26121,11 @@ async function dashRoutesOwner(D, req, res, q) {
     const r = await runAction(args, { timeout: ACTION_MS[name] ?? 0, person });
     // what the hub lists (the Inbox count, the fleet's mode) follows an owner action at once
     if (r.ok) refreshHello();
+    if (r.ok && ACTION_JSON.has(name)) {
+      let said = null;
+      try { said = JSON.parse(r.stdout); } catch {}
+      return send(res, isObj(said) ? 200 : 500, 'application/json', JSON.stringify(isObj(said) ? said : { error: 'the action printed no JSON' }));
+    }
     send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') }));
   });
   return;
@@ -26158,7 +26171,7 @@ async function cmdDashboard() {
   const versioning = new Map();
   // person: the request's (kit-252), on this child's env alone
   const runAction = (args, { person = null, ...o } = {}) => runOwnerAction(args, { ...o, env: personEnv(ownerEnv, person), log });
-  const { ID, text, autonomyArgs, turnOk, lineOk, filesArgs, ACTIONS, ACTION_MS } = dashboardActions();
+  const { ID, text, autonomyArgs, turnOk, lineOk, filesArgs, ACTIONS, ACTION_MS, ACTION_JSON } = dashboardActions();
   const send = (res, code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', ...extra }); res.end(body); };
   // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 30 s
   // (kit-595; it was 10 s: each run is a child holding about 140 MB, so the hub's pulse is at most
@@ -26540,7 +26553,7 @@ async function cmdDashboard() {
       const live = readText(path.join(liveLogDir(), f));
       const durable = readText(path.join(durableLogDir(), f));
       const text = mergeLogText(live, durable);
-      threadFiles.set(f, { k, lines: parseLines(text, f, { validate: false }).lines.filter((l) => ['thread', 'turn', 'question'].includes(l.type)) });
+      threadFiles.set(f, { k, lines: parseLines(text, f, { validate: false }).lines.filter((l) => ['thread', 'turn', 'question'].includes(l.type) || (l.type === 'message' && l.kind === 'addressed')) });
     }
     const all = [...threadFiles.values()].flatMap((x) => x.lines);
     const asked = new Set(all.filter((l) => l.type === 'question' && l.op === 'new' && typeof l.thread === 'string').map((l) => l.id));
@@ -26670,7 +26683,7 @@ async function cmdDashboard() {
   // ms), and the kept /api/data build is stale (dataEpoch)
   const logWatch = presenceChanged(liveLogDir(), () => { dataEpoch += 1; presence.changed(); });
   every(logWatch.tick, 1000);
-  const D = dashContext({ log, page, pageCsp, run, describing, versioning, remote, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, sessionPrompts, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
+  const D = dashContext({ log, page, pageCsp, run, describing, versioning, remote, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, ACTION_JSON, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, sessionPrompts, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
   const server = http.createServer(async (req, res) => {
     if (draining) res.setHeader('connection', 'close');
     // Node's five minutes for a body, for all but an upload (UPLOAD_REQUEST_MS, and its stall timer)
@@ -27293,6 +27306,8 @@ function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null, 
 // nothing else here (a responder turn or the owner's resolve never settles it; a reply citing it
 // with --re closes it through each reader's replied set, as for any message).
 function settledByLanding(m) {
+  // a session's mark on an artifact note awaits no reply: the owner checks the note
+  if (m.kind === 'addressed') return true;
   if (m.kind === 'handoff') {
     // the supervisor's newest turn per thread, worked out once per fold (readLog's object), not per message per read
     const log = readLog();
@@ -32334,14 +32349,17 @@ function cmdWait() {
       // not the owner's turns routed to the responder, nor the thread line (new, or a reopen) whose
       // first owner turn at or after it is (kit-104): those are the responder's, and an overdue one
       // comes back as responder-overdue. A thread line read before its turn is written wakes once.
-      const ls = readLog().lines.filter((l) => l.by === 'owner');
+      const { lines: all, objects } = readLog();
+      const ls = all.filter((l) => l.by === 'owner');
       const turnsOf = new Map();
       for (const l of ls) if (l.type === 'turn' && typeof l.thread === 'string') (turnsOf.get(l.thread) ?? turnsOf.set(l.thread, []).get(l.thread)).push(l);
       for (const us of turnsOf.values()) us.sort((a, b) => String(a.at).localeCompare(String(b.at)));
       const opens = (l) => l.type === 'thread' && (l.op === 'new' || (l.op === 'set' && l.status === 'open'));
       const notMine = (r) => r === 'responder' || r === 'session';
       const responders = (l) => l.type === 'turn' ? notMine(l.routed_to) : opens(l) && notMine((turnsOf.get(l.id) ?? []).find((u) => u.at >= l.at)?.routed_to);
-      const owner = ls.filter((l) => !responders(l)).map((l) => ({ k: l.id, at: Date.parse(l.at) }));
+      // nor an artifact note's turns and thread lines: the owner hands a note over, with a message
+      const noted = (l) => ['turn', 'thread'].includes(l.type) && objects.get(l.type === 'turn' ? l.thread : l.id)?.subject?.kind === 'artifact';
+      const owner = ls.filter((l) => !responders(l) && !noted(l)).map((l) => ({ k: l.id, at: Date.parse(l.at) }));
       const got = sub(['messages', '--open', '--to', 'supervisor', '--json']);
       const msgs = (got ?? []).map((m) => ({ k: `${m.id} [${m.kind}] from ${m.created_by}: ${String(m.text).slice(0, 160)}`, at: Date.parse(m.created_at) }));
       last = got ? { key, owner, msgs } : null;
@@ -36855,10 +36873,13 @@ function sessionWords(w, objects = readLog().objects) {
 // Who owes the reply to the owner's next turn in thread t (kit-104; the spine's routing rules 1, 3
 // and 4), worked out once, before the turn is written, and stored on it (routed_to, and delivered
 // for the responder); nothing recomputes it. t may be a thread not yet written ({ subject }).
-// { to: 'supervisor' } or { to: 'responder', delivered: 'typed' | 'queued', target }; why says why
+// { to: 'supervisor' } or { to: 'responder', delivered: 'typed' | 'queued', target }, or no `to` on an
+// artifact note (its owner hands it over); why says why
 // the supervisor's. A subject naming a record not in the log takes the ordinary rules. Every "the
 // owner said it" here is a line's writer, never its text.
 function responderRoute(t, objects = readLog().objects, s = loadSettings(), now = Date.now()) {
+  // an artifact note's turns wait for Hand over: no route is written, and nobody owes a reply
+  if (isObj(t.subject) && t.subject.kind === 'artifact') return { why: 'an artifact note' };
   const ownerCorrected = (r) => (r.updates ?? []).some((u) => u.corrected !== undefined && writerClass(u.by) === 'owner');
   // 1: its own open question asked in the thread, or a subject still the supervisor's
   if (t.id && [...objects.values()].some((o) => o.type === 'question' && o.thread === t.id && threadQuestion(o).status === 'open')) return { to: 'supervisor', why: 'its open question' };

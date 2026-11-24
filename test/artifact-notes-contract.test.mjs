@@ -174,7 +174,7 @@ test('artifact-notes-contract A4: /api/threads carries the note fields, with no 
       const e = expected(f);
       const v = threads.find((x) => x.id === e.thread);
       assert.ok(v, `${f}: /api/threads lists ${e.thread}`);
-      noteFieldsEqual(v, { ...(e.api ?? e.view), addressed: null }, `${f} (api)`);
+      noteFieldsEqual(v, e.view, `${f} (api)`);
       assert.equal(v.source, null, `${f}: source`);
     }
   } finally { if (dash) await dash.stop(); F.done(); }
