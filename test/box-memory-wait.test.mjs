@@ -72,11 +72,13 @@ const count = (l, args) => l.children.filter((c) => JSON.stringify(c) === JSON.s
 const git = (X, args) => execFileSync('git', args, { cwd: X.F.old, encoding: 'utf8' }).trim();
 
 // Each check: cycle 0 and a quiet line, the change at t, then the first line whose key differs from
-// cycle 0's, which must come by line N (the snapshot running at t may already catch it).
+// cycle 0's, which must come by line N (the snapshot running at t may already catch it). t is
+// taken once change() has returned: moving main is two git commands, and a snapshot that starts
+// while they run may read the old sha.
 async function keyChange(X, w, change) {
   await untilLine(w, (l) => l.cycle >= 1, 'a quiet line');
-  const t = Date.now();
   change();
+  const t = Date.now(); // the change is done: a snapshot started after this must see it
   const N = await afterChange(w, t);
   const k0 = w.lines()[0].key;
   const hit = await untilLine(w, (l) => l.key !== k0, 'a line with a new key');
