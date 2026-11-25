@@ -21,6 +21,8 @@ if (process.env.DEVTEAM_TEST_GITLEAKS === '1') assert.ok(hasGitleaks, 'DEVTEAM_T
 const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 const fake = (n, seed) => { let x = seed, s = ''; for (let i = 0; i < n; i++) { x = (x * 1103515245 + 12345) % 2147483648; s += ALNUM[x % ALNUM.length]; } return s; };
 const genericKey = fake(32, 7);
+// lowercase, dash-joined and starting like an id: shaped as a key's segments, not as words
+const dashed = 'zq-81734-7k2m9x4c-3p8w5t1h-9d4f2j6v';
 const githubPat = `${'gh'}p_${fake(36, 11)}`;
 
 const at = '2026-11-11T16:16:36.488Z';
@@ -42,6 +44,9 @@ const leakLines = {
   nested: obs('o-20261111-170235765-supervisor', { detail: 'x', my_source_key: genericKey }),
   value: obs('o-20261111-170235766-supervisor', { detail: 'x', source_key: genericKey }),
   pat: obs('o-20261111-170235767-supervisor', { detail: 'x', source_key: githubPat }),
+  // a key where the second ticket id would be, as it is and as a lowercase dash-joined value
+  afterId: obs('o-20261111-170235769-supervisor', { detail: 'x', refs: [`app-41-secrets-gate,${genericKey}`] }),
+  dashedAfterId: obs('o-20261111-170235770-supervisor', { detail: 'x', refs: [`app-41-secrets-gate,${dashed}`] }),
 };
 
 test('the kit config allowlists only generic-api-key, only on the source_key JSON key and runs of kit ticket ids', () => {
@@ -68,9 +73,9 @@ test('the allowlist regex: a source_key slug passes, anything else on the line d
     // base64's + / =, a run over 20, a value cut where gitleaks cuts it, another key name
     'source_key":"abc+def/ghi=12345"', `source_key":"spike-${fake(21, 3)}"`, 'source_key":"abc-12345;', 'SOURCE_KEY":"abc-12345"', 'detail":"abc-12345"',
   ]) assert.ok(!allow.test(m), m);
-  // a run of kit ticket ids, one with "secrets" in its slug: what a refs list of a real log carried
-  for (const m of ['app-41-secrets-gate,ops-43-ci-floor-gates"', 'ops-12-api-keys app-7-token-cache ']) assert.ok(allow.test(m), m);
-  for (const m of [`app-41-secrets-gate,${genericKey}"`, 'app-41-secrets-gate,ops-43-ci-Floor-gates"', `app-41-secrets-gate,ops-43-${fake(21, 5).toLowerCase()}"`, 'app-41-secrets-gate"']) assert.ok(!allow.test(m), m);
+  // two kit ticket ids, one with "secrets" in its slug: what a refs list of a real log carried
+  for (const m of ['app-41-secrets-gate,ops-43-ci-floor-gates"', 'ops-12-api-keys, app-7-token-cache-v2 ']) assert.ok(allow.test(m), m);
+  for (const m of [`app-41-secrets-gate,${genericKey}"`, 'app-41-secrets-gate,ops-43-ci-Floor-gates"', `app-41-secrets-gate,ops-43-${fake(21, 5).toLowerCase()}"`, 'app-41-secrets-gate"', `app-41-secrets-gate,${dashed}"`, 'xx=app-41-secrets-gate,ops-43-ci-floor-gates"', 'app-41-secrets-gate,ops-43-a-b-c-d-e-f-g-h"']) assert.ok(!allow.test(m), m);
 });
 
 const scan = (dir, args = []) => {
