@@ -904,19 +904,39 @@ test('I1: IMAGE_RUNS lists the contract, the sampler and every part, and startHu
 // The sampler with the kit's own processes, disk, pool and claude parts (state, park and room stubs),
 // over real files: a FIFO's open doesn't return until a writer opens it, holding one of Node's file
 // threads as a hung volume does. fs.promises.open of a FIFO is counted (now: out, most: the most out at
-// once), and every readdir is listed. Timers are kept and never fire by themselves.
+// once, twice: the most of one FIFO out at once), and every readdir is listed. Every lstat is counted
+// the same way (stats), and one of a path in stats.stuck doesn't answer until stats.go() is called. With
+// stats.noDtype, readdir withFileTypes is Node's getDirents on a filesystem that leaves d_type unknown
+// (XFS without ftype, some FUSE and network mounts): the names, then one lstat per entry, all at once.
+// Timers are kept and never fire by themselves.
 function loadAll({ env = {}, roots = [] } = {}) {
   const logs = [], clock = { t: T0 }, timers = { live: new Set(), list: [] };
-  const fifos = new Set(), opens = { now: 0, most: 0 }, dirs = [], files = [];
+  const fifos = new Set(), opens = { now: 0, most: 0, twice: 0 }, dirs = [], files = [], per = new Map();
+  const stats = { now: 0, most: 0, stuck: new Set(), noDtype: false, waits: [], go: () => stats.waits.splice(0).forEach((r) => r()) };
   const promises = new Proxy(fs.promises, { get: (o, k) => {
     if (k === 'open') return (p, ...a) => {
       files.push(String(p));
       if (!fifos.has(String(p))) return o.open(p, ...a);
+      const f = String(p);
       opens.now++; opens.most = Math.max(opens.most, opens.now);
-      return o.open(p, ...a).finally(() => { opens.now--; });
+      per.set(f, (per.get(f) ?? 0) + 1); opens.twice = Math.max(opens.twice, per.get(f));
+      return o.open(p, ...a).finally(() => { opens.now--; per.set(f, per.get(f) - 1); });
+    };
+    if (k === 'lstat') return async (p, ...a) => {
+      stats.now++; stats.most = Math.max(stats.most, stats.now);
+      try {
+        if (stats.stuck.has(String(p))) await new Promise((r) => stats.waits.push(r));
+        return await o.lstat(p, ...a);
+      } finally { stats.now--; }
     };
     if (k === 'readFile') return (p, ...a) => { files.push(String(p)); return o.readFile(p, ...a); };
-    if (k === 'readdir') return (p, ...a) => { dirs.push(String(p)); return o.readdir(p, ...a); };
+    if (k === 'readdir') return async (p, ...a) => {
+      dirs.push(String(p));
+      if (!(stats.noDtype && a[0]?.withFileTypes)) return o.readdir(p, ...a);
+      const names = await o.readdir(p);
+      const got = await Promise.all(names.map((n) => promises.lstat(path.join(String(p), n))));
+      return names.map((name, i) => ({ name, isDirectory: () => got[i].isDirectory(), isFile: () => got[i].isFile() }));
+    };
     return o[k];
   } });
   const ffs = new Proxy(fs, { get: (o, k) => (k === 'promises' ? promises : o[k]) });
@@ -934,7 +954,7 @@ function loadAll({ env = {}, roots = [] } = {}) {
   const code = `'use strict';\n${helpers}\n${memory}\n${regions.map((n) => regionOf(n, src)).join('\n')}\n${['state', 'park', 'room'].map((n) => stub(n)).join('\n')}\nreturn { boxHealth, boxHealthDisk, boxHealthProcesses, boxHealthIo: typeof boxHealthIo === 'function' ? boxHealthIo : undefined };`;
   const got = new Function(...Object.keys(names), code)(...Object.values(names));
   const make = () => got.boxHealth((m) => logs.push(m), async () => [], { real: () => clock.t });
-  return { ...got, health: make(), make, clock, logs, timers, fifos, opens, dirs, files };
+  return { ...got, health: make(), make, clock, logs, timers, fifos, opens, dirs, files, stats };
 }
 const iso = (ms) => new Date(ms).toISOString();
 // a FIFO at f, its name added to fifos
@@ -963,7 +983,7 @@ function loadWith(t, { env = {}, roots, make }) {
   const proc = make(fifos);
   const s = loadAll({ env: { ...nowhere(), DEVTEAM_PROC: proc, ...env }, roots });
   for (const f of fifos) s.fifos.add(f);
-  t.after(() => release(s));
+  t.after(() => { s.stats.go(); s.stats.stuck.clear(); return release(s); });
   return s;
 }
 // the parts' intervals, as each part's start set them: processes, disk, pool, claude
@@ -1093,8 +1113,8 @@ test('S30: the disk part\'s look is a read of the budget: while none can start i
 });
 
 
-test('S28: a stop then a start still counts the reads stuck from the old run (kit-919)', async (t) => {
-  const s = await stuckStarted(t);
+// stops s's run and starts another, whose parts ask until one more FIFO open is out (or 60 rounds)
+async function restart(s) {
   const before = s.opens.now;
   s.health.stop();
   const from = s.timers.list.length;
@@ -1102,7 +1122,42 @@ test('S28: a stop then a start still counts the reads stuck from the old run (ki
   await Promise.race([h2.start(), sleep(1000)]);
   const p = partTimers(s, from);
   await stick(s, [p.processes, p.disk, p.pool, p.claude].filter(Boolean), before + 1);
+}
+
+test('S28: a stop then a start still counts the reads stuck from the old run, and asks none of them again (kit-919)', async (t) => {
+  // every slot held by the old run
+  const s = await stuckStarted(t);
+  await restart(s);
   assert.ok(s.opens.most <= 3, `${s.opens.most} FIFO opens were out at once across the two runs`);
+  assert.ok(s.opens.twice <= 1, `a FIFO had ${s.opens.twice} opens out at once across the two runs`);
+  // the first's stuck reads let go, so Node's file threads are free for the second
+  await release(s);
+  // one held (a project's accounts.json): the new run's own caps are empty and slots are free, so only
+  // the budget's own check keeps it from a second open
+  const r = newDir();
+  const s2 = loadWith(t, { roots: [r], make: (fifos) => {
+    fifo(fifos, path.join(r, 'docs', 'devteam', 'run', 'accounts.json'));
+    return fakeProc(fifos, []);
+  } });
+  await s2.health.start();
+  await stick(s2, [partTimers(s2).claude], 1);
+  assert.equal(s2.opens.now, 1, 'the old run holds one');
+  await restart(s2);
+  assert.ok(s2.opens.twice <= 1, `a FIFO had ${s2.opens.twice} opens out at once across the two runs`);
+});
+
+test('S37: the disk part lists a root\'s worktrees with one file call out at a time, where the volume leaves entry types unknown (kit-919 final-1 F1)', async (t) => {
+  const r = newDir();
+  const s = loadWith(t, { roots: [r], make: () => fakeProc(new Set(), []) });
+  for (const w of ['w1', 'w2', 'w3']) { fs.mkdirSync(path.join(r, '.worktrees', w), { recursive: true }); s.stats.stuck.add(path.join(r, '.worktrees', w)); }
+  s.stats.noDtype = true;
+  await s.health.start();
+  await Promise.race([partTimers(s).disk.fn(), sleep(200)]);
+  await turns(40);
+  const most = s.stats.most;
+  s.stats.go(); s.stats.stuck.clear();
+  for (let i = 0; i < 10; i++) { s.stats.go(); await turns(); }
+  assert.ok(most <= 1, `${most} lstats were out at once in one read of the budget`);
 });
 
 test('S29: a reset in year 1 rolls on in one step, as cheap as last week\'s (kit-840 final-2 F1)', () => {

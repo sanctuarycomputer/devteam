@@ -25666,8 +25666,17 @@ const boxHealthDisk = (() => {
     for (const { root } of ctx.roots()) {
       let list = [];
       const dir = path.join(root, '.worktrees');
-      // a read of the hub's budget (kit-919): one that can't start keeps the root's rows, as an unreadable one does
-      const p = boxHealthIo(dir, () => fs.promises.readdir(dir, { withFileTypes: true }));
+      // a read of the hub's budget (kit-919): one that can't start keeps the root's rows, as an unreadable one does.
+      // The names, then each one's lstat one after another, so the read holds one file thread at a time:
+      // withFileTypes, on a volume that leaves entry types unknown, starts every entry's lstat at once
+      // (final-1 F1). An entry gone before its lstat is left out.
+      const p = boxHealthIo(dir, async () => {
+        const dirs = [];
+        for (const name of await fs.promises.readdir(dir)) {
+          try { if ((await fs.promises.lstat(path.join(dir, name))).isDirectory()) dirs.push(name); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
+        }
+        return dirs;
+      });
       if (p === null) {
         if (boxHealthIoFull()) ctx.say(BOX_HEALTH_FULL);
         for (const k of r.order) if (k.startsWith(`${root}\0`)) order.push(k);
@@ -25678,7 +25687,7 @@ const boxHealthDisk = (() => {
         if (e?.code !== 'ENOENT') for (const k of r.order) if (k.startsWith(`${root}\0`)) order.push(k);
         continue;
       }
-      for (const d of list) if (d.isDirectory()) { found.push({ root, worktree: d.name }); order.push(keyOf({ root, worktree: d.name })); }
+      for (const name of list) { found.push({ root, worktree: name }); order.push(keyOf({ root, worktree: name })); }
     }
     if (ctx.stopped() || run !== r) return;
     r.order = order;
