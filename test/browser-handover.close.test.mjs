@@ -235,15 +235,23 @@ const thawed = (pids, label) => until(() => pids.every((p) => !alive(p)), 5000, 
 // kit-877: the typed text on disk, then the daemon killed -9 (its Chrome left to the reaper, with its
 // helpers frozen first when freeze), and nothing else run: a scan clean within 8 s of the kill, and
 // none found after. Then the close is handled as any killed daemon's: a withdraw and the next start.
+// The login is on a site of its own (kdSite, allowed by this start only): cD's C12 and C13 count every
+// sign-in POST the shared site sees as a replay, and the chains run at once.
+let kdSite;
+before(async () => { kdSite = await startSites(); });
+after(async () => { await kdSite?.close(); });
 async function killedMidHandover(P, label, freeze) {
-  await ok(P, ['open', `${site.origin}/login`]);
+  const S = kdSite;
+  await ok(P, ['stop']);
+  await ok(P, ['start'], { DEVTEAM_TEST_BROWSER_ALLOW: `${site.port},${S2.port},${S3.port},${S.port}` });
+  await ok(P, ['open', `${S.origin}/login`]);
   const q = await askHandover(P);
-  const v = await ownerLogIn(P, { to: `${site.origin}/account` });
+  const v = await ownerLogIn(P, { S, to: `${S.origin}/account` });
   v.close();
-  await codeOnDisk(P, site.code);
+  await codeOnDisk(P, S.code);
   const group = readState(P).chrome_pid;
   let frozen = [];
-  const loop = scanLoop(P, [site.password, site.code]);
+  const loop = scanLoop(P, [S.password, S.code]);
   let killedAt;
   try {
     if (freeze) frozen = freezeHelpers(group);
