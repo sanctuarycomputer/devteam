@@ -1,0 +1,18 @@
+{
+  "v": 1,
+  "at": "2026-11-24T18:40:00Z",
+  "hour_end": "2026-11-24T18:40:00Z",
+  "cap": 4,
+  "ready": 2,
+  "planners": 0,
+  "goals": [
+    {"id":"g-search","title":"Plain search","priority":2,"usd_hour":null,"new_hour":260000}
+  ],
+  "workers": [
+    {"name":"web-41-search","title":"Plain search","goal":0,"phase":"build","since":"2026-11-24T17:40:00Z","tokens":{"state":"not-measured","reason":"no-reader","reviews_new":300000,"reviews_usd_hour":null,"reviews_new_hour":60000}},
+    {"name":"web-42-invoices","title":"Invoices page","goal":0,"phase":"plan","since":"2026-11-24T17:50:00Z","tokens":{"state":"measured","new":400000,"cached":2000000,"usd_hour":0.5,"new_hour":200000,"points":[{"at":"2026-11-24T17:50:00Z","new":80000},{"at":"2026-11-24T18:00:00Z","new":80000},{"at":"2026-11-24T18:10:00Z","new":80000},{"at":"2026-11-24T18:20:00Z","new":80000},{"at":"2026-11-24T18:30:00Z","new":80000}]}},
+    {"name":"web-43-footer","phase":"build","since":"2026-11-24T17:10:00Z","tokens":{"state":"not-measured","reason":"command-failed"}}
+  ],
+  "recent": [],
+  "other": {"usd_hour":1,"new_hour":90000}
+}
