@@ -36923,7 +36923,8 @@ async function browserReapRun() {
   }
 }
 // The stop path: Browser.close, then the group signalled (SIGTERM, SIGKILL 2 s later) if Chrome
-// hasn't gone in 5 s; the session files deleted; state.json removed when it is this daemon's; the
+// hasn't gone in 5 s; the session files deleted (a failure said in last-error by browserReportDelete;
+// once they are gone, the reaper told done); state.json removed when it is this daemon's; the
 // guard and servers closed; exit. Once a signal came, a dead pty can't end it early.
 function browserShutdown(ctx, why, detail) {
   if (ctx.stopping) return ctx.stopping;
@@ -36937,7 +36938,7 @@ function browserShutdown(ctx, why, detail) {
     try { ctx.viewer?.ws.close(1001); } catch {} // the view's socket closes with the daemon (no bye)
     await browserEndChrome(ctx.cdp, ctx.chrome?.pid);
     let deleted = false;
-    try { browserDeleteSession(ctx.profile); deleted = true; } catch {}
+    try { browserDeleteSession(ctx.profile); deleted = true; } catch (e) { browserReportDelete(why === 'error' && detail ? String(detail) : null, String(e?.message ?? e)); } // kit-877: said, never swallowed
     if (deleted && ctx.reaper) await Promise.race([new Promise((r) => { try { ctx.reaper.stdin.write('done\n', () => r()); } catch { r(); } }), browserSleep(500)]); // kit-877: the reaper stands down
     if (browserRawState()?.daemon_pid === process.pid) fs.rmSync(browserStateFile(), { force: true });
     for (const s of [ctx.control, ctx.view]) { try { s?.closeAllConnections?.(); s?.close(); } catch {} }
