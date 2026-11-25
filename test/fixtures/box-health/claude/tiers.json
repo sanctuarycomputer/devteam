@@ -1,0 +1,30 @@
+{
+ "now": "2026-11-25T12:00:00.000Z",
+ "rate": 4,
+ "list": [
+  {
+   "n": 1,
+   "label": "Account 1",
+   "active": true,
+   "disabled": false,
+   "status": "ok",
+   "five_pct": 0,
+   "models_full": [],
+   "week_pct": 50,
+   "week_resets_at": "2026-11-26T23:00:00.000Z",
+   "tier": 20
+  },
+  {
+   "n": 2,
+   "label": "Account 2",
+   "active": false,
+   "disabled": false,
+   "status": "ok",
+   "five_pct": 0,
+   "models_full": [],
+   "week_pct": 0,
+   "week_resets_at": "2026-11-26T23:00:00.000Z",
+   "tier": 5
+  }
+ ]
+}
