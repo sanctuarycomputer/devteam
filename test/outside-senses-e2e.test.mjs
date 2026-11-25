@@ -90,7 +90,21 @@ test('Tillstack draws self.md, then exterior.md, each landed only with the owner
       const f = W.findings('self-missing');
       assert.equal(f.length, 1, `E1 one self-missing\n${JSON.stringify(f)}`);
       assert.equal(f[0].key, W.blob(STRAT), 'E1 keyed by the strategy\'s blob');
+      assert.equal(f[0].severity, 'high', 'K1 self-missing is high until the owner is asked about a draft');
       assert.deepEqual(W.findings('exterior-missing'), [], 'E1 no exterior-missing without self.md');
+    });
+
+    // kit-814: what the owner has been asked sets self-missing's and exterior-missing's severity
+    const severity = (kind) => W.findings(kind).map((f) => f.severity);
+    let q0 = null;
+    await check('K2 self-missing is medium while a self-change question is open', () => {
+      W.chore('self-0', (w) => write(path.join(w, SELF), SELF_MD));
+      q0 = W.ask('self-change', SELF, 'The Self', 'self-0');
+      assert.deepEqual(severity('self-missing'), ['medium'], 'K2 medium while the owner reads the draft');
+    });
+    await check('K2b self-missing is high again after the owner refines it', () => {
+      W.owner(['answer', q0, 'No: say what it makes first']);
+      assert.deepEqual(severity('self-missing'), ['high'], 'K2b high again once the owner refines it');
     });
 
     let selfQ = null;
@@ -112,6 +126,20 @@ test('Tillstack draws self.md, then exterior.md, each landed only with the owner
     });
 
     const EXTERIOR_MD = FIX('exterior.md').replace('STRATEGY_BLOB', W.blob(STRAT)).replace('"SELF_BLOB"', JSON.stringify(W.blob(SELF)));
+    await check('K3a exterior-missing is high until the owner is asked about a draft', () => {
+      assert.deepEqual(severity('exterior-missing'), ['high'], 'K3a high until the owner is asked about a draft');
+    });
+    let q1 = null;
+    await check('K3 exterior-missing is medium while an exterior-change question is open', () => {
+      W.chore('exterior-0', (w) => write(path.join(w, EXT), EXTERIOR_MD));
+      q1 = W.ask('exterior-change', EXT, 'The exterior', 'exterior-0');
+      assert.deepEqual(severity('exterior-missing'), ['medium'], 'K3 medium while the owner reads the draft');
+    });
+    await check('K3b exterior-missing is high again after the owner refines it', () => {
+      W.owner(['answer', q1, 'No: name the shops first']);
+      assert.deepEqual(severity('exterior-missing'), ['high'], 'K3b high again once the owner refines it');
+    });
+
     let extQ = null;
     await check('E3 exterior.md drawn from both: exterior-missing until then; refused until an exterior-change answer pins it, then lands', () => {
       assert.equal(W.findings('exterior-missing').length, 1, 'E3 exterior-missing once main has self.md and a linking strategy');
