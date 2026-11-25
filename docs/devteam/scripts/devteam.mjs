@@ -25097,9 +25097,10 @@ const boxHealthState = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
 //
 // A project's dashboard, from the hub's scan (which can't tell a refused port from a slow one):
 //   up     a hello names the root: its port and its fleet's mode are the hello's
-//   slow   no hello, but its port (the last hello's for the root, else its run/dashboard-port) takes
-//          a TCP connection, or doesn't answer the connection within 1 s of real(): still counted,
-//          with that port and the last hello's mode
+//   slow   no hello, but its port (the last hello's for the root, else its run/dashboard-port, or
+//          while that read is late the port its last read had) takes a TCP connection, or doesn't
+//          answer the connection within 1 s of real(): still counted, with that port and the last
+//          hello's mode
 //   none   no port known, the port refuses the connection, or another root's hello holds it: not
 //          counted, and its rows have no port
 // A project's ready, for answer.headroom and the parts after it:
@@ -25191,10 +25192,11 @@ const boxHealthPool = (() => {
       const run_ = path.join(root, 'docs', 'devteam', 'run');
       const text = await settled(ctx, r, path.join(run_, 'cache', 'pool.json'), POOL_MAX_BYTES);
       if (run !== r || ctx.stopped()) return;
+      // this root's last read: kept by a read that is late
+      const was = r.files.find((x) => x.root === root);
       let f;
       if (text === LATE) {
         // its last read stands (its at still ages it), or none
-        const was = r.files.find((x) => x.root === root);
         f = { root, name, pool: was?.pool ?? null, refused: !!was?.refused };
         ctx.say("a project's pool.json did not answer within 2 s: its last read is kept");
       } else {
@@ -25206,7 +25208,7 @@ const boxHealthPool = (() => {
       else {
         const last = r.hellos.get(root);
         let saved;
-        if (last?.port === undefined) { const t = await settled(ctx, r, path.join(run_, 'dashboard-port'), 16); saved = t === LATE ? undefined : portOf(Number(t?.trim())); }
+        if (last?.port === undefined) { const t = await settled(ctx, r, path.join(run_, 'dashboard-port'), 16); saved = t === LATE ? was?.port : portOf(Number(t?.trim())); }
         const port = last?.port ?? saved;
         const how = port === undefined || (held.has(port) && held.get(port) !== root) ? 'refused' : await knock(ctx, r, port);
         if (run !== r || ctx.stopped()) return;
