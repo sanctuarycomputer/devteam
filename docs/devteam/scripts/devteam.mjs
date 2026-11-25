@@ -13072,9 +13072,9 @@ async function shotLaunch({ noSandbox = false, extraArgs = [], cap }) {
     '--headless=new', '--remote-debugging-pipe', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync', '--hide-scrollbars',
     // the artifact's frame in its page's own process, laid out and asked with it; and a page's WebRTC
-    // joins no mDNS group and asks the network for no .local name (kit-813, as the browser's kit-805).
-    // One list: of two --disable-features Chrome keeps only the last.
-    '--disable-features=IsolateSandboxedIframes,WebRtcHideLocalIpsWithMdns',
+    // joins no mDNS group and asks the network for no .local name (kit-813, as the browser's kit-805);
+    // and no Cast or DIAL discovery (kit-912). One list: of two --disable-features Chrome keeps only the last.
+    '--disable-features=IsolateSandboxedIframes,WebRtcHideLocalIpsWithMdns,MediaRouter',
     // no dump of a page that crashed is kept
     '--disable-breakpad', '--disable-crash-reporter',
     '--renderer-process-limit=2', '--js-flags=--max-old-space-size=256', ...['', 'force-'].map((f) => `--${f}webrtc-ip-handling-policy=disable_non_proxied_udp`), '--disable-quic',
