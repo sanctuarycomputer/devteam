@@ -9583,7 +9583,7 @@ function tPins(threads) {
 // owner is starting likewise. Neither counts as seen or unread: a pending turn's clock is the page's.
 // files: those sent with it (kit-171), as threadView gives a turn's.
 const tPendingTurn = (text, at, files) => ({ id: null, by: 'owner', at, text, refs: [], question: null, pending: true, files: files ?? [] });
-const tPendingThread = (id, title, subject, turn) => ({ id, title, subject: subject || null, status: 'open', outcome: null, ready: null, turns: [turn], questions: [], waiting: 'supervisor', created_at: turn.at, resolved_at: null, activity_at: turn.at, first_reply_ms: null, pending: true });
+const tPendingThread = (id, title, subject, turn) => ({ id, title, subject: subject || null, status: 'open', outcome: null, ready: null, turns: [turn], questions: [], waiting: subject?.kind === 'artifact' ? 'owner' : 'supervisor', created_at: turn.at, resolved_at: null, activity_at: turn.at, first_reply_ms: null, pending: true, ...(subject?.kind === 'artifact' ? { check: null, handed: null } : {}) });
 // The threads as the owner's presses will leave them: each pending send's turn on its thread (or
 // its new thread), and a thread resolved or reopened, until the server's threads show it.
 function tOverlay(raw, pend) {
@@ -9592,8 +9592,10 @@ function tOverlay(raw, pend) {
     const id = tPendId(p);
     const t = threads.find((x) => x.id === id);
     // whatever the owner says, resolves or reopens clears a standing proposal, as threadView has it
-    if (p.status) { if (t) Object.assign(t, { status: p.status, ready: null }); continue; }
-    if (t) { if (t.turns.filter((u) => u.by === 'owner' && u.text === p.turn.text).length <= p.had) { t.turns.push(p.turn); t.ready = null; t.waiting = 'supervisor'; } }
+    // a note on an artifact is the owner's move again, nothing handed or to check standing (kit-148)
+    const note = (x) => { x.ready = null; x.check = null; x.handed = null; delete x.with; x.waiting = 'owner'; };
+    if (p.status) { if (t) { Object.assign(t, { status: p.status, ready: null }); if (t.subject?.kind === 'artifact') note(t); } continue; }
+    if (t) { if (t.turns.filter((u) => u.by === 'owner' && u.text === p.turn.text).length <= p.had) { t.turns.push(p.turn); t.ready = null; if (t.subject?.kind === 'artifact') note(t); else t.waiting = 'supervisor'; } }
     else if (p.fresh) threads.push(tPendingThread(id, p.fresh.title, p.fresh.subject, p.turn));
   }
   return threads;
@@ -10742,9 +10744,9 @@ const TH_TITLES = { supervisor: "The supervisor's terminal: the follow-on goal",
 // An open thread's one state, by kit-84's rule (the hub's threads: { you, waiting, ready }), so the button
 // here and the hub's tab agree: ready to accept, else your move (the supervisor spoke last, or no turns),
 // else waiting on the supervisor. The owner's pending presses are laid over TL.threads, so a send moves it.
-const tState = (t) => (t.ready || tNoteState(t) === 'check' ? 'ready' : t.waiting === 'owner' ? 'you' : 'wait');
+const tState = (t) => (t.ready || tNoteState(t) === 'check' ? 'ready' : t.waiting === 'owner' ? 'you' : t.waiting === 'session' ? 'with' : 'wait');
 function tCounts(threads) {
-  const c = { open: 0, you: 0, ready: 0, wait: 0 };
+  const c = { open: 0, you: 0, ready: 0, wait: 0, with: 0 };
   for (const t of threads) if (t.status === 'open') { c.open++; c[tState(t)]++; }
   return c;
 }
@@ -10752,10 +10754,10 @@ function tCounts(threads) {
 function tButton(c) {
   if (c.ready) { const w = `${c.ready} ready to accept${c.you ? `, ${c.you} your move` : ''}`; return { cls: 'ok', n: c.ready + c.you, title: w, label: w }; }
   if (c.you) { const w = `${c.you} your move`; return { cls: 'you', n: c.you, title: w, label: w }; }
-  if (c.open) { const w = `${c.open} waiting on the supervisor`; return { cls: 'wait', n: c.open, title: w, label: w }; }
+  if (c.wait) { const w = `${c.wait} waiting on the supervisor`; return { cls: 'wait', n: c.wait, title: w, label: w }; }
   return { cls: null, n: 0, title: '', label: '' };
 }
-const TH_MARK = { ready: ['ok', 'Ready to accept'], you: ['you', 'Your move'], wait: ['wait', 'Waiting on the supervisor'] };
+const TH_MARK = { ready: ['ok', 'Ready to accept'], you: ['you', 'Your move'], wait: ['wait', 'Waiting on the supervisor'], with: ['with', 'With a session'] };
 // The time since a thread's last activity, short.
 function thAgo(iso) {
   const m = Math.floor((Date.now() - Date.parse(iso)) / 60000);
@@ -10768,12 +10770,15 @@ const thGone = (t) => (t.subject?.kind === 'item' && !tlHome(t.subject)) || tlRo
 // subject is drawn), the time since, and its title. No line under it (spec §2.3).
 function thRow(t, nums) {
   const st = t.status === 'open' ? tState(t) : null;
-  const [cls, words] = st ? TH_MARK[st] : [];
+  const [cls, mw] = st ? TH_MARK[st] : [];
+  const note = t.subject?.kind === 'artifact' && typeof tNoteState === 'function' ? tNoteState(t) : null;
+  const wth = t.with ?? t.handed?.to;
+  const words = st === 'with' && wth ? `With ${wth}` : mw;
   const mark = !st ? '' : st === 'ready' ? `<i class="th-st ok icon-check" role="img" aria-label="${words}" title="${words}"></i>` : `<span class="th-st ${cls}" role="img" aria-label="${words}" title="${words}"></span>`;
   const gone = thGone(t);
   const n = st && !gone ? nums.get(t.id) : null;
   // a thread the supervisor started (kit-108) says so first
-  const where = [t.started_by === 'supervisor' ? 'From the supervisor' : '', t.subject ? `${tWhere(t.subject)}${gone ? ' · subject gone' : ''}` : ''].filter(Boolean).join(' · ');
+  const where = [t.started_by === 'supervisor' ? 'From the supervisor' : '', t.subject ? `${tWhere(t.subject)}${gone ? ' · subject gone' : ''}` : '', note === 'open' ? 'Open · not handed over yet' : note === 'with' && wth ? `With ${wth}` : ''].filter(Boolean).join(' · ');
   const on = TL.open === t.id;
   // a note on an artifact to check (kit-145): what it waits for, its picture and Show me, beside the row's button
   const toCheck = t.subject?.kind === 'artifact' && tNoteState(t) === 'check' ? `<div class="th-check"><span class="badge">to check</span><span class="grow"></span>${tShot(t, true)}${avShowMe.to(t) ? `<button type="button" class="ghost" data-tl-show="${esc(t.id)}">Show me</button>` : ''}</div>` : '';
