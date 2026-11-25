@@ -204,7 +204,7 @@ test('kit-109 session-bound threads', { skip: NO_TMUX, timeout: 600000 }, async 
     write(path.join(F.old, '.worktrees', W, 'docs/devteam/project/artifacts/mock-a/index.html'), '<p>x</p>');
     const ta = F.newThread(JSON.stringify({ kind: 'artifact', slug: 'mock-a', at: W }));
     const o = F.lineOf(ta.U);
-    assert.ok(o.routed_to !== 'session' && !wp.typed().includes(ta.T) && ['supervisor', 'responder'].includes(o.routed_to), `routed by the other rules, not to W: ${o.routed_to}`);
+    assert.ok(o.routed_to === undefined && !wp.typed().includes(ta.T), `routed to nobody, not to W (kit-144): ${o.routed_to}`);
   });
 
   // ---- done-when 2: falling through
