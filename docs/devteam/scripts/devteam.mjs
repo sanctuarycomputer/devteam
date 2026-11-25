@@ -30273,6 +30273,18 @@ function makeSession(role) {
     const l = list.split('\n\n').map((b) => b.split('\n')).find((ls) => ls.includes(`worktree ${at}`))?.find((x) => x === 'locked' || x.startsWith('locked '));
     return l === undefined ? null : l.slice('locked '.length);
   };
+  // A start that moves the branch under a worktree marks it, in the worktree's own git folder, until its
+  // files are the new commit's: an undo that must leave the worktree (its lock not this start's) leaves
+  // the mark, and a retry refuses it rather than resume with the older commit's files read as changes (kit-886).
+  const markOf = () => { const g = responderGit(['rev-parse', '--absolute-git-dir'], wt); return g.status === 0 && g.stdout.trim() ? path.join(g.stdout.trim(), 'devteam-start-filling') : null; };
+  const filling = () => {
+    const mark = markOf();
+    const said = mark && readText(mark);
+    if (said === null || said === undefined) return null;
+    const [from, to] = said.trim().split(' ');
+    const head = responderGit(['rev-parse', '--verify', '--quiet', 'HEAD'], wt);
+    return `the worktree ${wt} is at ${head.status === 0 ? head.stdout.trim().slice(0, 8) : 'no commit git can read'}, but a start moved its branch there from ${(from ?? '').slice(0, 8) || 'another commit'} and could not check out its files${to ? ` (${to.slice(0, 8)}'s)` : ''}, so they may be the older commit's, read as changes: look in it (git -C ${shq(wt)} status), keep what it holds, and remove ${shq(mark)}`;
+  };
   // locked by a start, this one or another
   const startsLock = (why) => why === making || (why ?? '').startsWith(`${making} (`);
   const unfinished = () => startsLock(lockOf());
@@ -30298,7 +30310,7 @@ function makeSession(role) {
     const top = responderGit(['rev-parse', '--show-toplevel'], wt);
     if (top.status !== 0 && fs.existsSync(path.join(wt, '.git'))) return `git can't read ${wt} as a worktree (${firstLine(top.stderr).replace(/^fatal: /, '') || `exit ${top.status}`}), and it may hold work: ${inRepo} repair ${shq(wt)} mends one that moved; if it holds nothing to keep, move it away`;
     if (top.status !== 0 || realPath(top.stdout.trim()) !== realPath(wt)) return `${wt} is no worktree git knows: look in it, then move it away`;
-    if (!locked) return null;
+    if (!locked) return filling();
     const head = responderGit(['rev-parse', '--verify', '--quiet', 'HEAD'], wt);
     return `the worktree ${wt} is there, ${head.status === 0 ? `at ${head.stdout.trim().slice(0, 8)}` : 'with no commit git can read'}: if no other start is making it and it holds nothing to keep, remove it (${inRepo} unlock ${shq(wt)} && ${inRepo} remove --force ${shq(wt)})`;
   };
@@ -30414,12 +30426,20 @@ function makeSession(role) {
     };
     landed(local ?? sha);
     if (local && local !== sha) {
+      const mark = markOf();
+      try { if (!mark) throw new Error('git found no git folder for it'); fs.writeFileSync(mark, `${local} ${sha}\n`); } catch (e) { undo(`could not mark ${wt} as being filled: ${e.message}`); }
+      // the branch isn't moved yet, so its files are still its own: off with the mark, then undo
+      const unmarked = (why) => { try { fs.rmSync(mark, { force: true }); } catch {} undo(why); };
+      // read again once the mark is there: a lock taken off or replaced before it was there let another
+      // start resume in this worktree, so the branch isn't moved under it (plan-1 P1-1)
+      if (lockOf() !== mine) unmarked('the new worktree\'s lock changed while it was made');
       const moved = responderGit(['update-ref', '--no-deref', ref, sha, local], R.root);
-      if (moved.status !== 0) undo(`could not move ${branch} to ${short(sha)}: something moved it while it was checked out`);
+      if (moved.status !== 0) unmarked(`could not move ${branch} to ${short(sha)}: something moved it while it was checked out`);
       // as worktree add fills one: no time limit (a filter or a lazy fetch can be slow), no submodules
       const filled = gitRun([...RESPONDER_GIT, 'read-tree', '--reset', '-u', '--no-recurse-submodules', sha], wt);
       if (filled.status !== 0) undo(`could not check out ${short(sha)}: ${redactUrl(firstLine(filled.err).replace(/^(fatal|error): /, '')) || `exit ${filled.status}`}`);
       landed(sha);
+      try { fs.rmSync(mark); } catch (e) { undo(`could not remove ${mark}: ${e.message}`); }
     }
     // only its own lock: one a hook or a person put on it in its place is theirs, and stays (final-1 F2, final-1b F4)
     const lockNow = lockOf();
@@ -30434,7 +30454,7 @@ function makeSession(role) {
   }
   // looked at again before anything is written there: another start's add into a folder that was
   // there, empty, may have locked it since the look (final-1 F3)
-  if (there && (unfinished() || beingMade())) die(`${name}'s start isn't finished, so nothing was started: ${leftAt() ?? `another start is making ${wt}`}, then start it again`);
+  if (there && (beingMade() || unfinished())) die(`${name}'s start isn't finished, so nothing was started: ${leftAt() ?? `another start is making ${wt}`}, then start it again`);
   // A harness keeps its sessions by directory on its own machine: a worktree made just now has no
   // session to continue (a new machine, or the worktree was removed), so start fresh, with the
   // handoff note if there is one, and say so.
