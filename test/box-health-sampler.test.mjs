@@ -166,6 +166,9 @@ test('S5: the first tick has no rate, and a counter that fell or a clock set bac
   b.cpu({ usage: 5e6, periods: 1, throttled: 0 });
   await step(s);
   assert.equal(cpu().throttled, 0, 'no period in between, none held');
+  b.cpu({ usage: 9e6, periods: 2, throttled: 1 });
+  await step(s, 0);
+  assert.deepEqual([cpu().used, cpu().throttled], [undefined, undefined], 'a clock that did not move');
   await step(s, -20000);
   assert.deepEqual([cpu().used, cpu().throttled, cpu().host_cores], [undefined, undefined, undefined], 'a clock set back');
   ok(answer(s.health));
@@ -255,7 +258,8 @@ test('S9: it samples with DEVTEAM_BOX_HEALTH=on, or unset on port 4320; off star
 });
 
 test('S10: stopped, it clears every timer and samples no more; startHub starts it as it listens and stops it at close', async (t) => {
-  const s = load({ env: nowhere(), realTimers: true, real: () => Date.now() });
+  let ctx;
+  const s = load({ env: nowhere(), realTimers: true, real: () => Date.now(), parts: [['state', { start: (c) => { ctx = c; }, part() {}, stop() {} }]] });
   t.after(() => s.health.stop());
   await s.health.start();
   assert.ok(s.timers.live.size > 0);
@@ -266,6 +270,11 @@ test('S10: stopped, it clears every timer and samples no more; startHub starts i
   await s.health.start();
   assert.equal(answer(s.health).json.samples.length, n);
   assert.equal(s.timers.live.size, 0);
+  // a part that asks for a timer once stopped gets none
+  ctx.every(5, () => {});
+  ctx.after(5, () => {});
+  ctx.timeout(5, () => {});
+  assert.deepEqual([s.timers.live.size, s.timers.set > 0], [0, true], 'no timer set once stopped');
   // only a dashboard's kit hand-over closes a hub, and its process ends after: what can be pinned here
   // is that the hub's close() stops it
   const hub = cut('\nfunction startHub(', '\n// ===== account rotation');
@@ -346,19 +355,25 @@ test('S13: part is called in order once a tick and never for a request, each wit
 
 test('S14: an absent part is left out; a section with no base is too; one that throws costs only its own', async () => {
   const boom = { start() {}, part: () => { throw new Error('boom'); }, stop: () => { throw new Error('stop boom'); } };
-  const room = { start() {}, part: (c, p) => { p.sample.load = -1; p.samples.at(-1).mem = -1; try { if (p.samples.length > 1) p.samples[0].mem = -1; } catch {} p.now.cpu.load = 'gone'; return { answer: { headroom: { room: 1 }, pool: { what_if: { now: 1 } } }, sample: { room: 1, at: '2020-01-01T00:00:00Z' } }; }, stop() {} };
+  const room = { start() {}, part: (c, p) => { p.sample.load = -1; p.samples.at(-1).mem = -1; try { if (p.samples.length > 1) p.samples[0].mem = -1; } catch {} p.now.cpu.load = 'gone'; return { answer: { headroom: { room: 1 }, pool: { what_if: { now: 1 } } }, sample: { room: 1, at: '2020-01-01T00:00:00Z', load: 99 } }; }, stop() {} };
   let stops = 0;
   const bad = { start: () => { throw new Error('start boom'); }, part: () => ({ answer: { box: {} } }), stop: () => { stops++; } };
-  const s = load({ env: nowhere(), parts: [['state', bad], ['pool', boom], ['claude', { start() {}, part() {}, stop: () => { stops++; } }], ['room', room]] });
+  // what a part gives may throw as it is read: a getter, a Proxy; that costs its part, never the tick,
+  // and nothing it gave before the throw is kept
+  const odd = { start() {}, part: () => new Proxy({}, { get() { throw new Error('trap'); } }), stop() {} };
+  const late = { start() {}, part: () => ({ answer: { box: { kit: 'v9' } }, get sample() { throw new TypeError('late'); } }), stop() {} };
+  const s = load({ env: nowhere(), parts: [['disk', odd], ['state', bad], ['pool', boom], ['claude', { start() {}, part() {}, stop: () => { stops++; } }], ['park', late], ['room', room]] });
   await s.health.start();
   await step(s);
   const a = answer(s.health);
   ok(a);
-  assert.deepEqual(Object.keys(a.json).sort(), ['at', 'headroom', 'now', 'samples', 'v', 'window_s']);
+  assert.deepEqual(Object.keys(a.json).sort(), ['at', 'headroom', 'now', 'samples', 'v', 'window_s'], 'no box from the part that threw after giving it');
+  assert.equal(a.json.samples.length, 2, 'every tick sampled');
   assert.deepEqual([a.json.samples.at(-1).room, a.json.samples.at(-1).at], [1, new Date(s.clock.t).toISOString()], "the sample's time is the tick's");
+  assert.equal(a.json.samples.at(-1).load, 1.5, "a part's sample never overwrites the sampler's own");
   s.health.stop();
   assert.equal(stops, 1, 'the claude part stopped; the one whose start threw was not');
-  assert.deepEqual(s.logs.map((l) => l.replace(/ at line \d+$/, '')), ['hub: box health: state: start failed: Error', 'hub: box health: pool: part failed: Error', 'hub: box health: pool: stop failed: Error']);
+  assert.deepEqual(s.logs.map((l) => l.replace(/ at line \d+$/, '')), ['hub: box health: state: start failed: Error', 'hub: box health: disk: part failed: Error', 'hub: box health: pool: part failed: Error', 'hub: box health: park: part failed: TypeError', 'hub: box health: pool: stop failed: Error']);
 });
 
 test('S15: fields box-health@1 refuses are left out and said, with nothing of what they held; the same object is checked once', async () => {
@@ -399,7 +414,8 @@ test('S15b: a value that changes is said once, and an error\'s own text never', 
   let n = 0, ctx;
   const say = ['claude', { start: (c) => { ctx = c; }, part: (c) => { c.say('one line'); JSON.parse(label); }, stop() {} }];
   const parts = [['state', { start() {}, part: () => ({ answer: { box: { oom_kills: --n } } }), stop() {} }], say,
-    ['park', { start: () => { throw Object.assign(new Error(label), { name: label, code: 'ENOENT' }); }, part() {}, stop() {} }]];
+    ['park', { start: () => { throw Object.assign(new Error(label), { name: label, code: 'ENOENT' }); }, part() {}, stop() {} }],
+    ['room', { start() {}, part() {}, stop: () => { throw Object.assign(new Error('x'), { code: label }); } }]];
   const s = load({ env: nowhere(), parts, realTimers: true, real: () => Date.now() });
   t.after(() => s.health.stop());
   await s.health.start();
@@ -412,6 +428,7 @@ test('S15b: a value that changes is said once, and an error\'s own text never', 
   assert.equal(s.logs.filter((l) => l.includes('claude: a timer failed: SyntaxError')).length, 1);
   assert.equal(s.logs.filter((l) => l.includes('claude: part failed: SyntaxError')).length, 1);
   assert.equal(s.logs.filter((l) => l.includes('park: start failed: an error ENOENT')).length, 1);
+  assert.equal(s.logs.filter((l) => /room: stop failed: Error( at line \d+)?$/.test(l)).length, 1, 'a code that is not a word is not said');
   assert.equal(s.logs.filter((l) => /claude: (one line|line \d+)$/.test(l)).length, 20);
 });
 
@@ -470,6 +487,13 @@ test('S16: with DEVTEAM_BOX_HEALTH_FAST now and its intervals run n times as fas
   assert.equal(Math.round(ctx.real() - T0), 5000);
   assert.ok(answer(s.health).json.samples.length >= 719);
   ok(answer(s.health));
+  // now is stale by the real clock: 14 s with no tick is still now, 16 s is not, though by now that is hours
+  const at = s.clock.t;
+  s.clock.t = at + 14000;
+  assert.ok(answer(s.health).json.now.cpu, '14 s by the real clock is still now');
+  s.clock.t = at + 16000;
+  assert.deepEqual(answer(s.health).json.now, {}, '16 s by the real clock is not now');
+  s.clock.t = at;
   // records stamped with the machine's time as the hub began are still fresh by real (a pool.json for
   // 15 minutes, an accounts.json for 5), and would not be by now
   assert.ok(ctx.real() - T0 < 5 * MIN && ctx.now() - T0 > 15 * MIN);

@@ -24104,7 +24104,7 @@ function poolProblem(input) {
 //                     pool and claude are there only when a part has given what they require (pool:
 //                     projects, allocated and recent; claude: accounts); fields a part adds to a
 //                     section no part before it gave are left out with it
-//       sample        fields joined into this tick's sample ({ room })
+//       sample        fields joined into this tick's sample ({ room }); one the sampler or an earlier part set is kept
 //                     Each is checked against box-health@1 alone, once for each new object, and a copy
 //                     of it is what is sent: one that is refused is left out and said. So return a new
 //                     object when anything in it changed (a change to one already returned is never
@@ -24382,23 +24382,30 @@ function boxHealth(log, scan, { parts = boxHealthParts(), real = () => Date.now(
       const alone = (more) => ({ v: 1, at, window_s: 3600, now: {}, samples: [], ...more });
       for (const p of running) {
         if (!p.up) continue;
-        let got;
+        // what it gave is read inside its own try (a getter or a Proxy may throw there), and kept only
+        // when all of it was read: a throw costs its part, never the tick
+        let mine;
         try {
-          got = p.part.part(p.ctx, { now: structuredClone(reading), sample: { ...entry.sample }, samples: [...ring.map((r) => r.sample), { ...entry.sample }], ...results });
+          const got = p.part.part(p.ctx, { now: structuredClone(reading), sample: { ...entry.sample }, samples: [...ring.map((r) => r.sample), { ...entry.sample }], ...results });
+          if (got === undefined || got === null) continue;
+          if (!memoryIsMap(got) || typeof got.then === 'function') { swallow(p, 'part', got); say(`${p.name} shape`, `${p.name}: part gave something other than an object, left out`); continue; }
+          const sections = {};
+          for (const [k, fields] of Object.entries(got.answer ?? {})) {
+            if (!Object.hasOwn(BOX_HEALTH_BASE, k)) { say(`${p.name} section`, `${p.name}: a section box-health@1 does not have, left out`); continue; }
+            const base = BOX_HEALTH_BASE[k];
+            const kept = accepted(p, fields, `answer.${k}`, (c) => alone({ [k]: { ...base, ...c } }));
+            if (kept) sections[k] = kept;
+          }
+          const more = got.sample === undefined ? null : accepted(p, got.sample, 'sample', (c) => alone({ samples: [{ at, ...c }] }));
+          mine = { got, sections, more };
         } catch (e) { fail(p.name, 'part', e); continue; }
-        if (got === undefined || got === null) continue;
-        if (!memoryIsMap(got) || typeof got.then === 'function') { swallow(p, 'part', got); say(`${p.name} shape`, `${p.name}: part gave something other than an object, left out`); continue; }
-        results[p.name] = got;
-        for (const [k, fields] of Object.entries(got.answer ?? {})) {
-          if (!Object.hasOwn(BOX_HEALTH_BASE, k)) { say(`${p.name} section`, `${p.name}: a section box-health@1 does not have, left out`); continue; }
-          const base = BOX_HEALTH_BASE[k];
-          const mine = accepted(p, fields, `answer.${k}`, (c) => alone({ [k]: { ...base, ...c } }));
-          if (!mine) continue;
-          const next = { ...joined[k], ...mine };
-          if (Object.keys(base).every((f) => Object.hasOwn(next, f))) joined[k] = next;
+        results[p.name] = mine.got;
+        for (const [k, kept] of Object.entries(mine.sections)) {
+          const next = { ...joined[k], ...kept };
+          if (Object.keys(BOX_HEALTH_BASE[k]).every((f) => Object.hasOwn(next, f))) joined[k] = next;
         }
-        const more = got.sample === undefined ? null : accepted(p, got.sample, 'sample', (c) => alone({ samples: [{ at, ...c }] }));
-        if (more) entry.sample = { ...entry.sample, ...more, at };
+        // a part adds fields: the sampler's own, and an earlier part's, are never overwritten
+        if (mine.more) entry.sample = { ...mine.more, ...entry.sample };
       }
       // a part is given the hour's own samples: none can change them
       Object.freeze(entry.sample);
