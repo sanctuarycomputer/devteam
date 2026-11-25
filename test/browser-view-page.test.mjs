@@ -536,8 +536,15 @@ test('a page\'s dialog: who asks, its words as text, and each answer names it on
       c.send({ ...ASK, id, kind, text: 'Name?', ...(kind === 'prompt' ? { default: 'Sam' } : {}) });
       await until(() => askOpen(p), id);
       await armed(p);
-      const want = { t: 'dialog', id, accept, ...(kind === 'prompt' && accept ? { text: 'Sam' } : {}) };
+      if (kind === 'prompt') {
+        assert.equal(await p.ev(`document.getElementById('ask-text').value`), 'Sam');
+        await p.ev(`(() => { const i = document.getElementById('ask-text'); i.focus(); i.select(); })()`);
+        await p.send('Input.insertText', { text: 'Ann' });
+      }
+      const want = { t: 'dialog', id, accept, ...(kind === 'prompt' && accept ? { text: 'Ann' } : {}) };
       if (kind === 'beforeunload') assert.deepEqual([await text(p, 'ask-no'), await text(p, 'ask-yes')], ['Stay', 'Leave']);
+      if (kind === 'beforeunload') assert.equal(await text(p, 'ask-from'), 'The page at shop.example asks before leaving. What you entered may be lost.');
+      assert.equal(await p.ev(`document.activeElement.id`), kind === 'prompt' ? 'ask-text' : 'ask-from', 'focus on neither answer');
       assert.deepEqual(await sent(c, async () => press(p, await askBox(p, accept ? 'ask-yes' : 'ask-no'))), [want]);
       await end(id);
     }
@@ -550,10 +557,12 @@ test('a page\'s dialog that swaps under the pointer arms again; one that ends is
   try {
     let c;
     ({ p, c } = await ready(srv));
-    for (const bad of [{ ...ASK, id: 'nope' }, { ...ASK, kind: 'alert' }, { ...ASK, url: 'javascript:1' }, { ...ASK, text: 'x'.repeat(2001) }, { ...ASK, extra: 1 }, { ...ASK, default: 'x' }]) c.send(bad);
+    for (const bad of [{ ...ASK, id: 'nope' }, { ...ASK, kind: 'alert' }, { ...ASK, url: 'javascript:1' }, { ...ASK, text: 'x'.repeat(2001) }, { ...ASK, extra: 1 }, { ...ASK, default: 'x' }, { ...ASK, kind: 'constructor' }, { ...ASK, id: [ASK.id] }, { ...ASK, url: 'https://a:99999/' }, { ...ASK, frame: false }]) c.send(bad);
     await sleep(300);
     assert.equal(await askOpen(p), false);
     c.send(ASK);
+    await until(() => askOpen(p), 'a good one after them');
+    assert.deepEqual(await sent(c, async () => press(p, await askBox(p, 'ask-yes')), 200), [], 'armed as ever after them');
     c.send({ ...ASK, id: 'd-1111111111111111', text: 'second' });
     await until(() => askOpen(p), 'the first');
     await armed(p);
@@ -574,5 +583,60 @@ test('a page\'s dialog that swaps under the pointer arms again; one that ends is
     await until(() => askOpen(p), 'the third');
     c.close();
     await until(async () => !(await askOpen(p)), 'down with its socket');
+  } finally { if (p) await shut(p); await srv.close(); }
+});
+
+test('a press or key held across a page\'s dialog never reaches Chrome; Sign out still can, and its own question goes when one arrives', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  let p;
+  try {
+    let c;
+    ({ p, c } = await ready(srv));
+    const at = await askBox(p, 'screen');
+    const down = (id) => { c.send({ t: 'dialog_end', id }); return until(async () => !(await askOpen(p)), 'down'); };
+    // a press on the canvas, let go well after the dialog has come and gone
+    await mouse(p, 'mousePressed', at, { button: 'left', clickCount: 1 });
+    const press1 = await sent(c, async () => {
+      c.send(ASK);
+      await until(() => askOpen(p), 'the dialog');
+      await down(ASK.id);
+      await sleep(1200);
+      await mouse(p, 'mouseReleased', at, { button: 'left', clickCount: 1 });
+    }, 300, { all: true });
+    assert.deepEqual(press1.filter((m) => m.t === 'mouse' && m.type !== 'move'), [], 'a held press');
+    // a drag in progress ends with an up, where it was
+    const drag = await sent(c, async () => {
+      await mouse(p, 'mousePressed', at, { button: 'left', clickCount: 1 });
+      await mouse(p, 'mouseMoved', { x: at.x + 30, y: at.y }, { button: 'left', buttons: 1 });
+      c.send({ ...ASK, id: 'd-1111111111111111' });
+      await until(() => askOpen(p), 'the dialog');
+      await mouse(p, 'mouseReleased', at, { button: 'left', clickCount: 1 });
+      await down('d-1111111111111111');
+      await sleep(1200);
+    }, 300, { all: true });
+    assert.deepEqual(drag.filter((m) => m.t === 'mouse' && m.type !== 'move').map((m) => m.type), ['down', 'up'], 'the drag ends');
+    // Enter pressed while one was up and still held when it goes: its repeats reach nothing
+    const keys = await sent(c, async () => {
+      c.send({ ...ASK, id: 'd-2222222222222222' });
+      await until(() => askOpen(p), 'the dialog');
+      await down('d-2222222222222222');
+      await sleep(1200);
+      await p.ev(`document.getElementById('screen').focus()`);
+      await keyEvent(p, 'keyDown', 'Enter', 'Enter', { text: '\r', windowsVirtualKeyCode: 13, autoRepeat: true });
+    }, 300, { all: true });
+    assert.deepEqual(keys.filter((m) => m.t === 'key'), [], 'a held key');
+    const fresh = await sent(c, () => keyEvent(p, 'keyDown', 'Enter', 'Enter', { text: '\r', windowsVirtualKeyCode: 13 }), 300);
+    assert.deepEqual(fresh.map((m) => m.t), ['key'], 'a fresh press');
+    // Sign out's question goes when one arrives, and Sign out is sent even in the quiet second
+    await p.click('#signout');
+    await until(() => p.ev(`document.getElementById('confirm').open`), 'the question');
+    c.send({ ...ASK, id: 'd-3333333333333333' });
+    await until(() => askOpen(p), 'the dialog');
+    assert.equal(await p.ev(`document.getElementById('confirm').open`), false, 'its question is gone');
+    const out = await sent(c, async () => {
+      await down('d-3333333333333333');
+      await p.ev(`document.getElementById('signout').click(); document.getElementById('forget').click()`);
+    }, 300, { all: true });
+    assert.deepEqual(out.filter((m) => m.t === 'forget'), [{ t: 'forget' }], 'Sign out in the quiet second');
   } finally { if (p) await shut(p); await srv.close(); }
 });

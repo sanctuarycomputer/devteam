@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-wRdUmEp8+DZCPzFhG8KU/Eb5koW3JfllgmaJZTDX7LU='; style-src 'sha256-JSPtZ5R78Dn/uizI/hTh3Brb1pSvWTwVtabppCXPnng='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-q99WlUU4SSy29q9sXHM9rU0ZGGJOHz52kcoyqaIGSmc='; style-src 'sha256-JSPtZ5R78Dn/uizI/hTh3Brb1pSvWTwVtabppCXPnng='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Supervisor's browser</title>
@@ -164,13 +164,13 @@
     if (m.t === 'frame') draw(m, sock);
     else if (m.t === 'url') { if (closed(m, ['t', 'url']) && typeof m.url === 'string' && MASKED.test(m.url)) showUrl(m.url); }
     else if (m.t === 'dialog') {
-      if (!closed(m, ['t', 'id', 'kind', 'url', 'text', 'default', 'frame']) || !DIALOG_ID.test(m.id) || !ASKS[m.kind] || typeof m.url !== 'string' || !MASKED.test(m.url) || !words(m.text)) return;
+      if (!closed(m, ['t', 'id', 'kind', 'url', 'text', 'default', 'frame']) || !dialogId(m.id) || !Object.hasOwn(ASKS, m.kind) || typeof m.url !== 'string' || !MASKED.test(m.url) || !URL.canParse(m.url) || !words(m.text)) return;
       if (m.frame !== undefined && m.frame !== true) return;
       if (m.default !== undefined && (m.kind !== 'prompt' || !words(m.default) || !m.default)) return;
       if (!asks.some((x) => x.id === m.id)) asks.push(m);
       showAsk();
     }
-    else if (m.t === 'dialog_end') { if (closed(m, ['t', 'id']) && DIALOG_ID.test(m.id)) dropAsk(m.id); }
+    else if (m.t === 'dialog_end') { if (closed(m, ['t', 'id']) && dialogId(m.id)) dropAsk(m.id); }
     else if (m.t === 'bye') {
       // 1 to 200 characters, counted as the schema counts them: by code point
       if (!closed(m, ['t', 'why']) || typeof m.why !== 'string' || !int([...m.why].length, 1, 200)) return;
@@ -221,7 +221,7 @@
   // a second after one appears or moves neither a press nor a key answers it, and for a second after
   // one goes nothing but an up reaches Chrome (send): a press or key meant for what was there lands on
   // neither.
-  const DIALOG_ID = /^d-[0-9a-f]{16}$/;
+  const dialogId = (v) => typeof v === 'string' && /^d-[0-9a-f]{16}$/.test(v);
   const ASKS = { confirm: ['Cancel', 'OK'], prompt: ['Cancel', 'OK'], beforeunload: ['Stay', 'Leave'] };
   const words = (v) => typeof v === 'string' && [...v].length <= 2000;
   const SETTLE_MS = 1000;
@@ -245,6 +245,8 @@
     shown = m;
     if (was) { $('ask-text').value = ''; quietUntil = performance.now() + SETTLE_MS; }
     if (!m) { arm(); ask.close(); return; }
+    letGo(); // what was held on the canvas was for the page as it was
+    stale = true;
     confirm.close(); // Sign out's own question never sits under the page's
     const host = m.url === 'about:blank' ? 'A page' : `${m.frame ? 'A frame in the page' : 'The page'} at ${new URL(m.url).host}`;
     $('ask-from').textContent = `${host} ${m.kind === 'beforeunload' ? 'asks before leaving. What you entered may be lost.' : 'says'}`;
@@ -305,6 +307,7 @@
   }
 
   // A press is held back until it is a click (released within 4 px) or a drag (it travels further).
+  let stale = false; // a key held since before a page's dialog: its repeats are no one's to send
   let press = null; // { button, x, y, cx, cy, down, last }
   let lastClick = null; // { at, cx, cy, button, n }: the page counts clicks itself
   let queued = null;
@@ -344,13 +347,14 @@
     send(withMods({ t: 'mouse', type: 'click', x: p.x, y: p.y, button: p.button, clicks: lastClick.n }, e));
   });
   // a drag whose capture is lost still ends where it last was; a press not yet a drag just ends
-  canvas.addEventListener('lostpointercapture', () => {
+  function letGo() {
     const p = press;
     press = null;
     if (!p || !p.down) return;
     flush();
     send({ t: 'mouse', type: 'up', ...(p.last ?? { x: p.x, y: p.y }), button: p.button, clicks: 1 });
-  });
+  }
+  canvas.addEventListener('lostpointercapture', letGo);
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
     if (!frame) return;
@@ -373,6 +377,8 @@
   const altGr = (e) => e.getModifierState('AltGraph') || (e.ctrlKey && e.altKey && !(/^Key[A-Z]$/.test(e.code) && e.key.toLowerCase() === e.code.slice(3).toLowerCase()));
   const named = (e) => (e.code && e.code.length <= 32 ? { key: e.key, code: e.code } : { key: e.key });
   canvas.addEventListener('keydown', (e) => {
+    if (stale && e.repeat) return e.preventDefault();
+    stale = false;
     if (e.isComposing || MODIFIERS.has(e.key) || pasteChord(e)) return;
     e.preventDefault();
     if (!e.key || e.key.length > 32) return;
