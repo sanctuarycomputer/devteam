@@ -3,8 +3,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { canDrive } from './lib/chrome.mjs';
-import { a, browser, kitCli, ok, running, viewer, within, readState, sleep, s1 } from './lib/browser-view-fixture.mjs';
-import { TEXT, dsite, dialogsFile, up, isDialog, hold, release, heldDialog, byHand, pageGot, allow } from './lib/browser-dialogs-fixture.mjs';
+import { site, a, browser, kitCli, ok, running, viewer, within, readState, sleep, s1 } from './lib/browser-view-fixture.mjs';
+import { TEXT, dsite, dialogsFile, up, isDialog, hold, release, heldDialog, byHand, pageGot, allow, other } from './lib/browser-dialogs-fixture.mjs';
 
 // CI's Node 22 and 24 jobs have Chrome: there the file must run, never skip.
 const mustRun = !!process.env.CI && Number(process.versions.node.split('.')[0]) >= 22;
