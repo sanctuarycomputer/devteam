@@ -1055,6 +1055,20 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
       const third = run(old, ['worker', 'ch-56-t', '--resume'], SUP);
       assert.equal(third.status, 0, `X31: then it resumes: ${third.err}`);
     });
+    await t.test('X33: a branch move that fails with the lock still the start\'s: the worktree and its mark go, and a retry starts whole', tmux, () => {
+      const { main } = behind('ch-54-r', 'X33');
+      // just before the start moves its branch, something else moves it to origin's main; the lock stays the start's
+      const b = before('git-moves-first-X33', `*' update-ref --no-deref refs/heads/ticket/ch-54-r '*`, (g) => `'${g}' -C '${old}' update-ref refs/heads/ticket/ch-54-r '${main}'`);
+      const r = run(old, ['worker', 'ch-54-r', '--resume'], b.env);
+      assert.ok(fs.existsSync(b.said), 'X33: it was moved first');
+      assert.notEqual(r.status, 0, `X33: refused: ${r.out}`);
+      assert.match(r.err, /could not move ticket\/ch-54-r to [0-9a-f]{8}: something moved it while it was checked out, so nothing was started; try again/, `X33: says so: ${r.err}`);
+      assert.ok(!fs.existsSync(wt('ch-54-r')), 'X33: the worktree is removed');
+      assert.ok(!fs.existsSync(path.join(old, '.git/worktrees/ch-54-r')), 'X33: its git folder, and the mark in it, are gone');
+      closeWindow(F, ok(old, ['worker', 'ch-54-r', '--resume'], SUP));
+      assert.equal(git(['rev-parse', 'HEAD'], wt('ch-54-r')), main, 'X33: the retry starts at origin\'s main');
+      assert.equal(git(['status', '--porcelain'], wt('ch-54-r')), '', 'X33: and clean');
+    });
     await t.test('X32: a start killed after its files landed and before its mark came off is refused in words that say the files are in place', tmux, () => {
       const { at, main } = behind('ch-55-s', 'X32');
       // killed at the read of HEAD's branch after the fill: the files are main's, the mark still there

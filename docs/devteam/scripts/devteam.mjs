@@ -30441,7 +30441,7 @@ function makeSession(role) {
       // start resume in this worktree, so the branch isn't moved under it (plan-1 P1-1)
       if (lockOf() !== mine) unmarked('the new worktree\'s lock changed while it was made');
       const moved = responderGit(['update-ref', '--no-deref', ref, sha, local], R.root);
-      // a move that fails keeps the mark: whatever moved the branch instead moved HEAD off these files
+      // a move that fails keeps the mark: most often something else moved the branch, and HEAD with it, off these files
       if (moved.status !== 0) undo(`could not move ${branch} to ${short(sha)}: something moved it while it was checked out`);
       // as worktree add fills one: no time limit (a filter or a lazy fetch can be slow), no submodules
       const filled = gitRun([...RESPONDER_GIT, 'read-tree', '--reset', '-u', '--no-recurse-submodules', sha], wt);
