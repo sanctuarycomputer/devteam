@@ -6661,7 +6661,23 @@ function openFile(params) {
     : path === `docs/devteam/project/${k}.md`));
   const txt = FILES.get(url);
   if (txt === undefined) { refetchFile(url); return showDrawer(`${head}<p class="loading">Loading…</p>${tail}`); }
-  if (typeof txt !== 'string') return showDrawer(`${head}${wk && /^not found: /.test(String(txt.error)) ? `<div class="viewer"><div class="md"><p>The ${wk === 'self' ? 'Self' : 'Exterior'} is not drafted yet: main has no ${wk}.md.</p></div></div>` : `<p class="err">${esc(txt.error)}</p>`}${tail}`);
+  if (typeof txt !== 'string') {
+    // The server answers `not found:` both for a file main lacks and for one over its read cap (kit-909). For the
+    // project's Self or Exterior, main's listing of the file's folder (git show of a tree lists its names) tells
+    // them apart: a file it names is there but too big, one it doesn't (or no folder) is not drafted yet. A
+    // folder read that fails otherwise leaves the file's own error.
+    let line = null;
+    if (wk && /^not found: /.test(String(txt.error))) {
+      const name = wk === 'self' ? 'Self' : 'Exterior', dir = path.split('/').slice(0, -1).join('/');
+      line = `The ${name} is not drafted yet: main has no ${wk}.md.`;
+      const durl = dir && `/api/file?${new URLSearchParams({ path: dir })}`;
+      const ls = durl ? FILES.get(durl) : '';
+      if (ls === undefined) { refetchFile(durl); return showDrawer(`${head}<p class="loading">Loading…</p>${tail}`); }
+      if (typeof ls === 'string' && ls.split('\n').includes(`${wk}.md`)) line = `The ${name} is too big to show here: main's ${wk}.md is larger than the dashboard reads.`;
+      else if (typeof ls !== 'string' && !/^not found: /.test(String(ls.error))) line = null;
+    }
+    return showDrawer(`${head}${line ? `<div class="viewer"><div class="md"><p>${esc(line)}</p></div></div>` : `<p class="err">${esc(txt.error)}</p>`}${tail}`);
+  }
   const where = `<code>${esc(path)}</code>${ref ? ` at <code>${esc(ref)}</code>` : ''}`;
   // Markdown renders (sanitized: agents write these files) with a toggle back to the raw text.
   const isMd = ['md', 'markdown'].includes(ext) && window.marked && window.DOMPurify;
