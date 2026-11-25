@@ -24867,6 +24867,33 @@ const boxHealthParts = () => [
 // What a section needs before it is in the answer at all, and stands in for while a part's own fields
 // are checked alone.
 const BOX_HEALTH_BASE = { headroom: {}, pool: { projects: [], allocated: [], recent: [] }, claude: { accounts: [] }, box: {} };
+// The hub's one budget of file reads (kit-919), the sampler's and every part's. Node runs each async
+// file call on one of its file threads (libuv's pool, UV_THREADPOOL_SIZE read once as C's atoi reads
+// it: 4 when unset, 1 for 0 or no number, 1024 at most and for a negative one), and a read that hangs
+// (a dead volume, a process whose memory is locked) holds its thread until it returns. Box health has
+// one fewer than the threads at once, so one is always left for the rest of the hub, and never two
+// reads of one file. boxHealthIo(file, fn) gives null, calling nothing, when that file is out or the
+// budget is (boxHealthIoFull() tells which); otherwise fn's promise, the one its caller awaits, with
+// the file out until it settles, however long, whatever run asked or whether that run has stopped:
+// the budget is this process's, not a sampler's, so a start after a stop still counts what the old
+// run left out. fn makes its file calls one after another, so it holds one thread at a time. A refusal
+// is null itself, never a promise of null, so it is never taken for a missing file: each reader keeps
+// its last value on it (a volume, a gap), and one that finds the budget full says BOX_HEALTH_FULL.
+const BOX_HEALTH_THREADS = (() => {
+  const v = process.env.UV_THREADPOOL_SIZE;
+  if (v === undefined) return 4;
+  const n = Number(/^\s*([+-]?\d+)/.exec(v)?.[1] ?? 0);
+  return n === 0 ? 1 : n < 0 || n > 1024 ? 1024 : n;
+})();
+const BOX_HEALTH_IO = BOX_HEALTH_THREADS - 1;
+const boxHealthIoOut = new Set();
+const boxHealthIoFull = () => boxHealthIoOut.size >= BOX_HEALTH_IO;
+function boxHealthIo(file, fn) {
+  if (boxHealthIoOut.has(file) || boxHealthIoFull()) return null;
+  boxHealthIoOut.add(file);
+  return (async () => fn())().finally(() => boxHealthIoOut.delete(file));
+}
+const BOX_HEALTH_FULL = "the hub's box-health file reads are all in use: a read that can't start keeps its last value";
 // the engine's own then, and the call that applies it, taken once as the region loads: it attaches to a
 // native promise whatever that promise's own then is, and nothing patched later changes it
 const boxHealthThen = Promise.prototype.then, boxHealthApply = Reflect.apply;
@@ -25013,25 +25040,53 @@ function boxHealth(log, scan, { kit = null, parts = boxHealthParts(), real = () 
   };
   const ctx = ctxFor('sampler');
   const running = parts.map(([name, part]) => ({ name, part, ctx: ctxFor(name), up: false }));
+  // The roots as memoryRoots names them, but each root's settings read one at a time through the
+  // budget (kit-919): one that can't start, or hasn't answered in 2 s of real(), keeps that root's last.
+  const settingsOf = new Map();
   const readRoots = async () => {
     let list = [];
     try { list = await scan(); } catch { list = []; }
-    ({ roots, ceiling } = await memoryRoots(list));
+    let registry = [];
+    try { registry = machineRepos(); } catch { registry = []; }
+    const scanned = (Array.isArray(list) ? list : []).filter((s) => memoryIsMap(s) && typeof s.root === 'string').map((s) => ({ root: s.root, name: typeof s.name === 'string' ? s.name : '' }));
+    const all = [...new Set([...registry, ...scanned.map((s) => s.root)].filter((r) => typeof r === 'string').map((r) => r.replace(/\/+$/, '')))].filter((r) => r.startsWith('/'));
+    const late = Symbol('late');
+    for (const r of all) {
+      if (stopped) return;
+      const p = boxHealthIo(path.join(r, 'docs', 'devteam', 'project', 'settings.md'), () => memorySettings(r));
+      if (p === null) { if (boxHealthIoFull()) ctx.say(BOX_HEALTH_FULL); continue; }
+      let end = () => {};
+      const got = await Promise.race([p, new Promise((res) => { end = ctx.timeout(BOX_HEALTH_STATFS_MS, () => res(late)); })]);
+      end();
+      if (got !== late) settingsOf.set(r, got);
+    }
+    for (const r of [...settingsOf.keys()]) if (!all.includes(r)) settingsOf.delete(r);
+    ({ roots, ceiling } = memoryNameRoots(registry, scanned, (r) => settingsOf.get(r) ?? null));
   };
   // [device, its entry], one a distinct volume. At most two reads are ever out, so a volume that hangs
-  // can't hold the threads every file read shares, and no root of it is asked while one is.
+  // can't hold the threads every file read shares, and no root of it is asked while one is. Each is a
+  // read of the budget: one that can't start counts as not answered (a gap, its volume not forgotten);
+  // with the budget full the tick asks no more, and a root whose own read is out is passed over.
   const readDisks = async () => {
     const found = new Map();
     const queue = roots.map((r) => r.root), waiting = [];
-    let over = false;
+    let over = false, skipped = false;
     const one = async (root) => {
       asking.add(root);
       try {
-        const { dev } = await fs.promises.stat(root);
-        deviceOf.set(root, dev);
-        if ([...asking].some((r) => r !== root && deviceOf.get(r) === dev)) { waiting.push(root); return; }
-        const s = await fs.promises.statfs(root);
-        if (!found.has(dev)) found.set(dev, s);
+        const p = boxHealthIo(root, async () => {
+          const { dev } = await fs.promises.stat(root);
+          deviceOf.set(root, dev);
+          if ([...asking].some((r) => r !== root && deviceOf.get(r) === dev)) { waiting.push(root); return; }
+          const s = await fs.promises.statfs(root);
+          if (!found.has(dev)) found.set(dev, s);
+        });
+        if (p === null) {
+          skipped = true;
+          if (boxHealthIoFull()) { over = true; ctx.say(BOX_HEALTH_FULL); }
+          return;
+        }
+        await p;
       } catch {} finally { asking.delete(root); }
     };
     const worker = async () => {
@@ -25051,7 +25106,7 @@ function boxHealth(log, scan, { kit = null, parts = boxHealthParts(), real = () 
     end();
     if (asking.size) ctx.say('a volume did not answer within 2 s');
     // every root answered or is gone: a volume with none left is forgotten
-    if (!asking.size && !queue.length) volumes = volumes.filter((dev) => found.has(dev));
+    if (!asking.size && !queue.length && !skipped) volumes = volumes.filter((dev) => found.has(dev));
     const got = new Map(found);
     for (const dev of got.keys()) if (!volumes.includes(dev)) volumes.push(dev);
     return volumes.flatMap((dev) => {

@@ -5,9 +5,10 @@
 // sampler is on the parts are stubs or fakes, never the kit's own: those have their own test files.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { PORTS, kit, until } from './lib/kit.mjs';
@@ -52,7 +53,7 @@ function load({ env = {}, port = 4320, cores = 8, roots = [], parts, realTimers 
   };
   const helpers = ['readText', 'readNum'].map((n) => cut(`const ${n} = `, '\n')).join('\n');
   const memory = cut('const memoryCountsCache', 'const GiB');
-  const code = `'use strict';\n${helpers}\n${memory}\n${['box-memory', 'box-health-contract', 'box-health-sampler'].map((n) => regionOf(n, src)).join('\n')}\n${PARTS.map((n) => stub(n)).join('\n')}\nreturn { boxHealth, boxHealthParts, machineMemory };`;
+  const code = `'use strict';\n${helpers}\n${memory}\n${['box-memory', 'box-health-contract', 'box-health-sampler'].map((n) => regionOf(n, src)).join('\n')}\n${PARTS.map((n) => stub(n)).join('\n')}\nreturn { boxHealth, boxHealthParts, machineMemory, boxHealthIo: typeof boxHealthIo === 'function' ? boxHealthIo : undefined };`;
   const got = new Function(...Object.keys(names), code)(...Object.values(names));
   const opts = { real: real ?? (() => clock.t) };
   if (parts) opts.parts = parts;
@@ -896,4 +897,310 @@ test('I1: IMAGE_RUNS lists the contract, the sampler and every part, and startHu
   const at = src.indexOf('\nconst IMAGE_RUNS = {');
   const listed = new Function(`return ${src.slice(at + '\nconst IMAGE_RUNS = '.length, src.indexOf('\n};\n', at) + 2)}`)().parts;
   for (const n of ['box-health-contract', 'box-health-sampler', ...REGIONS, 'startHub']) assert.equal(listed.filter((x) => x === n).length, 1, n);
+});
+
+// ===== kit-919: one budget of file reads across the parts =====
+
+// The sampler with the kit's own processes, disk, pool and claude parts (state, park and room stubs),
+// over real files: a FIFO's open doesn't return until a writer opens it, holding one of Node's file
+// threads as a hung volume does. fs.promises.open of a FIFO is counted (now: out, most: the most out at
+// once), and every readdir is listed. Timers are kept and never fire by themselves.
+function loadAll({ env = {}, roots = [] } = {}) {
+  const logs = [], clock = { t: T0 }, timers = { live: new Set(), list: [] };
+  const fifos = new Set(), opens = { now: 0, most: 0 }, dirs = [], files = [];
+  const promises = new Proxy(fs.promises, { get: (o, k) => {
+    if (k === 'open') return (p, ...a) => {
+      files.push(String(p));
+      if (!fifos.has(String(p))) return o.open(p, ...a);
+      opens.now++; opens.most = Math.max(opens.most, opens.now);
+      return o.open(p, ...a).finally(() => { opens.now--; });
+    };
+    if (k === 'readFile') return (p, ...a) => { files.push(String(p)); return o.readFile(p, ...a); };
+    if (k === 'readdir') return (p, ...a) => { dirs.push(String(p)); return o.readdir(p, ...a); };
+    return o[k];
+  } });
+  const ffs = new Proxy(fs, { get: (o, k) => (k === 'promises' ? promises : o[k]) });
+  const fos = { cpus: () => [], loadavg: () => [0, 0, 0], totalmem: () => 16e9, freemem: () => 4e9, homedir: () => NOWHERE };
+  const set = (kind) => (fn, ms) => { const h = { kind, ms, fn, unref() {} }; timers.live.add(h); timers.list.push(h); return h; };
+  const clear = (h) => { timers.live.delete(h); };
+  const names = {
+    fs: ffs, path, os: fos, Buffer, URL, net, process: { env, pid: 4242, memoryUsage: { rss: () => 1 } }, HUB_PORT: 4320,
+    spawn: () => { throw new Error('no du here'); }, KIT_UPSTREAM: 'sanctuarycomputer/devteam',
+    setTimeout: set('once'), clearTimeout: clear, setInterval: set('every'), clearInterval: clear, setImmediate, machineRepos: () => roots,
+  };
+  const helpers = ['readText', 'readNum'].map((n) => cut(`const ${n} = `, '\n')).join('\n');
+  const memory = cut('const memoryCountsCache', 'const GiB');
+  const regions = ['box-memory', 'box-health-contract', 'box-health-sampler', 'box-health-processes', 'box-health-disk', 'box-health-pool', 'box-health-claude'];
+  const code = `'use strict';\n${helpers}\n${memory}\n${regions.map((n) => regionOf(n, src)).join('\n')}\n${['state', 'park', 'room'].map((n) => stub(n)).join('\n')}\nreturn { boxHealth, boxHealthDisk, boxHealthIo: typeof boxHealthIo === 'function' ? boxHealthIo : undefined };`;
+  const got = new Function(...Object.keys(names), code)(...Object.values(names));
+  const make = () => got.boxHealth((m) => logs.push(m), async () => [], { real: () => clock.t });
+  return { ...got, health: make(), make, clock, logs, timers, fifos, opens, dirs, files };
+}
+const iso = (ms) => new Date(ms).toISOString();
+// a FIFO at f, its name added to fifos
+const fifo = (fifos, f) => { fs.mkdirSync(path.dirname(f), { recursive: true }); execFileSync('mkfifo', [f]); fifos.add(f); return f; };
+const turns = async (n = 20) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
+// how long a promise takes, in ms, given at most 1 s
+const timed = async (p) => { const t0 = Date.now(); return Promise.race([p.then(() => Date.now() - t0), sleep(1000).then(() => Infinity)]); };
+// a fake /proc: uptime, and each pid's stat (a node, child of 1); its cmdline a FIFO
+// (or, given cmdline, a file holding it)
+function fakeProc(fifos, pids, cmdline) {
+  const d = newDir();
+  fs.writeFileSync(path.join(d, 'uptime'), '100000.00 0\n');
+  for (const pid of pids) {
+    const f = Array(40).fill('0');
+    f[0] = 'S'; f[1] = '1';
+    fs.mkdirSync(path.join(d, String(pid)));
+    fs.writeFileSync(path.join(d, String(pid), 'stat'), `${pid} (node) ${f.join(' ')}\n`);
+    if (cmdline === undefined) fifo(fifos, path.join(d, String(pid), 'cmdline'));
+    else fs.writeFileSync(path.join(d, String(pid), 'cmdline'), cmdline);
+  }
+  return d;
+}
+// the sampler over roots and a fake /proc whose FIFOs are made first, so they are counted
+function loadWith(t, { env = {}, roots, make }) {
+  const fifos = new Set();
+  const proc = make(fifos);
+  const s = loadAll({ env: { ...nowhere(), DEVTEAM_PROC: proc, ...env }, roots });
+  for (const f of fifos) s.fifos.add(f);
+  t.after(() => release(s));
+  return s;
+}
+// the parts' intervals, as each part's start set them: processes, disk, pool, claude
+const partTimers = (s, from = 0) => {
+  const [processes, disk, pool, claude] = s.timers.list.slice(from).filter((h) => h.kind === 'every');
+  return { processes, disk, pool, claude };
+};
+// fires the given intervals once, then every 2 s limit that is set, until n FIFO opens are out (or 60 rounds)
+async function stick(s, fns, n) {
+  for (const h of fns) h.fn();
+  for (let i = 0; i < 60 && s.opens.now < n; i++) {
+    await turns();
+    for (const h of [...s.timers.live]) if (h.kind === 'once' && h.ms === 2000) { s.timers.live.delete(h); h.fn(); }
+  }
+  await turns(40);
+}
+// Every FIFO open out returns and none can start again: each FIFO's other end is opened O_RDWR (never
+// blocks on Linux, so every open out returns), every FIFO is unlinked (an open after this is ENOENT),
+// then those ends close (every read out gets end of file).
+async function release(s) {
+  const ends = [];
+  for (const f of s.fifos) { try { ends.push(fs.openSync(f, fs.constants.O_RDWR | fs.constants.O_NONBLOCK)); } catch {} }
+  for (const f of s.fifos) fs.rmSync(f, { force: true });
+  await sleep(10);
+  for (const fd of ends) fs.closeSync(fd);
+  for (let i = 0; i < 100 && s.opens.now > 0; i++) await sleep(10);
+  assert.equal(s.opens.now, 0, 'every FIFO open returned');
+}
+// The budget held: n reads that never settle until the function it gives is called. On a kit with no
+// budget nothing is held.
+const hold = (s, n = 3) => {
+  const go = [];
+  for (let i = 0; i < n; i++) s.boxHealthIo?.(`/held/${i}`, () => new Promise((r) => go.push(r)));
+  return () => go.splice(0).forEach((r) => r());
+};
+const THREADS_SET = process.env.UV_THREADPOOL_SIZE ? "needs Node's own four file threads: UV_THREADPOOL_SIZE is set" : false;
+// Three projects whose pool.json and accounts.json are FIFOs and three processes whose cmdline is: the
+// parts that read files ask for more than Node's four file threads, all stuck.
+async function stuckStarted(t, env = {}) {
+  const roots = [newDir(), newDir(), newDir()];
+  const s = loadWith(t, { env, roots, make: (fifos) => {
+    for (const r of roots) { fifo(fifos, path.join(r, 'docs', 'devteam', 'run', 'cache', 'pool.json')); fifo(fifos, path.join(r, 'docs', 'devteam', 'run', 'accounts.json')); }
+    return fakeProc(fifos, [101, 102, 103]);
+  } });
+  await s.health.start();
+  const p = partTimers(s);
+  await stick(s, [p.processes, p.disk, p.pool, p.claude], 6);
+  return s;
+}
+
+test('S24: with every part\'s file reads stuck at once (FIFOs), an unrelated read in the process answers within 50 ms (kit-919)', { skip: THREADS_SET }, async (t) => {
+  const s = await stuckStarted(t);
+  const plain = path.join(newDir(), 'plain.txt');
+  fs.writeFileSync(plain, 'hi');
+  const ms = await timed(fs.promises.readFile(plain, 'utf8'));
+  assert.ok(ms < 50, `an unrelated read took ${ms} ms with ${s.opens.now} FIFO opens out`);
+});
+
+test('S25: with every part\'s file reads stuck at once, the sampler\'s tick is not delayed (kit-919)', { skip: THREADS_SET }, async (t) => {
+  const s = await stuckStarted(t);
+  s.clock.t += 5000;
+  const ms = await timed(s.health.tick());
+  assert.ok(ms < 50, `a tick took ${ms} ms with ${s.opens.now} FIFO opens out`);
+});
+
+test('S26: the budget is one fewer than Node\'s file threads, as libuv reads UV_THREADPOOL_SIZE (kit-919)', async (t) => {
+  const most = [];
+  for (const uv of ['2', undefined, '1', 'abc', '-3']) {
+    const s = await stuckStarted(t, uv === undefined ? {} : { UV_THREADPOOL_SIZE: uv });
+    most.push(s.opens.most);
+    await release(s);
+  }
+  assert.deepEqual(most.slice(0, 4), [1, 3, 0, 0], 'the most FIFO opens ever out: 2 threads, 4 (unset), 1, 1 (abc), less one');
+  assert.ok(most[4] > 3, `1024 threads (-3) hold the parts to their own caps only: ${most[4]}`);
+});
+
+// With the budget held by three stuck reads (two projects' pool.json, a process's cmdline), claude's
+// accounts.json changes and the disk's next look comes due: { left, wasLeft, looked, wasLooked, rows, wasRows }.
+async function heldBudget(t) {
+  const [a, b, c] = [newDir(), newDir(), newDir()];
+  const s2 = loadWith(t, { roots: [a, b, c], make: (fifos) => {
+    for (const r of [b, c]) fifo(fifos, path.join(r, 'docs', 'devteam', 'run', 'cache', 'pool.json'));
+    return fakeProc(fifos, [101]);
+  } });
+  const accounts = path.join(a, 'docs', 'devteam', 'run', 'accounts.json');
+  const record = (pct) => JSON.stringify({ at: iso(s2.clock.t), capacity: { list: [{ n: 1, label: 'One', active: true, status: 'ok', week_pct: pct, week_resets_at: iso(s2.clock.t + 3 * HOUR) }] } });
+  fs.mkdirSync(path.dirname(accounts), { recursive: true });
+  fs.writeFileSync(accounts, record(10));
+  fs.mkdirSync(path.join(a, '.worktrees', 'w1'), { recursive: true });
+  await s2.health.start();
+  const p = partTimers(s2);
+  await p.claude.fn();
+  await p.disk.fn();
+  await turns(40);
+  await step(s2);
+  const left = () => answer(s2.health).json.claude?.accounts?.[0]?.week_left;
+  const rows = s2.boxHealthDisk.part();
+  const wasLeft = left();
+  const looked = s2.dirs.filter((d) => d === path.join(a, '.worktrees')).length;
+  await stick(s2, [p.processes, p.pool], 3);
+  s2.clock.t += MIN;
+  fs.writeFileSync(accounts, record(20));
+  await Promise.race([p.claude.fn(), sleep(1000)]);
+  await Promise.race([p.disk.fn(), sleep(1000)]);
+  await turns(40);
+  await step(s2);
+  return { left: left(), wasLeft, looked: s2.dirs.filter((d) => d === path.join(a, '.worktrees')).length, wasLooked: looked, rows: s2.boxHealthDisk.part(), wasRows: rows };
+}
+
+test('S27: a part whose read can\'t start keeps its last value: claude\'s accounts (kit-919)', async (t) => {
+  const h = await heldBudget(t);
+  assert.equal(h.wasLeft, 90);
+  assert.equal(h.left, 90, 'claude keeps its last read while its read can\'t start');
+});
+
+test('S30: the disk part\'s look is a read of the budget: while none can start it lists no folder and keeps its rows (kit-919)', async (t) => {
+  const h = await heldBudget(t);
+  assert.ok(h.wasRows?.worktrees?.length === 1, 'a row before');
+  assert.deepEqual([h.looked, h.rows], [h.wasLooked, h.wasRows], 'the disk lists no folder and keeps its rows');
+});
+
+
+test('S28: a stop then a start still counts the reads stuck from the old run (kit-919)', async (t) => {
+  const s = await stuckStarted(t);
+  const before = s.opens.now;
+  s.health.stop();
+  const from = s.timers.list.length;
+  const h2 = s.make();
+  await Promise.race([h2.start(), sleep(1000)]);
+  const p = partTimers(s, from);
+  await stick(s, [p.processes, p.disk, p.pool, p.claude].filter(Boolean), before + 1);
+  assert.ok(s.opens.most <= 3, `${s.opens.most} FIFO opens were out at once across the two runs`);
+});
+
+test('S29: a reset in year 1 rolls on in one step, as cheap as last week\'s (kit-840 final-2 F1)', () => {
+  const roll = new Function(`${cut('const claudeRoll = ', '\n')}\nreturn claudeRoll;`)();
+  const at = Date.parse('0001-01-01T00:00:00.000Z'), period = 60000;
+  const t0 = Date.now();
+  const got = roll(at, period, T0);
+  const ms = Date.now() - t0;
+  assert.ok(got > T0 && got - T0 <= period && (got - at) % period === 0, `${got}`);
+  assert.ok(ms < 100, `the roll took ${ms} ms: one step costs no more than last week's`);
+});
+
+test('S31: with the budget held, a tick reads no volume: no stat or statfs (kit-919)', async () => {
+  const roots = [newDir(), newDir()];
+  const s = load({ env: nowhere(), roots });
+  let asked = 0;
+  s.disk.stat = async () => { asked++; return { dev: 1 }; };
+  s.disk.statfs = async () => { asked++; return { bavail: 1, bsize: 1, blocks: 2, files: 2, ffree: 1 }; };
+  await s.health.start();
+  asked = 0;
+  const free = hold(s);
+  await step(s);
+  free();
+  assert.equal(asked, 0, 'no stat or statfs while the budget is held');
+});
+
+// the sampler's own minute read of the roots: the last interval its start set
+const rootsTimer = (s) => s.timers.list.filter((h) => h.kind === 'every').at(-1);
+
+test('S32: with the budget held, a walk whose roots changed opens no run/ file and lists no run/sensors (kit-919)', async (t) => {
+  const a = newDir();
+  const run = path.join(a, 'docs', 'devteam', 'run');
+  fs.mkdirSync(path.join(run, 'sensors', 'web'), { recursive: true });
+  fs.writeFileSync(path.join(run, 'supervisor-up.json'), JSON.stringify({ pid: 101 }));
+  const s = loadWith(t, { roots: [a], make: (fifos) => fakeProc(fifos, [101], 'node\0x.mjs\0') });
+  await s.health.start();
+  const p = partTimers(s);
+  const free = hold(s);
+  await Promise.race([rootsTimer(s).fn(), sleep(1000)]);
+  const before = [s.files.length, s.dirs.length];
+  await Promise.race([p.processes.fn(), sleep(1000)]);
+  const ran = [...s.files.slice(before[0]), ...s.dirs.slice(before[1])].filter((f) => f.startsWith(run));
+  free();
+  assert.deepEqual(ran, [], 'no run/ file or listing while the budget is held');
+});
+
+test('S33: with the budget held, the sampler\'s minute read of the roots opens no settings.md, and the ceiling it gave stays (kit-919)', async (t) => {
+  const a = newDir();
+  const settings = path.join(a, 'docs', 'devteam', 'project', 'settings.md');
+  fs.mkdirSync(path.dirname(settings), { recursive: true });
+  fs.writeFileSync(settings, '# Settings\n\n```json devteam\n{ "machine_memory_ceiling": 0.6 }\n```\n');
+  const s = loadWith(t, { roots: [a], make: () => NOWHERE });
+  await s.health.start();
+  const before = s.files.filter((f) => f === settings).length;
+  const free = hold(s);
+  await Promise.race([rootsTimer(s).fn(), sleep(1000)]);
+  await step(s);
+  const read = s.files.filter((f) => f === settings).length - before;
+  const ceiling = answer(s.health).json.now.memory?.ceiling;
+  free();
+  assert.deepEqual([before, read], [1, 0], 'settings.md read at the start, and not while the budget is held');
+  assert.equal(ceiling, 0.6, 'the ceiling it gave stays');
+});
+
+test('S26b: one read of a file at a time, the budget\'s reads at most, and a read that fails frees its file (kit-919)', async () => {
+  const s = load({ env: nowhere() });
+  const never = () => new Promise(() => {});
+  let called = 0;
+  assert.ok(s.boxHealthIo('/f/a', never) instanceof Promise, 'a file not out starts');
+  assert.equal(s.boxHealthIo('/f/a', () => { called++; }), null, 'the same file again is refused');
+  assert.equal(called, 0, 'and what it would read is never called');
+  assert.ok(s.boxHealthIo('/f/b', never) instanceof Promise, 'another file starts');
+  let fail;
+  const failing = s.boxHealthIo('/f/c', () => new Promise((_, rej) => { fail = rej; }));
+  assert.equal(s.boxHealthIo('/f/d', never), null, 'with three out a fourth is refused');
+  const unhandled = [];
+  const seen = (e) => unhandled.push(e);
+  process.on('unhandledRejection', seen);
+  fail(new Error('gone'));
+  await assert.rejects(failing, /gone/);
+  await sleep(10);
+  process.off('unhandledRejection', seen);
+  assert.deepEqual(unhandled, [], 'a read that fails is its caller\'s, never unhandled');
+  assert.ok(s.boxHealthIo('/f/c', never) instanceof Promise, 'its file and its place are free again');
+  const t = load({ env: nowhere() });
+  await assert.rejects(t.boxHealthIo('/g/a', () => { throw new Error('at once'); }), /at once/);
+  assert.ok(t.boxHealthIo('/g/a', never) instanceof Promise, 'one that throws at once frees its file');
+});
+
+test('S34: a volume whose read can\'t start is a gap, and is not forgotten: its line stays its own (kit-919)', async () => {
+  const [a, b] = [newDir(), newDir()];
+  const s = load({ env: nowhere(), roots: [a, b] });
+  let hangA = false;
+  s.disk.stat = (p) => (p === a && hangA ? new Promise(() => {}) : Promise.resolve({ dev: p === a ? 1 : 2 }));
+  s.disk.statfs = async (p) => { const u = p === a ? 1 : 7; return { bavail: u, bsize: 1, blocks: 2 * u, files: 2, ffree: 1 }; };
+  await s.health.start();
+  assert.deepEqual(answer(s.health).json.now.disks.map((d) => d.free), [1, 7]);
+  const free = hold(s);
+  await Promise.race([step(s), sleep(1000)]);
+  const held = answer(s.health).json;
+  free();
+  await sleep(5);
+  assert.deepEqual([held.now.disks, held.samples.at(-1).disk], [undefined, undefined], 'no volume read while the budget is held');
+  hangA = true;
+  await hung(s, () => step(s), () => true);
+  const j = answer(s.health).json;
+  assert.deepEqual([j.samples.at(-1).disk, j.now.disks?.map((d) => d.free)], [undefined, [7]], "the first volume's line has a gap, never the other's free");
 });
