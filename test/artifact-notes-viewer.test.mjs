@@ -790,8 +790,11 @@ test('the viewer: the to-check card in a short window (kit-882)', { skip: canDri
     await holdPoll(V);
     // the terminal's ask as a read of the threads gives it: window.__ask, whatever the stubbed read says
     await V.p.ev(`(window.__ask = null, window.__askSet = askSet, askSet = () => window.__askSet(window.__ask), true)`);
+    // a session at work on the note as a read gives it (TL.working): window.__working, whatever the stubbed read says
+    await V.p.ev(`(window.__working = null, Object.defineProperty(TL, 'working', { get: () => window.__working ?? {}, set() {}, configurable: true }), true)`);
     const Q = { kind: 'menu', digest: 'd-28', token: 'tok', question: 'Which of the three should it be, with the words the terminal shows over several lines of it?', options: [1, 2, 3].map((n) => ({ n, label: `Option ${n}, said at some length` })), hint: 'Enter to confirm' };
-    // [its name, its row, { the terminal's ask, the context open, the tall picture, the box focused when the ask comes }]
+    // [its name, its row, { the terminal's ask, the context open, the tall picture, the box focused when the ask comes,
+    //   who is responding on its newest owner turn (the state line: one line for the supervisor, two for a session) }]
     const CASES = [
       ['all of it', note(2), { ask: true, ctx: true, pic: true }],
       ['a conversation', note(16), { ask: true, ctx: true, pic: true }],
@@ -801,6 +804,10 @@ test('the viewer: the to-check card in a short window (kit-882)', { skip: canDri
       ['a short mark, the ask coming while the box has the focus', note(1, short), { ask: true, focus: true }],
       ['a short mark, sixteen turns', note(16, short), {}],
       ['the mark, two turns', note(2), {}],
+      ['all of it, the supervisor responding', note(2), { ask: true, ctx: true, pic: true, work: 'supervisor' }],
+      ['all of it, a session responding', note(2), { ask: true, ctx: true, pic: true, work: 'kit-882-to-check-card-short-window' }],
+      ['a short mark, the ask, a session responding', note(1, short), { ask: true, work: 'kit-882-to-check-card-short-window' }],
+      ['all of it, the ask coming while the box has the focus, a session responding', note(2), { ask: true, ctx: true, pic: true, focus: true, work: 'kit-882-to-check-card-short-window' }],
     ];
     // each case at w x h, in each place; what each gives back, by its name
     const PLACES = { corner: 'the corner', spot: 'beside its spot', none: 'no spot on screen' };
@@ -811,6 +818,9 @@ test('the viewer: the to-check card in a short window (kit-882)', { skip: canDri
         const corner = where === 'corner';
         // (no focus left from the case before: the card would stay where that one put it)
         await V.p.ev('(window.__ask = null, document.activeElement?.blur?.(), true)');
+        // the session's record: for the newest owner turn, begun after every turn (or none)
+        const lo = row.turns.findLast((x) => x.by === 'owner')?.id;
+        await V.p.ev(`(window.__working = ${o.work ? J({ [N.onMain]: { stage: 'responding', by: o.work, turn: lo, at: new Date(Date.now() + 3600e3).toISOString() } }) : 'null'}, true)`);
         await V.rows({ [N.onMain]: row });
         await V.p.ev(`(() => {
           avStep.unseen = () => ${corner}; avStep.off = ${corner ? '{ id: TL.open, av: AV, gone: true }' : 'null'};
@@ -858,6 +868,13 @@ test('the viewer: the to-check card in a short window (kit-882)', { skip: canDri
           const e = $(s), r = e?.getBoundingClientRect();
           if (!r || !(r.width > 10 && r.height > 10) || r.top < 0 || r.left < 0 || r.right > innerWidth || r.bottom > innerHeight) { out.push(s + ' is at ' + (r ? [r.left, r.top, r.right, r.bottom].map(Math.round) : 'none') + ' in ' + innerWidth + 'x' + innerHeight); continue; }
           for (const f of [0.15, 0.5, 0.85]) { const hit = document.elementFromPoint(r.left + r.width * f, r.top + r.height * f); if (!e.contains(hit)) { out.push(s + ' is under ' + (hit ? hit.id || hit.className || hit.tagName : 'nothing')); break; } }
+        }
+        // the state line as the case means it: '… is responding…' over one line (the supervisor) or two (a session; one
+        // in the sheet, as wide as the window), its height against one line's, measured with one word in it
+        if (${!!o.work}) {
+          const st = document.getElementById('tl-c-state'), box = st.parentElement, words = st.textContent, lines = ${o.work === 'supervisor' ? 1 : 2} === 2 && !card.classList.contains('sheet') ? 2 : 1;
+          const h = box.getBoundingClientRect().height; st.textContent = 'x'; const one = box.getBoundingClientRect().height; st.textContent = words;
+          if (!/ is responding…$/.test(words) || Math.abs(h - lines * one) > 1) out.push('setup: the state line ' + JSON.stringify(words) + ' is ' + Math.round(h) + 'px, ' + lines + ' line(s) of ' + Math.round(one) + 'px');
         }
         return out; })()`));
     }
