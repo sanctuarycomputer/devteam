@@ -465,6 +465,9 @@ test('every bound in the contract refuses what it should', () => {
   const st = json('state.json');
   const status = json('status.json');
   const frame = json('view-from-server.json').find((m) => m.t === 'frame');
+  const ask = json('view-from-server.json').find((m) => m.t === 'dialog' && m.kind === 'prompt');
+  const answer = json('view-from-page.json').find((m) => m.t === 'dialog');
+  const { id: _id, ...noId } = answer;
   const cases = [
     ['status', { ...status, held: 'q-123' }, 'status.held "q-123" does not match'],
     ['status', { ...status, instance: 'acme-shop' }, 'status.instance "acme-shop" does not match'],
@@ -478,6 +481,13 @@ test('every bound in the contract refuses what it should', () => {
     ['from_server', { ...frame, data: 'data:image/jpeg;base64,' + frame.data }, 'from_server.data "data:image/jpeg;base64,'],
     ['from_server', { ...frame, w: 0 }, 'from_server.w must be at least 1'],
     ['from_server', { t: 'held', qid: 'nope' }, 'from_server.qid "nope" does not match'],
+    ['from_server', { ...ask, kind: 'alert' }, 'from_server.kind must be one of confirm, prompt, beforeunload'],
+    ['from_server', { ...ask, text: 'x'.repeat(2001) }, 'from_server.text must be at most 2000 characters'],
+    ['from_server', { ...ask, default: 'x'.repeat(2001) }, 'from_server.default must be at most 2000 characters'],
+    ['from_server', { ...ask, frame: false }, 'from_server.frame must be true'],
+    ['from_page', { ...answer, id: 'd-1' }, 'from_page.id "d-1" does not match'],
+    ['from_page', noId, 'from_page.id is required'],
+    ['from_page', { ...answer, text: 'x'.repeat(10001) }, 'from_page.text must be at most 10000 characters'],
     ['from_page', { t: 'paste', text: 'x'.repeat(10001) }, 'from_page.text must be at most 10000 characters'],
     ['from_page', { t: 'nav', url: 'x'.repeat(2049) }, 'from_page.url must be at most 2048 characters'],
     ['from_page', { t: 'mouse', type: 'click', x: 8193, y: 1 }, 'from_page.x must be at most 8192'],

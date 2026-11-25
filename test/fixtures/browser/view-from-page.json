@@ -82,6 +82,11 @@
     "text": "Sam Lee"
   },
   {
+    "t": "dialog",
+    "id": "d-2123456789abcdef",
+    "accept": false
+  },
+  {
     "t": "nav",
     "url": "https://shop.example/account"
   },
