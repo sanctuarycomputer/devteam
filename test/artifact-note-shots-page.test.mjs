@@ -64,8 +64,8 @@ test('C7e the proxy flags: dead but for the capture and the allowed hosts', asyn
     for (const f of ['--webrtc-ip-handling-policy=disable_non_proxied_udp', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp']) assert.ok(a.includes(f), f);
     assert.deepEqual(a.join(' ').match(/--host-resolver-rules=(.*?) (?:--|about:)/)?.[1].split(',').map((x) => x.trim()), ['MAP * ~NOTFOUND', 'EXCLUDE 127.0.0.1', ...HOSTS.map((h) => `EXCLUDE ${h}`)], 'no name resolved but the allowed hosts\'');
     assert.ok(!a.some((x) => x === `--proxy-server=http://${bypass[1]}`), 'the dead proxy is not the capture server');
-    // kit-813: mDNS off in the one list Chrome keeps
-    assert.deepEqual(a.filter((x) => x.startsWith('--disable-features=')), ['--disable-features=IsolateSandboxedIframes,WebRtcHideLocalIpsWithMdns']);
+    // kit-813, kit-912: mDNS and Cast discovery off in the one list Chrome keeps
+    assert.deepEqual(a.filter((x) => x.startsWith('--disable-features=')), ['--disable-features=IsolateSandboxedIframes,WebRtcHideLocalIpsWithMdns,MediaRouter']);
   }
 });
 
@@ -282,9 +282,15 @@ test('a picture\'s stamp is its thread\'s own, and shots itself may be no symlin
 });
 
 // kit-813: a page's WebRTC under the picture's Chrome, counted as kit-805 counts the browser's. While the
-// page holds WebRTC open (its fonts are ready only once it has told), the UDP sockets on 5353 (mDNS)
-// that Chrome's group holds; what reaches this file's listeners; and what the page was given.
+// page holds WebRTC open (its fonts are ready only once it has told), the local-network UDP sockets that
+// Chrome's group holds (kit-912: on 5353, mDNS; on 1900, SSDP; or bound or connected to a multicast
+// address); what reaches this file's listeners; and what the page was given.
 const procNet = (f) => { try { return fs.readFileSync(`/proc/net/${f}`, 'utf8').split('\n').slice(1).map((l) => l.trim().split(/\s+/)).filter((c) => c.length > 1); } catch { return []; } };
+// /proc/net's hex address, each 32-bit word in host order (little-endian on CI and the box), so a word's
+// first byte is its last two digits: IPv4 224-239, IPv6 ff, or IPv4 inside ::ffff:0:0/96
+const multicast = (hex) => { const v4 = hex.length === 8 ? hex : /^0{16}FFFF0000/.test(hex) ? hex.slice(24) : null; return v4 ? /^[0-9A-F]{6}E/.test(v4) : /^[0-9A-F]{6}FF/.test(hex); };
+// a UDP socket of the local network: on port 1900 (SSDP) or 5353 (mDNS), or with a multicast address at either end
+const lanSocket = ([, local, remote]) => ['076C', '14E9'].includes(local.split(':')[1]) || multicast(local.split(':')[0]) || multicast(remote.split(':')[0]);
 // the socket inodes of every process whose group is leader's
 function groupSockets(leader) {
   const held = new Set();
@@ -295,7 +301,7 @@ function groupSockets(leader) {
       for (const fd of fs.readdirSync(`/proc/${d}/fd`)) { const m = /^socket:\[(\d+)\]$/.exec(fs.readlinkSync(`/proc/${d}/fd/${fd}`)); if (m) held.add(m[1]); }
     } catch {}
   }
-  return { mdns: ['udp', 'udp6'].flatMap(procNet).filter((c) => c[1].endsWith(':14E9') && held.has(c[9])).length, tcp: ['tcp', 'tcp6'].flatMap(procNet).filter((c) => held.has(c[9])).length };
+  return { lan: ['udp', 'udp6'].flatMap((f) => procNet(f).map((c) => [f, ...c])).filter((c) => held.has(c[10]) && lanSocket(c.slice(1))).map((c) => `${c[0]} ${c[2]} -> ${c[3]}`), tcp: ['tcp', 'tcp6'].flatMap(procNet).filter((c) => held.has(c[9])).length };
 }
 const RTC_PAGE = `<!doctype html><title>RTC</title><button id="buy">Start trial</button><script>
 let told;
@@ -317,7 +323,7 @@ Object.defineProperty(document, 'fonts', { value: { ready: new Promise((r) => { 
 })().catch((e) => fetch('rtc-done-' + encodeURIComponent(e)).finally(told));
 </script>`;
 
-test('K1 a page\'s WebRTC joins no mDNS group and sends nothing round the dead proxy (kit-813)', async () => {
+test('K1 a page\'s WebRTC joins no mDNS group and sends nothing round the dead proxy (kit-813), and Chrome\'s group holds no UDP socket on 1900, 5353 or a multicast address (kit-912)', async () => {
   const k = shotKit();
   fs.writeFileSync(path.join(k.arts, 'pricing', 'rtc.html'), RTC_PAGE);
   k.F.g(['add', '-A'], k.F.old);
@@ -327,12 +333,12 @@ test('K1 a page\'s WebRTC joins no mDNS group and sends nothing round the dead p
   const pids = path.join(TMP, 'rtc-chrome.pid'), wrap = path.join(TMP, 'rtc-chrome.sh');
   fs.writeFileSync(wrap, `#!/bin/sh\necho "$$" >> '${pids}'\nexec '${chromePath}' "$@"\n`, { mode: 0o755 });
   const linux = fs.existsSync('/proc/net/udp');
-  const held = { mdns: 0, read: !linux };
+  const held = { lan: new Set(), read: !linux };
   let over = false;
   const watch = (async () => {
     while (!over) {
       // no /proc (macOS): no count, the rest is still checked
-      for (const p of linux && fs.existsSync(pids) ? fs.readFileSync(pids, 'utf8').trim().split('\n').map(Number) : []) { const g = groupSockets(p); held.mdns = Math.max(held.mdns, g.mdns); held.read ||= g.tcp > 0; }
+      for (const p of linux && fs.existsSync(pids) ? fs.readFileSync(pids, 'utf8').trim().split('\n').map(Number) : []) { const g = groupSockets(p); for (const s of g.lan) held.lan.add(s); held.read ||= g.tcp > 0; }
       await new Promise((r) => setTimeout(r, 100));
     }
   })();
@@ -346,5 +352,5 @@ test('K1 a page\'s WebRTC joins no mDNS group and sends nothing round the dead p
   const [added, candidates, shown] = told[0].split('-');
   assert.equal(added, '4', `the page offered, and added its four candidates: ${told[0]}`);
   assert.ok(held.read, "the sockets of Chrome's network process can be read");
-  assert.deepEqual({ mdns: held.mdns, reached: [...reached], candidates, shown }, { mdns: 0, reached: [], candidates: '0', shown: 'none' });
+  assert.deepEqual({ lan: [...held.lan], reached: [...reached], candidates, shown }, { lan: [], reached: [], candidates: '0', shown: 'none' });
 });
