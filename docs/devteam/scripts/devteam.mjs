@@ -25093,7 +25093,9 @@ const boxHealthProcesses = (() => {
 //               time of now() when that read ended. disk is absent when that read failed (du exited
 //               other than 0, gave no number, or couldn't be run) or was stopped at 60 s, until a
 //               later one ends with a number; a worktree not read yet has no row. A worktree gone
-//               from its .worktrees/ is forgotten at the next look.
+//               from its .worktrees/ is forgotten at the next look; a .worktrees/ that is missing has
+//               none, and one that can't be listed otherwise keeps its root's rows as they are. With no
+//               row left, part gives undefined, not an empty list.
 // stop() kills a du still running, as the sampler asks (its limit goes with the run's timers).
 const DISK_LOOK_MS = 60000, DISK_EVERY_MS = 900000, DISK_LIMIT_MS = 60000, DISK_OUT_MAX = 4096, DISK_ALIVE = 2;
 const boxHealthDisk = (() => {
@@ -25121,14 +25123,18 @@ const boxHealthDisk = (() => {
   });
   const keyOf = (w) => `${w.root}\0${w.worktree}`;
   const look = async (ctx, r) => {
-    const found = [];
+    const found = [], order = [];
     for (const { root } of ctx.roots()) {
       let list = [];
-      try { list = await fs.promises.readdir(path.join(root, '.worktrees'), { withFileTypes: true }); } catch { list = []; }
-      for (const d of list) if (d.isDirectory()) found.push({ root, worktree: d.name });
+      try { list = await fs.promises.readdir(path.join(root, '.worktrees'), { withFileTypes: true }); } catch (e) {
+        // missing: no worktrees; unreadable (EACCES, EIO): its rows stay as they are, none read again
+        if (e?.code !== 'ENOENT') for (const k of r.order) if (k.startsWith(`${root}\0`)) order.push(k);
+        continue;
+      }
+      for (const d of list) if (d.isDirectory()) { found.push({ root, worktree: d.name }); order.push(keyOf({ root, worktree: d.name })); }
     }
     if (ctx.stopped() || run !== r) return;
-    r.order = found.map(keyOf);
+    r.order = order;
     const live = new Set(r.order);
     let changed = false;
     for (const k of [...r.seen.keys()]) if (!live.has(k)) { r.seen.delete(k); changed = true; }

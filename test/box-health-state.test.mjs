@@ -249,6 +249,22 @@ test('D6: a worktree gone from .worktrees/ is forgotten at the next look; stop g
   assert.equal(d.part(), undefined, 'stopped: nothing of the run is given');
 });
 
+test('D10: a .worktrees/ that can\'t be listed keeps its rows; one that is missing has none', async () => {
+  const b = bin();
+  const one = rootWith('a'), two = rootWith('b');
+  const d = diskStarted([one.root, two.root], b);
+  await d.look();
+  const before = d.part().worktrees;
+  assert.deepEqual(before.map((w) => w.worktree), ['a', 'b']);
+  d.fake.readdir = (p) => (p.startsWith(one.root) ? Promise.reject(Object.assign(new Error('denied'), { code: 'EACCES' })) : undefined);
+  await d.look();
+  assert.deepEqual(d.part().worktrees, before, 'unreadable: its row stays, in its place');
+  d.fake.readdir = () => undefined;
+  fs.rmSync(path.join(one.root, '.worktrees'), { recursive: true });
+  await d.look();
+  assert.deepEqual(d.part().worktrees.map((w) => w.worktree), ['b'], 'missing: none');
+});
+
 test('D7: stop kills a du still running, and its read gives nothing after', async () => {
   const b = bin();
   const r = rootWith();
