@@ -1486,6 +1486,7 @@
         "refused": [],
         "held": [],
         "hosts": [
+          "a(b",
           "one.zorbly.example",
           "two.zorbly.example",
           "three.zorbly.example",
@@ -1535,6 +1536,89 @@
           "six.zorbly.example",
           "seven.zorbly.example"
         ]
+      }
+    },
+    {
+      "file": "cases/public-host-href-stray-quote.md",
+      "doc": "exterior",
+      "shows": "an href holding a line break, after a stray quote in the text",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "one.zorbly.example",
+          "two.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-special-scheme.md",
+      "doc": "exterior",
+      "shows": "a host after ftp:, ws: or wss: with no slash, one, or a backslash",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "one.zorbly.example",
+          "two.zorbly.example",
+          "three.zorbly.example",
+          "four.zorbly.example",
+          "five.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-scheme-backslash-user.md",
+      "doc": "exterior",
+      "shows": "a host after a backslash in another scheme's user",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "one.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-in-host-punctuation.md",
+      "doc": "exterior",
+      "shows": "a host holding a comma, a semicolon or parentheses",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "ledgerpad,one.zorbly.example",
+          "ledgerpad;two.zorbly.example",
+          "ledgerpad,three.zorbly.example",
+          "ledgerpad(four).zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-heading-after-break-fence.md",
+      "doc": "exterior",
+      "shows": "a fence after a thematic break is top level: the heading after it is code",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [
+          "Zorbly"
+        ],
+        "hosts": []
       }
     },
     {

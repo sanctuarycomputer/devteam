@@ -480,15 +480,20 @@ const tail = (h) => { const c = Array.from(h); while (c.length && !/[\p{L}\p{N}]
 // One address's host from its authority: past the last @ (a user), else up to what ends a sentence
 // or a link in prose (, ; ' " ` ( ) [ ] |); less a port and what follows the host.
 const host = (a) => { const at = a.lastIndexOf('@'); const h = at >= 0 ? a.slice(at + 1) : a.replace(/[,;'"`()[\]|].*$/s, ''); return tail(h.replace(/:\d*$/, '')).toLowerCase(); };
+// With no @, the authority whole as well, up to what a host may not hold ([ ] | ^ % :): a browser keeps
+// , ; ' " ` ( ) in a host, so prose's ends are read both ways.
+const whole = (a) => (a.includes('@') ? '' : tail(a.replace(/[[\]|^%:].*$/s, '')).toLowerCase());
 // Every host in the whole text, lower case, each once: read as markdown decodes the text, then again
 // with each HTML attribute's value read as a browser does. The authority after http: or https: and
-// any slashes or backslashes, another scheme's //, or two or more slashes or backslashes not inside a
-// word or path, up to a slash, backslash, ?, #, white space, < or >; and where it holds ]( (a link's
+// any slashes or backslashes (or ftp:, ws:, wss:, the browser's other schemes that read a host so),
+// two or more slashes or backslashes not inside a word or path, up to a slash, backslash, ?, #,
+// white space, < or >; another scheme's // up to a slash, ?, #, white space, < or > (a backslash
+// is part of its authority); and where it holds ]( (a link's
 // words ending in an address), each part of it on either side as well. Each address of a mailto:; an
 // e-mail autolink <local@domain> (CommonMark's local-part characters); an e-mail address's host, as
 // GitHub links a bare one (a letter, digit, . _ + or - before the @, a dot in the host); and a bare
 // www. name.
-const HOST = /<[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@([\p{L}\p{N}.-]+)>|(?:https?:[/\\]*|[a-z][a-z0-9+.-]{0,30}:\/\/|(?<![\p{L}\p{N}/\\._-])[/\\]{2,})([^\s/\\?#<>]+)|mailto:([^\s/\\?#<>"`()[\]|]+)|(?<=[\p{L}\p{N}._+-])@([\p{L}\p{N}_-][\p{L}\p{N}._-]*)|(?<![\p{L}\p{N}/.@-])(www\.[\p{L}\p{N}.-]+)/giu;
+const HOST = /<[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@([\p{L}\p{N}.-]+)>|(?:(?:https?|ftp|wss?):[/\\]*|(?<![\p{L}\p{N}/\\._-])[/\\]{2,})([^\s/\\?#<>]+)|mailto:([^\s/\\?#<>"`()[\]|]+)|(?<=[\p{L}\p{N}._+-])@([\p{L}\p{N}_-][\p{L}\p{N}._-]*)|(?<![\p{L}\p{N}/.@-])(www\.[\p{L}\p{N}.-]+)|[a-z][a-z0-9+.-]{0,30}:\/\/([^\s/?#<>]+)/giu;
 // The third reading: the second, with the white space a URL keeps inside its user taken out, where
 // markdown or HTML lets it stand inside an address (angle-bracket destinations, attribute values,
 // references), the < and > a user may hold there too, and every white space but the ASCII ones.
@@ -496,6 +501,21 @@ const HOST = /<[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@([\p{L}\p{N}.-]+)>|(?:https?:[/\
 // too, as pandoc reads them), up to white space, with
 // its < and > taken out: a browser encodes them inside a user.
 const dests = (t) => t.replace(/(\]\(|\]:)([ \t\f\v]*(?:\n[ \t\f\v]*(?:>[ \t\f\v]*)*)?)(\S*)/g, (all, o, sp, v) => (v[0] === '<' ? all : o + sp + v.replace(/\\?[<>]/g, '')));
+// Each quoted value after an = (and any white space), read on its own as ="…" or ='…', so a stray
+// quote elsewhere cannot pair with an attribute's own and leave its value unread. Each value ends at
+// the next quote of its kind, so the values of one kind do not overlap: linear.
+const values = (t) => {
+  const out = [];
+  for (let i = t.indexOf('='); i >= 0; i = t.indexOf('=', i + 1)) {
+    let j = i + 1;
+    while (j < t.length && (t[j] === ' ' || t[j] === '\t' || t[j] === '\n' || t[j] === '\f' || t[j] === '\r')) j += 1;
+    const q = t[j];
+    if (q !== '"' && q !== "'") continue;
+    const k = t.indexOf(q, j + 1);
+    if (k > 0) out.push(`=${t.slice(j, k + 1)}`);
+  }
+  return out.join(' ');
+};
 const third = (t) => decode(attrs(angles(dests(t)), true), true).replace(/[^\S\t\n\v\f\r ]/gu, '');
 export function hosts(text) {
   const out = new Set();
@@ -503,13 +523,18 @@ export function hosts(text) {
   const t = String(text).replace(/\r\n?/g, '\n'); // a line ends at LF, CR or CRLF
   // A URL keeps white space inside its user (a browser encodes it), so a third reading takes out the
   // white space inside angle-bracket destinations, attribute values, and what references decode to.
-  for (const each of new Set([decode(t), decode(attrs(t)), third(t)])) { // each distinct reading once
+  const v = values(t);
+  for (const each of new Set([decode(t), decode(attrs(t)), third(t), decode(attrs(v)), decode(attrs(v, true), true)])) { // each distinct reading once
     for (const m of each.matchAll(HOST)) {
       if (m[1] !== undefined) add(tail(m[1]).toLowerCase());
-      else if (m[2] !== undefined) { add(host(m[2])); if (m[2].includes('](')) for (const a of m[2].split('](')) add(host(a)); }
+      else if (m[2] !== undefined || m[6] !== undefined) {
+        const a = m[2] ?? m[6];
+        add(host(a)); add(whole(a));
+        if (a.includes('](')) for (const b of a.split('](')) { add(host(b)); add(whole(b)); }
+      }
       else if (m[3] !== undefined) { for (const a of m[3].split(/[,;]/)) if (a.includes('@')) add(host(a)); }
       else if (m[4] !== undefined) { const h = tail(m[4]).toLowerCase(); if (h.includes('.')) add(h); }
-      else add(tail(m[5]).toLowerCase());
+      else if (m[5] !== undefined) add(tail(m[5]).toLowerCase());
     }
   }
   return [...out];
