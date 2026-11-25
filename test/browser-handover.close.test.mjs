@@ -189,7 +189,7 @@ async function closeAndScan(P, q, close, label, v, before) {
     if (byeAt === null && v.msgs.some((m) => m.t === 'bye')) byeAt = now;
     if (goneAt === null && !alive(oldPid)) goneAt = now;
   };
-  if (before) await before(oldPid); // kit-877: KD1 freezes Chrome's helpers here, with the scan running
+  if (before) { try { await before(oldPid); } catch (e) { await loop.stop(); throw e; } } // kit-877: KD1 freezes Chrome's helpers here, with the scan running (stopped if that throws)
   const tick = setInterval(mark, 50); // from before the answer command, so a bye or exit during it is seen
   try {
     await close();
