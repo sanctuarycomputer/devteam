@@ -7391,6 +7391,7 @@ avStep.ready = (c) => { avStep.sample(); for (const [k, rec] of avStep.press.see
 avStep.forget = () => { for (const [k, rec] of avStep.press.seen) if (rec.el.matches('[data-tl-accept]')) avStep.press.seen.delete(k); };
 avStep.watch = () => {
   const P = avStep.press;
+  avStep.clear();
   if (P.on) return;
   P.on = true;
   const tick = () => {
