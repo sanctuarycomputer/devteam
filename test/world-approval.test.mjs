@@ -73,7 +73,7 @@ function world(name, { selfOnMain = true } = {}) {
   // a release-scope or classless question, answered yes
   const other = (cls) => { const q = ok(old, ['ask', '--question', `Something else (${++n})?`, '--recommendation', 'yes', '--stake', '1', '--urgency', '1', '--new-because', 'the test asks again', ...(cls ? ['--class', cls, '--reasons', 'below-rung', '--no-default', 'the test waits'] : [])], SUP).trim(); ok(old, ['answer', q, 'yes']); return q; };
   const onMain = (rel, text) => { write(path.join(old, rel), text); g(['add', '-A'], old); g(['commit', '-qm', `main: ${rel}`], old); g(['push', '-q', 'origin', 'main'], old); };
-  // a minimal valid self.md on main, which an exterior.md draft is drawn from
+  // a minimal valid self.md on main (the exterior track runs beside one, as a project would)
   if (selfOnMain) onMain(FILES.self.rel, draft('self', 'The approved self.', 'approved self'));
   const supLine = (o) => fs.appendFileSync(path.join(old, 'docs/devteam/run/log', `supervisor-${new Date().toISOString().slice(0, 7)}.jsonl`), line({ at: new Date().toISOString(), by: 'supervisor', ...o }));
   // check-pr's exit on a chore that changes only a project note: what a warning must leave it at

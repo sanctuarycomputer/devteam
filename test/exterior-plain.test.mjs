@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { execFileSync } from 'node:child_process';
-import { json, write } from './lib/kit.mjs';
+import { json, line, write } from './lib/kit.mjs';
 import { fixture, SUP } from './lib/next-step-fixture.mjs';
 import { checkExterior as refCheckExterior } from './fixtures/world2/check.mjs';
 
@@ -48,7 +48,8 @@ function proj(name, { strategy = world2('strategy.md'), self = world2('self.md')
   const visFile = path.join(F.base, 'visibility');
   g(['config', `url.${F.org}.insteadOf`, 'https://github.com/acme/quillmark.git'], old);
   g(['remote', 'set-url', 'origin', 'https://github.com/acme/quillmark.git'], old);
-  write(path.join(bin, 'gh'), `#!/bin/sh\ncase "$*" in *acme/quillmark*) ;; *) exit 1 ;; esac\nif [ "$1 $2" = "repo view" ] && [ -s '${visFile}' ]; then cat '${visFile}'; exit 0; fi\nexit 1\n`);
+  const ghLog = path.join(F.base, 'gh.log');
+  write(path.join(bin, 'gh'), `#!/bin/sh\necho "$*" >> '${ghLog}'\ncase "$*" in *acme/quillmark*) ;; *) exit 1 ;; esac\nif [ "$1 $2" = "repo view" ] && [ -s '${visFile}' ]; then cat '${visFile}'; exit 0; fi\nexit 1\n`);
   fs.chmodSync(path.join(bin, 'gh'), 0o755);
   const setVisibility = (v) => fs.writeFileSync(visFile, v === 'unknown' ? '' : `${v.toUpperCase()}\n`);
   setVisibility(visibility);
@@ -108,7 +109,14 @@ function proj(name, { strategy = world2('strategy.md'), self = world2('self.md')
   const findings = (kinds, cwd = old) => json(ok(['metrics', '--json'], cwd)).findings.filter((f) => kinds.includes(f.kind));
   const record = (v) => write(path.join(old, 'docs/devteam/run/repo-visibility.json'), JSON.stringify({ visibility: v, at: new Date().toISOString() }));
   const logLines = () => { const d = path.join(old, 'docs/devteam/run/log'); return fs.existsSync(d) ? fs.readdirSync(d).filter((f) => f.endsWith('.jsonl')).flatMap((f) => fs.readFileSync(path.join(d, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))) : []; };
-  return { ...F, run, ok, onMain, blob, commitOn, wtOf, chorePr, checkPr, askAbout, land, findings, record, logLines, setVisibility, ENV };
+  // the gh calls asking the repo's visibility since the log was last cleared
+  const visCalls = () => (fs.existsSync(ghLog) ? fs.readFileSync(ghLog, 'utf8').split('\n').filter((l) => l.startsWith('repo view')) : []);
+  const clearGh = () => fs.rmSync(ghLog, { force: true });
+  // a question line written by hand, as the supervisor's log holds one
+  // the owner's answer (an owner command: the fixture's own, with no role)
+  const answer = (q, a = 'yes') => F.ok(old, ['answer', q, a]);
+  const supLine = (o) => fs.appendFileSync(path.join(old, 'docs/devteam/run/log', `supervisor-${new Date().toISOString().slice(0, 7)}.jsonl`), line({ at: new Date().toISOString(), by: 'supervisor', ...o }));
+  return { ...F, run, ok, onMain, blob, commitOn, wtOf, chorePr, checkPr, askAbout, land, findings, record, logLines, setVisibility, visCalls, clearGh, supLine, answer, ENV };
 }
 const withProject = (name, opts, body) => async (t) => {
   const W = proj(name, opts);
@@ -142,7 +150,7 @@ test('P1t the region reads a hostile or large exterior text in under 2 s each', 
   const name = (i) => `Z${i.toString(36).replace(/\d/g, (d) => 'abcdefghij'[d])}x`;
   const distinct = (n) => Array.from({ length: n }, (_, i) => name(i)).join(' ');
   for (const [what, x] of [
-    ['20,000 distinct held words', distinct(20000)],
+    ['100,000 distinct held words', distinct(100000)],
     ['40,000 nested [ then links', `${'['.repeat(40000)}${'[a](b) '.repeat(40000)}`],
     ['40,000 links to distinct hosts', Array.from({ length: 40000 }, (_, i) => `[a](https://h${i}.example/)`).join(' ')],
     ['5,000 ### entries, each dated', Array.from({ length: 5000 }, (_, i) => `### ${name(i)}\n\n[p](https://x.example/) (read 2026-11-20)\n`).join('\n')],
@@ -218,11 +226,12 @@ test('N the names rule: free on a private repo; on any other, over every pushed 
     assert.match(p.text, new RegExp(`"Zorbly" \\(a ### heading\\)[^\\n]*commit ${hand} carries it`), `N3 the heading, in ${hand}\n${p.text}`);
     assert.match(p.text, new RegExp(`"Brindle" \\(word\\) in ${hand}`), `N3 the word, in ${hand}\n${p.text}`);
     assert.match(p.text, new RegExp(`"zorbly\\.example" \\(link host\\) in ${hand}`), `N3 the host, in ${hand}\n${p.text}`);
-    const sha = W.commitOn('hist2', (x) => write(path.join(x, EXT), ZORBLY));
+    const sha = W.commitOn('hist2', (x) => write(path.join(x, EXT), ZORBLY.replace('It syncs notes too.', 'It syncs notes too, as Brindle does.')));
     const sha2 = W.commitOn('hist2', (x) => write(path.join(x, EXT), EXTERIOR));
     const c = W.checkPr('chore-hist2', sha2);
     assert.match(lines(c.out, 'fail').join('\n'), new RegExp(`"Zorbly" \\(a ### heading\\)[^\\n]*commit ${sha.slice(0, 12)} carries it`), `N3 check-pr fails the earlier version's heading\n${c.out}`);
     assert.match(lines(c.out, 'fail').join('\n'), /names "zorbly\.example" \(link host\) in /, `N3 check-pr fails its host\n${c.out}`);
+    assert.match(lines(c.out, 'fail').join('\n'), new RegExp(`names "Brindle" \\(word\\) in ${sha.slice(0, 12)}`), `N3 check-pr fails the earlier version's word, naming its commit\n${c.out}`);
   });
   await check('N4 the branch\'s own strategy allows nothing; origin main\'s does, a heading named whole', () => {
     W.setVisibility('public');
@@ -237,6 +246,23 @@ test('N the names rule: free on a private repo; on any other, over every pushed 
     assert.equal(r.status, 0, `N4 named on origin main: passes\n${r.text}`);
     assert.doesNotMatch(r.out, /Zorbly|zorbly/, `N4 no name line\n${r.out}`);
     fs.rmSync(path.join(W.old, EXT));
+  });
+  await check('N5 a draft holding nothing asks gh nothing, at exterior check, chore pr and check-pr, and leaves the visibility record as it was', () => {
+    W.setVisibility('public');
+    const rec = path.join(W.old, 'docs/devteam/run/repo-visibility.json');
+    const before = fs.existsSync(rec) ? fs.readFileSync(rec, 'utf8') : null;
+    W.clearGh();
+    write(path.join(W.old, EXT), EXTERIOR);
+    const r = W.run(['exterior', 'check']);
+    assert.equal(r.status, 0, `N5 exterior check passes\n${r.text}`);
+    fs.rmSync(path.join(W.old, EXT));
+    const p = W.chorePr('clean', (w) => write(path.join(w, EXT), EXTERIOR.replace('The most important come first.', 'The most important come first, always.')));
+    assert.equal(p.status, 0, `N5 chore pr pushes\n${p.text}`);
+    const sha = W.commitOn('clean2', (x) => write(path.join(x, EXT), EXTERIOR.replace('The most important come first.', 'The most important come first; the rest follow.')));
+    const c = W.checkPr('chore-clean2', sha);
+    assert.doesNotMatch(c.out, /exterior\.md (breaks|names)|\(a ### heading\)/, `N5 check-pr has no exterior line\n${c.out}`);
+    assert.deepEqual(W.visCalls(), [], 'N5 no gh repo view');
+    assert.equal(fs.existsSync(rec) ? fs.readFileSync(rec, 'utf8') : null, before, 'N5 the visibility record unchanged');
   });
 }));
 
@@ -268,6 +294,20 @@ test('S exterior-stale from git: the latest approving answer\'s commit, else the
     assert.equal(stale().length, 1, 'S3 the refused one pinning main\'s text at today\'s strategy counts for nothing');
     W.askAbout('again', 'yes');
     assert.deepEqual(stale(), [], 'S3 the latest approving one, at today\'s strategy and Self: not stale');
+  });
+  await check('S3b an approved draft that never landed is no base: its pinned blob is not main\'s', () => {
+    W.onMain({ [STRAT]: `${world2('strategy.md')}\nA moved aim.\n` });
+    assert.equal(stale().length, 1, 'S3b stale once the strategy moves');
+    W.commitOn('later', (w) => write(path.join(w, EXT), EXTERIOR.replace('The most important come first.', 'The most important first, at the moved aim.')));
+    W.askAbout('later');
+    assert.equal(stale().length, 1, 'S3b the later approval, of a draft main lacks, drawn at today\'s strategy, counts for nothing');
+  });
+  await check('S3c a pin whose ref is not a full sha counts for nothing', () => {
+    const head = W.g(['rev-parse', 'origin/main'], W.old);
+    const q = 'q-20260105-000000001-supervisor';
+    W.supLine({ id: q, type: 'question', op: 'new', kind: 'owner-decision', class: 'exterior-change', reasons: ['owner-only'], question: 'Approve this exterior (by hand)?', recommendation: 'yes', approves: ['chore-later'], links: [{ title: 'The exterior', path: EXT, ref: head.slice(0, 12), blob: W.blob(EXT) }] });
+    W.answer(q);
+    assert.equal(stale().length, 1, 'S3c main\'s own commit, named by 12 digits, is no base');
   });
   await check('S4 a squash merge: the pinned commit holds while this clone has it; once its branch is deleted and gone, the squash commit is the base (a strategy change made while the draft waited is missed); one more change is seen', () => {
     W.commitOn('sq', (w) => write(path.join(w, EXT), EXTERIOR.replace('The most important come first.', 'The most important come first; the rest follow.')));
@@ -348,10 +388,20 @@ test('M version 1 on main, and a version 1 draft', withProject('x-v1', { strateg
     const sha = W.commitOn('v1b', (w) => write(path.join(w, EXT), draft));
     assert.match(lines(W.checkPr('chore-v1b', sha).out, 'fail').join('\n'), /exterior\.md breaks exterior@2 at [0-9a-f]{12}: exterior\.md holds a fenced exterior block/, 'M3 check-pr fails it');
   });
+  await check('M3b a block the version 1 reader can\'t see (~~~, or in a list item) gets the block error from validate', () => {
+    for (const [what, block] of [['~~~', '~~~exterior\n{ "exterior": 1 }\n~~~\n'], ['in a list item', '- An item.\n\n  ```exterior\n  { "exterior": 1 }\n  ```\n']]) {
+      write(path.join(W.old, EXT), `${world2('exterior.md')}\n${block}`);
+      const v = W.run(['validate']);
+      assert.match(v.out, /exterior\.md: exterior\.md holds a fenced exterior block at line \d+: a plain document has none/, `M3b ${what}: validate\n${v.text}`);
+    }
+    W.g(['checkout', '--', EXT], W.old);
+  });
   await check('M4 exterior show prints a version 1 document whole, exit 0', () => {
+    write(path.join(W.old, EXT), world2('exterior.md'));
     const r = W.run(['exterior', 'show']);
     assert.equal(r.status, 0, r.text);
-    assert.ok(r.out.includes(world('exterior.md').trimEnd()), `M4 the whole document\n${r.out}`);
+    assert.equal(r.out, `Exterior: ${EXT} on main\n\n${world('exterior.md').trimEnd()}`, `M4 the whole document, main's (the working tree holds a plain draft)\n${r.out}`);
+    W.g(['checkout', '--', EXT], W.old);
   });
   await check('M5 a plain version landing on main clears the drift', () => {
     W.onMain({ [EXT]: world2('exterior.md') });
@@ -365,10 +415,16 @@ test('V exterior show, --json and dashboard-data for a plain file', withProject(
     const r = W.run(['exterior', 'show']);
     assert.equal(r.status, 0, r.text);
     assert.equal(r.out, `Exterior: ${EXT} on main\n\n${world2('exterior.md').trimEnd()}`, 'V1 the document');
+    write(path.join(W.old, EXT), `${world2('exterior.md')}\nA draft line main lacks.\n`);
+    assert.equal(W.ok(['exterior', 'show']), `Exterior: ${EXT} on main\n\n${world2('exterior.md').trimEnd()}`, 'V1 main\'s, not the working tree\'s draft');
+    W.g(['checkout', '--', EXT], W.old);
   });
   await check('V2 exterior show --json and dashboard-data\'s exterior are null', () => {
     assert.equal(W.ok(['exterior', 'show', '--json']).trim(), 'null', 'V2 --json');
     assert.equal(json(W.ok(['dashboard-data'])).exterior, null, 'V2 dashboard-data');
+    write(path.join(W.old, EXT), world('exterior.md'));
+    assert.equal(W.ok(['exterior', 'show', '--json']).trim(), 'null', 'V2 --json reads main\'s plain file, not a version 1 draft in the working tree');
+    W.g(['checkout', '--', EXT], W.old);
   });
   await check('V3 validate passes a plain exterior.md on main and in the working tree', () => {
     write(path.join(W.old, EXT), `${world2('exterior.md')}\nAnother line.\n`);

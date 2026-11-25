@@ -9040,7 +9040,7 @@ function exteriorOnMain() {
 function exteriorBase(main, blob) {
   const rel = EXTERIOR_REL();
   const pins = questions().filter((v) => v.class === 'exterior-change' && v.status === 'answered' && v.answered_by === 'owner' && v.matched === true)
-    .map((v) => ({ id: v.id, at: String(v.answered_at ?? ''), pin: (v.links ?? []).find((l) => isObj(l) && l.path === rel && l.blob === blob && typeof l.ref === 'string' && /^[0-9a-f]{40,64}$/.test(l.ref)) }))
+    .map((v) => ({ id: v.id, at: String(v.answered_at ?? ''), pin: (v.links ?? []).find((l) => isObj(l) && l.path === rel && l.blob === blob && typeof l.ref === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(l.ref)) }))
     .filter((x) => x.pin).sort((a, b) => a.at.localeCompare(b.at));
   const last = pins.pop();
   if (last && git(['cat-file', '-e', `${last.pin.ref}^{commit}`], mainRoot) !== null) return { commit: last.pin.ref, from: `${last.id}'s draft` };
