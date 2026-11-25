@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
+import { execFileSync } from 'node:child_process';
 import { json, write } from './lib/kit.mjs';
 import { fixture, SUP } from './lib/next-step-fixture.mjs';
 import { checkExterior as refCheckExterior } from './fixtures/world2/check.mjs';
@@ -239,7 +240,101 @@ test('N the names rule: free on a private repo; on any other, over every pushed 
   });
 }));
 
+test('S exterior-stale from git: the latest approving answer\'s commit, else the last commit changing the file on main', withProject('x-stale', {}, async (W, check) => {
+  const stale = () => W.findings(['exterior-stale']).map((f) => [f.severity, f.subject, f.key]);
+  const pair = () => `${W.blob(STRAT)}-${W.blob(SELF)}`;
+  let q1;
+  await check('S1 an approved plain exterior.md, landed: not stale; once the strategy moves, one exterior-stale per pair', () => {
+    W.commitOn('ext', (w) => write(path.join(w, EXT), EXTERIOR));
+    q1 = W.askAbout('ext');
+    W.land('ext');
+    assert.deepEqual(stale(), [], 'S1 fresh');
+    W.onMain({ [STRAT]: `${world2('strategy.md')}\nA new aim.\n` });
+    assert.deepEqual(stale(), [['low', 'exterior', pair()]], 'S1 one stale, keyed by the pair');
+    assert.match(W.findings(['exterior-stale'])[0].detail, /drew from a strategy\.md main has moved on from/, 'S1 its detail');
+    W.ok(['observe-metrics']);
+    W.ok(['observe-metrics']);
+    assert.equal(W.logLines().filter((x) => x.type === 'observation' && x.kind === 'exterior-stale').length, 1, 'S1 one observation per pair');
+  });
+  await check('S2 the Self moving makes it stale too, under a new pair', () => {
+    const before = pair();
+    W.onMain({ [SELF]: world2('self.md').replace('# ', '# The ') });
+    assert.deepEqual(stale(), [['low', 'exterior', pair()]], 'S2 one stale');
+    assert.notEqual(pair(), before, 'S2 a new pair');
+  });
+  await check('S3 a refused question never counts; the latest approving one does', () => {
+    W.commitOn('again', (w) => write(path.join(w, `${P}/designs/note.md`), 'n\n'));
+    W.askAbout('again', 'no');
+    assert.equal(stale().length, 1, 'S3 the refused one pinning main\'s text at today\'s strategy counts for nothing');
+    W.askAbout('again', 'yes');
+    assert.deepEqual(stale(), [], 'S3 the latest approving one, at today\'s strategy and Self: not stale');
+  });
+  await check('S4 a squash merge: the pinned commit holds while this clone has it; once its branch is deleted and gone, the squash commit is the base (a strategy change made while the draft waited is missed); one more change is seen', () => {
+    W.commitOn('sq', (w) => write(path.join(w, EXT), EXTERIOR.replace('The most important come first.', 'The most important come first; the rest follow.')));
+    const a = W.g(['rev-parse', 'chore-sq'], W.old);
+    W.askAbout('sq');
+    W.onMain({ [STRAT]: `${world2('strategy.md')}\nA newer aim.\n` });
+    W.land('sq', { squash: true });
+    assert.equal(stale().length, 1, 'S4 the pinned commit\'s strategy is not main\'s: stale');
+    W.g(['worktree', 'remove', '--force', W.wtOf('sq')], W.old);
+    W.g(['branch', '-D', 'chore-sq'], W.old);
+    W.g(['push', '-q', 'origin', '--delete', 'chore-sq'], W.old);
+    W.g(['update-ref', '-d', 'refs/remotes/origin/chore-sq'], W.old);
+    fs.rmSync(path.join(W.old, '.git/ORIG_HEAD'), { force: true });
+    W.g(['reflog', 'expire', '--expire=now', '--all'], W.old);
+    W.g(['gc', '-q', '--prune=now'], W.old);
+    assert.throws(() => W.g(['cat-file', '-e', `${a}^{commit}`], W.old), undefined, 'S4 the pinned commit is gone');
+    assert.deepEqual(stale(), [], 'S4 falls back to the squash commit, whose strategy is main\'s: the change made while it waited is missed, as the design says');
+    W.onMain({ [STRAT]: `${world2('strategy.md')}\nThe newest aim.\n` });
+    assert.equal(stale().length, 1, 'S4 a change after the squash commit is seen');
+  });
+  await check('S5 a shallow clone whose boundary is the last commit changing the file: unknown, nothing raised, and exterior check says so', () => {
+    W.onMain({ [EXT]: EXTERIOR.replace('The most important come first.', 'Most important first.') }, 'exterior, by hand');
+    W.onMain({ [STRAT]: `${world2('strategy.md')}\nAn aim after it.\n` }, 'strategy after it');
+    const clone = path.join(W.base, 'shallow');
+    execFileSync('git', ['clone', '-q', '--depth', '2', `file://${W.org}`, clone]);
+    const r = W.run(['metrics', '--json'], clone);
+    assert.equal(r.status, 0, r.text);
+    assert.deepEqual(json(r.out).findings.filter((f) => f.kind === 'exterior-stale'), [], 'S5 nothing raised');
+    const c = W.run(['exterior', 'check'], clone);
+    assert.match(c.out, /^warn: exterior\.md: whether main's exterior\.md is stale is unknown: the last commit changing it, [0-9a-f]{12}, is this shallow clone's boundary/m, `S5 exterior check says so\n${c.out}`);
+  });
+}));
+
+test('D exterior-drift from headings, only where the repo was last known public', withProject('x-drift', { exterior: world2('exterior.md') }, async (W, check) => {
+  const drift = () => W.findings(['exterior-drift']).map((f) => [f.key, f.severity, f.subject]);
+  await check('D1 a heading main\'s strategy no longer names: one exterior-drift, keyed by it; a body word dropped raises none', () => {
+    W.record('public');
+    assert.deepEqual(drift(), [], 'D1 none while named');
+    W.onMain({ [STRAT]: world2('strategy.md').replace('Notes stay plain text, where Ledgerpad locks them in. Its page is ledgerpad.example.', 'Notes stay plain text.').replace('It follows the Open Notes Format.', 'It follows an open format.') });
+    assert.deepEqual(drift().sort(), [['ledgerpad', 'low', 'exterior'], ['open notes format', 'low', 'exterior']], 'D1 once per heading');
+    W.ok(['observe-metrics']);
+    W.ok(['observe-metrics']);
+    assert.equal(W.logLines().filter((x) => x.type === 'observation' && x.kind === 'exterior-drift').length, 2, 'D1 one observation per name');
+  });
+  await check('D2 last known private, unknown, or no record: none', () => {
+    for (const v of ['private', 'unknown']) { W.record(v); assert.deepEqual(drift(), [], `D2 ${v}`); }
+    fs.rmSync(path.join(W.old, 'docs/devteam/run/repo-visibility.json'));
+    assert.deepEqual(drift(), [], 'D2 no record');
+  });
+  await check('D3 a dependency name allows a heading', () => {
+    W.record('public');
+    W.onMain({ [EXT]: world2('exterior.md').replace('### Ledgerpad', '### inkwell-sync'), [STRAT]: world2('strategy.md') });
+    assert.deepEqual(drift(), [], 'D3 none');
+  });
+}));
+
 test('M version 1 on main, and a version 1 draft', withProject('x-v1', { strategy: world('strategy.md'), self: world('self.md'), exterior: world('exterior.md'), files: { 'app/main.js': 'a\n', 'app/plugins/api.js': 'a\n', 'sync/server.js': 's\n', 'deploy/sync.yml': 'd\n' } }, async (W, check) => {
+  await check('M1 validate says nothing of a version 1 exterior.md on main', () => {
+    const r = W.run(['validate']);
+    assert.doesNotMatch(r.text, /exterior\.md/, `M1 validate\n${r.text}`);
+  });
+  await check('M2 one exterior-drift (exterior@1) and nothing else, even public with the strategy moved', () => {
+    W.record('public');
+    W.onMain({ [STRAT]: `${world('strategy.md')}\nA new aim.\n` });
+    assert.deepEqual(W.findings(['exterior-drift', 'exterior-stale']).map((f) => [f.kind, f.key, f.severity]), [['exterior-drift', 'exterior@1', 'low']], 'M2 one drift');
+    assert.match(W.findings(['exterior-drift'])[0].suggestion, /plain document/, 'M2 asks for the plain version');
+  });
   await check('M3 a version 1 draft is refused by exterior check, chore pr and check-pr', () => {
     const draft = `${world('exterior.md')}\nOne more line.\n`;
     write(path.join(W.old, EXT), draft);
@@ -252,6 +347,11 @@ test('M version 1 on main, and a version 1 draft', withProject('x-v1', { strateg
     assert.match(p.text, /fenced exterior block/, `M3 chore pr names the block\n${p.text}`);
     const sha = W.commitOn('v1b', (w) => write(path.join(w, EXT), draft));
     assert.match(lines(W.checkPr('chore-v1b', sha).out, 'fail').join('\n'), /exterior\.md breaks exterior@2 at [0-9a-f]{12}: exterior\.md holds a fenced exterior block/, 'M3 check-pr fails it');
+  });
+  await check('M5 a plain version landing on main clears the drift', () => {
+    W.onMain({ [EXT]: world2('exterior.md') });
+    W.record('private');
+    assert.deepEqual(W.findings(['exterior-drift']), [], 'M5 none');
   });
 }));
 

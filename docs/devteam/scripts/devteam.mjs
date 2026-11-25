@@ -8910,46 +8910,6 @@ function exteriorDraft(text, allowed) {
   return selfPlain.checkExterior(text, { today: exteriorToday(), visibility: 'public', allowed });
 }
 const exteriorRefusedLine = (name) => `"${name}" (a ### heading) is not named whole in origin main's strategy.md or its dependency names: on a repo not known to be private an entry is headed only by a name they give; head it as a group or a topic, or have the strategy name it first`;
-// The names rule (spec, The names rule): an organisation or work is allowed when origin main's
-// strategy.md names it as whole words in any case, or, for depends_on, its dependency names do. The
-// branch's own strategy never counts; with no ref, nothing allows it. A group is never checked here
-// (its words are, in exteriorWords). refused: [{ index, name, line }]; warnings: the dependency files'.
-function exteriorNameLines(block, ref = mainRef()) {
-  const strategy = fileAtRef(strategyRel, ref) ?? '';
-  const deps = dependencyNames(ref);
-  const refused = [];
-  block.entities.forEach((e, i) => {
-    if (e.kind !== 'organisation' && e.kind !== 'work') return;
-    const dep = e.relation === 'depends_on';
-    if (namesWhole(strategy, e.name) || (dep && namesWhole(deps.text, e.name))) return;
-    refused.push({ index: i, name: e.name, line: `exterior.entities[${i}] "${e.name}" (${e.kind}) is not named in origin main's strategy.md${dep ? ', nor its dependency files' : ''}: name it as a group, or have the strategy name it first` });
-  });
-  return { refused, warnings: deps.warnings };
-}
-// An exterior.md's pieces for kit-139's capitalised words: the text outside the exterior block
-// (sentences; every other fenced block is in it, as selfPieces reads self.md), each name (every word, so a group's first word counts), each matters, strategy quote and signal
-// what (sentences), and each relation_word. With no parsed block, the whole text as prose.
-function exteriorPieces(text, block) {
-  if (!block) return [{ where: 'prose', text: String(text), sentences: true }];
-  const lines = String(text).split(/\r?\n/);
-  const b = fencedBlocks(text).blocks.find((x) => x.info === 'exterior');
-  // the block's lines, opening fence to closing, become one blank line
-  lines.splice(b.line - 1, b.body.split('\n').length + 2, '');
-  const pieces = [{ where: 'prose', text: lines.join('\n'), sentences: true }];
-  const add = (where, t, sentences) => pieces.push({ where, text: t, sentences });
-  block.entities.forEach((e, i) => {
-    add(`entities[${i}].name`, e.name, false);
-    add(`entities[${i}].matters`, e.matters, true);
-    e.strategy.forEach((q, j) => add(`entities[${i}].strategy[${j}]`, q, true));
-    e.signals.forEach((x, j) => add(`entities[${i}].signals[${j}].what`, x.what, true));
-    if (e.relation_word !== undefined) add(`entities[${i}].relation_word`, e.relation_word, false);
-  });
-  return pieces;
-}
-// One exterior.md text's words that origin main's strategy and dependency files don't name.
-function exteriorWords(text, block, ref = mainRef()) {
-  return unknownNames(exteriorPieces(text, block), `${namesAllowedText(ref)}\n${dependencyNames(ref).text}`);
-}
 const exteriorWordLine = (w) => `"${w.word}" (${w.where}) is in neither origin main's strategy.md nor its dependency files: on a repo not known to be private, the draft is public once its branch is pushed; reword it, or check it and name it on the chore (chore pr --names-checked)`;
 // The draft's history (every version is pushed): the contract and dated sources on head ({ text }, or
 // null when there is no exterior.md at the head), then the names rule on each version ([{ commit,
@@ -9089,36 +9049,71 @@ function exteriorShowLines(block, selfWhat) {
   }
   return lines;
 }
+// The commit main's exterior.md (blob) was drawn at, whose strategy.md and self.md it stands on (the
+// design's Staleness, from git): 1. the pinned commit of the latest exterior-change question the owner
+// answered with its recommendation whose pinned blob is blob (a refused one never counts), when this
+// clone has that commit; 2. else the commit that last changed the file on main, unless it is a
+// shallow clone's boundary (whose change can't be read); 3. else unknown. { commit, from } or
+// { commit: null, why }.
+function exteriorBase(main, blob) {
+  const rel = EXTERIOR_REL();
+  const pins = questions().filter((v) => v.class === 'exterior-change' && v.status === 'answered' && v.answered_by === 'owner' && v.matched === true)
+    .map((v) => ({ id: v.id, at: String(v.answered_at ?? ''), pin: (v.links ?? []).find((l) => isObj(l) && l.path === rel && l.blob === blob && typeof l.ref === 'string' && /^[0-9a-f]{40,64}$/.test(l.ref)) }))
+    .filter((x) => x.pin).sort((a, b) => a.at.localeCompare(b.at));
+  const last = pins.pop();
+  if (last && git(['cat-file', '-e', `${last.pin.ref}^{commit}`], mainRoot) !== null) return { commit: last.pin.ref, from: `${last.id}'s draft` };
+  const changed = git(['log', '-1', '--format=%H', main, '--', rel], mainRoot);
+  if (!changed) return { commit: null, why: 'no commit on main changes it' };
+  if (git(['rev-parse', '--is-shallow-repository'], mainRoot) === 'true') {
+    const shallow = readText(path.resolve(mainRoot, git(['rev-parse', '--git-path', 'shallow'], mainRoot) ?? '.git/shallow')) ?? '';
+    if (shallow.split('\n').includes(changed)) return { commit: null, why: `the last commit changing it, ${changed.slice(0, 12)}, is this shallow clone's boundary` };
+  }
+  return { commit: changed, from: 'the last commit changing it on main' };
+}
 // metrics' exterior findings, read from main with no network call (none with no main), each keyed so
-// observeFindings keeps one observation per name or blob pair (spec, Findings):
-// exterior-drift once per organisation or work the names rule no longer allows against main's files,
-// unless the visibility last recorded is private; exterior-stale while main's strategy.md or self.md
-// blob isn't the one exterior.md drew from; both low. exterior-missing while main has self.md, a
-// written strategy linking it, and no exterior.md: high until an exterior-change question is asked,
-// medium while it is open (worldMissingSeverity, kit-814). A main exterior.md breaking the contract
-// raises none (validate errors on it).
+// observeFindings keeps one observation per name or blob pair. A version 1 exterior.md: one
+// exterior-drift (key exterior@1) asking for the plain version, and no other. A plain one:
+// exterior-drift once per ### heading main's strategy.md and dependency names no longer name, only
+// where the repo was last known public (a machine with no record says nothing); exterior-stale while
+// main's strategy.md or self.md blob isn't the one at its base (exteriorBase; unknown raises none);
+// both low. exterior-missing while main has self.md, a written strategy linking it, and no
+// exterior.md: high until an exterior-change question is asked, medium while it is open
+// (worldMissingSeverity, kit-814).
 function exteriorFindings(add) {
   const main = projectInRepo ? mainRef() : null;
   if (!main) return;
-  const blobAt = (rel) => git(['rev-parse', '--verify', '--quiet', `${main}:${rel}`], mainRoot);
-  const strategyBlob = blobAt(strategyRel);
-  const selfBlob = blobAt(selfRel());
+  const blobAt = (c, rel) => git(['rev-parse', '--verify', '--quiet', `${c}:${rel}`], mainRoot);
+  const strategyBlob = blobAt(main, strategyRel);
+  const selfBlob = blobAt(main, selfRel());
   const pair = `${strategyBlob}-${selfBlob}`;
   const m = exteriorOnMain();
   if (!m) {
     if (selfBlob && strategyState() === 'written' && linksSelf(strategyMainText())) add(worldMissingSeverity('exterior-change'), 'exterior-missing', 'exterior', 'main has self.md and a strategy linking it, and no exterior.md', 'draft exterior.md from the strategy and self.md (supervisor.md, Monitoring) in a chore, run exterior check, and ask exterior-change', { key: pair });
     return;
   }
-  const { block } = exteriorDoc(m.text);
-  if (!block) return;
-  if (lastRepoVisibility() !== 'private') {
-    for (const r of exteriorNameLines(block, main).refused) add('low', 'exterior-drift', 'exterior', `exterior.md names "${r.name}", which main's strategy.md${block.entities[r.index].relation === 'depends_on' ? ' and dependency files' : ''} no longer name`, 'draft a new version of exterior.md that names it as a group, or have the strategy name it; run exterior check before chore pr', { key: r.name.toLowerCase() });
+  if (selfPlainVersion(m.text) === 1) {
+    add('low', 'exterior-drift', 'exterior', "main's exterior.md is version 1 (a fenced exterior block)", 'draft exterior.md as a plain document in a chore (exterior check, then chore pr and ask exterior-change; supervisor.md, Monitoring)', { key: 'exterior@1' });
+    return;
   }
-  if (block.strategy_blob !== strategyBlob || block.self_blob !== selfBlob) add('low', 'exterior-stale', 'exterior', `exterior.md drew from ${block.strategy_blob !== strategyBlob ? 'a strategy.md' : 'a self.md'} main has moved on from`, 're-read self.md first and draft a new one if it no longer holds; then draft a new version of exterior.md from the strategy and that self.md', { key: pair });
+  if (lastRepoVisibility() === 'public') {
+    const allowed = exteriorAllowed(main);
+    const seen = new Set();
+    for (const h of selfPlain.headings(m.text)) {
+      if (h.level !== 3 || seen.has(h.text.toLowerCase()) || selfPlain.namesWhole(allowed.names, h.text)) continue;
+      seen.add(h.text.toLowerCase());
+      add('low', 'exterior-drift', 'exterior', `exterior.md's entry "${h.text}" is named in neither main's strategy.md nor its dependency names`, 'draft a new version of exterior.md that heads it as a group or a topic, or have the strategy name it; run exterior check before chore pr', { key: h.text.toLowerCase() });
+    }
+  }
+  const base = exteriorBase(main, m.blob);
+  if (!base.commit) return;
+  const sb = blobAt(base.commit, strategyRel);
+  const fb = blobAt(base.commit, selfRel());
+  if (sb !== strategyBlob || fb !== selfBlob) add('low', 'exterior-stale', 'exterior', `exterior.md drew from ${sb !== strategyBlob ? 'a strategy.md' : 'a self.md'} main has moved on from (at ${base.commit.slice(0, 12)}, ${base.from})`, 're-read self.md first and draft a new one if it no longer holds; then draft a new version of exterior.md from the strategy and that self.md', { key: pair });
 }
 // exterior check's lines for the working tree's exterior.md, the draft: the contract (errors) and its
 // dated sources (warnings); then, on a repo not known to be private (gh asked only when a name is
-// refused or held), each refused heading an error and each held word or link host a warning.
+// refused or held), each refused heading an error and each held word or link host a warning; and,
+// with a plain exterior.md on main whose base can't be read, a warning that its staleness is unknown.
 function exteriorCheckLines() {
   const text = exteriorTreeText();
   if (text === null) return { errors: [], warnings: [] };
@@ -9133,6 +9128,12 @@ function exteriorCheckLines() {
       errors.push(...d.refused.map((n) => `${exteriorRefusedLine(n)}${tail}`));
       warnings.push(...[...d.held.map((word) => ({ word, where: 'word' })), ...d.hosts.map((word) => ({ word, where: 'link host' }))].map(exteriorWordLine));
     }
+  }
+  const main = projectInRepo ? mainRef() : null;
+  const m = main ? exteriorOnMain() : null;
+  if (m && selfPlainVersion(m.text) === 2) {
+    const base = exteriorBase(main, m.blob);
+    if (!base.commit) warnings.push(`whether main's exterior.md is stale is unknown: ${base.why}, and no answered exterior-change question pins a commit this clone has`);
   }
   return { errors, warnings };
 }
