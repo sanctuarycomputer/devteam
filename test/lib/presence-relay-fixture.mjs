@@ -50,10 +50,14 @@ after(async () => {
   F.done();
 });
 
+// `text` without the fixture's own base path: its mkdtemp end is random and can spell zq7 (git-facts.json
+// keys name the repository's path).
+const sansBase = (F, text) => text.replaceAll(F.base, '<base>');
+
 // A8 (d)'s look, for A7's parts (each on a dashboard of its own): with every connection closed, no
 // path under run/ names presence, no file there holds a zq7 word, and the dashboard's output holds none.
 async function nothingKept() {
-  const { runDir, dash } = await dashboard();
+  const { F, runDir, dash } = await dashboard();
   await closeEvery();
   const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : e.isFile() ? [path.join(d, e.name)] : []));
   const files = walk(runDir);
@@ -61,9 +65,9 @@ async function nothingKept() {
   for (const f of files) {
     const rel = path.relative(runDir, f);
     assert.ok(!/presence/i.test(rel), `no path under run/ names presence (${rel})`);
-    assert.ok(!fs.readFileSync(f).includes('zq7'), `run/${rel} holds nothing of the test's presence`);
+    assert.ok(!sansBase(F, fs.readFileSync(f, 'utf8')).includes('zq7'), `run/${rel} holds nothing of the test's presence`);
   }
-  assert.ok(!dash.out().includes('zq7'), "the dashboard's output holds nothing of the test's presence");
+  assert.ok(!sansBase(F, dash.out()).includes('zq7'), "the dashboard's output holds nothing of the test's presence");
 }
 
 // ---- the file's clients: every one through open(), which answers the relay's ping, and closed with its
@@ -158,4 +162,4 @@ async function onlyProbe(url) {
   clients.delete(probe);
 }
 
-export { between, check, clients, closedWithin, closeEvery, dashboard, fill200, hereMsg, HUB_PORT, json, kinds, nothingKept, onlyProbe, open, P, peopleIds, peopleWith, sentinel, until };
+export { between, check, clients, closedWithin, closeEvery, dashboard, fill200, hereMsg, HUB_PORT, json, kinds, nothingKept, onlyProbe, open, P, peopleIds, peopleWith, sansBase, sentinel, until };
