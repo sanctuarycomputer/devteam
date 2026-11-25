@@ -1649,7 +1649,8 @@ test('a preview\'s Start and Stop', { ...CHROME, timeout: 300000 }, async (t) =>
   // a press within a second of its coming up is refused with its words (kit-145); once it has settled, the same press goes
   const live = `(() => { const b = document.querySelector('${start}'); return !!b && avStep.ready(b) !== null; })()`;
   assert.equal(await p.ev('window.__starts ?? 0'), 0, 'nothing sent yet');
-  await p.ev('avStep.press.seen.clear()');
+  // (begun again as the press's own move arrives, so a slow box can't let the second go by in between)
+  await p.ev(`(window.addEventListener('mousemove', () => avStep.press.seen.clear(), { capture: true, once: true }), true)`);
   await p.click(start);
   await soon(`document.getElementById('av-held')?.textContent === 'That moved just now. Press again in a second.' && !document.getElementById('av-held').hidden`, 'the press refused, with its words');
   assert.equal(await p.ev('window.__starts ?? 0'), 0, 'refused: nothing sent');

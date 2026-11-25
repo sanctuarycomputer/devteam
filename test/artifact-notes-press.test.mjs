@@ -11,6 +11,17 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
   const X = await notes(t, 'artifact-notes-press');
   const { sub } = X;
   const { N, AV_WT, plant, openAt, shown, text, has, tabOf, cardOf, holdPoll, ARMED, at, press, settled, enter, forge, spot, SETTLE, acts, heldShown, byArrow, tapOn } = X;
+  // a press that must count: made once its control is live, and again only if it was held (frames that stall on a busy
+  // box begin its second again)
+  const counts = async (V, sel, done, what, how = press) => {
+    for (let k = 0; k < 6 && !(await V.p.ev(done)); k++) {
+      await V.soon(`(() => { const e = document.querySelector(${J(sel)}); return ${done} || (!!e && avStep.ready(e) !== null); })()`, `${what}: it is live`);
+      if (await V.p.ev(done)) return;
+      await how(V, sel);
+      if (await V.settle(done, 1500)) return;
+    }
+    assert.ok(await V.p.ev(done), what);
+  };
   await sub('A24: a page that moves Resolve under the pointer gets no press', async () => {
     const V = await byArrow();
     const was = await V.p.ev(SETTLE('#tl-card [data-tl-accept]'));
@@ -24,8 +35,7 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
     await new Promise((r) => setTimeout(r, 700));
     assert.equal(await V.p.ev(heldShown), true, 'the words still there after a redraw');
     await settled(V);
-    await press(V, '#tl-card [data-tl-accept]');
-    await V.soon(`window.__posts.some((x) => x.action === 'thread-accept-addressed')`, 'settled: Resolve posts');
+    await counts(V, '#tl-card [data-tl-accept]', `window.__posts.some((x) => x.action === 'thread-accept-addressed')`, 'settled: Resolve posts');
     assert.deepEqual(await acts(V, 'thread-accept-addressed'), [{ id: N.trial, at: AT }], 'the note as drawn');
   });
 
@@ -77,10 +87,18 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
     await V.p.ev(FRAMES);
     assert.deepEqual(await acts(V, 'thread-accept-addressed'), [], 'drawn above it until just now: nothing');
     // and a thing drawn above it in its card, pushing it down
+    // (away from the edges: against the bottom the card is placed higher as it grows, and Resolve never moves at all)
+    await V.p.move(5, 5);
+    await V.p.ev('(document.activeElement?.blur(), true)');
+    await move({ x: 40, y: 120, w: 220, h: 40 });
     await settled(V);
-    await V.p.ev(`(document.querySelector('#tl-card .tl-addr .by').insertAdjacentHTML('afterend', '<div style="height:9px"></div>'), true)`);
+    // (pushed as the press's own move arrives, so a slow box can't let the second go by in between)
+    await V.p.ev(`(window.__under = null, window.addEventListener('mousemove', (e) => {
+      document.querySelector('#tl-card .tl-addr .by').insertAdjacentHTML('afterend', '<div style="height:4px"></div>');
+      window.__under = document.querySelector(${J(R)}).contains(document.elementFromPoint(e.clientX, e.clientY)); }, { capture: true, once: true }), true)`);
     await press(V, R);
     await V.p.ev(FRAMES);
+    assert.equal(await V.p.ev('window.__under'), true, 'setup: pushed, and Resolve is still under the pointer');
     assert.deepEqual(await acts(V, 'thread-accept-addressed'), [], 'pushed down just now: nothing');
     // crept, less than half a pixel a frame
     await settled(V);
@@ -119,8 +137,7 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
     await V.p.ev(`(document.dispatchEvent(new Event('visibilitychange')), true)`);
     await soonAfter('the tab hidden or shown: nothing');
     await settled(V);
-    await press(V, '#tl-card [data-tl-accept]');
-    await V.soon(`window.__posts.some((x) => x.action === 'thread-accept-addressed')`, 'settled: Resolve posts');
+    await counts(V, '#tl-card [data-tl-accept]', `window.__posts.some((x) => x.action === 'thread-accept-addressed')`, 'settled: Resolve posts');
   });
 
   await sub('A24: Hand over bared by the card closing, and another artifact\'s in the same place', async () => {
@@ -151,8 +168,7 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
     assert.deepEqual(await acts(V, 'artifact-handoff'), [], 'another artifact\'s Hand over in its place: nothing');
     await V.p.ev(`(TS.at = 'plan-pricing', true)`);
     await new Promise((r) => setTimeout(r, ARMED));
-    await press(V, bar);
-    await V.soon(`window.__posts.some((x) => x.action === 'artifact-handoff')`, 'settled: Hand over posts');
+    await counts(V, bar, `window.__posts.some((x) => x.action === 'artifact-handoff')`, 'settled: Hand over posts');
   });
 
   await sub('A24: after the viewer closes, what it bared waits a second, by pointer and key; plain Send does not', async () => {
@@ -162,16 +178,21 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
     await V.focusFrame();
     const shut = async () => { await V.p.ev(`(window.__hits = [], leaveArtifact(), true)`); await V.soon(CLOSED, 'setup: closed'); };
     await V.p.ev(`(window.__t0 = 0, new MutationObserver(() => { window.__t0 = performance.now(); }).observe(document.getElementById('artifact-view'), { attributes: true, attributeFilter: ['hidden'] }), true)`);
-    await forge(V, { type: 'key', key: 'Escape' });
-    await V.soon(CLOSED, 'setup: the page closed the viewer');
-    await press(V, '#zz-a'); await press(V, '#zz-k');
-    await V.p.ev(`(document.getElementById('zz-a').focus(), true)`); await enter(V);
-    await V.p.ev(`(document.getElementById('zz-k').focus(), true)`); await enter(V);
-    await V.p.ev(`(document.getElementById('zz-g').focus(), true)`); await V.p.key('ArrowDown'); await press(V, '#zz-g');
-    const late = await V.p.ev('performance.now() - window.__t0');
+    // a run slower than the second shows nothing: it is made again
+    let late = Infinity;
+    for (let i = 0; i < 5 && late >= 950; i++) {
+      if (i) { await openAt(V, AV_WT, 'plan-pricing'); await V.focusFrame(); await V.p.ev('(window.__hits = [], true)'); }
+      await forge(V, { type: 'key', key: 'Escape' });
+      await V.soon(CLOSED, 'setup: the page closed the viewer');
+      await press(V, '#zz-a'); await press(V, '#zz-k');
+      await V.p.ev(`(document.getElementById('zz-a').focus(), true)`); await enter(V);
+      await V.p.ev(`(document.getElementById('zz-k').focus(), true)`); await enter(V);
+      await V.p.ev(`(document.getElementById('zz-g').focus(), true)`); await V.p.key('ArrowDown'); await press(V, '#zz-g');
+      late = await V.p.ev('performance.now() - window.__t0');
+    }
     assert.ok(late < 950, `setup: all within the second (${late})`);
     assert.deepEqual(await V.p.ev('window.__hits'), [], 'nothing within the second, by pointer or key');
-    assert.equal(await V.p.ev(heldShown), true, 'the words say why');
+    assert.ok(await V.settle(heldShown, 1000), 'the words say why');
     await new Promise((r) => setTimeout(r, ARMED));
     await press(V, '#zz-a'); await press(V, '#zz-k');
     await V.p.ev(`(document.getElementById('zz-a').focus(), true)`); await enter(V);
@@ -218,8 +239,7 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
     await V.p.ev(FRAMES);
     assert.deepEqual(await acts(V, 'thread-accept-addressed'), [], 'a mark swapped in: nothing');
     await settled(V);
-    await press(V, '#tl-card [data-tl-accept]');
-    await V.soon(`window.__posts.some((x) => x.action === 'thread-accept-addressed')`, 'settled with no viewer: Resolve posts');
+    await counts(V, '#tl-card [data-tl-accept]', `window.__posts.some((x) => x.action === 'thread-accept-addressed')`, 'settled with no viewer: Resolve posts');
     assert.deepEqual(await acts(V, 'thread-accept-addressed'), [{ id: N.trial, at: NEWER }], 'the new mark');
     // another press in the same card isn't held
     const W = await tabOf({ [N.trial]: { ...ROW.C20(), status: 'resolved' } });
@@ -237,13 +257,12 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
     await V.p.send('Emulation.setTouchEmulationEnabled', { enabled: true });
     await new Promise((r) => setTimeout(r, ARMED));
     await settled(V);
+    await V.soon(`avStep.ready(document.getElementById('zz-q')) !== null`, 'setup: the answer is live');
     await tapOn(V, '#zz-q');
     await V.soon('window.__q === 1', 'a tap on a settled answer');
-    await tapOn(V, '#av-handover');
-    await V.soon(`window.__posts.some((x) => x.action === 'artifact-handoff')`, 'a tap on a settled Hand over posts');
+    await counts(V, '#av-handover', `window.__posts.some((x) => x.action === 'artifact-handoff')`, 'a tap on a settled Hand over posts', tapOn);
     await settled(V);
-    await tapOn(V, '#tl-card [data-tl-accept]');
-    await V.soon(`window.__posts.some((x) => x.action === 'thread-accept-addressed')`, 'a tap on the settled Resolve posts');
+    await counts(V, '#tl-card [data-tl-accept]', `window.__posts.some((x) => x.action === 'thread-accept-addressed')`, 'a tap on the settled Resolve posts', tapOn);
   });
 
   await sub('A24: the rule holds in a /view/ tab; a person who may only look gets their own words', async () => {
@@ -260,11 +279,9 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
     assert.deepEqual([await acts(V, 'thread-accept-addressed'), await acts(V, 'artifact-handoff')], [[], []], 'moved just now: nothing');
     await new Promise((r) => setTimeout(r, ARMED));
     await settled(V);
-    await press(V, '#av-handover');
-    await V.soon(`window.__posts.some((x) => x.action === 'artifact-handoff')`, 'settled: Hand over posts');
+    await counts(V, '#av-handover', `window.__posts.some((x) => x.action === 'artifact-handoff')`, 'settled: Hand over posts');
     await settled(V);
-    await press(V, '#tl-card [data-tl-accept]');
-    await V.soon(`window.__posts.some((x) => x.action === 'thread-accept-addressed')`, 'settled: Resolve posts');
+    await counts(V, '#tl-card [data-tl-accept]', `window.__posts.some((x) => x.action === 'thread-accept-addressed')`, 'settled: Resolve posts');
     const W = await byArrow();
     await W.p.ev(`(window.__vo = viewOnly, viewOnly = () => window.__vo('view'), viewOnly(), avStep.forget(), true)`);
     await press(W, '#tl-card [data-tl-accept]');
@@ -307,8 +324,11 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
       await V.p.clickAt(s.x, s.y);
     }
     assert.deepEqual(await V.p.ev('window.__zz'), [], 'moved just now: none gets through');
-    await new Promise((r) => setTimeout(r, ARMED + 100));
-    for (const s of await spots()) await V.p.clickAt(s.x, s.y);
+    // (frames that stall on a busy box start a second again: each is pressed once it is live, and again if it stalled between)
+    for (const [i, s] of (await spots()).entries()) for (let k = 0; k < 5 && (await V.p.ev('window.__zz.length')) === i; k++) {
+      await V.soon(`avStep.ready(document.querySelectorAll('.zz')[${i}]) !== null`, `${s.n} is live`);
+      await V.p.clickAt(s.x, s.y);
+    }
     assert.deepEqual(await V.p.ev('window.__zz'), names, 'settled: each gets through');
     // another lesson's button in the same place
     await V.p.ev(`(window.__zz = [], document.querySelectorAll('.zz[data-zz="two"]').forEach((e) => { e.dataset.oaKnow = 'l-2'; }), true)`);
@@ -330,7 +350,7 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
       await V.p.ev(`(window.__s = 0, document.addEventListener('click', (e) => { if (e.target.closest('[data-tl-send]')) window.__s++; }, true), document.getElementById('tl-card').style.marginLeft = '2px', true)`);
       await press(V, '[data-tl-send]');
       assert.equal(await V.p.ev('window.__s'), want, want ? 'plain words: at once' : 'it would reopen: held');
-      if (!want) { await new Promise((r) => setTimeout(r, ARMED)); await press(V, '[data-tl-send]'); assert.equal(await V.p.ev('window.__s'), 1, 'settled: it goes'); }
+      if (!want) { await counts(V, '[data-tl-send]', 'window.__s > 0', 'settled: it goes'); assert.equal(await V.p.ev('window.__s'), 1, 'settled: once'); }
     }
   });
 
@@ -354,8 +374,7 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
     const c = await V.p.ev(`(() => { const r = document.getElementById('tl-card').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
     await V.p.move(c.x, c.y);
     await settled(V);
-    await press(V, '#tl-card [data-tl-accept]');
-    await V.soon(`window.__posts.some((x) => x.action === 'thread-accept-addressed')`, 'the pointer on the card: it settles and posts');
+    await counts(V, '#tl-card [data-tl-accept]', `window.__posts.some((x) => x.action === 'thread-accept-addressed')`, 'the pointer on the card: it settles and posts');
     await loop(false);
     // the keyboard, on a page that moves it with nothing on the card
     const W = await byArrow();
