@@ -1100,7 +1100,7 @@ export function createGateway(opts = {}) {
   const dir = opts.dir ?? gatewayDir();
   const ttydPort = Number(opts.ttydPort ?? env.DEVTEAM_TTYD_PORT ?? 7681);
   const stored = stateStore(dir);
-  // every write is followed by a look at the open presence sockets (endPresence), in the same turn
+  // every write is followed by a look at the open presence and canvas sockets (endPresence), in the same turn
   let afterSave = () => {};
   const store = { load: stored.load, save: (s) => { stored.save(s); afterSave(); } };
   const firstFile = (...c) => c.find((f) => f && fs.existsSync(f));
@@ -3520,7 +3520,7 @@ export function createGateway(opts = {}) {
     socket.once('close', () => heldSockets.delete(socket));
   };
   const dropPerson = (id) => { for (const [sock, holder] of heldSockets) if (holder.person === id) sock.destroy(); };
-  // A /presence socket (presence@1 §2) lives no longer than its session, at the level it opened with.
+  // A /presence or /canvas socket (presence@1 §2, canvas@1 §3) lives no longer than its session, at the level it opened with.
   // Looked at after every write (sign-out, removal, a level or role change), at the session's own end,
   // and each second while any is open, for a write by another process (devteam-reclaim). A state that
   // can't be read ends them all: the page tries again.
@@ -3626,7 +3626,7 @@ export function createGateway(opts = {}) {
     if (!isOwner(who.person) && ownerOnlyPreview(name)) return refuse(403, 'Forbidden');
     holdSocket(socket, who.person);
     const link = previews.get(name);
-    // a project's name that has the form of a preview's: no socket of its but /presence
+    // a project's name that has the form of a preview's: no socket of its but /presence and /canvas
     if (!link && projects.has(name)) return refuse(421, 'Misdirected Request');
     if (!req.url.startsWith('/') || req.url.startsWith('//')) return refuse(400, 'Bad Request');
     if (!link || link.ambiguous) return refuse(503, 'Service Unavailable');
@@ -3642,7 +3642,8 @@ export function createGateway(opts = {}) {
     socket.once('close', drop);
     return relayUpgrade(req, socket, head, { port: link.port, host, own, loopbackHost: 'localhost' });
   };
-  // A page's presence socket (presence@1 §2), on a project's name or the box's own: that name's Origin
+  // A page's presence socket (presence@1 §2), on a project's name or the box's own, or its canvas
+  // socket (canvas@1 §3, the same handshake), on a project's name alone: that name's Origin
   // (an artifact frame's is null), a session, at any level, and the person and level the gateway says.
   // Project and preview names share a form, so the list decides, once there is a session.
   const PRESENCE_ANSWER_MS = opts.presenceAnswerMs ?? 10000; // only a test shortens it
@@ -3666,12 +3667,14 @@ export function createGateway(opts = {}) {
     }
     return relayUpgrade(req, socket, head, { port, host: '127.0.0.1', own, loopbackHost: '127.0.0.1', extra: person ? { 'x-devteam-person': person, 'x-devteam-level': levelOf(who.person) } : null, answerMs: PRESENCE_ANSWER_MS, only101: true });
   };
-  // The terminal's WebSocket, on the terminal's name, its Origin, a session; any preview's; and presence.
+  // The terminal's WebSocket, on the terminal's name, its Origin, a session; any preview's; presence; and a canvas.
   server.on('upgrade', (req, socket, head) => {
     const refuse = (code, msg) => endUpgrade(socket, code, msg);
     const label = labelOf(req.headers.host);
-    // the path exactly as sent, less a query, as the relay reads it: only /presence is /presence
-    if (req.method === 'GET' && req.url.split('?')[0] === '/presence' && (label || req.headers.host === pubUrl.host)) return presenceUpgrade(req, socket, head, label, refuse).catch(() => socket.destroy());
+    // the path exactly as sent, less a query, as the relay reads it: only /presence is /presence, and
+    // only /canvas is /canvas (canvas@1 §3), which a project's dashboard serves and the hub doesn't
+    const route = req.method === 'GET' ? req.url.split('?')[0] : null;
+    if ((route === '/presence' && (label || req.headers.host === pubUrl.host)) || (route === '/canvas' && label)) return presenceUpgrade(req, socket, head, label, refuse).catch(() => socket.destroy());
     const pv = previewOf(req.headers.host);
     if (pv) return previewUpgrade(req, socket, head, pv, refuse).catch(() => socket.destroy());
     if (req.headers.host !== termHost) return refuse(421, 'Misdirected Request');
