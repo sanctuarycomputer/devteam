@@ -92,6 +92,7 @@ test('a call with no answer says what Chrome was doing', { skip: canDrive ? fals
         assert.ok(r.e, 'the close fails');
         assert.ok(r.ms >= 30000 && r.ms < 36500, `took ${r.ms} ms`);
         assert.match(r.e.message, /^closing the tab: still open after Page\.close; Runtime\.evaluate: no answer from Chrome in 30 s; tab [0-9A-F]{8} (at about:blank|\(Chrome's list of tabs: no answer in 2 s\)); a beforeunload dialog \("", at about:blank\) open on this tab for \d+\.\d s; /);
+        if (/Chrome's list of tabs: no answer/.test(r.e.message)) t.diagnostic(`a look ran out its bound: ${r.e.message.slice(r.e.message.indexOf('; tab '))}`);
       } finally { await chrome.close(); }
     }),
     t.test('a tab still saving is closed once the save ends, with no dialog', async () => {
