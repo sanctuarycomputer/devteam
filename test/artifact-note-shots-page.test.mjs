@@ -331,7 +331,8 @@ test('K1 a page\'s WebRTC joins no mDNS group and sends nothing round the dead p
   let over = false;
   const watch = (async () => {
     while (!over) {
-      for (const p of fs.existsSync(pids) ? fs.readFileSync(pids, 'utf8').trim().split('\n').map(Number) : []) { const g = groupSockets(p); held.mdns = Math.max(held.mdns, g.mdns); held.read ||= g.tcp > 0; }
+      // no /proc (macOS): no count, the rest is still checked
+      for (const p of linux && fs.existsSync(pids) ? fs.readFileSync(pids, 'utf8').trim().split('\n').map(Number) : []) { const g = groupSockets(p); held.mdns = Math.max(held.mdns, g.mdns); held.read ||= g.tcp > 0; }
       await new Promise((r) => setTimeout(r, 100));
     }
   })();
