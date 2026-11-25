@@ -1,9 +1,10 @@
-// kit-135: project/exterior.md, what the project relates to (exterior@1). The supervisor drafts it
-// from the strategy and self.md: each entity by its relation, why it matters, its weight and the
-// signals that show it. exterior show and exterior check read it, validate refuses one that breaks
-// the contract, the strategy and self blobs and quotes are checked at the draft only, the names rule
-// holds a draft on a repo not known to be private, and metrics raises exterior-drift, exterior-stale
-// and exterior-missing. Each assertion names its check (A1…) in the spec's acceptance table.
+// kit-135: project/exterior.md, what the project relates to; since kit-863 a plain document
+// (exterior@2), each ### entry with a dated source. exterior show prints main's; exterior check, chore
+// pr and check-pr refuse a draft holding a version 1 block, and on a repo not known to be private hold
+// a ### heading main's strategy or dependency names don't name whole, and each other capitalised word
+// and link host until named on the chore. A version 1 file still validates by its contract (its
+// quotes and blobs at the draft). metrics raises exterior-drift, exterior-stale and exterior-missing.
+// Each assertion names its check (A1…) in kit-135's acceptance table, as kit-863 moved it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -26,6 +27,46 @@ const PARTS = { 'app/main.js': 'app\n', 'app/plugins/api.js': 'api\n', 'sync/ser
 // of version 1 is refused, though main's version 1 file still validates
 const PLAIN_SELF = SELF_MD.replace(/\n```self\n[\s\S]*?\n```\n?/, '\n').replace('Its parts are the app people write in, the sync service', 'Its parts are [the app](../../../app/) people write in, [the sync service](../../../sync/)');
 const re = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+// a read date three days back, so every dated source is in range whatever day the test runs
+const DAY = new Date(Date.now() - 3 * 86400000).toISOString().slice(0, 10);
+// the fixture strategy naming the one host the plain fixtures' sources use (its blob is not
+// EXTERIOR_MD's strategy_blob, so version 1 checks keep STRATEGY)
+const STRATEGY_PLAIN = `${STRATEGY}- Its own pages, at quillmark.example, say what it ships.\n`;
+const src = (what, page) => `([${what}](https://quillmark.example/${page}), read ${DAY})`;
+// a plain exterior.md (exterior@2) on the strategy: each ### entry a name it gives, each capitalised
+// word in it, each source on quillmark.example
+const PLAIN_EXT = `# Exterior
+
+What Quillmark relates to, by how each relates to it.
+
+## Who it serves
+
+### Independent researchers
+
+They write long notes and want them to last ${src('notes', 'researchers')}.
+
+## What it depends on
+
+### Acme Storage
+
+Sync runs on it, so its prices and its outages are ours ${src('prices', 'acme')}.
+
+## What builds on it
+
+### Inkwell Plugins
+
+The plugins people ask for most ${src('plugins', 'inkwell')}.
+
+## Its alternative
+
+### Ledgerpad
+
+It does the same job and locks notes in ${src('compare', 'ledgerpad')}.
+`;
+// the plain fixture with one more entry, headed by a name nothing gives
+const ZENTRIX = `${PLAIN_EXT}\n## Who it works with\n\n### Zentrix Labs\n\nIt sponsors the yearly meetup ${src('meetup', 'meetup')}.\n`;
+// a plain exterior.md of one ### entry
+const onePlain = (heading, prose = 'It matters here') => `# Exterior\n\nWhat Quillmark relates to.\n\n## Who it serves\n\n### ${heading}\n\n${prose} ${src('notes', 'x')}.\n`;
 
 // A fixture project (kit-139's shape): main holds strategy (null: init's template), self.md and
 // exterior.md (null: none) and the parts' files; a gh on PATH answers `gh repo view acme/quillmark`
@@ -89,8 +130,11 @@ const withProject = (name, opts, body) => async (t) => {
   try { await body(W, (title, fn) => t.test(title, fn)); } finally { W.done(); }
 };
 
+// exterior check's refusal of a draft holding a version 1 block (exterior@2 has none)
+const BLOCK = /^error: exterior\.md: exterior\.md holds a fenced exterior block at line \d+: a plain document has none$/m;
+
 test('A5 A8 exterior check and validate hold the contract', withProject('exterior-contract', {}, async (W, check) => {
-  await check('A5 every exterior case is refused by exterior check and validate', () => {
+  await check('A5 every version 1 case: exterior check refuses its block, validate its contract; a file with no block is plain', () => {
     const cases = [
       ...CASES.map((c) => ({ name: c.file, text: world(`invalid/${c.file}`), expect: c.expect })),
       { name: 'inline unclosed', text: '# Exterior\n\n```exterior\n{ "exterior": 1 }\n', expect: 'never closes' },
@@ -100,8 +144,15 @@ test('A5 A8 exterior check and validate hold the contract', withProject('exterio
     for (const c of cases) {
       W.writeTree(EXT, c.text);
       const x = W.run(['exterior', 'check']);
+      if (c.name === 'exterior-no-block.md') {
+        // no block: a plain document of a title and prose (exterior@2), which both pass
+        assert.equal(x.status, 0, `A5 exterior check passes ${c.name}, a plain file\n${x.text}`);
+        assert.equal(W.run(['validate']).status, 0, `A5 validate passes ${c.name}, a plain file`);
+        ran += 1;
+        continue;
+      }
       assert.equal(x.status, 1, `A5 exterior check exits 1 for ${c.name}\n${x.text}`);
-      assert.match(x.out, new RegExp(`error: exterior\\.md: .*${re(c.expect)}`), `A5 exterior check says why for ${c.name}\n${x.out}`);
+      assert.match(x.out, BLOCK, `A5 exterior check refuses the version 1 block of ${c.name}\n${x.out}`);
       const v = W.run(['validate']);
       assert.notEqual(v.status, 0, `A5 validate refuses ${c.name}\n${v.text}`);
       assert.match(v.out, new RegExp(`exterior\\.md: .*${re(c.expect)}`), `A5 validate says why for ${c.name}\n${v.out}`);
@@ -117,7 +168,9 @@ test('A5 A8 exterior check and validate hold the contract', withProject('exterio
     assert.doesNotMatch(W.run(['validate']).out, /exterior\.md/, 'A8 validate says nothing about a missing exterior.md');
     W.writeTree(EXT, world('exterior-empty.md'));
     const e = W.run(['exterior', 'check']);
-    assert.equal(e.status, 0, `A8 exterior check passes an exterior.md with no entities\n${e.text}`);
+    assert.equal(e.status, 1, `A8 exterior check refuses a version 1 exterior.md with no entities\n${e.text}`);
+    assert.match(e.out, BLOCK, 'A8 by its block');
+    assert.equal(W.run(['validate']).status, 0, 'A8 validate passes it (version 1, valid)');
     W.writeTree(EXT, null);
   });
 }));
@@ -126,11 +179,11 @@ test('A5 A8 exterior check and validate hold the contract', withProject('exterio
 const extBlock = (edit, text = EXTERIOR_MD) => text.replace(/```exterior\n([\s\S]*?)\n```/, (_, b) => { const v = JSON.parse(b); edit(v); return `\`\`\`exterior\n${JSON.stringify(v, null, 2)}\n\`\`\``; });
 
 test('A6 the quotes and strategy_blob', withProject('exterior-strategy', {}, async (W, check) => {
-  await check('A6 a quote not in the strategy is refused by exterior check and validate', () => {
+  await check('A6 a quote not in the strategy is refused by validate (exterior check: by its block)', () => {
     W.writeTree(EXT, extBlock((v) => { v.entities[1].strategy[0] = 'Sync runs on Acme Storage, so it must stay fast and cheaq.'; }));
     const x = W.run(['exterior', 'check']);
-    assert.equal(x.status, 1, `A6 exterior check refuses a changed quote\n${x.text}`);
-    assert.match(x.out, /not found in strategy\.md at d4b0bd76/, 'A6 exterior check names the quote\'s strategy blob');
+    assert.equal(x.status, 1, `A6 exterior check refuses the version 1 draft\n${x.text}`);
+    assert.match(x.out, BLOCK, 'A6 exterior check refuses its block');
     const v = W.run(['validate']);
     assert.notEqual(v.status, 0, `A6 validate refuses a changed quote\n${v.text}`);
     assert.match(v.out, /exterior\.md: .*not found in strategy\.md at d4b0bd76/, 'A6 validate names the quote\'s strategy blob');
@@ -141,15 +194,21 @@ test('A6 the quotes and strategy_blob', withProject('exterior-strategy', {}, asy
     const other = W.g(['hash-object', '-w', f], W.old);
     W.writeTree(EXT, extBlock((v) => { v.strategy_blob = other; }));
     const x = W.run(['exterior', 'check']);
-    assert.equal(x.status, 1, `A6 exterior check refuses another strategy blob\n${x.text}`);
-    assert.match(x.out, /strategy_blob is not the head's strategy\.md/, 'A6 exterior check says draft from the head\'s strategy');
+    assert.equal(x.status, 1, `A6 exterior check refuses the version 1 draft\n${x.text}`);
+    assert.match(x.out, BLOCK, 'A6 exterior check refuses its block');
+    const v = W.run(['validate']);
+    assert.notEqual(v.status, 0, `A6 validate refuses another strategy blob\n${v.text}`);
+    assert.match(v.out, /exterior\.md: .*strategy_blob is not the head's strategy\.md/, 'A6 validate says draft from the head\'s strategy');
   });
   await check('A6 a strategy_blob the repo can\'t read is an error at the draft and a warning on main', () => {
     const zero = extBlock((v) => { v.strategy_blob = '0'.repeat(40); });
     W.writeTree(EXT, zero);
     const x = W.run(['exterior', 'check']);
-    assert.equal(x.status, 1, `A6 exterior check refuses an unreadable strategy_blob\n${x.text}`);
-    assert.match(x.out, /error: exterior\.md: .*can't read/, 'A6 exterior check says it can\'t read the blob');
+    assert.equal(x.status, 1, `A6 exterior check refuses the version 1 draft\n${x.text}`);
+    assert.match(x.out, BLOCK, 'A6 exterior check refuses its block');
+    const d = W.run(['validate']);
+    assert.notEqual(d.status, 0, `A6 validate refuses an unreadable strategy_blob at the draft\n${d.text}`);
+    assert.match(d.out, /error: .*exterior\.md: .*can't read/, 'A6 validate says it can\'t read the blob');
     W.onMain({ [EXT]: zero }, 'exterior.md with an unreadable strategy_blob');
     const v = W.run(['validate']);
     assert.equal(v.status, 0, `A6 validate on main only warns of an unreadable strategy_blob\n${v.text}`);
@@ -162,18 +221,24 @@ test('A6 the quotes and strategy_blob', withProject('exterior-strategy', {}, asy
 test('A7 self_blob at the draft only', withProject('exterior-self', {}, async (W, check) => {
   await check('A7 a self_blob not the head\'s self.md is refused at the draft', () => {
     W.writeTree(EXT, extBlock((v) => { v.self_blob = 'c69d5ece56a6aa7dd72e1257f0eac0892e0c73c1'; }));
-    for (const args of [['exterior', 'check'], ['validate']]) {
-      const r = W.run(args);
-      assert.notEqual(r.status, 0, `A7 ${args[0]} refuses another self_blob\n${r.text}`);
-      assert.match(r.out, /exterior\.md: .*not the head's self\.md/, `A7 ${args[0]} says self_blob is not the head's self.md\n${r.out}`);
-    }
+    const x = W.run(['exterior', 'check']);
+    assert.equal(x.status, 1, `A7 exterior check refuses the version 1 draft\n${x.text}`);
+    assert.match(x.out, BLOCK, 'A7 exterior check refuses its block');
+    const r = W.run(['validate']);
+    assert.notEqual(r.status, 0, `A7 validate refuses another self_blob\n${r.text}`);
+    assert.match(r.out, /exterior\.md: .*not the head's self\.md/, `A7 validate says self_blob is not the head's self.md\n${r.out}`);
   });
-  await check('A7 with no self.md at the head, draw self.md first', () => {
+  await check('A7 with no self.md at the head: a version 1 draft, draw self.md first; a plain one needs none', () => {
     W.writeTree(EXT, EXTERIOR_MD);
     W.writeTree(SELF, null);
-    const r = W.run(['exterior', 'check']);
-    assert.equal(r.status, 1, `A7 exterior check refuses with no self.md\n${r.text}`);
-    assert.match(r.out, /draw self\.md first/, 'A7 exterior check says draw self.md first');
+    const v = W.run(['validate']);
+    assert.notEqual(v.status, 0, `A7 validate refuses with no self.md\n${v.text}`);
+    assert.match(v.out, /exterior\.md: there is no self\.md at the head: draw self\.md first/, 'A7 validate says draw self.md first');
+    assert.match(W.run(['exterior', 'check']).out, BLOCK, 'A7 exterior check refuses its block');
+    W.writeTree(EXT, PLAIN_EXT);
+    const p = W.run(['exterior', 'check']);
+    assert.equal(p.status, 0, `A7 a plain draft with no self.md passes exterior check (exterior@2 has no self rule)\n${p.text}`);
+    W.writeTree(EXT, null);
     W.g(['checkout', '--', SELF], W.old);
   });
   await check('A7 on main, a later self.md change leaves validate passing', () => {
@@ -195,38 +260,18 @@ test('A7 self_blob at the draft only', withProject('exterior-self', {}, async (W
 }));
 
 const DATA = JSON.parse(world('dashboard-data.json'));
-const RELATIONS = ['serves', 'depends_on', 'builds_on_it', 'alternative', 'collaborates', 'governs', 'affects', 'other'];
-// the relation headings exterior show prints, in its order
-const headings = (out) => out.split('\n').map((l) => l.trim()).filter((l) => RELATIONS.includes(l));
-const before = (out, a, b, why) => {
-  const i = out.indexOf(a);
-  const j = out.indexOf(b);
-  assert.ok(i >= 0 && j >= 0 && i < j, `${why}: "${a}" prints before "${b}"\n${out}`);
-};
 
 test('A1 A2 A3 A4 A8 exterior show, dashboard-data and search read exterior.md', withProject('exterior-show', { exterior: EXTERIOR_MD }, async (W, check) => {
-  await check('A1 show ranks by relation, then file order, then score', () => {
-    const s = W.run(['exterior', 'show']);
-    assert.equal(s.status, 0, `A1 exterior show exits 0\n${s.text}`);
-    assert.equal(s.out.split('\n')[0], 'Self: A note app for independent researchers that keeps every note as plain text.', 'A1 line 1 is the Self');
-    assert.deepEqual(headings(s.out), RELATIONS, 'A1 the relations print in the contract\'s order');
-    before(s.out, '9  Their storage prices, which set what sync costs.', '6  Incidents on their status page.', 'A1 signals by score');
-    assert.match(s.out, /Small Press Fair.*sponsors/, 'A1 an other entity shows its relation_word');
-    W.writeTree(EXT, extBlock((v) => {
-      v.entities.reverse();
-      const acme = v.entities.find((e) => e.id === 'acme-storage');
-      acme.signals.reverse();
-      acme.signals.push({ id: 'storage-limits', what: 'Their storage limits.', value: 3 });
-      const at = v.entities.findIndex((e) => e.id === 'researchers');
-      v.entities.splice(at, 0, { id: 'students', name: 'Visiting students', relation: 'serves', kind: 'group', matters: 'Some come back as researchers.', weight: 1, strategy: ['Independent researchers who write long notes and want them to last.'], signals: [{ id: 'student-visits', what: 'Visits from students.', value: 4 }] });
-    }, EXTERIOR_MD.replace('It serves independent researchers', 'It serves visiting students and independent researchers')));
-    const r = W.run(['exterior', 'show']);
-    assert.equal(r.status, 0, `A1 exterior show exits 0 on the reordered copy\n${r.text}`);
-    assert.deepEqual(headings(r.out), RELATIONS, 'A1 the reordered copy keeps the contract\'s relation order');
-    before(r.out, '9  Their storage prices, which set what sync costs.', '9  Their storage limits.', 'A1 a tie keeps file order');
-    before(r.out, '9  Their storage limits.', '6  Incidents on their status page.', 'A1 the reordered signals go by score');
-    before(r.out, 'Visiting students', 'Independent researchers', 'A1 within a relation, entities keep file order');
+  await check('A1 show prints main\'s exterior.md as it is, either version', () => {
+    const s1 = W.run(['exterior', 'show']);
+    assert.equal(s1.status, 0, `A1 exterior show exits 0\n${s1.text}`);
+    assert.equal(s1.out, `Exterior: ${EXT} on main\n\n${EXTERIOR_MD.trimEnd()}`, 'A1 a version 1 file, printed as it is');
+    W.writeTree(EXT, PLAIN_EXT);
+    assert.equal(W.run(['exterior', 'show']).out, `Exterior: ${EXT} on main\n\n${EXTERIOR_MD.trimEnd()}`, 'A1 main\'s, whatever the working tree holds');
     W.g(['checkout', '--', EXT], W.old);
+    W.onMain({ [EXT]: PLAIN_EXT }, 'a plain exterior.md');
+    assert.equal(W.run(['exterior', 'show']).out, `Exterior: ${EXT} on main\n\n${PLAIN_EXT.trimEnd()}`, 'A1 a plain file, printed as it is');
+    W.onMain({ [EXT]: EXTERIOR_MD }, 'exterior.md again');
   });
   await check('A2 show --json is the contract\'s dashboard block', () => {
     const j = W.run(['exterior', 'show', '--json']);
@@ -240,52 +285,55 @@ test('A1 A2 A3 A4 A8 exterior show, dashboard-data and search read exterior.md',
     W.g(['checkout', '--', EXT], W.old);
     W.onMain({ [EXT]: null }, 'no exterior.md');
     assert.equal(json(W.ok(['dashboard-data'])).exterior, null, 'A3 dashboard-data is null with no exterior.md on main');
+    W.onMain({ [EXT]: PLAIN_EXT }, 'a plain exterior.md');
+    assert.equal(json(W.ok(['dashboard-data'])).exterior, null, 'A3 dashboard-data is null for a plain exterior.md (it has no block)');
     W.onMain({ [EXT]: EXTERIOR_MD }, 'exterior.md again');
   });
   await check('A4 search finds a word of exterior.md', () => {
     const s = W.run(['search', 'outages', '--type', 'doc']);
     assert.match(s.out, /exterior\.md/, `A4 search "outages" finds exterior.md\n${s.text}`);
   });
-  await check('A8 show with no exterior.md, and with no entity', () => {
-    W.writeTree(EXT, null);
+  await check('A8 show with no exterior.md on main, and with no entity', () => {
+    W.onMain({ [EXT]: null }, 'no exterior.md');
     const s = W.run(['exterior', 'show']);
     assert.equal(s.status, 0, `A8 exterior show exits 0 with no exterior.md\n${s.text}`);
     assert.match(s.out, /exterior\.md is not drafted yet/, 'A8 exterior show says not drafted yet');
     assert.equal(W.run(['exterior', 'show', '--json']).out.trim(), 'null', 'A8 exterior show --json prints null');
-    W.writeTree(EXT, world('exterior-empty.md'));
-    assert.match(W.run(['exterior', 'show']).out, /no entity drawn yet/, 'A8 an empty list prints no entity drawn yet');
-    W.g(['checkout', '--', EXT], W.old);
+    W.onMain({ [EXT]: world('exterior-empty.md') }, 'an exterior.md with no entity');
+    assert.ok(W.run(['exterior', 'show']).out.includes(world('exterior-empty.md').trimEnd()), 'A8 a file with no entity prints as it is');
+    W.onMain({ [EXT]: EXTERIOR_MD }, 'exterior.md again');
   });
 }));
 
-// An exterior.md of one entity, the prose naming it; on main's strategy and the fixture self.md.
+// A version 1 exterior.md of one entity, the prose naming it; on main's strategy and the fixture
+// self.md (for main only: a draft is plain).
 const oneEntity = (W, entity, prose = `It relates to ${entity.name}.`) => `# Exterior\n\n${prose}\n\n\`\`\`exterior\n${JSON.stringify({
   exterior: 1, strategy_blob: W.blob(STRAT), self_blob: W.blob(SELF),
   entities: [{ id: 'x', matters: 'It matters.', weight: 1, strategy: ['Independent researchers who write long notes and want them to last.'], signals: [], ...entity }],
 }, null, 2)}\n\`\`\`\n`;
-const NOT_NAMED = /is not named in origin main's strategy/;
+const NOT_NAMED = /\(a ### heading\) is not named whole in origin main's strategy/;
 
-test('A9 exterior check holds an unnamed organisation by visibility', withProject('exterior-names-vis', {}, async (W, check) => {
-  const zentrix = extBlock((v) => { const e = v.entities.find((x) => x.id === 'press-fair'); e.name = 'Zentrix Labs'; }, EXTERIOR_MD.replace('And the Small Press Fair sponsors', 'And Zentrix Labs sponsors'));
-  await check('A9 public: an error; unknown: a warning; private: nothing', () => {
-    W.writeTree(EXT, zentrix);
-    const words = /"Zentrix Labs" \(organisation\) is not named in origin main's strategy\.md/;
+test('A9 exterior check holds an unnamed ### heading by visibility', withProject('exterior-names-vis', { strategy: STRATEGY_PLAIN }, async (W, check) => {
+  await check('A9 public and unknown: an error; private: nothing', () => {
+    W.writeTree(EXT, ZENTRIX);
+    const words = /"Zentrix Labs" \(a ### heading\) is not named whole in origin main's strategy\.md or its dependency names/;
     W.setVisibility('public');
     const p = W.run(['exterior', 'check']);
     assert.equal(p.status, 1, `A9 public: exterior check exits 1\n${p.text}`);
-    assert.match(p.out, new RegExp(`error: exterior\\.md: .*${words.source}`), 'A9 public: an error naming Zentrix Labs');
+    assert.match(p.out, new RegExp(`^error: exterior\\.md: ${words.source}`, 'm'), 'A9 public: an error naming Zentrix Labs');
     W.setVisibility('unknown');
     const u = W.run(['exterior', 'check']);
-    assert.equal(u.status, 0, `A9 unknown: exterior check exits 0\n${u.text}`);
-    assert.match(u.out, new RegExp(`warn: exterior\\.md: .*${words.source}`), 'A9 unknown: a warning naming Zentrix Labs');
+    assert.equal(u.status, 1, `A9 unknown: exterior check exits 1\n${u.text}`);
+    assert.match(u.out, new RegExp(`^error: exterior\\.md: ${words.source}.*\\(the repo's visibility is unknown`, 'm'), 'A9 unknown: an error naming Zentrix Labs, saying the visibility is unknown');
     W.setVisibility('private');
     const q = W.run(['exterior', 'check']);
-    assert.doesNotMatch(q.out, NOT_NAMED, `A9 private: no names-rule line\n${q.out}`);
+    assert.equal(q.status, 0, `A9 private: exterior check exits 0\n${q.text}`);
+    assert.doesNotMatch(q.out, /Zentrix/, `A9 private: no names-rule line and no word line\n${q.out}`);
     W.writeTree(EXT, null);
   });
-  await check('A9 the fixture exterior.md, every name in the strategy, passes clean on a public repo', () => {
+  await check('A9 the plain fixture, every name and host in the strategy, passes clean on a public repo', () => {
     W.setVisibility('public');
-    W.writeTree(EXT, EXTERIOR_MD);
+    W.writeTree(EXT, PLAIN_EXT);
     const r = W.run(['exterior', 'check']);
     assert.equal(r.status, 0, `A9 the fixture passes exterior check\n${r.text}`);
     assert.doesNotMatch(r.out, /^(warn|error):/m, `A9 the fixture draws no line\n${r.out}`);
@@ -295,76 +343,73 @@ test('A9 exterior check holds an unnamed organisation by visibility', withProjec
 
 test('A12 focus 3 focus 4 the names rule\'s cases', withProject('exterior-names-cases', {
   visibility: 'public',
-  strategy: `${STRATEGY}- It reads from the zorblat archive.\n- The C++ Guild reviews its plugin interface.\n`,
+  strategy: `${STRATEGY_PLAIN}- It reads from the zorblat archive.\n- The C++ Guild reviews its plugin interface.\n`,
   files: { ...PARTS, 'package.json': JSON.stringify({ dependencies: { lodash: '1' }, devDependencies: { moment: '1', 'node.js': '1' } }), Gemfile: "source 'https://rubygems.org'\ngem 'rails'\n  gem \"faraday\", '~> 2'\ngem(\"puma\")\n", 'requirements.txt': '# pinned\nrequests==2.0\n' },
 }, async (W, check) => {
-  const run = (entity, prose) => { W.writeTree(EXT, oneEntity(W, entity, prose)); return W.run(['exterior', 'check']); };
-  const allowed = (why, entity) => {
-    const r = run(entity);
+  const run = (heading, prose) => { W.writeTree(EXT, onePlain(heading, prose)); return W.run(['exterior', 'check']); };
+  const allowed = (why, heading) => {
+    const r = run(heading);
     assert.equal(r.status, 0, `A12 allowed: ${why}\n${r.text}`);
     assert.doesNotMatch(r.out, NOT_NAMED, `A12 allowed: ${why}: no names-rule line\n${r.out}`);
   };
-  const refused = (why, entity, deps = false) => {
-    const r = run(entity);
+  const refused = (why, heading) => {
+    const r = run(heading);
     assert.equal(r.status, 1, `A12 refused: ${why}\n${r.text}`);
-    const words = `exterior.entities[0] "${entity.name}" (${entity.kind}) is not named in origin main's strategy.md${deps ? ', nor its dependency files' : ''}: name it as a group, or have the strategy name it first`;
+    const words = `"${heading}" (a ### heading) is not named whole in origin main's strategy.md or its dependency names`;
     assert.ok(r.out.includes(`error: exterior.md: ${words}`), `A12 refused: ${why}: the rule's words\n${r.out}`);
   };
-  await check('A12 allowed: in lower case in main\'s strategy', () => allowed('lower case', { name: 'Zorblat Archive', relation: 'depends_on', kind: 'organisation' }));
-  await check('A12 allowed: depends_on works in the dependency files', () => {
-    for (const name of ['lodash', 'moment', 'rails', 'faraday', 'puma', 'requests']) allowed(`dependency ${name}`, { name, relation: 'depends_on', kind: 'work' });
+  await check('A12 allowed: in lower case in main\'s strategy', () => allowed('lower case', 'Zorblat Archive'));
+  await check('A12 allowed: a name in the dependency files (a plain file has no relation to require)', () => {
+    for (const name of ['lodash', 'moment', 'rails', 'faraday', 'puma', 'requests']) allowed(`dependency ${name}`, name);
   });
-  await check('A12 refused: a dependency name off depends_on, substrings, and the branch\'s own strategy', () => {
-    refused('lodash builds on it', { name: 'lodash', relation: 'builds_on_it', kind: 'work' });
-    refused('a longer word', { name: 'Acme Storages', relation: 'depends_on', kind: 'organisation' }, true);
-    refused('a prefixed word', { name: 'XAcme Storage', relation: 'depends_on', kind: 'organisation' }, true);
-    refused('an organisation named Zentrix Labs', { name: 'Zentrix Labs', relation: 'collaborates', kind: 'organisation' });
-    refused('a work named Zentrix Labs', { name: 'Zentrix Labs', relation: 'alternative', kind: 'work' });
-    const text = oneEntity(W, { name: 'Zentrix Labs', relation: 'collaborates', kind: 'organisation' });
+  await check('A12 refused: substrings, and the branch\'s own strategy', () => {
+    refused('a longer word', 'Acme Storages');
+    refused('a prefixed word', 'XAcme Storage');
+    refused('a name nothing gives', 'Zentrix Labs');
     W.writeTree(STRAT, `${fs.readFileSync(path.join(W.old, STRAT), 'utf8')}- It works with Zentrix Labs.\n`);
-    W.writeTree(EXT, text);
+    W.writeTree(EXT, onePlain('Zentrix Labs'));
     const r = W.run(['exterior', 'check']);
     assert.equal(r.status, 1, `A12 refused: named only in the branch's strategy\n${r.text}`);
-    assert.match(r.out, /error: exterior\.md: .*"Zentrix Labs" \(organisation\) is not named in origin main's strategy\.md/, 'A12 refused: the branch\'s strategy allows nothing');
+    assert.match(r.out, /^error: exterior\.md: "Zentrix Labs" \(a ### heading\) is not named whole in origin main's strategy\.md/m, 'A12 refused: the branch\'s strategy allows nothing');
     W.g(['checkout', '--', STRAT], W.old);
   });
-  await check('A12 a group is held by its words, never the rule', () => {
-    // the name starts its sentence, so only the group-name check (first word included) sees it
-    const r = run({ name: 'Zentrix customers', relation: 'serves', kind: 'group' }, 'Zentrix customers are who it serves.');
-    assert.equal(r.status, 0, `A12 warned: a group named Zentrix customers exits 0\n${r.text}`);
-    assert.match(r.out, /warn: exterior\.md: "Zentrix" \(entities\[0\]\.name\)/, 'A12 warned: the group\'s word Zentrix');
-    assert.doesNotMatch(r.out, NOT_NAMED, 'A12 a group is never checked by the rule');
+  await check('A12 a word in prose is held as a word, never the heading rule', () => {
+    // the name starts its sentence, so only the capitalised-word check (first word included) sees it
+    const r = run('Independent researchers', 'Zentrix customers are who it serves');
+    assert.equal(r.status, 0, `A12 warned: prose naming Zentrix exits 0\n${r.text}`);
+    assert.match(r.out, /^warn: exterior\.md: "Zentrix" \(word\)/m, 'A12 warned: the word Zentrix');
+    assert.doesNotMatch(r.out, NOT_NAMED, 'A12 prose is never checked by the heading rule');
     W.onMain({ [STRAT]: `${fs.readFileSync(path.join(W.old, STRAT), 'utf8')}- Zentrix shops sell it.\n` }, 'strategy names Zentrix');
-    const a = run({ name: 'Zentrix customers', relation: 'serves', kind: 'group' });
-    assert.equal(a.status, 0, `A12 allowed: Zentrix customers with Zentrix in main's strategy\n${a.text}`);
+    const a = run('Independent researchers', 'Zentrix customers are who it serves');
+    assert.equal(a.status, 0, `A12 allowed: Zentrix with Zentrix in main's strategy\n${a.text}`);
     assert.doesNotMatch(a.out, /"Zentrix"/, `A12 allowed: no warning once main's strategy names Zentrix\n${a.out}`);
   });
   await check('focus 4 names with regex characters', () => {
-    allowed('C++ Guild in the strategy', { name: 'C++ Guild', relation: 'collaborates', kind: 'work' });
-    allowed('Node.js in package.json', { name: 'Node.js', relation: 'depends_on', kind: 'work' });
+    allowed('C++ Guild in the strategy', 'C++ Guild');
+    allowed('Node.js in package.json', 'Node.js');
   });
   await check('focus 3 a package.json that is not JSON, or whose dependencies is a list', () => {
     W.onMain({ 'package.json': '{not json' }, 'a broken package.json');
-    const r = run({ name: 'Zorblat Archive', relation: 'depends_on', kind: 'organisation' });
+    const r = run('Zorblat Archive');
     assert.equal(r.status, 0, `focus 3 a broken package.json is no crash\n${r.text}`);
     assert.equal(r.out.split('\n').filter((l) => /^warn: .*package\.json/.test(l)).length, 1, `focus 3 one warning names package.json\n${r.out}`);
     W.onMain({ 'package.json': JSON.stringify({ dependencies: ['lodash'] }) }, 'dependencies as a list');
-    refused('a list of dependencies gives no names', { name: 'lodash', relation: 'depends_on', kind: 'work' }, true);
+    refused('a list of dependencies gives no names', 'lodash');
   });
 }));
 
 // the live log's lines
 const logLines = (W) => { const d = path.join(W.old, 'docs/devteam/run/log'); return fs.existsSync(d) ? fs.readdirSync(d).filter((f) => f.endsWith('.jsonl')).flatMap((f) => fs.readFileSync(path.join(d, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))) : []; };
 const namesActs = (W) => logLines(W).filter((o) => o.type === 'act' && o.class === 'names-checked');
-// the fixture with the Small Press Fair renamed Zentrix Labs, in block and prose
-const ZENTRIX = extBlock((v) => { v.entities.find((x) => x.id === 'press-fair').name = 'Zentrix Labs'; }, EXTERIOR_MD.replace('And the Small Press Fair sponsors', 'And Zentrix Labs sponsors'));
-// the fixture with one more sentence of prose, every word in the strategy
-const REWORDED = EXTERIOR_MD.replace('locks notes in.', 'locks notes in, which researchers dislike.');
+// the version 1 fixture with one more clause of prose, every word in the strategy (a version 1 draft)
+const REWORDED_V1 = EXTERIOR_MD.replace('locks notes in.', 'locks notes in, which researchers dislike.');
+// the plain fixture with one more clause of prose, every word in the strategy
+const REWORDED = PLAIN_EXT.replace('locks notes in', 'locks notes in, which researchers dislike');
 const inWt = (W, slug) => path.join(W.old, '.worktrees', `chore-${slug}`);
 const writeIn = (w, rel, text) => write(path.join(w, rel), text);
 const commitIn = (W, w, msg) => { W.g(['add', '-A'], w); W.g(['commit', '-qm', msg], w); return W.g(['rev-parse', 'HEAD'], w); };
 
-test('A10 chore pr pushes nothing it refuses, in any commit since main', withProject('exterior-chore', { exterior: EXTERIOR_MD, visibility: 'public' }, async (W, check) => {
+test('A10 chore pr pushes nothing it refuses, in any commit since main', withProject('exterior-chore', { exterior: PLAIN_EXT, strategy: STRATEGY_PLAIN, visibility: 'public' }, async (W, check) => {
   const main = () => W.g(['rev-parse', 'origin/main'], W.old);
   await check('A10 public and unknown: refused before any commit, nothing pushed', () => {
     for (const [slug, vis] of [['zp', 'public'], ['zu', 'unknown']]) {
@@ -381,7 +426,7 @@ test('A10 chore pr pushes nothing it refuses, in any commit since main', withPro
     W.setVisibility('public');
     const p = W.chorePr('zp', () => {}, ['--names-checked', 'Zentrix,Labs']);
     assert.equal(p.status, 1, `A10 --names-checked: still refused\n${p.text}`);
-    assert.match(p.text, /"Zentrix Labs" \(organisation\) is not named/, 'A10 the names rule still speaks');
+    assert.match(p.text, /"Zentrix Labs" \(a ### heading\) is not named whole/, 'A10 the names rule still speaks');
     assert.equal(p.pushed(), false, 'A10 --names-checked: nothing pushed');
   });
   await check('A10 private: pushed', () => {
@@ -407,7 +452,7 @@ test('A10 chore pr pushes nothing it refuses, in any commit since main', withPro
     const w = inWt(W, 'h2');
     writeIn(w, EXT, ZENTRIX);
     const first = commitIn(W, w, 'a draft naming it');
-    writeIn(w, EXT, EXTERIOR_MD);
+    writeIn(w, EXT, PLAIN_EXT);
     commitIn(W, w, 'put back');
     const p = W.chorePr('h2', () => {});
     assert.equal(p.status, 1, `A10 history 2: refused\n${p.text}`);
@@ -421,7 +466,7 @@ test('A10 chore pr pushes nothing it refuses, in any commit since main', withPro
   });
 }));
 
-test('A11 check-pr and merge --chore hold every commit of a PR changing exterior.md', withProject('exterior-checkpr', { exterior: EXTERIOR_MD, visibility: 'public' }, async (W, check) => {
+test('A11 check-pr and merge --chore hold every commit of a PR changing exterior.md', withProject('exterior-checkpr', { exterior: PLAIN_EXT, strategy: STRATEGY_PLAIN, visibility: 'public' }, async (W, check) => {
   const plain = W.branchOf('chore-plain', (w) => writeIn(w, `${P}/designs/n.md`, 'n\n'));
   const baseline = W.checkPr('chore-plain', plain).status;
   assert.equal(baseline, 0, `check-pr passes a chore changing only a note\n${W.checkPr('chore-plain', plain).text}`);
@@ -429,13 +474,13 @@ test('A11 check-pr and merge --chore hold every commit of a PR changing exterior
   await check('A11 public: check-pr fails naming it', () => {
     const r = W.checkPr('chore-zx', zx);
     assert.equal(r.status, 1, `A11 public: check-pr fails\n${r.text}`);
-    assert.match(r.text, /^fail: .*"Zentrix Labs" \(organisation\) is not named/m, 'A11 public: a fail naming Zentrix Labs');
+    assert.match(r.text, /^fail: .*"Zentrix Labs" \(a ### heading\) is not named whole/m, 'A11 public: a fail naming Zentrix Labs');
   });
   await check('A11 unknown: check-pr warns, its exit unchanged', () => {
     W.setVisibility('unknown');
     const r = W.checkPr('chore-zx', zx);
     assert.equal(r.status, baseline, `A11 unknown: exit unchanged\n${r.text}`);
-    assert.match(r.out, /^warn: .*"Zentrix Labs" \(organisation\) is not named/m, 'A11 unknown: a warning naming Zentrix Labs');
+    assert.match(r.out, /^warn: .*"Zentrix Labs" \(a ### heading\) is not named whole/m, 'A11 unknown: a warning naming Zentrix Labs');
     W.setVisibility('public');
   });
   await check('A11 a range whose tip rewords it still fails on the earlier commit', () => {
@@ -450,7 +495,7 @@ test('A11 check-pr and merge --chore hold every commit of a PR changing exterior
   await check('A11 merge --chore --dry-run fails the same', () => {
     const m = W.run(['merge', '--chore', 'zx', '--dry-run']);
     assert.notEqual(m.status, 0, `A11 merge --chore refuses\n${m.text}`);
-    assert.match(m.text, /^(?!warn).*"Zentrix Labs" \(organisation\) is not named/m, 'A11 merge --chore names it, not as a warning');
+    assert.match(m.text, /^(?!warn).*"Zentrix Labs" \(a ### heading\) is not named whole/m, 'A11 merge --chore names it, not as a warning');
   });
   await check('A11 a PR not changing exterior.md gets no exterior line, whatever main\'s names', () => {
     W.onMain({ [EXT]: oneEntity(W, { name: 'lodash', relation: 'depends_on', kind: 'work' }), 'package.json': JSON.stringify({ dependencies: { lodash: '1' } }) }, 'an exterior on a dependency');
@@ -462,8 +507,8 @@ test('A11 check-pr and merge --chore hold every commit of a PR changing exterior
   });
 }));
 
-test('A16 focus 1 exterior.md\'s capitalised words are held as self.md\'s', withProject('exterior-words', { exterior: EXTERIOR_MD, visibility: 'public' }, async (W, check) => {
-  const hosted = EXTERIOR_MD.replace('And the Small Press Fair sponsors its yearly meetup.', 'And the Small Press Fair sponsors its yearly meetup, which Zentrix hosts.');
+test('A16 focus 1 exterior.md\'s capitalised words are held as self.md\'s', withProject('exterior-words', { exterior: PLAIN_EXT, strategy: STRATEGY_PLAIN, visibility: 'public' }, async (W, check) => {
+  const hosted = PLAIN_EXT.replace('It does the same job and locks notes in', 'It does the same job, which Zentrix hosts, and locks notes in');
   const G = W.goal('Billing', 1);
   W.feature('billing', G);
   W.ticket('billing-01-a', 'billing');
@@ -473,13 +518,13 @@ test('A16 focus 1 exterior.md\'s capitalised words are held as self.md\'s', with
     W.writeTree(EXT, hosted);
     const r = W.run(['exterior', 'check']);
     assert.equal(r.status, 0, `A16 exterior check exits 0\n${r.text}`);
-    assert.match(r.out, /^warn: exterior\.md: "Zentrix" \(prose\)/m, 'A16 exterior check warns of Zentrix in the prose');
+    assert.match(r.out, /^warn: exterior\.md: "Zentrix" \(word\)/m, 'A16 exterior check warns of the word Zentrix');
     W.g(['checkout', '--', EXT], W.old);
   });
   await check('A16 chore pr holds the word until --names-checked names it, then logs the act', () => {
     const p = W.chorePr('w', (w) => writeIn(w, EXT, hosted));
     assert.equal(p.status, 1, `A16 chore pr refuses the unchecked word\n${p.text}`);
-    assert.match(p.text, /"Zentrix" \(prose\)/, 'A16 naming the word');
+    assert.match(p.text, /"Zentrix" \(word\)/, 'A16 naming the word');
     assert.equal(p.pushed(), false, 'A16 nothing pushed');
     const q = W.chorePr('w', () => {}, ['--names-checked', 'Zentrix']);
     assert.equal(q.status, 0, `A16 --names-checked Zentrix pushes\n${q.text}`);
@@ -493,11 +538,11 @@ test('A16 focus 1 exterior.md\'s capitalised words are held as self.md\'s', with
     for (const [ref, sha] of [['plan/billing', planSha], ['ticket/billing-01-a', ticketSha]]) {
       const r = W.checkPr(ref, sha);
       assert.notEqual(r.status, 0, `A16 ${ref} fails\n${r.text}`);
-      assert.match(r.text, /^fail: .*names "Zentrix" \(prose\)[^\n]*reword it/m, `A16 ${ref} fails on the word, saying reword it\n${r.text}`);
+      assert.match(r.text, /^fail: .*names "Zentrix" \(word\)[^\n]*reword it/m, `A16 ${ref} fails on the word, saying reword it\n${r.text}`);
     }
   });
   await check('A16 a lower-case name in prose draws no line (the accepted P6 risk)', () => {
-    W.writeTree(EXT, EXTERIOR_MD.replace('locks notes in.', 'locks notes in. zentrix labs hosts it.'));
+    W.writeTree(EXT, PLAIN_EXT.replace('locks notes in', 'locks notes in, and zentrix labs hosts it'));
     const r = W.run(['exterior', 'check']);
     assert.doesNotMatch(r.out, /zentrix/i, `A16 no line for a lower-case name\n${r.out}`);
     W.g(['checkout', '--', EXT], W.old);
@@ -506,8 +551,7 @@ test('A16 focus 1 exterior.md\'s capitalised words are held as self.md\'s', with
     const both = (slug) => (w) => {
       const self = PLAIN_SELF.replace('It controls its code', 'It mails through Quux.\n\nIt controls its code');
       writeIn(w, SELF, self);
-      const selfBlob = W.g(['hash-object', path.join(w, SELF)], w);
-      writeIn(w, EXT, extBlock((v) => { v.self_blob = selfBlob; }, hosted));
+      writeIn(w, EXT, hosted);
       void slug;
     };
     const only = W.chorePr('both1', both('both1'), ['--names-checked', 'Zentrix']);
@@ -560,15 +604,13 @@ test('focus 2 focus 5 a deleted exterior.md, and a branch with no merge base', w
   });
 }));
 
-// an exterior.md on main's strategy and self.md naming two depends_on works
-const twoDeps = (W) => `# Exterior\n\nIt depends on Lodash and Moment.\n\n\`\`\`exterior\n${JSON.stringify({
-  exterior: 1, strategy_blob: W.blob(STRAT), self_blob: W.blob(SELF),
-  entities: ['Lodash', 'Moment'].map((name) => ({ id: name.toLowerCase(), name, relation: 'depends_on', kind: 'work', matters: 'The app runs on it.', weight: 1, strategy: ['Independent researchers who write long notes and want them to last.'], signals: [] })),
-}, null, 2)}\n\`\`\`\n`;
+// a plain exterior.md whose two entries are headed by dependency names
+const TWO_DEPS = `# Exterior\n\nWhat Quillmark relates to.\n\n## What it depends on\n\n### lodash\n\nThe app runs on it ${src('notes', 'lodash')}.\n\n### moment\n\nThe app runs on it too ${src('notes', 'moment')}.\n`;
 const exteriorFindings = (W) => json(W.ok(['metrics', '--json'])).findings.filter((f) => f.kind.startsWith('exterior-'));
 
-test('A13 exterior-drift once per name a dependency no longer allows', withProject('exterior-drift', { files: { ...PARTS, 'package.json': JSON.stringify({ dependencies: { lodash: '1', moment: '1' } }) } }, async (W, check) => {
-  W.onMain({ [EXT]: twoDeps(W) }, 'exterior.md on two dependencies');
+test('A13 exterior-drift once per heading a dependency no longer allows, where last known public', withProject('exterior-drift', { strategy: STRATEGY_PLAIN, files: { ...PARTS, 'package.json': JSON.stringify({ dependencies: { lodash: '1', moment: '1' } }) } }, async (W, check) => {
+  W.onMain({ [EXT]: TWO_DEPS }, 'exterior.md on two dependencies');
+  write(path.join(W.old, 'docs/devteam/run/repo-visibility.json'), JSON.stringify({ visibility: 'public', at: new Date().toISOString() }));
   await check('A13 a PR removing the dependencies passes check-pr and validate', () => {
     const sha = W.branchOf('chore-deps', (w) => writeIn(w, 'package.json', JSON.stringify({ dependencies: {} })));
     const r = W.checkPr('chore-deps', sha);
@@ -599,8 +641,8 @@ test('A13 exterior-drift once per name a dependency no longer allows', withProje
   });
 }));
 
-test('A14 A15 exterior-stale and exterior-missing', withProject('exterior-stale', { exterior: EXTERIOR_MD }, async (W, check) => {
-  await check('A14 the fixture as it stands raises nothing', () => {
+test('A14 A15 exterior-stale and exterior-missing', withProject('exterior-stale', { exterior: PLAIN_EXT }, async (W, check) => {
+  await check('A14 the plain fixture as it stands raises nothing (its base: the last commit changing it on main)', () => {
     assert.deepEqual(exteriorFindings(W), [], 'A14 no exterior finding');
   });
   let first = null;
@@ -648,13 +690,13 @@ test('A17 Monitoring documents drafting exterior.md', () => {
   assert.ok(c >= 0 && c < para.indexOf('chore pr'), 'A17 exterior check comes before chore pr');
 });
 
-// final-1 F1: a name in another fenced block is read; F2: a version added then deleted is still read
-const SECRET = `${EXTERIOR_MD}\n\`\`\`text\nZentrix Labs is our secret client.\n\`\`\`\n`;
-test('final-1 F1 F2 every fenced block and every version are read', withProject('exterior-final1', { visibility: 'public' }, async (W, check) => {
+// final-1 F1: a name in a fenced block is read; F2: a version added then deleted is still read
+const SECRET = `${PLAIN_EXT}\n\`\`\`text\nZentrix Labs is our secret client.\n\`\`\`\n`;
+test('final-1 F1 F2 every fenced block and every version are read', withProject('exterior-final1', { strategy: STRATEGY_PLAIN, visibility: 'public' }, async (W, check) => {
   await check('F1 a word in another fenced block is held by exterior check, chore pr and check-pr', () => {
     W.writeTree(EXT, SECRET);
     const x = W.run(['exterior', 'check']);
-    assert.match(x.out, /^warn: exterior\.md: "Zentrix" \(prose\)/m, `F1 exterior check warns of the word in a text block\n${x.text}`);
+    assert.match(x.out, /^warn: exterior\.md: "Zentrix" \(word\)/m, `F1 exterior check warns of the word in a text block\n${x.text}`);
     W.writeTree(EXT, null);
     const p = W.chorePr('fence', (w) => writeIn(w, EXT, SECRET));
     assert.equal(p.status, 1, `F1 chore pr refuses\n${p.text}`);
@@ -662,7 +704,7 @@ test('final-1 F1 F2 every fenced block and every version are read', withProject(
     const sha = W.branchOf('chore-fence2', (w) => writeIn(w, EXT, SECRET));
     const k = W.checkPr('chore-fence2', sha);
     assert.equal(k.status, 1, `F1 check-pr fails\n${k.text}`);
-    assert.match(k.text, /^fail: .*names "Zentrix" \(prose\)/m, 'F1 check-pr names the word');
+    assert.match(k.text, /^fail: .*names "Zentrix" \(word\)/m, 'F1 check-pr names the word');
   });
   await check('F2 an exterior.md added then deleted on a branch, main having none, is still held', () => {
     const added = W.branchOf('chore-ad', (w) => writeIn(w, EXT, ZENTRIX));
@@ -672,23 +714,25 @@ test('final-1 F1 F2 every fenced block and every version are read', withProject(
     W.g(['push', '-q', 'origin', 'chore-ad'], w);
     const k = W.checkPr('chore-ad', tip);
     assert.equal(k.status, 1, `F2 check-pr fails\n${k.text}`);
-    assert.match(k.text, /"Zentrix Labs" \(organisation\) is not named/, 'F2 check-pr names it');
+    assert.match(k.text, /"Zentrix Labs" \(a ### heading\) is not named whole/, 'F2 check-pr names it');
     assert.ok(k.text.includes(added.slice(0, 12)), `F2 naming the commit ${added.slice(0, 12)}`);
     const m = W.run(['merge', '--chore', 'ad', '--dry-run']);
     assert.notEqual(m.status, 0, `F2 merge --chore refuses\n${m.text}`);
   });
 }));
 
-// final-1b F3: steps 2 and 3 at the gates
-test('final-1b F3 check-pr, merge --chore and chore pr check the quotes and the blobs at the head', withProject('exterior-final1b', { exterior: EXTERIOR_MD, visibility: 'public' }, async (W, check) => {
-  const staleSelf = extBlock((v) => { v.self_blob = 'c69d5ece56a6aa7dd72e1257f0eac0892e0c73c1'; }, REWORDED);
-  const badQuote = extBlock((v) => { v.entities[1].strategy[0] = 'Sync runs on Acme Storage, so it must stay fast and cheaq.'; }, REWORDED);
-  for (const [slug, text, words] of [['stale', staleSelf, /self_blob is not the head's self\.md/], ['quote', badQuote, /not found in strategy\.md at d4b0bd76/]]) {
+// final-1b F3: a version 1 draft, whatever its quotes and blobs, is refused at every gate by its block
+// (exterior@2 has none); the quote and blob rules themselves are A6 and A7's validate halves
+test('final-1b F3 check-pr, merge --chore and chore pr refuse a version 1 draft at the head', withProject('exterior-final1b', { exterior: EXTERIOR_MD, visibility: 'public' }, async (W, check) => {
+  const staleSelf = extBlock((v) => { v.self_blob = 'c69d5ece56a6aa7dd72e1257f0eac0892e0c73c1'; }, REWORDED_V1);
+  const badQuote = extBlock((v) => { v.entities[1].strategy[0] = 'Sync runs on Acme Storage, so it must stay fast and cheaq.'; }, REWORDED_V1);
+  const words = /holds a fenced exterior block at line \d+: a plain document has none/;
+  for (const [slug, text] of [['stale', staleSelf], ['quote', badQuote]]) {
     await check(`F3 ${slug}: refused at check-pr, merge --chore and chore pr`, () => {
       const sha = W.branchOf(`chore-${slug}`, (w) => writeIn(w, EXT, text));
       const k = W.checkPr(`chore-${slug}`, sha);
       assert.equal(k.status, 1, `F3 ${slug}: check-pr fails\n${k.text}`);
-      assert.match(k.text, new RegExp(`^fail: .*${words.source}`, 'm'), `F3 ${slug}: check-pr says why`);
+      assert.match(k.text, new RegExp(`^fail: .*breaks exterior@2 at [0-9a-f]{12}: .*${words.source}`, 'm'), `F3 ${slug}: check-pr says why`);
       const m = W.run(['merge', '--chore', slug, '--dry-run']);
       assert.notEqual(m.status, 0, `F3 ${slug}: merge --chore refuses\n${m.text}`);
       assert.match(m.text, words, `F3 ${slug}: merge --chore says why`);
