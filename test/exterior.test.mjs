@@ -620,7 +620,7 @@ test('A14 A15 exterior-stale and exterior-missing', withProject('exterior-stale'
     const f = W.findings('exterior-missing');
     assert.equal(f.length, 1, `A15 one missing\n${JSON.stringify(f)}`);
     assert.match(f[0].suggestion, /draft exterior\.md/, 'A15 says draft exterior.md');
-    assert.deepEqual([f[0].severity, f[0].subject, f[0].key], ['low', 'exterior', `${W.blob(STRAT)}-${W.blob(SELF)}`], 'A15 low, keyed by both blobs');
+    assert.deepEqual([f[0].severity, f[0].subject, f[0].key], ['high', 'exterior', `${W.blob(STRAT)}-${W.blob(SELF)}`], 'A15 high (kit-814 K1), keyed by both blobs');
   });
   await check('A15 an unlinked strategy, or no self.md: none', () => {
     W.onMain({ [STRAT]: STRATEGY.replace(/^What Quillmark is.*\n\n/m, '') }, 'strategy unlinks self.md');
@@ -640,6 +640,7 @@ test('A17 Monitoring documents drafting exterior.md', () => {
     /never a private person/, /what matters/, /signals that would show it, in words/, /1 to 4/, /strategy quote/, /names rule/,
     /exterior-drift/, /exterior-stale.*re-read `?self\.md`? first/, /exterior-missing/,
   ]) assert.match(para, want, `A17 the paragraph says ${want}`);
+  assert.match(para, /`exterior-missing` \([^)]*high until the owner has[^)]*medium while its question is open\)/, 'K9 the exterior-missing line says its severity (kit-814)');
   const c = para.indexOf('exterior check');
   assert.ok(c >= 0 && c < para.indexOf('chore pr'), 'A17 exterior check comes before chore pr');
 });
