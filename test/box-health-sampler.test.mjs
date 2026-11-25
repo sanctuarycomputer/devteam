@@ -1035,13 +1035,13 @@ test('S25: with every part\'s file reads stuck at once, the sampler\'s tick is n
 
 test('S26: the budget is one fewer than Node\'s file threads, as libuv reads UV_THREADPOOL_SIZE (kit-919)', async (t) => {
   const most = [];
-  for (const uv of ['2', undefined, '1', 'abc', '-3']) {
+  for (const uv of ['2', undefined, '1', 'abc', '2x', '-3']) {
     const s = await stuckStarted(t, uv === undefined ? {} : { UV_THREADPOOL_SIZE: uv });
     most.push(s.opens.most);
     await release(s);
   }
-  assert.deepEqual(most.slice(0, 4), [1, 3, 0, 0], 'the most FIFO opens ever out: 2 threads, 4 (unset), 1, 1 (abc), less one');
-  assert.ok(most[4] > 3, `1024 threads (-3) hold the parts to their own caps only: ${most[4]}`);
+  assert.deepEqual(most.slice(0, 5), [1, 3, 0, 0, 1], 'the most FIFO opens ever out: 2 threads, 4 (unset), 1, 1 (abc), 2 (2x), less one');
+  assert.ok(most[5] > 3, `1024 threads (-3) hold the parts to their own caps only: ${most[5]}`);
 });
 
 // With the budget held by three stuck reads (two projects' pool.json, a process's cmdline), claude's
