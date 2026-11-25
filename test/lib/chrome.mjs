@@ -16,6 +16,8 @@ const found = () => {
 export const chromePath = found();
 export const canDrive = !!chromePath && typeof WebSocket === 'function';
 
+// 'an alert', 'a confirm': a dialog's type with its article
+const an = (w) => `${/^[aeiou]/.test(w) ? 'an' : 'a'} ${w}`;
 const KEYS = { Tab: 9, Enter: 13, Escape: 27, ' ': 32, ArrowLeft: 37, ArrowRight: 39 };
 const CODES = { ' ': 'Space' };
 
@@ -72,18 +74,84 @@ export async function openChrome() {
     proc.once('exit', done);
     signal('SIGTERM');
   }));
+  // The JS dialogs open on this browser's tabs, by target id (a page with Page.enable is told of
+  // them): one holds its tab, and every tab its renderer runs, until it is answered, and nothing here
+  // answers one. Kept after this side's socket to the tab closes (the tab and its dialog stay: a test
+  // that gave up on a tab and dropped it, say), until Chrome's list no longer has the tab.
+  const dialogs = new Map();
+  // What Chrome was doing when a call on tab tid got no answer. Each look at Chrome's own endpoint is
+  // raced with a second or two, and all of them with 6 s, so a Chrome that answers nothing still lets
+  // the call fail soon; what was seen by then is said, and a look that failed says how.
+  const whatChromeDid = async (tid, heard) => {
+    const out = [];
+    const stop = new AbortController();
+    let b = null;
+    const within = (ms, p) => { let t; return Promise.race([p, new Promise((_, no) => { t = setTimeout(() => no(new Error(`no answer in ${ms / 1000} s`)), ms); })]).finally(() => clearTimeout(t)); };
+    const ago = (at) => `${((Date.now() - at) / 1000).toFixed(1)} s`;
+    const looks = (async () => {
+      const tab = out.push(`tab ${tid.slice(0, 8)}`) - 1;
+      const open = out.length;
+      // each dialog still open, said after the tab
+      const said = () => out.splice(open, 0, ...[...dialogs].map(([id, d]) => `${an(d.type)} dialog (${JSON.stringify(String(d.message).slice(0, 80))}, at ${d.url}) open on ${id === tid ? 'this tab' : `tab ${id.slice(0, 8)}`} for ${ago(d.at)}`));
+      out.push(`last heard on its socket: ${heard.length ? heard.slice(-4).map((h) => `${h.what} ${ago(h.at)} ago`).join(', ') : 'nothing'}`);
+      out.push(proc.exitCode !== null || proc.signalCode !== null ? `Chrome exited (${proc.exitCode ?? proc.signalCode})` : 'Chrome running');
+      try {
+        const list = await within(2000, fetch(`${base}/json/list`, { signal: stop.signal }).then((r) => r.json()));
+        const t = list.find((x) => x.id === tid);
+        out[tab] += t ? ` at ${t.url}` : ' not listed (closed or crashed)';
+        // a dialog whose tab is gone went with it
+        const ids = new Set(list.map((x) => x.id));
+        for (const id of dialogs.keys()) if (!ids.has(id)) dialogs.delete(id);
+        said();
+      } catch (e) { out[tab] += ` (Chrome's list of tabs: ${e.message})`; said(); }
+      const v = await within(2000, fetch(`${base}/json/version`, { signal: stop.signal }).then((r) => r.json()));
+      b = new WebSocket(v.webSocketDebuggerUrl);
+      await within(2000, new Promise((ok, no) => { b.onopen = ok; b.onerror = () => no(new Error('could not reach it')); }));
+      let n = 0;
+      const calls = new Map();
+      b.onmessage = (m) => { const o = JSON.parse(m.data); const c = calls.get(o.id); if (!c) return; calls.delete(o.id); if (o.error) c.no(new Error(o.error.message)); else c.ok(o.result); };
+      const call = (ms, method, params = {}, sessionId) => within(ms, new Promise((ok, no) => { const id = ++n; calls.set(id, { ok, no }); b.send(JSON.stringify({ id, method, params, ...(sessionId && { sessionId }) })); }));
+      const cpu = () => call(1000, 'SystemInfo.getProcessInfo').then((r) => new Map(r.processInfo.filter((p) => p.type === 'renderer').map((p) => [p.id, p.cpuTime])), () => null);
+      const c0 = await cpu();
+      const t0 = Date.now();
+      // a second session on the same tab (closing the socket below ends it): does the page answer anyone?
+      try {
+        const { sessionId } = await call(1000, 'Target.attachToTarget', { targetId: tid, flatten: true });
+        const t = Date.now();
+        out.push(await call(2000, 'Runtime.evaluate', { expression: '1', returnByValue: true }, sessionId).then(() => `its page answers a second session in ${Date.now() - t} ms`, (e) => `its page gives a second session ${e.message}`));
+      } catch (e) { out.push(`a second session: ${e.message}`); }
+      const c1 = await cpu();
+      const s = (Date.now() - t0) / 1000;
+      out.push(c0 && c1 ? `renderers: ${[...c1].map(([pid, c]) => `${pid} ${c0.has(pid) ? `${Math.round(((c - c0.get(pid)) / s) * 100)}% cpu` : 'new'}`).join(', ') || 'none'}` : 'renderers: no process info');
+    })().catch((e) => { out.push(`Chrome's endpoint: ${e.message}`); });
+    let cut;
+    await Promise.race([looks, new Promise((r) => { cut = setTimeout(() => r(out.push('diagnosis cut at 6 s')), 6000); })]);
+    clearTimeout(cut);
+    stop.abort();
+    try { b?.close(); } catch {}
+    return out.join('; ');
+  };
   const newPage = async () => {
     const target = await (await fetch(`${base}/json/new?about:blank`, { method: 'PUT' })).json();
     const ws = new WebSocket(target.webSocketDebuggerUrl);
     await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = () => reject(new Error('could not reach the page')); });
     let seq = 0;
     const waiting = new Map();
+    // each call's method by its id until answered (one answered after its call gave up is "late"), and
+    // the last six things the socket brought, for what a call with no answer says
+    const names = new Map();
+    const heard = [];
     // the page's script worlds by origin (Runtime.enable sends them), for evIn: a frame of another origin is out of its parent's reach
     const worlds = new Map();
     ws.onmessage = (m) => { const o = JSON.parse(m.data);
+      heard.push({ what: o.method === 'Page.javascriptDialogOpening' ? `${an(o.params.type)} dialog` : o.method ?? `the answer to ${names.get(o.id) ?? o.id}${waiting.has(o.id) ? '' : ' (late)'}`, at: Date.now() });
+      if (heard.length > 6) heard.shift();
+      names.delete(o.id);
       if (o.method === 'Runtime.executionContextCreated' && o.params.context.auxData?.isDefault) worlds.set(o.params.context.id, o.params.context.origin);
       else if (o.method === 'Runtime.executionContextDestroyed') worlds.delete(o.params.executionContextId);
       else if (o.method === 'Runtime.executionContextsCleared') worlds.clear();
+      else if (o.method === 'Page.javascriptDialogOpening') dialogs.set(target.id, { ...o.params, at: Date.now() });
+      else if (o.method === 'Page.javascriptDialogClosed') dialogs.delete(target.id);
       const w = waiting.get(o.id); if (!w) return; waiting.delete(o.id); if (o.error) w.reject(new Error(`${w.method}: ${o.error.message}`)); else w.resolve(o.result); };
     // A page that stops answering fails the call: an await nobody will ever settle hangs the run.
     // the page's socket gone (Chrome died or closed it): every call still waiting fails, saying so
@@ -95,7 +163,9 @@ export async function openChrome() {
     const send = (method, params = {}) => new Promise((resolve, reject) => {
       if (ended) return reject(new Error(`${method}: ${ended}`));
       const id = ++seq;
-      const timer = setTimeout(() => { waiting.delete(id); reject(new Error(`${method}: no answer from Chrome in 30 s`)); }, 30000);
+      names.set(id, method);
+      // no answer in 30 s: the call fails once (never sent again), saying what Chrome was doing
+      const timer = setTimeout(() => { waiting.delete(id); whatChromeDid(target.id, heard).catch((e) => `what Chrome was doing is unknown: ${e.message}`).then((why) => reject(new Error(`${method}: no answer from Chrome in 30 s; ${why}`))); }, 30000);
       timer.unref();
       const settled = (f) => (v) => { clearTimeout(timer); f(v); };
       waiting.set(id, { resolve: settled(resolve), reject: settled(reject), method });
