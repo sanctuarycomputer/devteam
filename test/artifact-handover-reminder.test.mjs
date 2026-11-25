@@ -28,7 +28,7 @@ const SAYS = `(() => { const r = document.getElementById('av-remind'); if (!r) r
   focusIn: r.contains(document.activeElement) }; })()`;
 
 test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1500000 }, async (t) => {
-  const { F, PV, visit, sub } = await H(t);
+  const { F, PV, T, visit, sub } = await H(t);
 
   // A draft of viewer-a in the fixture's worktree w (a plain folder: S5), and n open notes on it, each on
   // a point of its own (one subject per spot).
@@ -68,8 +68,11 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     await V.soon(`${VIEWER_UP} && TS.kind === 'artifact' && TS.slug === 'viewer-a' && TS.at === ${J(w)} && TS.ready && TL.have > 0`, `setup: the viewer up on viewer-a@${w}`);
     await V.p.ev(FRAMES);
   };
-  // the page's threads hold every id in ids
-  const hasThreads = (V, ids) => V.soon(`${J(ids)}.every((id) => TL.threads.some((t) => t.id === id))`, `setup: the page has read ${ids.join(', ')}`);
+  // the page's threads hold every id in ids (read now, not at the page's next 5 s poll)
+  const hasThreads = async (V, ids) => {
+    await V.p.ev('tlRefresh(); void 0');
+    await V.soon(`${J(ids)}.every((id) => TL.threads.some((t) => t.id === id))`, `setup: the page has read ${ids.join(', ')}`);
+  };
   // Every fetch through a wrapper: POST bodies kept in __posts; a stub per action (window.__stub[action]
   // = {status, body, ms}); /api/threads rows with window.__over[id]'s fields laid over them.
   const wrap = (V) => V.p.ev(`(() => {
@@ -109,6 +112,26 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     assert.ok(at, `setup: #${id} is not in the page`);
     assert.ok(at.top, `setup: #${id} is covered`);
     await V.press(at.x, at.y, id);
+  };
+  // A real press on a decision in the viewer's bar (#av-handover). kit-145's guard (avStep.press) takes a pointer press
+  // on one only once it has sat in the same box, uncovered, for ASK_ARM_MS (1 s) by the page's own frames, a frame gap
+  // over 250 ms starting that second again; any other press it stops before the page's listeners (and WATCH's) see
+  // it. The bar is drawn as the viewer comes up, so a press straight after openW is always stopped, and on a loaded
+  // box the 1 s retry of V.press can be too (rem2). So: pressed once the page's guard says it has settled (kit-145's
+  // own LIVE, fixtures/artifact-notes-viewer), and again, once settled again, if a stalled frame began its second anew.
+  const ARMED = (id) => `(() => { const el = document.getElementById(${J(id)}); return !!el && performance.now() - avStep.press.last <= 250 && [...avStep.press.seen.values()].some((r) => r.el === el && avStep.settled(r)); })()`;
+  const pressArmed = async (V, id) => {
+    for (let k = 0; k < 6; k++) {
+      await V.soon(ARMED(id), `setup: #${id} settled, by kit-145's press guard`);
+      const at = await V.p.ev(`(() => { const b = document.getElementById(${J(id)}), r = b.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2; return { x, y, top: !!document.elementFromPoint(x, y)?.closest('#' + ${J(id)}) }; })()`);
+      assert.ok(at.top, `setup: #${id} is covered`);
+      const n = await V.p.ev('window.__clicks.length');
+      await V.p.move(at.x, at.y);
+      await V.p.clickAt(at.x, at.y);
+      if (await V.settle(`window.__clicks.slice(${n}).includes(${J(id)})`, 1500)) return;
+      t.diagnostic(`the press on #${id} once settled never reached the page: pressed again once it settles`);
+    }
+    assert.fail(`setup: six presses on #${id}, each once it had settled, never reached the page`);
   };
   const closeBy = async (V, kind) => {
     if (kind === 'back') await V.p.ev('history.back(); void 0');
@@ -157,6 +180,10 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     // a planner whose worktree is gone (the Library no longer lists it): the supervisor
     await openW(V, 'plan-gone');
     fs.rmSync(path.join(F.old, '.worktrees', 'plan-gone'), { recursive: true, force: true });
+    // the dashboard serves a finished data build again for 20 s unless the log moves (DATA_REUSE_MS, dataEpoch), and
+    // a folder removed moves nothing: a line in the log (the harness's own thread T, which no case here reads) makes
+    // the page's next read a fresh build, not one up to 20 s old
+    F.owner(['thread', 'say', T, 'The Library reads again']);
     await V.soon("!(DATA?.library?.artifacts ?? []).some((x) => x.at === 'plan-gone')", 'setup: the Library no longer lists plan-gone');
     await closeBy(V, 'x');
     s = await shownSoon(V, 'R2 a planner gone');
@@ -231,7 +258,7 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     await openW(V, 'rem-bar');
     await wrap(V);
     await V.p.ev("window.__stub['artifact-handoff'] = { status: 200, body: { to: 'supervisor', typed: false, count: 2 } }; void 0");
-    await pressId(V, 'av-handover');
+    await pressArmed(V, 'av-handover');
     await V.soon("window.__posts.some((p) => p.action === 'artifact-handoff')", "R4: the bar's press posted");
     assert.deepEqual(await V.p.ev("window.__posts.find((p) => p.action === 'artifact-handoff').body"), { slug: 'viewer-a', at: 'rem-bar' }, "R4: the bar's body is the reminder's");
   });
@@ -257,9 +284,11 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     await pressId(V, 'av-remind-later');
     await openW(V, 'rem-hold');
     await wrap(V);
-    await pressId(V, 'av-handover');
+    await pressArmed(V, 'av-handover');
     await V.soon(`${J([...V_HOLD, C])}.every((id) => TL.threads.find((t) => t.id === id)?.handed)`, 'R5: handed from the bar');
     F.owner(['thread', 'say', V_HOLD[0], 'Not quite: bigger still']);
+    // (read now, not at the page's next 5 s poll)
+    await V.p.ev('tlRefresh(); void 0');
     await V.soon(`TL.threads.find((t) => t.id === ${J(V_HOLD[0])})?.handed == null`, 'R5: the reply sent A back');
     await closeBy(V, 'x');
     s = await shownSoon(V, 'R5 sent back');
