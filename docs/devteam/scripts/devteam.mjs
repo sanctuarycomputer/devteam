@@ -8790,19 +8790,32 @@ function cmdSelf() {
 }
 /* self-model end */
 /* world-model start */
-// project/exterior.md, what the project relates to (log.schema.json#exterior@1): a markdown file whose
-// one fenced `exterior` block holds the contract. Rules 1 to 7 are kit-139's worldDocErrors; 8 to 10
-// follow test/fixtures/world/check.mjs, so the two refuse the same invalid/ cases.
+// project/exterior.md, what the project relates to: since kit-863 a plain document
+// (log.schema.json#exterior2), judged by the self-plain region's checkExterior, which follows
+// test/fixtures/world2/check.mjs rule for rule: one # title, ### entries, a dated source for each, and
+// on a repo not known to be private the names rule (a ### heading named whole in origin main's
+// strategy or dependency names, else refused; every capitalised word and every link host held until
+// named on the chore). A draft must be one. Version 1 (log.schema.json#exterior@1, one fenced
+// `exterior` block) still validates on main, by kit-135's rules below, and raises one exterior-drift.
 const EXTERIOR_REL = () => `${projectRel}/exterior.md`;
 const EXTERIOR_NOT_DRAFTED = 'exterior.md is not drafted yet: the supervisor drafts it from the strategy and self.md (supervisor.md, Monitoring)';
-// An exterior.md's text in: its parsed block (null unless it holds) and its contract errors. Past the
-// schema: an id shared across entities and signals (8), relation_word only and always for other (9),
-// and the prose outside the block naming each entity, as whole words in any case (10).
+// The day a read date is judged against: today, in UTC.
+const exteriorToday = () => new Date().toISOString().slice(0, 10);
+// An exterior.md's text in, as validate reads it: { version, block, errors }. Version 2 (no fenced self
+// or exterior block, selfPlainVersion) against exterior@2's form: the title, and no block. Version 1
+// against exterior@1, its block parsed when it holds; one whose block exterior@1's reader can't find (a
+// ~~~ fence, one indented or in a list item) gets exterior@2's block error. Past exterior@1's schema:
+// an id shared across entities and signals (8), relation_word only and always for other (9), and the
+// prose outside the block naming each entity, as whole words in any case (10).
 function exteriorDoc(text) {
+  const version = selfPlainVersion(text);
+  const plain = () => ({ version, block: null, errors: selfPlain.checkExterior(text, { today: exteriorToday(), visibility: 'private', allowed: { names: '', words: '' } }).errors });
+  if (version === 2) return plain();
+  const fb = fencedBlocks(text);
+  if (!fb.unclosed && !fb.blocks.some((x) => x.info === 'self' || x.info === 'exterior')) return plain();
   const errors = worldDocErrors(text, 'exterior');
-  if (errors.length) return { block: null, errors };
-  const b = fencedBlocks(text);
-  const v = JSON.parse(b.blocks.find((x) => x.info === 'exterior').body);
+  if (errors.length) return { version, block: null, errors };
+  const v = JSON.parse(fb.blocks.find((x) => x.info === 'exterior').body);
   const seen = new Set();
   const ids = v.entities.flatMap((e, i) => [[`exterior.entities[${i}].id`, e.id], ...e.signals.map((x, j) => [`exterior.entities[${i}].signals[${j}].id`, x.id])]);
   for (const [where, id] of ids) {
@@ -8812,14 +8825,14 @@ function exteriorDoc(text) {
   v.entities.forEach((e, i) => {
     if (e.relation === 'other' && e.relation_word === undefined) errors.push(`exterior.entities[${i}].relation_word is required when relation is other`);
     if (e.relation !== 'other' && e.relation_word !== undefined) errors.push(`exterior.entities[${i}].relation_word is only for relation other`);
-    if (!namesWhole(b.prose, e.name)) errors.push(`exterior.entities[${i}] "${e.name}": the prose outside the block never names it`);
+    if (!namesWhole(fb.prose, e.name)) errors.push(`exterior.entities[${i}] "${e.name}": the prose outside the block never names it`);
   });
-  return { block: errors.length ? null : v, errors };
+  return { version, block: errors.length ? null : v, errors };
 }
 const exteriorTreeText = () => readText(path.join(projectDir, 'exterior.md'));
-// The head's strategy.md and self.md blobs (null for no file): ref's, or with ref null the working
-// tree's (git hash-object, so an uncommitted draft counts), with the strategy's text when it was read
-// from the tree (a blob hash-object didn't write can't be read back with cat-file).
+// A version 1 file's checks past its contract, for validate. The head's strategy.md and self.md blobs
+// (null for no file): ref's, or with ref null the working tree's (git hash-object, so an uncommitted
+// draft counts), with the strategy's text when it was read from the tree.
 function headBlobs(ref, root = projectDir) {
   const rels = { strategy: strategyRel, self: `${projectRel}/self.md` };
   if (ref) {
@@ -8830,17 +8843,16 @@ function headBlobs(ref, root = projectDir) {
   return { strategyBlob: tree('strategy.md'), selfBlob: tree('self.md'), strategyText: readText(path.join(root, 'strategy.md')) };
 }
 // Whether validate is at the draft: main can be read and the working tree's exterior.md is not
-// main's (none on main counts as differing). With no main (a depth-1 CI checkout) it is not: the
-// stale state never errors, and check-pr and merge --chore run the draft's checks (spec, The check).
+// main's (none on main counts as differing). With no main (a depth-1 CI checkout) it is not.
 function exteriorAtDraft() {
   if (!projectInRepo || !mainRef()) return false;
   const f = path.join(projectDir, 'exterior.md');
   if (!fs.existsSync(f)) return false;
   return git(['hash-object', '--', f], mainRoot) !== git(['rev-parse', '--verify', '--quiet', `${mainRef()}:${EXTERIOR_REL()}`], mainRoot);
 }
-// Steps 2 and 3 of the check (spec, The check). Each quote is a verbatim part of the strategy_blob
-// object's text, always; a strategy_blob the repo can't read is an error at the draft and a warning
-// otherwise. At the draft, strategy_blob and self_blob are the head's strategy.md and self.md.
+// A version 1 block's quotes, each a verbatim part of its strategy_blob's text; a strategy_blob the
+// repo can't read is an error at the draft and a warning otherwise. At the draft, strategy_blob and
+// self_blob are the head's strategy.md and self.md.
 function exteriorBlobLines(block, { draft, strategyBlob, selfBlob, strategyText = null }) {
   const errors = [];
   const warnings = [];
@@ -8883,6 +8895,21 @@ function dependencyNames(ref = mainRef()) {
   }
   return { text: names.join('\n'), warnings };
 }
+// What the names rule allows at ref (origin main; the branch's own files never count): names, which
+// a ### heading must be named in whole (main's strategy.md and its dependency names), and words, which
+// hold every other capitalised word and every link host (main's strategy.md and its dependency files'
+// whole text, namesAllowedText); warnings, the dependency files'.
+function exteriorAllowed(ref = mainRef()) {
+  const deps = dependencyNames(ref);
+  return { names: `${fileAtRef(strategyRel, ref) ?? ''}\n${deps.text}`, words: namesAllowedText(ref), warnings: deps.warnings };
+}
+// The one judgment of an exterior.md draft (exterior@2): the self-plain region's checkExterior, as on a
+// repo not known to be private: { errors, warnings, refused, held, hosts }. A caller on a private repo
+// drops refused, held and hosts; a version 1 block is an error, alone.
+function exteriorDraft(text, allowed) {
+  return selfPlain.checkExterior(text, { today: exteriorToday(), visibility: 'public', allowed });
+}
+const exteriorRefusedLine = (name) => `"${name}" (a ### heading) is not named whole in origin main's strategy.md or its dependency names: on a repo not known to be private an entry is headed only by a name they give; head it as a group or a topic, or have the strategy name it first`;
 // The names rule (spec, The names rule): an organisation or work is allowed when origin main's
 // strategy.md names it as whole words in any case, or, for depends_on, its dependency names do. The
 // branch's own strategy never counts; with no ref, nothing allows it. A group is never checked here
@@ -8924,43 +8951,37 @@ function exteriorWords(text, block, ref = mainRef()) {
   return unknownNames(exteriorPieces(text, block), `${namesAllowedText(ref)}\n${dependencyNames(ref).text}`);
 }
 const exteriorWordLine = (w) => `"${w.word}" (${w.where}) is in neither origin main's strategy.md nor its dependency files: on a repo not known to be private, the draft is public once its branch is pushed; reword it, or check it and name it on the chore (chore pr --names-checked)`;
-// The draft's history (spec, The check, every version): steps 1 to 3 on head ({ text, blobs }, or
-// null when there is no exterior.md at the head), then the names rule and the words on each version
-// ([{ commit, text }], commit null for the head's own, each name and word kept at its first version).
-// { errors, warns, named: [{ line, commit }], words: [{ word, where, commit }] }.
-function exteriorVersionsScan(head, versions) {
+// The draft's history (every version is pushed): the contract and dated sources on head ({ text }, or
+// null when there is no exterior.md at the head), then the names rule on each version ([{ commit,
+// text }], commit null for the head's own): each refused heading and each held word or link host kept
+// at its first version. { errors, warns, named: [{ name, line, commit }], words: [{ word, where, commit }] }.
+function exteriorVersionsScan(head, versions, allowed) {
+  const judged = new Map();
+  const judge = (t) => { if (!judged.has(t)) judged.set(t, exteriorDraft(t, allowed)); return judged.get(t); };
   const errors = [];
   const warns = [];
-  if (head) {
-    const { block, errors: e } = exteriorDoc(head.text);
-    errors.push(...e);
-    if (block) { const b = exteriorBlobLines(block, { draft: true, ...head.blobs }); errors.push(...b.errors); warns.push(...b.warnings); }
-  }
+  if (head) { const d = judge(head.text); errors.push(...d.errors); warns.push(...d.warnings); }
   const named = [];
   const words = [];
   const seen = new Set();
-  let depWarns = null;
   for (const { commit, text } of versions) {
-    const block = exteriorDoc(text).block;
-    if (block) {
-      const n = exteriorNameLines(block);
-      depWarns ??= n.warnings;
-      for (const r of n.refused) if (!seen.has(`n:${r.name}`)) { seen.add(`n:${r.name}`); named.push({ line: r.line, commit }); }
-    }
-    for (const w of exteriorWords(text, block)) if (!seen.has(`w:${w.word}`)) { seen.add(`w:${w.word}`); words.push({ ...w, commit }); }
+    const d = judge(text);
+    for (const name of d.refused) if (!seen.has(`n:${name}`)) { seen.add(`n:${name}`); named.push({ name, line: exteriorRefusedLine(name), commit }); }
+    for (const [list, where] of [[d.held, 'word'], [d.hosts, 'link host']]) for (const word of list) if (!seen.has(`w:${word}`)) { seen.add(`w:${word}`); words.push({ word, where, commit }); }
   }
-  warns.push(...(depWarns ?? []));
+  warns.push(...allowed.warnings);
   return { errors, warns, named, words };
 }
 // A line's tail naming the commit that carries it, for a version that isn't the head's own.
 const exteriorCarries = (commit) => (commit ? `; commit ${commit.slice(0, 12)} carries it: rewrite the branch (once pushed, chore drop <slug> --reason "…" first; then git reset --soft origin/main and chore pr again)` : '');
 const EXTERIOR_NO_BASE = "no merge base with main: exterior.md's drafts can't be checked";
-// check-pr's hold on a PR changing exterior.md (spec, Commands), for checkPr in home: with exterior.md
-// at sha and a commit in merge-base..sha changing it, steps 1 to 3 at sha, and the names rule (public a
-// fail, unknown a warning, private nothing) and namesHoldLines over every version. With no
-// exterior.md at sha, steps 1 to 3 are skipped (a deletion of main's is kit-138's gate) but every
-// version since the base is still read: one added then deleted would land in main's history (final-1
-// F2). With no main, one warning (merge, which has main, checks it). { fails, warns }.
+// check-pr's hold on a PR changing exterior.md, for checkPr in home: with exterior.md at sha and a
+// commit in merge-base..sha changing it, the contract at sha (a fail) and its dated sources (warnings),
+// and over every version since the base the names rule: a refused heading a fail on a public repo and
+// a warning on an unknown one, each held word or link host namesHoldLines' (public a fail, unknown a
+// warning, cleared by a names-checked act on the chore), a private repo nothing. With no exterior.md at
+// sha the contract is skipped (a deletion of main's is kit-138's gate) but every version is still read:
+// one added then deleted would land in main's history. With no main, one warning. { fails, warns }.
 function exteriorDraftLines(base, sha, branch) {
   const rel = EXTERIOR_REL();
   const none = { fails: [], warns: [] };
@@ -8972,11 +8993,10 @@ function exteriorDraftLines(base, sha, branch) {
   if (!blobs.length) return none;
   const read = (b) => git(['cat-file', 'blob', b], mainRoot) ?? '';
   const versions = [...(headBlob ? [{ commit: null, text: read(headBlob) }] : []), ...blobs.filter((b) => b.blob !== headBlob).map((b) => ({ commit: b.commit, text: read(b.blob) }))];
-  const x = exteriorVersionsScan(headBlob ? { text: read(headBlob), blobs: headBlobs(sha) } : null, versions);
+  const x = exteriorVersionsScan(headBlob ? { text: read(headBlob) } : null, versions, exteriorAllowed());
   let vis;
   const visibility = () => (vis ??= repoVisibility());
-  const contract = new Set(headBlob ? exteriorDoc(read(headBlob)).errors : []);
-  const fails = x.errors.map((e) => (contract.has(e) ? `${rel} breaks exterior@1 at ${sha.slice(0, 12)}: ${e}` : `${rel} at ${sha.slice(0, 12)}: ${e}`));
+  const fails = x.errors.map((e) => `${rel} breaks exterior@2 at ${sha.slice(0, 12)}: ${e}`);
   const warns = x.warns.map((w) => `${rel}: ${w}`);
   if (x.named.length) {
     const lines = x.named.map((n) => `${rel}: ${n.line}${exteriorCarries(n.commit)}`);
@@ -8989,14 +9009,15 @@ function exteriorDraftLines(base, sha, branch) {
   const h = namesHoldLines({ rel, words: x.words, act, checked: namesChecked(act, 'exterior', since), visibility });
   return { fails: [...fails, ...h.fails], warns: [...warns, ...h.warns] };
 }
-// chore pr's hold on an exterior.md draft (spec, Commands), every read in the chore's worktree wt.
-// phase 'tree', before git add: the working tree's exterior.md and every blob already committed
-// since base, so a name in a hand commit refuses before anything new is committed. phase 'range',
-// after the commit and before the push: every blob since base, the head's first. At the draft only:
-// the tree's file differs from main's, a commit since base changes it, or there is no origin main
-// (then only the tree and HEAD's blob are read). A refused name, or on a repo not known to be
-// private a word checkedWords doesn't name, fails; unknown visibility counts as not private.
-// { fails, warns, words (to log once named), changed }.
+// chore pr's hold on an exterior.md draft, every read in the chore's worktree wt. phase 'tree', before
+// git add: the working tree's exterior.md and every blob already committed since base, so a name in a
+// hand commit refuses before anything new is committed. phase 'range', after the commit and before the
+// push: every blob since base, the head's first. At the draft only: the tree's file differs from
+// main's, a commit since base changes it, or there is no origin main (then only the tree and HEAD's
+// blob are read). The contract at the head fails; on a repo not known to be private (unknown counts as
+// not private) a refused heading fails, whatever --names-checked says, and so does a held word or link
+// host checkedWords doesn't name. A private repo holds no name. { fails, warns (the dated sources and
+// the dependency files', printed once pushed), words (to log once named), changed }.
 function exteriorChoreLines(wt, phase, { base, checkedWords }) {
   const rel = EXTERIOR_REL();
   const none = { fails: [], warns: [], words: [], changed: false };
@@ -9012,18 +9033,17 @@ function exteriorChoreLines(wt, phase, { base, checkedWords }) {
   const treeDraft = treeText !== null && (!main || git(['hash-object', '--', treeFile], wt) !== at(main));
   if (!treeDraft && !blobs.length) return none;
   const read = (b) => git(['cat-file', 'blob', b], wt) ?? '';
-  const root = path.join(wt, projectRel);
   let versions;
   let headDoc;
   if (phase === 'tree') {
     versions = [...blobs.map((b) => ({ commit: b.commit, text: read(b.blob) })), ...(treeText !== null ? [{ commit: null, text: treeText }] : [])];
-    headDoc = treeText !== null ? { text: treeText, blobs: headBlobs(null, root) } : null;
+    headDoc = treeText !== null ? { text: treeText } : null;
   } else {
     versions = [...(headBlob ? [{ commit: null, text: read(headBlob) }] : []), ...blobs.filter((b) => b.blob !== headBlob).map((b) => ({ commit: b.commit, text: read(b.blob) }))];
-    headDoc = headBlob ? { text: read(headBlob), blobs: headBlobs(head) } : null;
+    headDoc = headBlob ? { text: read(headBlob) } : null;
   }
-  const x = exteriorVersionsScan(headDoc, versions);
-  const fails = [...x.errors];
+  const x = exteriorVersionsScan(headDoc, versions, exteriorAllowed());
+  const fails = x.errors.map((e) => `exterior.md: ${e}`);
   const warns = [...x.warns];
   let vis;
   const visibility = () => (vis ??= repoVisibility());
@@ -9031,54 +9051,15 @@ function exteriorChoreLines(wt, phase, { base, checkedWords }) {
   if (x.named.length && visibility() !== 'private') fails.push(...x.named.map((n) => `${n.line}${visibility() === 'unknown' ? ` (${unknown})` : ''}${exteriorCarries(n.commit)}`));
   const shown = (w) => `"${w.word}" (${w.where})${w.commit ? ` in ${w.commit.slice(0, 12)}` : ''}`;
   const open = x.words.filter((w) => !checkedWords?.has(w.word));
-  if (open.length && visibility() === 'private') warns.push(...open.map((w) => `${shown(w)} is in neither origin main's strategy.md nor its dependency files: the repo is private, so it may be pushed`));
-  else if (open.length) {
-    fails.push(`exterior.md names words origin main's strategy.md and dependency files don't, and ${visibility() === 'public' ? 'this repo is public' : unknown}, so the draft is public once pushed: ${open.map(shown).join(', ')}; reword them, or check each and name it: --names-checked ${x.words.map((w) => w.word).join(',')}`);
+  if (open.length && visibility() !== 'private') {
+    // --names-checked splits at commas, so a word or host holding one can't be named: only rewording clears it
+    const nameable = x.words.filter((w) => !w.word.includes(','));
+    const commas = open.filter((w) => w.word.includes(','));
+    fails.push(`exterior.md names words origin main's strategy.md and dependency files don't, and ${visibility() === 'public' ? 'this repo is public' : unknown}, so the draft is public once pushed: ${open.map(shown).join(', ')}; reword them, or check each and name it${nameable.length ? `: --names-checked ${nameable.map((w) => w.word).join(',')}` : ''}`);
+    if (commas.length) fails.push(`${commas.map(shown).join(', ')} ${commas.length > 1 ? 'hold' : 'holds'} a comma, which --names-checked can't name: reword ${commas.length > 1 ? 'them' : 'it'}`);
     for (const c of [...new Set(open.map((w) => w.commit).filter(Boolean))]) fails.push(`${c.slice(0, 12)} carries a word: rewrite the branch (once pushed, chore drop ${path.basename(wt).replace(/^chore-/, '')} --reason "…" first; then git reset --soft origin/main and chore pr again), or check and name the word`);
   }
   return { fails, warns, words: open.length ? [] : x.words.map((w) => w.word), changed: true };
-}
-// exterior check's lines for the working tree's exterior.md (null text: none): the contract, the
-// blobs as at the draft, then (at the draft) the names rule by the repo's visibility (public an
-// error, unknown a warning, private nothing; gh asked only when a name is refused) and the words.
-// errors exit 1; warnings leave the exit as it is.
-function exteriorCheckLines({ draft = true } = {}) {
-  const text = exteriorTreeText();
-  if (text === null) return { errors: [], warnings: [] };
-  const { block, errors } = exteriorDoc(text);
-  if (!block) return { errors, warnings: draft ? exteriorWords(text, null).map(exteriorWordLine) : [] };
-  const r = exteriorBlobLines(block, { draft, ...headBlobs(null) });
-  if (!draft) return r;
-  const names = exteriorNameLines(block);
-  r.warnings.push(...names.warnings);
-  if (names.refused.length) {
-    const v = repoVisibility();
-    if (v === 'public') r.errors.push(...names.refused.map((x) => x.line));
-    else if (v === 'unknown') r.warnings.push(...names.refused.map((x) => `${x.line} (the repo's visibility is unknown, which counts as not private)`));
-  }
-  r.warnings.push(...exteriorWords(text, block).map(exteriorWordLine));
-  return r;
-}
-// validate's lines for the working tree's exterior.md: the contract and the quotes, and the blobs at
-// the draft (exteriorAtDraft); none when there is no file. Never the names rule.
-function exteriorValidateLines() {
-  const text = exteriorTreeText();
-  if (text === null) return { errors: [], warnings: [] };
-  const { block, errors } = exteriorDoc(text);
-  if (!block) return { errors, warnings: [] };
-  return exteriorBlobLines(block, { draft: exteriorAtDraft(), ...headBlobs(null) });
-}
-// The contract's relations, in the order show and the dashboard group them by.
-const EXTERIOR_RELATIONS = ['serves', 'depends_on', 'builds_on_it', 'alternative', 'collaborates', 'governs', 'affects', 'other'];
-// dashboard-data's exterior block (log.schema.json#exterior@1 dashboard), as check.mjs's
-// dashboardExterior gives it: file order, relation_word or null, each signal's score weight×value.
-function exteriorDashboard(block) {
-  return {
-    entities: block.entities.map((e) => ({
-      entity: e.id, relation: e.relation, relation_word: e.relation_word ?? null, kind: e.kind, name: e.name, matters: e.matters, weight: e.weight,
-      signals: e.signals.map((x) => ({ signal: x.id, what: x.what, value: x.value, score: e.weight * x.value })),
-    })),
-  };
 }
 // main's exterior.md: { text, blob }, or null when main has none; with no main, or the project
 // outside the repo, the working tree's (as selfMainText reads self.md).
@@ -9134,6 +9115,48 @@ function exteriorFindings(add) {
     for (const r of exteriorNameLines(block, main).refused) add('low', 'exterior-drift', 'exterior', `exterior.md names "${r.name}", which main's strategy.md${block.entities[r.index].relation === 'depends_on' ? ' and dependency files' : ''} no longer name`, 'draft a new version of exterior.md that names it as a group, or have the strategy name it; run exterior check before chore pr', { key: r.name.toLowerCase() });
   }
   if (block.strategy_blob !== strategyBlob || block.self_blob !== selfBlob) add('low', 'exterior-stale', 'exterior', `exterior.md drew from ${block.strategy_blob !== strategyBlob ? 'a strategy.md' : 'a self.md'} main has moved on from`, 're-read self.md first and draft a new one if it no longer holds; then draft a new version of exterior.md from the strategy and that self.md', { key: pair });
+}
+// exterior check's lines for the working tree's exterior.md, the draft: the contract (errors) and its
+// dated sources (warnings); then, on a repo not known to be private (gh asked only when a name is
+// refused or held), each refused heading an error and each held word or link host a warning.
+function exteriorCheckLines() {
+  const text = exteriorTreeText();
+  if (text === null) return { errors: [], warnings: [] };
+  const allowed = exteriorAllowed();
+  const d = exteriorDraft(text, allowed);
+  const errors = [...d.errors];
+  const warnings = [...d.warnings, ...allowed.warnings];
+  if (d.refused.length || d.held.length || d.hosts.length) {
+    const v = repoVisibility();
+    if (v !== 'private') {
+      const tail = v === 'unknown' ? " (the repo's visibility is unknown, which counts as not private)" : '';
+      errors.push(...d.refused.map((n) => `${exteriorRefusedLine(n)}${tail}`));
+      warnings.push(...[...d.held.map((word) => ({ word, where: 'word' })), ...d.hosts.map((word) => ({ word, where: 'link host' }))].map(exteriorWordLine));
+    }
+  }
+  return { errors, warnings };
+}
+// validate's lines for the working tree's exterior.md: the contract (either version), and for a
+// version 1 file its quotes, and its blobs at the draft (exteriorAtDraft); none when there is no file.
+// Never the names rule, nor the dated sources.
+function exteriorValidateLines() {
+  const text = exteriorTreeText();
+  if (text === null) return { errors: [], warnings: [] };
+  const { block, errors } = exteriorDoc(text);
+  if (!block) return { errors, warnings: [] };
+  return exteriorBlobLines(block, { draft: exteriorAtDraft(), ...headBlobs(null) });
+}
+// The contract's relations, in the order show and the dashboard group them by.
+const EXTERIOR_RELATIONS = ['serves', 'depends_on', 'builds_on_it', 'alternative', 'collaborates', 'governs', 'affects', 'other'];
+// dashboard-data's exterior block (log.schema.json#exterior@1 dashboard), for a version 1 file whose
+// block holds: file order, relation_word or null, each signal's score weight×value. kit-868 drops it.
+function exteriorDashboard(block) {
+  return {
+    entities: block.entities.map((e) => ({
+      entity: e.id, relation: e.relation, relation_word: e.relation_word ?? null, kind: e.kind, name: e.name, matters: e.matters, weight: e.weight,
+      signals: e.signals.map((x) => ({ signal: x.id, what: x.what, value: x.value, score: e.weight * x.value })),
+    })),
+  };
 }
 // exterior show [--json]: the working tree's exterior.md and self.md. exterior check: the working
 // tree's, the draft.
