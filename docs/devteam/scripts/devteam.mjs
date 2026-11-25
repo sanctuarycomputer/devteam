@@ -38209,7 +38209,8 @@ async function browserReapRun() {
     const p = /^([1-9]\d*)-/.exec(t ?? '')?.[1];
     return !!p && browserAlive(Number(p));
   };
-  const left = () => browserSessionFiles(profile).some((f) => fs.lstatSync(f, { throwIfNoEntry: false }));
+  // a file that can't even be looked at (EACCES, EIO) counts as left, so its failed delete is still said
+  const left = () => browserSessionFiles(profile).some((f) => { try { return !!fs.lstatSync(f, { throwIfNoEntry: false }); } catch { return true; } });
   const gone = () => {
     if (standDown()) return 0;
     const text = browserReadLastError()?.replace(/^\S+ /, '') ?? '';
