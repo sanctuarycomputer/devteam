@@ -56,3 +56,41 @@ test('version 1 is a fenced self or exterior block, anywhere', () => {
   for (const c of cases) assert.equal(version(read(c.file)), c.expect.errors.some((e) => /^fenced (self|exterior) block$/.test(e)) ? 1 : 2, c.file);
   for (const f of ['self.md', 'exterior.md', 'exterior-empty.md']) assert.equal(version(read(`../world/${f}`)), 1, `world/${f}`);
 });
+
+test('cases.json lists every file in cases/ once, and each of its fields', () => {
+  const files = fs.readdirSync(path.join(dir, 'cases')).map((f) => `cases/${f}`).sort();
+  assert.deepEqual(cases.map((c) => c.file).sort(), files);
+  for (const c of cases) {
+    assert.ok(c.shows, c.file);
+    assert.deepEqual(Object.keys(c.expect).sort(), (c.doc === 'self' ? ['errors', 'parts'] : Object.keys(clean)).sort(), c.file);
+    if (c.doc === 'exterior') assert.ok(['private', 'public', 'unknown'].includes(c.visibility), c.file);
+  }
+});
+
+for (const c of cases) {
+  test(`${c.file}: ${c.shows}`, () => {
+    const got = run(c);
+    for (const k of ['errors', 'warnings']) {
+      const want = c.expect[k] ?? [];
+      assert.equal((got[k] ?? []).length, want.length, `${k}: ${JSON.stringify(got[k])}`);
+      want.forEach((w, i) => assert.ok(got[k][i].includes(w), `${k}: "${got[k][i]}" names "${w}"`));
+    }
+    for (const k of ['parts', 'refused', 'held', 'hosts']) if (c.expect[k]) assert.deepEqual(got[k], c.expect[k], k);
+  });
+}
+
+test('a hostile text is read in seconds, not minutes', () => {
+  const n = 2000;
+  for (const x of [`[a](${' '.repeat(n)}`, '[a]('.repeat(n), '['.repeat(n), '![' .repeat(n), '`` ` '.repeat(n), '<!-- '.repeat(n), 'www.'.repeat(n), `### ${'Z'.repeat(40000)}`, `x ${'#'.repeat(n)} y`]) {
+    const start = process.hrtime.bigint();
+    checkExterior(`# T\n\n${x}\n`, { today, allowed, visibility: 'public' });
+    checkSelf(`# T\n\n${x}\n`, { root, has });
+    assert.ok(process.hrtime.bigint() - start < 10_000_000_000n, x.slice(0, 20));
+  }
+});
+
+test('the cases include every one the ticket\'s done-when lists', () => {
+  const have = cases.map((c) => c.file);
+  for (const f of ['self-block', 'exterior-block', 'self-no-title', 'exterior-no-title', 'self-no-part', 'self-part-nothing', 'self-part-outside', 'self-part-code', 'self-part-fence', 'self-part-image', 'self-part-anchor', 'self-part-md',
+    'self-fenced-heading', 'exterior-fenced-heading', 'exterior-no-date', 'exterior-future-date', 'exterior-good-date', 'public-heading', 'public-line-start', 'public-list-item', 'public-table-cell', 'public-bold', 'public-link-host']) assert.ok(have.includes(`cases/${f}.md`), f);
+});
