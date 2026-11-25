@@ -25274,6 +25274,10 @@ function boxHealth(log, scan, { kit = null, parts = boxHealthParts(), real = () 
 //             dropped. At most two processes' reads are ever out, across walks, and never two for
 //             one process, so a read that hangs (a process whose memory is locked) holds at most
 //             one of the threads every file read shares, and only while it hangs (final-1 F1).
+//             Each process's two reads are one read of the hub's budget (boxHealthIo, kit-919): one
+//             that can't start leaves its last info as it was, and with the budget full the walk
+//             starts no more. The run/ files and the sensors listing are too: one that can't
+//             start ends that pids read, keeping the last pids, and the next walk asks again.
 //             What is left of the 2 s ends the reading, not the walk: a process not read yet
 //             counts as unknown (outside, never a stray) until its read settles. Only the kind, whether it starts a test run, whether it is devteam's or tmux,
 //             and its cwd are kept, and only in this region. One whose cmdline can't be read is
@@ -25379,19 +25383,27 @@ const boxHealthProcesses = (() => {
     } catch { return null; } finally { await fh?.close().catch(() => {}); }
   };
   // the pids the known roots' run/ folders record
+  // Each read is one of the hub's budget (kit-919): one that can't start ends this read, so the last
+  // pids are kept and the next walk asks again.
   const readPids = async (ctx, r, roots) => {
     const pids = new Set();
     const add = (v) => { if (Number.isSafeInteger(v) && v > 1) pids.add(v); };
-    const json = async (f) => { try { const o = JSON.parse(await readSmall(f) ?? 'null'); return memoryIsMap(o) ? o : null; } catch { return null; } };
-    for (const { root } of roots) {
-      const dir = path.join(root, 'docs', 'devteam', 'run');
-      const b = await json(path.join(dir, 'browser', 'state.json'));
-      add(b?.daemon_pid); add(b?.chrome_pid);
-      add((await json(path.join(dir, 'supervisor-up.json')))?.pid);
-      let sensors = [];
-      try { sensors = await fs.promises.readdir(path.join(dir, 'sensors')); } catch { sensors = []; }
-      for (const s of sensors) { const t = (await readSmall(path.join(dir, 'sensors', s, 'stream.pid')))?.trim(); if (/^\d+$/.test(t ?? '')) add(Number(t)); }
-    }
+    const refused = Symbol('refused');
+    const io = (key, fn) => { const p = boxHealthIo(key, fn); if (p !== null) return p; if (boxHealthIoFull()) ctx.say(BOX_HEALTH_FULL); throw refused; };
+    const small = (f) => io(f, () => readSmall(f));
+    const json = async (f) => { const t = await small(f); try { const o = JSON.parse(t ?? 'null'); return memoryIsMap(o) ? o : null; } catch { return null; } };
+    try {
+      for (const { root } of roots) {
+        const dir = path.join(root, 'docs', 'devteam', 'run');
+        const b = await json(path.join(dir, 'browser', 'state.json'));
+        add(b?.daemon_pid); add(b?.chrome_pid);
+        add((await json(path.join(dir, 'supervisor-up.json')))?.pid);
+        let sensors = [];
+        const listed = path.join(dir, 'sensors');
+        try { sensors = await io(listed, () => fs.promises.readdir(listed)); } catch (e) { if (e === refused) throw e; sensors = []; }
+        for (const s of sensors) { const t = (await small(path.join(dir, 'sensors', s, 'stream.pid')))?.trim(); if (/^\d+$/.test(t ?? '')) add(Number(t)); }
+      }
+    } catch (e) { if (e === refused) return; throw e; }
     if (run === r) { r.pids = pids; r.pidsOf = roots; }
   };
   // readPids, one at a time, waited for at most 2 s; a late one sets the pids when it ends
@@ -25404,11 +25416,16 @@ const boxHealthProcesses = (() => {
     if (was) ctx.say("a root's run/ files did not answer within 2 s: the last pids are kept");
   };
   // a process's info: { cwd, kind, test, own }; one whose cmdline can't be read is known as nothing
+  // undefined: a read of the hub's budget (kit-919) that can't start, so the last info stands
   const readInfo = async (ctx, pid) => {
-    const dir = path.join(ctx.proc, String(pid));
-    const text = await readSmall(path.join(dir, 'cmdline'));
+    const dir = path.join(ctx.proc, String(pid)), cmdline = path.join(dir, 'cmdline');
+    const p = boxHealthIo(cmdline, async () => {
+      const text = await readSmall(cmdline);
+      return text === null ? { text } : { text, cwd: await fs.promises.readlink(path.join(dir, 'cwd')).catch(() => null) };
+    });
+    if (p === null) { if (boxHealthIoFull()) ctx.say(BOX_HEALTH_FULL); return undefined; }
+    const { text, cwd } = await p;
     if (text === null) return { cwd: null, kind: null, test: false, own: false, none: true };
-    const cwd = await fs.promises.readlink(path.join(dir, 'cwd')).catch(() => null);
     return { cwd, ...procClassify(memoryWords(text)) };
   };
   const walk = async (ctx, r) => {
@@ -25444,6 +25461,8 @@ const boxHealthProcesses = (() => {
           r.out.add(k);
           try {
             const info = await readInfo(ctx, pid);
+            // the budget full: this walk reads no more; one whose file is out is passed over
+            if (info === undefined) { if (boxHealthIoFull()) over = true; continue; }
             if (run === r) r.info.set(k, { at: ctx.real(), ...info });
           } finally { r.out.delete(k); }
         }
@@ -25603,7 +25622,8 @@ const boxHealthProcesses = (() => {
 // A killed du stuck in the kernel stays alive until it closes: while one is, its worktree gets no
 // second du (its row stays), and while two are, no du starts at all (every row stays). The
 // .worktrees/ folders are listed one at a time inside the one look, so a volume that hangs holds at
-// most one of the threads every file read shares, and no look starts until it answers.
+// most one of the threads every file read shares, and no look starts until it answers. Each listing
+// is a read of the hub's budget (boxHealthIo, kit-919): one that can't start keeps that root's rows.
 //
 // part(ctx, parts) gives undefined until a read has ended, then (a new object after each read):
 //   worktrees   [{ root, worktree, disk, disk_at }], in the order the roots and their folders were
@@ -25645,7 +25665,15 @@ const boxHealthDisk = (() => {
     const found = [], order = [];
     for (const { root } of ctx.roots()) {
       let list = [];
-      try { list = await fs.promises.readdir(path.join(root, '.worktrees'), { withFileTypes: true }); } catch (e) {
+      const dir = path.join(root, '.worktrees');
+      // a read of the hub's budget (kit-919): one that can't start keeps the root's rows, as an unreadable one does
+      const p = boxHealthIo(dir, () => fs.promises.readdir(dir, { withFileTypes: true }));
+      if (p === null) {
+        if (boxHealthIoFull()) ctx.say(BOX_HEALTH_FULL);
+        for (const k of r.order) if (k.startsWith(`${root}\0`)) order.push(k);
+        continue;
+      }
+      try { list = await p; } catch (e) {
         // missing: no worktrees; unreadable (EACCES, EIO): its rows stay as they are, none read again
         if (e?.code !== 'ENOENT') for (const k of r.order) if (k.startsWith(`${root}\0`)) order.push(k);
         continue;

@@ -931,7 +931,7 @@ function loadAll({ env = {}, roots = [] } = {}) {
   const helpers = ['readText', 'readNum'].map((n) => cut(`const ${n} = `, '\n')).join('\n');
   const memory = cut('const memoryCountsCache', 'const GiB');
   const regions = ['box-memory', 'box-health-contract', 'box-health-sampler', 'box-health-processes', 'box-health-disk', 'box-health-pool', 'box-health-claude'];
-  const code = `'use strict';\n${helpers}\n${memory}\n${regions.map((n) => regionOf(n, src)).join('\n')}\n${['state', 'park', 'room'].map((n) => stub(n)).join('\n')}\nreturn { boxHealth, boxHealthDisk, boxHealthIo: typeof boxHealthIo === 'function' ? boxHealthIo : undefined };`;
+  const code = `'use strict';\n${helpers}\n${memory}\n${regions.map((n) => regionOf(n, src)).join('\n')}\n${['state', 'park', 'room'].map((n) => stub(n)).join('\n')}\nreturn { boxHealth, boxHealthDisk, boxHealthProcesses, boxHealthIo: typeof boxHealthIo === 'function' ? boxHealthIo : undefined };`;
   const got = new Function(...Object.keys(names), code)(...Object.values(names));
   const make = () => got.boxHealth((m) => logs.push(m), async () => [], { real: () => clock.t });
   return { ...got, health: make(), make, clock, logs, timers, fifos, opens, dirs, files };
@@ -1235,4 +1235,45 @@ test('S27b: the pool keeps its last read of a project while the budget can\'t st
   await sleep(5);
   const after = await workers();
   assert.deepEqual([was, held, after], [shop.workers.length, shop.workers.length, 1], 'its last read while the budget is held, the new one after');
+});
+
+// a walk of the processes part, given at most 1 s, and its result
+const walked = async (s, p) => { await Promise.race([p.processes.fn(), sleep(1000)]); await turns(); return s.boxHealthProcesses.part(); };
+
+test('S35: a process whose info falls due while the budget is held keeps its last info: it counts where it did, never outside (kit-919)', async (t) => {
+  const a = newDir();
+  const w1 = path.join(a, '.worktrees', 'w1');
+  fs.mkdirSync(w1, { recursive: true });
+  const s = loadWith(t, { roots: [a], make: (fifos) => { const d = fakeProc(fifos, [101], 'node\0x.mjs\0'); fs.symlinkSync(w1, path.join(d, '101', 'cwd')); return d; } });
+  await s.health.start();
+  const p = partTimers(s);
+  const inW1 = (got) => [got?.places?.find((x) => x.worktree === 'w1')?.n ?? 0, got?.outside?.n];
+  const first = inW1(await walked(s, p));
+  s.clock.t += 5 * MIN + 1000;
+  const free = hold(s);
+  const held = inW1(await walked(s, p));
+  free();
+  assert.deepEqual([first, held], [[1, 0], [1, 0]], 'in w1 before, and still in w1 when its info is due and can\'t be read');
+});
+
+test('S36: a pid a run/ file records stays known while the budget is held, and is read again after (kit-919)', async (t) => {
+  const a = newDir();
+  const up = path.join(a, 'docs', 'devteam', 'run', 'supervisor-up.json');
+  fs.mkdirSync(path.dirname(up), { recursive: true });
+  fs.writeFileSync(up, JSON.stringify({ pid: 101 }));
+  const s = loadWith(t, { roots: [a], make: (fifos) => fakeProc(fifos, [101], 'node\0x.mjs\0') });
+  await s.health.start();
+  const p = partTimers(s);
+  const strays = (got) => got?.strays?.length;
+  const first = strays(await walked(s, p));
+  const free = hold(s);
+  await Promise.race([rootsTimer(s).fn(), sleep(1000)]);
+  const held = strays(await walked(s, p));
+  free();
+  await sleep(5);
+  const opened = s.files.filter((f) => f === up).length;
+  await Promise.race([rootsTimer(s).fn(), sleep(1000)]);
+  await walked(s, p);
+  assert.deepEqual([first, held], [0, 0], 'its pid keeps it from being a stray while the run/ files can\'t be read');
+  assert.ok(s.files.filter((f) => f === up).length > opened, 'supervisor-up.json is read again once the budget is free');
 });
