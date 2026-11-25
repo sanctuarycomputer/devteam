@@ -3,14 +3,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { canDrive } from './lib/chrome.mjs';
-import { harness, J } from './fixtures/artifact-viewer/harness.mjs';
+import { harness, J, FRAMES, VIEWER_UP } from './fixtures/artifact-viewer/harness.mjs';
 import { buildStack, ok, SLUG, FAQ, PLAN, CHORE, OLD } from './fixtures/artifact-annotations-e2e/stack.mjs';
 
 const WIN = { width: 1100, height: 800 };
+const HEAD_P = `#artifact/wt/${PLAN}/${SLUG}`;
 
 test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 900000 }, async (t) => {
   const H = await harness(t, 'ann-e2e');
-  const { F, visit } = H;
+  const { F, visit, AV_A, AV_B, PV } = H;
   const times = {};
   const step = (name, fn, opts = {}) => t.test(name, { timeout: 120000, ...opts }, async (s) => {
     const at = Date.now();
@@ -29,6 +30,122 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
     const V = await visit('#library', WIN);
     const listed5 = await V.settle(`JSON.stringify(DATA.library.artifacts.filter((a) => ['${SLUG}', '${FAQ}'].includes(a.slug)).map((a) => a.slug + ' ' + a.at).sort()) === ${J(J(ROWS))}`, 5000);
     assert.ok(listed5, `the dashboard's library lists the same four rows within 5 s: ${await V.p.ev("JSON.stringify(DATA.library.artifacts.map((a) => a.slug + ' ' + a.at))")}`);
+  });
+
+  // ---- the viewer helpers (the probe's, moved in) ----
+  const said = (from, page, hash = null) => `window.__own.slice(${from}).some((m) => m.own === 'at' && m.page === ${J(page)}${hash === null ? '' : ` && m.hash === ${J(hash)}`})`;
+  // the draft opened over the library, its lens ready and its index loaded in the frame
+  const openDraft = async (V) => {
+    const n = await V.mark();
+    await V.p.ev(`location.hash = ${J(HEAD_P)}; void 0`);
+    await V.soon(`${VIEWER_UP} && TS.kind === 'artifact' && TS.slug === ${J(SLUG)} && TS.at === ${J(PLAN)} && TS.ready`, 'setup: the viewer up on the draft, its lens ready');
+    await V.soon(said(n, 'pricing/index.html'), "setup: the draft's index loaded in the frame");
+  };
+  const threads = () => JSON.parse(ok(F, 'owner', ['thread', 'list', '--all', '--json']));
+  const notes = {}, widths = {};
+  // a note placed by real input (the Threads panel closed): Shift held, the pointer moved there, the lens's hit heard,
+  // Shift+click, the draft typed and sent (Enter); the frame's width at that moment kept for C2a
+  const place = async (V, key, where, text) => {
+    const { p, soon } = V;
+    await p.ev('TS.waitMs = 2000');
+    const at = await p.ev(`(() => { const f = tsFrame(), r = f.getBoundingClientRect(); const w = ${J(where)}; let x, y; if (w.id) { const m = window.__own.filter((m) => m.own === 'at' && m.rects && m.rects[w.id]).pop(); const e = m.rects[w.id]; x = e.x + e.w / 2; y = e.y + e.h / 2; } else { x = w.x; y = w.y; } return { x: r.left + f.clientLeft + x, y: r.top + f.clientTop + y }; })()`);
+    await p.ev('(() => { document.activeElement?.blur?.(); window.focus(); return true; })()');
+    await p.hold('Shift', true);
+    await soon(`!document.getElementById('av-over').hidden`, 'setup: Shift raised the overlay');
+    await p.move(at.x, at.y, 8);
+    await soon(where.id ? `TS.hit?.anchor?.selector === ${J('#' + where.id)}` : 'TS.hit !== undefined && TS.hit !== null', `setup: the lens's hit for ${key}`);
+    await p.clickAt(at.x, at.y, 8);
+    await p.hold('Shift', false);
+    await soon(`TL.draft?.subject?.kind === 'artifact'`, `setup: a note about to start (${key})`);
+    widths[key] = await p.ev(`document.getElementById('av-frame').clientWidth`);
+    const before = new Set(threads().map((x) => x.id));
+    await p.type(text);
+    await p.key('Enter', 8);
+    let th = null;
+    for (let i = 0; i < 200 && !th; i++) { th = threads().find((x) => !before.has(x.id) && x.subject?.kind === 'artifact'); if (!th) await new Promise((r) => setTimeout(r, 100)); }
+    assert.ok(th, `setup: the note ${key} was written`);
+    await p.ev('tlClose(); TS.waitMs = 150; void 0');
+    notes[key] = th;
+    t.diagnostic(`${key} ${th.id} subject ${J(th.subject)}`);
+    return th;
+  };
+  const pins = (V) => V.p.ev(`[...document.querySelectorAll('#av-pins [data-tl-pin]')].filter((b) => { const r = b.getBoundingClientRect(); return r.width > 0 && getComputedStyle(b).visibility !== 'hidden' && getComputedStyle(b).display !== 'none'; }).map((b) => b.dataset.tlPin).sort()`);
+  const pinsAre = async (V, keys, what) => {
+    const want = keys.map((k) => notes[k].id).sort();
+    await V.settle(`(() => { const s = [...document.querySelectorAll('#av-pins [data-tl-pin]')].filter((b) => b.getBoundingClientRect().width > 0).map((b) => b.dataset.tlPin).sort(); return ${J(want.join())} === s.join(); })()`, 4000);
+    await V.p.ev(FRAMES);
+    assert.deepEqual(await pins(V), want, `${what}: exactly ${keys.join(', ') || 'no'} pins`);
+  };
+
+  await step('step 2: four notes placed by real input on the draft', async () => {
+    const V = await visit('#library', WIN);
+    await openDraft(V);
+    await V.frameClick('to-a', 'pricing/a.html');
+    await place(V, 'N1', { id: 'plan-monthly' }, 'Make the monthly plan stand out');
+    await V.frameClick('to-tab2', 'pricing/a.html', { hash: '#tab2', load: false });
+    await place(V, 'N2', { id: 'annual-price' }, 'Show the saving on the annual price');
+    await place(V, 'N3', { x: 800, y: 420 }, 'This half of the annual view is empty');
+    await V.frameClick('to-b', 'pricing/b.html');
+    await V.frameClick('to-section-2', 'pricing/b.html', { hash: '#section-2', load: false });
+    await place(V, 'N4', { id: 'faq-cancel' }, 'Answer the cancel question first');
+  });
+
+  await step('C2a: each note has its subject and the frame it was placed over', async () => {
+    const want = { N1: ['a.html', '#plan-monthly', ''], N2: ['a.html', '#annual-price', '#tab2'], N3: ['a.html#tab2', undefined, '#tab2'], N4: ['b.html', '#faq-cancel', '#section-2'] };
+    for (const [key, [path, selector, hash]] of Object.entries(want)) {
+      assert.ok(notes[key], `C2a: ${key} was placed in step 2`);
+      const th = JSON.parse(ok(F, 'owner', ['thread', 'show', notes[key].id, '--json']));
+      const sub = th.subject, frame = th.frame;
+      assert.equal(sub.kind, 'artifact', `C2a: ${key} is an artifact note`);
+      assert.equal(sub.slug, SLUG, `C2a: ${key} is about ${SLUG}`);
+      assert.equal(sub.at, PLAN, `C2a: ${key} is at ${PLAN}`);
+      assert.equal(sub.path, path, `C2a: ${key}'s path`);
+      assert.equal(sub.anchor?.selector, selector, `C2a: ${key}'s anchor selector`);
+      assert.ok(frame, `C2a: ${key} carries the frame it was placed over: ${J(th)}`);
+      if (key === 'N2' || key === 'N4') assert.equal(frame.hash, hash, `C2a: ${key}'s frame.hash`);
+      assert.ok(Number.isInteger(widths[key]) && widths[key] > 0, `C2a: ${key}'s placement width was read (${widths[key]})`);
+      assert.equal(frame.w, widths[key], `C2a: ${key}'s frame.w equals #av-frame's clientWidth at its placement`);
+    }
+  });
+
+  await step('step 3: each view shows only its own pins', async () => {
+    const V = await visit('#library', WIN);
+    await openDraft(V);
+    await V.frameClick('to-a', 'pricing/a.html');
+    await pinsAre(V, ['N1'], 'a.html');
+    await V.frameClick('to-tab2', 'pricing/a.html', { hash: '#tab2', load: false });
+    await pinsAre(V, ['N2', 'N3'], 'a.html#tab2');
+    await V.frameClick('to-b', 'pricing/b.html');
+    await pinsAre(V, ['N4'], 'b.html');
+    await V.frameClick('to-section-2', 'pricing/b.html', { hash: '#section-2', load: false });
+    await pinsAre(V, ['N4'], 'b.html#section-2');
+  });
+
+  // step 4: every close closes; each case from a fresh visit, so one failing closer leaves nothing for the next
+  for (const kind of ['x', 'escape-dash', 'escape-frame', 'scrim']) {
+    await step(`step 4: ${kind} after an in-frame move closes the viewer`, async () => {
+      const V = await visit('#library', WIN);
+      await openDraft(V);
+      await V.frameClick('to-a', 'pricing/a.html');
+      await V.close(kind);
+      await V.closedOn('#library', `${kind} after an in-frame move`);
+    });
+  }
+  await step('step 4: open A, close, open B, close', async () => {
+    const V = await visit('#library', WIN);
+    await V.open(AV_A);
+    await V.close('x');
+    await V.closedOn('#library', 'open A, close');
+    await V.open(AV_B);
+    await V.close('x');
+    await V.closedOn('#library', 'open A, close, open B, close');
+  });
+  await step("step 4: a preview's route change, then close", async () => {
+    const V = await visit('#library', WIN);
+    await V.open(PV);
+    await V.appLink();
+    await V.close('x');
+    await V.closedOn('#library', 'a preview after a route change');
   });
 
   void stack;
