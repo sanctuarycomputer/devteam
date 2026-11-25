@@ -163,18 +163,17 @@ const within = (ms, what, p, stop) => new Promise((resolve, reject) => {
     reject(e);
     stop();
   }, ms);
-  p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); e.message = `${what}: ${e.message}`; reject(e); });
+  p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); if (e instanceof Error) e.message = `${what}: ${e.message}`; reject(e); });
 });
 // a server's close; past its limit its connections are cut and it is unref'd, so the failure is reported
 // and the process is not held open after it
 const connectionsOf = (server) => { const all = new Set(); server.on('connection', (c) => { all.add(c); c.on('close', () => all.delete(c)); }); return all; };
-const closing = (server, what, conns) => within(CLOSE_LIMIT_MS, `close of ${what}`, new Promise((r) => {
+const closing = (server, what, conns) => { let idle; return within(CLOSE_LIMIT_MS, `close of ${what}`, new Promise((r) => {
   // A stranger's kept-alive connection (a hosting platform probes new ports) would hold the close for the
   // gateway's 65 s: idle connections are dropped while it waits. One with a request in flight is not.
-  const idle = setInterval(() => server.closeIdleConnections?.(), 100);
+  idle = setInterval(() => server.closeIdleConnections?.(), 100);
   server.close(() => { clearInterval(idle); r(); });
-  setTimeout(() => clearInterval(idle), CLOSE_LIMIT_MS).unref();
-}), () => { for (const c of conns) c.destroy(); server.unref(); });
+}), () => { clearInterval(idle); for (const c of conns) c.destroy(); server.unref(); }); };
 // a listen: its error is the test's (not an uncaught one that leaves the wait), and it has a limit too
 const listening = (server, port, what) => within(REQUEST_LIMIT_MS, `listen of ${what}`, new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve(); }); }), () => server.unref());
 // an answer read to its end: one cut off after its head is an error, not a wait
@@ -212,6 +211,7 @@ async function gateway(name, extra = {}) {
   const dir = opts.dir ?? path.join(tmp, tag);
   const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubPage: HUB_PAGE, log: (m) => logs.push(m), methodTypes: { stub }, ...opts });
   const conns = connectionsOf(g.server);
+  const close = () => closing(g.server, `${tag}'s gateway`, conns);
   await listening(g.server, port, `${tag}'s gateway`);
   const token = /claim#([\w-]+)/.exec(logs.join('\n'))?.[1];
   const file = path.join(dir, 'state.json');
@@ -220,8 +220,11 @@ async function gateway(name, extra = {}) {
   const write = (s) => { const t = `${file}.test.tmp`; fs.writeFileSync(t, JSON.stringify(s, null, 2), { mode: 0o600 }); fs.renameSync(t, file); };
   // the gateway's signing key, as vapid() keeps it: it would make its own by the same export
   // (test/gateway.test.mjs's 'behind the gateway the kit runs as on a laptop' checks the key it makes)
-  const v = ecdhJwk();
-  write({ ...state(), vapid: { jwk: v, publicKey: u(Buffer.concat([Buffer.from([4]), Buffer.from(v.x, 'base64url'), Buffer.from(v.y, 'base64url')])) } });
+  await orClose(close, async () => {
+    if (state().vapid) return; // a reopened state keeps its own
+    const v = ecdhJwk();
+    write({ ...state(), vapid: { jwk: v, publicKey: u(Buffer.concat([Buffer.from([4]), Buffer.from(v.x, 'base64url'), Buffer.from(v.y, 'base64url')])) } });
+  });
   const raw = (method, route, { body, cookie = '', headers = {} } = {}) => { let r; return within(REQUEST_LIMIT_MS, `${tag}: ${method} ${headers.host ?? host}${route}`, new Promise((resolve, reject) => {
     // a body always framed: node sends a DELETE's unchunked, so without a length its bytes read as a second request
     const h = { host, ...(method !== 'GET' ? { origin: publicUrl, 'content-type': 'application/json' } : {}), ...(cookie ? { cookie } : {}), ...(body === undefined ? {} : { 'content-length': Buffer.byteLength(JSON.stringify(body)) }), ...headers };
@@ -233,7 +236,7 @@ async function gateway(name, extra = {}) {
     r.on('error', reject);
     r.end(body === undefined ? undefined : JSON.stringify(body));
   }), () => r.destroy()); };
-  return { g, port, publicUrl, host, inst, logs, token, dir, file, state, write, raw, close: () => closing(g.server, `${tag}'s gateway`, conns) };
+  return { g, port, publicUrl, host, inst, logs, token, dir, file, state, write, raw, close };
 }
 
 const FLOW_NAME = /^(__Host-)?devteam_flow=/;
@@ -373,16 +376,18 @@ async function boxWithInstance(name) {
   const track = (srv) => { srv.on('connection', (c) => { held.add(c); c.on('close', () => held.delete(c)); }); return srv; };
   const seen = [];
   const inst = track(http.createServer((q, s) => { q.resume(); q.on('end', () => { seen.push({ method: q.method, url: q.url, h: q.headers }); s.writeHead(200, { 'content-type': 'application/json' }); s.end('{"ok":true}'); }); }));
-  await listening(inst, INSTANCE, 'the fake dashboard');
+  const up = []; // what listens so far: a later listen that fails closes it
+  const open = (srv, port, what) => orClose(() => closeEach(...up.map((x) => () => closing(x, `${name}: a fake, after a failed setup`, held))), async () => { await listening(srv, port, what); up.push(srv); });
+  await open(inst, INSTANCE, 'the fake dashboard');
   const devSeen = [];
   const dev = track(http.createServer((q, s) => { q.resume(); devSeen.push({ method: q.method, url: q.url, h: q.headers }); s.writeHead(200, { 'content-type': 'text/plain' }); s.end('the app'); }));
   dev.on('upgrade', (q, sock) => { devSeen.push({ method: 'UPGRADE', url: q.url, h: q.headers }); sock.on('error', () => {}); sock.write('HTTP/1.1 101 Switching Protocols\r\nconnection: Upgrade\r\nupgrade: websocket\r\n\r\n'); });
-  await listening(dev, 0, 'the fake app');
+  await open(dev, 0, 'the fake app');
   const ttyd = track(net.createServer((sock) => { sock.on('error', () => {}); sock.once('data', () => sock.write('HTTP/1.1 101 Switching Protocols\r\nconnection: Upgrade\r\nupgrade: websocket\r\n\r\n')); }));
-  await listening(ttyd, 0, 'the ttyd stand-in');
+  await open(ttyd, 0, 'the ttyd stand-in');
   const list = [{ devteam: 1, root: '/srv/alpha', port: INSTANCE, name: 'alpha', previews: [{ name: 'cool-tiger', port: dev.address().port, project: 'alpha', session: 'api-01-x', label: 'admin', at: '2026-11-10', up: true, run: false }] }];
   const hub = track(http.createServer((q, s) => { q.resume(); s.writeHead(200, { 'content-type': 'application/json' }); s.end(JSON.stringify(q.url.startsWith('/operator/') ? { threads: [] } : { hub: 1, instances: list })); }));
-  await listening(hub, PORTS, 'the fake hub');
+  await open(hub, PORTS, 'the fake hub');
   const closeFakes = async () => {
     for (const c of held) c.destroy();
     await closeEach(...[['the fake dashboard', inst], ['the fake app', dev], ['the fake hub', hub], ['the ttyd stand-in', ttyd]].map(([what, x]) => async () => {
@@ -812,7 +817,7 @@ test('org-access A14: in Chrome, the invite page says view only for a View invit
     assert.equal(view, `You're invited to ${gw.host}, Vi, as ${INVITE_VIEW}`);
     const full = await said('full', 'Fu');
     assert.equal(full, `You're invited to ${gw.host}, Fu, as Full: you can do everything on the box except manage people.`);
-  } finally { await chrome.close(); await gw.close(); }
+  } finally { await closeEach(() => chrome.close(), gw.close); }
 });
 
 // --- the dashboard learns the level: /api/data's viewer and /api/hello's level (T3) ---------------
@@ -920,7 +925,7 @@ test('org-access A14: a dashboard served at View shows View only and sends no wr
   fs.writeFileSync(path.join(art, 'index.html'), '<!doctype html><html><body><p id="art">the mock</p></body></html>');
   for (const a of [['add', '-A'], ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'artifact: view-mock']]) assert.equal(spawnSync('git', a, { cwd: root, encoding: 'utf8', timeout: 30000 }).status, 0, a.join(' '));
   const { dash, port } = await dashboardOnFreePort(root, env);
-  const chrome = await openChrome();
+  const chrome = await orClose(async () => { await dash.stop(); }, () => openChrome());
   try {
     const at = async (level, route) => {
       const p = await chrome.newPage();
@@ -1001,8 +1006,7 @@ test('org-access A14: a dashboard served at View shows View only and sends no wr
     await until(f, `window.__posts.length > 0`, 'the press posts at Full');
     f.close();
   } finally {
-    await chrome.close();
-    await dash.stop();
+    await closeEach(() => chrome.close(), () => dash.stop());
     fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
