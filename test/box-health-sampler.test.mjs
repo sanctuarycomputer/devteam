@@ -1199,6 +1199,12 @@ test('S34: a volume whose read can\'t start is a gap, and is not forgotten: its 
   free();
   await sleep(5);
   assert.deepEqual([held.now.disks, held.samples.at(-1).disk], [undefined, undefined], 'no volume read while the budget is held');
+  // a stopped run's reads of these very roots still out: each is passed over, and still not forgotten
+  const go = [];
+  for (const r of [a, b]) s.boxHealthIo?.(r, () => new Promise((res) => go.push(res)));
+  await Promise.race([step(s), sleep(1000)]);
+  go.splice(0).forEach((res) => res());
+  await sleep(5);
   hangA = true;
   await hung(s, () => step(s), () => true);
   const j = answer(s.health).json;
