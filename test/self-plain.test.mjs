@@ -11,7 +11,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { json, kit as KIT, write } from './lib/kit.mjs';
 import { fixture, SUP } from './lib/next-step-fixture.mjs';
-import { version as refVersion } from './fixtures/world2/check.mjs';
+import { checkSelf as refCheckSelf, version as refVersion } from './fixtures/world2/check.mjs';
 
 const P = 'docs/devteam/project';
 const SELF = `${P}/self.md`;
@@ -95,6 +95,7 @@ test('P1 the kit\'s plain self checker, run alone, gives each world2 self case i
       assert.equal(got.errors.length, c.expect.errors.length, `P1 ${c.file}: ${JSON.stringify(got.errors)}`);
       c.expect.errors.forEach((w, i) => assert.ok(got.errors[i].includes(w), `P1 ${c.file}: "${got.errors[i]}" names "${w}"`));
       assert.deepEqual(JSON.parse(JSON.stringify(got.parts)), c.expect.parts, `P1 ${c.file} parts`);
+      assert.deepEqual(JSON.parse(JSON.stringify(got)), refCheckSelf(world2(c.file), { root: W2.root, has }), `P1 ${c.file}: word for word the reference checker's`);
     }
   });
   await t.test('P1 selfPlainVersion agrees with the reference on every case and on version 1\'s fixtures', () => {
