@@ -323,15 +323,19 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
   const TOCHECK = ['N1', 'N2', 'N4'];
   const idOfKey = (key) => notes[key].id;
   const cardUp = (key) => `TL.open === ${J(idOfKey(key))} && !document.getElementById('tl-card').hidden`;
-  const rectOf = (V, sel) => V.p.ev(`(() => { const e = document.querySelector(${J(sel)}); if (!e) return null; e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+  // the middle of the element sel finds, as the pointer will meet it: brought into view first (scroll: false for a
+  // guarded control, which a scroll would unsettle), and what the page shows at that point named
+  const rectOf = (V, sel, scroll = true) => V.p.ev(`(() => { const e = document.querySelector(${J(sel)}); if (!e) return null; if (${scroll}) e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2, hit = document.elementFromPoint(x, y); return { x, y, on: !!hit && e.contains(hit), hit: hit ? hit.id || hit.className || hit.tagName : null }; })()`);
   // a real press on the first element sel finds (what: the click target's id or tag, as the harness names it); a guarded
   // control (Resolve) is pressed only once avStep.ready says it has sat still, found again by sel on every try
   const pressSel = async (V, sel, what, { guard = null } = {}) => {
-    const cond = guard ?? `!!document.querySelector(${J(sel)})`;
-    await V.soon(cond, `setup: ${sel} is there${guard ? ' and settled under the press guard' : ''}`);
+    await V.soon(`!!document.querySelector(${J(sel)})`, `setup: ${sel} is there`);
+    await rectOf(V, sel);
+    if (guard) await V.soon(guard, `setup: ${sel} settled under the press guard`);
     await V.p.ev(FRAMES);
-    const at = await rectOf(V, sel);
+    const at = await rectOf(V, sel, false);
     assert.ok(at, `setup: ${sel} has a box to press`);
+    assert.ok(at.on, `setup: the point at ${sel} (${at.x},${at.y}) is covered by ${at.hit}`);
     await V.press(at.x, at.y, what);
   };
   // one real press on ‹ or ›, and the wait for the step to land: the note's card open, its page there, no step under way
@@ -340,7 +344,7 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
     await V.soon(`${cardUp(key)} && TS.ready && !avStep.want`, `${what}: ${id === 'av-next' ? '›' : '‹'} lands on ${key}'s card`);
   };
   const landsOn = async (V, key, file, hash, what) => {
-    await V.soon(`TS.ready && TS.path === ${J(file)} && TS.hash === ${J(hash)} && ${cardUp(key)}`, `${what}: the viewer lands on ${file}${hash} with ${key}'s card (it is on ' + ' ${'${TS.path}'}`);
+    await V.soon(`TS.ready && TS.path === ${J(file)} && TS.hash === ${J(hash)} && ${cardUp(key)}`, `${what}: the viewer lands on ${file}${hash} with ${key}'s card`);
     const want = idOfKey(key);
     await V.p.ev(FRAMES);
     const seen = await V.settle(`[...document.querySelectorAll('#av-pins [data-tl-pin]')].some((b) => b.dataset.tlPin === ${J(want)} && b.getBoundingClientRect().width > 0 && getComputedStyle(b).visibility !== 'hidden')`, 5000);
