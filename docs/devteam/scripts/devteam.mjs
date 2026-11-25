@@ -28028,12 +28028,22 @@ function makeSession(role) {
   // locked by a start, this one or another
   const startsLock = (why) => why === making || (why ?? '').startsWith(`${making} (`);
   const unfinished = () => startsLock(lockOf());
+  // git's record of a worktree a start is adding now: git writes its lock before the folder, and its
+  // gitdir (what the list reads) after, so in between only the record says (final-1 F3)
+  const beingMade = () => {
+    const dir = path.join(R.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], R.root) ?? path.join(R.root, '.git'), 'worktrees');
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch {}
+    return names.map((n) => path.join(dir, n)).find((d) => !fs.existsSync(path.join(d, 'gitdir')) && startsLock(readText(path.join(d, 'locked'))?.trim() ?? null)) ?? null;
+  };
   // what is at wt, in words, or null when it is a worktree of its own, or nothing. The commands clear
   // only a locked one: unlock refuses on a worktree a start has finished since (kit-856).
   const inRepo = `git -C ${shq(R.root)} worktree`;
   const leftAt = () => {
     const there = fs.existsSync(wt);
     if (there && !fs.statSync(wt).isDirectory()) return `${wt} is a file, where the worktree goes: move it away`;
+    const rec = beingMade();
+    if (rec) return `git is making a worktree for ${wt} (its record ${rec} has no gitdir yet): if no other start is making it, remove that record`;
     const locked = unfinished();
     if (!there) return locked ? `git still holds a worktree for ${wt}, whose folder is gone: if no other start is making it, clear it (${inRepo} unlock ${shq(wt)} && ${inRepo} remove --force ${shq(wt)})` : null;
     if (!locked && !fs.readdirSync(wt).length) return null;
@@ -28176,7 +28186,7 @@ function makeSession(role) {
   }
   // looked at again before anything is written there: another start's add into a folder that was
   // there, empty, may have locked it since the look (final-1 F3)
-  if (there && unfinished()) die(`${name}'s start isn't finished, so nothing was started: ${leftAt() ?? `another start is making ${wt}`}, then start it again`);
+  if (there && (unfinished() || beingMade())) die(`${name}'s start isn't finished, so nothing was started: ${leftAt() ?? `another start is making ${wt}`}, then start it again`);
   // A harness keeps its sessions by directory on its own machine: a worktree made just now has no
   // session to continue (a new machine, or the worktree was removed), so start fresh, with the
   // handoff note if there is one, and say so.

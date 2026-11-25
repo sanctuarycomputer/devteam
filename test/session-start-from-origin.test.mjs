@@ -956,6 +956,16 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
       assert.notEqual(r.status, 0, `X17: refused: ${r.out}`);
       assert.match(r.err, /ch-63-h's start isn't finished, so nothing was started/, `X17: named: ${r.err}`);
     });
+    await t.test('X25: a folder whose worktree git is making (its record locked by a start, no gitdir yet) is not resumed', tmux, () => {
+      behind('ch-62-z', 'X25');
+      fs.mkdirSync(wt('ch-62-z'), { recursive: true });
+      const rec = path.join(old, '.git/worktrees/ch-62-z');
+      write(path.join(rec, 'locked'), 'devteam: a start of ch-62-z is making this worktree (other)');
+      let r;
+      try { r = run(old, ['worker', 'ch-62-z', '--resume'], SUP); } finally { fs.rmSync(rec, { recursive: true }); }
+      assert.notEqual(r.status, 0, `X25: refused: ${r.out}`);
+      assert.ok(r.err.includes(`git is making a worktree for ${wt('ch-62-z')} (its record ${rec} has no gitdir yet)`), `X25: named: ${r.err}`);
+    });
     await t.test('X18: a lock a post-checkout hook put on the worktree in place of the start\'s stays', tmux, () => {
       ticket('ch-64-i');
       const r = withHook('git worktree unlock "$(pwd)" && git worktree lock --reason mine "$(pwd)"', () => run(old, ['worker', 'ch-64-i'], SUP));
