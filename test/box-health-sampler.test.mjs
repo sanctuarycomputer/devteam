@@ -1279,7 +1279,7 @@ test('S36: a pid a run/ file records stays known while the budget is held, and i
   free();
   await sleep(5);
   const opened = s.files.filter((f) => f === up).length;
-  await Promise.race([rootsTimer(s).fn(), sleep(1000)]);
+  // no new roots: the walk asks again only because the refused read left the last roots unread
   await walked(s, p);
   assert.deepEqual([first, held], [0, 0], 'its pid keeps it from being a stray while the run/ files can\'t be read');
   assert.ok(s.files.filter((f) => f === up).length > opened, 'supervisor-up.json is read again once the budget is free');
