@@ -125,19 +125,27 @@ test('R2 CPU: (90% of the limit − the last minute\'s mean) ÷ a session\'s mea
   assert.equal(head(pressed).cpu, 0, 'zero when tasks waited for CPU 40% of the last minute');
   const under = p.tick({ processes: walk(T0, s, { outside: 1, unattributed: 1.5 }), now: reading({ cpu: { some60: 39.9 } }), samples: samples(T0, [[0, 0]]) });
   assert.equal(head(under).cpu, 7, 'under 40% it is measured: 10.8 ÷ 1.5 = 7.2');
+  // a sample exactly a minute old is out of the last minute (final-1 F1-4)
+  const edge = p.tick({ processes: walk(T0, s, { outside: 1, unattributed: 1.5 }), now: reading(), samples: samples(T0, [[MIN, 10.8], [0, 0]]) });
+  assert.equal(head(edge).cpu, 7, 'the mean is 0, not 5.4: 10.8 ÷ 1.5 = 7.2');
 });
 
 test('R3 five minutes of walks: memory, CPU and the what-if wait for them, and a walk over five minutes old is dropped', () => {
   const p = started();
   const P = pool([file([worker('a', tok(1000))], 1000, { ready: 3 })]);
+  // o 1000, m 1000, now 1, rate 2: burn 1 + W lasts to 4 workers, 3 more
+  const C = claude(2);
   let got;
   for (let t = T0 - 5 * MIN + 15000; t <= T0; t += 15000) {
     p.clock.t = t;
-    got = p.tick({ processes: walk(t, [{ rss: GB, cpu: 1 }]), now: reading(), samples: samples(t, [[0, 2]]), pool: P });
+    // the claude part's reading of T0 (its reset 10 hours on) comes with the last tick
+    got = p.tick({ processes: walk(t, [{ rss: GB, cpu: 1 }]), now: reading(), samples: samples(t, [[0, 2]]), pool: P, ...(t === T0 ? { claude: C } : {}) });
   }
   assert.deepEqual([head(got).memory, head(got).cpu, whatIf(got)], [undefined, undefined, undefined], '4 min 45 s of walks: nothing yet');
+  // the token forecast and the Claude limit don't wait for walks (spec call, agreed; final-1 F1-3)
+  assert.deepEqual([head(got).claude, head(got).room, head(got).binds], [3, 3, 'claude'], 'the Claude limit before five minutes of walks');
   p.clock.t = T0 + 15000;
-  got = p.tick({ processes: walk(T0 + 15000, [{ rss: GB, cpu: 1 }]), now: reading(), samples: samples(T0 + 15000, [[0, 2]]), pool: P });
+  got = p.tick({ processes: walk(T0 + 15000, [{ rss: GB, cpu: 1 }]), now: reading(), samples: samples(T0 + 15000, [[0, 2]]), pool: P, claude: C });
   assert.equal(head(got).memory, 31, 'five minutes: (51.2 − 20) ÷ 1 GB');
   assert.equal(whatIf(got).now, 1, 'and the what-if');
   // a big session in the first walks only: once those are over five minutes old it no longer counts
@@ -147,6 +155,13 @@ test('R3 five minutes of walks: memory, CPU and the what-if wait for them, and a
     got = q.tick({ processes: walk(t, [{ rss: (t < T0 - 6 * MIN ? 30 : 1) * GB, cpu: 1 }]), now: reading(), samples: samples(t, [[0, 2]]) });
   }
   assert.equal(head(got).memory, 31, 'the 30 GB walks are over five minutes old');
+  // a walk exactly five minutes old is dropped (final-1 F1-4): 30 GB then, 1 GB now
+  const e = started();
+  e.clock.t = T0 - 5 * MIN;
+  e.tick({ processes: walk(T0 - 5 * MIN, [{ rss: 30 * GB, cpu: 1 }]), now: reading(), samples: [] });
+  e.clock.t = T0;
+  got = e.tick({ processes: walk(T0, [{ rss: GB, cpu: 1 }]), now: reading(), samples: samples(T0, [[0, 2]]) });
+  assert.equal(head(got).memory, 31, 'only the walk of now is kept');
 });
 
 test('R4 no session: memory and CPU are absent (nothing to measure from), and so are the what-if\'s full counts; with no /proc no what-if', () => {
@@ -171,6 +186,8 @@ test('R5 room is the least; binds names it, or ready when every fleet is known a
   assert.deepEqual([head(got).room, head(got).binds, head(got).starts, got.sample], [8, 'cpu', 8, { room: 8 }], 'CPU sets room; ready 20 is not under it');
   got = measured(s, { pool: pool([file([], 0, { ready: 3 })]) }).got;
   assert.deepEqual([head(got).room, head(got).binds, head(got).starts], [8, 'ready', 3], 'ready under room binds');
+  got = measured(s, { pool: pool([file([], 0, { ready: 8 })]) }).got;
+  assert.deepEqual([head(got).room, head(got).binds, head(got).starts], [8, 'cpu', 8], 'ready equal to room: what set room binds (final-1 F1-4)');
   got = measured(s, { pool: pool([file([], 0, { ready: 3 })], { ready_unknown: ['gone'] }) }).got;
   accepted(got);
   assert.deepEqual([head(got).room, head(got).binds, 'starts' in head(got)], [8, 'cpu', false], 'an unknown fleet: no starts, and binds is what set room');
@@ -232,6 +249,8 @@ test('C2 with no forecast: the why, the steps with no token fields, and the limi
   accepted(got);
   got = measured(s, { pool: many, claude: claude(4) }).got;
   assert.deepEqual([head(got).claude, head(got).claude_why], [undefined, 'lasts'], 'too many: it lasts, so no limit');
+  got = measured(s, { pool: many, claude: claude(6, { projection: undefined }) }).got;
+  assert.deepEqual([whatIf(got).why, head(got).claude_why], ['no-projection', 'no-projection'], 'no projection comes before too many (final-1 F1-4)');
   // too many, and the limit still says no Claude use, or none by workers (spec-1 F1-2)
   const codex = pool([file(Array.from({ length: 60 }, (_, i) => worker(`w${i}`, tok(0))), 1000, { ready: 0 }), file([worker('x', tok(0))], 0, { ready: 0 })]);
   got = measured(s, { pool: codex, claude: claude(6) }).got;
@@ -297,6 +316,9 @@ test('B1 burn at W is R × (o + m·W) ÷ (o + m·now), and R at now: plain, with
   // prices: by dollars when every one has a price, else new tokens (a null price makes it new_hour)
   p = measured(s, { pool: pool([file([worker('a', tok(1000, { usd_hour: null })), worker('b', tok(3000))], 2000, { ready: 1 })]), claude: claude(20) });
   stepsAre(p, p.got, 20, 2000, 2000, 2, 'one with no price: new tokens');
+  // a null reviews price is a missing price too (final-1 F1-2): new tokens, m (3000 + 3000) ÷ 2
+  p = measured(s, { pool: pool([file([worker('a', tok(1000, { reviews_usd_hour: null, reviews_new_hour: 2000 })), worker('b', tok(3000))], 2000, { ready: 1 })]), claude: claude(20) });
+  stepsAre(p, p.got, 20, 2000, 3000, 2, 'a reviews price missing: new tokens');
 });
 
 test('B2 steps run 0 to now + 20, 81 at most, and over 60 workers none; memory_full_at and cpu_full_at are now + room + 1; no cswap, no token fields', () => {
@@ -344,6 +366,16 @@ test('N2 the forecast is worked out again only for a new parts.claude or new hou
   const got = p.tick({ ...base, pool: more, claude: c });
   assert.equal(p.s.calls(), n + 24, 'new hours: 24 steps again');
   assert.notEqual(whatIf(got).most_that_lasts, undefined);
-  p.tick({ ...base, pool: more, claude: claude(20) });
+  const c2 = claude(20);
+  p.tick({ ...base, pool: more, claude: c2 });
   assert.equal(p.s.calls(), n + 48, 'a new parts.claude: again');
+  // a reviewer's hour alone, then a goal's price alone going null, are new hours (final-1 F1-1)
+  const ws = (rv) => [worker('a', tok(1000)), worker('b', tok(500, reviews(rv))), worker('c', tok(2000))];
+  p.tick({ ...base, pool: pool([file(ws(600), 1000, { ready: 9 })]), claude: c2 });
+  assert.equal(p.s.calls(), n + 72, "a reviewer's hour changed");
+  const goal = (usd) => [{ id: 'g1', title: 'Goal one', usd_hour: usd, new_hour: 100 }];
+  p.tick({ ...base, pool: pool([file(ws(600), 1000, { ready: 9, goals: goal(0.001) })]), claude: c2 });
+  const before = p.s.calls();
+  p.tick({ ...base, pool: pool([file(ws(600), 1000, { ready: 9, goals: goal(null) })]), claude: c2 });
+  assert.equal(p.s.calls(), before + 24, "a goal's price gone null");
 });
