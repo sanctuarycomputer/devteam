@@ -41,7 +41,8 @@ test("the viewer's box, its narrowing for the panel, and the frames that fill a 
   });
 
   await sub('DW6: the Inbox panel narrows the viewer, and a pin and a new thread are placed from the narrowed frame', async () => {
-    const V = await visit('#library');
+    // tall enough that the page on the stage has no scrollbar under the bar's row of notes (kit-145)
+    const V = await visit('#library', { height: 900 });
     const p = V.p;
     await V.open(AV_A);
     // the panel, opened by #tt-peek (a real press)
