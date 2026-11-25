@@ -9031,24 +9031,6 @@ function exteriorOnMain() {
   const text = exteriorTreeText();
   return text === null ? null : { text, blob: null };
 }
-// exterior show's lines: the Self's what, then each relation that has entities, in the contract's
-// order; under it its entities in file order, each with why it matters and its signals by score,
-// high to low, ties in file order (a stable sort).
-function exteriorShowLines(block, selfWhat) {
-  const lines = [`Self: ${selfWhat ?? 'not drafted yet'}`];
-  if (!block.entities.length) return [...lines, 'no entity drawn yet'];
-  for (const rel of EXTERIOR_RELATIONS) {
-    const es = block.entities.filter((e) => e.relation === rel);
-    if (!es.length) continue;
-    lines.push('', rel);
-    for (const e of es) {
-      lines.push(`  ${e.name} (${e.kind}, weight ${e.weight})${e.relation === 'other' ? `: ${e.relation_word}` : ''}`, `    ${e.matters}`);
-      const sig = e.signals.map((x) => ({ score: e.weight * x.value, what: x.what })).sort((a, b) => b.score - a.score);
-      for (const x of sig) lines.push(`    ${x.score}  ${x.what}`);
-    }
-  }
-  return lines;
-}
 // The commit main's exterior.md (blob) was drawn at, whose strategy.md and self.md it stands on (the
 // design's Staleness, from git): 1. the pinned commit of the latest exterior-change question the owner
 // answered with its recommendation whose pinned blob is blob (a refused one never counts), when this
@@ -9147,8 +9129,6 @@ function exteriorValidateLines() {
   if (!block) return { errors, warnings: [] };
   return exteriorBlobLines(block, { draft: exteriorAtDraft(), ...headBlobs(null) });
 }
-// The contract's relations, in the order show and the dashboard group them by.
-const EXTERIOR_RELATIONS = ['serves', 'depends_on', 'builds_on_it', 'alternative', 'collaborates', 'governs', 'affects', 'other'];
 // dashboard-data's exterior block (log.schema.json#exterior@1 dashboard), for a version 1 file whose
 // block holds: file order, relation_word or null, each signal's score weight×value. kit-868 drops it.
 function exteriorDashboard(block) {
@@ -9159,27 +9139,25 @@ function exteriorDashboard(block) {
     })),
   };
 }
-// exterior show [--json]: the working tree's exterior.md and self.md. exterior check: the working
-// tree's, the draft.
+// exterior show [--json]: main's exterior.md, printed as it is, either version (--json: a version 1
+// block's dashboard data, else null). exterior check: the working tree's, the draft
+// (exteriorCheckLines: errors exit 1; warnings leave the exit as it is).
 function cmdExterior() {
   const sub = positional[0];
   if (sub === 'show') {
-    const text = exteriorTreeText();
-    if (text === null) return flags.json ? json(null) : out(EXTERIOR_NOT_DRAFTED);
-    const { block, errors } = exteriorDoc(text);
-    if (errors.length) {
-      for (const e of errors) out(`error: exterior.md: ${e}`);
-      process.exit(1);
-    }
-    if (flags.json) return json(exteriorDashboard(block));
-    const selfText = readText(path.join(projectDir, 'self.md'));
-    const self = selfText === null ? null : selfDoc(selfText).block;
-    return out(exteriorShowLines(block, self?.what ?? null).join('\n'));
+    gitReadCache = new Map();
+    const m = exteriorOnMain();
+    if (m === null) return flags.json ? json(null) : out(EXTERIOR_NOT_DRAFTED);
+    if (flags.json) { const d = exteriorDoc(m.text); return json(d.block ? exteriorDashboard(d.block) : null); }
+    out(`Exterior: ${EXTERIOR_REL()} ${projectInRepo && mainRef() ? 'on main' : 'in the working tree'}`);
+    out('');
+    out(String(m.text).replace(/\s+$/, ''));
+    return;
   }
   if (sub === 'check') {
     if (exteriorTreeText() === null) return out('no exterior.md: nothing to check');
     gitReadCache = new Map();
-    const { errors, warnings } = exteriorCheckLines({ draft: true });
+    const { errors, warnings } = exteriorCheckLines();
     for (const e of errors) out(`error: exterior.md: ${e}`);
     for (const w of warnings) out(`warn: exterior.md: ${w}`);
     process.exit(errors.length ? 1 : 0);
@@ -40168,7 +40146,7 @@ const HELP_OBSERVE = `Observe and orient
   governance [--json]   the kit's governance and process files and the project's strategy, Self and exterior: title, last change, changed here
   self show [--json]   main's project/self.md, what the project is, printed as it is; --json is the dashboard's self block, null when not drafted or plain (self@2)
   self check   the working tree's self.md against self@2 (a plain document; a fenced self block is refused), each part link on disk, and the names rule; errors exit 1, warnings don't
-  exterior show [--json] | exterior check   the working tree's project/exterior.md, what the project relates to, by relation, with each entity's signals and scores (--json the dashboard's exterior block, null when not drafted); check: the working tree's against exterior@1, its blobs and quotes at the draft, and the names rule; errors exit 1
+  exterior show [--json] | exterior check   show: main's project/exterior.md, what the project relates to, printed as it is (--json a version 1 block's dashboard data, else null); check: the working tree's draft against exterior@2 (a version 1 block refused), its dated sources, and on a repo not known to be private the names rule (a ### heading not named whole in origin main's strategy or dependency names refused; each other capitalised word and link host held until named on the chore); errors exit 1
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
   search "<words>" [--type <log type>|doc]… [--since <date>] [--limit n] [--json]   what the project already wrote about it, best first, quoted as data (supervisor.md §6)
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …`;

@@ -348,6 +348,11 @@ test('M version 1 on main, and a version 1 draft', withProject('x-v1', { strateg
     const sha = W.commitOn('v1b', (w) => write(path.join(w, EXT), draft));
     assert.match(lines(W.checkPr('chore-v1b', sha).out, 'fail').join('\n'), /exterior\.md breaks exterior@2 at [0-9a-f]{12}: exterior\.md holds a fenced exterior block/, 'M3 check-pr fails it');
   });
+  await check('M4 exterior show prints a version 1 document whole, exit 0', () => {
+    const r = W.run(['exterior', 'show']);
+    assert.equal(r.status, 0, r.text);
+    assert.ok(r.out.includes(world('exterior.md').trimEnd()), `M4 the whole document\n${r.out}`);
+  });
   await check('M5 a plain version landing on main clears the drift', () => {
     W.onMain({ [EXT]: world2('exterior.md') });
     W.record('private');
@@ -356,6 +361,15 @@ test('M version 1 on main, and a version 1 draft', withProject('x-v1', { strateg
 }));
 
 test('V exterior show, --json and dashboard-data for a plain file', withProject('x-show', { exterior: world2('exterior.md') }, async (W, check) => {
+  await check('V1 exterior show prints main\'s plain document whole, exit 0', () => {
+    const r = W.run(['exterior', 'show']);
+    assert.equal(r.status, 0, r.text);
+    assert.equal(r.out, `Exterior: ${EXT} on main\n\n${world2('exterior.md').trimEnd()}`, 'V1 the document');
+  });
+  await check('V2 exterior show --json and dashboard-data\'s exterior are null', () => {
+    assert.equal(W.ok(['exterior', 'show', '--json']).trim(), 'null', 'V2 --json');
+    assert.equal(json(W.ok(['dashboard-data'])).exterior, null, 'V2 dashboard-data');
+  });
   await check('V3 validate passes a plain exterior.md on main and in the working tree', () => {
     write(path.join(W.old, EXT), `${world2('exterior.md')}\nAnother line.\n`);
     const r = W.run(['validate']);
@@ -370,4 +384,10 @@ test('P5 one function judges a draft for exterior check, chore pr and check-pr',
   assert.match(body('exteriorVersionsScan'), /exteriorDraft\(/, 'P5 the versions scan (chore pr, check-pr) calls it');
   for (const f of ['exteriorChoreLines', 'exteriorDraftLines']) assert.match(body(f), /exteriorVersionsScan\(/, `P5 ${f} scans the versions`);
   assert.match(body('exteriorCheckLines'), /exteriorDraft\(/, 'P5 exterior check calls it');
+});
+
+test('H HELP_OBSERVE\'s exterior line says exterior@2 and the document', () => {
+  const help = SRC.slice(SRC.indexOf('const HELP_OBSERVE')).split('\n').find((l) => l.includes('exterior show'));
+  assert.doesNotMatch(help, /exterior@1|signals and scores/, `H no version 1 words: ${help}`);
+  assert.match(help, /exterior@2/, `H names exterior@2: ${help}`);
 });
