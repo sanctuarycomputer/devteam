@@ -430,7 +430,11 @@ export function selfHeld(text) {
   const pl = plain(text).split('\n');
   const at = [];
   pl.reduce((o, l, i) => { at[i] = o; return o + l.length + 1; }, 0);
-  const inLink = links(text).map((k) => [k.index, k.close]);
+  // the links' words, [ to ], sorted and apart (a link inside another's words is none), read by a
+  // pointer that only moves on, as the words come in order: each word one look
+  const spans = links(text).map((k) => [k.index, k.close]);
+  let k = 0;
+  const inLink = (o) => { while (k < spans.length && spans[k][1] <= o) k += 1; return k < spans.length && o > spans[k][0]; };
   const out = new Set();
   const add = (w) => { const c = capWord(w); if (c) out.add(c); };
   let item = false; // in a list item, until a blank line
@@ -453,7 +457,7 @@ export function selfHeld(text) {
       gap += p.slice(prev, m.index);
       prev = m.index + m[0].length;
       const o = at[i] + m.index;
-      const whole = p.slice(m.index, prev) !== m[0] || inLink.some(([a, b]) => o > a && o < b);
+      const whole = p.slice(m.index, prev) !== m[0] || inLink(o);
       if (whole || !(start || /[.!?]\s/.test(gap))) add(m[0]);
       start = false;
       gap = '';
