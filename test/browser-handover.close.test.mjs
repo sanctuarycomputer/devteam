@@ -18,7 +18,7 @@ handoverFile();
 const mustRun = !!process.env.CI && Number(process.versions.node.split('.')[0]) >= 22;
 const skip = canDrive ? false : 'needs Chrome and Node 22+';
 // The checks run as four chains at once, one per project (each its own daemon), checks in order within
-// a chain: cA's (C23, C15, C20, W1, C21, RF3, KD2, KD5, KD3, KD4), cB's (C18, C19, PC1, PC4, PC5, RF4, T4-1, T4-3, KD6, PC3, T4-2),
+// a chain: cA's (C23, C15, C20, W1, C21, RF3, KD2, KD5, KD3, KD4, KD9), cB's (C18, C19, PC1, PC4, PC5, RF4, T4-1, T4-3, KD6, PC3, T4-2),
 // cC's (C24, T6-3, RF2, RL0, RL1, RL2, KD8, KD8b, RL3) and cD's (C12, C13, C14, KD1, KD7, C16, PC6). onA, onB, onC and onD add a check.
 const cAChecks = [], cBChecks = [], cCChecks = [], cDChecks = [];
 const onA = (name, fn) => cAChecks.push([name, fn]);
@@ -532,6 +532,24 @@ onA('KD4 a failed delete after the daemon is killed -9 is said by the offline st
   assert.match(off.out, LAST_DELETE, off.out);
   await ok(P, ['start']);
   await ok(P, ['stop']);
+});
+
+// kit-877 (ruling m-20261125-103500671): a clean stop deleted the session files itself and told its
+// reaper so; nothing of the old daemon's touches what comes after it. A file in Default/Sessions
+// planted right after the stop (as a start's Chrome would write one) is still there 3 s later.
+onA('KD9 a clean stop: its reaper stands down, so a file written on the profile right after the stop is kept', async () => {
+  const P = cA();
+  await ok(P, ['start']);
+  await ok(P, ['open', `${site.origin}/record`]);
+  await until(() => fs.existsSync(path.join(P.profile, 'Default', 'Sessions')), 15000, "Chrome's session folder");
+  await ok(P, ['stop']);
+  const f = path.join(P.profile, 'Default', 'Sessions', 'kd9-kept');
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f, 'x');
+  try {
+    await sleep(3000); // a reaper that ran would have deleted it within about 1 s (a node start)
+    assert.ok(fs.existsSync(f), "KD9: the old daemon's reaper deleted a file written after a clean stop");
+  } finally { fs.rmSync(f, { force: true }); }
 });
 
 // --- cB: DEVTEAM_TEST_BROWSER_WATCH_HANDLE=0, so a close is handled only by a verb's pre-verb read or
