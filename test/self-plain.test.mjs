@@ -82,7 +82,6 @@ const withProject = (name, opts, body) => async (t) => {
   try { await body(W, (title, fn) => t.test(title, fn)); } finally { W.done(); }
 };
 const logLines = (W) => { const d = path.join(W.old, 'docs/devteam/run/log'); return fs.existsSync(d) ? fs.readdirSync(d).filter((f) => f.endsWith('.jsonl')).flatMap((f) => fs.readFileSync(path.join(d, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))) : []; };
-// the self.md lines a command printed: its errors, without the "error: self.md: " or the file's path
 
 test('P1 the kit\'s plain self checker, run alone, gives each world2 self case its result', async (t) => {
   await t.test('P1 the self-plain region gives every case its errors and parts', () => {
