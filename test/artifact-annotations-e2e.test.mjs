@@ -339,7 +339,7 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
   };
   await step('step 7b: Show me on L1 and L2, with the chore draft and after it is removed', async () => {
     await showMe('L1', `#artifact/wt/${CHORE}/${FAQ}`, 'chore', 'C5g L1');
-    await showMe('L2', `#artifact/main/${FAQ}`, 'main-2', 'C5g L2');
+    await showMe('L2', `#artifact/main/${FAQ}`, 'main-2', 'C5h L2 while the chore draft exists');
     F.g(['worktree', 'remove', '--force', stack.CHORE], F.old);
     assert.equal(fs.existsSync(stack.CHORE), false, 'C5h: the chore worktree is removed');
     await showMe('L1', `#artifact/main/${FAQ}`, 'main-2', 'C5h L1 after the chore draft is gone');
