@@ -190,7 +190,8 @@ test('self.md and exterior.md beside the strategy, as documents', { skip: canDri
     await openPeek(SELF, 'Self');
     assert.ok((await paras()).some((x) => x.startsWith('Its parts are the app, the sync service and its plugin interface.')), 'the parts in words');
     // clicking a part's words goes nowhere: the peek stays open on the Self, on the dashboard's own page
-    const at = await md(`(() => { const w = document.createTreeWalker(m, NodeFilter.SHOW_TEXT); let tn; while ((tn = w.nextNode()) && !tn.textContent.includes('the sync service')); const r = document.createRange(); const i = tn.textContent.indexOf('the sync service'); r.setStart(tn, i); r.setEnd(tn, i + 4); const b = r.getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 }; })()`);
+    const at = await md(`(() => { const w = document.createTreeWalker(m, NodeFilter.SHOW_TEXT); let tn; while ((tn = w.nextNode()) && !tn.textContent.includes('the sync service')); tn.parentElement.scrollIntoView({ block: 'center' }); const r = document.createRange(); const i = tn.textContent.indexOf('the sync service'); r.setStart(tn, i); r.setEnd(tn, i + 4); const b = r.getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2, seen: b.width > 0 && b.top >= 0 && b.bottom <= innerHeight && b.left >= 0 && b.right <= innerWidth }; })()`);
+    assert.ok(at.seen, 'the words to click are in view');
     await p.clickAt(at.x, at.y);
     await new Promise((r) => setTimeout(r, 500));
     assert.equal(await p.ev(`location.pathname === '/' && ${drawerOpen} && DRAWER.id === ${JSON.stringify(SELF)}`).catch(() => false), true, 'a part\'s words lead nowhere');
