@@ -1096,12 +1096,13 @@ function loadSettings({ origin = false, until = null } = {}) {
       // A ref lock another git process holds (two starts at once, each setting it: kit-910) goes in
       // moments, but git gives up on it after 100 ms: while git says the lock file exists and the ref is
       // still as it was, try again, for 5 s at most and never past a second before the deadline, so a
-      // lock no one lets go refuses in git's own words. Any other failure refuses on the first try.
+      // lock no one lets go refuses in git's own words. Any other failure refuses on the first try. Git
+      // speaks C here (LC_ALL), so the lock's words are the same under any locale.
       const lockedUntil = Math.min(Date.now() + 5000, end - 1000);
       let set;
       for (;;) {
         const ms = Math.floor(end - Date.now());
-        set = ms < 100 ? { status: 124, stderr: '' } : spawnSync('git', [...RESPONDER_GIT, 'update-ref', '--no-deref', tracking, sha, old], { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: ms, env: { ...process.env, GIT_NO_LAZY_FETCH: '1' } });
+        set = ms < 100 ? { status: 124, stderr: '' } : spawnSync('git', [...RESPONDER_GIT, 'update-ref', '--no-deref', tracking, sha, old], { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: ms, env: { ...process.env, GIT_NO_LAZY_FETCH: '1', LC_ALL: 'C' } });
         if (set.status === null) set.status = 124;
         if (set.status === 0 || !/Unable to create '[^']*\.lock': File exists/.test(set.stderr ?? '') || Date.now() >= lockedUntil || isAt() !== old) break;
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);

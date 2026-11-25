@@ -279,9 +279,8 @@ test('recover: two at once on one repo start one supervisor', { skip: !hasTmux }
     F.killSession();
     const dt = path.join(F.root, 'docs/devteam/scripts/devteam.mjs');
     const once = () => new Promise((resolve) => execFile(process.execPath, [dt, 'recover'], { cwd: F.root, env: F.env({ ...asOwner, ...server.env }), encoding: 'utf8' }, (err, stdout, stderr) => resolve({ status: err?.code ?? 0, stdout, stderr })));
-    // recover reads origin before its lock (cmdRecover), so both fetch at once: with origin/main already
-    // current neither fetch writes the ref, and the start claim is what's under test (two recovers racing
-    // one moved origin's ref lock is a product bug, kit-910-recover-ref-lock-race)
+    // fetch first, so with origin/main already current neither recover sets the ref and the start claim
+    // alone is under test; two recovers meeting a moved origin's ref lock is kit-910's test below
     execFileSync('git', ['fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main'], { cwd: F.root });
     const both = await Promise.all([once(), once()]);
     assert.deepEqual(both.map((r) => r.status), [0, 0], both.map((r) => `${r.stdout}${r.stderr}`.trim()).join(' | '));
@@ -325,12 +324,15 @@ test('recover: two at once after origin moved both finish, though origin/main\'s
     let ended = 0;
     const once = (trace) => new Promise((resolve) => execFile(process.execPath, [dt, 'recover'], { cwd: F.root, env: F.env({ ...asOwner, ...server.env, GIT_TRACE2_EVENT: trace }), encoding: 'utf8' }, (err, stdout, stderr) => { ended += 1; resolve({ status: err?.code ?? 0, stdout, stderr }); }));
     // The race made certain: the lock is held (as the other recover's update holds it) until git has
-    // refused it to each read's update (each recover has its own trace), or a recover has ended; git
-    // gives up on a held ref lock after 100 ms (core.filesRefLockTimeout), less than a loaded box's
-    // other recover can hold it
+    // refused it to a read's update (each recover has its own trace), then until it has refused the other
+    // too or 1 s has passed (well inside the 5 s a read waits on it, on any runner), or until a recover has
+    // ended; git gives up on a held ref lock after 100 ms (core.filesRefLockTimeout), less than a loaded
+    // box's other recover can hold it
     write(lock, '');
     const running = Promise.all(traces.map(once));
-    await until(() => ended > 0 || traces.every((t) => updatesRefused(t) >= 1), 'git refused the held lock to each read, or a recover ended');
+    await until(() => ended > 0 || traces.some((t) => updatesRefused(t) >= 1), 'git refused the held lock to a read, or a recover ended');
+    const firstRefused = Date.now();
+    await until(() => ended > 0 || traces.every((t) => updatesRefused(t) >= 1) || Date.now() - firstRefused >= 1000, 'the other read refused too, or 1 s passed');
     fs.rmSync(lock, { force: true });
     const both = await running;
     const said = both.map((r) => `${r.stdout}${r.stderr}`.trim()).join(' | ');
