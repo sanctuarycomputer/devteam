@@ -18,7 +18,8 @@ const q = (s) => JSON.stringify(s);
 // race.arm(match, how): the next git call whose arguments hold every string of match, in order; how:
 // 'fill' (empty, filled 0.4 s after the call failed), 'stuck' (empty, left so), or { says } (that
 // call, and each one after it that matches, prints says and exits 128). codes(): each matching call's
-// exit. Disarmed and made whole by reset().
+// exit. stamps(): every git call, matched or not, as { ms, args } when it started. Disarmed and made
+// whole by reset().
 function race(F, cwd) {
   const sib = path.join(fs.mkdtempSync(path.join(F.base, 'sib-')), 'sibling');
   F.g(['worktree', 'add', '-q', '--detach', sib, 'HEAD'], cwd);
@@ -27,6 +28,7 @@ function race(F, cwd) {
   const at = (n) => path.join(bin, n);
   fs.copyFileSync(common, at('whole'));
   const shim = (match, how) => `#!/bin/sh
+echo "$(date +%s%N) $*" >> ${q(at('stamps'))}
 case " $* " in ${match.map((m) => `*${q(m)}`).join('')}*) ;; *) exec ${q(realGit)} "$@" ;; esac
 ${how.says ? `echo ${q(how.says)} >&2; echo 128 >> ${q(at('codes'))}; exit 128` : `first=; if [ ! -e ${q(at('met'))} ]; then first=1; : > ${q(at('met'))}; : > ${q(common)}; fi
 ${q(realGit)} "$@"
@@ -35,12 +37,13 @@ echo "$code" >> ${q(at('codes'))}
 ${how === 'fill' ? `if [ -n "$first" ]; then (sleep 0.4; cp ${q(at('whole'))} ${q(common)}) </dev/null >/dev/null 2>&1 & fi` : ''}
 exit $code`}
 `;
-  const reset = () => { for (const n of ['codes', 'met', 'git']) fs.rmSync(at(n), { force: true }); fs.copyFileSync(at('whole'), common); };
+  const reset = () => { for (const n of ['codes', 'met', 'git', 'stamps']) fs.rmSync(at(n), { force: true }); fs.copyFileSync(at('whole'), common); };
   return {
     env: { ...SUP, PATH: `${bin}${path.delimiter}${process.env.PATH}` },
     arm: (match, how) => { reset(); fs.writeFileSync(at('git'), shim(match, how), { mode: 0o755 }); },
     reset,
     codes: () => (fs.existsSync(at('codes')) ? fs.readFileSync(at('codes'), 'utf8').trim().split('\n') : []),
+    stamps: () => (fs.existsSync(at('stamps')) ? fs.readFileSync(at('stamps'), 'utf8').trim().split('\n') : []).map((l) => ({ ms: Number(l.slice(0, l.indexOf(' '))) / 1e6, args: l.slice(l.indexOf(' ') + 1) })),
   };
 }
 const OTHER = 'fatal: a cause of its own';
@@ -214,7 +217,7 @@ test('the records checkout\'s fetches outlive it', tmux, async (t) => {
   const { old, g, ticket } = F;
   try {
     const R = race(F, old), T = resetting(t, R);
-    for (let n = 1; n <= 4; n++) ticket(`console-3${n}-a`);
+    for (let n = 1; n <= 5; n++) ticket(`console-3${n}-a`);
     const worker = (n) => F.run(old, ['worker', `console-3${n}-a`], R.env);
     const tip = (n) => g(['rev-parse', 'HEAD'], path.join(old, '.worktrees', `records-console-3${n}-a`));
     await T.test('home\'s main', () => {
@@ -239,6 +242,21 @@ test('the records checkout\'s fetches outlive it', tmux, async (t) => {
       const m = worker(4);
       assert.equal(m.status, 0, m.err);
       assert.deepEqual(R.codes(), ['128'], 'one try of main\'s');
+    });
+    await T.test('left half made: the two fetches share one 5 s, and the add names the entry', () => {
+      ahead(F, 'ticket/console-35-a');
+      R.arm([' fetch --quiet origin '], 'stuck');
+      const r = worker(5);
+      assert.notEqual(r.status, 0);
+      assert.match(r.err, NOTE);
+      assert.deepEqual(R.codes(), [FETCH_HALF, FETCH_HALF], 'each fetch tried once');
+      const s = R.stamps();
+      const at = (re) => s.findIndex((c) => re.test(c.args));
+      const main = at(/^fetch --quiet origin main$/), branch = at(/^fetch --quiet origin \+refs\/heads\/ticket\/console-35-a:/);
+      assert.ok(main >= 0 && branch > main && branch + 1 < s.length, s.map((c) => c.args).join('\n'));
+      assert.ok(s[main + 1].ms - s[main].ms >= 4900, 'main\'s fetch waited out the 5 s');
+      const after = s[branch + 1].ms - s[branch].ms;
+      assert.ok(after < 2500, `the ticket branch's fetch had no 5 s of its own: the next git started ${Math.round(after)} ms after it`);
     });
   } finally { F.done(); }
 });
