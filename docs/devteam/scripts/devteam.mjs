@@ -36825,9 +36825,9 @@ function browserWatch(ctx) {
 // restart, one line, for the offline status's plain text (browser@1's status JSON is unchanged). A
 // daemon that comes up removes it. Control characters dropped, 300 characters at most.
 const browserErrorFile = () => path.join(BROWSER_DIR(), 'last-error');
-function browserLastError(detail) {
+function browserLastError(detail, { make = true } = {}) {
   try {
-    browserDirMade();
+    if (make) browserDirMade(); // the reaper's: none made (kit-877), a folder gone meanwhile fails the write
     const tmp = path.join(BROWSER_DIR(), `last-error.${process.pid}.tmp`);
     fs.rmSync(tmp, { force: true });
     fs.writeFileSync(tmp, `${new Date().toISOString()} ${String(detail).replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, 300)}\n`, { mode: 0o600, flag: 'wx' });
@@ -36838,16 +36838,17 @@ const browserReadLastError = () => { try { return fs.readFileSync(browserErrorFi
 // kit-877: a failed delete of the session files said, never swallowed, by one rule for the shutdown and
 // the reaper. reason: why the daemon ended, as last-error already says it (or null). No reason: msg
 // alone. A reason that already says the delete failed: nothing added. Else the reason, cut to fit, and
-// the delete's message whole, within last-error's 300 characters.
-function browserReportDelete(reason, msg) {
-  if (!reason) return browserLastError(msg);
+// the delete's message whole, within last-error's 300 characters; a message too long to leave the
+// reason 20 of them goes alone (cut at 300 only if it is longer itself). opts: browserLastError's.
+function browserReportDelete(reason, msg, opts) {
+  if (!reason) return browserLastError(msg, opts);
   if (reason.includes("couldn't delete")) return;
-  const join = "; the session files stay: ";
-  browserLastError(`${reason.slice(0, Math.max(0, 300 - join.length - msg.length))}${join}${msg}`);
+  const join = "; the session files stay: ", room = 300 - join.length - msg.length;
+  browserLastError(room < 20 ? msg : `${reason.slice(0, room)}${join}${msg}`, opts);
 }
 // kit-877, the reaper: once Chrome is up the daemon starts sh blocked reading a pipe only the daemon
 // holds; when the daemon ends, however it ends (kill -9 too), the pipe closes and sh runs browser reap,
-// unless the daemon's own shutdown deleted the session files and said "done" on the pipe first (a clean
+// unless the daemon's own shutdown deleted the session files, with no process left on the profile, and said "done" on the pipe first (a clean
 // stop leaves the reaper nothing to do, and a start right after it nothing to race). Detached, so it
 // outlives the daemon's window. DEVTEAM_TEST_BROWSER_REAP=0 (tests) starts none.
 function browserReaper(ctx) {
@@ -36858,7 +36859,7 @@ function browserReaper(ctx) {
     r.stdin.on('error', () => {});
     r.unref();
     r.stdin.unref?.();
-    ctx.reaper = r; // never written to: only its close matters
+    ctx.reaper = r; // written to once, "done", by a shutdown that deleted the session files itself; else only its close matters
   } catch {}
 }
 const browserCmdlineOf = (pid) => {
@@ -36898,8 +36899,9 @@ async function browserReapRun() {
     return !!p && browserAlive(Number(p));
   };
   const report = (msg) => {
-    if (!fs.existsSync(BROWSER_DIR()) || standDown()) return 1;
-    browserReportDelete(browserReadLastError()?.replace(/^\S+ /, '') ?? null, msg);
+    if (standDown()) return 0;
+    if (!fs.existsSync(BROWSER_DIR())) return 1;
+    browserReportDelete(browserReadLastError()?.replace(/^\S+ /, '') ?? null, msg, { make: false });
     return 1;
   };
   if (standDown()) return 0;
@@ -36919,7 +36921,7 @@ async function browserReapRun() {
     if (!procs.length) {
       try { browserDeleteSession(profile); return 0; } catch (e) { return report(String(e?.message ?? e)); }
     }
-    if (Date.now() > end) return report(`browser: a process (pid ${procs[0]}) still carried the profile 5 s after the daemon ended, so the session files stay`);
+    if (Date.now() > end) return report(`browser: the daemon ended and a process (pid ${procs[0]}) still had the profile 5 s later; its session files stay until browser stop or the next start`);
   }
 }
 // The stop path: Browser.close, then the group signalled (SIGTERM, SIGKILL 2 s later) if Chrome
@@ -36939,7 +36941,7 @@ function browserShutdown(ctx, why, detail) {
     await browserEndChrome(ctx.cdp, ctx.chrome?.pid);
     let deleted = false;
     try { browserDeleteSession(ctx.profile); deleted = true; } catch (e) { browserReportDelete(why === 'error' && detail ? String(detail) : null, String(e?.message ?? e)); } // kit-877: said, never swallowed
-    if (deleted && ctx.reaper) await Promise.race([new Promise((r) => { try { ctx.reaper.stdin.write('done\n', () => r()); } catch { r(); } }), browserSleep(500)]); // kit-877: the reaper stands down
+    if (deleted && ctx.reaper && browserProcsOn(ctx.profile)?.length === 0) await Promise.race([new Promise((r) => { try { ctx.reaper.stdin.write('done\n', () => r()); } catch { r(); } }), browserSleep(500)]); // kit-877: the reaper stands down
     if (browserRawState()?.daemon_pid === process.pid) fs.rmSync(browserStateFile(), { force: true });
     for (const s of [ctx.control, ctx.view]) { try { s?.closeAllConnections?.(); s?.close(); } catch {} }
     await Promise.race([ctx.guard?.close(), browserSleep(2000)]).catch(() => {});
