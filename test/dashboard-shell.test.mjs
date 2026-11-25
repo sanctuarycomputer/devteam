@@ -1,11 +1,13 @@
 // The dashboard shell (dashboard-shell@2, test/contracts/shell.md): its two blocks are
 // byte-identical in index.html and hub.html, scoped so today's pages can't change, and their
 // builders, binders and URL rules do what the contract says (run in vm, over a tiny DOM of their
-// own HTML); and the measure check (test/lib/measure.mjs) passes on the fixture page built only from
-// the blocks, at three sizes, and fails, check by check, on broken copies (headless Chrome).
+// own HTML); the measure check (test/lib/measure.mjs) passes on the fixture page built only from
+// the blocks, at three sizes, and fails, check by check, on broken copies; and the hub frame's two
+// fakes talk as §10 says, on two loopback origins (both headless Chrome).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
@@ -714,4 +716,87 @@ test('the measure: every check passes on the fixture at three sizes and fails on
     const fails = await measure(p);
     assert.ok(fails.some((f) => f.startsWith(`${check}: `)), `${check} fails on its broken copy: ${JSON.stringify(fails)}`);
   }
+});
+
+// ---- §10 the hub frame: the two fakes, each on a loopback origin of its own (headless Chrome) ----
+const FAKES = ['hub-frame-fake.html', 'dashboard-frame-fake.html'];
+const FAKE_DIR = path.join(here, 'fixtures');
+const serveFakes = () => new Promise((resolve, reject) => {
+  const s = http.createServer((req, res) => {
+    const name = new URL(req.url, 'http://x').pathname.slice(1);
+    if (!FAKES.includes(name)) { res.writeHead(404); return void res.end(); }
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(fs.readFileSync(path.join(FAKE_DIR, name)));
+  });
+  s.on('error', reject);
+  s.listen(0, '127.0.0.1', () => resolve(s));
+});
+
+test('the hub frame: hub-base on every load, the hub follows hub-route from its frame only, a bad base is kept by no one', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 120000 }, async (t) => {
+  const later = cleanup(t);
+  const hubS = await serveFakes(), dashS = await serveFakes();
+  later(() => new Promise((r) => hubS.close(r)));
+  later(() => new Promise((r) => dashS.close(r)));
+  const hubO = `http://127.0.0.1:${hubS.address().port}`, dashO = `http://127.0.0.1:${dashS.address().port}`;
+  const chrome = await openChrome();
+  later(() => chrome.close());
+  const p = await chrome.newPage();
+  later(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  const until = async (fn, what) => {
+    let last;
+    for (let i = 0; i < 200; i++) { try { last = await fn(); if (last === true) return; } catch (e) { last = e.message; } await new Promise((r) => setTimeout(r, 50)); }
+    assert.fail(`${what} (last: ${JSON.stringify(last)})`);
+  };
+  const key = 'devteam-dev';
+  const base = `${hubO}/hub-frame-fake.html#${key}/`;
+  const src = `${dashO}/dashboard-frame-fake.html#board?goal=g-1`;
+  // before its first hub-base the dashboard posts nothing: the hub holds that base back while the frame loads,
+  // writes its head and changes its hash
+  const hubUrl = `${hubO}/hub-frame-fake.html?key=${key}&src=${encodeURIComponent(src)}`;
+  await p.send('Page.navigate', { url: `${hubUrl}&hold=1` });
+  await until(async () => (await p.ev('window.__held')) === true && (await p.evIn(dashO, "document.getElementById('head').textContent")) === '#board?goal=g-1', 'the held frame has loaded');
+  await p.evIn(dashO, "location.hash = '#goals'");
+  await new Promise((r) => setTimeout(r, 400));
+  assert.deepEqual(await p.ev("window.__log.filter((e) => e.got === 'hub-route')"), [], 'the dashboard fake posts no hub-route before its first hub-base');
+  await p.ev('window.__release()');
+  await until(async () => (await p.ev('location.hash')) === `#${key}/goals`, 'its head goes at once with the first');
+  await p.send('Page.navigate', { url: hubUrl });
+  // the bases the dashboard fake kept: true when there is one at least and each is the hub fake's (it sends one on
+  // load and one after each hub-route it accepts), else the list
+  const bases = async () => { const b = await p.evIn(dashO, 'JSON.stringify(window.__bases)'); const l = JSON.parse(b); return (l.length > 0 && l.every((x) => x === base)) || b; };
+  await until(bases, "the dashboard fake receives the hub fake's base on load");
+  await until(async () => (await p.ev('location.hash')) === `#${key}/board?goal=g-1`, 'the hub fake has the head the dashboard fake loaded at');
+  // the hub's hash follows each head the dashboard is sent to (by assignment: a new entry, a hashchange)
+  for (const h of ['#board?goal=g-1&p=ticket%2Fkit-1', '#progress?goal=g-1', `#library?${pq(`artifact/tree/${HEX40}/the-mock?path=b.html`)}`, '#talk/t-1?u=u-1']) {
+    await p.evIn(dashO, `location.hash = ${JSON.stringify(h)}`);
+    await until(async () => (await p.ev('location.hash')) === `#${key}/${h.slice(1)}`, `the hub fake's hash follows ${h}`);
+  }
+  // a head over 2,048 characters is sent as null: the bare key
+  await p.evIn(dashO, `location.hash = '#board?goal=' + 'x'.repeat(2100)`);
+  await until(async () => (await p.ev('location.hash')) === `#${key}`, 'a head sent as null shows the bare key');
+  await p.evIn(dashO, "location.hash = '#goals'");
+  await until(async () => (await p.ev('location.hash')) === `#${key}/goals`, 'and follows again after it');
+  // the dashboard reloads itself: a new document, hub-base again
+  await p.evIn(dashO, 'location.reload()');
+  await until(async () => (await p.ev("window.__log.filter((e) => e.why === 'load').length")) === 2 && (await bases()) === true, 'the dashboard fake receives hub-base again after it reloads itself');
+  // a hub-base the dashboard must not keep: javascript:, data:, credentials
+  await until(async () => (await p.evIn(dashO, 'window.__seen')) >= 1, 'the reloaded fake has read a base');
+  await new Promise((r) => setTimeout(r, 300));
+  const seen = await p.evIn(dashO, 'window.__seen');
+  for (const b of ['javascript:alert(1)//', 'data:text/html,x', `http://u:pw@127.0.0.1:1/x#`, `https://u@127.0.0.1:1/#`]) await p.ev(`document.getElementById('f').contentWindow.postMessage({ devteam: 'hub-base', base: ${JSON.stringify(b)} }, ${JSON.stringify(dashO)})`);
+  await until(async () => (await p.evIn(dashO, 'window.__seen')) >= seen + 4, 'the dashboard fake read the four bad bases');
+  assert.equal(await p.evIn(dashO, 'window.__base()'), base, 'the dashboard fake keeps its base');
+  assert.equal(await bases(), true, 'and keeps none of the bad ones');
+  // a hub-route from a window that is not the hub's frame (another window at the frame's origin, and the hub's own):
+  // the hub's hash doesn't change
+  const before = await p.ev('location.hash');
+  await p.ev(`(() => { const r = document.createElement('iframe'); r.id = 'rogue'; r.src = ${JSON.stringify(`${dashO}/dashboard-frame-fake.html#rogue`)}; document.body.append(r); })()`);
+  await until(async () => (await p.evIn(dashO, 'location.hash')) === '#rogue', 'the other window has loaded');
+  await p.evIn(dashO, "window.parent.postMessage({ devteam: 'hub-route', head: '#evil' }, '*')");
+  await p.ev("window.postMessage({ devteam: 'hub-route', head: '#self' }, '*')");
+  await until(async () => (await p.ev("window.__log.filter((e) => e.head === '#evil' || e.head === '#self').length")) === 2, 'the hub fake received both');
+  assert.deepEqual(await p.ev("window.__log.filter((e) => e.head === '#evil' || e.head === '#self').map((e) => e.accepted)"), [false, false], 'neither is accepted');
+  assert.equal(await p.ev('location.hash'), before, "the hub fake's hash does not change");
 });
