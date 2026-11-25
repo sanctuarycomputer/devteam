@@ -7696,11 +7696,12 @@ worldFileFails.actOf = (ref) => {
   return b.startsWith('plan/') ? `plan-${b.slice(5)}` : b.startsWith('ticket/') && !b.startsWith('ticket/chore-') ? b.slice(7) : b;
 };
 /* self-model start */
-// project/self.md, what the project is (log.schema.json#self@1): a markdown file whose one fenced
-// `self` block holds the contract. The parser and the contract check follow
-// test/fixtures/world/check.mjs rule for rule, so the two refuse the same invalid/ cases; kit-135
-// reuses them for exterior.md.
-//
+// project/self.md, what the project is: since kit-862 a plain document (log.schema.json#self2),
+// read by the self-plain region below; a draft must be one. Version 1 (log.schema.json#self@1, one
+// fenced `self` block holding the contract) still validates on main, read by fencedBlocks and
+// worldDocErrors, which follow test/fixtures/world/check.mjs rule for rule; kit-135 reuses them for
+// exterior.md.
+
 /* self-plain start */
 // self@2's reader (log.schema.json#self2): test/fixtures/world2/check.mjs's self rules, rule for rule
 // (its reading of lines, fences, code, comments and links; parts; the title; checkSelf), so the kit
@@ -8062,6 +8063,7 @@ const selfPlainVersion = selfPlain.version;
 // ('' the root); has(path) says whether a path is in the repo, by exact case.
 const selfPlainCheck = selfPlain.checkSelf;
 /* self-plain end */
+
 // The fenced blocks of a markdown file. A fence is a line at column 0 of three or more backticks;
 // one opens a block when none is open, its info string the rest of the line, its spaces and tabs
 // trimmed (possibly empty). The block closes at the next line of at least as many backticks and
@@ -8286,7 +8288,7 @@ function selfFindings(add) {
     if (selfPlainVersion(text) === 1) add('low', 'self-drift', 'self', "main's self.md is version 1 (a fenced self block)", 'draft self.md as a plain document in a chore, each part a link to its folder or file (self check, then chore pr and ask self-change; supervisor.md, Monitoring)', { key: 'self@1' });
     else {
       const has = hasAt(main);
-      for (const p of selfPlainCheck(text, { root: selfRoot(), has: () => true }).parts) if (!has(p)) add('low', 'self-drift', 'self', `part ${p} is not on main`, 'the code moved: draft a new self.md in a chore (self check, then chore pr and ask self-change; supervisor.md, Monitoring)', { key: p });
+      for (const p of selfPlain.parts(text, selfRoot())) if (p.path !== null && !has(p.path)) add('low', 'self-drift', 'self', `part link ${p.target} points to nothing on main`, 'the code moved: draft a new self.md in a chore (self check, then chore pr and ask self-change; supervisor.md, Monitoring)', { key: p.path });
     }
     if (!linked) add('low', 'self-unlinked', 'self', 'main has self.md and its strategy.md does not link it', 'propose a strategy-change linking [self.md](./self.md) in place of any lines restating what the project is, in its own PR', { key: strategyKey });
   } else if (strategyState() === 'written') {

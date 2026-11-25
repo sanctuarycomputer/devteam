@@ -20,7 +20,7 @@ const SELF_MD = world('self.md');
 const STRATEGY = world('strategy.md');
 const EXTERIOR_MD = world('exterior.md');
 const CASES = JSON.parse(world('invalid/cases.json')).filter((c) => c.file.startsWith('exterior-'));
-// the paths the fixture self.md's parts name, as files on main
+// the paths the version 1 fixture self.md's parts name (and PLAIN_SELF's links reach), as files on main
 const PARTS = { 'app/main.js': 'app\n', 'app/plugins/api.js': 'api\n', 'sync/server.js': 'sync\n', 'deploy/sync.yml': 'deploy\n' };
 // the fixture self.md as a plain draft (self@2, kit-862): its block gone, its parts linked; a draft
 // of version 1 is refused, though main's version 1 file still validates

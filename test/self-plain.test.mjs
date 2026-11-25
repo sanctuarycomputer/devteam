@@ -11,7 +11,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { json, kit as KIT, write } from './lib/kit.mjs';
 import { fixture, SUP } from './lib/next-step-fixture.mjs';
-import { checkSelf as refCheckSelf, version as refVersion } from './fixtures/world2/check.mjs';
+import { version as refVersion } from './fixtures/world2/check.mjs';
 
 const P = 'docs/devteam/project';
 const SELF = `${P}/self.md`;
@@ -22,16 +22,11 @@ const V1 = world('self.md');
 const V1_PARTS = { 'app/main.js': 'app\n', 'app/plugins/api.js': 'api\n', 'sync/server.js': 'sync\n', 'deploy/sync.yml': 'deploy\n' };
 const W2 = JSON.parse(world2('cases.json'));
 const CASES = W2.cases.filter((c) => c.doc === 'self');
-// What the surfaces read: each case, and the two outside cases one folder further out, since the
-// fixture's project is one folder deeper than cases.json's root (so they leave its repo too).
-const SURFACE = [...CASES.map((c) => ({ name: c.file, text: world2(c.file) })),
-  ...['cases/self-part-outside.md', 'cases/self-part-outside-escaped.md'].map((f) => ({ name: `${f}, one folder further out`, text: world2(f).replace('/shop/)', '/../shop/)') }))];
 // cases.json's root is docs/project; the fixture's project is docs/devteam/project, so its docs/x is docs/devteam/x
 const PARTS = Object.fromEntries(W2.paths.map((p) => [`docs/devteam/${p.slice('docs/'.length)}`, 'x\n']));
 const SELF_MD = world2('self.md');
 const STRATEGY = world2('strategy.md');
 const SRC = fs.readFileSync(path.join(KIT, 'scripts', 'devteam.mjs'), 'utf8');
-const re = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 
 function proj(name, { strategy = STRATEGY, self = SELF_MD, files = PARTS, visibility = 'private' } = {}) {
   const F = fixture(name);
@@ -88,7 +83,6 @@ const withProject = (name, opts, body) => async (t) => {
 };
 const logLines = (W) => { const d = path.join(W.old, 'docs/devteam/run/log'); return fs.existsSync(d) ? fs.readdirSync(d).filter((f) => f.endsWith('.jsonl')).flatMap((f) => fs.readFileSync(path.join(d, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))) : []; };
 // the self.md lines a command printed: its errors, without the "error: self.md: " or the file's path
-const selfErrors = (text) => [...text.matchAll(/^(?:error: self\.md: |fail: .*self\.md: )(.*)$/gm)].map((m) => m[1]);
 
 test('P1 the kit\'s plain self checker, run alone, gives each world2 self case its result', async (t) => {
   await t.test('P1 the self-plain region gives every case its errors and parts', () => {
@@ -120,6 +114,8 @@ test('P1 the kit\'s plain self checker, run alone, gives each world2 self case i
 test('P5 one function judges the draft for self check, chore pr and check-pr', async (t) => {
   await t.test('P5 one function, selfDraftErrors, in the self-model region, judges the draft for self check, chore pr and check-pr', () => {
     assert.equal((SRC.match(/\nfunction selfDraftErrors\(/g) ?? []).length, 1, 'P5 selfDraftErrors is defined once');
+    const model = SRC.slice(SRC.indexOf('/* self-model start */'), SRC.indexOf('/* self-model end */'));
+    assert.match(model, /\nfunction selfDraftErrors\(/, 'P5 selfDraftErrors is in the self-model region');
     const body = (name) => SRC.match(new RegExp(`\\nfunction ${name}\\([\\s\\S]*?\\n}\\n`))?.[0] ?? '';
     for (const f of ['choreSelfHold', 'selfDraftLines', 'cmdSelf']) assert.match(body(f), /selfDraftErrors\(/, `P5 ${f} calls selfDraftErrors`);
   });
@@ -129,6 +125,13 @@ test('Q a version 1 self.md on main validates, fails no PR, and raises one self-
   await check('Q1 validate passes with a version 1 self.md', () => {
     const v = W.run(['validate']);
     assert.doesNotMatch(v.out, /self\.md/, `Q1 validate says nothing of self.md\n${v.out}`);
+  });
+  await check('Q1b validate refuses a self block the version 1 reader cannot see (a ~~~ fence) as a plain document does', () => {
+    write(path.join(W.old, SELF), V1.replace('```self', '~~~self').replace(/\n```\n/, '\n~~~\n'));
+    const v = W.run(['validate']);
+    W.g(['checkout', '--', SELF], W.old);
+    assert.notEqual(v.status, 0, `Q1b validate refuses it\n${v.text}`);
+    assert.match(v.out, /self\.md: self\.md holds a fenced self block at line \d+: a plain document has none/, `Q1b says why\n${v.out}`);
   });
   await check('Q2 a PR not changing self.md passes check-pr', () => {
     const sha = W.branchOf('chore-note', (w) => write(path.join(w, `${P}/designs/n.md`), 'n\n'));
@@ -171,6 +174,7 @@ test('R a plain self.md on main: self-drift once per part link gone, never for a
   await check('R2 metrics raises self-drift once per part path gone, keyed by it, and never for a link that is no part', () => {
     const f = W.findings('self-drift');
     assert.deepEqual(f.map((x) => [x.severity, x.subject, x.key]).sort(), [['low', 'self', 'docs/devteam/app'], ['low', 'self', 'docs/devteam/plugin api/index.js']], `R2 once per path\n${JSON.stringify(f)}`);
+    assert.deepEqual(f.map((x) => x.detail).sort(), ['part link ../app/ points to nothing on main', 'part link ../plugin%20api/index.js#top points to nothing on main'], `R2 the detail names the link as written (spec What changes 4)\n${JSON.stringify(f)}`);
   });
   await check('R3 observe-metrics records one observation per path', () => {
     W.ok(['observe-metrics']);

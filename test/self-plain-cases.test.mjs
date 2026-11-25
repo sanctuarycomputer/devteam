@@ -5,18 +5,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import vm from 'node:vm';
 import { json, kit as KIT, write } from './lib/kit.mjs';
 import { fixture, SUP } from './lib/next-step-fixture.mjs';
-import { checkSelf as refCheckSelf, version as refVersion } from './fixtures/world2/check.mjs';
+import { checkSelf as refCheckSelf } from './fixtures/world2/check.mjs';
 
 const P = 'docs/devteam/project';
 const SELF = `${P}/self.md`;
 const STRAT = `${P}/strategy.md`;
 const world = (f) => fs.readFileSync(new URL(`./fixtures/world/${f}`, import.meta.url), 'utf8');
 const world2 = (f) => fs.readFileSync(new URL(`./fixtures/world2/${f}`, import.meta.url), 'utf8');
-const V1 = world('self.md');
-const V1_PARTS = { 'app/main.js': 'app\n', 'app/plugins/api.js': 'api\n', 'sync/server.js': 'sync\n', 'deploy/sync.yml': 'deploy\n' };
 const W2 = JSON.parse(world2('cases.json'));
 const CASES = W2.cases.filter((c) => c.doc === 'self');
 // What the surfaces read: each case, and the two outside cases one folder further out, since the
@@ -27,8 +24,6 @@ const SURFACE = [...CASES.map((c) => ({ name: c.file, text: world2(c.file) })),
 const PARTS = Object.fromEntries(W2.paths.map((p) => [`docs/devteam/${p.slice('docs/'.length)}`, 'x\n']));
 const SELF_MD = world2('self.md');
 const STRATEGY = world2('strategy.md');
-const SRC = fs.readFileSync(path.join(KIT, 'scripts', 'devteam.mjs'), 'utf8');
-const re = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 
 function proj(name, { strategy = STRATEGY, self = SELF_MD, files = PARTS, visibility = 'private' } = {}) {
   const F = fixture(name);
@@ -83,7 +78,6 @@ const withProject = (name, opts, body) => async (t) => {
   const W = proj(name, opts);
   try { await body(W, (title, fn) => t.test(title, fn)); } finally { W.done(); }
 };
-const logLines = (W) => { const d = path.join(W.old, 'docs/devteam/run/log'); return fs.existsSync(d) ? fs.readdirSync(d).filter((f) => f.endsWith('.jsonl')).flatMap((f) => fs.readFileSync(path.join(d, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))) : []; };
 // the self.md lines a command printed: its errors, without the "error: self.md: " or the file's path
 const selfErrors = (text) => [...text.matchAll(/^(?:error: self\.md: |fail: .*self\.md: )(.*)$/gm)].map((m) => m[1]);
 

@@ -178,7 +178,7 @@ test('Tillstack draws self.md, then exterior.md, each landed only with the owner
       const ext = W.ok(['exterior', 'show']);
       for (const [rel, name] of [['serves', 'Independent shops'], ['depends_on', 'Stripe'], ['alternative', 'Cartwell']]) assert.match(ext, new RegExp(`^${rel}\\n {2}${name} \\(`, 'm'), `E5 exterior show lists ${name} under ${rel}`);
       const d = json(W.ok(['dashboard-data']));
-      assert.deepEqual(d.self, json(W.ok(['self', 'show', '--json'])), 'E5 dashboard-data carries main\'s self block');
+      assert.deepEqual(d.self, json(W.ok(['self', 'show', '--json'])), 'E5 dashboard-data\'s self is self show --json\'s');
       assert.equal(d.self, null, 'E5 dashboard-data\'s self is null for a plain self.md (the page reads the document)');
       assert.deepEqual(d.exterior, json(W.ok(['exterior', 'show', '--json'])), 'E5 dashboard-data carries main\'s exterior block');
       assert.deepEqual(d.exterior?.entities.map((e) => [e.entity, e.relation, e.name]), [['shops', 'serves', 'Independent shops'], ['stripe', 'depends_on', 'Stripe'], ['cartwell', 'alternative', 'Cartwell']], 'E5 dashboard-data\'s exterior is Tillstack\'s three entities');

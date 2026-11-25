@@ -167,7 +167,7 @@ test('self check and validate refuse every self case in test/fixtures/world/inva
       assert.notEqual(r.status, 0, `C6 self check refuses ${c.file}\n${r.text}`);
       for (const e of refCheckSelf(text, { root: P, has: hasIn(W.old) }).errors) assert.ok(r.out.includes(`error: self.md: ${e}`), `C6 self check says "${e}" for ${c.file}\n${r.out}`);
     }
-    // a self.md saved with CRLF line ends is the same document (fences and JSON read alike)
+    // a self.md saved with CRLF line ends is the same document
     write(path.join(W.old, SELF), SELF_MD.replace(/\n/g, '\r\n'));
     const crlf = W.run(['self', 'check']);
     assert.equal(crlf.status, 0, `C6 self check passes the fixture with CRLF line ends\n${crlf.text}`);
@@ -243,7 +243,7 @@ test('on main a part\'s path gone fails nothing: the refactor passes check-pr an
     assert.doesNotMatch(W.run(['validate']).out, /self\.md/, 'C12 validate says nothing of a part\'s path on main');
     const f = W.findings('self-drift');
     assert.deepEqual(f.map((x) => [x.severity, x.subject, x.key]).sort(), [['low', 'self', 'docs/devteam/plugin api/index.js'], ['low', 'self', 'docs/devteam/services/sync']], `C12 self-drift, low, subject self, once per missing path, keyed by it\n${JSON.stringify(f)}`);
-    assert.match(f[0].detail, /part docs\/devteam\/(services\/sync|plugin api\/index\.js) is not on main/, 'C12 the detail names the path');
+    assert.match(f[0].detail, /part link \.\.\/(services\/sync\/|plugin%20api\/index\.js#top) points to nothing on main/, 'C12 the detail names the path');
   });
   await check('C28 observe-metrics records each self-drift path as its own observation, its source_key carrying the finding\'s key', () => {
     W.ok(['observe-metrics']);
