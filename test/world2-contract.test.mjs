@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkSelf, checkExterior, entries, headings, version, namesWhole } from './fixtures/world2/check.mjs';
+import { checkSelf, checkExterior, entries, headings, version, namesWhole, selfHeld } from './fixtures/world2/check.mjs';
 
 const dir = fileURLToPath(new URL('./fixtures/world2/', import.meta.url));
 const read = (f) => fs.readFileSync(path.join(dir, f), 'utf8');
@@ -110,7 +110,7 @@ test('a large text is read in under 2 s, without a throw', () => {
     ['a line of 200,000 nested markers', `${'* + '.repeat(100000)}x`],
     ['a user of 100,000 commas', `[x](https://${'a,'.repeat(100000)}@b.example)`],
   ]) {
-    for (const [doc, check] of [['exterior', (t) => checkExterior(t, { today, allowed, visibility: 'public' })], ['self', (t) => checkSelf(t, { root, has })]]) {
+    for (const [doc, check] of [['exterior', (t) => checkExterior(t, { today, allowed, visibility: 'public' })], ['self', (t) => checkSelf(t, { root, has })], ['self names', (t) => selfHeld(t)]]) {
       const start = process.hrtime.bigint();
       assert.doesNotThrow(() => check(`# T\n\n${x}\n`), `${doc}: ${what}`);
       const s = Number(process.hrtime.bigint() - start) / 1e9;

@@ -20,12 +20,13 @@ const refused = (r, pattern, m) => { assert.notEqual(r.status, 0, `${m}: exits n
 // a disk that ignores case (macOS, Windows) makes a twin the file itself; CI's disk doesn't
 const caseBlind = fs.existsSync(path.join(KIT, 'SCHEMA'));
 const re = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
-// file k's draft: its words, and for self.md a valid self@1 block too (kit-139 holds a draft that breaks
-// the contract), its one part named by name, its path one the fixture has, no capitalised word in it;
+// file k's draft: its words, and for self.md a plain self@2 document (kit-862 holds a draft that breaks
+// it), its one part a link to the project folder, which the fixture has, no capitalised word in it but
+// a sentence's first (name is kept for the callers; a plain document has no part names);
 // for exterior.md a valid exterior@1 block (kit-135 holds one that breaks it), no entity, drawn from
 // main's strategy.md and self.md (world() lands a self.md, as exterior.md's draft needs one)
 let mainBlobs = null;
-const draft = (k, words, name) => `# ${k}\n\n${words}\n${k === 'self' ? `\n\`\`\`self\n${JSON.stringify({ self: 1, what: 'a project the owner approves drafts of.', makes: 'the drafts these tests land.', parts: [{ id: 'project', name, what: 'the project folder.', code: ['docs/devteam/project/'] }], controls: ['its code'], not: [] }, null, 2)}\n\`\`\`\n` : k === 'exterior' ? `\n\`\`\`exterior\n${JSON.stringify({ exterior: 1, strategy_blob: mainBlobs.strategy, self_blob: mainBlobs.self, entities: [] }, null, 2)}\n\`\`\`\n` : ''}`;
+const draft = (k, words, name) => `# ${k}\n\n${words}\n${k === 'self' ? `\nIts one part is [the project folder](./), ${name}.\n` : k === 'exterior' ? `\n\`\`\`exterior\n${JSON.stringify({ exterior: 1, strategy_blob: mainBlobs.strategy, self_blob: mainBlobs.self, entities: [] }, null, 2)}\n\`\`\`\n` : ''}`;
 
 // A fixture with a chore per draft, the owner's answers and the two gates (merge --dry-run, check-pr).
 // selfOnMain: false keeps kit-138's self.md track on a main with no self.md (a chore adds the first)
@@ -171,7 +172,7 @@ for (const k of ['self', 'exterior']) {
       chore('empty', (w) => write(path.join(w, rel), ''));
       refused(merge('empty'), new RegExp(`changes ${re(rel)}: .*ask --class ${cls}`), 'DW1 emptied');
       // an empty self.md or exterior.md breaks its contract (it is no deletion), so even the owner's yes doesn't land it
-      refused(merge('empty', answered(k, 'empty')), new RegExp(`breaks ${k}@1`), `an empty ${k}.md breaks the contract, answered or not`);
+      refused(merge('empty', answered(k, 'empty')), new RegExp(`breaks ${k}@${k === 'self' ? 2 : 1}`), `an empty ${k}.md breaks the contract, answered or not`);
       // changed: a new text needs its own answer
       chore('edit', (w) => write(path.join(w, rel), draft(k, 'The next version.', 'next version')));
       refused(merge('edit'), new RegExp(`changes ${re(rel)}: .*ask --class ${cls}`), 'DW1 changed, no answer');

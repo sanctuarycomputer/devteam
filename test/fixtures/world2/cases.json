@@ -2150,5 +2150,75 @@
         ]
       }
     }
+  ],
+  "names": [
+    {
+      "file": "names/heading-first.md",
+      "shows": "a word first in a heading counts",
+      "words": [
+        "Self",
+        "Kestrel"
+      ]
+    },
+    {
+      "file": "names/list-first.md",
+      "shows": "a word first in a list item, and on its next line, counts",
+      "words": [
+        "Self",
+        "Corvid",
+        "Plover"
+      ]
+    },
+    {
+      "file": "names/bold-list-first.md",
+      "shows": "a bold word first in a list item counts",
+      "words": [
+        "Self",
+        "Heronfold"
+      ]
+    },
+    {
+      "file": "names/link-first.md",
+      "shows": "a word first in a link's words, at a paragraph's start, counts",
+      "words": [
+        "Self",
+        "Wrenfield"
+      ]
+    },
+    {
+      "file": "names/code-first.md",
+      "shows": "a code span at a paragraph's start counts",
+      "words": [
+        "Self",
+        "Zephyr"
+      ]
+    },
+    {
+      "file": "names/table-first.md",
+      "shows": "a word first in a table cell counts",
+      "words": [
+        "Self",
+        "Ostrander",
+        "Plover"
+      ]
+    },
+    {
+      "file": "names/comment-fence-first.md",
+      "shows": "a word first in a comment or a fence counts",
+      "words": [
+        "Self",
+        "Talbrook",
+        "Marrowind"
+      ]
+    },
+    {
+      "file": "names/prose-first.md",
+      "shows": "a prose sentence's first word alone is skipped; a wrapped line's is not",
+      "words": [
+        "Self",
+        "Postwick",
+        "Dunmore"
+      ]
+    }
   ]
 }
