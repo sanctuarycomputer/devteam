@@ -279,7 +279,11 @@ test('H10 the view page itself, in real Chrome: the owner presses OK and the pag
   try {
     const p = await chrome.newPage();
     await p.send('Page.enable');
-    await p.send('Page.navigate', { url: `http://127.0.0.1:${readState(a).view_port}/` });
+    const origin = `http://127.0.0.1:${readState(a).view_port}`;
+    await p.send('Page.navigate', { url: `${origin}/` });
+    // the view loaded before the first read (kit-920): Page.navigate answers once the page commits, while
+    // #chip may not be parsed yet, and a read in a context the navigation replaces throws; those retry
+    await within(30000, () => p.ev(`location.origin === ${JSON.stringify(origin)} && document.readyState === 'complete'`).catch(() => false), 'the view page loaded');
     await within(10000, () => p.ev(`document.getElementById('chip').textContent === 'Live'`), 'the view live');
     dsite.go = false;
     dsite.answered = null;
