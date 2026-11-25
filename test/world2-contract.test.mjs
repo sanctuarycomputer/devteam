@@ -89,8 +89,75 @@ test('a hostile text is read in seconds, not minutes', () => {
   }
 });
 
-test('the cases include every one the ticket\'s done-when lists', () => {
-  const have = cases.map((c) => c.file);
-  for (const f of ['self-block', 'exterior-block', 'self-no-title', 'exterior-no-title', 'self-no-part', 'self-part-nothing', 'self-part-outside', 'self-part-code', 'self-part-fence', 'self-part-image', 'self-part-anchor', 'self-part-md',
-    'self-fenced-heading', 'exterior-fenced-heading', 'exterior-no-date', 'exterior-future-date', 'exterior-good-date', 'public-heading', 'public-line-start', 'public-list-item', 'public-table-cell', 'public-bold', 'public-link-host']) assert.ok(have.includes(`cases/${f}.md`), f);
+test('a large text is read in under 2 s, without a throw', () => {
+  const name = (i) => `Z${i.toString(36).replace(/\d/g, (d) => 'abcdefghij'[d])}x`;
+  const distinct = (n) => Array.from({ length: n }, (_, i) => name(i)).join(' ');
+  for (const [what, x] of [
+    ['a 200,000-line paragraph', 'word\n'.repeat(200000)],
+    ['20,000 comments on a line', `x ${'<!-- -->'.repeat(20000)}`],
+    ["50,000 spaces inside a fence's info string", `\`\`\`a${' '.repeat(50000)}b\n\`\`\``],
+    ['100,000 apostrophes in a word', `Za${"'".repeat(100000)}b`],
+    ['20,000 distinct held words', distinct(20000)],
+    ['3,000 Z words', distinct(3000)],
+    ['40,000 nested [ then links', `${'['.repeat(40000)}${'[a](b) '.repeat(40000)}`],
+    ['100,000 spaces in a heading', `### a${' '.repeat(100000)}b`],
+    ['a heading of 50,000 [x](', `### ${'[x]('.repeat(50000)}`],
+    ['100,000 ![ then 100,000 ](', `${'!['.repeat(100000)}${']('.repeat(100000)}`],
+    ['a line of 18 list markers', `${'-   '.repeat(18)}x`],
+    ['a line of 5,000 list markers', `${'-   '.repeat(5000)}x`],
+    ['a line of 5,000 ordered markers', `${'1.  '.repeat(5000)}x`],
+    ['100,000 spaces after ](', `[x](${' '.repeat(100000)}x`],
+    ['a line of 200,000 nested markers', `${'* + '.repeat(100000)}x`],
+    ['a user of 100,000 commas', `[x](https://${'a,'.repeat(100000)}@b.example)`],
+  ]) {
+    for (const [doc, check] of [['exterior', (t) => checkExterior(t, { today, allowed, visibility: 'public' })], ['self', (t) => checkSelf(t, { root, has })]]) {
+      const start = process.hrtime.bigint();
+      assert.doesNotThrow(() => check(`# T\n\n${x}\n`), `${doc}: ${what}`);
+      const s = Number(process.hrtime.bigint() - start) / 1e9;
+      assert.ok(s < 2, `${doc}: ${what} took ${s.toFixed(2)} s`);
+    }
+  }
+});
+
+// Every case, by name: a case dropped with its file, or one added without its name here, fails.
+const CASES = [
+  'self-block', 'self-exterior-block', 'self-block-tilde', 'self-no-title', 'self-two-titles', 'self-fenced-title',
+  'self-fenced-heading', 'self-no-part', 'self-part-nothing', 'self-part-case', 'self-part-bad-escape',
+  'self-part-outside', 'self-part-outside-escaped', 'self-part-code', 'self-part-image', 'self-part-anchor',
+  'self-part-md', 'self-part-md-elsewhere', 'self-part-absolute', 'self-part-fence', 'self-part-indented',
+  'self-part-comment', 'self-part-comment-midline', 'self-part-list-indented', 'self-part-span-list', 'self-part-parens',
+  'self-part-slash', 'self-two-blocks', 'self-crlf', 'self-part-prose', 'self-part-resolves', 'exterior-block',
+  'exterior-self-block', 'exterior-no-title', 'exterior-fenced-heading', 'exterior-no-date', 'exterior-no-link',
+  'exterior-no-real-date', 'exterior-future-date', 'exterior-good-date', 'exterior-undated-first', 'exterior-date-deeper',
+  'exterior-date-code', 'exterior-two-dates', 'exterior-date-wrapped', 'exterior-date-capital', 'exterior-source-autolink',
+  'exterior-source-reference', 'exterior-source-parens', 'exterior-source-relative', 'exterior-empty-heading',
+  'exterior-block-names', 'public-named', 'public-heading', 'public-heading-lower', 'public-heading-dependency',
+  'public-line-start', 'public-list-item', 'public-table-cell', 'public-bold', 'public-section', 'public-link-host',
+  'public-link-host-forms', 'public-heading-part', 'public-heading-substring', 'public-heading-any-case',
+  'public-heading-dependency-file', 'public-possessive', 'public-url-word', 'public-fenced-host',
+  'public-host-punctuation', 'public-host-user', 'private-names', 'unknown-names', 'public-host-user-comma',
+  'public-host-user-semicolon', 'public-host-user-apostrophe', 'public-host-entity', 'public-host-entity-slashes',
+  'public-host-entity-named', 'public-host-reference-tight', 'public-host-three-slashes', 'public-host-backslash',
+  'public-host-href-break', 'public-host-mailto-second', 'public-host-email-autolink', 'public-host-email-bare',
+  'public-host-email-version', 'public-host-user-brackets', 'public-host-escaped', 'public-host-reference-escaped',
+  'public-host-email-autolink-local', 'public-host-href-after-break', 'public-host-href-unquoted',
+  'public-host-href-no-semicolon', 'public-heading-not-a-link', 'public-heading-line-separator', 'public-heading-lone-cr',
+  'public-host-user-space', 'public-host-user-reference-space', 'public-host-long-user', 'public-host-user-unicode-space',
+  'self-part-unicode-space', 'public-host-user-angle-bracket', 'public-host-user-angle-bracket-breaks',
+  'public-host-user-angle-bracket-feed', 'public-host-href-stray-quote', 'public-host-special-scheme',
+  'public-host-scheme-backslash-user', 'public-host-in-host-punctuation', 'public-heading-after-break-fence',
+  'public-host-percent-encoded', 'public-host-mailto-encoded', 'public-host-long-scheme', 'public-host-scheme-relative',
+  'public-host-www-encoded', 'public-host-glued', 'public-host-mailto-separators', 'public-host-other-scheme-encoded',
+  'public-heading-span-in-tail', 'public-heading-span-in-angle-tail', 'public-heading-code-span',
+  'public-heading-paren-title', 'public-heading-backslash-space', 'self-part-backslash-space', 'self-part-list-fence',
+  'self-part-list-fence-open', 'self-part-list-fence-deep', 'public-heading-after-list-fence',
+  'public-heading-after-ordered-interrupt', 'public-heading-after-nested-list-fence', 'public-heading-angle-link',
+  'public-heading-after-indented-continuation', 'public-heading-after-empty-item-in-paragraph',
+  'public-heading-after-one-line-nested-fence', 'public-heading-after-empty-item-fence', 'public-heading-after-item-fence',
+  'public-heading-after-item-fence-wide', 'self-part-item-fence-deep', 'exterior-entry-ends-at-section',
+  'public-one-letter', 'self-part-md-capital', 'self-part-long-tail', 'self-part-link-in-link', 'public-host-www-in-path',
+  'self-part-after-break', 'self-part-in-image',
+];
+test('the cases are exactly these, the ticket done-whens\' among them', () => {
+  assert.deepEqual(cases.map((c) => c.file), CASES.map((f) => `cases/${f}.md`));
 });
