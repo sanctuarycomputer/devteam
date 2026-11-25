@@ -18,7 +18,7 @@ handoverFile();
 const mustRun = !!process.env.CI && Number(process.versions.node.split('.')[0]) >= 22;
 const skip = canDrive ? false : 'needs Chrome and Node 22+';
 // The checks run as four chains at once, one per project (each its own daemon), checks in order within
-// a chain: cA's (C23, C15, C20, W1, C21, RF3, KD2, KD5, KD3, KD4, KD9, KD10), cB's (C18, C19, PC1, PC4, PC5, RF4, T4-1, T4-3, KD6, PC3, T4-2),
+// a chain: cA's (C23, C15, C20, W1, C21, RF3, KD2, KD5, KD3, KD4, KD9, KD10, KD11), cB's (C18, C19, PC1, PC4, PC5, RF4, T4-1, T4-3, KD6, PC3, T4-2),
 // cC's (C24, T6-3, RF2, RL0, RL1, RL2, KD8, KD8b, RL3) and cD's (C12, C13, C14, KD1, KD7, C16, PC6). onA, onB, onC and onD add a check.
 const cAChecks = [], cBChecks = [], cCChecks = [], cDChecks = [];
 const onA = (name, fn) => cAChecks.push([name, fn]);
@@ -562,17 +562,41 @@ onA('KD9 a clean stop: its reaper stands down, so a file written on the profile 
 
 // kit-877 (m-20261125-140559755): the four chains, like two projects on one box, pick view ports blind
 // to each other; a start whose bind is taken retries on a random free port, up to four tries in all.
-// The hook fails the first three binds; the start comes up on the fourth.
-onA('KD10 a start whose first three binds are taken still comes up', async () => {
+// The hook fails the first three binds and lists their ports; the start comes up on the fourth. kit-923:
+// each try is a port of the view range that no earlier try lost (a lowest-free retry tries a lost one again).
+const lostPorts = (marker) => fs.readFileSync(marker, 'utf8').split('\n').filter(Boolean).map(Number);
+onA('KD10 a start whose first three binds are taken still comes up, each try on a port no earlier try lost', async () => {
   const P = cA();
   const marker = path.join(P.home, 'kd10-bind-fails');
   fs.rmSync(marker, { force: true });
   await ok(P, ['stop']);
   try {
     await ok(P, ['start'], { DEVTEAM_TEST_BROWSER_BIND_FAIL: marker, DEVTEAM_TEST_BROWSER_BIND_FAIL_N: '3' });
-    assert.equal(fs.readFileSync(marker, 'utf8'), '3', 'KD10: three binds failed first');
+    const tried = [...lostPorts(marker), readState(P).view_port];
+    assert.equal(tried.length, 4, `KD10: three binds failed first, then one came up: ${tried.join(', ')}`);
+    for (const p of tried) assert.ok(p >= 4400 && p <= 4499, `KD10: port ${p} is outside the view range 4400-4499: ${tried.join(', ')}`);
+    assert.equal(new Set(tried).size, 4, `KD10: a retry tried a port this start had lost: ${tried.join(', ')}`);
     assert.ok(alive(readState(P).daemon_pid), 'KD10: the daemon is up');
   } finally { fs.rmSync(marker, { force: true }); }
+  await ok(P, ['stop']);
+});
+
+// kit-923: with no port left to retry on but those this start lost, the start fails in words and never
+// tries a lost one again. The pool hook narrows the retries to 4498 and 4499; the first try and both of
+// theirs fail, so none is left.
+onA('KD11 a start that has lost every port it could retry on fails in words, never on a lost port again', async () => {
+  const P = cA();
+  const marker = path.join(P.home, 'kd11-bind-fails');
+  fs.rmSync(marker, { force: true });
+  await ok(P, ['stop']);
+  try {
+    const r = await browser(P, ['start'], { DEVTEAM_TEST_BROWSER_BIND_FAIL: marker, DEVTEAM_TEST_BROWSER_BIND_FAIL_N: '3', DEVTEAM_TEST_BROWSER_RETRY_POOL: '4498,4499' });
+    const lost = lostPorts(marker);
+    assert.notEqual(r.status, 0, `KD11: the start came up after losing ${lost.join(', ')}: ${r.out}`);
+    assert.match(r.err, /devteam: browser: no free view port left in 4400-4499 to retry on: this start lost \d+, 449[89], 449[89]\b/, r.err);
+    assert.deepEqual([...lost.slice(1)].sort(), [4498, 4499], `KD11: the retries were not the pool's two ports: ${lost.join(', ')}`);
+  } finally { fs.rmSync(marker, { force: true }); }
+  await ok(P, ['start']);
   await ok(P, ['stop']);
 });
 
