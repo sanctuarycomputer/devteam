@@ -481,12 +481,13 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
     const V = await visit('#library?th=open', WIN);
     const btn = `#tl-list [data-tl-show="${L[key]}"]`;
     await V.soon(`!!document.querySelector(${J(btn)})`, `${check}: ${key}'s row has Show me`);
-    const n = await V.mark();
+    // only the stage's page counts: the Library's thumbnails frame every version (x-01-old's too) and post the same messages
+    await V.p.ev(`window.__stage = []; addEventListener('message', (e) => { const f = document.getElementById('av-frame'); if (e.data && e.data.own === 'at' && f && e.source === f.contentWindow) window.__stage.push(e.data); }); void 0`);
     await pressSel(V, btn, 'BUTTON');
     assert.ok(await V.settle(`location.hash === ${J(head)}`, 8000), `${check}: Show me on ${key} opens ${head}, not ${await V.p.ev('location.hash')}`);
-    const said = `window.__own.slice(${n}).some((m) => m.own === 'at' && m.page === 'faq/index.html' && m.copy === ${J(copy)})`;
+    const said = `window.__stage.some((m) => m.page === 'faq/index.html' && m.copy === ${J(copy)})`;
     const got = await V.settle(said, 10000);
-    const seen = await V.p.ev(`[...new Set(window.__own.slice(${n}).filter((m) => m.own === 'at' && m.copy).map((m) => m.copy))]`);
+    const seen = await V.p.ev(`[...new Set(window.__stage.filter((m) => m.copy).map((m) => m.copy))]`);
     copies.push(...seen);
     assert.ok(got, `${check}: the framed page says copy: ${copy} on ${key} (it said ${J(seen)})`);
   };
@@ -497,7 +498,7 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
     assert.equal(fs.existsSync(stack.CHORE), false, 'C5h: the chore worktree is removed');
     await showMe('L1', `#artifact/main/${FAQ}`, 'main-2', 'C5h L1 after the chore draft is gone');
     await showMe('L2', `#artifact/main/${FAQ}`, 'main-2', 'C5h L2 after the chore draft is gone');
-    assert.equal(copies.includes('old'), false, `C5h: no own message ever said copy: old (${J(copies)})`);
+    assert.equal(copies.includes('old'), false, `C5h: the stage's page never said copy: old (${J(copies)})`);
   }, { timeout: 240000 });
 
   t.diagnostic(`file: ${Date.now() - fileAt} ms`);
