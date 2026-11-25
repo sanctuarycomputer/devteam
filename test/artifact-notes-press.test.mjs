@@ -107,12 +107,12 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
     assert.deepEqual(await acts(V, 'thread-accept-addressed'), [], 'pushed down just now: nothing');
     // crept, less than half a pixel a frame
     await settled(V);
-    await V.p.ev(`(window.__cr = 0, window.__ct = setInterval(() => { document.getElementById('tl-card').style.marginLeft = (window.__cr += 0.3) + 'px'; }, 16), true)`);
+    await V.p.ev(`(window.__cr = 0, window.__ct = true, (function creep() { if (!window.__ct) return; document.getElementById('tl-card').style.marginLeft = (window.__cr += 0.3) + 'px'; requestAnimationFrame(creep); })(), true)`);
+    await V.soon('window.__cr > 5', 'setup: it crept, a little each frame');
     await new Promise((r) => setTimeout(r, ARMED + 300));
     await press(V, R);
     await V.p.ev(FRAMES);
-    await V.p.ev('(clearInterval(window.__ct), true)');
-    assert.ok(await V.p.ev('window.__cr > 5'), 'setup: it crept');
+    await V.p.ev('(window.__ct = false, true)');
     assert.deepEqual(await acts(V, 'thread-accept-addressed'), [], 'crept there: nothing');
   });
 
@@ -393,35 +393,40 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
 
   await sub('A25: at phone, tablet and desktop widths every control of the bar is its own, inside the viewer', async () => {
     const V = await tabOf({ [N.trial]: ROW.C20(), [N.plans]: withFrame(ROW.C12(), ''), [N.onMain]: ROW.C20() });
-    // the bar as full as it gets, set and measured in one go: a 34-character session, With, the Public tile
+    // the bar as full as it gets, set and measured in one go: a 34-character session, With, a note in the head, an
+    // 80-character refusal, the Public tile with its globe
     const bad = (tile) => V.p.ev(`(() => {
       const $$ = (id) => document.getElementById(id), view = $$('artifact-view').getBoundingClientRect(), out = [];
       $$('av-where').textContent = AV.at === 'main' ? 'main' : 'plan-pricing-with-a-longer-name-34';
       $$('av-with').hidden = false; $$('av-with').textContent = 'With plan-pricing-with-a-longer-name-34';
+      $$('e-avn').textContent = ${tile ? J('Not saved: there is no session that could take these notes for pricing just now.') : J('')};
+      $$('av-note').hidden = ${!tile}; $$('av-note').textContent = 'Its page changed since';
       const w = document.querySelector('.av-pub-wrap'), was = w.innerHTML;
-      w.innerHTML = ${tile ? J('<button class="ghost av-pill amber" id="zz-pub">Public · update available</button>') : J('')};
+      w.innerHTML = ${tile ? J('<button class="ghost av-pill amber" id="zz-pub"><i class="icon-globe"></i>Public · update available</button>') : J('')};
       for (const id of ['av-prev', 'av-next', 'av-filter', 'av-handover', 'av-ver', 'av-reload', 'av-tab', 'av-close', ...(${!!tile} ? ['zz-pub'] : [])]) {
         const e = $$(id), r = e.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2, hit = document.elementFromPoint(x, y);
         if (!(r.width >= 10 && r.height >= 10)) out.push(id + ' has no size');
         else if (!e.contains(hit)) out.push(id + ' is under ' + (hit ? hit.id || hit.className || hit.tagName : 'nothing'));
         else if (r.left < view.left || r.right > view.right + 0.5 || r.bottom > view.bottom) out.push(id + ' is outside the viewer');
       }
-      w.innerHTML = was;
+      const bar = document.querySelector('.av-bar').getBoundingClientRect().height, row = $$('av-step').getBoundingClientRect().top >= $$('av-reload').getBoundingClientRect().bottom;
+      if (view.width > 1100 ? bar !== 41 || row : bar <= 41 || !row) out.push('the bar is ' + bar + ' tall at ' + view.width + (row ? ', a row of notes' : ', one row'));
+      w.innerHTML = was; $$('e-avn').textContent = ''; $$('av-note').hidden = true;
       return out; })()`);
     const found = [];
     for (const [head, at] of [[AV_WT, 'plan-pricing'], [AV_MAIN, 'main']]) {
       await V.size(1280, 800);
       await openAt(V, head, at);
       await has(V, '#av-handover', 'Hand over');
-      for (const w of [320, 375, 390, 430, 601, 700, 768, 820, 1024, 1280]) {
+      for (const w of [320, 375, 390, 430, 601, 700, 768, 820, 1024, 1140, 1180, 1280]) {
         await V.size(w, 800);
         await V.p.ev(FRAMES);
         for (const tile of [false, true]) for (const x of await bad(tile)) found.push(`${w}${tile ? ' with the tile' : ''} on ${at}: ${x}`);
       }
       await V.p.ev(`(thGo({ th: 'open' }), true)`);
-      for (const w of [1024, 1280]) {
+      for (const w of [1024, 1280, 1512]) {
         await V.size(w, 800);
-        await new Promise((r) => setTimeout(r, 500));
+        await V.soon(`(() => { const r = document.getElementById('artifact-view').getBoundingClientRect(), k = r.width; const was = window.__vw; window.__vw = k; return was === k && k < ${w} - 300; })()`, `setup: the panel narrows the viewer at ${w}`);
         for (const x of await bad(true)) found.push(`${w} with the panel on ${at}: ${x}`);
       }
       await V.p.ev(`(thGo({}), true)`);
