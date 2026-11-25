@@ -113,6 +113,9 @@ test('log-sync keeps origin/chore-log past a failed fetch', async (t) => {
       const r = sync();
       assert.notEqual(r.status, 0, 'L3: no sync');
       assert.match(r.err, /couldn't fetch chore-log from origin \(fatal: unable to access origin: Connection refused\), and origin's is at [0-9a-f]{7,}, not [0-9a-f]{7,}: kept origin\/chore-log and synced nothing; run log-sync again/, 'L3: says why');
+      // the stop itself, never a warning the sync goes on past (to a push git refuses)
+      assert.match(r.err, /^devteam: couldn't fetch chore-log/m, 'L3: a stop, not a warning');
+      assert.doesNotMatch(r.err, /git push|\[rejected\]/, 'L3: no push tried');
       assert.equal(tracked(), was, 'L3: origin/chore-log kept');
       assert.equal(onOrigin(), moved, 'L3: nothing pushed');
       S.disarm();
@@ -129,6 +132,9 @@ test('log-sync keeps origin/chore-log past a failed fetch', async (t) => {
       const r = sync();
       assert.notEqual(r.status, 0, 'L4: no sync');
       assert.match(r.err, /couldn't fetch chore-log from origin \(fatal: unable to access origin: Connection refused\) or ask origin for it \(fatal: unable to access origin: Connection refused\): kept origin\/chore-log and synced nothing; run log-sync again/, 'L4: says why');
+      // the stop itself, never a warning the sync goes on past (to a push git refuses)
+      assert.match(r.err, /^devteam: couldn't fetch chore-log/m, 'L4: a stop, not a warning');
+      assert.doesNotMatch(r.err, /git push|\[rejected\]/, 'L4: no push tried');
       assert.equal(tracked(), was, 'L4: origin/chore-log kept');
       assert.equal(onOrigin(), was, 'L4: nothing pushed');
     });
