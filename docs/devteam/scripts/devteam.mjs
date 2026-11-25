@@ -36494,7 +36494,8 @@ function browserCookieParam(c) {
 // hook DEVTEAM_TEST_BROWSER_COOKIES_BULK_FAILS=1 (tests) treats the one call as refused.
 async function browserCookiesBack(cdp, jar) {
   if (!cdp || !jar?.length) return;
-  const cookies = jar.map(browserCookieParam);
+  let cookies;
+  try { cookies = jar.map(browserCookieParam); } catch { return; } // a malformed jar sets nothing
   try {
     if (browserTestEnv('DEVTEAM_TEST_BROWSER_COOKIES_BULK_FAILS') === '1') throw new Error('refused (the test hook)');
     await cdp.send('Storage.setCookies', { cookies });
@@ -36801,7 +36802,7 @@ function browserStartGate(ctx) {
   const closes = browserUnhandled(ctx, hs);
   if (closes.length) browserRecordCloses(ctx, closes, []);
 }
-// The watch, from start to stop: every 500 ms a fresh fold (browserFresh keys it cheaply), ctx.held
+// The watch, from start to stop: every 250 ms (kit-877) a fresh fold (browserFresh keys it cheaply), ctx.held
 // kept, and a close not yet handled queued once on the verbs' queue (ctx.gateQueued, set when queued
 // and cleared when the job ends, so a close queued or running isn't queued again); the owner's dialogs
 // (kit-770) end as that close is seen, off the queue. With
@@ -36845,12 +36846,14 @@ function browserReportDelete(reason, msg) {
   browserLastError(`${reason.slice(0, Math.max(0, 300 - join.length - msg.length))}${join}${msg}`);
 }
 // kit-877, the reaper: once Chrome is up the daemon starts sh blocked reading a pipe only the daemon
-// holds; when the daemon ends, however it ends (kill -9 too), the pipe closes and sh runs browser reap.
-// Detached, so it outlives the daemon's window. DEVTEAM_TEST_BROWSER_REAP=0 (tests) starts none.
+// holds; when the daemon ends, however it ends (kill -9 too), the pipe closes and sh runs browser reap,
+// unless the daemon's own shutdown deleted the session files and said "done" on the pipe first (a clean
+// stop leaves the reaper nothing to do, and a start right after it nothing to race). Detached, so it
+// outlives the daemon's window. DEVTEAM_TEST_BROWSER_REAP=0 (tests) starts none.
 function browserReaper(ctx) {
   if (browserTestEnv('DEVTEAM_TEST_BROWSER_REAP') === '0') return;
   try {
-    const r = spawn('sh', ['-c', 'cat >/dev/null; exec "$0" "$1" browser reap', process.execPath, fileURLToPath(import.meta.url)], { stdio: ['pipe', 'ignore', 'ignore'], detached: true, cwd: process.cwd(), env: process.env });
+    const r = spawn('sh', ['-c', 'read -r x; [ "$x" = done ] || exec "$0" "$1" browser reap', process.execPath, fileURLToPath(import.meta.url)], { stdio: ['pipe', 'ignore', 'ignore'], detached: true, cwd: process.cwd(), env: process.env });
     r.on('error', () => {});
     r.stdin.on('error', () => {});
     r.unref();
@@ -36933,7 +36936,9 @@ function browserShutdown(ctx, why, detail) {
     browserOwnerDialogsEnd(ctx);
     try { ctx.viewer?.ws.close(1001); } catch {} // the view's socket closes with the daemon (no bye)
     await browserEndChrome(ctx.cdp, ctx.chrome?.pid);
-    try { browserDeleteSession(ctx.profile); } catch {}
+    let deleted = false;
+    try { browserDeleteSession(ctx.profile); deleted = true; } catch {}
+    if (deleted && ctx.reaper) await Promise.race([new Promise((r) => { try { ctx.reaper.stdin.write('done\n', () => r()); } catch { r(); } }), browserSleep(500)]); // kit-877: the reaper stands down
     if (browserRawState()?.daemon_pid === process.pid) fs.rmSync(browserStateFile(), { force: true });
     for (const s of [ctx.control, ctx.view]) { try { s?.closeAllConnections?.(); s?.close(); } catch {} }
     await Promise.race([ctx.guard?.close(), browserSleep(2000)]).catch(() => {});
