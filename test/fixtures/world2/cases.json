@@ -1,0 +1,17 @@
+{
+  "root": "docs/project",
+  "paths": [
+    "docs/site/(pages)/index.js",
+    "docs/app/guide.md",
+    "docs/services/sync/main.js",
+    "docs/plugin api/index.js"
+  ],
+  "today": "2026-11-24",
+  "package": {
+    "author": "Quillworks, https://quillworks.example",
+    "dependencies": {
+      "inkwell-sync": "1.0.0"
+    }
+  },
+  "cases": []
+}
