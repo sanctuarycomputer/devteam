@@ -1,0 +1,32 @@
+{
+ "v": 1,
+ "at": "2026-11-25T11:40:00Z",
+ "hour_end": "2026-11-25T11:40:00Z",
+ "cap": 4,
+ "ready": 5,
+ "planners": 1,
+ "goals": [
+  {
+   "id": "g-orders",
+   "title": "Orders keep their order",
+   "priority": 3,
+   "usd_hour": 2.5,
+   "new_hour": 500000
+  }
+ ],
+ "workers": [
+  {
+   "name": "stale-1-job",
+   "phase": "build",
+   "since": "2026-11-25T09:00:00Z",
+   "tokens": {
+    "state": "none-yet"
+   }
+  }
+ ],
+ "recent": [],
+ "other": {
+  "usd_hour": 0.75,
+  "new_hour": 160000
+ }
+}
