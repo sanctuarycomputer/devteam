@@ -25485,6 +25485,79 @@ const claudeRawRoom = (acc) => acc.reduce((s, x) => s + (claudeHasRoom(x) ? (x.w
 const claudeRound = (n) => Number(n.toFixed(3));
 // the room of a reading, in accounts' worth
 const claudeRoom = (rows, now) => claudeRound(claudeRawRoom(claudeState(rows, now).acc));
+// at most CLAUDE_POINTS of the projection's points: the first, the last and every change of direction
+// (on the room unrounded, so rounding is no turn), then evenly; room is rounded as they are sent
+function claudeThin(points) {
+  const sent = (list) => list.map((p) => ({ at: p.at, room: claudeRound(p.room) }));
+  if (points.length <= CLAUDE_POINTS) return sent(points);
+  const sign = (i) => { const d = points[i + 1].room - points[i].room; return Math.abs(d) < 1e-9 ? 0 : Math.sign(d); };
+  const keep = new Set([0, points.length - 1]);
+  for (let i = 1; i < points.length - 1; i++) if (sign(i - 1) !== sign(i)) keep.add(i);
+  const even = (list, n) => (n <= 0 || !list.length ? [] : n === 1 ? [list[Math.floor((list.length - 1) / 2)]] : Array.from({ length: n }, (_, j) => list[Math.round((j * (list.length - 1)) / (n - 1))]));
+  let idx = [...keep].sort((a, b) => a - b);
+  if (idx.length > CLAUDE_POINTS) idx = even(idx, CLAUDE_POINTS);
+  else {
+    const rest = points.map((_, i) => i).filter((i) => !keep.has(i));
+    idx = [...idx, ...even(rest, CLAUDE_POINTS - idx.length)].sort((a, b) => a - b);
+  }
+  return sent([...new Set(idx)].map((i) => points[i]));
+}
+function projectClaude(accounts, rate, now) {
+  const rows = claudeRows(accounts);
+  if (!rows || !(typeof rate === 'number' && Number.isFinite(rate) && rate >= 0) || !Number.isFinite(now)) return null;
+  const { acc, at_least } = claudeState(rows, now);
+  const ahead = acc.flatMap((x) => [x.weekAt, x.fiveAt, x.models]).filter((t) => Number.isFinite(t) && t > now);
+  if (!ahead.length) return null;
+  const end = Math.max(...ahead);
+  const weekly = acc.map((x) => x.weekAt).filter((t) => t !== undefined && t > now);
+  const iso = boxHealthIso;
+  const binding = (x) => Math.max(x.week, x.five);
+  const recovers = (x) => (x.five > x.week ? x.fiveAt : x.weekAt) ?? Infinity;
+  const before = (x, b) => binding(x) < binding(b) || (binding(x) === binding(b) && (recovers(x) < recovers(b) || (recovers(x) === recovers(b) && x.n < b.n)));
+  const best = (list) => list.reduce((b, x) => (!b || before(x, b) ? x : b), null);
+  const pick = (cur) => {
+    if (cur && claudeHasRoom(cur) && binding(cur) < CLAUDE_LINE) return cur;
+    const room = acc.filter(claudeHasRoom);
+    const under = room.filter((x) => binding(x) < CLAUDE_LINE);
+    if (under.length) return best(under);
+    if (cur && claudeHasRoom(cur)) return cur;
+    return best(room);
+  };
+  const points = [], switches = [];
+  let cur = acc.find((x) => x.active), lasts = true, runsOut, pausedUntil, was = null;
+  for (let ts = now; ; ts = Math.min(ts + CLAUDE_STEP_MS, end)) {
+    for (const x of acc) claudeRestore(x, ts);
+    points.push({ at: iso(ts), room: claudeRawRoom(acc) });
+    if (!lasts && pausedUntil === undefined && acc.some(claudeHasRoom)) pausedUntil = ts;
+    if (ts >= end) break;
+    const step = Math.min(CLAUDE_STEP_MS, end - ts);
+    const need0 = (rate * step) / CLAUDE_HOUR_MS;
+    let need = need0;
+    for (let guard = 0; need > 1e-9 && guard < 2 * acc.length + 2; guard++) {
+      cur = pick(cur);
+      if (!cur) break;
+      if (cur !== was) { switches.push({ at: iso(ts), n: cur.n }); was = cur; }
+      const line = binding(cur) < CLAUDE_LINE ? CLAUDE_LINE : 100;
+      const take = Math.min(need, (line - cur.week) * cur.w);
+      if (take <= 0) { cur = null; continue; }
+      cur.week = Math.min(line, cur.week + take / cur.w);
+      need -= take;
+    }
+    if (need > 1e-9 && lasts) { lasts = false; runsOut = ts + Math.round(step * (1 - need / need0)); }
+  }
+  return boxHealthPresent({
+    lasts, runs_out_at: lasts ? undefined : iso(runsOut), paused_until: pausedUntil === undefined ? undefined : iso(pausedUntil),
+    next_reset_at: weekly.length ? iso(Math.min(...weekly)) : undefined, points: claudeThin(points), switches, at_least,
+  });
+}
+function claudeSafeRate(accounts, now) {
+  const lasts = (tenths) => projectClaude(accounts, tenths / 10, now)?.lasts === true;
+  if (!lasts(1)) return undefined;
+  let lo = 1, hi = 2;
+  while (lasts(hi)) { lo = hi; hi *= 2; if (hi > 1e7) return lo / 10; }
+  while (hi - lo > 1) { const m = Math.floor((lo + hi) / 2); if (lasts(m)) lo = m; else hi = m; }
+  return lo / 10;
+}
 const boxHealthClaude = (() => {
   let run = null;
   const LATE = Symbol('late');
@@ -25526,12 +25599,17 @@ const boxHealthClaude = (() => {
     }));
     const claude = { accounts, rate_hours: Number((span / CLAUDE_HOUR_MS).toFixed(2)), points: ring.map((x) => ({ at: boxHealthIso(x.t), room: x.room })) };
     const measuring = span < CLAUDE_MEASURING_MS;
-    let rate;
+    let rate, projection, safe;
     if (!measuring) {
       rate = Number((claudeBurn(ring, rec.rows) / (span / CLAUDE_HOUR_MS)).toFixed(2));
       claude.rate = rate;
+      projection = projectClaude(rec.rows, rate, now);
+      if (projection) {
+        safe = claudeSafeRate(rec.rows, now);
+        claude.projection = boxHealthPresent({ lasts: projection.lasts, runs_out_at: projection.runs_out_at, next_reset_at: projection.next_reset_at, safe_rate: safe, points: projection.points });
+      }
     }
-    return { answer: { claude }, rows: rec.rows, rate, measuring };
+    return { answer: { claude }, rows: rec.rows, rate, measuring, projection: projection ?? undefined, safe_rate: safe, has_room: claudeState(rec.rows, now).acc.some(claudeHasRoom) };
   };
   const read = async (ctx, r) => {
     r.readAt = ctx.now();
