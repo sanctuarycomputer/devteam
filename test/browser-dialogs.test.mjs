@@ -7,8 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { canDrive } from './lib/chrome.mjs';
-import { site, a, browser, kitCli, ok, viewer, within, readState, sleep } from './lib/browser-view-fixture.mjs';
-import { TEXT, MANY, page, dsite, dialogsFile, up, timed, stillGoing, named, said, later, asked, LATER } from './lib/browser-dialogs-fixture.mjs';
+import { a, browser, ok, viewer, readState, sleep } from './lib/browser-view-fixture.mjs';
+import { TEXT, MANY, dsite, dialogsFile, up, timed, stillGoing, named, said, later, asked, LATER } from './lib/browser-dialogs-fixture.mjs';
 
 // CI's Node 22 and 24 jobs have Chrome: there the file must run, never skip.
 const mustRun = !!process.env.CI && Number(process.versions.node.split('.')[0]) >= 22;
@@ -75,19 +75,6 @@ test('D8 ping and a JSON answer leave a kept dialog for the next plain-text answ
   assert.equal(JSON.parse(await ok(a, ['tabs'])).browser, 1);
   assert.equal(JSON.parse(await ok(a, ['snapshot', '--json'])).browser, 1);
   assert.ok((await ok(a, ['snapshot'])).split('\n').includes(LATER), 'the next plain-text answer names it');
-});
-
-test('D9 a dialog while the owner has the browser is answered and never reaches the agent', opts, async () => {
-  await up();
-  await later();
-  const h = await kitCli(a, ['browser', 'handover', '--reason', 'Log in to the fixture site, then press Done']);
-  assert.equal(h.status, 0, h.err || h.out);
-  const qid = h.out.split('\n').find((l) => /^q-\d{8}-\d{9}-[a-z0-9-]+$/.test(l));
-  await asked();
-  const w = await kitCli(a, ['withdraw', qid, '--reason', 'the test is done with it']);
-  assert.equal(w.status, 0, w.err || w.out);
-  const s = await ok(a, ['status']);
-  assert.ok(!s.includes(TEXT.later) && !(await ok(a, ['snapshot'])).includes(TEXT.later), s);
 });
 
 test('D6 five dialogs are named, the rest counted; each text is JSON-quoted on its own line and cut to 300 characters', opts, async () => {

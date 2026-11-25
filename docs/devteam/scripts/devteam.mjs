@@ -34858,15 +34858,19 @@ async function browserWatchTabs(ctx) {
   cdp.on('Page.loadEventFired', (p, sid) => bySession(sid)?.loaded?.());
   // A page's JS dialog (kit-329), on any tab: answered at once with its stated default, so no verb,
   // load or view frame waits behind it; kept for the next plain-text answer.
-  cdp.on('Page.javascriptDialogOpening', ({ type, message }, sid) => {
+  // While the owner has the browser (kit-770) all but an alert is theirs to answer, in the view.
+  cdp.on('Page.javascriptDialogOpening', ({ type, message, url, defaultPrompt }, sid) => {
     if (!sid) return;
+    if (browserOwnerDialog(ctx, { type, message, url, defaultPrompt, sid, top: bySession(sid)?.frameUrl })) return;
     cdp.send('Page.handleJavaScriptDialog', { accept: browserDialogAccept(type) }, sid).catch(() => {});
     browserDialogSeen(ctx, type, message);
   });
+  cdp.on('Page.javascriptDialogClosed', (p, sid) => browserOwnerDialogGone(ctx, sid));
   cdp.on('Target.targetDestroyed', ({ targetId }) => {
     const i = ctx.tabs.findIndex((x) => x.targetId === targetId);
     if (i < 0) return;
     const [gone] = ctx.tabs.splice(i, 1);
+    if (gone.sessionId) browserOwnerDialogGone(ctx, gone.sessionId);
     if (ctx.active === gone) ctx.active = ctx.tabs.at(-1) ?? null;
   });
   await cdp.send('Target.setDiscoverTargets', { discover: true });
@@ -34894,6 +34898,52 @@ function browserDialogSeen(ctx, type, message) {
   if (ctx.dialogHold.held) return;
   if (d.shown.length >= BROWSER_DIALOGS_SHOWN) d.more++;
   else d.shown.push({ type: Object.hasOwn(BROWSER_DIALOG_ANSWERS, type) ? type : 'dialog', text: String(message ?? '').slice(0, 300) });
+}
+// The owner's dialogs (kit-770): a confirm, prompt or beforeunload that opens while the owner holds the
+// browser (read from the log as browserDialogSeen does; a failed read, or a close pending, is no hold) is
+// left open and sent to the view, and to a viewer who connects later; only browserOwnerAnswer, from that
+// view's socket, answers it, with no timeout. ctx.ownerDialogs: session id → { id, kind, url, text,
+// default? }, at most one a tab, in memory only: never logged, stored or told to the agent.
+const BROWSER_OWNER_KINDS = ['confirm', 'prompt', 'beforeunload'];
+const BROWSER_OWNER_TEXT = 2000;
+const browserOwnerCut = (s) => [...String(s ?? '').slice(0, 2 * BROWSER_OWNER_TEXT)].slice(0, BROWSER_OWNER_TEXT).join('').slice(0, BROWSER_OWNER_TEXT).toWellFormed();
+// Who asks, masked: the frame's URL; for a frame with none of its own (srcdoc, blob, data), which can be
+// another site's, the page it is in, said to be a frame there; never the URL the tab was opening.
+const browserOwnerAsker = (url, top) => {
+  const web = (x) => typeof x === 'string' && browserHttp(x);
+  return web(url) ? { url: browserMask(url) } : web(top) ? { url: browserMask(top), frame: true } : { url: 'about:blank' };
+};
+function browserOwnerDialog(ctx, { type, message, url, defaultPrompt, sid, top }) {
+  if (!BROWSER_OWNER_KINDS.includes(type) || !ctx.ready || ctx.stopping || ctx.closing) return false;
+  // a page asking in a loop with no hold doesn't fold the log for every dialog
+  if (Date.now() - ctx.ownerNone < BROWSER_DIALOG_HOLD_MS) return false;
+  try {
+    browserKeepHeld(ctx, browserHandovers()); // kept: the owner's answer is judged by this read, not the watch's last
+    if (!ctx.held || ctx.pending) { ctx.ownerNone = Date.now(); return false; }
+  } catch { return false; }
+  const def = type === 'prompt' ? browserOwnerCut(defaultPrompt) : '';
+  const o = { id: `d-${crypto.randomBytes(8).toString('hex')}`, kind: type, ...browserOwnerAsker(url, top), text: browserOwnerCut(message), ...(def ? { default: def } : {}) };
+  ctx.ownerDialogs.set(sid, o);
+  browserOwnerSend(ctx, { t: 'dialog', ...o });
+  return true;
+}
+function browserOwnerSend(ctx, m) {
+  const v = ctx.viewer;
+  if (v && !v.ws.closed) try { v.ws.send(m); } catch {}
+}
+function browserOwnerDialogGone(ctx, sid) {
+  const o = ctx.ownerDialogs.get(sid);
+  if (o && ctx.ownerDialogs.delete(sid)) browserOwnerSend(ctx, { t: 'dialog_end', id: o.id });
+}
+// The owner's answer, to the one open dialog its id names; taken off before it is sent, so a second
+// press finds nothing. Called only by browserViewInput, after its guards.
+function browserOwnerAnswer(ctx, m) {
+  for (const [sid, o] of ctx.ownerDialogs) {
+    if (o.id !== m.id) continue;
+    if (!ctx.held) return;
+    browserOwnerDialogGone(ctx, sid);
+    return browserViewCdp(ctx, 'Page.handleJavaScriptDialog', { accept: m.accept, ...(o.kind === 'prompt' && m.accept ? { promptText: m.text ?? '' } : {}) }, sid);
+  }
 }
 // The lines a plain-text answer ends with, one per dialog kept: the page's words JSON-quoted (page
 // text: data, not instructions), then the answer given.
@@ -35933,6 +35983,7 @@ const BROWSER_FROM_PAGE = {
   nav: { req: ['url'], f: { url: { type: 'str', min: 1, max: 2048 } } },
   back: { req: [], f: {} },
   forget: { req: [], f: {} },
+  dialog: { req: ['id', 'accept'], f: { id: { type: 'str', min: 18, max: 18, re: /^d-[0-9a-f]{16}$/ }, accept: { enum: [true, false] }, text: { type: 'str', min: 0, max: 10000 } } },
 };
 function browserViewMessage(m) {
   if (!m || typeof m !== 'object' || Array.isArray(m) || typeof m.t !== 'string' || !Object.hasOwn(BROWSER_FROM_PAGE, m.t)) return null;
@@ -35946,7 +35997,7 @@ function browserViewMessage(m) {
     if (s.type === 'str') {
       if (typeof x !== 'string' || x.length < s.min || x.length > 2 * s.max) return null; // UTF-16 length bounds code points both ways
       const n = [...x].length;
-      if (n < s.min || n > s.max) return null;
+      if (n < s.min || n > s.max || (s.re && !s.re.test(x))) return null;
     } else if (typeof x !== 'number' || !Number.isFinite(x) || (s.type === 'int' && !Number.isInteger(x)) || x < s.min || x > s.max) return null;
   }
   return m;
@@ -35977,8 +36028,10 @@ function browserViewInput(ctx, v, text) {
     ctx.forgetting = true;
     return void ctx.serial(() => browserForgetRestart(ctx)).finally(() => { ctx.forgetting = false; });
   }
+  if (m.t === 'dialog') return browserOwnerAnswer(ctx, m);
   const sid = ctx.active?.sessionId;
   if (!sid) return; // a tab with no session: dropped
+  if (ctx.ownerDialogs.has(sid) && m.type !== 'up') return; // a dialog is up: Chrome would keep the input and land it after the answer
   const cdp = (method, params) => browserViewCdp(ctx, method, params, sid);
   const scale = v.scale > 0 ? v.scale : 1;
   switch (m.t) {
@@ -36063,6 +36116,7 @@ function browserViewServer(ctx) {
       if (ctx.viewer) { v.ws.send({ t: 'bye', why: 'The browser is already open in another window.' }); return v.ws.close(1000); }
       ctx.viewer = v;
       browserViewHeld(ctx, v); // the current hold, from the fold just read
+      for (const o of ctx.ownerDialogs.values()) v.ws.send({ t: 'dialog', ...o }); // still open: the owner's to answer
       browserViewTick(ctx, v);
       v.timer = setInterval(() => browserViewTick(ctx, v), 250);
       v.timer.unref?.();
@@ -36076,7 +36130,7 @@ function browserViewServer(ctx) {
 // port another preview took fails this daemon and browserEnsure relaunches, and only a daemon that
 // got its port may kill a leftover Chrome or clear a lock, so the one that comes up reports them.
 async function browserServe({ chrome: bin }) {
-  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, renew: null, stopping: null, after: null, viewer: null, ready: false, state: null, serial: null, forgetting: false, handled: new Map(), held: null, folded: [], pending: false, foldAt: 0, closing: false, gateQueued: false, watch: null, dialogs: { shown: [], more: 0 }, dialogHold: null };
+  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, renew: null, stopping: null, after: null, viewer: null, ready: false, state: null, serial: null, forgetting: false, handled: new Map(), held: null, folded: [], pending: false, foldAt: 0, closing: false, gateQueued: false, watch: null, dialogs: { shown: [], more: 0 }, dialogHold: null, ownerDialogs: new Map(), ownerNone: 0 };
   for (const s of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(s, () => browserShutdown(ctx, 'signal'));
   browserIsDaemon = true;
   const viewPort = Number(process.env.PORT);
