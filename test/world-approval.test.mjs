@@ -23,10 +23,10 @@ const re = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 // file k's draft: its words, and for self.md a plain self@2 document (kit-862 holds a draft that breaks
 // it), its one part a link to the project folder, which the fixture has, no capitalised word in it but
 // a sentence's first (name is kept for the callers; a plain document has no part names);
-// for exterior.md a valid exterior@1 block (kit-135 holds one that breaks it), no entity, drawn from
-// main's strategy.md and self.md (world() lands a self.md, as exterior.md's draft needs one)
-let mainBlobs = null;
-const draft = (k, words, name) => `# ${k}\n\n${words}\n${k === 'self' ? `\nIts one part is [the project folder](./), ${name}.\n` : k === 'exterior' ? `\n\`\`\`exterior\n${JSON.stringify({ exterior: 1, strategy_blob: mainBlobs.strategy, self_blob: mainBlobs.self, entities: [] }, null, 2)}\n\`\`\`\n` : ''}`;
+// for exterior.md a plain exterior@2 document (kit-863; a version 1 block is refused), one ### entry
+// headed by words the template strategy names whole, with a dated source three days back
+const DAY = new Date(Date.now() - 3 * 86400000).toISOString().slice(0, 10);
+const draft = (k, words, name) => `# ${k}\n\n${words}\n${k === 'self' ? `\nIts one part is [the project folder](./), ${name}.\n` : k === 'exterior' ? `\n## Who it serves\n\n### The people who use it\n\nThey hire it for a job ([a page](https://example.org/users), read ${DAY}).\n` : ''}`;
 
 // A fixture with a chore per draft, the owner's answers and the two gates (merge --dry-run, check-pr).
 // selfOnMain: false keeps kit-138's self.md track on a main with no self.md (a chore adds the first)
@@ -75,7 +75,6 @@ function world(name, { selfOnMain = true } = {}) {
   const onMain = (rel, text) => { write(path.join(old, rel), text); g(['add', '-A'], old); g(['commit', '-qm', `main: ${rel}`], old); g(['push', '-q', 'origin', 'main'], old); };
   // a minimal valid self.md on main, which an exterior.md draft is drawn from
   if (selfOnMain) onMain(FILES.self.rel, draft('self', 'The approved self.', 'approved self'));
-  mainBlobs = { strategy: g(['rev-parse', `origin/main:${FILES.strategy.rel}`], old), self: selfOnMain ? g(['rev-parse', `origin/main:${FILES.self.rel}`], old) : null };
   const supLine = (o) => fs.appendFileSync(path.join(old, 'docs/devteam/run/log', `supervisor-${new Date().toISOString().slice(0, 7)}.jsonl`), line({ at: new Date().toISOString(), by: 'supervisor', ...o }));
   // check-pr's exit on a chore that changes only a project note: what a warning must leave it at
   const baseline = () => { const sha = chore('notes-only', (w) => write(path.join(w, `${P}/designs/notes.md`), 'n\n')); const r = checkPr('chore-notes-only', sha); assert.equal(r.status, 0, `check-pr passes a chore that changes only a project note\n${r.text}`); return r.status; };
@@ -172,7 +171,7 @@ for (const k of ['self', 'exterior']) {
       chore('empty', (w) => write(path.join(w, rel), ''));
       refused(merge('empty'), new RegExp(`changes ${re(rel)}: .*ask --class ${cls}`), 'DW1 emptied');
       // an empty self.md or exterior.md breaks its contract (it is no deletion), so even the owner's yes doesn't land it
-      refused(merge('empty', answered(k, 'empty')), new RegExp(`breaks ${k}@${k === 'self' ? 2 : 1}`), `an empty ${k}.md breaks the contract, answered or not`);
+      refused(merge('empty', answered(k, 'empty')), new RegExp(`breaks ${k}@2`), `an empty ${k}.md breaks the contract, answered or not`);
       // changed: a new text needs its own answer
       chore('edit', (w) => write(path.join(w, rel), draft(k, 'The next version.', 'next version')));
       refused(merge('edit'), new RegExp(`changes ${re(rel)}: .*ask --class ${cls}`), 'DW1 changed, no answer');
