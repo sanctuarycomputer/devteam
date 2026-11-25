@@ -1092,6 +1092,11 @@ try {
   .tl-compose textarea { margin-top: 6px; }
   .tl-compose .row-inline { align-items: center; }
   @media (max-width: 640px) { .tl-card:not(.sheet) { width: calc(100vw - 32px); } }
+  /* a short window (kit-882): the floating card's floors give way, the box to one line, the note's words to two */
+  @media (max-height: 480px) {
+    .tl-card:not(.in-panel) #tl-c-text { min-height: 34px; height: 34px; }
+    .tl-card:not(.in-panel) .tl-words { min-height: 40px; }
+  }
   /* under the scrim (20) and what opens over it (the drawer, a review, an artifact), over the page's own (at most 6) */
   .tl-pins { position: absolute; left: 0; top: 0; width: 0; height: 0; }
   .tl-pin { position: absolute; z-index: 10; width: 22px; height: 22px; padding: 0; margin: 0; border-radius: 50%; border: 2px solid #fff; background: var(--blue); color: #fff; font: 600 11px/18px var(--sans); text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
