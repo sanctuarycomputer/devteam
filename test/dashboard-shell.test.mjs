@@ -89,8 +89,15 @@ const load = (ctx = {}) => {
 const S = load();
 const R = S.SHELL_ROUTES;
 
-test('shell.md says @1 and defines what the design lists', () => {
-  assert.match(SHELL_MD, /dashboard-shell@1/);
+test('shell.md says @2 and defines what the design lists', () => {
+  assert.match(SHELL_MD, /^Contract `dashboard-shell@2`\./m, 'shell.md is headed dashboard-shell@2');
+  assert.match(SHELL_MD, /^- \*\*@2\*\* \(`kit-267`\): /m, 'a @2 line in its History');
+  assert.match(SHELL_MD, /^## 10\. The hub frame$/m, 'a §10');
+  // §6, §7, §8 and §10 name what the design's 'Contract dashboard-shell@2' section says
+  for (const n of ['`p=q/<id>`', '`i`', '`u`', 'SHELL_ROUTES.peeks', 'peekHead', 'legacy: true', '`tree/<id>`', '`wt/<worktree>`', '`path`', '`route`', '`talk/<t-id>?u=<u-id>`', 'th=inbox&i=', 'URLSearchParams', 'artifactPathOk', 'reads its page from the head', '`hub-route`', '`hub-base`', '2,048', '`null`', 'postHead()', '`box: 2`', '#<key>/<head>', '`#overview?ot=<id>`', 'test/fixtures/hub-frame-fake.html', 'test/fixtures/dashboard-frame-fake.html', 'An empty value is a value']) assert.ok(SHELL_MD.includes(n), `shell.md says ${n}`);
+  assert.match(SHELL_MD, /`box: 2`\) it is the project's own host, `https:\/\/<project>\.<box>\/#`/, "hub-base's base on a box: 2 box");
+  assert.match(SHELL_MD, /under `box: 1`, and on a laptop, it is the hub's own address/, "hub-base's base under box: 1 and on a laptop");
+  assert.match(SHELL_MD, /§8 governs freshness/);
   for (const t of ['--page-max', '--page-top', '--page-pad', '--header-pad', '--panel-pad', '--head-h', '--backdrop', '--gap', '--ease', '--dur', '--threads-w', '--bar-h', '--measure']) {
     assert.ok(SHELL_MD.includes(`\`${t}\``), `shell.md defines ${t}`);
     assert.match(LAYOUT, new RegExp(`${t}:`), `the layout block sets ${t}`);
