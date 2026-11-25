@@ -20,8 +20,11 @@ const SELF_MD = world('self.md');
 const STRATEGY = world('strategy.md');
 const EXTERIOR_MD = world('exterior.md');
 const CASES = JSON.parse(world('invalid/cases.json')).filter((c) => c.file.startsWith('exterior-'));
-// the paths the fixture self.md's parts name, as files on main
+// the paths the version 1 fixture self.md's parts name (and PLAIN_SELF's links reach), as files on main
 const PARTS = { 'app/main.js': 'app\n', 'app/plugins/api.js': 'api\n', 'sync/server.js': 'sync\n', 'deploy/sync.yml': 'deploy\n' };
+// the fixture self.md as a plain draft (self@2, kit-862): its block gone, its parts linked; a draft
+// of version 1 is refused, though main's version 1 file still validates
+const PLAIN_SELF = SELF_MD.replace(/\n```self\n[\s\S]*?\n```\n?/, '\n').replace('Its parts are the app people write in, the sync service', 'Its parts are [the app](../../../app/) people write in, [the sync service](../../../sync/)');
 const re = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 
 // A fixture project (kit-139's shape): main holds strategy (null: init's template), self.md and
@@ -501,7 +504,7 @@ test('A16 focus 1 exterior.md\'s capitalised words are held as self.md\'s', with
   });
   await check('focus 1 one --names-checked for self.md and exterior.md: each held on its own words, an act per scope', () => {
     const both = (slug) => (w) => {
-      const self = SELF_MD.replace('It controls its code', 'It mails through Quux.\n\nIt controls its code');
+      const self = PLAIN_SELF.replace('It controls its code', 'It mails through Quux.\n\nIt controls its code');
       writeIn(w, SELF, self);
       const selfBlob = W.g(['hash-object', path.join(w, SELF)], w);
       writeIn(w, EXT, extBlock((v) => { v.self_blob = selfBlob; }, hosted));
