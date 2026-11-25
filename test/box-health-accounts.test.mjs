@@ -109,3 +109,42 @@ test('the fields capacityOf gave before are unchanged', () => {
   assert.deepEqual(rows, before, 'the rows it was given are left as they were');
   assert.deepEqual(capacityOf([]), { accounts: 0, room: 0, unknown: 0, active_week_pct: null, active_5h_pct: null, runs_out_at: null, next_reset_at: null, gap: false, list: [] });
 });
+
+
+test('a per-model window is full only at a finite pct of 100 or more (kit-881)', () => {
+  const full = (...pcts) => one({ usage: { sevenDay: { pct: 1 }, scoped: pcts.map((pct) => ({ pct, resetsAt: '2026-11-25T09:00:00Z' })) } }).models_full.length;
+  for (const pct of ['100', '1e3', [100], [[100]], true, { valueOf: () => 100 }, NaN, Infinity, null, undefined]) assert.equal(full(pct), 0, `a pct of ${typeof pct} ${String(pct)} is not full`);
+  assert.equal(full(100, 100.5, 99.99, 1e9), 3, 'a number of 100 or more is full, one under it is not');
+});
+
+test('no pct in any shape throws (kit-881)', () => {
+  // valueOf and toString that are not functions, and an object with neither: >= on them throws
+  const odd = [{ valueOf: 1, toString: 1 }, Object.create(null), { [Symbol.toPrimitive]: 1 }, Symbol('pct')];
+  for (const pct of odd) {
+    const row = { number: 3, usageStatus: 'unavailable', usage: { fiveHour: { pct }, sevenDay: { pct }, scoped: [{ pct }] } };
+    assert.doesNotThrow(() => capacityOf([row]), String(typeof pct));
+    assert.deepEqual(listed(row)[0].models_full, [], 'nor is it full');
+  }
+});
+
+test('every time in the list is one box-health@1 takes, or is left out, at either edge of the years too (kit-881)', () => {
+  const { memoryAtOk } = checks();
+  const cases = [
+    ['9999-12-31T23:59:59-01:00', undefined], ['9999-12-31T23:59:00-14:00', undefined],
+    ['0000-01-01T00:00:00+01:00', undefined], ['0000-01-01T00:00:00+14:00', undefined],
+    ['9999-12-31T22:59:59-01:00', '9999-12-31T23:59:59.000Z'], ['9999-12-31T23:59:59Z', '9999-12-31T23:59:59.000Z'],
+    ['0000-01-01T00:00:00Z', '0000-01-01T00:00:00.000Z'], ['0000-01-01T00:00:00-01:00', '0000-01-01T01:00:00.000Z'],
+  ];
+  for (const [t, want] of cases) {
+    const r = one({ usage: { fiveHour: { pct: 1, resetsAt: t }, sevenDay: { pct: 1, resetsAt: t }, scoped: [{ pct: 100, resetsAt: t }] } });
+    for (const got of [r.week_resets_at, r.five_resets_at, r.models_full[0].resets_at]) {
+      assert.equal(got, want, t);
+      assert.ok(got === undefined || memoryAtOk(got), `${got} is a time box-health@1 takes`);
+    }
+  }
+});
+
+test('usage that is a list is read as no usage (kit-881)', () => {
+  for (const usage of [[], [{ pct: 1 }]]) assert.deepEqual(one({ usage }), { n: 3, label: 'Account 3', active: false, disabled: false, status: 'ok', models_full: [] }, JSON.stringify(usage));
+  assert.equal(one({ usage: {} }).five_pct, 0, 'an object with no five-hour window is still unused');
+});
