@@ -1,0 +1,23 @@
+{
+  "v": 1,
+  "at": "2026-11-24T18:40:00Z",
+  "hour_end": "2026-11-24T18:40:00Z",
+  "cap": 10,
+  "ready": 3,
+  "planners": 1,
+  "goals": [
+    {"id":"g-invoices","title":"Invoices keep their order","priority":4,"usd_hour":3.5,"new_hour":700000},
+    {"id":"g-notes","title":"Notes","usd_hour":0.25,"new_hour":50000}
+  ],
+  "workers": [
+    {"name":"app-28-invoices","title":"Invoices keep their order","goal":0,"phase":"final-review","since":"2026-11-24T16:40:00Z","tokens":{"state":"measured","new":1840000,"cached":16000000,"usd_hour":1.25,"new_hour":250000,"points":[{"at":"2026-11-24T16:40:00Z","new":41666},{"at":"2026-11-24T16:50:00Z","new":41666},{"at":"2026-11-24T17:00:00Z","new":41666},{"at":"2026-11-24T17:10:00Z","new":41666},{"at":"2026-11-24T17:20:00Z","new":41666},{"at":"2026-11-24T17:30:00Z","new":41666},{"at":"2026-11-24T17:40:00Z","new":41666},{"at":"2026-11-24T17:50:00Z","new":41666},{"at":"2026-11-24T18:00:00Z","new":41666},{"at":"2026-11-24T18:10:00Z","new":41666},{"at":"2026-11-24T18:20:00Z","new":41666},{"at":"2026-11-24T18:30:00Z","new":41666}],"reviews_new":300000,"reviews_usd_hour":0.5,"reviews_new_hour":100000}},
+    {"name":"app-30-importer","title":"The old importer goes","goal":0,"phase":"build","since":"2026-11-24T15:40:00Z","tokens":{"state":"measured","new":1400000,"cached":12000000,"usd_hour":0.75,"new_hour":150000,"points":[{"at":"2026-11-24T15:40:00Z","new":25000},{"at":"2026-11-24T15:50:00Z","new":25000},{"at":"2026-11-24T16:00:00Z","new":25000},{"at":"2026-11-24T16:10:00Z","new":25000},{"at":"2026-11-24T16:20:00Z","new":25000},{"at":"2026-11-24T16:30:00Z","new":25000},{"at":"2026-11-24T16:40:00Z","new":25000},{"at":"2026-11-24T16:50:00Z","new":25000},{"at":"2026-11-24T17:00:00Z","new":25000},{"at":"2026-11-24T17:10:00Z","new":25000},{"at":"2026-11-24T17:20:00Z","new":25000},{"at":"2026-11-24T17:30:00Z","new":25000},{"at":"2026-11-24T17:40:00Z","new":25000},{"at":"2026-11-24T17:50:00Z","new":25000},{"at":"2026-11-24T18:00:00Z","new":25000},{"at":"2026-11-24T18:10:00Z","new":25000},{"at":"2026-11-24T18:20:00Z","new":25000},{"at":"2026-11-24T18:30:00Z","new":25000}]}},
+    {"name":"app-32-notes","title":"Notes stay","goal":1,"phase":"spec","since":"2026-11-24T18:00:00Z","tokens":{"state":"measured","new":50000,"cached":400000,"usd_hour":0.25,"new_hour":50000,"points":[{"at":"2026-11-24T18:00:00Z","new":12500},{"at":"2026-11-24T18:10:00Z","new":12500},{"at":"2026-11-24T18:20:00Z","new":12500},{"at":"2026-11-24T18:30:00Z","new":12500}]}},
+    {"name":"app-34-chores","title":"Chores","phase":"build","since":"2026-11-24T18:30:00Z","tokens":{"state":"none-yet"}}
+  ],
+  "recent": [
+    {"name":"app-29-header","title":"A header","left_at":"2026-11-24T18:10:00Z","why":"merged","tokens":{"state":"measured","new":1100000,"cached":9000000,"points":[{"at":"2026-11-24T18:00:00Z","new":100000}],"reviews_new":20000}},
+    {"name":"app-27-old","left_at":"2026-11-24T09:40:00Z","why":"stopped","tokens":{"state":"not-measured","reason":"no-record"}}
+  ],
+  "other": {"usd_hour":2,"new_hour":350000}
+}
