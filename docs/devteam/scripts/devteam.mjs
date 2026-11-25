@@ -21027,7 +21027,7 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
   // when the hub is closed for good
   const recorder = memoryRecorder(log, scan);
   // its live health, a sample every 5 s in this process's memory (kit-836), started and stopped with it
-  const health = boxHealth(log, scan);
+  const health = boxHealth(log, scan, { kit });
   // What holds the hub port: 'hub', 'other' (a clean answer that isn't a hub), or 'unsure' (slow,
   // or gone between the bind and the ask), which is no reason to stop trying.
   const holder = () => new Promise((resolve) => {
@@ -24426,6 +24426,7 @@ function poolProblem(input) {
 //   stopped()       true once the hub has closed: slow work that finds it so ends
 //   say(words)      in the hub's log, under the part's name: each line once, 20 lines a part at most.
 //                   The words are the part's own, never text it read
+//   kit             the release serving the hub (startHub's kit, as /instances.json gives it), or null
 // With DEVTEAM_BOX_HEALTH_FAST=<n> (1 to 3600, tests; read only when DEVTEAM_BOX_HEALTH is on) now()
 // and its intervals run n times as fast. real() and timeout() never do.
 const BOX_HEALTH_EVERY_MS = 5000, BOX_HEALTH_WINDOW_MS = 3600000, BOX_HEALTH_SAMPLES = 720;
@@ -24509,8 +24510,8 @@ function boxHealthMemory(ctx, boxed) {
   out.some60 = boxHealthPressure(boxed ? boxHealthRead(ctx.cgroup, 'memory.pressure') : boxHealthRead(ctx.proc, 'pressure', 'memory')).some60;
   return boxHealthPresent(out);
 }
-// The sampler: { on, start, stop, serve, fail, tick }. parts and real are the tests' own.
-function boxHealth(log, scan, { parts = boxHealthParts(), real = () => Date.now() } = {}) {
+// The sampler: { on, start, stop, serve, fail, tick }. kit is startHub's; parts and real are the tests' own.
+function boxHealth(log, scan, { kit = null, parts = boxHealthParts(), real = () => Date.now() } = {}) {
   // what was said, by its key: one line each, so a value that changes in it adds none
   const said = new Set();
   const say = (key, words) => { if (!said.has(key)) { said.add(key); log(`hub: box health: ${words}`); } };
@@ -24564,7 +24565,7 @@ function boxHealth(log, scan, { parts = boxHealthParts(), real = () => Date.now(
   const ctxFor = (who) => {
     const once = (ms, fn) => { const end = timer(setTimeout, clearTimeout, ms, () => { end(); guarded(who, 'a timer', fn)(); }); return end; };
     return Object.freeze({
-      now, real,
+      now, real, kit,
       every: (ms, fn) => {
         let busy = false;
         const run = guarded(who, 'a timer', fn);
@@ -25092,12 +25093,202 @@ const boxHealthProcesses = (() => {
 })();
 /* box-health-processes end */
 /* box-health-disk start */
-// Each worktree's disk (kit-838's).
-const boxHealthDisk = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+// Each worktree's disk (kit-838): every minute of now() it lists <root>/.worktrees/ under each known
+// root (ctx.roots()), folders only, and reads, one after the other, every worktree whose last read
+// began 15 minutes of now() ago or more (or never), with `nice -n 19 du -skx <worktree>`: the lowest
+// CPU priority, and with no I/O class set Linux takes the I/O priority from it (the lowest of the
+// best-effort class); -x stays on the worktree's own volume. One du at a time, never two looks at
+// once; a du still running at 60 s of real() is killed. Nothing of its output but the number is kept.
+// A killed du stuck in the kernel stays alive until it closes: while one is, its worktree gets no
+// second du (its row stays), and while two are, no du starts at all (every row stays). The
+// .worktrees/ folders are listed one at a time inside the one look, so a volume that hangs holds at
+// most one of the threads every file read shares, and no look starts until it answers.
+//
+// part(ctx, parts) gives undefined until a read has ended, then (a new object after each read):
+//   worktrees   [{ root, worktree, disk, disk_at }], in the order the roots and their folders were
+//               listed: root as ctx.roots() gives it, worktree the folder's name under .worktrees/
+//               (as box-health-processes names it), disk in bytes (du's KiB × 1024), disk_at the ISO
+//               time of now() when that read ended. disk is absent when that read failed (du exited
+//               other than 0, gave no number, or couldn't be run) or was stopped at 60 s, until a
+//               later one ends with a number; a worktree not read yet has no row. A worktree gone
+//               from its .worktrees/ is forgotten at the next look; a .worktrees/ that is missing has
+//               none, and one that can't be listed otherwise keeps its root's rows as they are. With no
+//               row left, part gives undefined, not an empty list.
+// stop() kills a du still running, as the sampler asks (its limit goes with the run's timers).
+const DISK_LOOK_MS = 60000, DISK_EVERY_MS = 900000, DISK_LIMIT_MS = 60000, DISK_OUT_MAX = 4096, DISK_ALIVE = 2;
+const boxHealthDisk = (() => {
+  let run = null;
+  // one du: bytes, or undefined. Its output is read for the first number only, at most 4 KB
+  const du = (ctx, dir, kids, key) => new Promise((resolve) => {
+    let out = '', done = false, end = () => {}, child;
+    const finish = (v) => { if (done) return; done = true; end(); resolve(v); };
+    try {
+      child = spawn('nice', ['-n', '19', 'du', '-skx', dir], { stdio: ['ignore', 'pipe', 'ignore'], env: process.env });
+    } catch { ctx.say("du can't be run: no disk by worktree"); finish(undefined); return; }
+    // alive until it closes, which a du stuck in the kernel may not do for a long time after its kill
+    kids.set(child, key);
+    const gone = () => kids.delete(child);
+    const kill = () => { try { child.kill('SIGKILL'); } catch {} };
+    end = ctx.timeout(DISK_LIMIT_MS, () => { kill(); ctx.say("a worktree's du ran 60 s and was stopped: its disk is absent until a read ends"); finish(undefined); });
+    child.on('error', () => { gone(); ctx.say("du can't be run: no disk by worktree"); finish(undefined); });
+    child.stdout.on('data', (c) => { out += c; if (out.length > DISK_OUT_MAX) { kill(); finish(undefined); } });
+    child.on('close', (code) => {
+      gone();
+      const m = /^(\d+)\s/.exec(out);
+      const bytes = m ? Number(m[1]) * 1024 : NaN;
+      finish(code === 0 && Number.isSafeInteger(bytes) ? bytes : undefined);
+    });
+  });
+  const keyOf = (w) => `${w.root}\0${w.worktree}`;
+  const look = async (ctx, r) => {
+    const found = [], order = [];
+    for (const { root } of ctx.roots()) {
+      let list = [];
+      try { list = await fs.promises.readdir(path.join(root, '.worktrees'), { withFileTypes: true }); } catch (e) {
+        // missing: no worktrees; unreadable (EACCES, EIO): its rows stay as they are, none read again
+        if (e?.code !== 'ENOENT') for (const k of r.order) if (k.startsWith(`${root}\0`)) order.push(k);
+        continue;
+      }
+      for (const d of list) if (d.isDirectory()) { found.push({ root, worktree: d.name }); order.push(keyOf({ root, worktree: d.name })); }
+    }
+    if (ctx.stopped() || run !== r) return;
+    r.order = order;
+    const live = new Set(r.order);
+    let changed = false;
+    for (const k of [...r.seen.keys()]) if (!live.has(k)) { r.seen.delete(k); changed = true; }
+    const publish = () => { const rows = r.order.flatMap((k) => (r.seen.get(k)?.row ? [r.seen.get(k).row] : [])); r.result = rows.length ? { worktrees: rows } : undefined; };
+    if (changed) publish();
+    for (const w of found) {
+      const k = keyOf(w), was = r.seen.get(k);
+      if (was && ctx.now() - was.began < DISK_EVERY_MS) continue;
+      // its last du still alive (killed, not yet ended): not a second for it, and its row stays
+      if ([...r.kids.values()].includes(k)) continue;
+      // two alive at once: none more until one ends, and every row stays
+      if (r.kids.size >= DISK_ALIVE) { ctx.say('two du are still alive after their kill: no more until one ends'); break; }
+      const began = ctx.now();
+      r.seen.set(k, { began, row: was?.row });
+      const disk = await du(ctx, path.join(w.root, '.worktrees', w.worktree), r.kids, k);
+      if (ctx.stopped() || run !== r) return;
+      r.seen.set(k, { began, row: { root: w.root, worktree: w.worktree, ...(disk === undefined ? {} : { disk }), disk_at: boxHealthIso(ctx.now()) } });
+      publish();
+    }
+  };
+  return {
+    start(ctx) {
+      const r = { seen: new Map(), order: [], result: undefined, looking: false, kids: new Map() };
+      run = r;
+      ctx.every(DISK_LOOK_MS, async () => {
+        if (r.looking || run !== r) return;
+        r.looking = true;
+        try { await look(ctx, r); } finally { r.looking = false; }
+      });
+    },
+    part(ctx, parts) { return run?.result; },
+    // a child still running is killed: its limit goes with the run's timers
+    stop() { for (const c of run?.kids?.keys() ?? []) { try { c.kill('SIGKILL'); } catch {} } run = null; },
+  };
+})();
 /* box-health-disk end */
 /* box-health-state start */
-// answer.box: the last restart, OOM kills, GitHub, the kit's release (kit-838's).
-const boxHealthState = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+// answer.box (kit-838): the box's last start, its OOM kills since, GitHub's allowance, and the kit's
+// release against the newest one.
+//   started_at  pid 1's start: <proc>/stat's btime plus <proc>/1/stat's start time (ticks, 100 a
+//               second). In a container that is the container's start; on a machine, where pid 1
+//               starts with it, the boot. Read once a run, at the first tick that can.
+//   oom_kills   each tick, oom_kill in <cgroup>/memory.events (the box's, since its cgroup began with
+//               it); where there is no cgroup of the box (no cpu.max, no memory.current), /proc's
+//               vmstat oom_kill (the machine's, since boot). A box whose memory.events can't be read
+//               has none: the host's is never given for it.
+//   github      `gh api rate_limit` every 5 minutes of now(), the first at start: resources.core's
+//               remaining (left), limit and reset (resets_at)
+//   latest      `gh api repos/<KIT_UPSTREAM>/releases/latest --jq .tag_name` every hour of now(), the
+//               first at start, when it is vX.Y.Z
+//   kit         ctx.kit, the release serving the hub (startHub's kit), when there is one
+// Each gh is one async child, never two of a kind alive at once (a killed one that hasn't closed
+// keeps the next of its kind from starting, and its field as it is), killed at 30 s of real(). Its stderr is
+// never read, its stdout only parsed, and nothing of either is said or kept: a missing or failing
+// gh, or one whose output doesn't parse, leaves its field out until a later one answers. The
+// sampler starts this part only when it is on, so no gh child starts unless it is; stop() kills one
+// still running.
+const STATE_GITHUB_MS = 300000, STATE_LATEST_MS = 3600000, STATE_GH_MS = 30000, STATE_OUT_MAX = 65536;
+const boxHealthState = (() => {
+  let run = null;
+  const read = (...p) => { try { return fs.readFileSync(path.join(...p), 'utf8'); } catch { return null; } };
+  // one gh: its stdout, or null when it failed, ran out of time or said too much
+  const gh = (ctx, args, kids, kind) => new Promise((resolve) => {
+    let out = '', done = false, end = () => {}, child;
+    const finish = (v) => { if (done) return; done = true; end(); resolve(v); };
+    try {
+      child = spawn('gh', args, { stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, GH_PROMPT_DISABLED: '1', NO_COLOR: '1' } });
+    } catch { ctx.say("gh can't be run: GitHub's allowance and the newest release are left out"); finish(null); return; }
+    // alive until it closes: no second of its kind starts before that
+    kids.set(child, kind);
+    const gone = () => kids.delete(child);
+    const kill = () => { try { child.kill('SIGKILL'); } catch {} };
+    end = ctx.timeout(STATE_GH_MS, () => { kill(); ctx.say('a gh ran 30 s and was stopped'); finish(null); });
+    child.on('error', () => { gone(); ctx.say("gh can't be run: GitHub's allowance and the newest release are left out"); finish(null); });
+    child.stdout.on('data', (c) => { out += c; if (out.length > STATE_OUT_MAX) { kill(); finish(null); } });
+    child.on('close', (code) => { gone(); finish(code === 0 ? out : null); });
+  });
+  const rate = (text) => {
+    let core = null;
+    try { core = JSON.parse(text ?? 'null')?.resources?.core; } catch { core = null; }
+    const whole = (n) => Number.isSafeInteger(n) && n >= 0;
+    if (!core || !whole(core.remaining) || !whole(core.limit)) return undefined;
+    const resets = whole(core.reset) && core.reset > 0 ? time(core.reset * 1000) : undefined;
+    const at = resets ? { resets_at: resets } : {};
+    return { left: core.remaining, limit: core.limit, ...at };
+  };
+  // a time Date can hold (spec-1 F2): past it toISOString throws, so the field is left out
+  const time = (ms) => (Number.isSafeInteger(ms) && ms >= 0 && ms <= 8.64e15 ? boxHealthIso(ms) : undefined);
+  const tag = (text) => { const t = (text ?? '').trim(); return /^v\d+\.\d+\.\d+$/.test(t) ? t : undefined; };
+  const startedAt = (ctx) => {
+    const btime = /^btime (\d+)$/m.exec(read(ctx.proc, 'stat') ?? '');
+    const one = procStat(read(ctx.proc, '1', 'stat') ?? '');
+    if (!btime || !one) return undefined;
+    const ms = Number(btime[1]) * 1000 + one.start * 1000 / PROC_HZ;
+    return time(Math.round(ms));
+  };
+  const ooms = (ctx) => {
+    const events = read(ctx.cgroup, 'memory.events');
+    if (events !== null) return boxHealthField(events, 'oom_kill');
+    const boxed = read(ctx.cgroup, 'cpu.max') !== null || read(ctx.cgroup, 'memory.current') !== null;
+    return boxed ? undefined : boxHealthField(read(ctx.proc, 'vmstat'), 'oom_kill');
+  };
+  // every ms of now(), the first now; one of a kind alive at a time
+  const each = (ctx, r, ms, args, take, field) => {
+    const ask = async () => {
+      // one of its kind still alive (running, or killed and not yet ended): none started, and the
+      // field stays as it is
+      if (run !== r || [...r.kids.values()].includes(field)) return;
+      const got = take(await gh(ctx, args, r.kids, field));
+      if (run === r) r[field] = got;
+    };
+    ctx.after(0, ask);
+    ctx.every(ms, ask);
+  };
+  return {
+    start(ctx) {
+      const r = { started: undefined, github: undefined, latest: undefined, last: null, key: '', kids: new Map() };
+      run = r;
+      each(ctx, r, STATE_GITHUB_MS, ['api', 'rate_limit'], rate, 'github');
+      each(ctx, r, STATE_LATEST_MS, ['api', `repos/${KIT_UPSTREAM}/releases/latest`, '--jq', '.tag_name'], tag, 'latest');
+    },
+    part(ctx, parts) {
+      const r = run;
+      if (!r) return undefined;
+      r.started ??= startedAt(ctx);
+      const kit = typeof ctx.kit === 'string' && ctx.kit ? ctx.kit : undefined;
+      const box = boxHealthPresent({ started_at: r.started, oom_kills: ooms(ctx), github: r.github, kit, latest: r.latest });
+      const key = JSON.stringify(box);
+      // the same object while nothing changed, so the sampler checks it once
+      if (key !== r.key) { r.key = key; r.last = { answer: { box } }; }
+      return r.last;
+    },
+    // a child still running is killed: its limit goes with the run's timers
+    stop() { for (const c of run?.kids?.keys() ?? []) { try { c.kill('SIGKILL'); } catch {} } run = null; },
+  };
+})();
 /* box-health-state end */
 /* box-health-pool start */
 // answer.pool (kit-842): every project's worker pool, read from its supervisor's
