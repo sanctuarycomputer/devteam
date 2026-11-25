@@ -279,8 +279,12 @@ test('recover: two at once on one repo start one supervisor', { skip: !hasTmux }
     F.killSession();
     const dt = path.join(F.root, 'docs/devteam/scripts/devteam.mjs');
     const once = () => new Promise((resolve) => execFile(process.execPath, [dt, 'recover'], { cwd: F.root, env: F.env({ ...asOwner, ...server.env }), encoding: 'utf8' }, (err, stdout, stderr) => resolve({ status: err?.code ?? 0, stdout, stderr })));
+    // recover reads origin before its lock (cmdRecover), so both fetch at once: with origin/main already
+    // current neither fetch writes the ref, and the start claim is what's under test (two recovers racing
+    // one moved origin's ref lock is a product bug, kit-910-recover-ref-lock-race)
+    execFileSync('git', ['fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main'], { cwd: F.root });
     const both = await Promise.all([once(), once()]);
-    assert.deepEqual(both.map((r) => r.status), [0, 0], both.map((r) => r.stderr).join());
+    assert.deepEqual(both.map((r) => r.status), [0, 0], both.map((r) => `${r.stdout}${r.stderr}`.trim()).join(' | '));
     assert.equal(both.filter((r) => /^resumed session/.test(r.stdout)).length, 1, both.map((r) => r.stdout).join());
     assert.equal(both.filter((r) => /^already running/.test(r.stdout)).length, 1, both.map((r) => r.stdout).join());
     await until(() => F.claudeCalls().length === 1, 'the stand-in claude ran');
