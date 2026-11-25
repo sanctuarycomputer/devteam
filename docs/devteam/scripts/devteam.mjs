@@ -25399,7 +25399,10 @@ const boxHealthPool = (() => {
 // is then true. It gives { lasts, runs_out_at, paused_until (the first step after running out with
 // room again), next_reset_at (the earliest weekly reset after now), points [{ at, room }] (room in
 // accounts' worth: the weekly room left of accounts that have room; at most 400: every change of
-// direction, then evenly), switches [{ at, n }], at_least }, or null with no reset ahead or no rate.
+// direction, then evenly), switches [{ at, n }] (the account spent from, first the one it starts on, then
+// each change), at_least }, or null with no reset ahead, or a rate that isn't 0 to 1e9. It looks at most
+// 8 days ahead (a weekly reset is never further): a reset time past that, which only a garbled record
+// gives, ends the steps at 8 days and doesn't come within them (task-3 F1).
 // claudeSafeRate(accounts, now) is the highest rate, to 0.1, at which it lasts, or undefined when not
 // even 0.1 does.
 //
@@ -25414,6 +25417,7 @@ const CLAUDE_EVERY_MS = 15000, CLAUDE_READ_MS = 60000, CLAUDE_FRESH_MS = 300000,
 const CLAUDE_MAX_BYTES = 262144, CLAUDE_RING_MS = 6 * 3600000, CLAUDE_MEASURING_MS = 1800000, CLAUDE_JUMP_MS = 3600000;
 const CLAUDE_STEP_MS = 900000, CLAUDE_POINTS = 400, CLAUDE_ACCOUNTS = 40, CLAUDE_LINE = 90;
 const CLAUDE_WEEK_MS = 7 * 86400000, CLAUDE_FIVE_MS = 5 * 3600000, CLAUDE_HOUR_MS = 3600000;
+const CLAUDE_AHEAD_MS = 8 * 86400000, CLAUDE_RATE_MAX = 1e9;
 // capacity.list's rows, each built again from its named fields; null when it isn't a list
 function claudeRows(list) {
   if (!Array.isArray(list)) return null;
@@ -25504,11 +25508,11 @@ function claudeThin(points) {
 }
 function projectClaude(accounts, rate, now) {
   const rows = claudeRows(accounts);
-  if (!rows || !(typeof rate === 'number' && Number.isFinite(rate) && rate >= 0) || !Number.isFinite(now)) return null;
+  if (!rows || !(typeof rate === 'number' && rate >= 0 && rate <= CLAUDE_RATE_MAX) || !Number.isFinite(now)) return null;
   const { acc, at_least } = claudeState(rows, now);
   const ahead = acc.flatMap((x) => [x.weekAt, x.fiveAt, x.models]).filter((t) => Number.isFinite(t) && t > now);
   if (!ahead.length) return null;
-  const end = Math.max(...ahead);
+  const end = Math.min(Math.max(...ahead), now + CLAUDE_AHEAD_MS);
   const weekly = acc.map((x) => x.weekAt).filter((t) => t !== undefined && t > now);
   const iso = boxHealthIso;
   const binding = (x) => Math.max(x.week, x.five);

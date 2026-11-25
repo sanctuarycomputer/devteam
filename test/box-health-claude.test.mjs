@@ -328,6 +328,17 @@ test('P11: a reset already past restores the account now; rate 0 lasts with ever
   assert.equal(p.part().has_room, false);
 });
 
+test('P12: a reset time years ahead (a garbled record) ends the steps at 8 days; a rate past 1e9 is no projection', () => {
+  const s = load();
+  const list = [row(1, { active: true, week_pct: 50, week_resets_at: '9999-12-31T00:00:00.000Z' }), row(2, { week_pct: 50, week_resets_at: at(2 * DAY) })];
+  const r = s.projectClaude(list, 1, T0);
+  assert.equal(r.points.at(-1).at, at(8 * DAY), 'the last step is 8 days ahead, not in 9999');
+  assert.ok(r.points.length <= 400);
+  assert.equal(s.projectClaude(list, 1e300, T0), null, 'a rate no burn reaches');
+  assert.equal(s.projectClaude(list, Number.MAX_VALUE, T0), null);
+  assert.notEqual(s.projectClaude(list, 1e9, T0), null, '1e9 is still a rate');
+});
+
 // ===== done-when 3: the record =====
 
 test('R1: the freshest record with a list wins', async () => {
