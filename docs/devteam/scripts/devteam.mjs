@@ -24734,9 +24734,13 @@ function boxHealth(log, scan, { kit = null, parts = boxHealthParts(), real = () 
       if (!on || started || stopped) return;
       started = true;
       for (const p of running) { try { p.up = true; swallow(p, 'start', p.part.start(p.ctx), () => { p.up = false; }); } catch (e) { p.up = false; fail(p.name, 'start', e); } }
-      ctx.every(BOX_HEALTH_EVERY_MS, tick);
+      // the first sample waits for the roots' first read, which under FAST can outlast a tick; a read
+      // that hangs holds it fast ticks of the interval, 5 s, as the first tick at FAST=1 is (kit-888)
+      let rooted = false, waited = 0;
+      ctx.every(BOX_HEALTH_EVERY_MS, () => (rooted || ++waited >= fast ? tick() : undefined));
       ctx.every(BOX_HEALTH_ROOTS_MS * fast, readRoots);
       await guarded('sampler', 'the roots', readRoots)();
+      rooted = true;
       await tick();
     },
     stop() {

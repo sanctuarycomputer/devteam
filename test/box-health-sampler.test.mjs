@@ -597,6 +597,42 @@ test('S18: no part reads the clock or sets a timer itself, and the sampler does 
   for (const good of ['new Date(ctx.now()).toISOString()', 'Date.parse(at)', 'ctx.timeout(2000, f)']) assert.doesNotMatch(good, forbidden);
 });
 
+test('S23: with DEVTEAM_BOX_HEALTH_FAST the first sample waits for the roots\' first read, or 5 s of ticks while that read hangs (kit-888)', async () => {
+  const fast = (scan) => load({ env: nowhere({ DEVTEAM_BOX_HEALTH: 'on', DEVTEAM_BOX_HEALTH_FAST: '720' }), port: 20002, roots: [scratch], settings: { scan } });
+  const interval = (s) => s.timers.list.find((h) => h.kind === 'every' && h.ms === 5000 / 720);
+  // the roots come in after a second of the machine's: the ticks before that sample nothing
+  let open;
+  const s = fast(() => new Promise((r) => { open = r; }));
+  const started = s.health.start();
+  for (let i = 0; i < 3; i++) { s.clock.t += 300; await interval(s).fn(); }
+  assert.equal(answer(s.health).json.samples.length, 0, 'no sample before the roots are read');
+  open([]);
+  await started;
+  const first = answer(s.health).json.samples;
+  assert.equal(first.length, 1);
+  assert.equal(typeof first[0].disk, 'number', 'the first sample has the roots\' disk');
+  s.clock.t += 5000 / 720;
+  await interval(s).fn();
+  assert.equal(answer(s.health).json.samples.length, 2, 'then each tick samples');
+  // a read of the roots that hangs holds the samples 720 ticks of the interval, 5 s, no longer; the
+  // machine's clock plays no part
+  const h = fast(() => new Promise(() => {}));
+  h.health.start();
+  for (let i = 0; i < 719; i++) await interval(h).fn();
+  assert.equal(answer(h.health).json.samples.length, 0, 'under 5 s, none');
+  await interval(h).fn();
+  const late = answer(h.health).json.samples;
+  assert.equal(late.length, 1, 'at 5 s it samples without the roots');
+  assert.equal(late[0].disk, undefined, 'and without their disks');
+  h.health.stop();
+  // with no FAST, the first tick of the interval samples, as it always has
+  const one = load({ env: nowhere({ DEVTEAM_BOX_HEALTH: 'on' }), port: 20002, roots: [scratch], settings: { scan: () => new Promise(() => {}) } });
+  one.health.start();
+  await one.timers.list.find((x) => x.kind === 'every' && x.ms === 5000).fn();
+  assert.equal(answer(one.health).json.samples.length, 1, 'at FAST=1 the first interval tick samples');
+  one.health.stop();
+});
+
 // ===== 6: disks =====
 
 test('S19: disks has one entry a distinct volume holding a known root, with bytes_per_hour over the hour after 10 minutes', async () => {
