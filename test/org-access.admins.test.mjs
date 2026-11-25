@@ -98,6 +98,15 @@ function seedPeople(state, people) {
 
 // --- a gateway on a localhost URL, new or older (extra.module), and a browser's requests ---------
 const freePort = () => new Promise((resolve, reject) => { const v = net.createServer(); v.on('error', reject); v.listen(0, '127.0.0.1', () => { const { port } = v.address(); v.close(() => resolve(port)); }); });
+// kit-887: every wait on a gateway ends within STEP_MS, failing with the step's name, long before the
+// runner's 300 s watchdog (which names only the last test that finished). A step takes milliseconds
+// (tests 12-112 ms on CI, at most 5 s each on this box at load 25-73); nothing is retried.
+const STEP_MS = 60e3;
+const within = (what, p) => {
+  let t;
+  const late = new Promise((_, reject) => { t = setTimeout(() => reject(new Error(`${what}: not done after ${STEP_MS / 1000} s`)), STEP_MS); });
+  return Promise.race([p, late]).finally(() => clearTimeout(t));
+};
 const modules = new Map();
 const load = async (file) => { if (!modules.has(file)) modules.set(file, await import(pathToFileURL(file).href)); return modules.get(file); };
 async function gateway(name, extra = {}) {
@@ -114,7 +123,10 @@ async function gateway(name, extra = {}) {
   const logs = [];
   const dir = opts.dir ?? path.join(tmp, name);
   const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubPage: HUB_PAGE, log: (m) => logs.push(m), ...opts });
-  await new Promise((r) => g.server.listen(port, '127.0.0.1', r));
+  // the sockets open on the gateway, whoever opened them
+  const open = new Set();
+  g.server.on('connection', (s) => { open.add(s); s.once('close', () => open.delete(s)); });
+  await within(`gateway ${name}: listen on ${port}`, new Promise((resolve, reject) => { g.server.once('error', reject); g.server.listen(port, '127.0.0.1', () => { g.server.off('error', reject); resolve(); }); }));
   const token = given ?? /claim#([A-Za-z0-9_-]+)/.exec(logs.join('\n'))?.[1];
   const file = path.join(dir, 'state.json');
   let jar = '';
@@ -137,8 +149,18 @@ async function gateway(name, extra = {}) {
       });
     });
     r.on('error', reject);
+    r.setTimeout(STEP_MS, () => r.destroy(new Error(`gateway ${name}: ${method} ${route} had no answer after ${STEP_MS / 1000} s`)));
     r.end(body === undefined ? undefined : JSON.stringify(body));
   });
+  // Every request of the test has had its answer by the time it closes the gateway. A connection still
+  // open then is not the test's to wait on (another process's, to a port freePort handed out twice):
+  // Node's close waits for each, and the gateway ends a request whose body never comes only after
+  // BODY_MS, 300 s, the runner's own watchdog (kit-887). It is ended here.
+  const close = () => {
+    const closed = new Promise((r) => g.server.close(r));
+    for (const s of open) s.destroy();
+    return within(`gateway ${name}: close`, closed);
+  };
   // extraBody.token: another claim link's (after a reclaim)
   const claim = async (a, extraBody = {}) => {
     const t = extraBody.token ?? token;
@@ -153,7 +175,7 @@ async function gateway(name, extra = {}) {
   const state = () => JSON.parse(fs.readFileSync(file, 'utf8'));
   const write = (s) => { const t = `${file}.test.tmp`; fs.writeFileSync(t, JSON.stringify(s, null, 2), { mode: 0o600 }); fs.renameSync(t, file); };
   const seed = (people) => { const { state: s, rows } = seedPeople(state(), people); write(s); return rows; };
-  return { g, port, publicUrl, inst, term, logs, token, dir, file, req, claim, login, state, write, seed, jar: () => jar, flow: () => flowJar, setJar: (v) => { jar = v; }, close: () => new Promise((r) => g.server.close(r)) };
+  return { g, port, publicUrl, inst, term, logs, token, dir, file, req, claim, login, state, write, seed, jar: () => jar, flow: () => flowJar, setJar: (v) => { jar = v; }, close };
 }
 
 // --- kit-253: admins and handing the box over ---------------------------------------------------
@@ -253,7 +275,7 @@ const heldPost = (gw, cookie, action, body) => {
   const host = new URL(gw.publicUrl).host;
   let release;
   let connected;
-  const ready = new Promise((r) => { connected = r; }).then(() => new Promise((r) => setTimeout(r, 100)));
+  const ready = within(`a held POST /auth/people/${action}: connect`, new Promise((r) => { connected = r; })).then(() => new Promise((r) => setTimeout(r, 100)));
   const sent = new Promise((resolve, reject) => {
     const r = http.request({ host: '127.0.0.1', port: gw.port, method: 'POST', path: `/auth/people/${action}`, agent: false,
       headers: { host, origin: gw.publicUrl, 'content-type': 'application/json', 'content-length': Buffer.byteLength(data), cookie } }, (res) => {
@@ -263,6 +285,7 @@ const heldPost = (gw, cookie, action, body) => {
     });
     r.on('error', reject);
     r.on('socket', (s) => (s.connecting ? s.once('connect', connected) : connected()));
+    r.setTimeout(STEP_MS, () => r.destroy(new Error(`a held POST /auth/people/${action} had no answer after ${STEP_MS / 1000} s`)));
     r.flushHeaders();
     release = () => r.end(data);
   });
