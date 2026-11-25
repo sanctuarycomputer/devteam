@@ -1069,19 +1069,37 @@ function loadSettings({ origin = false, until = null } = {}) {
     };
     // git's own words: its first fatal line (a missing remote's last line is only "and the repository exists.")
     const why = (r) => { const said = String(r.stderr ?? '').split('\n').map((l) => l.trim()).filter(Boolean); return r.status === 124 ? 'it did not answer in time' : (said.find((l) => /^fatal: /.test(l)) ?? said.at(-1) ?? `git exited ${r.status}`).replace(/^fatal: /, '').slice(0, 200); };
-    const ls = toOrigin(['ls-remote', '--symref', 'origin', 'HEAD']);
-    if (ls.status !== 0) no(why(ls));
-    const rows = String(ls.stdout ?? '').split('\n').map((l) => l.split('\t'));
-    const branch = rows.find(([a, b]) => b === 'HEAD' && a.startsWith('ref: refs/heads/'))?.[0].slice('ref: refs/heads/'.length);
-    const sha = rows.find(([a, b]) => b === 'HEAD' && /^[0-9a-f]{40,64}$/.test(a))?.[0];
-    if (!branch || !sha) no('it names no default branch');
-    // always fetched, into the tracking ref by name: a new worktree is based on origin/<main>, so it
-    // is put back where origin has it before anything reads it
-    const f = toOrigin(['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
-    if (f.status !== 0) no(why(f));
     // read here only, never fetched on the side (a partial clone's lazy fetch would run outside the deadline)
     const local = (args) => responderGit(args, mainRoot, { GIT_NO_LAZY_FETCH: '1' });
-    if (local(['cat-file', '-e', `${sha}^{commit}`]).status !== 0) no(`${sha.slice(0, 8)} did not arrive`);
+    let branch;
+    let sha;
+    for (let tries = 1; ; tries += 1) {
+      // the tracking refs before origin is read: which one is main's, origin says
+      const was = new Map(String(local(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/remotes/origin/']).stdout ?? '').split('\n').map((l) => l.split(' ')));
+      const ls = toOrigin(['ls-remote', '--symref', 'origin', 'HEAD']);
+      if (ls.status !== 0) no(why(ls));
+      const rows = String(ls.stdout ?? '').split('\n').map((l) => l.split('\t'));
+      branch = rows.find(([a, b]) => b === 'HEAD' && a.startsWith('ref: refs/heads/'))?.[0].slice('ref: refs/heads/'.length);
+      sha = rows.find(([a, b]) => b === 'HEAD' && /^[0-9a-f]{40,64}$/.test(a))?.[0];
+      if (!branch || !sha) no('it names no default branch');
+      // Always put where origin has it, before anything reads it. Into no ref: a fetch writes through a
+      // symbolic tracking ref. Then by sha, not following one, and only from what it was before origin
+      // was read: a push that moved it meanwhile isn't set back, and origin is read again (kit-856).
+      const f = toOrigin(['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--refmap=', 'origin', `refs/heads/${branch}`]);
+      if (f.status !== 0) no(why(f));
+      if (local(['cat-file', '-e', `${sha}^{commit}`]).status !== 0) no(`${sha.slice(0, 8)} did not arrive`);
+      const tracking = `refs/remotes/origin/${branch}`;
+      const isAt = () => { const now = local(['show-ref', '--verify', '--hash', tracking]); return now.status === 0 ? now.stdout.trim() : '0'.repeat(sha.length); };
+      if (isAt() === sha) break; // already right: a lock left on it stops nothing
+      const old = was.get(tracking) ?? '0'.repeat(sha.length);
+      // inside the deadline too: git waits on a lock left on the ref as long as core.filesRefLockTimeout says (final-1b F3)
+      const ms = Math.floor(end - Date.now());
+      const set = ms < 100 ? { status: 124, stderr: '' } : spawnSync('git', [...RESPONDER_GIT, 'update-ref', '--no-deref', tracking, sha, old], { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: ms, env: { ...process.env, GIT_NO_LAZY_FETCH: '1' } });
+      if (set.status === null) set.status = 124;
+      if (set.status === 0) break;
+      if (isAt() === old) no(why(set));
+      if (tries === 3) no(`origin/${branch} here kept moving while it was read`);
+    }
     const ref = `origin's ${branch} (${sha.slice(0, 8)})`;
     // before settings.md first lands on main (adoption), the working tree is all there is, as below;
     // only a settings.md git says isn't there, never one git failed to read
@@ -2455,23 +2473,34 @@ function fetchLinkMain(R, refusing = 'refusing to judge against a stale main', {
     if (r.status !== 0) no(r.status === 124 ? 'it did not answer in time' : redactUrl(firstLine(r.stderr).replace(/^fatal: /, '')) || `exit ${r.status}`);
     return String(r.stdout ?? '');
   };
-  const at = {};
-  // ls-remote matches a pattern against the end of a ref's name, so only an exact name counts
-  for (const [sha, ref] of toOrigin(['ls-remote', 'origin', `refs/heads/${rb}`, `refs/heads/${start}`]).split('\n').map((l) => l.split('\t'))) {
-    for (const b of [rb, start]) if (/^[0-9a-f]{40,64}$/.test(sha) && ref === `refs/heads/${b}`) at[b] = sha;
+  // by its exact name: rev-parse would fall back to a branch called refs/remotes/origin/<b>
+  const tracked = (b) => { const r = responderGit(['show-ref', '--verify', '--hash', `refs/remotes/origin/${b}`], R.root); return r.status === 0 ? r.stdout.trim() : null; };
+  for (let tries = 1; ; tries += 1) {
+    // Read before origin is: a session here that pushes meanwhile moves its tracking ref after that,
+    // so setting it from this value refuses, and origin is read again (kit-856).
+    const was = { [rb]: tracked(rb), [start]: tracked(start) };
+    const at = {};
+    // ls-remote matches a pattern against the end of a ref's name, so only an exact name counts
+    for (const [sha, ref] of toOrigin(['ls-remote', 'origin', `refs/heads/${rb}`, `refs/heads/${start}`]).split('\n').map((l) => l.split('\t'))) {
+      for (const b of [rb, start]) if (/^[0-9a-f]{40,64}$/.test(sha) && ref === `refs/heads/${b}`) at[b] = sha;
+    }
+    if (!at[rb]) no(`origin has no ${rb}`);
+    const held = [rb, start].filter((b) => at[b]);
+    // Into no ref: a fetch writes through a symbolic tracking ref, moving the branch it names. The
+    // tracking refs are set below, by sha, without following one.
+    toOrigin(['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--refmap=', 'origin', ...held.map((b) => `refs/heads/${b}`)]);
+    for (const b of held) if (responderGit(['cat-file', '-e', `${at[b]}^{commit}`], R.root, { GIT_NO_LAZY_FETCH: '1' }).status !== 0) no(`${at[b].slice(0, 8)} did not arrive`);
+    const moved = held.find((b) => {
+      const set = responderGit(['update-ref', '--no-deref', `refs/remotes/origin/${b}`, at[b], was[b] ?? '0'.repeat(at[b].length)], R.root);
+      if (set.status !== 0 && tracked(b) === was[b]) no(redactUrl(firstLine(set.stderr).replace(/^fatal: /, '')) || `exit ${set.status}`);
+      return set.status !== 0;
+    });
+    if (!moved) {
+      R.resetCaches();
+      return { main: at[rb], branch: at[start] ?? null };
+    }
+    if (tries === 3) no(`origin/${moved} here kept moving while it was read`);
   }
-  if (!at[rb]) no(`origin has no ${rb}`);
-  const held = [rb, start].filter((b) => at[b]);
-  // Into no ref: a fetch writes through a symbolic tracking ref, moving the branch it names. The
-  // tracking refs are set below, by sha, without following one.
-  toOrigin(['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--refmap=', 'origin', ...held.map((b) => `refs/heads/${b}`)]);
-  for (const b of held) if (responderGit(['cat-file', '-e', `${at[b]}^{commit}`], R.root, { GIT_NO_LAZY_FETCH: '1' }).status !== 0) no(`${at[b].slice(0, 8)} did not arrive`);
-  for (const b of held) {
-    const set = responderGit(['update-ref', '--no-deref', `refs/remotes/origin/${b}`, at[b]], R.root);
-    if (set.status !== 0) no(redactUrl(firstLine(set.stderr).replace(/^fatal: /, '')) || `exit ${set.status}`);
-  }
-  R.resetCaches();
-  return { main: at[rb], branch: at[start] ?? null };
 }
 // In a read-only command, full ref names resolve from one for-each-ref listing (a dashboard
 // refresh asked git about each ticket branch separately: ~90 processes). Anything else, and every
@@ -28607,7 +28636,55 @@ function makeSession(role) {
   // a planner's is home's. s stays home's for the session, the agent and its policy.
   const R = role === 'worker' ? repoOfTicket(tickets().get(id)) : repo('home');
   const mb = R.settings.main_branch;
-  if (!fs.existsSync(wt)) {
+  // A start makes its worktree locked, with this reason, and unlocks it once it is whole: one that is
+  // still locked was left by a start that stopped, or is being made now (kit-856).
+  const making = `devteam: a start of ${name} is making this worktree`;
+  // this start's own: those words and a token, so no start takes another's lock for its own (final-1 F1)
+  const mine = `${making} (${process.pid}.${Date.now().toString(36)}.${crypto.randomBytes(3).toString('hex')})`;
+  // the reason wt is locked with ('' for none), or null when it isn't locked. From git's list, so a
+  // folder that is empty or gone counts too.
+  const lockOf = () => {
+    const at = path.join(realPath(path.dirname(wt)), path.basename(wt));
+    const list = R.git(['worktree', 'list', '--porcelain'], R.root);
+    // another worktree's broken record fails the list: then this one's own says
+    if (list === null) return readText(path.join(/^gitdir: (.*)$/m.exec(readText(path.join(wt, '.git')) ?? '')?.[1] ?? wt, 'locked'))?.trim() ?? null;
+    const l = list.split('\n\n').map((b) => b.split('\n')).find((ls) => ls.includes(`worktree ${at}`))?.find((x) => x === 'locked' || x.startsWith('locked '));
+    return l === undefined ? null : l.slice('locked '.length);
+  };
+  // locked by a start, this one or another
+  const startsLock = (why) => why === making || (why ?? '').startsWith(`${making} (`);
+  const unfinished = () => startsLock(lockOf());
+  // git's record of a worktree a start is adding now: git writes its lock before the folder, and its
+  // gitdir (what the list reads) after, so in between only the record says (final-1 F3)
+  const beingMade = () => {
+    const dir = path.join(R.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], R.root) ?? path.join(R.root, '.git'), 'worktrees');
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch {}
+    return names.map((n) => path.join(dir, n)).find((d) => !fs.existsSync(path.join(d, 'gitdir')) && startsLock(readText(path.join(d, 'locked'))?.trim() ?? null)) ?? null;
+  };
+  // what is at wt, in words, or null when it is a worktree of its own, or nothing. The commands clear
+  // only a locked one: unlock refuses on a worktree a start has finished since (kit-856).
+  const inRepo = `git -C ${shq(R.root)} worktree`;
+  const leftAt = () => {
+    const there = fs.existsSync(wt);
+    if (there && !fs.statSync(wt).isDirectory()) return `${wt} is a file, where the worktree goes: move it away`;
+    const rec = beingMade();
+    if (rec) return `git is making a worktree for ${wt} (its record ${rec} has no gitdir yet): if no other start is making it, remove that record`;
+    const locked = unfinished();
+    if (!there) return locked ? `git still holds a worktree for ${wt}, whose folder is gone: if no other start is making it, clear it (${inRepo} unlock ${shq(wt)} && ${inRepo} remove --force ${shq(wt)})` : null;
+    if (!locked && !fs.readdirSync(wt).length) return null;
+    const top = responderGit(['rev-parse', '--show-toplevel'], wt);
+    if (top.status !== 0 && fs.existsSync(path.join(wt, '.git'))) return `git can't read ${wt} as a worktree (${firstLine(top.stderr).replace(/^fatal: /, '') || `exit ${top.status}`}), and it may hold work: ${inRepo} repair ${shq(wt)} mends one that moved; if it holds nothing to keep, move it away`;
+    if (top.status !== 0 || realPath(top.stdout.trim()) !== realPath(wt)) return `${wt} is no worktree git knows: look in it, then move it away`;
+    if (!locked) return null;
+    const head = responderGit(['rev-parse', '--verify', '--quiet', 'HEAD'], wt);
+    return `the worktree ${wt} is there, ${head.status === 0 ? `at ${head.stdout.trim().slice(0, 8)}` : 'with no commit git can read'}: if no other start is making it and it holds nothing to keep, remove it (${inRepo} unlock ${shq(wt)} && ${inRepo} remove --force ${shq(wt)})`;
+  };
+  // read before the look: a worktree another start adds after this fails the add below, never a resume
+  const there = fs.existsSync(wt);
+  const leftBefore = leftAt();
+  if (leftBefore) die(`${name}'s start isn't finished, so nothing was started: ${leftBefore}, then start it again`);
+  if (!there) {
     // what origin holds, by sha: main, and the branch if it was pushed (a moved fleet continues from
     // it, never from main). Every local ref is any session's to write without a push (kit-790).
     const at = fetchLinkMain(R, 'refusing to start a ticket on a stale main', { start: branch });
@@ -28649,22 +28726,26 @@ function makeSession(role) {
     // its commits are in the start, or under a ref of their own. A symbolic one holds none.
     const tracking = `refs/remotes/origin/${branch}`;
     const keptAt = `refs/devteam/kept/${branch}/`;
-    const raw = at.branch ? null : R.git(['rev-parse', '--verify', '--quiet', tracking], R.root); // read once: a tag's own object too
+    const exact = at.branch ? null : responderGit(['show-ref', '--verify', '--hash', tracking], R.root);
+    const raw = exact?.status === 0 ? exact.stdout.trim() : null; // read once: a tag's own object too
     const peeled = raw && responderGit(['rev-parse', '--verify', '--quiet', `${raw}^{commit}`], R.root);
     const stale = peeled && peeled.status === 0 ? peeled.stdout.trim() : null;
     let keptNow = null;
+    let keptUntil = null; // this start's own kept ref for commits the new worktree will hold
     if (stale) {
       const symbolic = R.git(['symbolic-ref', '--quiet', tracking], R.root) !== null;
-      const keep = !symbolic && !anc(stale, sha);
+      // the branch can be moved back before the checkout: only origin's main holds them whatever happens
+      const keep = !symbolic && !anc(stale, at.main);
       if (keep) keptNow = `${keptAt}${stale}`;
+      if (keep && anc(stale, sha) && responderGit(['show-ref', '--verify', '--quiet', keptNow], R.root).status !== 0) keptUntil = keptNow;
       if (keep) write(['update-ref', '--no-deref', `${keptAt}${stale}`, stale], `keep ${stale} under ${keptAt}`);
-      warn(`origin has no ${branch}: its tracking ref here (${short(stale)}) is ignored and removed${keep ? `, its commits kept at ${keptAt}${stale}` : ''}${sha === at.main ? `, and the branch starts from origin's ${mb} (${short(at.main)})` : ''}`);
+      warn(`origin has no ${branch}: its tracking ref here (${short(stale)}) is ignored and removed${keep ? `, its commits kept at ${keptAt}${stale}${keptUntil ? ' until the worktree holds them' : ''}` : ''}${sha === at.main ? `, and the branch starts from origin's ${mb} (${short(at.main)})` : ''}`);
       write(['update-ref', '--no-deref', '-d', tracking, raw], `remove ${tracking}`);
     }
     // read back, so a retry's act names what a stopped launch kept
     const found = (R.git(['for-each-ref', '--format=%(refname)', keptAt], R.root) ?? '').split('\n').filter((r) => r.startsWith(keptAt) && /^[0-9a-f]{40,64}$/.test(r.slice(keptAt.length)));
-    const keptRefs = [...new Set([...(keptNow ? [keptNow] : []), ...found])];
-    if (keptRefs.length) keptWords += `; commits kept at ${keptRefs.slice(0, 3).join(', ')}${keptRefs.length > 3 ? ` and ${keptRefs.length - 3} more` : ''}`;
+    let keptRefs = [...new Set([...(keptNow ? [keptNow] : []), ...found])];
+    const sayKept = () => { if (keptRefs.length) keptWords += `; commits kept at ${keptRefs.slice(0, 3).join(', ')}${keptRefs.length > 3 ? ` and ${keptRefs.length - 3} more` : ''}`; };
     // set by config: --track fails where the checkout's fetch refspec is blank
     // set again when it is main's and origin holds the branch now: a launch refused below leaves it written
     const merge = R.git(['config', '--get', `branch.${branch}.merge`], R.root);
@@ -28681,15 +28762,26 @@ function makeSession(role) {
       if (made.status !== 0) die(`could not make ${branch}: ${redactUrl(firstLine(made.stderr).replace(/^fatal: /, '')) || `exit ${made.status}`}; nothing was started`);
     }
     // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
-    const added = gitRun(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--no-guess-remote', wt, branch], R.root);
-    if (added.status !== 0) die(`git worktree add ${branch} failed: ${redactUrl(firstLine(added.err.split('\n').find((l) => /^fatal: /.test(l)) ?? added.err).replace(/^fatal: /, '')) || `exit ${added.status}`}; nothing was started`);
+    const headOf = () => { const h = responderGit(['rev-parse', '--verify', '--quiet', 'HEAD'], wt); return h.status === 0 ? short(h.stdout.trim()) : 'no commit'; };
+    const leftWords = (left) => (left ? `, but ${left}${unfinished() ? '. If git gave no reason above, a post-checkout hook may have failed: mend it first' : ''}` : fs.existsSync(wt) && fs.readdirSync(wt).length ? `; ${wt} is there, made by another start or left by this one (a post-checkout hook that unlocked it), at ${headOf()}: look at its commit before resuming it` : '');
+    const added = gitRun(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--no-guess-remote', '--lock', '--reason', mine, wt, branch], R.root);
+    if (added.status !== 0) die(`git worktree add ${branch} failed: ${redactUrl(firstLine(added.err.split('\n').find((l) => /^fatal: /.test(l)) ?? added.err).replace(/^fatal: /, '')) || `exit ${added.status}`}; nothing was started${leftWords(leftAt())}${/is already locked/.test(added.err) ? '; a post-checkout hook may not lock the worktree while a start makes it' : ''}`);
     // The add checks the branch out by name, so a session moving it meanwhile would win: what landed is
     // read back, and the worktree undone if it isn't the sha expected, on the branch (its full name: a
     // tag of the same name makes git print a longer short one). A branch still where this launch put it
     // goes back; one that moved keeps what landed on it.
     const read = (args, cwd) => { const r = responderGit(args, cwd); return r.status === 0 ? r.stdout.trim() : null; };
     const undo = (why) => {
-      R.git(['worktree', 'remove', '--force', wt], R.root);
+      // only while the lock is this start's own: one locked, unlocked or made again by anything else
+      // since is theirs, and the branch stays where it is (final-1 F1, final-1b F1)
+      const now = lockOf();
+      if (now !== mine) die(`${why}, so nothing was started; ${!fs.existsSync(wt) && now === null ? `${wt} went` : `something else ${now === null ? 'unlocked' : 'locked'} ${wt}`} while it was made, so the undo left it, and ${branch} at ${short(read(['rev-parse', '--verify', '--quiet', ref], R.root) ?? 'no commit')}: look in it before resuming it, since it may hold an older commit's files, then start it again`);
+      gitRun(['worktree', 'remove', '--force', '--force', wt], R.root); // forced twice: this start's own lock
+      // the branch stays under a worktree that is still there, or its files would read as changes to it
+      // an empty folder would be taken as a session's: with a file in it, it is refused
+      if (fs.existsSync(wt) && !fs.readdirSync(wt).length) { try { fs.writeFileSync(path.join(wt, 'start-unfinished.txt'), 'A start that failed could not remove this folder.\n'); } catch {} }
+      const left = leftAt() ?? (fs.existsSync(wt) ? `${wt} is still there, unlocked: look in it, then move it away` : null);
+      if (left) die(`${why}, so nothing was started; the undo couldn't remove it all, and ${branch} stays at ${short(read(['rev-parse', '--verify', '--quiet', ref], R.root) ?? 'no commit')}: ${left}, then start it again`);
       if (local !== sha) responderGit(['update-ref', '--no-deref', ...(local ? [ref, local, sha] : ['-d', ref, sha])], R.root);
       die(`${why}, so nothing was started; try again`);
     };
@@ -28707,8 +28799,20 @@ function makeSession(role) {
       if (filled.status !== 0) undo(`could not check out ${short(sha)}: ${redactUrl(firstLine(filled.err).replace(/^(fatal|error): /, '')) || `exit ${filled.status}`}`);
       landed(sha);
     }
+    // only its own lock: one a hook or a person put on it in its place is theirs, and stays (final-1 F2, final-1b F4)
+    const lockNow = lockOf();
+    // unlocked by something else, or locked by another start, so another start may be in it: the undo leaves it
+    if (lockNow === null || (lockNow !== mine && startsLock(lockNow))) undo(`the new worktree was ${lockNow === null ? 'unlocked' : 'locked by another start'} while it was made`);
+    const unlocked = lockNow === mine ? responderGit(['worktree', 'unlock', wt], R.root) : { status: 0 };
+    if (unlocked.status !== 0) undo(`could not unlock the new worktree: ${redactUrl(firstLine(unlocked.stderr).replace(/^(fatal|error): /, '')) || `exit ${unlocked.status}`}`);
+    // the worktree's branch holds them now
+    if (keptUntil && responderGit(['update-ref', '--no-deref', '-d', keptUntil, stale], R.root).status === 0) keptRefs = keptRefs.filter((r) => r !== keptUntil);
+    sayKept();
     madeWorktree = true;
   }
+  // looked at again before anything is written there: another start's add into a folder that was
+  // there, empty, may have locked it since the look (final-1 F3)
+  if (there && (unfinished() || beingMade())) die(`${name}'s start isn't finished, so nothing was started: ${leftAt() ?? `another start is making ${wt}`}, then start it again`);
   // A harness keeps its sessions by directory on its own machine: a worktree made just now has no
   // session to continue (a new machine, or the worktree was removed), so start fresh, with the
   // handoff note if there is one, and say so.
