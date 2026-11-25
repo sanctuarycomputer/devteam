@@ -1675,6 +1675,90 @@
       }
     },
     {
+      "file": "cases/public-host-scheme-relative.md",
+      "doc": "exterior",
+      "shows": "a host percent-encoded in a destination with no scheme: //, /\\ and a definition",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "ledgerpad,one.zorbly.example",
+          "ledgerpad,two.zorbly.example",
+          "ledgerpad;three.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-www-encoded.md",
+      "doc": "exterior",
+      "shows": "a www. host percent-encoded after a comma",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "www.ledgerpad.example",
+          "www.ledgerpad.example,one.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-glued.md",
+      "doc": "exterior",
+      "shows": "a link glued to a word and a colon before it, or to a table bar or a footnote after it",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "ledgerpad,one.zorbly.example",
+          "ledgerpad,two.zorbly.example",
+          "ledgerpad,three.zorbly.example",
+          "four.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-mailto-separators.md",
+      "doc": "exterior",
+      "shows": "mailto addresses split at ; and a malformed %, each decoded on its own",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "one.zorbly.example",
+          "two.zorbly.example",
+          "three.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-other-scheme-encoded.md",
+      "doc": "exterior",
+      "shows": "another scheme's host percent-encoded",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "ledgerpad%2c%6fne.zorbly.example",
+          "ledgerpad,one.zorbly.example"
+        ]
+      }
+    },
+    {
       "file": "cases/public-heading-span-in-tail.md",
       "doc": "exterior",
       "shows": "a heading whose link's tail holds a code span is no link",

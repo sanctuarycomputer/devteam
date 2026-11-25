@@ -493,7 +493,7 @@ const whole = (a) => (a.includes('@') ? '' : tail(a.replace(/[[\]|^%:].*$/s, '')
 // e-mail autolink <local@domain> (CommonMark's local-part characters); an e-mail address's host, as
 // GitHub links a bare one (a letter, digit, . _ + or - before the @, a dot in the host); and a bare
 // www. name.
-const HOST = /<[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@([\p{L}\p{N}.-]+)>|(?:(?:https?|ftp|wss?):[/\\]*|(?<![\p{L}\p{N}/\\._-])[/\\]{2,})([^\s/\\?#<>]+)|mailto:([^\s/\\?#<>"`()[\]|]+)|(?<=[\p{L}\p{N}._+-])@([\p{L}\p{N}_-][\p{L}\p{N}._-]*)|(?<![\p{L}\p{N}/.@-])(www\.[\p{L}\p{N}.-]+)|[a-z][a-z0-9+.-]{0,30}:\/\/([^\s/?#<>]+)/giu;
+const HOST = /<[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@([\p{L}\p{N}.-]+)>|(?:(?:https?|ftp|wss?):[/\\]*|(?<![\p{L}\p{N}/\\._-])[/\\]{2,})([^\s/\\?#<>]+)|mailto:([^\s/\\?#<>"`()[\]|]+)|(?<=[\p{L}\p{N}._+-])@([\p{L}\p{N}_-][\p{L}\p{N}._-]*)|(?<![\p{L}\p{N}/.@-])(www\.[^\s/\\?#<>]+)|(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/([^\s/?#<>]+)/giu;
 // The third reading: the second, with the white space a URL keeps inside its user taken out, where
 // markdown or HTML lets it stand inside an address (angle-bracket destinations, attribute values,
 // references), the < and > a user may hold there too, and every white space but the ASCII ones.
@@ -522,16 +522,33 @@ const values = (t) => {
 // to, cc and bcc fields, decoded, past the last @. This closes the class the rules above spell out
 // form by form: a host percent-encoded, behind punctuation a host keeps, or after a long scheme.
 const ADDRESS = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:[^\s<>]*/giu;
-const unpct = (s) => { try { return decodeURIComponent(s); } catch { return s; } };
-function urlHosts(s) {
-  if (!URL.canParse(s)) return [];
-  const u = new URL(s);
-  if (u.protocol !== 'mailto:') return u.hostname ? [unpct(u.hostname)] : [];
+// Each run of %xx decoded on its own, as a browser or a mail client does; a malformed one kept as written.
+const pct = (s) => s.replace(/(?:%[0-9a-f]{2})+/gi, (r) => { try { return decodeURIComponent(r); } catch { return r.replace(/%([0-9a-f]{2})/gi, (x, h) => (parseInt(h, 16) < 128 ? String.fromCharCode(parseInt(h, 16)) : x)); } });
+// An authority read again percent-decoded: whole, past its @, and by node's URL with an https base
+// (so a scheme-relative //host, /\host or www. host is read as a browser on a web page reads it).
+function decoded(a) {
+  if (!a.includes('%') && /^[\x20-\x7e]*$/.test(a)) return []; // nothing to decode: the readings above hold it
+  const d = pct(a);
+  const cut = a.replace(/[[\]|^"'`].*$/s, '');
+  const u = URL.canParse(`https://${cut}/`) ? new URL(`https://${cut}/`).hostname : '';
+  return [whole(d), host(d), tail(pct(u)).toLowerCase()];
+}
+// A mailto value's addresses: its path and its to, cc and bcc fields, each run of %xx decoded on its
+// own, split at , and ;, the domain past each address's last @ up to what ends it in prose.
+function mailHosts(v) {
+  const q = v.indexOf('?');
+  const fields = [q < 0 ? v : v.slice(0, q)];
+  if (q >= 0) for (const p of v.slice(q + 1).split('&')) { const e = p.indexOf('='); if (e > 0 && /^(?:to|cc|bcc)$/i.test(p.slice(0, e))) fields.push(p.slice(e + 1)); }
   const out = [];
-  const fields = [u.pathname];
-  for (const [k, v] of u.searchParams) if (/^(?:to|cc|bcc)$/i.test(k)) fields.push(v);
-  for (const f of fields) for (const a of unpct(f).split(',')) { const at = a.lastIndexOf('@'); if (at >= 0) out.push(a.slice(at + 1)); }
+  for (const f of fields) for (const a of pct(f).split(/[,;]/)) { const at = a.lastIndexOf('@'); if (at >= 0) out.push(a.slice(at + 1).replace(/[\s()[\]|^"'`<>].*$/s, '')); }
   return out;
+}
+const MAILTO = /mailto:([^\s<>]*)/gi;
+function urlHosts(s) {
+  if (/^mailto:/i.test(s)) return mailHosts(s.slice(7));
+  if (!URL.canParse(s)) return [];
+  const h = new URL(s).hostname;
+  return h ? [pct(h)] : [];
 }
 const third = (t) => decode(attrs(angles(dests(t)), true), true).replace(/[^\S\t\n\v\f\r ]/gu, '');
 export function hosts(text) {
@@ -547,12 +564,14 @@ export function hosts(text) {
       else if (m[2] !== undefined || m[6] !== undefined) {
         const a = m[2] ?? m[6];
         add(host(a)); add(whole(a));
-        if (a.includes('](')) for (const b of a.split('](')) { add(host(b)); add(whole(b)); }
+        for (const h of decoded(a)) add(h);
+        if (a.includes('](')) for (const b of a.split('](')) { add(host(b)); add(whole(b)); for (const h of decoded(b)) add(h); }
       }
       else if (m[3] !== undefined) { for (const a of m[3].split(/[,;]/)) if (a.includes('@')) add(host(a)); }
       else if (m[4] !== undefined) { const h = tail(m[4]).toLowerCase(); if (h.includes('.')) add(h); }
-      else if (m[5] !== undefined) add(tail(m[5]).toLowerCase());
+      else if (m[5] !== undefined) { add(host(m[5])); add(whole(m[5])); for (const h of decoded(m[5])) add(h); }
     }
+    for (const m of each.matchAll(MAILTO)) for (const h of mailHosts(m[1])) add(tail(h).toLowerCase());
     for (const u of each.matchAll(ADDRESS)) for (const h of urlHosts(u[0])) add(tail(h).toLowerCase());
   }
   return [...out];
