@@ -23777,7 +23777,7 @@ const HEALTH_TOKENS = healthTokens(60, { may: { per_hour: HEALTH_AMOUNT } });
 const BOX_HEALTH_SHAPE = healthObject({
   v: healthLeaf((v) => v === 1, "1, this contract's version"),
   at: HEALTH_TIME,
-  window_s: healthWhole(1, Infinity, 'a whole number of seconds, 1 or more'),
+  window_s: healthLeaf((v) => v === 3600, '3600, the seconds of an hour'),
   now: healthObject({}, {
     cpu: healthObject({}, {
       limit: healthLeaf((v) => typeof v === 'number' && Number.isFinite(v) && v > 0, 'a number of cores, more than 0'),
@@ -23801,7 +23801,7 @@ const BOX_HEALTH_SHAPE = healthObject({
   headroom: healthObject({}, {
     room: HEALTH_COUNT, starts: HEALTH_COUNT, binds: healthOneOf('memory', 'cpu', 'claude', 'ready'),
     memory: HEALTH_COUNT, cpu: HEALTH_COUNT, claude: HEALTH_COUNT, ready: HEALTH_COUNT, ready_unknown: healthList(healthText()), claude_why: HEALTH_REASON_WORD,
-  }, (v, p) => (v.claude === undefined ? null : healthOnly(v, p, ['claude_why'], 'an absent claude'))),
+  }, (v, p) => (v.ready_unknown?.length ? healthOnly(v, p, ['starts'], 'every fleet known') : null) ?? (v.claude === undefined ? null : healthOnly(v, p, ['claude_why'], 'an absent claude'))),
   pool: healthObject({
     projects: healthList(healthObject({ name: healthText() }, {
       port: HEALTH_PORT, at: HEALTH_TIME, workers: HEALTH_COUNT, planners: HEALTH_COUNT, cap: HEALTH_COUNT, ready: HEALTH_COUNT, cpu: HEALTH_AMOUNT, rss: HEALTH_COUNT,
@@ -23826,7 +23826,7 @@ const BOX_HEALTH_SHAPE = healthObject({
       most_that_lasts: HEALTH_COUNT, measured: HEALTH_COUNT,
       steps: healthList(healthObject({ workers: HEALTH_COUNT }, { lasts: HEALTH_BOOL, runs_out_at: HEALTH_TIME, paused_until: HEALTH_TIME }, healthLasts(['paused_until'])), 81),
       memory_full_at: HEALTH_COUNT, cpu_full_at: HEALTH_COUNT, why: HEALTH_REASON_WORD,
-    }, (v, p) => ((v.steps ?? []).some((s) => s.lasts !== undefined) ? healthOnly(v, p, ['why'], 'every lasts left out') : null)),
+    }, (v, p) => (v.now > 60 ? healthOnly(v, p, ['steps'], 'a pool of at most 60 workers') : null) ?? ((v.steps ?? []).some((s) => s.lasts !== undefined) ? healthOnly(v, p, ['why'], 'every lasts left out') : null)),
   }),
   claude: healthObject({
     accounts: healthList(healthObject({
@@ -23862,7 +23862,7 @@ const POOL_SHAPE = healthObject({
 function healthProblem(input, root, shape, max) {
   let v = input, text = input;
   if (typeof input === 'string') {
-    if (healthBytes(text) > max) return `${root} is over ${max} bytes: it should be at most that`;
+    if (healthOver(text, max)) return `${root} is over ${max} bytes: it should be at most that`;
     try { v = JSON.parse(input); } catch { return `${root} is not JSON: it should be one JSON object`; }
   }
   if (!memoryIsMap(v)) return healthIs(root, v, 'one JSON object');
@@ -23872,10 +23872,12 @@ function healthProblem(input, root, shape, max) {
   if (typeof input !== 'string') {
     try { text = JSON.stringify(v); } catch { text = undefined; }
     if (typeof text !== 'string') return `${root} can't be written as JSON: it should be one JSON object`;
-    if (healthBytes(text) > max) return `${root} is over ${max} bytes: it should be at most that`;
+    if (healthOver(text, max)) return `${root} is over ${max} bytes: it should be at most that`;
   }
   return null;
 }
+// Over max bytes of UTF-8? A text has at least as many bytes as characters, so a long one is not counted.
+const healthOver = (s, max) => s.length > max || healthBytes(s) > max;
 // UTF-8 bytes of a text, without Buffer (the region runs alone).
 function healthBytes(s) {
   let n = s.length;
@@ -23891,11 +23893,15 @@ function healthBytes(s) {
 // gateway too, and what the Overview's strip and `machine health` read. Held in the hub's memory
 // only. A field that can't be read is absent, never zero. Required: `v`, `at`, `window_s`, `now`,
 // `samples`; in an object, the fields marked *. Times are UTC, YYYY-MM-DDTHH:MM:SS(.sss)Z. Bytes and
-// counts are whole, 0 or more; shares are 0 to 1; percents 0 to 100; CPU is in cores.
-//   `v`*  1     `at`*  when it was answered     `window_s`*  seconds `samples` covers: 3600
-//   `now`*      the latest reading. `cpu`: `limit` (the box's own cap), `used`, `host_cores` (a share
+// counts are whole, 0 or more; shares are 0 to 1; percents 0 to 100; CPU is in cores. Every other
+// number is 0 or more, but bytes_per_hour, which may be below zero. Text is never
+// empty, and a title is at most 80 characters (UTF-16 units). A word (`status`, what_if's `why`,
+// `claude_why`) is at most 40 of a-z, 0-9, _ and -, the first a letter.
+//   `v`*  1     `at`*  when it was answered     `window_s`*  seconds `samples` covers: 3600, always
+//   `now`*      the latest reading. `cpu`: `limit` (the box's own cap, over 0), `used`, `host_cores` (a share
 //               a core), `shared` (true: `host_cores` are the host's, whose other boxes share them;
-//               else absent), `load` (1, 5, 15 minutes), `load_scope` ("host", with `shared`),
+//               else absent), `load` (1, 5, 15 minutes), `load_scope` ("host": `load` is the host's;
+//               with `shared`, but not checked, since a first reading has `load` and no `host_cores`),
 //               `some60` (percent of the last minute some task waited), `throttled` (share of periods
 //               held at the limit). `memory`: `used` (as machineMemory counts it), `max`, `available`
 //               in bytes, `ceiling` (the share of max, 0.5 to 0.95, as machine-memory@1), `swap_used`,
@@ -23903,10 +23909,10 @@ function healthBytes(s) {
 //               `free`* and `total`* bytes, `inodes_free`, `inodes`, `bytes_per_hour` (the change in
 //               free; below zero is shrinking). `io`: `some10`, `some60`, `full60` percents.
 //   `samples`*  every 5 s for an hour, oldest first, at most 720: `at`*, `cpu` cores, `cpu_some`
-//               percent, `throttled`, `load` (1 minute), `mem` bytes, `mem_some`, `swap` bytes, `disk`
+//               percent, `throttled`, `load` (1 minute), `mem` bytes, `mem_some` percent, `swap` bytes, `disk`
 //               and `inodes` free on the first of `disks`, `io` (some60), `room`
 //   `headroom`  `room` (how many more workers the box could hold: the least of `memory`, `cpu` and
-//               `claude`), `starts` (the least of room and ready; absent with an unknown fleet),
+//               `claude`), `starts` (the least of room and ready; absent with a name in ready_unknown),
 //               `binds` ("memory", "cpu", "claude" or "ready": what limits it), `memory`, `cpu`,
 //               `claude` (whole; absent when there is no Claude limit to state), `ready` (over known
 //               fleets), `ready_unknown` (the names of fleets whose ready count isn't known), `claude_why`
@@ -23928,11 +23934,12 @@ function healthBytes(s) {
 //     `others`      the same use by role, not added to projects: `planners`, `supervisors`, `outside`
 //                   (in no project), each `n`, `cpu`, `rss`; `unattributed`: `cpu`
 //     `strays`      at most 40 groups: `project` (absent: in none), `kind`* ("agent", "browser",
-//                   "node", "test"), `why`* ("parent-gone", "folder-gone", "long-test"), `n`*,
-//                   `oldest_s`, `rss`, `cpu`
+//                   "node", "test"), `why`* ("parent-gone", "folder-gone", "long-test"), `n`*
+//                   (1 or more),
+//                   `oldest_s` (whole), `rss`, `cpu`
 //     `what_if`     `now`* (workers holding a slot), `most_that_lasts` (absent when no step lasts; when
 //                   it equals the last step's workers the page adds "or over"), `measured` (of now),
-//                   `steps` (0 to now + 20, at most 81; absent over 60 workers: `workers`*, `lasts`
+//                   `steps` (0 to now + 20, at most 81; absent with now over 60: `workers`*, `lasts`
 //                   (absent with no token forecast), `runs_out_at` (always, and only, when it doesn't
 //                   last), `paused_until` (only then)), `memory_full_at`, `cpu_full_at` (the first count past each),
 //                   `why` (only when no step has lasts: the first of these that holds)
@@ -23956,9 +23963,9 @@ function healthBytes(s) {
 //               writes), `cached`* (cached reads), `per_hour`, and `points`* (ten-minute buckets, at
 //               most 60: `at`* its start, `new`*; a bucket left out is zero). Any state may have
 //               `reviews_new` (its ticket's reviews so far). `recent` has the same.
-//   `claude`    absent with no cswap. `accounts`*, at most 40: `n`*, `label`* (the alias when set and
+//   `claude`    absent with no cswap. `accounts`*, at most 40: `n`* (1 or more), `label`* (the alias when set and
 //               not an address, else "Account n"; one with an @ is refused), `active`, `week_left`,
-//               `five_left` percents, `week_resets_at`, `five_resets_at`, `status` (a lowercase word).
+//               `five_left` percents, `week_resets_at`, `five_resets_at`, `status` (a word).
 //               `rate` (points of one account-week an hour; absent while measuring), `rate_hours` (what
 //               it covers, at most 6), `points` (measured: `at`*, `room`* in accounts' worth),
 //               `projection`: `lasts`*, `runs_out_at` (always, and only, when it doesn't last),
@@ -23976,17 +23983,25 @@ function healthBytes(s) {
 // the first bad field's path (answer, for the whole). It never quotes text it was given, and names an
 // unknown key only when it looks like a field's name. Order: size (a text's), JSON, object, v, then
 // each object's unknown keys, its fields in order and what goes with what; a value's size is last.
-// Shape only: it adds nothing up and compares no times. A new field is box-health@2; a new
+// What goes with what: no `starts` with a name in `ready_unknown`; no `claude_why` beside `claude`; no
+// `steps` with what_if's `now` over 60; no `why` beside a step's `lasts`; `runs_out_at` and
+// `paused_until` by `lasts`; a tokens row's fields by its `state`. Limits on a number, a text or a
+// list are checked too. What a field means (an order, a least, how many steps,
+// when a reading is absent) is the producer's to keep: the check is of shape only, adds nothing up,
+// compares no times and can't see the machine. A new field is box-health@2; a new
 // word for `why` or `claude_why` is not, and a page shows its fallback sentence for one.
 function boxHealthProblem(input) {
   return healthProblem(input, 'answer', BOX_HEALTH_SHAPE, BOX_HEALTH_MAX_BYTES);
 }
 // pool@1, a project's worker pool: run/cache/pool.json, written by its supervisor's `metrics` and read
 // by the machine's hub, across projects and kit releases. Required: every field but those marked ?.
+// Times are as box-health@1's. Counts are whole, 0 or more; dollars 0 or more; text is never empty; a
+// title is at most 80 characters.
 //   `v`  1     `at`  when it was written     `hour_end`  the end of the hour the hours below cover
 //   `cap`?      max_active_tickets; absent: no limit
 //   `ready`     the count behind idle-capacity     `planners`  running now
-//   `goals`     at most 20: `id`, `title` (at most 80 characters), `priority`?, `usd_hour`, `new_hour`
+//   `goals`     at most 20: `id`, `title` (at most 80 characters), `priority`? (whole, of
+//               either sign), `usd_hour`, `new_hour`
 //   `workers`   those holding a slot, at most 60; past 60 they are in `other`: `name`, `title`?, `goal`?
 //               (an index into goals; absent for none), `phase`?, `since`?, `tokens`
 //   `recent`    slots that ended in 24 hours, newest first, at most 20: `name`, `title`?, `left_at`,
