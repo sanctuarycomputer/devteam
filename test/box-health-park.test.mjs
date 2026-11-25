@@ -80,6 +80,11 @@ test('K2 together enough: no row is enough alone, and the rows come by share, la
   const rows = parkOf(park(claude(10, 7), [project('alpha', 4321, A), project('zeta', 4322, Z)]));
   assert.deepEqual(rows.map((r) => [r.fleet, ids(r), r.share, r.enough]), [['zeta', ['z1'], 0.25, false], ['alpha', ['a1'], 0.15, false]]);
   assert.ok(10 * (1 - rows.reduce((s, r) => s + r.share, 0)) <= 7, 'all of them together are enough');
+  // not enough with more goals and the larger share still comes first: by share, not fewest goals (final-1 F1)
+  const A2 = file([goal('a1', 1, 1.5), goal('a2', 2, 1)], [worker('a', 0, tok(1.5)), worker('b', 1, tok(1))], other(2.5));
+  const Z2 = file([goal('z1', 1, 1.5)], [worker('z', 0, tok(1.5))], other(3.5));
+  const mixed = parkOf(park(claude(10, 7), [project('zeta', 4322, Z2), project('alpha', 4321, A2)]));
+  assert.deepEqual(mixed.map((r) => [r.fleet, ids(r), r.share, r.enough]), [['alpha', ['a2', 'a1'], 0.25, false], ['zeta', ['z1'], 0.15, false]], 'alpha (2 goals, 0.25) before zeta (1 goal, 0.15)');
 });
 
 test('K3 not enough: every goal offered is in its row, and even all rows together are not enough', () => {
@@ -106,6 +111,9 @@ test('K5 within a project: one with no priority goes first, then the highest num
   assert.deepEqual(ids(rows[0]), ['none'], 'the goal with no priority alone is enough at safe_rate 9.99');
   const all = parkOf(park(claude(10, 1), [project('alpha', 4321, A)]));
   assert.deepEqual(ids(all[0]), ['none', 'p4-b-big', 'p4-a-small', 'p1'], 'equal priority: the larger share first, whatever the id');
+  // equal priority and share: by id, whatever the file's order (final-1 F4)
+  const B = file([goal('g-b', 2, 1), goal('g-a', 2, 1)], [worker('b', 0, tok(1)), worker('a', 1, tok(1))], other(8));
+  assert.deepEqual(ids(parkOf(park(claude(10, 1), [project('beta', 4321, B)]))[0]), ['g-a', 'g-b'], 'a tie on priority and share goes by id');
 });
 
 // ===== done-when 2: what a share counts =====
@@ -130,6 +138,10 @@ test('W2 usd_hour when every project has every price; new_hour across all of the
     // by new_hour: alpha 100000 + 900000, beta 100000 + 0 → a1 1/11, b1 1/11
     assert.deepEqual(rows.map((r) => [r.fleet, r.share]), [['alpha', 0.0909], ['beta', 0.0909]], `a null usd_hour in ${where}: every share by new_hour`);
   }
+  // the null price only in a stale file: still new_hour for all, and the stale project has no row (final-1 F3)
+  const S = file([goal('s1', 1, 1, 100000)], [worker('s', 0, tok(1, 100000))], other(null, 0));
+  const stale = parkOf(park(claude(10, 7), [project('alpha', 4321, A()), project('stale', 4322, S, false)]));
+  assert.deepEqual(stale.map((r) => [r.fleet, r.share]), [['alpha', 0.0909]], 'a null usd_hour in a stale file: every share by new_hour');
 });
 
 test('W3 the total is the workers, their reviewers and other, once each; a goal\'s hour is not added to it', () => {
@@ -140,6 +152,9 @@ test('W3 the total is the workers, their reviewers and other, once each; a goal\
   // an unmeasured worker adds nothing and is in no share
   const B = file([goal('a1', 1, 3)], [worker('a', 0, tok(3)), worker('u', 0, { state: 'not-measured', reason: 'no-reader' })], other(3));
   assert.deepEqual(parkOf(park(claude(10, 1), [project('alpha', 4321, B)])).map((r) => r.share), [0.5]);
+  // a goal whose only worker isn't measured still runs: its hour (reviewers, planners) gives it a share (final-1 F4)
+  const C = file([goal('u1', 1, 2)], [worker('u', 0, { state: 'not-measured', reason: 'no-reader', reviews_usd_hour: 2, reviews_new_hour: 200000 })], other(2));
+  assert.deepEqual(parkOf(park(claude(10, 1), [project('gamma', 4321, C)])).map((r) => [ids(r), r.share]), [[['u1'], 0.5]], 'offered though its worker is not measured');
 });
 
 test('W4 a goal with nothing running has no row, nor a project with no fresh pool.json; a stale file\'s hour stays in the total', () => {
@@ -167,11 +182,12 @@ test('P1 each row carries its project\'s port; two projects of one name get a ro
   const one = file([goal('g1', 1, 4)], [worker('a', 0, tok(4))], other(1));
   const two = file([goal('g1', 1, 3)], [worker('a', 0, tok(3))], other(1));
   const bare = file([goal('g2', 1, 1)], [worker('a', 0, tok(1))], other(0));
-  const got = park(claude(10, 7), [project('app', 4325, two), project('app', 4321, one), project('bare', undefined, bare)]);
+  // the larger share has the higher port: enough rows of one goal each go by share, not port (final-1 F2)
+  const got = park(claude(10, 7), [project('app', 4321, two), project('app', 4325, one), project('bare', undefined, bare)]);
   accepted(got);
   assert.deepEqual(parkOf(got).map((r) => [r.fleet, r.port, ids(r), r.share]), [
-    ['app', 4321, ['g1'], 0.4],
-    ['app', 4325, ['g1'], 0.3],
+    ['app', 4325, ['g1'], 0.4],
+    ['app', 4321, ['g1'], 0.3],
     ['bare', undefined, ['g2'], 0.1],
   ], 'total 10; the port is the row\'s own; a project with no dashboard has none');
   assert.ok(!('port' in parkOf(got)[2]), 'no port key with no dashboard');
