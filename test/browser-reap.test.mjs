@@ -4,7 +4,8 @@
 // way Chrome's do. The close's deadline is checked by cutting browserCloseRestart and browserRelaunch
 // out of devteam.mjs and running them under node:vm on a stand-in Chrome that never answers its close.
 // Each check is the spec's (docs/devteam/project/tickets/kit-917-browser-reap-tests/spec.md, home),
-// named by its id. Only processes this file started are ever killed.
+// named by its id. Only processes this file started are ever killed: a kill checks the pid's command
+// line still carries this file's stand-in code (killMine), so a pid reused by another process is never hit.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -16,6 +17,13 @@ import { monoFixture } from './lib/kit.mjs';
 
 const kitFile = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'docs', 'devteam', 'scripts', 'devteam.mjs');
 const started = [];
+const STANDIN = 'setTimeout(() => process.exit(0), 120000); setInterval(() => {}, 1000)';
+// SIGKILL to pid only while it is alive and its command line still carries STANDIN (one of ours).
+function killMine(pid) {
+  let cmd = '';
+  try { cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8'); } catch { return; }
+  if (cmd.split('\0').includes(STANDIN)) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Alive and not a zombie.
 function alive(pid) {
@@ -42,14 +50,13 @@ before(() => {
   P = { env, home, key, profile: path.join(home, '.devteam', 'browser', key), run, lastError: path.join(run, 'last-error') };
 });
 after(() => {
-  for (const p of started) { try { if (alive(p)) process.kill(p, 'SIGKILL'); } catch {} }
+  for (const p of started) killMine(p);
   F?.done();
 });
 
 // A stand-in process: node sleeping, with args on its command line; its own group when detached. It
 // ends itself after 120 s (STANDIN), so a run killed before its after (a timeout, CI's watchdog) leaves
 // nothing running on a shared machine for long.
-const STANDIN = 'setTimeout(() => process.exit(0), 120000); setInterval(() => {}, 1000)';
 function sleeper(args, { detached = true } = {}) {
   const c = spawn(process.execPath, ['-e', STANDIN, '--', ...args], { detached, stdio: 'ignore' });
   c.unref();
@@ -127,7 +134,7 @@ test('RP2 a start lock with a live owner stands the reaper down; a dead owner do
   let r = await reap();
   assert.equal(planted(), true, `RP2: deleted under a live start lock: ${why(r)}`);
   assert.equal(r.code, 0, why(r));
-  lockOwner(spawnSync('true').pid);
+  lockOwner(Number(fs.readFileSync('/proc/sys/kernel/pid_max', 'utf8')) + 1); // a pid no process can have
   r = await reap();
   assert.equal(planted(), false, `RP2: kept under a dead owner's lock: ${why(r)}`);
 });
@@ -140,6 +147,21 @@ test('RP3 a helper left in the dead Chrome\'s group, on the profile, is killed a
   assert.equal(alive(helper), false, `RP3: the helper in the dead Chrome's group lives: ${why(r)}`);
   assert.equal(planted(), false, `RP3: the session files stay: ${why(r)}`);
   assert.deepEqual([r.code, readErr()], [0, null], why(r));
+});
+
+test('RP3b a process on the profile outside the dead Chrome\'s group is never killed: the files stay and that is said', { skip, timeout: 30000 }, async () => {
+  reset(); plant();
+  const { leader, helper } = await deadLeaderWithHelper();
+  const other = sleeper([`--user-data-dir=${P.profile}`]); // its own group: never the reaper's to kill
+  try {
+    state({ daemon_pid: 0, chrome_pid: leader });
+    const r = await reap();
+    assert.equal(alive(other), true, `RP3b: the reaper killed a process outside the dead Chrome's group: ${why(r)}`);
+    assert.equal(alive(helper), false, `RP3b: the helper in the group lives: ${why(r)}`);
+    assert.equal(planted(), true, why(r));
+    assert.match(errText() ?? '', /still had the profile 5 s later; its session files stay/, why(r));
+    assert.equal(r.code, 1, why(r));
+  } finally { killMine(other); }
 });
 
 test('RP4 a failed delete whose line already says the delete failed isn\'t said again', { skip }, async () => {
@@ -175,7 +197,7 @@ test('LE2 a clean stop with a process still on the profile 5 s later, files alre
     const r = await reap();
     assert.ok(!STAY.test(readErr() ?? ''), `LE2: ${why(r)}`);
     assert.equal(r.code, 0, why(r));
-  } finally { try { process.kill(stray, 'SIGKILL'); } catch {} }
+  } finally { killMine(stray); }
 });
 
 test('LE3 a shutdown\'s failed delete the reaper finishes: the line keeps the reason and says the files are gone', { skip }, async () => {
@@ -206,6 +228,25 @@ test('LE3c a reason too long for the ending is cut so the ending is whole', { sk
   assert.equal(errText(), `${reason.slice(0, 245)}; the session files were deleted after the daemon ended`, `LE3c: ${why(r)}`);
 });
 
+test('LE4 an earlier reaper\'s own "files stay" report, with the files now gone: the line is removed', { skip }, async () => {
+  reset();
+  writeErr("browser: couldn't list this machine's processes after the daemon ended, so the session files stay");
+  const r = await reap({ DEVTEAM_TEST_BROWSER_PROCS_UNLISTED: '1' });
+  assert.equal(readErr(), null, `LE4: ${why(r)}`);
+  assert.equal(r.code, 0, why(r));
+});
+
+test('X1 a session file the reaper can\'t even look at (its folder unsearchable) counts as left: the failed delete is said', { skip: skip || (process.getuid?.() === 0 ? 'root searches any folder' : false) }, async () => {
+  reset(); plant(); runDir();
+  const dflt = path.join(P.profile, 'Default');
+  fs.chmodSync(dflt, 0o600);
+  let r;
+  try { r = await reap(); } finally { fs.chmodSync(dflt, 0o700); }
+  assert.match(errText() ?? '', /^browser: couldn't delete .*: Chrome would bring its tabs back$/, `X1: the failed delete wasn't said: ${why(r)}`);
+  assert.equal(planted(), true, why(r));
+  assert.equal(r.code, 1, why(r));
+});
+
 // ----- done-when 2: the close's deadline is counted from Done. browserCloseRestart and browserRelaunch
 // run under node:vm on a stand-in Chrome (a sleeper) whose Browser.close is never answered, so it ends
 // only when the close kills it; the kill is timed from the close's start.
@@ -234,12 +275,12 @@ async function closeTimed({ doneAgo, hold = 0 }) {
     browserOwnerDialogsEnd() {}, browserViewClose() {}, browserNotePages: () => [], browserReopen: async () => [], browserRecordCloses() {},
     browserShutdown: (c) => { c.stopping = true; },
     browserCookieJar: async () => [],
-    browserKillProfile: async (c, cdp, pid) => { killedAt = Date.now(); try { process.kill(pid, 'SIGKILL'); } catch {} c.stopping = true; },
+    browserKillProfile: async (c, cdp, pid) => { killedAt = Date.now(); killMine(pid); c.stopping = true; },
   });
   const closeRestart = vm.runInContext(`${src}\n;browserCloseRestart`, sandbox);
   const t0 = Date.now();
   await closeRestart(ctx, [{ qid: 'q-1', outcome: 'done', closeAt: new Date(t0 - doneAgo).toISOString() }]);
-  try { process.kill(chrome, 'SIGKILL'); } catch {}
+  killMine(chrome);
   assert.ok(killedAt, 'the close killed the stand-in Chrome');
   return killedAt - t0;
 }
