@@ -316,6 +316,86 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     assert.deepEqual(await W.p.ev(POSTS), [], 'R4b: view only posts nothing');
   });
 
+
+  // R13 (kit-916): the guard's words ("That moved just now. Press again in a second.", #av-held) and View only's
+  // (#view-only-toast) never cover the card's buttons while it shows, at 1280 and 375 px wide, and stay inside the
+  // window. A sampler in the page reads, every frame once the frame's own callbacks have run (what is drawn),
+  // whether either message's box meets Not now's or Hand over's, or leaves the window. Three ways in, each its own
+  // case: (a) held, as the card appears; (b) View only's words up, then the card comes up under them; (c) View
+  // only, pressed on the card's own Hand over.
+  const SAMPLE = `(() => {
+    window.__hits = []; window.__out = []; window.__seen = { 'av-held': 0, 'view-only-toast': 0 }; window.__sampling = true;
+    const box = (e) => { if (!e || e.hidden || getComputedStyle(e).display === 'none') return null; const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 ? r : null; };
+    const meet = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+    const tick = () => {
+      if (!window.__sampling) return;
+      const c = document.getElementById('av-remind');
+      if (c && !c.hidden) for (const id of ['av-held', 'view-only-toast']) {
+        const m = box(document.getElementById(id));
+        if (!m) continue;
+        window.__seen[id]++;
+        if (m.top < 0 || m.left < 0 || m.right > innerWidth || m.bottom > innerHeight) window.__out.push([id, Math.round(m.top), Math.round(m.bottom)]);
+        for (const b of ['av-remind-later', 'av-remind-hand']) { const r = box(document.getElementById(b)); if (r && meet(m, r)) window.__hits.push([id, b, Math.round(m.top), Math.round(m.bottom), Math.round(r.top), Math.round(r.bottom)]); }
+      }
+      requestAnimationFrame(() => setTimeout(tick));
+    };
+    requestAnimationFrame(() => setTimeout(tick));
+    return true;
+  })()`;
+  const SAMPLED = '(() => { window.__sampling = false; return { hits: window.__hits.slice(0, 3), n: window.__hits.length, out: window.__out.slice(0, 3), seen: window.__seen }; })()';
+  // the close as the X's own first way (the entry replaced by the page, then routed): the card comes up in this turn
+  const CLOSE_NOW = "history.replaceState({ page: '#library', depth: 0, openedHere: false }, '', '#library'); route();";
+  const STUB = "window.__stub['artifact-handoff'] = { status: 200, body: { to: 'supervisor', typed: false, count: 2 } };";
+  // (kept at view through the page's polls, as R4b (d) does)
+  const VIEW = `${STUB} window.__vo = viewOnly; viewOnly = () => window.__vo('view'); viewOnly(); void 0`;
+  const clear = (s, id, what, w) => {
+    assert.ok(s.seen[id] > 0, `setup: R13 ${w} ${what} showed with the card (${J(s)})`);
+    assert.deepEqual(s.hits, [], `R13: at ${w} px ${what} never meet the card's buttons (${s.n} frames)`);
+    assert.deepEqual(s.out, [], `R13: at ${w} px ${what} stay inside the window`);
+  };
+  for (const [w, h] of [[1280, 800], [375, 700]]) {
+    await sub(`R13a: at ${w} px the held words clear the card's buttons`, async () => {
+      const V = await visit('#library', { width: w, height: h });
+      await openW(V, 'rem-busy');
+      await wrap(V);
+      await V.p.ev(`${STUB} void 0`);
+      await V.p.ev(SAMPLE);
+      // one real press on the card's Hand over as it appears (as R4b (a))
+      const at = await V.p.ev(`(() => { ${CLOSE_NOW} const b = document.getElementById('av-remind-hand'), r = b.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2; return { x, y, shown: ${REMIND}, top: !!document.elementFromPoint(x, y)?.closest('#av-remind-hand') }; })()`);
+      assert.ok(at.shown && at.top, `setup: R13a ${w} the card came up with its Hand over bare (${J(at)})`);
+      await V.p.clickAt(at.x, at.y);
+      await V.settle("(() => { const e = document.getElementById('av-held'); return !!e && !e.hidden && e.textContent === 'That moved just now. Press again in a second.'; })()", 2000);
+      await new Promise((r) => setTimeout(r, 1500));
+      clear(await V.p.ev(SAMPLED), 'av-held', 'the held words', w);
+      assert.deepEqual(await V.p.ev("window.__posts.filter((p) => p.action === 'artifact-handoff')"), [], 'setup: R13a the held press posted nothing');
+    });
+    await sub(`R13b: at ${w} px View only's words, up as the card comes, clear its buttons`, async () => {
+      const W = await visit('#library', { width: w, height: h });
+      await openW(W, 'rem-busy');
+      await wrap(W);
+      await W.p.ev(VIEW);
+      await W.p.ev(SAMPLE);
+      // View only's words up, as a press on the bar's Hand over shows them; then the close, and the card under them
+      await W.p.ev(`viewToast(); ${CLOSE_NOW} void 0`);
+      await shownSoon(W, `R13b ${w}`);
+      await new Promise((r) => setTimeout(r, 1000));
+      clear(await W.p.ev(SAMPLED), 'view-only-toast', "View only's words", w);
+    });
+    await sub(`R13c: at ${w} px View only's words, pressed on the card, clear its buttons`, async () => {
+      const W = await visit('#library', { width: w, height: h });
+      await openW(W, 'rem-busy');
+      await closeBy(W, 'x');
+      await shownSoon(W, `R13c ${w}`);
+      await wrap(W);
+      await W.p.ev(VIEW);
+      await W.p.ev(SAMPLE);
+      await pressArmed(W, 'av-remind-hand');
+      await W.settle("document.getElementById('view-only-toast')?.hidden === false", 2000);
+      await new Promise((r) => setTimeout(r, 1500));
+      clear(await W.p.ev(SAMPLED), 'view-only-toast', "View only's words", w);
+      assert.deepEqual(await W.p.ev("window.__posts.filter((p) => p.action === 'artifact-handoff')"), [], 'setup: R13c view only posted nothing');
+    });
+  }
   // R5: Not now holds; a new note shows it again; Hand over ends the hold; a reload ends it; no storage.
   await sub('R5: Not now and the hold', async () => {
     let V = await visit('#library');

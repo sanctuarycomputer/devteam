@@ -26020,8 +26020,307 @@ const boxHealthPool = (() => {
 })();
 /* box-health-pool end */
 /* box-health-claude start */
-// answer.claude: the accounts, the burn rate and the projection (kit-840's).
-const boxHealthClaude = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+// answer.claude (kit-840): the cswap accounts, the burn rate over six hours, and whether the room
+// lasts to the resets. Nothing is written, and cswap is never run here: accounts-tick's record is read.
+//
+// Every 15 s of now() it reads again once a minute of now() has passed since the last read (the first
+// read follows the sampler's first read of the roots). A read: for each known root, one at a time,
+// <root>/docs/devteam/run/accounts.json (at most 256 KB + 1), raced with 2 s of real(). At most two
+// reads are out at once, never two of one file: a read that can't start, or hasn't answered in 2 s,
+// keeps that file's last read. The record used is the freshest (by its at) whose capacity.list is a
+// list, among those within 5 minutes of real() (one older, or ahead: a wrong clock, is dropped); with none, claude is absent (no cswap,
+// an older kit's record, or a stopped tick). Each read that finds one adds a reading to the ring.
+//
+// A row is copied by named fields only (claudeRows), so no email or token can leave with it: a label
+// with an @ (in any width), a control character or over 40 characters is "Account n".
+//
+// The ring holds the readings of the last six hours of now(), one a read. Burn (claudeBurn) is, per
+// account, the sum of rises of its weekly percent over the highest reading so far of the same window,
+// in points of one account-week. A window is new only when the reset time moves forward by more than
+// an hour: cswap's times shift by a fraction of a second at each fetch, across a minute or an hour. A
+// drop inside a window adds nothing; an absent reset time keeps the last seen; with none ever seen
+// every rise counts. Accounts weigh equally unless every enabled account names a tier multiplier;
+// then each weighs its tier over the mean tier, so "an account" stays the average one. The rate is the
+// weighted burn over the hours the ring covers; under 30 minutes of readings it is measuring (no rate,
+// no projection).
+//
+// projectClaude(accounts, rate, now) is the projection, for this part and the parts after it (park,
+// room): capacity.list rows, points of an account-week an hour, and ms. It steps every 15 minutes to
+// the last known reset, spending accounts as cswap's default best strategy does: the active one until
+// 90%, then the one with the most room (100 less its higher window; on a tie, the sooner reset of
+// that window, then the earliest slot), and
+// the last tenth of each only when none is under 90%. An account is restored at its weekly reset (the
+// next one a week on) and at its five-hour reset; one with a full per-model window, or a full
+// five-hour window now, has no room until that resets (never, with no reset time). Disabled accounts
+// and those that can't be read (no weekly percent, or a status that isn't ok) are left out: at_least
+// is then true. It gives { lasts, runs_out_at, paused_until (the first step after running out with
+// room again), next_reset_at (the earliest weekly reset after now), points [{ at, room }] (room in
+// accounts' worth: the weekly room left of accounts that have room; at most 400: every change of
+// direction, then evenly), switches [{ at, n }] (the account spent from, first the one it starts on, then
+// each change), at_least }, or null with no reset ahead, or a rate that isn't 0 to 1e9. It looks at most
+// 8 days ahead (a weekly reset is never further): a reset time past that, which only a garbled record
+// gives, ends the steps at 8 days and doesn't come within them (task-3 F1).
+// claudeSafeRate(accounts, now) is the highest rate, to 0.1, at which it lasts, or undefined when not
+// even 0.1 does.
+//
+// part(ctx, parts) gives, as the same object until the next read:
+//   answer.claude   accounts (enabled ones, at most 40: n, label, active, week_left, five_left,
+//                   week_resets_at, five_resets_at, status), rate (absent while measuring),
+//                   rate_hours, points (one a reading: at, room), projection (lasts, runs_out_at,
+//                   next_reset_at, safe_rate, points; absent while measuring or with no reset ahead)
+//   rows            the record's rows (claudeRows), rate, measuring, projection (projectClaude's),
+//                   safe_rate (claudeSafeRate's), has_room (an account has room now)
+const CLAUDE_EVERY_MS = 15000, CLAUDE_READ_MS = 60000, CLAUDE_FRESH_MS = 300000, CLAUDE_FILE_MS = 2000, CLAUDE_READS = 2;
+const CLAUDE_MAX_BYTES = 262144, CLAUDE_RING_MS = 6 * 3600000, CLAUDE_MEASURING_MS = 1800000, CLAUDE_JUMP_MS = 3600000;
+const CLAUDE_STEP_MS = 900000, CLAUDE_POINTS = 400, CLAUDE_ACCOUNTS = 40, CLAUDE_LINE = 90;
+const CLAUDE_WEEK_MS = 7 * 86400000, CLAUDE_FIVE_MS = 5 * 3600000, CLAUDE_HOUR_MS = 3600000;
+const CLAUDE_AHEAD_MS = 8 * 86400000, CLAUDE_RATE_MAX = 1e9;
+// capacity.list's rows, each built again from its named fields; null when it isn't a list
+function claudeRows(list) {
+  if (!Array.isArray(list)) return null;
+  const pct = (v) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100 ? v : undefined);
+  const at = (t) => (memoryAtOk(t) ? t : undefined);
+  const out = [], seen = new Set();
+  for (const a of list) {
+    if (!memoryIsMap(a) || !Number.isSafeInteger(a.n) || a.n < 1 || seen.has(a.n)) continue;
+    seen.add(a.n);
+    const label = typeof a.label === 'string' && a.label.trim() && a.label.length <= 40 && !/[@\p{C}]/u.test(a.label.normalize('NFKC')) ? a.label : `Account ${a.n}`;
+    out.push(boxHealthPresent({
+      n: a.n, label, active: a.active === true, disabled: a.disabled === true,
+      status: typeof a.status === 'string' && /^[a-z][a-z0-9_-]{0,39}$/.test(a.status) ? a.status : undefined,
+      week_pct: pct(a.week_pct), week_resets_at: at(a.week_resets_at),
+      five_pct: pct(a.five_pct), five_resets_at: at(a.five_resets_at),
+      models_full: Array.isArray(a.models_full) ? a.models_full.filter(memoryIsMap).map((m) => boxHealthPresent({ resets_at: at(m.resets_at) })) : [],
+      tier: Number.isSafeInteger(a.tier) && a.tier > 0 && a.tier < 1000 ? a.tier : undefined,
+    }));
+  }
+  return out;
+}
+// each account's weight: 1, or its tier over the mean tier when every enabled account names one
+function claudeWeights(rows) {
+  const live = rows.filter((a) => !a.disabled);
+  if (!live.length || !live.every((a) => a.tier)) return () => 1;
+  const mean = live.reduce((s, a) => s + a.tier, 0) / live.length;
+  return (a) => (a.tier ? a.tier / mean : 1);
+}
+// the burn in the ring, weighted, for the accounts of the latest rows
+function claudeBurn(ring, rows) {
+  const w = claudeWeights(rows);
+  let burn = 0;
+  for (const a of rows) {
+    if (a.disabled) continue;
+    let hi, reset;
+    for (const x of ring) {
+      const r = x.rows.find((y) => y.n === a.n);
+      if (r?.week_pct === undefined) continue;
+      const at = r.week_resets_at === undefined ? reset : Date.parse(r.week_resets_at);
+      if (hi === undefined || (at !== undefined && reset !== undefined && at - reset > CLAUDE_JUMP_MS)) hi = r.week_pct;
+      else if (r.week_pct > hi) { burn += (r.week_pct - hi) * w(a); hi = r.week_pct; }
+      reset = at;
+    }
+  }
+  return burn;
+}
+// the accounts as the projection spends them: readable, enabled, with ok usage
+function claudeState(rows, now) {
+  const w = claudeWeights(rows);
+  const t = (s) => (s === undefined ? undefined : Date.parse(s));
+  const live = rows.filter((a) => !a.disabled);
+  const known = live.filter((a) => a.status === 'ok' && a.week_pct !== undefined);
+  const acc = known.map((a) => {
+    const x = { n: a.n, w: w(a), active: a.active, week: a.week_pct, weekAt: t(a.week_resets_at), five: a.five_pct ?? 0, fiveAt: t(a.five_resets_at) };
+    if (a.models_full.length) x.models = a.models_full.every((m) => m.resets_at) ? Math.max(...a.models_full.map((m) => t(m.resets_at))) : Infinity;
+    // a reset already past has happened: restored now, the next one a period on
+    claudeRestore(x, now);
+    return x;
+  });
+  return { acc, at_least: known.length < live.length };
+}
+// the next reset after now, a whole number of periods on, in one step however far back a garbled time
+// is (final-1 F1)
+const claudeRoll = (at, period, now) => at + Math.ceil((now - at + 1) / period) * period;
+function claudeRestore(x, now) {
+  if (x.weekAt !== undefined && x.weekAt <= now) { x.week = 0; x.weekAt = claudeRoll(x.weekAt, CLAUDE_WEEK_MS, now); }
+  if (x.fiveAt !== undefined && x.fiveAt <= now) { x.five = 0; x.fiveAt = claudeRoll(x.fiveAt, CLAUDE_FIVE_MS, now); }
+  if (x.models !== undefined && x.models <= now) delete x.models;
+}
+const claudeHasRoom = (x) => x.week < 100 && x.five < 100 && x.models === undefined;
+const claudeRawRoom = (acc) => acc.reduce((s, x) => s + (claudeHasRoom(x) ? (x.w * (100 - x.week)) / 100 : 0), 0);
+const claudeRound = (n) => Number(n.toFixed(3));
+// the room of a reading, in accounts' worth
+const claudeRoom = (rows, now) => claudeRound(claudeRawRoom(claudeState(rows, now).acc));
+// at most CLAUDE_POINTS of the projection's points: the first, the last and every change of direction
+// (on the room unrounded, so rounding is no turn), then evenly; room is rounded as they are sent
+function claudeThin(points) {
+  const sent = (list) => list.map((p) => ({ at: p.at, room: claudeRound(p.room) }));
+  if (points.length <= CLAUDE_POINTS) return sent(points);
+  const sign = (i) => { const d = points[i + 1].room - points[i].room; return Math.abs(d) < 1e-9 ? 0 : Math.sign(d); };
+  const keep = new Set([0, points.length - 1]);
+  for (let i = 1; i < points.length - 1; i++) if (sign(i - 1) !== sign(i)) keep.add(i);
+  const even = (list, n) => (n <= 0 || !list.length ? [] : n === 1 ? [list[Math.floor((list.length - 1) / 2)]] : Array.from({ length: n }, (_, j) => list[Math.round((j * (list.length - 1)) / (n - 1))]));
+  let idx = [...keep].sort((a, b) => a - b);
+  if (idx.length > CLAUDE_POINTS) idx = even(idx, CLAUDE_POINTS);
+  else {
+    const rest = points.map((_, i) => i).filter((i) => !keep.has(i));
+    idx = [...idx, ...even(rest, CLAUDE_POINTS - idx.length)].sort((a, b) => a - b);
+  }
+  return sent([...new Set(idx)].map((i) => points[i]));
+}
+function projectClaude(accounts, rate, now) {
+  const rows = claudeRows(accounts);
+  if (!rows || !(typeof rate === 'number' && rate >= 0 && rate <= CLAUDE_RATE_MAX) || !Number.isFinite(now)) return null;
+  return claudeProject(rows, rate, now, false);
+}
+// the steps of projectClaude over rows already rebuilt; quick (claudeSafeRate's trials) keeps no points
+// or switches and stops at the first shortfall, giving only { lasts } (final-1 F4)
+function claudeProject(rows, rate, now, quick) {
+  const { acc, at_least } = claudeState(rows, now);
+  const ahead = acc.flatMap((x) => [x.weekAt, x.fiveAt, x.models]).filter((t) => Number.isFinite(t) && t > now);
+  if (!ahead.length) return null;
+  const end = Math.min(Math.max(...ahead), now + CLAUDE_AHEAD_MS);
+  const weekly = acc.map((x) => x.weekAt).filter((t) => t !== undefined && t > now);
+  const iso = boxHealthIso;
+  const binding = (x) => Math.max(x.week, x.five);
+  const recovers = (x) => (x.five > x.week ? x.fiveAt : x.weekAt) ?? Infinity;
+  const before = (x, b) => binding(x) < binding(b) || (binding(x) === binding(b) && (recovers(x) < recovers(b) || (recovers(x) === recovers(b) && x.n < b.n)));
+  const best = (list) => list.reduce((b, x) => (!b || before(x, b) ? x : b), null);
+  const pick = (cur) => {
+    if (cur && claudeHasRoom(cur) && binding(cur) < CLAUDE_LINE) return cur;
+    const room = acc.filter(claudeHasRoom);
+    const under = room.filter((x) => binding(x) < CLAUDE_LINE);
+    if (under.length) return best(under);
+    if (cur && claudeHasRoom(cur)) return cur;
+    return best(room);
+  };
+  const points = [], switches = [];
+  let cur = acc.find((x) => x.active), lasts = true, runsOut, pausedUntil, was = null;
+  for (let ts = now; ; ts = Math.min(ts + CLAUDE_STEP_MS, end)) {
+    for (const x of acc) claudeRestore(x, ts);
+    if (!quick) points.push({ at: iso(ts), room: claudeRawRoom(acc) });
+    if (!lasts && pausedUntil === undefined && acc.some(claudeHasRoom)) pausedUntil = ts;
+    if (ts >= end) break;
+    const step = Math.min(CLAUDE_STEP_MS, end - ts);
+    const need0 = (rate * step) / CLAUDE_HOUR_MS;
+    let need = need0;
+    for (let guard = 0; need > 1e-9 && guard < 2 * acc.length + 2; guard++) {
+      cur = pick(cur);
+      if (!cur) break;
+      if (cur !== was && !quick) { switches.push({ at: iso(ts), n: cur.n }); was = cur; }
+      const line = binding(cur) < CLAUDE_LINE ? CLAUDE_LINE : 100;
+      const take = Math.min(need, (line - cur.week) * cur.w);
+      if (take <= 0) { cur = null; continue; }
+      cur.week = Math.min(line, cur.week + take / cur.w);
+      need -= take;
+    }
+    if (need > 1e-9 && lasts) { lasts = false; runsOut = ts + Math.round(step * (1 - need / need0)); }
+    if (quick && !lasts) return { lasts };
+  }
+  if (quick) return { lasts };
+  return boxHealthPresent({
+    lasts, runs_out_at: lasts ? undefined : iso(runsOut), paused_until: pausedUntil === undefined ? undefined : iso(pausedUntil),
+    next_reset_at: weekly.length ? iso(Math.min(...weekly)) : undefined, points: claudeThin(points), switches, at_least,
+  });
+}
+function claudeSafeRate(accounts, now) {
+  const rows = claudeRows(accounts);
+  if (!rows || !Number.isFinite(now)) return undefined;
+  const lasts = (tenths) => claudeProject(rows, tenths / 10, now, true)?.lasts === true;
+  if (!lasts(1)) return undefined;
+  let lo = 1, hi = 2;
+  while (lasts(hi)) { lo = hi; hi *= 2; if (hi > 1e7) return lo / 10; }
+  while (hi - lo > 1) { const m = Math.floor((lo + hi) / 2); if (lasts(m)) lo = m; else hi = m; }
+  return lo / 10;
+}
+const boxHealthClaude = (() => {
+  let run = null;
+  const LATE = Symbol('late');
+  // a file's text, at most max bytes and one more, or null
+  const readCapped = async (file, max) => {
+    let fh = null;
+    try {
+      fh = await fs.promises.open(file, fs.constants.O_RDONLY);
+      const buf = Buffer.alloc(max + 1);
+      const { bytesRead } = await fh.read(buf, 0, max + 1, 0);
+      return buf.toString('utf8', 0, bytesRead);
+    } catch { return null; } finally { await fh?.close().catch(() => {}); }
+  };
+  // raced with 2 s of real(); at most two out, never two of one file: one that can't start is late
+  const settled = (ctx, r, file) => {
+    if (r.out.has(file) || r.out.size >= CLAUDE_READS) { ctx.say("two file reads are out: a project whose accounts.json read can't start keeps its last read"); return Promise.resolve(LATE); }
+    r.out.add(file);
+    const p = readCapped(file, CLAUDE_MAX_BYTES).finally(() => r.out.delete(file));
+    let end = () => {};
+    const late = new Promise((res) => { end = ctx.timeout(CLAUDE_FILE_MS, () => res(LATE)); });
+    return Promise.race([p, late]).finally(() => end());
+  };
+  // a record with a list: { at, rows }, else null
+  const recordOf = (text) => {
+    if (typeof text !== 'string' || text.length > CLAUDE_MAX_BYTES) return null;
+    let o;
+    try { o = JSON.parse(text); } catch { return null; }
+    const rows = memoryIsMap(o) && memoryAtOk(o.at) && memoryIsMap(o.capacity) ? claudeRows(o.capacity.list) : null;
+    return rows ? { at: o.at, rows } : null;
+  };
+  const build = (ctx, r, rec) => {
+    const now = ctx.now();
+    const ring = r.ring;
+    const span = ring.length ? ring.at(-1).t - ring[0].t : 0;
+    const accounts = rec.rows.filter((a) => !a.disabled).slice(0, CLAUDE_ACCOUNTS).map((a) => boxHealthPresent({
+      n: a.n, label: a.label, active: a.active,
+      week_left: a.week_pct === undefined ? undefined : 100 - a.week_pct, five_left: a.five_pct === undefined ? undefined : 100 - a.five_pct,
+      week_resets_at: a.week_resets_at, five_resets_at: a.five_resets_at, status: a.status,
+    }));
+    const claude = { accounts, rate_hours: Number((span / CLAUDE_HOUR_MS).toFixed(2)), points: ring.map((x) => ({ at: boxHealthIso(x.t), room: x.room })) };
+    const measuring = span < CLAUDE_MEASURING_MS;
+    let rate, projection, safe;
+    if (!measuring) {
+      rate = Number((claudeBurn(ring, rec.rows) / (span / CLAUDE_HOUR_MS)).toFixed(2));
+      claude.rate = rate;
+      projection = projectClaude(rec.rows, rate, now);
+      if (projection) {
+        safe = claudeSafeRate(rec.rows, now);
+        claude.projection = boxHealthPresent({ lasts: projection.lasts, runs_out_at: projection.runs_out_at, next_reset_at: projection.next_reset_at, safe_rate: safe, points: projection.points });
+      }
+    }
+    return { answer: { claude }, rows: rec.rows, rate, measuring, projection: projection ?? undefined, safe_rate: safe, has_room: claudeState(rec.rows, now).acc.some(claudeHasRoom) };
+  };
+  const read = async (ctx, r) => {
+    r.readAt = ctx.now();
+    let best = null;
+    const files = new Set();
+    for (const { root } of ctx.roots()) {
+      const file = path.join(root, 'docs', 'devteam', 'run', 'accounts.json');
+      files.add(file);
+      const text = await settled(ctx, r, file);
+      if (run !== r || ctx.stopped()) return;
+      let rec;
+      if (text === LATE) rec = r.files.get(file) ?? null;
+      else { rec = recordOf(text); r.files.set(file, rec); }
+      if (rec && Math.abs(ctx.real() - Date.parse(rec.at)) <= CLAUDE_FRESH_MS && (!best || Date.parse(rec.at) > Date.parse(best.at))) best = rec;
+    }
+    for (const f of r.files.keys()) if (!files.has(f)) r.files.delete(f);
+    const now = ctx.now();
+    r.ring = r.ring.filter((x) => x.t >= now - CLAUDE_RING_MS);
+    if (!best) { r.given = undefined; return; }
+    r.ring.push({ t: now, rows: best.rows, room: claudeRoom(best.rows, now) });
+    r.given = build(ctx, r, best);
+  };
+  return {
+    start(ctx) {
+      const r = { files: new Map(), out: new Set(), ring: [], readAt: -Infinity, reading: false, given: undefined };
+      run = r;
+      ctx.every(CLAUDE_EVERY_MS, async () => {
+        if (r.reading || run !== r || ctx.now() - r.readAt < CLAUDE_READ_MS) return;
+        // before the sampler's first read of the roots there is nothing to read yet; after it, none is no record
+        if (!ctx.roots().length && r.readAt === -Infinity) return;
+        r.reading = true;
+        try { await read(ctx, r); } finally { r.reading = false; }
+      });
+    },
+    part() { return run?.given; },
+    stop() { run = null; },
+  };
+})();
 /* box-health-claude end */
 /* box-health-park start */
 // answer.claude.park: what to park (kit-843's).
@@ -29974,6 +30273,18 @@ function makeSession(role) {
     const l = list.split('\n\n').map((b) => b.split('\n')).find((ls) => ls.includes(`worktree ${at}`))?.find((x) => x === 'locked' || x.startsWith('locked '));
     return l === undefined ? null : l.slice('locked '.length);
   };
+  // A start that moves the branch under a worktree marks it, in the worktree's own git folder, until its
+  // files are the new commit's: an undo that must leave the worktree (its lock not this start's) leaves
+  // the mark, and a retry refuses it rather than resume with the older commit's files read as changes (kit-886).
+  const markOf = () => { const g = responderGit(['rev-parse', '--absolute-git-dir'], wt); return g.status === 0 && g.stdout.trim() ? path.join(g.stdout.trim(), 'devteam-start-filling') : null; };
+  const filling = () => {
+    const mark = markOf();
+    const said = mark && readText(mark);
+    if (said === null || said === undefined) return null;
+    const [from, to] = said.trim().split(' ');
+    const head = responderGit(['rev-parse', '--verify', '--quiet', 'HEAD'], wt);
+    return `the worktree ${wt} is at ${head.status === 0 ? head.stdout.trim().slice(0, 8) : 'no commit git can read'}, but a start moved its branch there from ${(from ?? '').slice(0, 8) || 'another commit'} and could not check out its files${to ? ` (${to.slice(0, 8)}'s)` : ''}, so they may be the older commit's, read as changes: look in it (git -C ${shq(wt)} status), keep what it holds, and remove ${shq(mark)}`;
+  };
   // locked by a start, this one or another
   const startsLock = (why) => why === making || (why ?? '').startsWith(`${making} (`);
   const unfinished = () => startsLock(lockOf());
@@ -29999,7 +30310,7 @@ function makeSession(role) {
     const top = responderGit(['rev-parse', '--show-toplevel'], wt);
     if (top.status !== 0 && fs.existsSync(path.join(wt, '.git'))) return `git can't read ${wt} as a worktree (${firstLine(top.stderr).replace(/^fatal: /, '') || `exit ${top.status}`}), and it may hold work: ${inRepo} repair ${shq(wt)} mends one that moved; if it holds nothing to keep, move it away`;
     if (top.status !== 0 || realPath(top.stdout.trim()) !== realPath(wt)) return `${wt} is no worktree git knows: look in it, then move it away`;
-    if (!locked) return null;
+    if (!locked) return filling();
     const head = responderGit(['rev-parse', '--verify', '--quiet', 'HEAD'], wt);
     return `the worktree ${wt} is there, ${head.status === 0 ? `at ${head.stdout.trim().slice(0, 8)}` : 'with no commit git can read'}: if no other start is making it and it holds nothing to keep, remove it (${inRepo} unlock ${shq(wt)} && ${inRepo} remove --force ${shq(wt)})`;
   };
@@ -30115,12 +30426,20 @@ function makeSession(role) {
     };
     landed(local ?? sha);
     if (local && local !== sha) {
+      const mark = markOf();
+      try { if (!mark) throw new Error('git found no git folder for it'); fs.writeFileSync(mark, `${local} ${sha}\n`); } catch (e) { undo(`could not mark ${wt} as being filled: ${e.message}`); }
+      // the branch isn't moved yet, so its files are still its own: off with the mark, then undo
+      const unmarked = (why) => { try { fs.rmSync(mark, { force: true }); } catch {} undo(why); };
+      // read again once the mark is there: a lock taken off or replaced before it was there let another
+      // start resume in this worktree, so the branch isn't moved under it (plan-1 P1-1)
+      if (lockOf() !== mine) unmarked('the new worktree\'s lock changed while it was made');
       const moved = responderGit(['update-ref', '--no-deref', ref, sha, local], R.root);
-      if (moved.status !== 0) undo(`could not move ${branch} to ${short(sha)}: something moved it while it was checked out`);
+      if (moved.status !== 0) unmarked(`could not move ${branch} to ${short(sha)}: something moved it while it was checked out`);
       // as worktree add fills one: no time limit (a filter or a lazy fetch can be slow), no submodules
       const filled = gitRun([...RESPONDER_GIT, 'read-tree', '--reset', '-u', '--no-recurse-submodules', sha], wt);
       if (filled.status !== 0) undo(`could not check out ${short(sha)}: ${redactUrl(firstLine(filled.err).replace(/^(fatal|error): /, '')) || `exit ${filled.status}`}`);
       landed(sha);
+      try { fs.rmSync(mark); } catch (e) { undo(`could not remove ${mark}: ${e.message}`); }
     }
     // only its own lock: one a hook or a person put on it in its place is theirs, and stays (final-1 F2, final-1b F4)
     const lockNow = lockOf();
@@ -30135,7 +30454,7 @@ function makeSession(role) {
   }
   // looked at again before anything is written there: another start's add into a folder that was
   // there, empty, may have locked it since the look (final-1 F3)
-  if (there && (unfinished() || beingMade())) die(`${name}'s start isn't finished, so nothing was started: ${leftAt() ?? `another start is making ${wt}`}, then start it again`);
+  if (there && (beingMade() || unfinished())) die(`${name}'s start isn't finished, so nothing was started: ${leftAt() ?? `another start is making ${wt}`}, then start it again`);
   // A harness keeps its sessions by directory on its own machine: a worktree made just now has no
   // session to continue (a new machine, or the worktree was removed), so start fresh, with the
   // handoff note if there is one, and say so.
