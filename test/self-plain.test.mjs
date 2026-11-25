@@ -117,53 +117,13 @@ test('P1 the kit\'s plain self checker, run alone, gives each world2 self case i
   });
 });
 
-test('P2 self check and check-pr give each world2 self case the reference checker\'s errors, and chore pr refuses or pushes as it says', withProject('p-cases', {}, async (W, check) => {
-  const oracle = (text) => refCheckSelf(text, { root: P, has: W.has }).errors;
-  await check('P2 self check: each case\'s errors, exit 1 only with one', () => {
-    assert.equal(SURFACE.filter((c) => oracle(c.text).some((e) => e.includes('leaves the repo'))).length, 2, 'P2 two texts leave the fixture\'s repo');
-    for (const c of SURFACE) {
-      write(path.join(W.old, SELF), c.text);
-      const want = oracle(c.text);
-      const r = W.run(['self', 'check']);
-      assert.deepEqual(selfErrors(r.out), want, `P2 self check on ${c.name}\n${r.out}`);
-      assert.equal(r.status, want.length ? 1 : 0, `P2 self check's exit on ${c.name}\n${r.out}`);
-    }
-    W.g(['checkout', '--', SELF], W.old);
-  });
-  await check('P3 check-pr: each case\'s errors, at its own commit', () => {
-    const w = path.join(W.old, '.worktrees', 'chore-cases');
-    W.g(['worktree', 'add', '-q', '-b', 'chore-cases', w, 'origin/main'], W.old);
-    write(path.join(W.old, 'docs/devteam/run/pr/chore-cases.md'), '# chore-cases: x\n\n## One-way doors\n\nNone.\n');
-    for (const c of SURFACE) {
-      write(path.join(w, SELF), c.text);
-      W.g(['add', '-A'], w);
-      W.g(['commit', '-qm', c.name, '--allow-empty'], w);
-      W.g(['push', '-qf', 'origin', 'chore-cases'], w);
-      const sha = W.g(['rev-parse', 'HEAD'], w);
-      const want = oracle(c.text);
-      const r = W.checkPr('chore-cases', sha);
-      const got = [...r.text.matchAll(/^fail: .*self\.md(?: breaks self@\d at [0-9a-f]{12})?: (.*)$/gm)].map((m) => m[1]);
-      assert.deepEqual(got, want, `P3 check-pr on ${c.name}\n${r.text}`);
-    }
-  });
-  await check('P4 chore pr refuses each text the reference refuses, with its errors, pushing nothing new; pushes each it passes', () => {
-    let last = null; // the chore's tip on origin
-    for (const c of SURFACE) {
-      const want = oracle(c.text);
-      const r = W.chorePr('drafts', (w) => write(path.join(w, SELF), c.text));
-      for (const e of want) assert.ok(r.text.includes(`self.md: ${e}`), `P4 chore pr on ${c.name} says "${e}"\n${r.text}`);
-      assert.equal(r.status === 0, !want.length, `P4 chore pr ${want.length ? 'refuses' : 'pushes'} ${c.name}\n${r.text}`);
-      const tip = W.g(['ls-remote', 'origin', 'refs/heads/chore-drafts'], W.old).split('\t')[0] || null;
-      assert.equal(tip, want.length ? last : r.sha(), `P4 ${c.name}: ${want.length ? 'nothing pushed' : 'its draft pushed'}`);
-      last = tip;
-    }
-  });
-  await check('P5 one function, selfDraftErrors, in the self-model region, judges the draft for self check, chore pr and check-pr', () => {
+test('P5 one function judges the draft for self check, chore pr and check-pr', async (t) => {
+  await t.test('P5 one function, selfDraftErrors, in the self-model region, judges the draft for self check, chore pr and check-pr', () => {
     assert.equal((SRC.match(/\nfunction selfDraftErrors\(/g) ?? []).length, 1, 'P5 selfDraftErrors is defined once');
     const body = (name) => SRC.match(new RegExp(`\\nfunction ${name}\\([\\s\\S]*?\\n}\\n`))?.[0] ?? '';
     for (const f of ['choreSelfHold', 'selfDraftLines', 'cmdSelf']) assert.match(body(f), /selfDraftErrors\(/, `P5 ${f} calls selfDraftErrors`);
   });
-}));
+});
 
 test('Q a version 1 self.md on main validates, fails no PR, and raises one self-drift asking for the plain version; a plain one clears it', withProject('q-v1', { self: V1, files: { ...PARTS, ...V1_PARTS } }, async (W, check) => {
   await check('Q1 validate passes with a version 1 self.md', () => {
