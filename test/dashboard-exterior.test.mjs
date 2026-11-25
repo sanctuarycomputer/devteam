@@ -18,10 +18,14 @@ const DATA = JSON.parse(fixture('world', 'dashboard-data.json'));
 const PROJ = 'docs/devteam/project';
 const SELF = `${PROJ}/self.md`, EXT = `${PROJ}/exterior.md`, STRAT = `${PROJ}/strategy.md`;
 const V1SELF = 'v1/self.md', V1EXT = 'v1/exterior.md';
+// a Self and an Exterior over the server's 8 MB read cap (/api/file's maxBuffer), in big/ (kit-909)
+const BIG_SELF = 'big/self.md', BIG_EXT = 'big/exterior.md';
+const big = (title) => `# ${title}\n\n${'A line of prose that goes on and on.\n'.repeat(Math.ceil((8 * 1024 * 1024 + 4096) / 37))}`;
 // the self@2 and exterior@2 fixtures, with links of each kind the page must judge: an .md outside self.md's folder
 // and one inside it (parts and references, as test/fixtures/world2/check.mjs's parts() resolves them), an anchor,
-// a reference and a folder in the Exterior
-const SELF2 = `${fixture('world2', 'self.md')}\nIts notes: [the readme](../README.md), [a plan](notes/plan.md), [the strategy again](../project/strategy.md) and [its values](#values).\n`;
+// a root path and one that climbs out of the repo and back into self.md's folder (neither a part nor a reference:
+// kit-909), a reference and a folder in the Exterior
+const SELF2 = `${fixture('world2', 'self.md')}\nIts notes: [the readme](../README.md), [a plan](notes/plan.md), [the strategy again](../project/strategy.md) and [its values](#values).\nNot its notes: [the root](/strategy.md), [from the root](/docs/devteam/project/strategy.md) and [the climb](../../../../docs/devteam/project/strategy.md).\n`;
 const EXT2 = `${fixture('world2', 'exterior.md')}\nIt is drawn against [the Self](self.md), beside [the docs](../docs/).\n`;
 const SELF1 = fixture('world', 'self.md'), EXT1 = fixture('world', 'exterior.md');
 const row = (p, title, at) => ({ group: 'project', path: p, title, last_change: at, differs: null, written: true, state: null });
@@ -90,6 +94,10 @@ test('self.md and exterior.md beside the strategy, as documents', { skip: canDri
   write(path.join(root, V1SELF), SELF1);
   write(path.join(root, V1EXT), EXT1);
   write(path.join(root, 'notes/exterior.md'), EXT1);
+  // a name in notes/ that holds self.md but isn't it, so only a whole line of the folder's listing names the file (kit-909)
+  write(path.join(root, 'notes/myself.md'), '# Not the Self\n');
+  write(path.join(root, BIG_SELF), big('Self'));
+  write(path.join(root, BIG_EXT), big('Exterior'));
   const git = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: root });
   git('add', '-A');
   git('commit', '-qm', 'the project');
@@ -202,6 +210,10 @@ test('self.md and exterior.md beside the strategy, as documents', { skip: canDri
     // only an .md in self.md's own folder is a reference: one elsewhere is a part, and an anchor has no page here
     assert.deepEqual(ls.filter(([w]) => ['the readme', 'a plan', 'its values'].includes(w)), [], 'an .md elsewhere and an anchor: words');
     assert.ok((await paras()).some((x) => x.includes('the readme, a plan, the strategy again and its values.')), 'their words show');
+    // a root path, and a climb past the repo's root back into self.md's folder, are neither part nor reference (kit-909)
+    assert.deepEqual(ls.filter(([w]) => ['the root', 'from the root'].includes(w)), [], 'a root path: words');
+    assert.deepEqual(ls.filter(([w]) => w === 'the climb'), [], 'a climb out of the repo: words');
+    assert.ok((await paras()).some((x) => x.includes('Not its notes: the root, from the root and the climb.')), 'those words show');
     // the references to strategy.md, as written and by a path through its folder, open the strategy's peek at main
     for (const words of ['the strategy', 'the strategy again']) {
       const ref = ls.find(([w]) => w === words);
@@ -262,6 +274,28 @@ test('self.md and exterior.md beside the strategy, as documents', { skip: canDri
     await openPeek(SELF, 'Self');
     assert.equal(await p.ev("[...document.querySelectorAll('#drawer-body .err')].map((e) => e.textContent.trim()).join('|')"), 'the read broke', 'another failure: its error');
     assert.equal(await p.ev("/not drafted yet/.test(document.getElementById('drawer-body').textContent)"), false, 'another failure: not said to be undrafted');
+    await closePeek();
+  });
+
+  // B8: a file over the server's read cap is too big to show, not undrafted; a folder read that fails leaves the
+  // file's own error (kit-909)
+  await t.test('B8 a file too big to show', async () => {
+    await load({}, '#governance', { drop: ['self', 'exterior'], gov: govAt(BIG_SELF, BIG_EXT) });
+    for (const [file, title, line] of [[BIG_SELF, 'Self', 'The Self is too big to show here: main\'s self.md is larger than the dashboard reads.'], [BIG_EXT, 'Exterior', 'The Exterior is too big to show here: main\'s exterior.md is larger than the dashboard reads.']]) {
+      await openPeek(file, title);
+      assert.equal(await md(`m.textContent.${fold}`), line, `${title}: too big to show`);
+      assert.equal(await p.ev("document.querySelectorAll('#drawer-body .err').length"), 0, `${title}: no error`);
+      await closePeek();
+    }
+    // a folder main holds without the file (only a myself.md): not drafted yet
+    await load({}, '#governance', { drop: ['self', 'exterior'], gov: govAt('notes/self.md', EXT) });
+    await openPeek('notes/self.md', 'Self');
+    assert.equal(await md(`m.textContent.${fold}`), 'The Self is not drafted yet: main has no self.md.', 'a folder without the file: not drafted');
+    await closePeek();
+    await load({}, '#governance', { drop: ['self', 'exterior'], gov: govAt('proj2/self.md', 'proj2/exterior.md'), fail: ['proj2'] });
+    await openPeek('proj2/self.md', 'Self');
+    assert.match(await p.ev("[...document.querySelectorAll('#drawer-body .err')].map((e) => e.textContent.trim()).join('|')"), /^not found: proj2\/self\.md at \S+$/, 'a folder read that fails: the file\'s error');
+    assert.equal(await p.ev("/not drafted yet|too big/.test(document.getElementById('drawer-body').textContent)"), false, 'a folder read that fails: neither line');
     await closePeek();
   });
 
