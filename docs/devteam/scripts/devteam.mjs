@@ -11754,6 +11754,16 @@ const ARTIFACT_LENS = String.raw`(() => {
     shiftDown = e.type === 'keydown' ? e.key === 'Shift' || e.shiftKey : e.key !== 'Shift' && e.shiftKey;
     tell({ type: 'key', key: e.key, shift: shiftDown, ...(e.type === 'keyup' ? { up: true } : {}) });
   };
+  // ArrowLeft and ArrowRight step the dashboard's notes (kit-145): told only with nothing of the page focused,
+  // and only for a key the page let pass, so it is decided once the event has run (a page's own handler may
+  // take it, and the capture listener below comes before those)
+  const onArrow = (e) => {
+    if (!heard || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') || e.repeat || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return;
+    setTimeout(() => {
+      const on = document.activeElement;
+      if (!e.defaultPrevented && (!on || ((on === document.body || on === document.documentElement) && !typingIn(on)))) tell({ type: 'key', key: e.key, shift: false });
+    }, 0);
+  };
   const onBlur = () => { if (heard && shiftDown) { shiftDown = false; tell({ type: 'key', key: 'Shift', shift: false }); } };
 
   // --- where the pointer is, told after hello: a selector alone, and how far across it --------------
@@ -11908,6 +11918,7 @@ const ARTIFACT_LENS = String.raw`(() => {
     if (!m || typeof m !== 'object' || m.lens !== 1 || typeof m.type !== 'string' || !Object.prototype.hasOwnProperty.call(ORDERS, m.type)) return;
     try { ORDERS[m.type](m); } catch (err) { /* one bad question costs only itself */ }
   });
+  addEventListener('keydown', onArrow);
   addEventListener('keydown', onKey, true);
   addEventListener('keyup', onKey, true);
   addEventListener('blur', onBlur);
