@@ -19,8 +19,13 @@ const ofClass = (F, type, cls) => logLines(F).filter((l) => l.type === type && l
 // a line as the kit would have written it, in the supervisor's file
 let handed = 0;
 const hand = (F, o, agoMs = 1000) => {
-  const d = new Date(Date.now() - agoMs - ++handed);
-  const id = `${o.type === 'decision' ? 'd' : 'a'}-${stamp(d)}-supervisor`;
+  let d = new Date(Date.now() - agoMs - ++handed);
+  const idAt = (x) => `${o.type === 'decision' ? 'd' : 'a'}-${stamp(x)}-supervisor`;
+  // an id is its time to the millisecond, and a line whose id the log has is ignored: step back past any
+  // the kit wrote in that millisecond (kit-855)
+  const taken = new Set(logLines(F).map((l) => l.id));
+  while (taken.has(idAt(d))) d = new Date(d.getTime() - 1);
+  const id = idAt(d);
   const dir = path.join(F.old, 'docs/devteam/run/log');
   fs.mkdirSync(dir, { recursive: true });
   fs.appendFileSync(path.join(dir, `supervisor-${month()}.jsonl`), line({ op: 'new', ...o, id, at: d.toISOString(), by: 'supervisor' }));

@@ -20,10 +20,11 @@ let walls = null;
 const wall = (what) => (walls ??= (async () => {
   const k = shotKit();
   reached.length = 0;
-  const got = {};
+  const got = { ended: {} };
   await each([['requests', '1'], ['routes', '1'], ['leave', '1'], ['paths', '1'], ['assets', undefined]], async ([page, noCsp]) => {
     const hook = seenFile();
-    await k.readyOn(k.subject({ path: `${page}.html` }), { DEVTEAM_TEST_SHOT_SEEN: hook, DEVTEAM_TEST_SHOT_NO_CSP: noCsp });
+    const r = await k.readyOn(k.subject({ path: `${page}.html` }), { DEVTEAM_TEST_SHOT_SEEN: hook, DEVTEAM_TEST_SHOT_NO_CSP: noCsp });
+    got.ended[page] = { status: r.status, stderr: String(r.stderr ?? '').slice(-300) };
     got[page] = k.seen(hook);
   });
   got.k = k;
@@ -68,10 +69,11 @@ test('C7e the proxy flags: dead but for the capture and the allowed hosts', asyn
 
 test('C7f no route to another server', async () => {
   const said = await wall('routes');
+  const ended = JSON.stringify((await wall('ended')).routes);
   assert.deepEqual(reached, []);
   for (const t of ['ws', 'sw', 'rtc', 'peer', 'shared']) assert.ok(said.includes(`serve /tried-${t} csp=no`), `${t} was tried: ${said.join(' | ')}`);
   assert.ok(said.includes(`fail ${OTHER}/worker`), 'the worker fetched');
-  assert.ok(said.includes(`fail ${OTHER}/moved`), 'the page tried to move');
+  assert.ok(said.includes(`fail ${OTHER}/moved`), `the page tried to move: ${said.join(' | ')}; the capture ended ${ended}`);
 });
 
 test('C7f the page stays, and leaves no file', async () => {

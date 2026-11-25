@@ -2,7 +2,7 @@
 <button id="buy">Start trial</button>
 <script>
 // each way out, and the capture server told once one was tried and refused
-Object.defineProperty(document, 'fonts', { value: { ready: new Promise((r) => setTimeout(r, 2500)) } });
+Object.defineProperty(document, 'fonts', { value: { ready: new Promise((r) => setTimeout(r, 6000)) } });
 const tried = (f) => { try { Promise.resolve(f()).catch(() => {}); } catch (e) { /* refused here */ } };
 tried(() => { const ws = new WebSocket('__OTHER__/ws'.replace('http', 'ws')); ws.onerror = () => fetch('tried-ws').catch(() => {}); });
 tried(() => window.open('__OTHER__/popup'));
