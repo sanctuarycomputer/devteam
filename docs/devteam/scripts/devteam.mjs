@@ -21073,26 +21073,27 @@ const accountKnownFull = (a) => accountAtLimit(a) || lastReadingFull(a);
 // Each account's numbers, for the machine's hub (box-health@1): built from named fields, never by
 // copying a row, so no email, token or new field of cswap's leaves with it. Text is kept only in a known
 // form: the alias as the label (else "Account n"; an address, in any width of @, or one over 40
-// characters is not kept) and a one-word status; a time is written again in UTC. A percent is of the
-// window used. What can't be read is left out, never zero, but for one: on status ok an absent
-// five-hour window is unused. A disabled account is listed, marked; a row with no slot number isn't.
+// characters is not kept) and a one-word status; a time is written again in UTC (and left out if that
+// leaves the years 0 to 9999). A percent is of the window used. What can't be read is left out, never
+// zero, but for one: on status ok an absent five-hour window is unused. A usage that is a list is no
+// usage. A disabled account is listed, marked; a row with no slot number isn't.
 function capacityList(rows) {
   const pct = (w) => (Number.isFinite(w?.pct) ? Math.min(100, Math.max(0, w.pct)) : undefined);
-  const at = (t) => (typeof t === 'string' && /^\d{4}-\d\d-\d\dT[\d:.]+(Z|[+-]\d\d:\d\d)$/.test(t) && Number.isFinite(Date.parse(t)) ? new Date(t).toISOString() : undefined);
+  const at = (t) => (typeof t === 'string' && /^\d{4}-\d\d-\d\dT[\d:.]+(Z|[+-]\d\d:\d\d)$/.test(t) && Number.isFinite(Date.parse(t)) && /^\d{4}-/.test(new Date(t).toISOString()) ? new Date(t).toISOString() : undefined);
   const label = (a) => {
     const alias = typeof a.alias === 'string' ? a.alias.trim() : '';
     return alias && alias.length <= 40 && !/[@\p{C}]/u.test(alias.normalize('NFKC')) ? alias : `Account ${a.number}`;
   };
   return rows.filter((a) => Number.isSafeInteger(a.number) && a.number > 0).map((a) => {
     const u = a.usage;
-    const unused = a.usageStatus === 'ok' && u && typeof u === 'object' && (u.fiveHour ?? null) === null;
+    const unused = a.usageStatus === 'ok' && u && typeof u === 'object' && !Array.isArray(u) && (u.fiveHour ?? null) === null;
     const tier = Number(/_([1-9]\d{0,2})x$/.exec(typeof a.plan?.tier === 'string' ? a.plan.tier : '')?.[1]);
     return {
       n: a.number, label: label(a), active: a.active === true, disabled: !!a.disabled,
       status: typeof a.usageStatus === 'string' && /^[a-z][a-z_]{0,29}$/.test(a.usageStatus) ? a.usageStatus : undefined,
       week_pct: pct(u?.sevenDay), week_resets_at: at(u?.sevenDay?.resetsAt),
       five_pct: unused ? 0 : pct(u?.fiveHour), five_resets_at: at(u?.fiveHour?.resetsAt),
-      models_full: Array.isArray(u?.scoped) ? u.scoped.filter((x) => x?.pct >= 100).map((x) => ({ resets_at: at(x.resetsAt) })) : [],
+      models_full: Array.isArray(u?.scoped) ? u.scoped.filter((x) => Number.isFinite(x?.pct) && x.pct >= 100).map((x) => ({ resets_at: at(x.resetsAt) })) : [],
       tier: tier || undefined,
     };
   });
