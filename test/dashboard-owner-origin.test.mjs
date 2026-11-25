@@ -73,6 +73,8 @@ const bodies = (F) => ({
   'thread-resolve': { id: F.T, outcome: 'forged' },
   'thread-reopen': { id: F.T },
   'thread-accept': { id: F.T, at: new Date().toISOString() },
+  'thread-accept-addressed': { id: F.T, at: new Date().toISOString() },
+  'artifact-handoff': { slug: 'pricing', at: 'main' },
 });
 
 const post = (B, name, body, headers) => fetch(`${B}/api/${name}`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body), signal: AbortSignal.timeout(60000) });
