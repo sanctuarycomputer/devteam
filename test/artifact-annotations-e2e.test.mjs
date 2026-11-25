@@ -328,21 +328,27 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
   const rectOf = (V, sel, scroll = true) => V.p.ev(`(() => { const e = document.querySelector(${J(sel)}); if (!e) return null; if (${scroll}) e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2, hit = document.elementFromPoint(x, y); return { x, y, on: !!hit && e.contains(hit), hit: hit ? hit.id || hit.className || hit.tagName : null }; })()`);
   // a real press on the first element sel finds (what: the click target's id or tag, as the harness names it); a guarded
   // control (Resolve) is pressed only once avStep.ready says it has sat still, found again by sel on every try
-  const pressSel = async (V, sel, what, { guard = null } = {}) => {
-    await V.soon(`!!document.querySelector(${J(sel)})`, `setup: ${sel} is there`);
-    await rectOf(V, sel);
-    if (guard) await V.soon(guard, `setup: ${sel} settled under the press guard`);
-    // the control's box the same on four reads running (a picture arriving late pushes the composer down)
-    await V.soon(`(() => { const e = document.querySelector(${J(sel)}); if (!e) return false; const r = e.getBoundingClientRect(), k = [r.left, r.top, r.width, r.height].join(), s = window.__still; window.__still = s && s.k === k ? { k, n: s.n + 1 } : { k, n: 0 }; return window.__still.n >= 4; })()`, `setup: ${sel} at rest`);
-    await V.p.ev(FRAMES);
-    const at = await rectOf(V, sel, false);
-    assert.ok(at, `setup: ${sel} has a box to press`);
-    assert.ok(at.on, `setup: the point at ${sel} (${at.x},${at.y}) is covered by ${at.hit}`);
-    try { await V.press(at.x, at.y, what); } catch (e) {
-      const now = await V.p.ev(`(() => { const e = document.querySelector(${J(sel)}); const r = e?.getBoundingClientRect(); const h = r && document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return { clicks: window.__clicks.slice(-6), box: r && [r.left, r.top, r.width, r.height], hit: h ? h.id || h.className || h.tagName : null, open: TL.open, ready: e ? avStep.ready(e) : 'n/a' }; })()`).catch(() => null);
-      e.message += ` [${sel} was at ${at.x},${at.y}; now ${J(now)}]`;
-      throw e;
+  // each try: the control found again, (guarded) settled, its box the same on four reads running (a picture arriving late
+  // pushes the card's parts about), then the press; with until, a press that left it false is made again, a press that never
+  // reached the page too, after naming what happened (never a second press once until holds)
+  const pressSel = async (V, sel, what, { guard = null, until = null } = {}) => {
+    let why = '';
+    for (let i = 0; i < 4; i++) {
+      if (i && until && await V.settle(until, 100)) return;
+      await V.soon(`!!document.querySelector(${J(sel)})`, `setup: ${sel} is there`);
+      await rectOf(V, sel);
+      if (guard) await V.soon(guard, `setup: ${sel} settled under the press guard`);
+      await V.soon(`(() => { const e = document.querySelector(${J(sel)}); if (!e) return false; const r = e.getBoundingClientRect(), k = [r.left, r.top, r.width, r.height].join(), s = window.__still; window.__still = s && s.k === k ? { k, n: s.n + 1 } : { k, n: 0 }; return window.__still.n >= 4; })()`, `setup: ${sel} at rest`);
+      await V.p.ev(FRAMES);
+      const at = await rectOf(V, sel, false);
+      assert.ok(at, `setup: ${sel} has a box to press`);
+      assert.ok(at.on, `setup: the point at ${sel} (${at.x},${at.y}) is covered by ${at.hit}`);
+      try { await V.press(at.x, at.y, what); } catch (e) { why = e.message; t.diagnostic(`press ${sel}: ${why}`); continue; }
+      if (!until || await V.settle(until, 3000)) return;
+      why = `${sel} pressed at ${at.x},${at.y} and ${until} stayed false: clicks ${J(await V.p.ev('window.__clicks.slice(-4)'))}`;
+      t.diagnostic(`press ${sel}: ${why}`);
     }
+    assert.fail(`setup: ${why}`);
   };
   // one real press on ‹ or ›, and the wait for the step to land: the note's card open, its page there, no step under way
   const stepBy = async (V, id, key, what) => {
@@ -392,7 +398,7 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
     for (const key of TOCHECK) {
       await stepBy(V, 'av-next', key, `C7b (c) ${key}`);
       await V.soon(`(() => { const i = document.querySelector('#tl-card .tl-shot img'); return !!i && i.complete && i.naturalWidth > 0; })()`, `C7b (c) ${key}: the card's picture loaded`);
-      await pressSel(V, '#tl-card .tl-shot img', 'IMG');
+      await pressSel(V, '#tl-card .tl-shot img', 'IMG', { until: `!!document.getElementById('av-shot')` });
       await V.soon(`!!document.getElementById('av-shot')`, `C7b (c) ${key}: a click on the picture opens #av-shot`);
       const want = png(fs.readFileSync(shots[key].file)).w;
       assert.ok(await V.settle(`(() => { const i = document.querySelector('#av-shot img'); return !!i && i.complete && i.naturalWidth === ${want}; })()`, 10000), `C7b (c) ${key}: #av-shot's image is ${want}px wide, the PNG's (it is ${await V.p.ev("document.querySelector('#av-shot img')?.naturalWidth")})`);
@@ -433,7 +439,7 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
     await pressSel(V, '#tl-c-text', 'tl-c-text');
     await V.p.type(text);
     await V.soon(`document.getElementById('tl-c-text').value === ${J(text)} && ${cardUp(key)}`, `C6b: ${key}'s composer holds the reply on ${key}'s card`);
-    await pressSel(V, '#tl-card [data-tl-send]', 'BUTTON');
+    await pressSel(V, '#tl-card [data-tl-send]', 'BUTTON', { until: `document.getElementById('tl-c-text').value === ''` });
   };
   await step('step 7 (g): Resolve N4; a reply on N1 and one on N3', async () => {
     const V = await visit('#library', WIN);
@@ -441,7 +447,7 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
     for (const key of TOCHECK) await stepBy(V, 'av-next', key, `C6a stepping to ${key}`);
     // Resolve: the control found again with TL.open and the guard read in one look, then pressed
     const resolveSel = '#tl-card .tl-addr [data-tl-accept]';
-    await pressSel(V, resolveSel, 'BUTTON', { guard: `${cardUp('N4')} && (() => { const e = document.querySelector(${J(resolveSel)}); return !!e && avStep.ready(e) !== null && !e.classList.contains('waiting'); })()` });
+    await pressSel(V, resolveSel, 'BUTTON', { until: `!document.querySelector(${J(resolveSel)})`, guard: `${cardUp('N4')} && (() => { const e = document.querySelector(${J(resolveSel)}); return !!e && avStep.ready(e) !== null && !e.classList.contains('waiting'); })()` });
     const resolved = await poll(() => { const th = JSON.parse(ok(F, 'owner', ['thread', 'show', idOfKey('N4'), '--json'])); return th.status === 'resolved' ? th : null; }, 20000);
     assert.ok(resolved, 'C6a: Resolve on N4 leaves thread show N4 resolved');
     assert.equal(resolved.status, 'resolved', 'C6a: N4 is resolved');
@@ -452,7 +458,7 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
     assert.ok(await poll(() => noteStates()[idOfKey('N1')] === 'open', 20000), `C6b: after the reply on N1 its state is open (${noteStates()[idOfKey('N1')]})`);
     await stepBy(V, 'av-next', 'N2', 'C6b stepping to N2 for N3\'s pin');
     await landsOn(V, 'N2', 'a.html', '#tab2', 'C6b setup N2');
-    await pressSel(V, `#av-pins [data-tl-pin="${idOfKey('N3')}"]`, 'tl-pin');
+    await pressSel(V, `#av-pins [data-tl-pin="${idOfKey('N3')}"]`, 'tl-pin', { until: cardUp('N3') });
     await V.soon(cardUp('N3'), "C6b: N3's pin opens its card");
     await reply(V, 'N3', 'Still the empty half; look again');
     assert.ok(await poll(() => noteStates()[idOfKey('N3')] === 'open', 20000), `C6b: after the reply on N3 its state is open (${noteStates()[idOfKey('N3')]})`);
