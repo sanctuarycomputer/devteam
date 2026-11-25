@@ -362,7 +362,9 @@ test('S14: an absent part is left out; a section with no base is too; one that t
   // and nothing it gave before the throw is kept
   const odd = { start() {}, part: () => new Proxy({}, { get() { throw new Error('trap'); } }), stop() {} };
   const late = { start() {}, part: () => ({ answer: { box: { kit: 'v9' } }, get sample() { throw new TypeError('late'); } }), stop() {} };
-  const s = load({ env: nowhere(), parts: [['disk', odd], ['state', bad], ['pool', boom], ['claude', { start() {}, part() {}, stop: () => { stops++; } }], ['park', late], ['room', room]] });
+  // and what it throws may throw as it is read: said as an error, costing only its part (final-2 F1)
+  const sly = { start() {}, part: () => { throw Object.defineProperty(new Error('m'), 'name', { get() { throw new Error('read'); } }); }, stop() {} };
+  const s = load({ env: nowhere(), parts: [['processes', sly], ['disk', odd], ['state', bad], ['pool', boom], ['claude', { start() {}, part() {}, stop: () => { stops++; } }], ['park', late], ['room', room]] });
   await s.health.start();
   await step(s);
   const a = answer(s.health);
@@ -373,7 +375,7 @@ test('S14: an absent part is left out; a section with no base is too; one that t
   assert.equal(a.json.samples.at(-1).load, 1.5, "a part's sample never overwrites the sampler's own");
   s.health.stop();
   assert.equal(stops, 1, 'the claude part stopped; the one whose start threw was not');
-  assert.deepEqual(s.logs.map((l) => l.replace(/ at line \d+$/, '')), ['hub: box health: state: start failed: Error', 'hub: box health: disk: part failed: Error', 'hub: box health: pool: part failed: Error', 'hub: box health: park: part failed: TypeError', 'hub: box health: pool: stop failed: Error']);
+  assert.deepEqual(s.logs.map((l) => l.replace(/ at line \d+$/, '')), ['hub: box health: state: start failed: Error', 'hub: box health: processes: part failed: an error', 'hub: box health: disk: part failed: Error', 'hub: box health: pool: part failed: Error', 'hub: box health: park: part failed: TypeError', 'hub: box health: pool: stop failed: Error']);
 });
 
 test('S15: fields box-health@1 refuses are left out and said, with nothing of what they held; the same object is checked once', async () => {
@@ -415,7 +417,8 @@ test('S15b: a value that changes is said once, and an error\'s own text never', 
   const say = ['claude', { start: (c) => { ctx = c; }, part: (c) => { c.say('one line'); JSON.parse(label); }, stop() {} }];
   const parts = [['state', { start() {}, part: () => ({ answer: { box: { oom_kills: --n } } }), stop() {} }], say,
     ['park', { start: () => { throw Object.assign(new Error(label), { name: label, code: 'ENOENT' }); }, part() {}, stop() {} }],
-    ['room', { start() {}, part() {}, stop: () => { throw Object.assign(new Error('x'), { code: label }); } }]];
+    ['room', { start() {}, part() {}, stop: () => { throw Object.assign(new Error('x'), { code: label }); } }],
+    ['pool', { start() {}, part: () => { let n = 0; throw Object.defineProperty(new Error('x'), 'code', { get: () => (n++ ? label : 'ENOENT') }); }, stop() {} }]];
   const s = load({ env: nowhere(), parts, realTimers: true, real: () => Date.now() });
   t.after(() => s.health.stop());
   await s.health.start();
@@ -429,6 +432,7 @@ test('S15b: a value that changes is said once, and an error\'s own text never', 
   assert.equal(s.logs.filter((l) => l.includes('claude: part failed: SyntaxError')).length, 1);
   assert.equal(s.logs.filter((l) => l.includes('park: start failed: an error ENOENT')).length, 1);
   assert.equal(s.logs.filter((l) => /room: stop failed: Error( at line \d+)?$/.test(l)).length, 1, 'a code that is not a word is not said');
+  assert.equal(s.logs.filter((l) => /pool: part failed: Error ENOENT( at line \d+)?$/.test(l)).length, 1, 'the code checked is the code said');
   assert.equal(s.logs.filter((l) => /claude: (one line|line \d+)$/.test(l)).length, 20);
 });
 
@@ -438,16 +442,24 @@ test('S15c: a promise that rejects, from start, part or stop, is said and costs 
   process.on('unhandledRejection', onNone);
   try {
     const late = async () => { throw new Error('late'); };
-    const parts = [['state', { start: late, part: () => ({ answer: { box: { oom_kills: 1 } } }), stop() {} }], ['pool', { start() {}, part: late, stop: late }], ['room', { start() {}, part: () => ({ answer: { headroom: { room: 1 } } }), stop() {} }]];
+    // a reason that throws as it is read: a getter, a Proxy (final-2 F1)
+    const sly = () => Object.defineProperty(new Error('m'), 'name', { get() { throw new Error('read'); } });
+    const trap = new Proxy({}, { get() { throw new Error('trap'); } });
+    let ctx;
+    const parts = [['disk', { start: (c) => { ctx = c; }, part() {}, stop() {} }], ['state', { start: late, part: () => ({ answer: { box: { oom_kills: 1 } } }), stop() {} }], ['pool', { start() {}, part: late, stop: late }],
+      ['claude', { start() {}, part: async () => { throw sly(); }, stop() {} }], ['room', { start() {}, part: () => ({ answer: { headroom: { room: 1 } } }), stop() {} }]];
     const s = load({ env: nowhere(), parts });
     await s.health.start();
+    ctx.after(1, async () => { throw trap; });
+    s.timers.list.find((h) => h.kind === 'once' && h.ms === 1).fn();
     await step(s);
+    assert.equal(answer(s.health).json.samples.length, 2, 'every tick sampled');
     const a = answer(s.health);
     ok(a);
     assert.deepEqual([a.json.box, a.json.headroom], [undefined, { room: 1 }]);
     s.health.stop();
     await sleep(20);
-    assert.deepEqual(s.logs.map((l) => l.replace(/ at line \d+$/, '')).sort(), ['hub: box health: pool: part failed: Error', 'hub: box health: pool: part gave something other than an object, left out', 'hub: box health: pool: stop failed: Error', 'hub: box health: state: start failed: Error']);
+    assert.deepEqual(s.logs.map((l) => l.replace(/ at line \d+$/, '')).sort(), ['hub: box health: claude: part failed: an error', 'hub: box health: claude: part gave something other than an object, left out', 'hub: box health: disk: a timer failed: an error', 'hub: box health: pool: part failed: Error', 'hub: box health: pool: part gave something other than an object, left out', 'hub: box health: pool: stop failed: Error', 'hub: box health: state: start failed: Error']);
     assert.deepEqual(none, []);
   } finally { process.off('unhandledRejection', onNone); }
 });
@@ -629,6 +641,16 @@ test('S20: a volume that does not answer is waited for 2 s, left out, and not as
   await hung(n, () => n.health.start(), () => asked >= 1);
   assert.equal(asked, 1);
   assert.deepEqual(answer(n.health).json.now.disks?.map((x) => x.free), [7]);
+  // accepted (final-2 F3): at the start no root's volume is known, and telling two roots of one apart
+  // needs the stat that hangs, so two of a volume whose stat hangs hold both places, and a volume that
+  // answers is not read until one of them does; a third place would let it hold more of the threads
+  const h = load({ env: nowhere(), roots: [a, c, b] });
+  const stats = [];
+  h.disk.stat = (q) => { stats.push(q); return q === b ? Promise.resolve({ dev: 2 }) : new Promise(() => {}); };
+  h.disk.statfs = s.disk.statfs;
+  await hung(h, () => h.health.start(), () => stats.length >= 2);
+  for (let i = 0; i < 2; i++) await hung(h, () => step(h), () => true);
+  assert.deepEqual([stats, answer(h.health).json.now.disks], [[a, c], undefined], 'both places held by one hung volume, until it answers');
 });
 
 test('S21: at most two reads are out, a root still out is not asked again, and a tick that ended asks no more', async () => {

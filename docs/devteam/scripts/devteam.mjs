@@ -24258,8 +24258,16 @@ function boxHealth(log, scan, { parts = boxHealthParts(), real = () => Date.now(
   const say = (key, words) => { if (!said.has(key)) { said.add(key); log(`hub: box health: ${words}`); } };
   const fail = (who, doing, e) => {
     const word = (v) => (typeof v === 'string' && /^\w{1,40}$/.test(v) ? v : null);
-    const line = /^ +at .*\bdevteam\.mjs:(\d+)/m.exec(String(e?.stack ?? ''))?.[1];
-    say(`${who} ${doing}`, `${who}: ${doing} failed: ${word(e?.name) ?? 'an error'}${word(e?.code) ? ` ${e.code}` : ''}${line ? ` at line ${line}` : ''}`);
+    // what was thrown may throw as it is read (a getter, a Proxy): each is read once, the value checked
+    // is the value said, and on any throw it is said as an error, with no code or line
+    let name = null, code = null, line;
+    try {
+      name = word(e?.name);
+      code = word(e?.code);
+      const stack = e?.stack;
+      line = typeof stack === 'string' ? /^ +at .*\bdevteam\.mjs:(\d+)/m.exec(stack)?.[1] : undefined;
+    } catch { name = code = line = null; }
+    say(`${who} ${doing}`, `${who}: ${doing} failed: ${name ?? 'an error'}${code ? ` ${code}` : ''}${line ? ` at line ${line}` : ''}`);
   };
   const spoken = new Map();
   const speak = (who, words) => {
