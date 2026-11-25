@@ -347,9 +347,10 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
       await openAt(V, AV_WT, 'plan-pricing');
       await cardOf(V, N.trial);
       await holdPoll(V);
-      await V.p.ev(`(window.__s = 0, document.addEventListener('click', (e) => { if (e.target.closest('[data-tl-send]')) window.__s++; }, true), document.getElementById('tl-card').style.marginLeft = '2px', true)`);
+      await V.soon(`(() => { const k = ${SETTLE('[data-tl-send]')}; const was = window.__at; window.__at = k; return was === k; })()`, 'setup: the card at rest');
+      await V.p.ev(`(window.__s = 0, window.addEventListener('pointerdown', (e) => { window.__on = e.target.closest('button')?.outerHTML ?? e.target.className; }, true), document.addEventListener('click', (e) => { if (e.target.closest('[data-tl-send]')) window.__s++; }, true), document.getElementById('tl-card').style.marginLeft = '2px', true)`);
       await press(V, '[data-tl-send]');
-      assert.equal(await V.p.ev('window.__s'), want, want ? 'plain words: at once' : 'it would reopen: held');
+      assert.equal(await V.p.ev('window.__s'), want, `${want ? 'plain words: at once' : 'it would reopen: held'} (pressed ${await V.p.ev('window.__on')})`);
       if (!want) { await counts(V, '[data-tl-send]', 'window.__s > 0', 'settled: it goes'); assert.equal(await V.p.ev('window.__s'), 1, 'settled: once'); }
     }
   });
