@@ -6,9 +6,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { canDrive, openChrome } from './lib/chrome.mjs';
+import fs from 'node:fs';
+import { closeTab, oneTab } from './fixtures/artifact-viewer/harness.mjs';
 
 // a call's error and how long it took to come
 const failing = async (call) => { const t = Date.now(); const e = await call.then(() => null, (x) => x); return { e, ms: Date.now() - t }; };
+// What follows "Chrome running; " in a diagnosis, in each form chrome.mjs gives (kit-918): the second-session line and
+// the renderers line (each may say its own look ran out its bound); or the whole look cut at 6 s, after the
+// second-session line or before it; or Chrome's endpoint unreachable, in place of both. ss: the second-session
+// forms this tab may give. Anything else in that place is refused.
+const RENDERERS = String.raw`renderers: (\d+ (\d+% cpu|new)(, \d+ (\d+% cpu|new))*|no process info)`;
+const CUT = 'diagnosis cut at 6 s';
+const ENDPOINT = String.raw`Chrome's endpoint: (no answer in 2 s|could not reach it)`;
+const HELD = String.raw`(its page gives a second session no answer in 2 s|a second session: no answer in 1 s)`;
+const ANY = String.raw`(its page answers a second session in \d+ ms|${HELD})`;
+const looks = (ss) => new RegExp(`; Chrome running; (${ss}; ${RENDERERS}|${ss}; ${CUT}|${CUT}|${ENDPOINT})$`);
 // a tab busy until a set time, whenever its evaluation starts (behind another tab's dialog in the same renderer, or not)
 const busy = (p, until) => failing(p.send('Runtime.evaluate', { expression: `for (;Date.now() < ${until};) {} 1` }));
 
@@ -30,14 +42,17 @@ test('a call with no answer says what Chrome was doing', { skip: canDrive ? fals
         assert.ok(ra.e && rb.e, 'both calls fail');
         // the 30 s as it was, the diagnosis after it bounded: never a second wait, never sooner
         assert.ok(ra.ms >= 30000 && ra.ms < 36500, `took ${ra.ms} ms`);
-        assert.match(ra.e.message, /^Runtime\.evaluate: no answer from Chrome in 30 s; tab [0-9A-F]{8} at about:blank; /);
+        assert.match(ra.e.message, /^Runtime\.evaluate: no answer from Chrome in 30 s; tab [0-9A-F]{8} (at about:blank|\(Chrome's list of tabs: no answer in 2 s\)); /);
         assert.match(ra.e.message, /; an alert dialog \("held here", at about:blank\) open on this tab for \d+\.\d s; /);
         const tab = ra.e.message.match(/; tab ([0-9A-F]{8}) /)[1];
         assert.match(rb.e.message, new RegExp(`; an alert dialog \\("held here", at about:blank\\) open on tab ${tab} for `), 'the other tab names the dialog on the held one');
         assert.match(ra.e.message, /; last heard on its socket: [^;]*an alert dialog \d+\.\d s ago/);
         assert.match(ra.e.message, /; Chrome running; /);
-        assert.match(ra.e.message, /; its page gives a second session no answer in 2 s(; |$)/);
-        assert.match(rb.e.message, /; renderers: \d+ (\d+% cpu|new)(, \d+ (\d+% cpu|new))*$/);
+        // On a loaded runner a look can run out its own bound, the whole look the 6 s cut, or Chrome's endpoint its 2 s
+        // (kit-918): each line is then the form that says so, and never a wrong one. The held page never answers the second session.
+        assert.match(ra.e.message, looks(HELD));
+        assert.match(rb.e.message, looks(ANY));
+        for (const r of [ra, rb]) if (/renderers: no process info|a second session: no answer|Chrome's list of tabs: no answer|diagnosis cut at 6 s|Chrome's endpoint: /.test(r.e.message)) t.diagnostic(`a look ran out its bound: ${r.e.message.slice(r.e.message.indexOf('; Chrome '))}`);
         // answered by the test, the page goes on: the held call ran once
         await held.send('Page.handleJavaScriptDialog', { accept: true });
         await new Promise((r) => setTimeout(r, Math.max(500, until - Date.now() + 500)));
@@ -73,5 +88,96 @@ test('a call with no answer says what Chrome was doing', { skip: canDrive ? fals
         assert.match(r.e.message, /^Runtime\.evaluate: no answer from Chrome in 30 s; tab [0-9A-F]{8} \(Chrome's list of tabs: no answer in 2 s\); last heard on its socket: nothing; Chrome running; Chrome's endpoint: no answer in 2 s$/);
       } finally { await chrome.close(); }
     }),
+    // kit-918: the artifact viewer's harness closes each case's tab with closeTab (Page.close runs the page's beforeunload)
+    t.test('a tab close the page holds with a dialog fails its caller, saying what Chrome was doing', async () => {
+      const chrome = await openChrome();
+      try {
+        const p = await chrome.newPage();
+        await p.send('Page.enable');
+        // the page always asks before it goes; a user gesture lets it ask
+        await p.send('Runtime.evaluate', { expression: "addEventListener('beforeunload', (e) => { e.preventDefault(); e.returnValue = ''; }); 1", userGesture: true });
+        const r = await failing(closeTab(p));
+        assert.ok(r.e, 'the close fails');
+        assert.ok(r.ms >= 30000 && r.ms < 36500, `took ${r.ms} ms`);
+        assert.match(r.e.message, /^closing the tab: still open after Page\.close; Runtime\.evaluate: no answer from Chrome in 30 s; tab [0-9A-F]{8} (at about:blank|\(Chrome's list of tabs: no answer in 2 s\)); a beforeunload dialog \("", at about:blank\) open on this tab for \d+\.\d s; /);
+        if (/Chrome's list of tabs: no answer/.test(r.e.message)) t.diagnostic(`a look ran out its bound: ${r.e.message.slice(r.e.message.indexOf('; tab '))}`);
+      } finally { await chrome.close(); }
+    }),
+    t.test('a tab still saving is closed once the save ends, with no dialog', async () => {
+      const chrome = await openChrome();
+      try {
+        const p = await chrome.newPage();
+        await p.send('Page.enable');
+        // the dashboard's guard (index.html's SAVING and beforeunload), the save ending 1.5 s on
+        await p.send('Runtime.evaluate', { expression: "var SAVING = 1; addEventListener('beforeunload', (e) => { if (SAVING) { e.preventDefault(); e.returnValue = ''; } }); setTimeout(() => { SAVING = 0; }, 1500); 1", userGesture: true });
+        const r = await failing(closeTab(p));
+        assert.equal(r.e, null, 'the close succeeds');
+        assert.ok(r.ms >= 1400 && r.ms < 10000, `took ${r.ms} ms`);
+      } finally { await chrome.close(); }
+    }),
+    t.test('a tab saving past the bound fails its close, saying so, and opens no dialog', async () => {
+      const chrome = await openChrome();
+      try {
+        const p = await chrome.newPage();
+        await p.send('Page.enable');
+        await p.send('Runtime.evaluate', { expression: "var SAVING = 2; addEventListener('beforeunload', (e) => { if (SAVING) { e.preventDefault(); e.returnValue = ''; } }); 1", userGesture: true });
+        const r = await failing(closeTab(p, { saving: 1000 }));
+        assert.ok(r.e, 'the close fails');
+        assert.ok(r.ms < 5000, `took ${r.ms} ms`);
+        assert.equal(r.e.message, 'closing the tab: the page still saving (SAVING 2) after 1 s; closing it would open its beforeunload dialog');
+      } finally { await chrome.close(); }
+    }),
   ]);
+});
+
+// kit-918: closeTab's order and bounds, on a page of its own making (no Chrome): what it was asked, and what it says.
+const fakePage = (answer) => { const asked = []; return { asked, ev: async (x) => { asked.push(`ev ${x}`); return 0; }, send: async (m) => { asked.push(m); return answer(m, asked); }, close: () => asked.push('socket closed') }; };
+const gone = () => { throw new Error("Runtime.evaluate: Chrome's page connection closed (code 1006)"); };
+test('closeTab: nothing saving, closed, then called until its socket closes', async () => {
+  const p = fakePage((m, asked) => (m === 'Runtime.evaluate' && asked.filter((a) => a === m).length === 2 ? gone() : {}));
+  await closeTab(p);
+  assert.deepEqual(p.asked, ["ev typeof SAVING === 'number' ? SAVING : 0", 'Page.close', 'Runtime.evaluate', 'Runtime.evaluate', 'socket closed']);
+});
+test('closeTab: a tab still answering after Page.close fails its caller, saying so', async () => {
+  const p = fakePage(() => ({}));
+  await assert.rejects(closeTab(p, { gone: 300 }), { message: 'closing the tab: still open 0.3 s after Page.close' });
+  assert.equal(p.asked.at(-1), 'socket closed');
+});
+test('closeTab: an error from Page.close other than the socket closing fails its caller', async () => {
+  const p = fakePage((m) => { if (m === 'Page.close') throw new Error('Page.close: Not attached to an active page'); return {}; });
+  await assert.rejects(closeTab(p), { message: 'closing the tab: Page.close: Not attached to an active page' });
+  assert.equal(p.asked.at(-1), 'socket closed');
+});
+test('the harness closes each case\'s tab with closeTab: the last one before the next, and the last at the end', async () => {
+  const pages = [];
+  const chrome = { newPage: async () => { const p = fakePage((m, asked) => (m === 'Runtime.evaluate' ? gone() : {})); pages.push(p); return p; } };
+  const tabs = oneTab(chrome);
+  const a = await tabs.next();
+  assert.deepEqual(a.asked, [], 'a new tab is not closed');
+  const b = await tabs.next();
+  assert.deepEqual(a.asked, ["ev typeof SAVING === 'number' ? SAVING : 0", 'Page.close', 'Runtime.evaluate', 'socket closed'], 'the last tab closed by closeTab before the next');
+  assert.deepEqual(b.asked, []);
+  await tabs.done();
+  assert.deepEqual(b.asked.slice(-2), ['Runtime.evaluate', 'socket closed'], 'the last tab closed at the end');
+  await tabs.done();
+  assert.equal(pages.length, 2);
+  // visit and the teardown take their tabs from oneTab, and nothing else in the harness closes a tab
+  const src = fs.readFileSync(new URL('./fixtures/artifact-viewer/harness.mjs', import.meta.url), 'utf8');
+  assert.equal(src.match(/'Page\.close'/g).length, 1, "the harness sends Page.close only in closeTab");
+  assert.equal(src.match(/chrome\.newPage\(\)/g).length, 1, 'the harness opens a tab only in oneTab');
+  assert.match(src, /const tabs = oneTab\(chrome\);\n  later\(\(\) => tabs\.done\(\)\);/);
+  assert.match(src, /async function visit\([^)]*\) \{\n    const p = await tabs\.next\(\);/);
+});
+test('a diagnosis\'s last looks: each form chrome.mjs gives is taken, anything else in their place refused', () => {
+  const at = (tail) => `Runtime.evaluate: no answer from Chrome in 30 s; tab 0123ABCD at about:blank; last heard on its socket: nothing; Chrome running; ${tail}`;
+  for (const tail of ['its page gives a second session no answer in 2 s; renderers: 12 0% cpu, 34 new', 'a second session: no answer in 1 s; renderers: no process info', 'its page gives a second session no answer in 2 s; diagnosis cut at 6 s', 'diagnosis cut at 6 s', "Chrome's endpoint: no answer in 2 s", "Chrome's endpoint: could not reach it"]) assert.match(at(tail), looks(HELD), tail);
+  assert.match(at('its page answers a second session in 3 ms; renderers: 12 100% cpu'), looks(ANY));
+  for (const tail of ['its page answers a second session in 3 ms; renderers: 12 0% cpu', 'its page gives a second session no answer in 2 s', 'renderers: 12 0% cpu', 'its page gives a second session no answer in 2 s; renderers: garbled', 'garbled; diagnosis cut at 6 s', 'its page gives a second session no answer in 2 s; renderers: 12 0% cpu; diagnosis cut at 6 s', "Chrome's endpoint: something else", "Chrome's endpoint: no answer in 2 s; renderers: 12 0% cpu", 'its page gives a second session no answer in 2 s; renderers: none']) assert.doesNotMatch(at(tail), looks(HELD), tail);
+});
+test('closeTab: a tab whose SAVING read gets no answer fails its caller at once, and is never sent Page.close', async () => {
+  const held = 'Runtime.evaluate: no answer from Chrome in 30 s; tab 0123ABCD at about:blank; a beforeunload dialog ("", at about:blank) open on this tab for 30.0 s';
+  const p = fakePage(() => ({}));
+  p.ev = async (x) => { p.asked.push(`ev ${x}`); throw new Error(held); };
+  await assert.rejects(closeTab(p), { message: `closing the tab: ${held}` });
+  assert.deepEqual(p.asked, ["ev typeof SAVING === 'number' ? SAVING : 0", 'socket closed']);
 });
