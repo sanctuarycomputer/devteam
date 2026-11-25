@@ -509,7 +509,7 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
   });
 
   await sub('A23: an open note whose newest turn is the owner\'s is kept with it, whatever the send said; the rest as today', async () => {
-    const KEPT = 'Kept with the note: Hand over sends it to the session drawing it.';
+    const KEPT = 'Not handed over yet. Hand over sends it to the supervisor.';
     const ago = (m) => new Date(Date.now() - m * 60000).toISOString();
     const own = (m, o = {}) => ({ id: 'u-20261120-100000000-owner', by: 'owner', at: ago(m), text: 'Make it primary', refs: [], question: null, files: [], ...o });
     const sup = (m) => ({ ...own(m), id: 'u-20261120-110000000-supervisor', by: 'supervisor', text: 'Why?' });
@@ -539,8 +539,8 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     ]) before.push([what, await says(row)]);
     for (const [what, said] of before) assert.notEqual(said, KEPT, what);
     const of = Object.fromEntries(before);
-    assert.match(of['a note handed over'], /supervisor/, 'handed over: as today');
-    assert.match(of['a note to check'], /supervisor/, 'to check: as today');
+    assert.equal(of['a note handed over'], 'With plan-pricing.', 'handed over: With plan-pricing.');
+    assert.equal(of['a note to check'], '', 'to check: no line');
     assert.match(of['a turn a session has'], /the agent on|kit-9-x/i, "a session's: as today");
     assert.equal(of["the supervisor's reply"], '', 'a reply: nothing, as today');
     assert.match(of['a resolved note'], /^Resolved/, 'resolved: as today');
