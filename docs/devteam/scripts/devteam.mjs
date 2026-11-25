@@ -27635,6 +27635,35 @@ function makeSession(role) {
   // a planner's is home's. s stays home's for the session, the agent and its policy.
   const R = role === 'worker' ? repoOfTicket(tickets().get(id)) : repo('home');
   const mb = R.settings.main_branch;
+  // A start makes its worktree locked, with this reason, and unlocks it once it is whole: one that is
+  // still locked was left by a start that stopped, or is being made now (kit-856).
+  const making = `devteam: a start of ${name} is making this worktree`;
+  // Is wt locked with that reason? From git's list, so a folder that is empty or gone counts too.
+  const unfinished = () => {
+    const at = path.join(realPath(path.dirname(wt)), name);
+    const list = R.git(['worktree', 'list', '--porcelain'], R.root);
+    // another worktree's broken record fails the list: then this one's own says
+    if (list === null) return readText(path.join(/^gitdir: (.*)$/m.exec(readText(path.join(wt, '.git')) ?? '')?.[1] ?? wt, 'locked'))?.trim() === making;
+    return list.split('\n\n').map((b) => b.split('\n')).some((ls) => ls.includes(`worktree ${at}`) && ls.includes(`locked ${making}`));
+  };
+  // what is at wt, in words, or null when it is a worktree of its own, or nothing. The commands clear
+  // only a locked one: unlock refuses on a worktree a start has finished since (kit-856).
+  const inRepo = `git -C ${shq(R.root)} worktree`;
+  const leftAt = () => {
+    const there = fs.existsSync(wt);
+    if (there && !fs.statSync(wt).isDirectory()) return `${wt} is a file, where the worktree goes: move it away`;
+    const locked = unfinished();
+    if (!there) return locked ? `git still holds a worktree for ${wt}, whose folder is gone: if no other start is making it, clear it (${inRepo} unlock ${shq(wt)} && ${inRepo} remove --force ${shq(wt)})` : null;
+    if (!locked && !fs.readdirSync(wt).length) return null;
+    const top = responderGit(['rev-parse', '--show-toplevel'], wt);
+    if (top.status !== 0 && fs.existsSync(path.join(wt, '.git'))) return `git can't read ${wt} as a worktree (${firstLine(top.stderr).replace(/^fatal: /, '') || `exit ${top.status}`}), and it may hold work: ${inRepo} repair ${shq(wt)} mends one that moved; if it holds nothing to keep, move it away`;
+    if (top.status !== 0 || realPath(top.stdout.trim()) !== realPath(wt)) return `${wt} is no worktree git knows: look in it, then move it away`;
+    if (!locked) return null;
+    const head = responderGit(['rev-parse', '--verify', '--quiet', 'HEAD'], wt);
+    return `the worktree ${wt} is there, ${head.status === 0 ? `at ${head.stdout.trim().slice(0, 8)}` : 'with no commit git can read'}: if no other start is making it and it holds nothing to keep, remove it (${inRepo} unlock ${shq(wt)} && ${inRepo} remove --force ${shq(wt)})`;
+  };
+  const leftBefore = leftAt();
+  if (leftBefore) die(`${name}'s start isn't finished, so nothing was started: ${leftBefore}, then start it again`);
   if (!fs.existsSync(wt)) {
     // what origin holds, by sha: main, and the branch if it was pushed (a moved fleet continues from
     // it, never from main). Every local ref is any session's to write without a push (kit-790).
@@ -27709,15 +27738,21 @@ function makeSession(role) {
       if (made.status !== 0) die(`could not make ${branch}: ${redactUrl(firstLine(made.stderr).replace(/^fatal: /, '')) || `exit ${made.status}`}; nothing was started`);
     }
     // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
-    const added = gitRun(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--no-guess-remote', wt, branch], R.root);
-    if (added.status !== 0) die(`git worktree add ${branch} failed: ${redactUrl(firstLine(added.err.split('\n').find((l) => /^fatal: /.test(l)) ?? added.err).replace(/^fatal: /, '')) || `exit ${added.status}`}; nothing was started`);
+    const leftWords = (left) => (left ? `, but ${left}${unfinished() ? '. If git gave no reason above, a post-checkout hook may have failed: mend it first' : ''}` : fs.existsSync(wt) && fs.readdirSync(wt).length ? `; ${wt} is there, made by another start: resume that` : '');
+    const added = gitRun(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--no-guess-remote', '--lock', '--reason', making, wt, branch], R.root);
+    if (added.status !== 0) die(`git worktree add ${branch} failed: ${redactUrl(firstLine(added.err.split('\n').find((l) => /^fatal: /.test(l)) ?? added.err).replace(/^fatal: /, '')) || `exit ${added.status}`}; nothing was started${leftWords(leftAt())}`);
     // The add checks the branch out by name, so a session moving it meanwhile would win: what landed is
     // read back, and the worktree undone if it isn't the sha expected, on the branch (its full name: a
     // tag of the same name makes git print a longer short one). A branch still where this launch put it
     // goes back; one that moved keeps what landed on it.
     const read = (args, cwd) => { const r = responderGit(args, cwd); return r.status === 0 ? r.stdout.trim() : null; };
     const undo = (why) => {
-      R.git(['worktree', 'remove', '--force', wt], R.root);
+      gitRun(['worktree', 'remove', '--force', '--force', wt], R.root); // forced twice: this start's own lock
+      // the branch stays under a worktree that is still there, or its files would read as changes to it
+      // an empty folder would be taken as a session's: with a file in it, it is refused
+      if (fs.existsSync(wt) && !fs.readdirSync(wt).length) { try { fs.writeFileSync(path.join(wt, 'start-unfinished.txt'), 'A start that failed could not remove this folder.\n'); } catch {} }
+      const left = leftAt() ?? (fs.existsSync(wt) ? `${wt} is still there, unlocked: look in it, then move it away` : null);
+      if (left) die(`${why}, so nothing was started; the undo couldn't remove it all, and ${branch} stays at ${short(read(['rev-parse', '--verify', '--quiet', ref], R.root) ?? 'no commit')}: ${left}, then start it again`);
       if (local !== sha) responderGit(['update-ref', '--no-deref', ...(local ? [ref, local, sha] : ['-d', ref, sha])], R.root);
       die(`${why}, so nothing was started; try again`);
     };
@@ -27735,6 +27770,8 @@ function makeSession(role) {
       if (filled.status !== 0) undo(`could not check out ${short(sha)}: ${redactUrl(firstLine(filled.err).replace(/^(fatal|error): /, '')) || `exit ${filled.status}`}`);
       landed(sha);
     }
+    const unlocked = responderGit(['worktree', 'unlock', wt], R.root);
+    if (unlocked.status !== 0) undo(`could not unlock the new worktree: ${redactUrl(firstLine(unlocked.stderr).replace(/^(fatal|error): /, '')) || `exit ${unlocked.status}`}`);
     madeWorktree = true;
   }
   // A harness keeps its sessions by directory on its own machine: a worktree made just now has no

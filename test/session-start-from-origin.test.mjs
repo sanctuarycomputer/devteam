@@ -782,6 +782,148 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
       assert.match(r.err, new RegExp(`${gone.slice(0, 8)} did not arrive`), 'R4');
       assert.equal(git(['rev-parse', 'refs/remotes/origin/main'], old), main, 'R4: the tracking ref is as it was');
     });
+    // a ticket whose worktree is gone and whose branch is behind origin's main, where marker.txt says tag
+    const behind = (id, tag) => {
+      ticket(id);
+      closeWindow(F, ok(old, ['worker', id], SUP));
+      ok(wt(id), ['phase', 'build'], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: id });
+      ok(old, ['worker', id, '--remove', '--force'], SUP);
+      write(path.join(old, 'marker.txt'), `main for ${tag}\n`);
+      git(['commit', '-qam', `main for ${tag}`], old);
+      git(['push', '-q', 'origin', 'main'], old);
+      return { at: git(['rev-parse', `refs/heads/ticket/${id}`], old), main: git(['rev-parse', 'HEAD'], old) };
+    };
+    // the command the words name, run as they give it
+    const cleared = (err, tag) => {
+      const cmd = / \((git -C .* worktree unlock .*)\), then start it again/.exec(err)?.[1];
+      assert.ok(cmd, `${tag}: a command is named: ${err}`);
+      execFileSync('sh', ['-c', cmd], { stdio: 'pipe' });
+    };
+    // what a retry over a worktree left behind must do: refuse, naming it; once it is gone, start whole
+    const refusedThenWhole = (id, tag, main, commit) => {
+      const r = run(old, ['worker', id, '--resume'], SUP);
+      assert.notEqual(r.status, 0, `${tag}: the retry is refused: ${r.out}`);
+      assert.match(r.err, new RegExp(`${id}'s start isn't finished, so nothing was started: the worktree ${wt(id)} is there, at ${commit.slice(0, 8)}`), `${tag}: the state named`);
+      cleared(r.err, tag);
+      ok(old, ['worker', id, '--resume'], SUP);
+      assert.equal(git(['rev-parse', 'HEAD'], wt(id)), main, `${tag}: then at origin's main`);
+      assert.equal(git(['status', '--porcelain'], wt(id)), '', `${tag}: then clean`);
+    };
+    await t.test('X1: a failing post-checkout hook on a branch behind origin: the worktree and its commit named, and no retry starts there', tmux, () => {
+      const { at, main } = behind('ch-74-e', 'X1');
+      const hook = path.join(old, '.git/hooks/post-checkout');
+      write(hook, '#!/bin/sh\nexit 1\n');
+      fs.chmodSync(hook, 0o755);
+      let r;
+      try { r = run(old, ['worker', 'ch-74-e', '--resume'], SUP); } finally { fs.rmSync(hook); }
+      assert.notEqual(r.status, 0, `X1: refused: ${r.out}`);
+      assert.ok(r.err.includes(`nothing was started, but the worktree ${wt('ch-74-e')} is there, at ${at.slice(0, 8)}`), `X1: named: ${r.err}`);
+      assert.match(r.err, /a post-checkout hook may have failed: mend it first/, 'X1: the hook');
+      refusedThenWhole('ch-74-e', 'X1', main, at);
+    });
+    await t.test('X2: an undo that can\'t remove the worktree names it, and leaves the branch on its files', tmux, () => {
+      const { main } = behind('ch-75-f', 'X2');
+      const r = run(old, ['worker', 'ch-75-f', '--resume'], before('git-no-undo', `*' read-tree '*|*' worktree remove '*`, (g) => `{ case " $* " in *' read-tree '*) '${g}' "$@" ;; esac; echo 'error: refused by the test' >&2; exit 4; }`).env);
+      assert.notEqual(r.status, 0, `X2: refused: ${r.out}`);
+      assert.equal(git(['status', '--porcelain'], wt('ch-75-f')), '', 'X2: no reversions staged');
+      assert.ok(r.err.includes(`the undo couldn't remove it all, and ticket/ch-75-f stays at ${main.slice(0, 8)}: the worktree ${wt('ch-75-f')} is there, at ${main.slice(0, 8)}`), `X2: named: ${r.err}`);
+      refusedThenWhole('ch-75-f', 'X2', main, main);
+    });
+    await t.test('X3: an empty folder an undo left: no retry starts there', tmux, () => {
+      const { main } = behind('ch-76-g', 'X3');
+      const r = run(old, ['worker', 'ch-76-g', '--resume'], before('git-half-undo', `*' read-tree '*|*' worktree remove '*`, (g) => `{ case " $* " in *' worktree remove '*) '${g}' "$@"; mkdir -p '${wt('ch-76-g')}' ;; esac; echo 'error: refused by the test' >&2; exit 4; }`).env);
+      assert.notEqual(r.status, 0, `X3: refused: ${r.out}`);
+      const again = run(old, ['worker', 'ch-76-g', '--resume'], SUP);
+      assert.notEqual(again.status, 0, `X3: the retry is refused: ${again.out}`);
+      assert.ok(again.err.includes(`${wt('ch-76-g')} is no worktree git knows`), `X3: named: ${again.err}`);
+      assert.ok(r.err.includes(`and ticket/ch-76-g stays at ${main.slice(0, 8)}: ${wt('ch-76-g')} is no worktree`), `X3: the first words: ${r.err}`);
+    });
+    for (const [tag, id, words, moved] of [['X4', 'ch-77-h', `*' update-ref --no-deref refs/heads/ticket/ch-77-h '*`, false], ['X5', 'ch-78-i', `*' read-tree '*`, true]]) {
+      await t.test(`${tag}: a launch killed ${moved ? 'between the move and the fill' : 'between the add and the move'} is found by the retry`, tmux, () => {
+        const { at, main } = behind(id, tag);
+        run(old, ['worker', id, '--resume'], before(`git-kills-${tag}`, words, () => '{ kill -9 $PPID; exit 9; }').env);
+        assert.ok(fs.existsSync(wt(id)), `${tag}: its worktree is there`);
+        refusedThenWhole(id, tag, main, moved ? main : at);
+      });
+    }
+    await t.test('X6: a second launch while the first is filling its worktree is refused, and the first starts', tmux, () => {
+      const { main } = behind('ch-79-j', 'X6');
+      const other = path.join(F.base, 'other-X6.sh');
+      const b = before('git-second-X6', `*' read-tree '*`, () => `sh '${other}'`);
+      write(other, `cd '${old}' && PATH='${process.env.PATH}' '${process.execPath}' docs/devteam/scripts/devteam.mjs worker ch-79-j --resume >'${other}.out' 2>&1\necho "exit $?" >>'${other}.out'\n`);
+      const r = run(old, ['worker', 'ch-79-j', '--resume'], b.env);
+      const said = fs.readFileSync(`${other}.out`, 'utf8');
+      assert.match(said, /ch-79-j's start isn't finished, so nothing was started/, `X6: ${said}`);
+      assert.equal(r.status, 0, `X6: the first starts: ${r.err}`);
+      assert.equal(git(['rev-parse', 'HEAD'], wt('ch-79-j')), main, 'X6: at origin\'s main');
+    });
+    await t.test('X7: a started worktree is unlocked; one locked with another reason still resumes', tmux, () => {
+      ticket('ch-80-k');
+      closeWindow(F, ok(old, ['worker', 'ch-80-k'], SUP));
+      assert.ok(!fs.existsSync(path.join(old, '.git/worktrees/ch-80-k/locked')), 'X7: unlocked');
+      git(['worktree', 'lock', '--reason', 'mine', wt('ch-80-k')], old);
+      const r = run(old, ['worker', 'ch-80-k', '--resume'], SUP);
+      assert.equal(r.status, 0, `X7: resumed: ${r.err}`);
+    });
+    await t.test('X8: a worktree that can\'t be unlocked is undone', tmux, () => {
+      ticket('ch-81-l');
+      const r = run(old, ['worker', 'ch-81-l'], refusing('git-no-unlock', `*' worktree unlock '*`));
+      assert.notEqual(r.status, 0, `X8: refused: ${r.out}`);
+      assert.ok(!fs.existsSync(wt('ch-81-l')), 'X8: no worktree');
+    });
+    await t.test('X9: an add that fails on a worktree another start has finished never says to remove it', tmux, () => {
+      behind('ch-88-s', 'X9');
+      const other = path.join(F.base, 'other-X9.sh');
+      const b = before('git-second-X9', `*' worktree add '*`, () => `sh '${other}'`);
+      write(other, `cd '${old}' && PATH='${process.env.PATH}' '${process.execPath}' docs/devteam/scripts/devteam.mjs worker ch-88-s --resume >/dev/null 2>&1\n`);
+      const r = run(old, ['worker', 'ch-88-s', '--resume'], b.env);
+      assert.notEqual(r.status, 0, `X9: refused: ${r.out}`);
+      assert.doesNotMatch(r.err, /worktree (remove|unlock|prune)/, 'X9: nothing to remove');
+      assert.ok(r.err.includes(`${wt('ch-88-s')} is there, made by another start`), `X9: named: ${r.err}`);
+    });
+    await t.test('X10: a killed start whose folder is gone is refused with a command that clears it', tmux, () => {
+      const { main } = behind('ch-89-t', 'X10');
+      run(old, ['worker', 'ch-89-t', '--resume'], before('git-kills-X10', `*' read-tree '*`, () => '{ kill -9 $PPID; exit 9; }').env);
+      fs.rmSync(wt('ch-89-t'), { recursive: true });
+      const r = run(old, ['worker', 'ch-89-t', '--resume'], SUP);
+      assert.notEqual(r.status, 0, `X10: refused: ${r.out}`);
+      assert.ok(r.err.includes(`git still holds a worktree for ${wt('ch-89-t')}, whose folder is gone`), `X10: named: ${r.err}`);
+      cleared(r.err, 'X10');
+      ok(old, ['worker', 'ch-89-t', '--resume'], SUP);
+      assert.equal(git(['rev-parse', 'HEAD'], wt('ch-89-t')), main, 'X10: then at origin\'s main');
+    });
+    await t.test('X13: when git can\'t list its worktrees, a killed start is still found', tmux, () => {
+      behind('ch-93-x', 'X13');
+      run(old, ['worker', 'ch-93-x', '--resume'], before('git-kills-X13', `*' read-tree '*`, () => '{ kill -9 $PPID; exit 9; }').env);
+      const r = run(old, ['worker', 'ch-93-x', '--resume'], refusing('git-no-list', `*' worktree list '*`));
+      assert.notEqual(r.status, 0, `X13: refused: ${r.out}`);
+      assert.match(r.err, /ch-93-x's start isn't finished, so nothing was started/, `X13: the state named: ${r.err}`);
+    });
+    await t.test('X14: a file where the worktree goes is refused in words', tmux, () => {
+      ticket('ch-94-y');
+      write(wt('ch-94-y'), 'x');
+      try {
+        const r = run(old, ['worker', 'ch-94-y'], SUP);
+        assert.match(r.err, /ch-94-y is a file, where the worktree goes/, 'X14');
+      } finally { fs.rmSync(wt('ch-94-y')); }
+    });
+    await t.test('X11: a worktree whose .git git can\'t follow is refused with repair, not a delete', tmux, () => {
+      ticket('ch-90-u');
+      closeWindow(F, ok(old, ['worker', 'ch-90-u'], SUP));
+      write(path.join(wt('ch-90-u'), '.git'), 'gitdir: /nowhere/at/all\n');
+      const r = run(old, ['worker', 'ch-90-u', '--resume'], SUP);
+      assert.notEqual(r.status, 0, `X11: refused: ${r.out}`);
+      assert.match(r.err, /git can't read .* as a worktree .* worktree repair /, 'X11: names repair');
+    });
+    await t.test('X12: the command the words name leaves a worktree that was finished since', tmux, () => {
+      const { main } = behind('ch-91-v', 'X12');
+      const other = path.join(F.base, 'other-X12.sh');
+      const b = before('git-second-X12', `*' read-tree '*`, () => `sh '${other}'`);
+      write(other, `cd '${old}' && PATH='${process.env.PATH}' '${process.execPath}' docs/devteam/scripts/devteam.mjs worker ch-91-v --resume >/dev/null 2>'${other}.err'; true\n`);
+      ok(old, ['worker', 'ch-91-v', '--resume'], b.env);
+      assert.throws(() => cleared(fs.readFileSync(`${other}.err`, 'utf8'), 'X12'), /is not locked/, 'X12: refused');
+      assert.equal(git(['rev-parse', 'HEAD'], wt('ch-91-v')), main, 'X12: still there');
+    });
   } finally { F.done(); }
 });
 
