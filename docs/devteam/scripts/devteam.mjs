@@ -3181,9 +3181,27 @@ function cmdLogSync() {
   // it, whether its PR is still open or was squash-merged and the branch kept. The extended branch
   // takes main in by a merge (still a fast-forward for the branch), so its PR is never behind and
   // carries only lines main doesn't have. A branch deleted on the forge leaves a stale
-  // origin/chore-log, dropped here, and the sync starts from main.
+  // origin/chore-log, dropped here, and the sync starts from main. Only origin saying so drops it
+  // (kit-884): a fetch that fails for any other reason (origin refused, a sibling's half-made
+  // worktree entry past fetchPastHalfMade's wait) keeps it, and the sync goes on from it while
+  // origin's chore-log is still that commit, or stops: started from main, its push would be refused.
   const main = loadSettings().main_branch;
-  if (!flags['dry-run'] && git(['fetch', '--quiet', 'origin', `+refs/heads/${LOG_BRANCH}:refs/remotes/origin/${LOG_BRANCH}`], wt) === null) git(['update-ref', '-d', `refs/remotes/origin/${LOG_BRANCH}`], wt);
+  if (!flags['dry-run']) {
+    const remote = `refs/remotes/origin/${LOG_BRANCH}`;
+    const f = fetchPastHalfMade(['fetch', '--quiet', 'origin', `+refs/heads/${LOG_BRANCH}:${remote}`]);
+    if (f.status !== 0) {
+      const why = firstLine(f.err) || `exit ${f.status}`;
+      // ls-remote matches a pattern against the end of a ref's name, so only the exact name counts
+      const ls = gitRun(['ls-remote', '--exit-code', 'origin', `refs/heads/${LOG_BRANCH}`]);
+      const theirs = ls.status === 0 ? ls.out.split('\n').map((l) => l.split('\t')).find(([, name]) => name === `refs/heads/${LOG_BRANCH}`)?.[0] ?? null : null;
+      const kept = resolveCommit(remote);
+      // origin answered without the branch (exit 2, or only a ref whose name ends in it): gone
+      if (ls.status === 2 || (ls.status === 0 && !theirs)) git(['update-ref', '-d', remote]);
+      else if (ls.status !== 0) die(`couldn't fetch ${LOG_BRANCH} from origin (${why}) or ask origin for it (${firstLine(ls.err) || `exit ${ls.status}`}): kept origin/${LOG_BRANCH} and synced nothing; run log-sync again`);
+      else if (theirs !== kept) die(`couldn't fetch ${LOG_BRANCH} from origin (${why}), and origin's is at ${theirs.slice(0, 12)}, ${kept ? `not ${kept.slice(0, 12)}` : 'with no copy here'}: kept origin/${LOG_BRANCH} and synced nothing; run log-sync again`);
+      else warn(`couldn't fetch ${LOG_BRANCH} from origin (${why}); origin's is still at ${kept.slice(0, 12)}, so this sync goes on from it`);
+    }
+  }
   // each checkout, merge and abort with -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
   if (resolveCommit(`origin/${LOG_BRANCH}`)) {
     gitOrDie(['-c', 'core.useReplaceRefs=false', 'checkout', '--quiet', '-B', LOG_BRANCH, `origin/${LOG_BRANCH}`], wt);
@@ -25097,9 +25115,10 @@ const boxHealthState = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
 //
 // A project's dashboard, from the hub's scan (which can't tell a refused port from a slow one):
 //   up     a hello names the root: its port and its fleet's mode are the hello's
-//   slow   no hello, but its port (the last hello's for the root, else its run/dashboard-port) takes
-//          a TCP connection, or doesn't answer the connection within 1 s of real(): still counted,
-//          with that port and the last hello's mode
+//   slow   no hello, but its port (the last hello's for the root, else its run/dashboard-port, or
+//          while that read is late the port its last read had) takes a TCP connection, or doesn't
+//          answer the connection within 1 s of real(): still counted, with that port and the last
+//          hello's mode
 //   none   no port known, the port refuses the connection, or another root's hello holds it: not
 //          counted, and its rows have no port
 // A project's ready, for answer.headroom and the parts after it:
@@ -25191,10 +25210,11 @@ const boxHealthPool = (() => {
       const run_ = path.join(root, 'docs', 'devteam', 'run');
       const text = await settled(ctx, r, path.join(run_, 'cache', 'pool.json'), POOL_MAX_BYTES);
       if (run !== r || ctx.stopped()) return;
+      // this root's last read: kept by a read that is late
+      const was = r.files.find((x) => x.root === root);
       let f;
       if (text === LATE) {
         // its last read stands (its at still ages it), or none
-        const was = r.files.find((x) => x.root === root);
         f = { root, name, pool: was?.pool ?? null, refused: !!was?.refused };
         ctx.say("a project's pool.json did not answer within 2 s: its last read is kept");
       } else {
@@ -25206,7 +25226,7 @@ const boxHealthPool = (() => {
       else {
         const last = r.hellos.get(root);
         let saved;
-        if (last?.port === undefined) { const t = await settled(ctx, r, path.join(run_, 'dashboard-port'), 16); saved = t === LATE ? undefined : portOf(Number(t?.trim())); }
+        if (last?.port === undefined) { const t = await settled(ctx, r, path.join(run_, 'dashboard-port'), 16); saved = t === LATE ? was?.port : portOf(Number(t?.trim())); }
         const port = last?.port ?? saved;
         const how = port === undefined || (held.has(port) && held.get(port) !== root) ? 'refused' : await knock(ctx, r, port);
         if (run !== r || ctx.stopped()) return;
