@@ -32,14 +32,19 @@ test('a call with no answer says what Chrome was doing', { skip: canDrive ? fals
         assert.ok(ra.e && rb.e, 'both calls fail');
         // the 30 s as it was, the diagnosis after it bounded: never a second wait, never sooner
         assert.ok(ra.ms >= 30000 && ra.ms < 36500, `took ${ra.ms} ms`);
-        assert.match(ra.e.message, /^Runtime\.evaluate: no answer from Chrome in 30 s; tab [0-9A-F]{8} at about:blank; /);
+        assert.match(ra.e.message, /^Runtime\.evaluate: no answer from Chrome in 30 s; tab [0-9A-F]{8} (at about:blank|\(Chrome's list of tabs: no answer in 2 s\)); /);
         assert.match(ra.e.message, /; an alert dialog \("held here", at about:blank\) open on this tab for \d+\.\d s; /);
         const tab = ra.e.message.match(/; tab ([0-9A-F]{8}) /)[1];
         assert.match(rb.e.message, new RegExp(`; an alert dialog \\("held here", at about:blank\\) open on tab ${tab} for `), 'the other tab names the dialog on the held one');
         assert.match(ra.e.message, /; last heard on its socket: [^;]*an alert dialog \d+\.\d s ago/);
         assert.match(ra.e.message, /; Chrome running; /);
-        assert.match(ra.e.message, /; its page gives a second session no answer in 2 s(; |$)/);
-        assert.match(rb.e.message, /; renderers: \d+ (\d+% cpu|new)(, \d+ (\d+% cpu|new))*$/);
+        // On a loaded runner a look can run out its own bound, or the whole look the 6 s cut (kit-918): each
+        // line is then the form that says so, and never a wrong one. The held page never answers the second session.
+        const cut = /; diagnosis cut at 6 s$/;
+        assert.doesNotMatch(ra.e.message, /its page answers a second session/);
+        if (!cut.test(ra.e.message)) assert.match(ra.e.message, /; (its page gives a second session no answer in 2 s|a second session: no answer in 1 s)(; |$)/);
+        if (!cut.test(rb.e.message)) assert.match(rb.e.message, /; renderers: (\d+ (\d+% cpu|new)(, \d+ (\d+% cpu|new))*|no process info)$/);
+        for (const r of [ra, rb]) if (/renderers: no process info|a second session: no answer|Chrome's list of tabs: no answer|diagnosis cut at 6 s/.test(r.e.message)) t.diagnostic(`a look ran out its bound: ${r.e.message.slice(r.e.message.indexOf('; Chrome '))}`);
         // answered by the test, the page goes on: the held call ran once
         await held.send('Page.handleJavaScriptDialog', { accept: true });
         await new Promise((r) => setTimeout(r, Math.max(500, until - Date.now() + 500)));
@@ -86,7 +91,7 @@ test('a call with no answer says what Chrome was doing', { skip: canDrive ? fals
         const r = await failing(closeTab(p));
         assert.ok(r.e, 'the close fails');
         assert.ok(r.ms >= 30000 && r.ms < 36500, `took ${r.ms} ms`);
-        assert.match(r.e.message, /^closing the tab: still open after Page\.close; Runtime\.evaluate: no answer from Chrome in 30 s; tab [0-9A-F]{8} at about:blank; a beforeunload dialog \("", at about:blank\) open on this tab for \d+\.\d s; /);
+        assert.match(r.e.message, /^closing the tab: still open after Page\.close; Runtime\.evaluate: no answer from Chrome in 30 s; tab [0-9A-F]{8} (at about:blank|\(Chrome's list of tabs: no answer in 2 s\)); a beforeunload dialog \("", at about:blank\) open on this tab for \d+\.\d s; /);
       } finally { await chrome.close(); }
     }),
     t.test('a tab still saving is closed once the save ends, with no dialog', async () => {
