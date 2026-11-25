@@ -117,6 +117,48 @@ const FRAMES = 'new Promise((r) => requestAnimationFrame(() => requestAnimationF
 const STEADY = (sel) => `(() => { const e = document.querySelector(${JSON.stringify(sel)}); if (!e) return false; const r = e.getBoundingClientRect(), k = [r.left, r.top, r.width, r.height].join(); const was = (window.__steady ||= {})[${JSON.stringify(sel)}]; window.__steady[${JSON.stringify(sel)}] = k; return was === k; })()`;
 const ON_PAGE = (id) => `!!document.querySelector('main.page > section[data-page="${id}"]')?.classList.contains('on')`;
 
+// A click on a peek's #inbox link whose wait times out says where it landed: what is at the click's point, the
+// link's box, the peek's state and the page's hash, then and at each pointer event (its target, the link's box,
+// whether the link is still the node armed on, whether the page prevented it). It reads only: the click is
+// p.click's one press, and the wait is the caller's. Arming brings the link into view as p.click does, and its
+// times (ms) count from arming, one round trip before the press; at most 200 events and 200 redraws are kept.
+// The last event's point is the click's; with none, the middle of the link as armed.
+const armClick = (sel) => `(() => {
+  const say = (e) => !e ? 'nothing' : e === document ? 'document' : e === window ? 'window' : \`\${e.tagName.toLowerCase()}\${e.id ? '#' + e.id : ''}\${[...e.classList].map((c) => '.' + c).join('')}\${e.getAttribute('href') ? \`[href="\${e.getAttribute('href')}"]\` : ''} "\${(e.textContent || '').trim().replace(/\\s+/g, ' ').slice(0, 40)}"\`;
+  const link = () => document.querySelector(${JSON.stringify(sel)});
+  const box = (e) => { if (!e) return null; const r = e.getBoundingClientRect(); return [r.left, r.top, r.width, r.height].map((v) => Math.round(v * 10) / 10); };
+  const d = document.getElementById('drawer');
+  link()?.scrollIntoView({ block: 'center' });
+  const armed = link(), armedBox = box(armed), t0 = performance.now(), events = [], redraws = [];
+  const ms = () => Math.round(performance.now() - t0);
+  const look = (e) => { const ev = { type: e.type, ms: ms(), x: e.clientX, y: e.clientY, target: say(e.target), link: box(link()), same: link() === armed }; if (events.length < 200) events.push(ev); setTimeout(() => { ev.prevented = e.defaultPrevented; }, 0); };
+  const types = ['mousemove', 'mousedown', 'mouseup', 'click'];
+  for (const k of types) addEventListener(k, look, true);
+  const seen = new MutationObserver(() => redraws.length < 200 && redraws.push({ ms: ms(), link: box(link()), same: link() === armed }));
+  seen.observe(document.getElementById('drawer-body'), { childList: true, subtree: true });
+  window.__click = {
+    stop() { for (const k of types) removeEventListener(k, look, true); seen.disconnect(); delete window.__click; },
+    said() {
+      const last = events[events.length - 1];
+      const [x, y] = last ? [last.x, last.y] : armedBox ? [armedBox[0] + armedBox[2] / 2, armedBox[1] + armedBox[3] / 2] : [0, 0];
+      return { point: [x, y], from: last ? last.type : 'no pointer event reached the page; the link as it was', at: say(document.elementFromPoint(x, y)), link: { box: box(link()), armed: armedBox, same: link() === armed },
+        peek: { kind: DRAWER.kind, id: DRAWER.id, hidden: d.hidden, open: document.body.classList.contains('peek-open'), transform: getComputedStyle(d).transform, box: box(d) },
+        hash: location.hash, page: history.state?.page ?? null, panel: { th: TH.th, open: document.body.classList.contains('threads-open') }, events, redraws };
+    },
+  };
+})()`;
+const clickSaying = async (p, sel, wait) => {
+  await p.ev(armClick(sel));
+  try {
+    await p.click(sel);
+    await wait();
+  } catch (e) {
+    const said = await p.ev('window.__click.said()').catch((x) => `not read: ${x.message}`);
+    e.message += `; the click: ${JSON.stringify(said)}`;
+    throw e;
+  } finally { await p.ev('window.__click?.stop()').catch(() => {}); }
+};
+
 test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
   const { p, soon, again, size, reload, fx, chrome, later, port } = await open(t, '#overview');
   const { Q } = fx;
@@ -225,8 +267,7 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     // link moving down (a click on where it was lands on nothing)
     await soon(`PEEKS.has(peekKey('lesson', ${JSON.stringify(fx.L1)})) && ${STEADY('#drawer-body a[href="#inbox"]')}`, "the lesson's peek drawn with its read, the link still");
     const lessonHash = await p.ev('location.hash');
-    await p.click('#drawer-body a[href="#inbox"]');
-    await soon(`history.state?.page === '#loop?th=inbox' && ${ON_INBOX} && !document.getElementById('drawer').hidden`, 'the peek open, the panel on Inbox under it');
+    await clickSaying(p, '#drawer-body a[href="#inbox"]', () => soon(`history.state?.page === '#loop?th=inbox' && ${ON_INBOX} && !document.getElementById('drawer').hidden`, 'the peek open, the panel on Inbox under it'));
     assert.equal(await p.ev('location.hash'), lessonHash, 'the peek\'s head kept: no #inbox hop');
     assert.equal(await p.ev(ON_PAGE('loop')), true, 'still Loop');
     await p.click('#th-close');
@@ -255,8 +296,7 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     await p.ev('new Promise((r) => setTimeout(() => r(true), 300))');
     assert.equal(await p.ev(IS_OPEN), false, 'still closed');
     await soon(STEADY(LINK), "the peek's Inbox link still");
-    await p.click(LINK);
-    await soon(`history.state?.page === '#loop?lt=orient&th=inbox' && ${ON_PAGE('loop')} && ${ON_INBOX} && !document.getElementById('drawer').hidden`, "the peek's link: the panel on Inbox over Loop, the peek open");
+    await clickSaying(p, LINK, () => soon(`history.state?.page === '#loop?lt=orient&th=inbox' && ${ON_PAGE('loop')} && ${ON_INBOX} && !document.getElementById('drawer').hidden`, "the peek's link: the panel on Inbox over Loop, the peek open"));
     assert.equal(await p.ev('location.hash'), lessonAt, 'the peek\'s head kept');
     await p.click('#th-close');
     await soon(`!${IS_OPEN}`, 'the panel closed');
@@ -309,6 +349,31 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     const soon1 = soonIn(q1, 30000);
     await soon1(`DRAWER.kind === 'q' && DRAWER.id === '${fx.q.q3}' && !document.getElementById('drawer').hidden && !!document.querySelector('#drawer-body [id="p-q-' + '${fx.q.q3}' + '"]')`, 'cold: the peek with its card');
     assert.deepEqual(await q1.ev('window.__thrown'), [], 'nothing thrown');
+  });
+
+  // a click lost to something over the link: the failure says what took it (kit-880)
+  await t.test('a lost click says where it landed', async () => {
+    const LINK = '#drawer-body a[href="#inbox"]';
+    await p.ev("location.hash = '#loop'");
+    await soon(`${ON_PAGE('loop')} && !${IS_OPEN}`, 'Loop');
+    await p.ev(`location.hash = '#lesson/${fx.L1}'`);
+    await soon(`DRAWER.id === ${JSON.stringify(fx.L1)} && !!document.querySelector('${LINK}') && getComputedStyle(document.getElementById('drawer')).transform === 'none' && PEEKS.has(peekKey('lesson', ${JSON.stringify(fx.L1)})) && ${STEADY(LINK)}`, "the lesson's peek at rest, its Inbox link still");
+    await p.ev("(() => { const c = document.createElement('div'); c.id = 'cover'; c.style.cssText = 'position:fixed;inset:0;z-index:2147483647'; document.body.append(c); })()");
+    await p.at(LINK);
+    const r = await p.ev(`(() => { const b = document.querySelector('${LINK}').getBoundingClientRect(); return [b.left, b.top, b.width, b.height].map((v) => Math.round(v * 10) / 10); })()`);
+    let said = null;
+    await assert.rejects(clickSaying(p, LINK, () => soonIn(p, 300)(IS_OPEN, 'the panel')), (e) => { said = e.message; return true; });
+    await p.ev("document.getElementById('cover').remove()");
+    assert.match(said, /^timed out: the panel; /, 'the wait\'s own words first');
+    const j = JSON.parse(said.slice(said.indexOf('; the click: ') + '; the click: '.length));
+    assert.match(j.at, /^div#cover /, `the element at the click's point: ${said}`);
+    assert.deepEqual(j.link.box, r, "the link's box");
+    assert.deepEqual([j.peek.kind, j.peek.id, j.peek.hidden, j.peek.open], ['lesson', fx.L1, false, true], "the peek's state");
+    assert.equal(j.hash, `#lesson/${fx.L1}`, "the page's hash");
+    assert.deepEqual(j.events.filter((e) => e.type !== 'mousemove').map((e) => [e.type, e.target.split(' ')[0], e.prevented]), [['mousedown', 'div#cover', false], ['mouseup', 'div#cover', false], ['click', 'div#cover', false]], 'the press, each event and its target');
+    assert.equal(await p.ev('window.__click === undefined'), true, 'the recorder gone');
+    await p.ev("document.getElementById('drawer-close').click()");
+    await soon("document.getElementById('drawer').hidden", 'the peek closed');
   });
 
   // AC3, first part (done-when 3)
