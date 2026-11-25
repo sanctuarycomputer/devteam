@@ -44,6 +44,9 @@ test('the Efficiency page', { skip: canDrive ? false : 'needs Chrome and a Node 
   const load = async (fx, hash = '#efficiency') => {
     if (script) await p.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: script });
     script = (await p.send('Page.addScriptToEvaluateOnNewDocument', { source: dataRewriteInit(fx) })).identifier;
+    // nothing still saving: the page asks before leaving while a press is out (beforeunload), and that
+    // dialog, which nothing here answers, would hold the tab (kit-914)
+    await soon("typeof SAVING !== 'number' || SAVING === 0", 'nothing still saving');
     await p.send('Page.navigate', { url: 'about:blank' });
     await soon("location.href === 'about:blank'", 'a blank page');
     await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/${hash}` });
