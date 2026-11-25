@@ -245,12 +245,31 @@ test('H17 an answer dropped on a failed read leaves the dialog up, and the next 
   await allow({ DEVTEAM_TEST_BROWSER_VIEW_READ_FAILS: flag });
   const { c, qid, d } = await heldDialog();
   fs.writeFileSync(flag, '');
-  try { c.send({ t: 'dialog', id: d.id, accept: true }); await sleep(700); } finally { fs.rmSync(flag, { force: true }); }
+  try { c.send({ t: 'dialog', id: d.id, accept: true }); await sleep(2000); } finally { fs.rmSync(flag, { force: true }); }
   assert.equal(dsite.answered, null, 'the first is dropped');
   c.send({ t: 'dialog', id: d.id, accept: true });
   await pageGot('true');
   await release(qid);
   await browser(a, ['stop']);
+});
+
+// the renderers below this test's own Chrome, from its state file's pid
+const renderersOf = (root) => {
+  const kids = (p) => fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x)).filter((x) => { try { const st = fs.readFileSync(`/proc/${x}/stat`, 'utf8'); return Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[1]) === p; } catch { return false; } }).map(Number);
+  const all = (p) => kids(p).flatMap((k) => [k, ...all(k)]);
+  return all(root).filter((p) => { try { return fs.readFileSync(`/proc/${p}/cmdline`, 'utf8').includes('--type=renderer'); } catch { return false; } });
+};
+test('H25 its page gone, the view is told it ended', { ...opts, skip: !canDrive ? 'needs Chrome and Node 22+' : fs.existsSync('/proc') ? false : 'needs /proc' }, async () => {
+  const { c, qid, d, n } = await heldDialog();
+  const pids = renderersOf(readState(a).chrome_pid);
+  assert.ok(pids.length > 0);
+  for (const pid of pids) try { process.kill(pid, 'SIGKILL'); } catch {}
+  const e = await c.wait((m) => m.t === 'dialog_end', 5000, n);
+  assert.equal(e.id, d.id);
+  c.send({ t: 'dialog', id: d.id, accept: true });
+  await sleep(500);
+  assert.equal(dsite.answered, null);
+  await release(qid);
 });
 
 test('H10 the view page itself, in real Chrome: the owner presses OK and the page in the browser gets true', opts, async () => {

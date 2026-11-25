@@ -13,7 +13,7 @@ const opts = { skip, timeout: 120000 };
 if (mustRun && !canDrive) test('Chrome is needed on CI\'s Node 22+', () => assert.fail('Chrome is needed on CI\'s Node 22+: this file must run there, not skip'));
 dialogsFile();
 
-test('H5 no agent answers it: every verb but status is refused, and stop answers Cancel', opts, async () => {
+test('H5 no agent answers it: every verb but status is refused, and stop is never an OK', opts, async () => {
   const { qid } = await heldDialog();
   for (const v of [['snapshot'], ['press', 'Enter'], ['open', `${dsite.origin}/plain`], ['back'], ['tabs'], ['screenshot']]) assert.equal((await browser(a, v)).status, 3, v.join(' '));
   // the daemon itself, past the CLI's own check

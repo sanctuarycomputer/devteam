@@ -34903,10 +34903,10 @@ function browserDialogSeen(ctx, type, message) {
 // browser (read from the log as browserDialogSeen does; a failed read, or a close pending, is no hold) is
 // left open and sent to the view, and to a viewer who connects later; only browserOwnerAnswer, from that
 // view's socket, answers it, with no timeout. ctx.ownerDialogs: session id → { id, kind, url, text,
-// default? }, at most one a tab, in memory only: never logged, stored or told to the agent.
+// default?, frame? }, at most one a tab, in memory only: never logged, stored or told to the agent.
 const BROWSER_OWNER_KINDS = ['confirm', 'prompt', 'beforeunload'];
 const BROWSER_OWNER_TEXT = 2000;
-const browserOwnerCut = (s) => [...String(s ?? '').slice(0, 2 * BROWSER_OWNER_TEXT)].slice(0, BROWSER_OWNER_TEXT).join('').slice(0, BROWSER_OWNER_TEXT).toWellFormed();
+const browserOwnerCut = (s) => String(s ?? '').slice(0, BROWSER_OWNER_TEXT).toWellFormed();
 // Who asks, masked: the frame's URL; for a frame with none of its own (srcdoc, blob, data), which can be
 // another site's, the page it is in, said to be a frame there; never the URL the tab was opening.
 const browserOwnerAsker = (url, top) => {
@@ -35604,7 +35604,8 @@ function browserStartGate(ctx) {
 }
 // The watch, from start to stop: every 500 ms a fresh fold (browserFresh keys it cheaply), ctx.held
 // kept, and a close not yet handled queued once on the verbs' queue (ctx.gateQueued, set when queued
-// and cleared when the job ends, so a close queued or running isn't queued again). With
+// and cleared when the job ends, so a close queued or running isn't queued again); the owner's dialogs
+// (kit-770) end as that close is seen, off the queue. With
 // DEVTEAM_TEST_BROWSER_WATCH_HANDLE=0 (tests) it keeps ctx.held only: a close is then handled by a
 // verb's pre-verb read or wait's settle alone.
 function browserWatch(ctx) {

@@ -28,9 +28,9 @@ export const PAGES = {
   '/later': page('Later', `<script>document.getElementById('r').textContent = 'loaded'; const w = setInterval(async () => { if (await (await fetch('/go')).text() !== 'go') return; clearInterval(w); const v = confirm(${JSON.stringify(TEXT.later)}); document.getElementById('r').textContent = 'later confirm returned ' + v; fetch('/answered?v=' + v); }, 100);</script>`),
   // a confirm asked once, on the test's word (one poll at a time, so never twice)
   '/hconfirm': page('Confirm later', `<script>(async () => { while ((await (await fetch('/go')).text()) !== 'go') await new Promise((r) => setTimeout(r, 20)); const v = confirm(${JSON.stringify(TEXT.later)}); fetch('/answered?v=' + v); })();</script>`),
-  // a confirm, a prompt or a beforeunload on the test's word, its answer to /answered
   // words and a default far over the limit, at an address with a secret in its query
   '/hlong': page('Long', `<script>(async () => { while ((await (await fetch('/go')).text()) !== 'go') await new Promise((r) => setTimeout(r, 100)); const v = prompt('w'.repeat(1999) + '\\u{1F600}' + 'w'.repeat(1000), 'v'.repeat(3000)); fetch('/answered?v=' + encodeURIComponent(JSON.stringify(v))); })();</script>`),
+  // a prompt on the test's word, its answer to /answered
   '/hprompt': page('Prompt', `<script>(async () => { while ((await (await fetch('/go')).text()) !== 'go') await new Promise((r) => setTimeout(r, 100)); const v = prompt(${JSON.stringify(TEXT.prompt)}, 'typed by default'); fetch('/answered?v=' + encodeURIComponent(JSON.stringify(v))); })();</script>`),
   // speaks again the moment its confirm is answered
   '/hspeaks': page('Speaks', `<script>(async () => { while ((await (await fetch('/go')).text()) !== 'go') await new Promise((r) => setTimeout(r, 100)); const v = confirm('q'); fetch('/answered?v=' + v); alert(${JSON.stringify(`${MARK} ownersecret`)} + v); })();</script>`),

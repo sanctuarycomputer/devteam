@@ -567,7 +567,10 @@ test('a page\'s dialog that swaps under the pointer arms again; one that ends is
     await until(() => askOpen(p), 'the first');
     await armed(p);
     const at = await askBox(p, 'ask-yes');
-    const got = await sent(c, async () => { c.send({ t: 'dialog_end', id: ASK.id }); await until(async () => (await text(p, 'ask-said')) === 'second', 'the second'); await press(p, at); }, 200);
+    await p.ev(`document.getElementById('ask-yes').focus()`);
+    let focus = null;
+    const got = await sent(c, async () => { c.send({ t: 'dialog_end', id: ASK.id }); await until(async () => (await text(p, 'ask-said')) === 'second', 'the second'); focus = await p.ev(`document.activeElement.id`); await press(p, at); }, 200);
+    assert.equal(focus, 'ask-from', 'the second starts on neither answer');
     assert.deepEqual(got, [], 'the swap is not answered by a press meant for the first');
     // a press begun before the answers armed, and let go after, is no answer
     const early = await sent(c, async () => {
