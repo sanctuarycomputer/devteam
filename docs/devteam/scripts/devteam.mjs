@@ -8152,18 +8152,6 @@ function selfDraftErrors(text, has) {
 function partPath(p) {
   return String(p).split('/').filter((s) => s !== '' && s !== '.').join('/');
 }
-// The parts' code paths that has(partPath(p)) doesn't find: [{ part, path }], each path as written,
-// once, in file order.
-function selfPathsMissing(block, has) {
-  const missing = [];
-  const seen = new Set();
-  for (const p of block.parts) for (const c of p.code) {
-    if (seen.has(c)) continue;
-    seen.add(c);
-    if (!has(partPath(c))) missing.push({ part: p.id, path: c });
-  }
-  return missing;
-}
 // Whether a normalised path is on disk under the repo root (the project folder, for a project outside
 // its repo: selfRoot), each segment matched by its exact case (as git reads it), so App/ is missing
 // beside app/ on a disk that folds case too.
@@ -8280,8 +8268,9 @@ function worldMissingSeverity(cls) {
   return questions().some((q) => q.status === 'open' && q.class === cls) ? 'medium' : 'high';
 }
 // metrics' self findings, read from main (none with no main, or the project outside the repo), each
-// keyed so observeFindings keeps one observation per path or strategy blob: self-drift once per part
-// path missing at main while main's self.md holds; self-unlinked while main has a self.md its
+// keyed so observeFindings keeps one observation per path or strategy blob: self-drift once while
+// main's self.md is version 1 (key self@1, asking for the plain version, and none per path), else
+// once per part link whose path main lacks (key the path from the repo root); self-unlinked while main has a self.md its
 // strategy doesn't link; both low. self-missing while the strategy is written and main has no
 // self.md, its next step the strategy-change link first when the strategy doesn't link it, then
 // self-change: high until that step is asked, medium while it is (worldMissingSeverity).
@@ -8293,8 +8282,11 @@ function selfFindings(add) {
   const strategyKey = git(['rev-parse', '--verify', '--quiet', `${main}:${strategyRel}`]) ?? undefined;
   const linked = linksSelf(strategy);
   if (text !== null) {
-    const { block } = selfDoc(text);
-    if (block) for (const m of selfPathsMissing(block, hasAt(main))) add('low', 'self-drift', 'self', `part ${m.part}'s path ${m.path} is not on main`, 'the code moved: draft a new self.md in a chore (self check, then chore pr and ask self-change; supervisor.md, Monitoring)', { key: m.path });
+    if (selfPlainVersion(text) === 1) add('low', 'self-drift', 'self', "main's self.md is version 1 (a fenced self block)", 'draft self.md as a plain document in a chore, each part a link to its folder or file (self check, then chore pr and ask self-change; supervisor.md, Monitoring)', { key: 'self@1' });
+    else {
+      const has = hasAt(main);
+      for (const p of selfPlainCheck(text, { root: selfRoot(), has: () => true }).parts) if (!has(p)) add('low', 'self-drift', 'self', `part ${p} is not on main`, 'the code moved: draft a new self.md in a chore (self check, then chore pr and ask self-change; supervisor.md, Monitoring)', { key: p });
+    }
     if (!linked) add('low', 'self-unlinked', 'self', 'main has self.md and its strategy.md does not link it', 'propose a strategy-change linking [self.md](./self.md) in place of any lines restating what the project is, in its own PR', { key: strategyKey });
   } else if (strategyState() === 'written') {
     const draft = 'draft self.md from the code and the strategy in a chore, run self check, and ask self-change (supervisor.md, Monitoring)';
