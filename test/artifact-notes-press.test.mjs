@@ -10,14 +10,17 @@ import { notes, AT, SHOT, ADDR, ROW, withFrame, V_C11, NEWER } from './fixtures/
 test('the viewer: what a framed page cannot do to a press, the bar, the card', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
   const X = await notes(t, 'artifact-notes-press');
   const { sub } = X;
-  const { N, AV_WT, plant, openAt, shown, text, has, tabOf, cardOf, holdPoll, LIVE, ARMED, at, press, settled, enter, forge, spot, SETTLE, acts, heldShown, byArrow, tapOn } = X;
+  const { N, AV_WT, AV_MAIN, plant, openAt, shown, text, has, tabOf, cardOf, holdPoll, LIVE, ARMED, at, press, settled, enter, forge, spot, SETTLE, acts, heldShown, byArrow, tapOn } = X;
   // a press that must count, on a control that is live: made again only if its second began again meanwhile, as frames that
   // stall on a busy box make it; a live control's press that doesn't count is red
   const counts = async (V, sel, done, what, how = press) => {
     const el = `document.querySelector(${J(sel)})`, since = `([...avStep.press.seen.values()].find((r) => r.el === ${el})?.since ?? null)`;
     for (let k = 0; k < 6; k++) {
-      await V.soon(LIVE(el), `${what}: it is live`);
-      const was = await V.p.ev(since);
+      // (read in one go: a second begun again between two reads would look like none)
+      let was = null;
+      const end = Date.now() + 8000;
+      while (was === null && Date.now() < end) { was = await V.p.ev(`${LIVE(el)} ? ${since} : null`); if (was === null) await new Promise((r) => setTimeout(r, 40)); }
+      assert.notEqual(was, null, `${what}: it is live`);
       await how(V, sel);
       if (await V.settle(done, 1500)) return;
       assert.notEqual(await V.p.ev(since), was, `${what}: a live control's press counts`);
@@ -386,5 +389,47 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
     await X.soon(`document.querySelector('#tl-card .tl-addr [data-tl-accept]').classList.contains('waiting')`, 'setup: its second begun again');
     await settled(X);
     await X.p.ev('(clearInterval(window.__rd), true)');
+  });
+
+  await sub('A25: at phone, tablet and desktop widths every control of the bar is its own, inside the viewer', async () => {
+    const V = await tabOf({ [N.trial]: ROW.C20(), [N.plans]: withFrame(ROW.C12(), ''), [N.onMain]: ROW.C20() });
+    // the bar as full as it gets, set and measured in one go: a 34-character session, With, the Public tile
+    const bad = (tile) => V.p.ev(`(() => {
+      const $$ = (id) => document.getElementById(id), view = $$('artifact-view').getBoundingClientRect(), out = [];
+      $$('av-where').textContent = AV.at === 'main' ? 'main' : 'plan-pricing-with-a-longer-name-34';
+      $$('av-with').hidden = false; $$('av-with').textContent = 'With plan-pricing-with-a-longer-name-34';
+      const w = document.querySelector('.av-pub-wrap'), was = w.innerHTML;
+      w.innerHTML = ${tile ? J('<button class="ghost av-pill amber" id="zz-pub">Public · update available</button>') : J('')};
+      for (const id of ['av-prev', 'av-next', 'av-filter', 'av-handover', 'av-ver', 'av-reload', 'av-tab', 'av-close', ...(${!!tile} ? ['zz-pub'] : [])]) {
+        const e = $$(id), r = e.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2, hit = document.elementFromPoint(x, y);
+        if (!(r.width >= 10 && r.height >= 10)) out.push(id + ' has no size');
+        else if (!e.contains(hit)) out.push(id + ' is under ' + (hit ? hit.id || hit.className || hit.tagName : 'nothing'));
+        else if (r.left < view.left || r.right > view.right + 0.5 || r.bottom > view.bottom) out.push(id + ' is outside the viewer');
+      }
+      w.innerHTML = was;
+      return out; })()`);
+    const found = [];
+    for (const [head, at] of [[AV_WT, 'plan-pricing'], [AV_MAIN, 'main']]) {
+      await V.size(1280, 800);
+      await openAt(V, head, at);
+      await has(V, '#av-handover', 'Hand over');
+      for (const w of [320, 375, 390, 430, 601, 700, 768, 820, 1024, 1280]) {
+        await V.size(w, 800);
+        await V.p.ev(FRAMES);
+        for (const tile of [false, true]) for (const x of await bad(tile)) found.push(`${w}${tile ? ' with the tile' : ''} on ${at}: ${x}`);
+      }
+      await V.p.ev(`(thGo({ th: 'open' }), true)`);
+      for (const w of [1024, 1280]) {
+        await V.size(w, 800);
+        await new Promise((r) => setTimeout(r, 500));
+        for (const x of await bad(true)) found.push(`${w} with the panel on ${at}: ${x}`);
+      }
+      await V.p.ev(`(thGo({}), true)`);
+    }
+    assert.deepEqual(found, [], 'each control is its own');
+    // cut in the one-row bar
+    await V.size(1280, 800);
+    await openAt(V, AV_WT, 'plan-pricing');
+    assert.ok(await V.p.ev(`(() => { const e = document.getElementById('av-with'); e.hidden = false; e.textContent = 'With ' + 'x'.repeat(80); return e.getBoundingClientRect().width <= 200; })()`), 'With is at most 200px in the one-row bar');
   });
 });

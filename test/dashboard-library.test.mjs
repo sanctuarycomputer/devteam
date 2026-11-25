@@ -1647,7 +1647,7 @@ test('a preview\'s Start and Stop', { ...CHROME, timeout: 300000 }, async (t) =>
   await soon(`document.querySelectorAll('#av-run button').length === 2`, 'Start and Stop');
   // refused: the error beside the buttons, the page's only element with that id, kept through polls
   // a press within a second of its coming up is refused with its words (kit-145); once it has settled, the same press goes
-  const live = `(() => { const b = document.querySelector('${start}'); return !!b && [...avStep.press.seen.values()].some((r) => r.el === b && avStep.settled(r)); })()`;
+  const live = `(() => { const b = document.querySelector('${start}'); return !!b && performance.now() - avStep.press.last <= 250 && [...avStep.press.seen.values()].some((r) => r.el === b && avStep.settled(r)); })()`;
   assert.equal(await p.ev('window.__starts ?? 0'), 0, 'nothing sent yet');
   // (begun again as the press's own move arrives, so a slow box can't let the second go by in between)
   await p.ev(`(window.addEventListener('mousemove', () => avStep.press.seen.clear(), { capture: true, once: true }), true)`);

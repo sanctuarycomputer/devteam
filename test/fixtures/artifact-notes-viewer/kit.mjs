@@ -148,7 +148,7 @@ export async function notes(t, name) {
   // a real press once the element is shown and at rest: a fixed card moves after a scroll or its picture's answer,
   // and p.click's own scrollIntoView would move the card itself
   // the control has settled, by the page's own frames: avStep.ready would take the sample itself, and hide a page that takes none
-  const LIVE = (el) => `(() => { const el = ${el}; return !!el && [...avStep.press.seen.values()].some((r) => r.el === el && avStep.settled(r)); })()`;
+  const LIVE = (el) => `(() => { const el = ${el}; return !!el && performance.now() - avStep.press.last <= 250 && [...avStep.press.seen.values()].some((r) => r.el === el && avStep.settled(r)); })()`;
   const pressAt = (V) => async (sel) => {
     await V.soon(`!!document.querySelector(${J(sel)})`, `setup: ${sel} is there`);
     const rect = `(() => { const e = document.querySelector(${J(sel)}); if (!e) return null; const r = e.getBoundingClientRect(); return r.width ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null; })()`;

@@ -105,6 +105,7 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     assert.equal(await V.p.ev('window.__again === true'), true, 'setup: the second press reached the pill');
     await V.soon(`window.__posts.some((x) => x.action === 'artifact-handoff')`, 'the press posted');
     assert.ok(await V.settle(`${text('#av-with')} === 'With plan-pricing'`, 4000), 'the first answer');
+    assert.equal(await V.p.ev(`document.getElementById('av-with').title`), 'With plan-pricing', 'its whole words in its title, where the bar cuts them');
     await new Promise((r) => setTimeout(r, 300));
     assert.deepEqual(await V.p.ev(`window.__posts.filter((x) => x.action === 'artifact-handoff')`), [{ action: 'artifact-handoff', body: { slug: 'pricing', at: 'plan-pricing' } }], 'one post, {slug, at}');
     assert.ok(await V.settle(`${text('#av-with')} === 'With plan-pricing' && !${shown('#av-handover')}`, 4000), `the bar says With plan-pricing (it says ${J(await V.p.ev(text('#av-with')))})`);
