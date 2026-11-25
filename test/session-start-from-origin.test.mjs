@@ -966,6 +966,58 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
       assert.notEqual(r.status, 0, `X25: refused: ${r.out}`);
       assert.ok(r.err.includes(`git is making a worktree for ${wt('ch-62-z')} (its record ${rec} has no gitdir yet)`), `X25: named: ${r.err}`);
     });
+    await t.test('X26: the look again reads git\'s records before its list, so an add landing between them is seen', tmux, () => {
+      behind('ch-61-y', 'X26');
+      fs.mkdirSync(wt('ch-61-y'), { recursive: true });
+      // the first look's list arms it; the next record read (the look again's) has the add land just before it
+      const bin = path.join(F.base, 'git-adds-between');
+      const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+      write(path.join(bin, 'git'), `#!/bin/sh\ncase " $* " in\n*' worktree list --porcelain '*) [ -e '${bin}/armed' ] || echo armed > '${bin}/armed' ;;\n*' --git-common-dir '*) if [ -e '${bin}/armed' ] && [ ! -e '${bin}/added' ]; then echo added > '${bin}/added'; '${realGit}' -C '${old}' worktree add --quiet --lock --reason 'devteam: a start of ch-61-y is making this worktree (other)' '${wt('ch-61-y')}' ticket/ch-61-y >/dev/null 2>&1; fi ;;\nesac\nexec '${realGit}' "$@"\n`);
+      fs.chmodSync(path.join(bin, 'git'), 0o755);
+      const r = run(old, ['worker', 'ch-61-y', '--resume'], { ...SUP, PATH: `${bin}${path.delimiter}${process.env.PATH}` });
+      assert.ok(fs.existsSync(path.join(bin, 'added')), 'X26: it was added');
+      assert.notEqual(r.status, 0, `X26: refused, not resumed: ${r.out}`);
+      assert.match(r.err, /ch-61-y's start isn't finished, so nothing was started: the worktree .* is there, at [0-9a-f]{8}: if no other start is making it/, `X26: named: ${r.err}`);
+    });
+    await t.test('X27: a retry over a worktree whose branch was moved and whose files weren\'t (its lock replaced during the fill, which failed) is refused', tmux, () => {
+      const { at, main } = behind('ch-60-x', 'X27');
+      const r = underTheFill('ch-60-x', 'X27', `git worktree unlock '${wt('ch-60-x')}' && git worktree lock --reason person '${wt('ch-60-x')}'`);
+      assert.notEqual(r.status, 0, `X27: A refused: ${r.out}`);
+      assert.equal(git(['rev-parse', 'HEAD'], wt('ch-60-x')), main, 'X27: HEAD at the moved branch');
+      assert.notEqual(git(['status', '--porcelain'], wt('ch-60-x')), '', 'X27: its files are the older commit\'s');
+      const again = run(old, ['worker', 'ch-60-x', '--resume'], SUP);
+      assert.notEqual(again.status, 0, `X27: the retry is refused, not resumed with reversions staged: ${again.out}`);
+      assert.ok(again.err.includes(`the worktree ${wt('ch-60-x')} is at ${main.slice(0, 8)}, but a start moved its branch there from ${at.slice(0, 8)} and could not check out its files`), `X27: named: ${again.err}`);
+
+      const mark = / and remove '([^']+)', then start it again/.exec(again.err)?.[1];
+      assert.ok(mark && fs.existsSync(mark), `X27: the mark is named: ${again.err}`);
+      git(['reset', '-q', '--hard'], wt('ch-60-x'));
+      fs.rmSync(mark);
+      const third = run(old, ['worker', 'ch-60-x', '--resume'], SUP);
+      assert.equal(third.status, 0, `X27: then it resumes: ${third.err}`);
+    });
+    await t.test('X28: a start that moves its branch and fills its files leaves no mark, and resumes later', tmux, () => {
+      const { main } = behind('ch-59-w', 'X28');
+      closeWindow(F, ok(old, ['worker', 'ch-59-w', '--resume'], SUP));
+      assert.equal(git(['rev-parse', 'HEAD'], wt('ch-59-w')), main, 'X28: at origin\'s main');
+      assert.ok(!fs.existsSync(path.join(old, '.git/worktrees/ch-59-w/devteam-start-filling')), 'X28: no mark left');
+      const r = run(old, ['worker', 'ch-59-w', '--resume'], SUP);
+      assert.equal(r.status, 0, `X28: resumed: ${r.err}`);
+    });
+    await t.test('X29: a lock taken off before the mark is there, another start resuming meanwhile: the branch isn\'t moved under it', tmux, () => {
+      const { at } = behind('ch-58-v', 'X29');
+      // just before the start marks its worktree, something unlocks it and another start resumes there; then the fill would fail
+      const bin = path.join(F.base, 'git-unlocks-before-mark');
+      const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+      write(path.join(bin, 'git'), `#!/bin/sh\ncase " $* " in\n*' --absolute-git-dir '*) if [ ! -e '${bin}/said' ]; then echo done > '${bin}/said'; '${realGit}' -C '${old}' worktree unlock '${wt('ch-58-v')}' && (cd '${old}' && ${otherStart('ch-58-v', 'X29')}); fi ;;\n*' read-tree '*) echo 'error: refused by the test' >&2; exit 4 ;;\nesac\nexec '${realGit}' "$@"\n`);
+      fs.chmodSync(path.join(bin, 'git'), 0o755);
+      const r = run(old, ['worker', 'ch-58-v', '--resume'], { ...SUP, PATH: `${bin}${path.delimiter}${process.env.PATH}` });
+      assert.ok(fs.existsSync(path.join(bin, 'said')), 'X29: it was unlocked');
+      assert.match(fs.readFileSync(path.join(F.base, 'start-X29.out'), 'utf8'), /resumed worker ch-58-v/, 'X29: the other start resumed there');
+      assert.notEqual(r.status, 0, `X29: the first refused: ${r.out}`);
+      assert.equal(git(['diff', '--cached', '--name-only'], wt('ch-58-v')), '', 'X29: no reversions staged under the other start');
+      assert.equal(git(['rev-parse', 'HEAD'], wt('ch-58-v')), at, 'X29: the branch where it was');
+    });
     await t.test('X18: a lock a post-checkout hook put on the worktree in place of the start\'s stays', tmux, () => {
       ticket('ch-64-i');
       const r = withHook('git worktree unlock "$(pwd)" && git worktree lock --reason mine "$(pwd)"', () => run(old, ['worker', 'ch-64-i'], SUP));
@@ -985,9 +1037,12 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
       assert.match(r.err, /a post-checkout hook may not lock the worktree while a start makes it/, `X20: ${r.err}`);
     });
     await t.test('X21: an undo leaves a worktree whose lock a hook replaced, with its files', tmux, () => {
-      behind('ch-67-l', 'X21');
-      const r = withHook('git worktree unlock "$(pwd)" && git worktree lock --reason mine "$(pwd)" && echo keep > unsaved.txt', () => underTheFill('ch-67-l', 'X21', 'true'));
-      kept('ch-67-l', 'X21', r);
+      const { at } = behind('ch-67-l', 'X21');
+      const r = withHook('git worktree unlock "$(pwd)" && git worktree lock --reason mine "$(pwd)" && echo keep > unsaved.txt', () => run(old, ['worker', 'ch-67-l', '--resume'], SUP));
+      assert.notEqual(r.status, 0, `X21: refused: ${r.out}`);
+      assert.ok(fs.existsSync(path.join(wt('ch-67-l'), 'unsaved.txt')), 'X21: the file stays');
+      assert.match(r.err, /while it was made, so the undo left it, and ticket\/.* at [0-9a-f]{8}: look in it before resuming it/, `X21: says so: ${r.err}`);
+      assert.equal(git(['rev-parse', 'HEAD'], wt('ch-67-l')), at, 'X21: the branch where it was');
       assert.equal(fs.readFileSync(path.join(old, '.git/worktrees/ch-67-l/locked'), 'utf8').trim(), 'mine', 'X21: the hook\'s lock stays');
     });
     await t.test('X22: an undo leaves a worktree another start made there after the first was cleared', tmux, () => {
@@ -995,10 +1050,11 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
       const r = underTheFill('ch-68-m', 'X22', `git worktree unlock '${wt('ch-68-m')}' && git worktree remove --force '${wt('ch-68-m')}' && ${otherStart('ch-68-m', 'X22')}; echo keep > '${wt('ch-68-m')}/unsaved.txt'`);
       kept('ch-68-m', 'X22', r);
     });
-    await t.test('X23: an undo leaves a worktree something unlocked and another start resumed in', tmux, () => {
+    await t.test('X23: an undo leaves a worktree something unlocked while it was filled, and another start is refused there', tmux, () => {
       behind('ch-69-n', 'X23');
-      const r = underTheFill('ch-69-n', 'X23', `git worktree unlock '${wt('ch-69-n')}' && ${otherStart('ch-69-n', 'X23')}; echo keep > '${wt('ch-69-n')}/unsaved.txt'`);
+      const r = underTheFill('ch-69-n', 'X23', `git worktree unlock '${wt('ch-69-n')}' && echo keep > '${wt('ch-69-n')}/unsaved.txt' && ${otherStart('ch-69-n', 'X23')}`);
       kept('ch-69-n', 'X23', r);
+      assert.match(fs.readFileSync(path.join(F.base, 'start-X23.out'), 'utf8'), /ch-69-n's start isn't finished, so nothing was started: the worktree .* could not check out its files/, 'X23: the other start is refused');
     });
     await t.test('X24: an undo leaves a worktree another start of the same name is making', tmux, () => {
       behind('ch-97-b', 'X24');
