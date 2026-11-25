@@ -7827,11 +7827,19 @@ function linksSelf(strategyText) {
 }
 // main's strategy.md, as strategyState reads it, or null when missing.
 const strategyMainText = () => (projectInRepo && mainRef() ? git(['show', `${mainRef()}:${strategyRel}`]) : readText(path.join(projectDir, 'strategy.md')));
+// How loud a missing Self or exterior is (kit-814): high, so wait keeps bringing it back, until the
+// owner has a draft of the next step it names; medium while a question of that step's class (cls) is
+// open. An answered one, approved or refined, counts for nothing: it is high again until the draft
+// lands or is asked again, as strategy-unwritten is.
+function worldMissingSeverity(cls) {
+  return questions().some((q) => q.status === 'open' && q.class === cls) ? 'medium' : 'high';
+}
 // metrics' self findings, read from main (none with no main, or the project outside the repo), each
 // keyed so observeFindings keeps one observation per path or strategy blob: self-drift once per part
 // path missing at main while main's self.md holds; self-unlinked while main has a self.md its
-// strategy doesn't link; self-missing while the strategy is written and main has no self.md, its
-// next step the strategy-change link first when the strategy doesn't link it. All low.
+// strategy doesn't link; both low. self-missing while the strategy is written and main has no
+// self.md, its next step the strategy-change link first when the strategy doesn't link it, then
+// self-change: high until that step is asked, medium while it is (worldMissingSeverity).
 function selfFindings(add) {
   const main = projectInRepo ? mainRef() : null;
   if (!main) return;
@@ -7845,7 +7853,7 @@ function selfFindings(add) {
     if (!linked) add('low', 'self-unlinked', 'self', 'main has self.md and its strategy.md does not link it', 'propose a strategy-change linking [self.md](./self.md) in place of any lines restating what the project is, in its own PR', { key: strategyKey });
   } else if (strategyState() === 'written') {
     const draft = 'draft self.md from the code and the strategy in a chore, run self check, and ask self-change (supervisor.md, Monitoring)';
-    add('low', 'self-missing', 'self', 'the strategy is written and main has no self.md', linked ? draft : `first propose a strategy-change linking [self.md](./self.md), in its own PR; then ${draft}`, { key: strategyKey });
+    add(worldMissingSeverity(linked ? 'self-change' : 'strategy-change'), 'self-missing', 'self', 'the strategy is written and main has no self.md', linked ? draft : `first propose a strategy-change linking [self.md](./self.md), in its own PR; then ${draft}`, { key: strategyKey });
   }
 }
 // The draft's history. Every self.md blob the branch carries since its merge base is pushed with it
@@ -8366,13 +8374,14 @@ function exteriorShowLines(block, selfWhat) {
   }
   return lines;
 }
-// metrics' exterior findings, read from main with no network call (none with no main), each low and
-// keyed so observeFindings keeps one observation per name or blob pair (spec, Findings):
+// metrics' exterior findings, read from main with no network call (none with no main), each keyed so
+// observeFindings keeps one observation per name or blob pair (spec, Findings):
 // exterior-drift once per organisation or work the names rule no longer allows against main's files,
 // unless the visibility last recorded is private; exterior-stale while main's strategy.md or self.md
-// blob isn't the one exterior.md drew from; exterior-missing while main has self.md, a strategy
-// linking it, and no exterior.md. A main exterior.md breaking the contract raises none (validate
-// errors on it).
+// blob isn't the one exterior.md drew from; both low. exterior-missing while main has self.md, a
+// written strategy linking it, and no exterior.md: high until an exterior-change question is asked,
+// medium while it is open (worldMissingSeverity, kit-814). A main exterior.md breaking the contract
+// raises none (validate errors on it).
 function exteriorFindings(add) {
   const main = projectInRepo ? mainRef() : null;
   if (!main) return;
@@ -8382,7 +8391,7 @@ function exteriorFindings(add) {
   const pair = `${strategyBlob}-${selfBlob}`;
   const m = exteriorOnMain();
   if (!m) {
-    if (selfBlob && linksSelf(strategyMainText())) add('low', 'exterior-missing', 'exterior', 'main has self.md and a strategy linking it, and no exterior.md', 'draft exterior.md from the strategy and self.md (supervisor.md, Monitoring) in a chore, run exterior check, and ask exterior-change', { key: pair });
+    if (selfBlob && strategyState() === 'written' && linksSelf(strategyMainText())) add(worldMissingSeverity('exterior-change'), 'exterior-missing', 'exterior', 'main has self.md and a strategy linking it, and no exterior.md', 'draft exterior.md from the strategy and self.md (supervisor.md, Monitoring) in a chore, run exterior check, and ask exterior-change', { key: pair });
     return;
   }
   const { block } = exteriorDoc(m.text);

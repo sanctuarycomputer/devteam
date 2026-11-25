@@ -472,7 +472,7 @@ test('linksSelf: metrics raises self-unlinked and self-missing, and self check w
       W.onMain({ [STRAT]: unlinked, [SELF]: null }, 'no self.md');
       assert.equal(one('self-unlinked'), null, 'C19 no self-unlinked without self.md');
       const f = one('self-missing');
-      assert.deepEqual([f?.severity, f?.subject, f?.key], ['low', 'self', W.blob(STRAT)], 'C20 self-missing: low, subject self, keyed by the strategy\'s blob');
+      assert.deepEqual([f?.severity, f?.subject, f?.key], ['high', 'self', W.blob(STRAT)], 'C20 self-missing: high (kit-814 K1), subject self, keyed by the strategy\'s blob');
       assert.match(f?.suggestion ?? '', /first[^;]*strategy-change[^;]*self\.md[\s\S]*then draft self\.md/i, `C20 unlinked: the link first, then the draft\n${f?.suggestion}`);
     });
     await check('C20 linked: self-missing\'s next step is the draft alone; none once main has self.md', () => {
@@ -485,6 +485,40 @@ test('linksSelf: metrics raises self-unlinked and self-missing, and self check w
     await check('C21 one function, linksSelf, in the self-model region, decides the link', () => {
       assert.equal((SRC.match(/\nfunction linksSelf\(/g) ?? []).length, 1, 'C21 linksSelf is defined once');
       assert.match(SRC, /\/\* self-model start \*\/[\s\S]*\nfunction linksSelf\([\s\S]*\/\* self-model end \*\//, 'C21 inside the self-model region');
+    });
+  } finally { W.done(); }
+});
+
+// kit-814: self-missing is high, so wait brings it back, until the owner has been asked about the
+// next step it names (the strategy-change link first, then self.md); medium while that question is open.
+test('self-missing is high until the owner is asked about its next step, medium while that question is open (kit-814)', async (t) => {
+  const unlinked = STRATEGY.replace(/^What Quillmark is.*\n\n/m, '');
+  const W = proj('self-asked', { strategy: unlinked, self: null });
+  const check = (title, fn) => t.test(title, fn);
+  const severity = () => W.findings('self-missing').map((f) => f.severity);
+  let n = 0;
+  const ask = (cls, rel, title, slug) => W.ok(['ask', '--question', `Approve this draft of ${title} (${++n})?`, '--recommendation', 'yes', '--stake', '3', '--urgency', '2',
+    '--class', cls, '--reasons', 'owner-only', '--links', JSON.stringify([{ title, path: rel, ref: `chore-${slug}` }]), ...(cls === 'strategy-change' ? [] : ['--approves', `chore-${slug}`])]).trim();
+  try {
+    await check('K4 unlinked: an open self-change question is not the next step, so self-missing stays high', () => {
+      assert.equal(W.chorePr('self', (w) => write(path.join(w, SELF), SELF_MD)).status, 0, 'K4 the self.md draft is on its chore');
+      ask('self-change', SELF, 'The Self', 'self');
+      assert.deepEqual(severity(), ['high'], 'K4 high: the strategy-change link comes first');
+    });
+    await check('K4 unlinked: medium while a strategy-change question about the link is open', () => {
+      assert.equal(W.chorePr('link', (w) => write(path.join(w, STRAT), STRATEGY)).status, 0, 'K4 the linking strategy is on its chore');
+      ask('strategy-change', STRAT, 'The strategy', 'link');
+      assert.deepEqual(severity(), ['medium'], 'K4 medium while the owner reads the link');
+    });
+    await check('K5 linked: medium while the self-change question is open', () => {
+      W.onMain({ [STRAT]: STRATEGY }, 'the link lands');
+      assert.deepEqual(severity(), ['medium'], 'K5 medium: the self-change question is the next step, and it is open');
+    });
+    await check('K6 no strategy on main: no self-missing and no exterior-missing, even with self.md', () => {
+      W.onMain({ [STRAT]: null }, 'no strategy');
+      assert.deepEqual(W.findings('self-missing'), [], 'K6 no self-missing without a strategy');
+      W.onMain({ [SELF]: SELF_MD }, 'self.md, still no strategy');
+      assert.deepEqual(W.findings('exterior-missing'), [], 'K6 no exterior-missing without a strategy');
     });
   } finally { W.done(); }
 });
@@ -504,6 +538,9 @@ test('init\'s strategy template links self.md in its opening lines; on the templ
     const f = W.findings('self-unlinked');
     const m = json(W.ok(['metrics', '--json'])).findings.map((x) => x.kind);
     assert.ok(f.length === 0 && /self/.test(SRC.match(/const STRATEGY_MD = `[\s\S]*?`;/)?.[0] ?? '') && m.every((k) => k !== 'self-unlinked') && /\[self\.md\]\(\.\/self\.md\)/.test(t), 'C22 no self-unlinked on the linked template');
+  });
+  await check('K7 on the template, self.md on main and no exterior.md raise no exterior-missing (kit-814)', () => {
+    assert.deepEqual(W.findings('exterior-missing'), [], 'K7 none while the strategy is the template, though it links self.md');
   });
   await check('C23 the comment directly above const STRATEGY_MD says the kit now reads it for the link to self.md', () => {
     const comment = /\nconst STRATEGY_TEMPLATE_MARK[^\n]*\n((?:\/\/[^\n]*\n)*)const STRATEGY_MD = /.exec(SRC)?.[1] ?? '';
@@ -532,4 +569,17 @@ test('help and supervisor.md say it (DW1, DW4, DW7)', async (t) => {
     ['--names-checked', /--names-checked/],
     ['self-drift, self-unlinked and self-missing', /self-drift[\s\S]*self-unlinked[\s\S]*self-missing|self-missing[\s\S]*self-unlinked[\s\S]*self-drift/],
   ]) await t.test(`C26 supervisor.md Monitoring documents ${what}`, () => assert.match(mon, pattern, `C26 ${what}`));
+  // kit-814
+  const start = /\n## 1\. Starting up\n([\s\S]*?)\n## /.exec(sup)?.[1] ?? '';
+  const asking = /\n## 6\. Questions to the owner\n([\s\S]*?)\n## /.exec(sup)?.[1] ?? '';
+  await t.test('K8 Starting up says to draft the Self and then the Exterior after the strategy, high until the owner has the draft', () => {
+    const step = start.split('\n').find((l) => /strategy-unwritten/.test(l)) ?? '';
+    assert.match(step, /^3\. No strategy, Self or Exterior yet \(`strategy-unwritten`[^)]*`self-missing`[^)]*`exterior-missing`\)[\s\S]*Then the Self, then the Exterior, the same way[\s\S]*`self-missing` and `exterior-missing` are high until the owner has your draft[^.]*`wait` keeps bringing them back[^.]*medium while its question is open[^.]*high again[^.]*\. After their yes, land it \(`merge --chore/, `K8 step 3 opens on all three, and goes on from the strategy to the Self and the Exterior: high until the owner has the draft, so wait brings them back; medium while asked; high again\n${step}`);
+  });
+  await t.test('K9 Monitoring\'s self-missing line agrees: high until the owner has the draft, medium while asked', () => {
+    assert.match(mon, /`self-missing` \([^)]*high until the owner has[^)]*medium while its question is open\)/, 'K9 the self-missing line says its severity');
+  });
+  await t.test('K10 §6: before a goal-met question recommends Yes, open each thing it names and say what you saw', () => {
+    assert.match(asking, /`--class goal-met`[^\n]*Before it recommends Yes, open each thing the question names[^.]*on main or in the running product[^.]*say in `--context` what you saw/, 'K10 the goal-met row says to look first');
+  });
 });
