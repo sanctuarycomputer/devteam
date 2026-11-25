@@ -404,7 +404,7 @@ test('recover: an origin/main here that git can\'t set for another reason refuse
     assert.match(r.stderr, /could not read main from origin \(update_ref failed for ref 'refs\/remotes\/origin\/main': cannot lock ref/, r.stderr);
     assert.equal(updatesRefused(trace), 1, 'git was asked once: only a held lock is waited on');
     assert.equal(F.claudeCalls().length, 0, 'nothing started');
-  } finally { fs.chmodSync(refs, 0o755); server.done(); F.done(); }
+  } finally { if (fs.existsSync(refs)) fs.chmodSync(refs, 0o755); server.done(); F.done(); }
 });
 
 test('recover: the start is claimed before a window opens, and taken back if nothing started', { skip: !hasTmux }, async () => {
