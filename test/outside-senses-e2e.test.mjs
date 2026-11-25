@@ -125,7 +125,7 @@ test('Tillstack draws self.md, then exterior.md, each landed only with the owner
       assert.deepEqual(W.findings('self-missing'), [], 'E2 self-missing gone');
     });
 
-    const EXTERIOR_MD = FIX('exterior.md').replace('STRATEGY_BLOB', W.blob(STRAT)).replace('"SELF_BLOB"', JSON.stringify(W.blob(SELF)));
+    const EXTERIOR_MD = FIX('exterior.md');
     await check('K3a exterior-missing is high until the owner is asked about a draft', () => {
       assert.deepEqual(severity('exterior-missing'), ['high'], 'K3a high until the owner is asked about a draft');
     });
@@ -157,11 +157,10 @@ test('Tillstack draws self.md, then exterior.md, each landed only with the owner
     });
 
     await check('E4 one PR changing both under one --approved is refused, whichever answer it cites', () => {
-      // a new self.md and an exterior.md drawn from it (chore pr holds one drawn from another self.md)
+      // a new self.md and a new exterior.md in one chore
       const sha = W.chore('both', (w) => {
         write(path.join(w, SELF), `${SELF_MD}\nIt also prints receipts.\n`);
-        const selfBlob = W.g(['hash-object', SELF], w);
-        write(path.join(w, EXT), `${EXTERIOR_MD.replace(W.blob(SELF), selfBlob)}\nShops print their receipts.\n`);
+        write(path.join(w, EXT), `${EXTERIOR_MD}\nShops print their receipts.\n`);
       });
       const bySelf = W.answered('self-change', SELF, 'The Self', 'both');
       refused(W.merge('both', bySelf), new RegExp(`is a self-change question; changing ${re(EXT)} needs an answered exterior-change question`), 'E4 under the self-change answer, merge');
@@ -174,14 +173,12 @@ test('Tillstack draws self.md, then exterior.md, each landed only with the owner
     await check('E5 both on main: self show, exterior show and dashboard-data carry them', () => {
       const self = W.ok(['self', 'show']);
       assert.ok(self.includes(SELF_MD.trim()), `E5 self show prints the Self, a plain document (kit-862)\n${self}`);
-      // exterior show's Self: line reads a version 1 block, so beside a plain self.md it is kit-863's to mend
-      const ext = W.ok(['exterior', 'show']);
-      for (const [rel, name] of [['serves', 'Independent shops'], ['depends_on', 'Stripe'], ['alternative', 'Cartwell']]) assert.match(ext, new RegExp(`^${rel}\\n {2}${name} \\(`, 'm'), `E5 exterior show lists ${name} under ${rel}`);
+      assert.equal(W.ok(['exterior', 'show']), `Exterior: ${EXT} on main\n\n${EXTERIOR_MD.trimEnd()}`, 'E5 exterior show prints the exterior, a plain document (kit-863)');
       const d = json(W.ok(['dashboard-data']));
       assert.deepEqual(d.self, json(W.ok(['self', 'show', '--json'])), 'E5 dashboard-data\'s self is self show --json\'s');
       assert.equal(d.self, null, 'E5 dashboard-data\'s self is null for a plain self.md (the page reads the document)');
-      assert.deepEqual(d.exterior, json(W.ok(['exterior', 'show', '--json'])), 'E5 dashboard-data carries main\'s exterior block');
-      assert.deepEqual(d.exterior?.entities.map((e) => [e.entity, e.relation, e.name]), [['shops', 'serves', 'Independent shops'], ['stripe', 'depends_on', 'Stripe'], ['cartwell', 'alternative', 'Cartwell']], 'E5 dashboard-data\'s exterior is Tillstack\'s three entities');
+      assert.deepEqual(d.exterior, json(W.ok(['exterior', 'show', '--json'])), 'E5 dashboard-data\'s exterior is exterior show --json\'s');
+      assert.equal(d.exterior, null, 'E5 dashboard-data\'s exterior is null for a plain exterior.md (the page reads the document)');
     });
 
     await check('E6 a strategy.md change raises exterior-stale; put back, it clears', () => {
