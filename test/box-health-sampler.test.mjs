@@ -971,14 +971,18 @@ const partTimers = (s, from = 0) => {
   const [processes, disk, pool, claude] = s.timers.list.slice(from).filter((h) => h.kind === 'every');
   return { processes, disk, pool, claude };
 };
-// fires the given intervals once, then every 2 s limit that is set, until n FIFO opens are out (or 60 rounds)
+// fires the given intervals, then every 2 s limit that is set, a minute of the clock apart (as the
+// parts' own intervals would ask again), until n FIFO opens are out (or 60 rounds); then lets the reads
+// that answer at once end
 async function stick(s, fns, n) {
-  for (const h of fns) h.fn();
   for (let i = 0; i < 60 && s.opens.now < n; i++) {
+    if (i > 0) s.clock.t += MIN;
+    for (const h of fns) h.fn();
     await turns();
     for (const h of [...s.timers.live]) if (h.kind === 'once' && h.ms === 2000) { s.timers.live.delete(h); h.fn(); }
   }
   await turns(40);
+  await sleep(50);
 }
 // Every FIFO open out returns and none can start again: each FIFO's other end is opened O_RDWR (never
 // blocks on Linux, so every open out returns), every FIFO is unlinked (an open after this is ENOENT),
