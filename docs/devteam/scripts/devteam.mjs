@@ -23699,6 +23699,319 @@ function memoryRecorder(log, scan) {
   };
 }
 /* box-memory end */
+/* box-health-contract start */
+// Two contracts' shapes as data, and a check for each. A shape is a function (value, path, whole)
+// giving null or one sentence that starts with the first bad field's path and a space. It reads
+// nothing outside this region and box-memory (a test runs the two alone).
+const BOX_HEALTH_MAX_BYTES = 1024 * 1024, POOL_MAX_BYTES = 256 * 1024;
+// A refusal says what a field should be and never quotes text it was given: a label or a status that
+// is refused may be an address, and the sentence is logged. A key is named only when it looks like a
+// field's own name.
+const healthIs = (p, v, should) => `${p} is ${v === undefined ? 'missing' : v === null || typeof v === 'number' || typeof v === 'boolean' ? String(v) : typeof v === 'string' ? (v === '' ? 'empty text' : 'text it should not be') : Array.isArray(v) ? 'a list' : `a ${typeof v}`}: it should be ${should}`;
+const healthPath = (p, k) => (/^[a-z_][a-z0-9_]{0,30}$/.test(k) ? (p ? `${p}.${k}` : k) : `${p}[a key not shown]`);
+const healthLeaf = (ok, should) => (v, p) => (ok(v) ? null : healthIs(p, v, should));
+const healthNumber = (min, max, should) => healthLeaf((v) => typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max, should);
+const healthWhole = (min, max, should) => healthLeaf((v) => Number.isSafeInteger(v) && v >= min && v <= max, should);
+const healthOneOf = (...names) => healthLeaf((v) => names.includes(v), `one of ${names.map((x) => JSON.stringify(x)).join(', ')}`);
+const healthText = (max = Infinity) => healthLeaf((v) => typeof v === 'string' && v !== '' && v.length <= max, max === Infinity ? 'text, not empty' : `text of 1 to ${max} characters`);
+const HEALTH_TIME = healthLeaf((v) => memoryAtOk(v), 'a UTC time, YYYY-MM-DDTHH:MM:SSZ, with or without milliseconds');
+const HEALTH_BOOL = healthLeaf((v) => typeof v === 'boolean', 'true or false');
+const HEALTH_TRUE = healthLeaf((v) => v === true, 'true, or left out');
+const HEALTH_AMOUNT = healthNumber(0, Infinity, 'a number, 0 or more');
+const HEALTH_SIGNED = healthNumber(-Infinity, Infinity, 'a number');
+const HEALTH_PERCENT = healthNumber(0, 100, 'a number from 0 to 100');
+const HEALTH_SHARE = healthNumber(0, 1, 'a number from 0 to 1');
+const HEALTH_COUNT = healthWhole(0, Infinity, 'a whole number, 0 or more');
+const HEALTH_PORT = healthWhole(1, 65535, 'a whole number from 1 to 65535, or left out');
+const HEALTH_PRICE = healthLeaf((v) => v === null || (typeof v === 'number' && Number.isFinite(v) && v >= 0), 'a number, 0 or more, or null when a record has no list price');
+const healthList = (item, max = Infinity) => (v, p, whole) => {
+  if (!Array.isArray(v)) return healthIs(p, v, 'a list');
+  if (v.length > max) return `${p} holds ${v.length} entries: it should hold at most ${max}`;
+  for (let i = 0; i < v.length; i++) { const bad = item(v[i], `${p}[${i}]`, whole); if (bad) return bad; }
+  return null;
+};
+// An object of named fields, required then optional; any other key is refused. `rule` is checked last.
+const healthObject = (required, optional = {}, rule = null) => {
+  const all = { ...required, ...optional };
+  const names = Object.keys(all), shapes = Object.entries(all);
+  return (v, p, whole) => {
+    if (!memoryIsMap(v)) return healthIs(p, v, 'one JSON object');
+    const other = Object.keys(v).find((k) => !Object.hasOwn(all, k));
+    if (other !== undefined) return `${healthPath(p, other)} is not a field of ${p || 'the whole'}: it holds only ${names.join(', ')}`;
+    for (const [k, shape] of shapes) {
+      const x = Object.hasOwn(v, k) ? v[k] : undefined;
+      if (x === undefined && Object.hasOwn(optional, k)) continue;
+      const bad = shape(x, p ? `${p}.${k}` : k, whole);
+      if (bad) return bad;
+    }
+    return rule ? rule(v, p, whole) : null;
+  };
+};
+// The fields only a state or an outcome may carry: named when they are there without it.
+const healthOnly = (v, p, keys, when) => {
+  const k = keys.find((x) => v[x] !== undefined);
+  return k === undefined ? null : `${healthPath(p, k)} is there without ${when}: it should be left out`;
+};
+const healthNeeds = (v, p, keys, when) => {
+  const k = keys.find((x) => v[x] === undefined);
+  return k === undefined ? null : `${healthPath(p, k)} is missing: ${when} has it`;
+};
+const HEALTH_STATES = ['measured', 'none-yet', 'not-measured'];
+const HEALTH_REASONS = ['no-reader', 'command-failed', 'no-record'];
+const HEALTH_WHY = ['merged', 'done', 'parked', 'held', 'stopped'];
+// The tokens of both contracts: `measured` are the fields a measured row has, `may` those it may have.
+const healthTokens = (points, { measured = {}, may = {}, any = {} }) => {
+  const own = { new: HEALTH_COUNT, cached: HEALTH_COUNT, points: healthList(healthObject({ at: HEALTH_TIME, new: HEALTH_COUNT }), points), ...measured };
+  return healthObject({ state: healthOneOf(...HEALTH_STATES) }, { reason: healthOneOf(...HEALTH_REASONS), ...own, ...may, reviews_new: HEALTH_COUNT, ...any }, (v, p) => {
+    if (v.state !== 'not-measured') { const bad = healthOnly(v, p, ['reason'], 'state "not-measured"'); if (bad) return bad; }
+    return v.state === 'measured' ? healthNeeds(v, p, Object.keys(own), 'a measured row') : healthOnly(v, p, [...Object.keys(own), ...Object.keys(may)], 'state "measured"');
+  });
+};
+// A forecast that runs out says when; one that lasts doesn't.
+const healthLasts = (more) => (v, p) => (v.lasts === false ? healthNeeds(v, p, ['runs_out_at'], 'one that does not last') : healthOnly(v, p, ['runs_out_at', ...more], '"lasts": false'));
+const healthWord = (should) => healthLeaf((v) => typeof v === 'string' && /^[a-z][a-z0-9_-]{0,39}$/.test(v), should);
+const HEALTH_REASON_WORD = healthWord('one lowercase word, a reason');
+const HEALTH_USE = { n: HEALTH_COUNT, cpu: HEALTH_AMOUNT, rss: HEALTH_COUNT };
+const HEALTH_ROOM_POINT = healthObject({ at: HEALTH_TIME, room: HEALTH_AMOUNT });
+const HEALTH_TOKENS = healthTokens(60, { may: { per_hour: HEALTH_AMOUNT } });
+const BOX_HEALTH_SHAPE = healthObject({
+  v: healthLeaf((v) => v === 1, "1, this contract's version"),
+  at: HEALTH_TIME,
+  window_s: healthWhole(1, Infinity, 'a whole number of seconds, 1 or more'),
+  now: healthObject({}, {
+    cpu: healthObject({}, {
+      limit: healthLeaf((v) => typeof v === 'number' && Number.isFinite(v) && v > 0, 'a number of cores, more than 0'),
+      used: HEALTH_AMOUNT, host_cores: healthList(HEALTH_SHARE), shared: HEALTH_TRUE,
+      load: (v, p) => (Array.isArray(v) && v.length === 3 ? healthList(HEALTH_AMOUNT)(v, p) : healthIs(p, v, 'three numbers, over 1, 5 and 15 minutes')),
+      load_scope: healthOneOf('host'), some60: HEALTH_PERCENT, throttled: HEALTH_SHARE,
+    }),
+    memory: healthObject({}, {
+      used: HEALTH_COUNT, max: HEALTH_COUNT, available: HEALTH_COUNT,
+      ceiling: healthNumber(MEMORY_CEILING_MIN, MEMORY_CEILING_MAX, `a number from ${MEMORY_CEILING_MIN} to ${MEMORY_CEILING_MAX}`),
+      swap_used: HEALTH_COUNT, swap_max: HEALTH_COUNT, some60: HEALTH_PERCENT,
+    }),
+    disks: healthList(healthObject({ free: HEALTH_COUNT, total: HEALTH_COUNT }, { inodes_free: HEALTH_COUNT, inodes: HEALTH_COUNT, bytes_per_hour: HEALTH_SIGNED })),
+    io: healthObject({}, { some10: HEALTH_PERCENT, some60: HEALTH_PERCENT, full60: HEALTH_PERCENT }),
+  }),
+  samples: healthList(healthObject({ at: HEALTH_TIME }, {
+    cpu: HEALTH_AMOUNT, cpu_some: HEALTH_PERCENT, throttled: HEALTH_SHARE, load: HEALTH_AMOUNT, mem: HEALTH_COUNT, mem_some: HEALTH_PERCENT,
+    swap: HEALTH_COUNT, disk: HEALTH_COUNT, inodes: HEALTH_COUNT, io: HEALTH_PERCENT, room: HEALTH_COUNT,
+  }), 720),
+}, {
+  headroom: healthObject({}, {
+    room: HEALTH_COUNT, starts: HEALTH_COUNT, binds: healthOneOf('memory', 'cpu', 'claude', 'ready'),
+    memory: HEALTH_COUNT, cpu: HEALTH_COUNT, claude: HEALTH_COUNT, ready: HEALTH_COUNT, ready_unknown: healthList(healthText()), claude_why: HEALTH_REASON_WORD,
+  }, (v, p) => (v.claude === undefined ? null : healthOnly(v, p, ['claude_why'], 'an absent claude'))),
+  pool: healthObject({
+    projects: healthList(healthObject({ name: healthText() }, {
+      port: HEALTH_PORT, at: HEALTH_TIME, workers: HEALTH_COUNT, planners: HEALTH_COUNT, cap: HEALTH_COUNT, ready: HEALTH_COUNT, cpu: HEALTH_AMOUNT, rss: HEALTH_COUNT,
+    })),
+    allocated: healthList(healthObject({ project: healthText(), name: healthText(), tokens: HEALTH_TOKENS }, {
+      port: HEALTH_PORT, title: healthText(80), phase: healthText(), since: HEALTH_TIME, agent: HEALTH_BOOL,
+      cpu: HEALTH_AMOUNT, rss: HEALTH_COUNT, disk: HEALTH_COUNT, disk_at: HEALTH_TIME,
+      points: healthList(healthObject({ at: HEALTH_TIME }, { cpu: HEALTH_AMOUNT, rss: HEALTH_COUNT, disk: HEALTH_COUNT }), 60),
+      tests: healthObject({ n: HEALTH_COUNT }, { cpu: HEALTH_AMOUNT, rss: HEALTH_COUNT }),
+    }), 60),
+    recent: healthList(healthObject({ project: healthText(), name: healthText(), left_at: HEALTH_TIME, why: healthOneOf(...HEALTH_WHY), tokens: HEALTH_TOKENS }, {
+      port: HEALTH_PORT, title: healthText(80), last: healthObject({}, { cpu: HEALTH_AMOUNT, rss: HEALTH_COUNT, disk: HEALTH_COUNT }),
+    }), 20),
+  }, {
+    others: healthObject({}, {
+      planners: healthObject({}, HEALTH_USE), supervisors: healthObject({}, HEALTH_USE), outside: healthObject({}, HEALTH_USE), unattributed: healthObject({}, { cpu: HEALTH_AMOUNT }),
+    }),
+    strays: healthList(healthObject({
+      kind: healthOneOf('agent', 'browser', 'node', 'test'), why: healthOneOf('parent-gone', 'folder-gone', 'long-test'), n: healthWhole(1, Infinity, 'a whole number, 1 or more'),
+    }, { project: healthText(), oldest_s: HEALTH_COUNT, rss: HEALTH_COUNT, cpu: HEALTH_AMOUNT }), 40),
+    what_if: healthObject({ now: HEALTH_COUNT }, {
+      most_that_lasts: HEALTH_COUNT, measured: HEALTH_COUNT,
+      steps: healthList(healthObject({ workers: HEALTH_COUNT }, { lasts: HEALTH_BOOL, runs_out_at: HEALTH_TIME, paused_until: HEALTH_TIME }, healthLasts(['paused_until'])), 81),
+      memory_full_at: HEALTH_COUNT, cpu_full_at: HEALTH_COUNT, why: HEALTH_REASON_WORD,
+    }, (v, p) => ((v.steps ?? []).some((s) => s.lasts !== undefined) ? healthOnly(v, p, ['why'], 'every lasts left out') : null)),
+  }),
+  claude: healthObject({
+    accounts: healthList(healthObject({
+      n: healthWhole(1, Infinity, 'a slot number, 1 or more'),
+      label: healthLeaf((v) => typeof v === 'string' && v !== '' && !v.includes('@'), 'text with no @ (an alias or "Account n", never an address)'),
+    }, {
+      active: HEALTH_BOOL, week_left: HEALTH_PERCENT, five_left: HEALTH_PERCENT, week_resets_at: HEALTH_TIME, five_resets_at: HEALTH_TIME,
+      status: healthWord('one lowercase word, as cswap names it'),
+    }), 40),
+  }, {
+    rate: HEALTH_AMOUNT, rate_hours: healthNumber(0, 6, 'a number from 0 to 6'), points: healthList(HEALTH_ROOM_POINT),
+    projection: healthObject({ lasts: HEALTH_BOOL }, { runs_out_at: HEALTH_TIME, next_reset_at: HEALTH_TIME, safe_rate: HEALTH_AMOUNT, points: healthList(HEALTH_ROOM_POINT, 400) }, healthLasts([])),
+    park: healthList(healthObject({ fleet: healthText(), goals: healthList(healthObject({ id: healthText(), title: healthText(80) })), share: HEALTH_SHARE, enough: HEALTH_BOOL }, { port: HEALTH_PORT })),
+  }),
+  box: healthObject({}, {
+    started_at: HEALTH_TIME, oom_kills: HEALTH_COUNT, kit: healthText(), latest: healthText(),
+    github: healthObject({ left: HEALTH_COUNT, limit: HEALTH_COUNT }, { resets_at: HEALTH_TIME }),
+  }),
+});
+const POOL_HOURS = { usd_hour: HEALTH_PRICE, new_hour: HEALTH_COUNT };
+const POOL_SHAPE = healthObject({
+  v: healthLeaf((v) => v === 1, "1, this contract's version"),
+  at: HEALTH_TIME, hour_end: HEALTH_TIME, ready: HEALTH_COUNT, planners: HEALTH_COUNT,
+  goals: healthList(healthObject({ id: healthText(), title: healthText(80), ...POOL_HOURS }, { priority: healthWhole(-Infinity, Infinity, 'a whole number, or left out') }), 20),
+  workers: healthList(healthObject({ name: healthText(), tokens: healthTokens(36, { measured: POOL_HOURS, any: { reviews_usd_hour: HEALTH_PRICE, reviews_new_hour: HEALTH_COUNT } }) }, {
+    title: healthText(80), phase: healthText(), since: HEALTH_TIME,
+    goal: (v, p, whole) => (Number.isSafeInteger(v) && v >= 0 && v < whole.goals.length ? null : healthIs(p, v, `an index into goals (${whole.goals.length} of them), or left out`)),
+  }), 60),
+  recent: healthList(healthObject({ name: healthText(), left_at: HEALTH_TIME, why: healthOneOf(...HEALTH_WHY), tokens: healthTokens(36, {}) }, { title: healthText(80) }), 20),
+  other: healthObject(POOL_HOURS),
+}, { cap: HEALTH_COUNT });
+// A contract's check over a file's or a body's text, or a parsed value (measured as its JSON).
+function healthProblem(input, root, shape, max) {
+  let v = input, text = input;
+  if (typeof input === 'string') {
+    if (healthBytes(text) > max) return `${root} is over ${max} bytes: it should be at most that`;
+    try { v = JSON.parse(input); } catch { return `${root} is not JSON: it should be one JSON object`; }
+  }
+  if (!memoryIsMap(v)) return healthIs(root, v, 'one JSON object');
+  if (v.v !== 1) return healthIs('v', v.v, "1, this contract's version");
+  const bad = shape(v, '', v);
+  if (bad) return bad;
+  if (typeof input !== 'string') {
+    try { text = JSON.stringify(v); } catch { text = undefined; }
+    if (typeof text !== 'string') return `${root} can't be written as JSON: it should be one JSON object`;
+    if (healthBytes(text) > max) return `${root} is over ${max} bytes: it should be at most that`;
+  }
+  return null;
+}
+// UTF-8 bytes of a text, without Buffer (the region runs alone).
+function healthBytes(s) {
+  let n = s.length;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) continue;
+    if (c < 0x800) n += 1;
+    else if (c >= 0xd800 && c < 0xdc00 && s.charCodeAt(i + 1) >= 0xdc00 && s.charCodeAt(i + 1) < 0xe000) { n += 2; i++; } else n += 2;
+  }
+  return n;
+}
+// box-health@1, the machine's live health: what its hub answers at GET /box-health.json, through the
+// gateway too, and what the Overview's strip and `machine health` read. Held in the hub's memory
+// only. A field that can't be read is absent, never zero. Required: `v`, `at`, `window_s`, `now`,
+// `samples`; in an object, the fields marked *. Times are UTC, YYYY-MM-DDTHH:MM:SS(.sss)Z. Bytes and
+// counts are whole, 0 or more; shares are 0 to 1; percents 0 to 100; CPU is in cores.
+//   `v`*  1     `at`*  when it was answered     `window_s`*  seconds `samples` covers: 3600
+//   `now`*      the latest reading. `cpu`: `limit` (the box's own cap), `used`, `host_cores` (a share
+//               a core), `shared` (true: `host_cores` are the host's, whose other boxes share them;
+//               else absent), `load` (1, 5, 15 minutes), `load_scope` ("host", with `shared`),
+//               `some60` (percent of the last minute some task waited), `throttled` (share of periods
+//               held at the limit). `memory`: `used` (as machineMemory counts it), `max`, `available`
+//               in bytes, `ceiling` (the share of max, 0.5 to 0.95, as machine-memory@1), `swap_used`,
+//               `swap_max` in bytes, `some60`. `disks`, one a distinct volume holding a known root,
+//               `free`* and `total`* bytes, `inodes_free`, `inodes`, `bytes_per_hour` (the change in
+//               free; below zero is shrinking). `io`: `some10`, `some60`, `full60` percents.
+//   `samples`*  every 5 s for an hour, oldest first, at most 720: `at`*, `cpu` cores, `cpu_some`
+//               percent, `throttled`, `load` (1 minute), `mem` bytes, `mem_some`, `swap` bytes, `disk`
+//               and `inodes` free on the first of `disks`, `io` (some60), `room`
+//   `headroom`  `room` (how many more workers the box could hold: the least of `memory`, `cpu` and
+//               `claude`), `starts` (the least of room and ready; absent with an unknown fleet),
+//               `binds` ("memory", "cpu", "claude" or "ready": what limits it), `memory`, `cpu`,
+//               `claude` (whole; absent when there is no Claude limit to state), `ready` (over known
+//               fleets), `ready_unknown` (the names of fleets whose ready count isn't known), `claude_why`
+//               (only with claude absent: the first that holds of "no-cswap", "measuring", "no-projection",
+//               "no-claude-use" and "none-by-workers", each as in what_if's `why` and with its sentence,
+//               then "lasts" (the top step lasts, or with no forecast the projection does: Claude
+//               capacity doesn't limit it.); any other word: There is no Claude limit to state now.)
+//   `pool`      the workers holding a slot, in every project:
+//     `projects`*   `name`*, `port`, `at` (its pool.json's), `workers`, `planners`, `cap` (its slots;
+//                   absent: no limit), `ready`, `cpu`, `rss` (all of the project's)
+//     `allocated`*  at most 60: `project`*, `port`, `name`*, `title` (at most 80 characters), `phase`,
+//                   `since`, `agent` (the walk sees an agent in its worktree), `cpu`, `rss`, `disk`
+//                   bytes, `disk_at`, `tokens`*, `points` (one a minute for an hour, at most 60:
+//                   `at`*, `cpu`, `rss`, `disk`), `tests` (its test runs, within cpu and rss: `n`*,
+//                   `cpu`, `rss`)
+//     `recent`*     slots that ended in the last 24 hours, newest first, at most 20: `project`*,
+//                   `port`, `name`*, `title`, `left_at`*, `why`* ("merged", "done", "parked", "held" or
+//                   "stopped"), `tokens`*, `last` (`cpu`, `rss`, `disk` last seen; absent after a restart)
+//     `others`      the same use by role, not added to projects: `planners`, `supervisors`, `outside`
+//                   (in no project), each `n`, `cpu`, `rss`; `unattributed`: `cpu`
+//     `strays`      at most 40 groups: `project` (absent: in none), `kind`* ("agent", "browser",
+//                   "node", "test"), `why`* ("parent-gone", "folder-gone", "long-test"), `n`*,
+//                   `oldest_s`, `rss`, `cpu`
+//     `what_if`     `now`* (workers holding a slot), `most_that_lasts` (absent when no step lasts; when
+//                   it equals the last step's workers the page adds "or over"), `measured` (of now),
+//                   `steps` (0 to now + 20, at most 81; absent over 60 workers: `workers`*, `lasts`
+//                   (absent with no token forecast), `runs_out_at` (always, and only, when it doesn't
+//                   last), `paused_until`), `memory_full_at`, `cpu_full_at` (the first count past each),
+//                   `why` (only when no step has lasts: the first of these that holds)
+//                   "no-cswap" (claude is absent): Token use isn't forecast without cswap's numbers.
+//                   "measuring" (under 30 minutes of burn readings): The token forecast needs more readings.
+//                   "no-projection" (a burn rate, and no account or reset to project from): There is
+//                   no token forecast now.
+//                   "too-many" (over 60 workers hold a slot): The pool is too large for a forecast.
+//                   "no-claude-use" (the hour's whole measured Claude use, every session's, is zero): No
+//                   Claude use was measured on this machine in the last hour.
+//                   "none-measured" (the hour has measured Claude use, and no worker is measured): No worker's
+//                   token use is measured.
+//                   "none-by-workers" (the hour has measured Claude use, and the measured workers and their
+//                   reviewers used none): None of the last hour's measured Claude use is by a worker.
+//                   Any other word: There is no token forecast now.
+//                   It doesn't by itself explain an absent headroom.claude, which what_if may outlive
+//                   or precede: that has `claude_why`
+//   `tokens`    `state`* "measured", "none-yet" or "not-measured"; the last may carry `reason`:
+//               "no-reader" (the harness has none and the project set no usage_command),
+//               "command-failed" or "no-record". Only measured has `new`* (input, output and cache
+//               writes), `cached`* (cached reads), `per_hour`, and `points`* (ten-minute buckets, at
+//               most 60: `at`* its start, `new`*; a bucket left out is zero). Any state may have
+//               `reviews_new` (its ticket's reviews so far). `recent` has the same.
+//   `claude`    absent with no cswap. `accounts`*, at most 40: `n`*, `label`* (the alias when set and
+//               not an address, else "Account n"; one with an @ is refused), `active`, `week_left`,
+//               `five_left` percents, `week_resets_at`, `five_resets_at`, `status` (a lowercase word).
+//               `rate` (points of one account-week an hour; absent while measuring), `rate_hours` (what
+//               it covers, at most 6), `points` (measured: `at`*, `room`* in accounts' worth),
+//               `projection`: `lasts`*, `runs_out_at` (always, and only, when it doesn't last),
+//               `next_reset_at`, `safe_rate` (absent when no rate lasts), `points` (at most 400).
+//               `park`: `fleet`*, `port`, `goals`* (`id`*, `title`*), `share`* (0 to 1), `enough`*
+//   `box`       `started_at`, `oom_kills` since then, `github` (`left`*, `limit`*, `resets_at`), `kit`,
+//               `latest`
+// `port`, on projects, allocated, recent and park rows, is the project's dashboard port from the
+// hub's scan, 1 to 65535, absent with no dashboard: it keeps two projects of one name apart and
+// opens a goal's page. It was added at graph review G1-11.
+// GET /box-health.json?after=<time>  only newer `samples` and `claude.points`; the pool's points and
+// the projection's are always whole. Any other parameter, or a bad time, is a 400. Same-origin, as
+// /memory.json. Every answer is at most 1 MB (1048576 bytes of UTF-8).
+// boxHealthProblem(input) takes a body's text or a parsed value: null, or one sentence starting with
+// the first bad field's path (answer, for the whole). It never quotes text it was given, and names an
+// unknown key only when it looks like a field's name. Order: size (a text's), JSON, object, v, then
+// each object's unknown keys, its fields in order and what goes with what; a value's size is last.
+// Shape only: it adds nothing up and compares no times. A new field is box-health@2; a new
+// word for `why` or `claude_why` is not, and a page shows its fallback sentence for one.
+function boxHealthProblem(input) {
+  return healthProblem(input, 'answer', BOX_HEALTH_SHAPE, BOX_HEALTH_MAX_BYTES);
+}
+// pool@1, a project's worker pool: run/cache/pool.json, written by its supervisor's `metrics` and read
+// by the machine's hub, across projects and kit releases. Required: every field but those marked ?.
+//   `v`  1     `at`  when it was written     `hour_end`  the end of the hour the hours below cover
+//   `cap`?      max_active_tickets; absent: no limit
+//   `ready`     the count behind idle-capacity     `planners`  running now
+//   `goals`     at most 20: `id`, `title` (at most 80 characters), `priority`?, `usd_hour`, `new_hour`
+//   `workers`   those holding a slot, at most 60; past 60 they are in `other`: `name`, `title`?, `goal`?
+//               (an index into goals; absent for none), `phase`?, `since`?, `tokens`
+//   `recent`    slots that ended in 24 hours, newest first, at most 20: `name`, `title`?, `left_at`,
+//               `why` ("merged", "done", "parked", "held" or "stopped"), `tokens`
+//   `other`     `usd_hour`, `new_hour` of every other session: supervisors, planners, the responder,
+//               ended sessions, and reviewers of no listed worker
+//   `tokens`    `state` "measured", "none-yet" or "not-measured", and `reason`? with the last, as in
+//               box-health@1. Only measured has `new`, `cached`, `points` (ten-minute buckets over six
+//               hours, at most 36: `at` its start, `new`) and, in workers, `usd_hour` and `new_hour`.
+//               Any state may have `reviews_new` (the ticket's reviews so far, any provider) and, in
+//               workers, `reviews_usd_hour` and `reviews_new_hour` (its reviewers' hour). `recent` has
+//               no hour fields: an ended session's hour is in `other`.
+// `usd_hour` and `new_hour` hold Claude models' records only, since they share Claude's limits;
+// `usd_hour` (and `reviews_usd_hour`, priced the same) is null when any record of the hour has no list
+// price. `new` and `points` hold every provider's. A worker's hours leave its reviewers' out. A goal's
+// usd_hour and new_hour are its workers', their reviewers', its planners' and its ended sessions'
+// hours. The whole hour is the workers, their reviewers and `other`: `goals` is a second view of the
+// same use, never added to it (design review F7-1).
+// A file is at most 256 KB (262144 bytes of UTF-8). The hub drops one poolProblem refuses, and treats
+// that project as unknown. poolProblem(input) takes the file's text or a parsed value and answers as
+// boxHealthProblem does, with pool for the whole. A new field is pool@2.
+function poolProblem(input) {
+  return healthProblem(input, 'pool', POOL_SHAPE, POOL_MAX_BYTES);
+}
+/* box-health-contract end */
 // The machine's own caps, not the host's: a platform caps CPU and memory in the cgroup, while
 // /proc/meminfo and the CPU count say what the whole host has (a 4-CPU, 16 GB box reads 32 CPUs, 123 GB).
 function machineLine(last) {
