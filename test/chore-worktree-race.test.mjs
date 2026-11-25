@@ -30,7 +30,7 @@ function raceFixture(name) {
   const bin = fs.mkdtempSync(path.join(F.base, 'shims-'));
   const tries = path.join(bin, 'tries');
   const armed = path.join(bin, 'empty-it');
-  fs.writeFileSync(path.join(bin, 'git'), `#!/bin/sh\ncase " $* " in *" worktree add "*) ;; *) exec ${JSON.stringify(realGit)} "$@" ;; esac\nif [ -e ${JSON.stringify(armed)} ]; then rm ${JSON.stringify(armed)}; if [ -e ${JSON.stringify(path.join(bin, 'move-first'))} ]; then rm ${JSON.stringify(path.join(bin, 'move-first'))}; ${JSON.stringify(realGit)} branch -q -f chore-c origin/main || exit 99; fi; : > ${JSON.stringify(common)}; fi\n${JSON.stringify(realGit)} "$@"\ncode=$?\necho "$code" >> ${JSON.stringify(tries)}\nexit $code\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(bin, 'git'), `#!/bin/sh\ncase " $* " in *" worktree add "*) ;; *) exec ${JSON.stringify(realGit)} "$@" ;; esac\nif [ -e ${JSON.stringify(armed)} ]; then rm ${JSON.stringify(armed)}; if [ -e ${JSON.stringify(path.join(bin, 'move-first'))} ]; then rm ${JSON.stringify(path.join(bin, 'move-first'))}; ${JSON.stringify(realGit)} branch -q -f chore-c origin/main || exit 99; fi; : > ${JSON.stringify(common)}; fi\nif [ -e ${JSON.stringify(path.join(bin, 'first.sh'))} ]; then mv ${JSON.stringify(path.join(bin, 'first.sh'))} ${JSON.stringify(path.join(bin, 'ran.sh'))}; . ${JSON.stringify(path.join(bin, 'ran.sh'))}; fi\n${JSON.stringify(realGit)} "$@"\ncode=$?\necho "$code" >> ${JSON.stringify(tries)}\nexit $code\n`, { mode: 0o755 });
   const start = (slug) => {
     const t0 = Date.now();
     const c = spawn(process.execPath, [path.join(old, 'docs/devteam/scripts/devteam.mjs'), 'chore', 'start', slug], { cwd: old, env: { ...F.env(SUP), PATH: `${bin}${path.delimiter}${process.env.PATH}` }, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -47,9 +47,12 @@ function raceFixture(name) {
     while (!codes().length) { assert.ok(Date.now() < end, 'no add was tried in 60 s'); await sleep(20); }
     assert.equal(codes()[0], '128', 'the first add met the empty commondir');
   };
+  // shell run in the shim before the first add; with an exit it stands in for that add, or for each one
+  const first = (sh) => fs.writeFileSync(path.join(bin, 'first.sh'), sh);
+  const says = (line) => `echo ${JSON.stringify(line)} >&2; echo 128 >> ${JSON.stringify(tries)}; mv ${JSON.stringify(path.join(bin, 'ran.sh'))} ${JSON.stringify(path.join(bin, 'first.sh'))}; exit 128\n`;
   const arm = () => fs.writeFileSync(armed, '');
   const fill = () => fs.writeFileSync(common, whole);
-  return { ...F, wt, entry, at, config, common, sibling, start, bin, codes, failedOnce, arm, fill };
+  return { ...F, wt, entry, at, config, common, sibling, start, bin, codes, failedOnce, first, says, arm, fill };
 }
 
 test('a start that meets a sibling\'s half-made entry succeeds once the entry is whole', async () => {
@@ -66,6 +69,74 @@ test('a start that meets a sibling\'s half-made entry succeeds once the entry is
     assert.equal(F.g(['rev-parse', '--abbrev-ref', 'HEAD'], F.wt('a')), 'chore-a');
     assert.equal(F.at('refs/heads/chore-a'), F.at('refs/remotes/origin/main'));
     assert.deepEqual(F.sibling(), was, 'the sibling\'s worktree is as it was');
+  } finally { F.done(); }
+});
+
+test('a start that meets a half-made entry made during its own add, or one that goes, succeeds', async (t) => {
+  const F = raceFixture('wt-race-late');
+  const aside = path.join(F.base, 'aside');
+  try {
+    await t.test('made after the start looked', async () => {
+      fs.renameSync(F.entry('b'), aside);
+      F.first(`mv ${JSON.stringify(aside)} ${JSON.stringify(F.entry('b'))}\n: > ${JSON.stringify(F.common)}\n`);
+      const done = F.start('a');
+      await F.failedOnce();
+      await sleep(300);
+      F.fill();
+      const r = await done;
+      assert.equal(r.status, 0, `an entry not there before the add is waited for too: ${r.err}`);
+    });
+    await t.test('gone while waiting', async () => {
+      fs.unlinkSync(path.join(F.bin, 'tries'));
+      F.arm();
+      const done = F.start('d');
+      await F.failedOnce();
+      await sleep(300);
+      fs.renameSync(F.entry('b'), aside);
+      const r = await done;
+      assert.equal(r.status, 0, `an entry that goes is no bar: ${r.err}`);
+    });
+    await t.test('gone by the time the start looks', async () => {
+      fs.renameSync(aside, F.entry('b'));
+      fs.unlinkSync(path.join(F.bin, 'tries'));
+      F.first(`: > ${JSON.stringify(F.common)}\n${JSON.stringify(realGit)} "$@"\ncode=$?\nmv ${JSON.stringify(F.entry('b'))} ${JSON.stringify(aside)}\necho "$code" >> ${JSON.stringify(path.join(F.bin, 'tries'))}\nexit $code\n`);
+      const r = await F.start('e');
+      assert.deepEqual(F.codes(), ['128', '0'], 'tried again');
+      assert.equal(r.status, 0, r.err);
+    });
+  } finally { F.done(); }
+});
+
+test('a branch another hand moves meanwhile is left where it was put', async (t) => {
+  const F = raceFixture('wt-race-moved');
+  const child = (of, m) => F.g(['commit-tree', F.g(['rev-parse', 'main^{tree}'], F.old), '-p', of, '-m', m], F.old);
+  try {
+    const open = child('main', 'open work');
+    const more = child(open, 'more of it');
+    await t.test('in the wait', async () => {
+      F.g(['branch', 'chore-a', open], F.old);
+      F.arm();
+      const done = F.start('a');
+      await F.failedOnce();
+      await sleep(500);
+      F.g(['update-ref', 'refs/heads/chore-a', more], F.old);
+      F.fill();
+      const r = await done;
+      assert.equal(F.at('refs/heads/chore-a'), more, 'the retry leaves the moved branch');
+      assert.notEqual(r.status, 0);
+      assert.match(r.err, HALF, 'git\'s words');
+      assert.match(r.err, /chore-a moved meanwhile/);
+      assert.ok(!fs.existsSync(F.wt('a')));
+    });
+    await t.test('during a try', async () => {
+      fs.unlinkSync(path.join(F.bin, 'tries'));
+      F.fill();
+      F.g(['branch', 'chore-c', open], F.old);
+      F.first(`${JSON.stringify(realGit)} update-ref refs/heads/chore-c ${more}\n: > ${JSON.stringify(F.common)}\n`);
+      const r = await F.start('c');
+      assert.notEqual(r.status, 0);
+      assert.equal(F.at('refs/heads/chore-c'), more, 'the undo leaves the moved branch');
+    });
   } finally { F.done(); }
 });
 
@@ -165,6 +236,19 @@ test('a failure of any other cause is not retried and keeps git\'s words', async
         assert.match(r.err, /the hook refused\s*$/);
       } finally { fs.unlinkSync(hook); }
     });
+    for (const [what, name, setup] of [['its own entry\'s commondir', 'chore-g', ''], ['an entry that never was', 'nowhere', ''], ['its own entry, numbered and left behind', 'chore-g1', 'own']]) {
+      await t.test(`a failure that names ${what}`, async () => {
+        fs.rmSync(path.join(F.bin, 'tries'), { force: true });
+        const own = path.join(F.old, '.git', 'worktrees', name);
+        F.first(`${setup && `mkdir -p ${JSON.stringify(own)}; printf '%s\\n' ${JSON.stringify(path.join(F.wt('g'), '.git'))} > ${JSON.stringify(path.join(own, 'gitdir'))}; : > ${JSON.stringify(path.join(own, 'commondir'))}\n`}${F.says(`fatal: could not write to '.git/worktrees/${name}/commondir': No space left on device`)}`);
+        const r = await F.start('g');
+        fs.rmSync(path.join(F.bin, 'first.sh'), { force: true });
+        if (setup) fs.rmSync(own, { recursive: true });
+        assert.equal(r.status, 1);
+        assert.deepEqual(F.codes(), ['128'], `one try: ${what}`);
+        assert.match(r.err, /No space left on device\s*$/, 'git\'s words, and no more');
+      });
+    }
     await t.test('a commondir that can\'t be read', { skip: process.getuid() === 0 && 'root reads everything' }, async () => {
       fs.chmodSync(F.common, 0);
       try {
