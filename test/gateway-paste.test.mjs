@@ -106,7 +106,7 @@ async function open(t, who = LINUX) {
   // the uploads the page makes, as it makes them
   await p.ev(`(() => { window.posts = []; const o = XMLHttpRequest.prototype.open; XMLHttpRequest.prototype.open = function (m, u) { window.posts.push(m + ' ' + u); return o.apply(this, arguments); }; })()`);
   const paste = (spec) => p.ev(`(async () => {
-    const bytes = { png: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', bmp: 'Qk06AAAAAAAAADYAAAAoAAAAAQAAAAEAAAABABgAAAAAAAQAAAATCwAAEwsAAAAAAAAAAAAAAAD/AA==' };
+    const bytes = { png: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', bmp: '${BMP}' };
     const s = ${JSON.stringify(spec)};
     const d = new DataTransfer();
     for (const [name, type, what] of s.files ?? []) d.items.add(new File([bytes[what] ? Uint8Array.from(atob(bytes[what]), (c) => c.charCodeAt(0)) : what], name, { type }));
@@ -124,6 +124,14 @@ async function open(t, who = LINUX) {
 }
 const SHOT = ['image.png', 'image/png', 'png'];
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+// two pixels, red then blue, so a redraw that loses or crops them shows
+const BMP = (() => {
+  const b = Buffer.alloc(62);
+  b.write('BM');
+  b.writeUInt32LE(62, 2); b.writeUInt32LE(54, 10); b.writeUInt32LE(40, 14); b.writeInt32LE(2, 18); b.writeInt32LE(1, 22); b.writeUInt16LE(1, 26); b.writeUInt16LE(24, 28); b.writeUInt32LE(8, 34);
+  b.set([0, 0, 255, 255, 0, 0], 54);
+  return b.toString('base64');
+})();
 const URL1 = 'https://example.com/cat';
 const IMG = `<img src="${URL1}" alt="a cat">`;
 const PATH = /^\/\S+\/\d{4}-\d{2}-\d{2}-[0-9a-f]{24}\/(\S+)$/;
@@ -232,7 +240,10 @@ each('names', [
   ['a clipboard JPEG is named .jpg', (p) => image(p, { files: [['image.jpg', 'image/jpeg', 'png']] }, /^pasted-\d{8}-\d{6}\.jpg$/)],
   ['a BMP is redrawn as PNG, under its own name', async (p) => {
     const at = await image(p, { files: [['scan.bmp', 'image/bmp', 'bmp']] }, /^scan\.png$/);
-    assert.equal(fs.readFileSync(at).subarray(0, 8).toString('hex'), '89504e470d0a1a0a', 'PNG bytes');
+    const png = fs.readFileSync(at);
+    assert.equal(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a', 'PNG bytes');
+    const pixels = await p.ev(`(async () => { const b = await createImageBitmap(new Blob([Uint8Array.from(atob('${png.toString('base64')}'), (c) => c.charCodeAt(0))])); const c = document.createElement('canvas'); c.width = b.width; c.height = b.height; const x = c.getContext('2d'); x.drawImage(b, 0, 0); return [b.width, b.height, ...x.getImageData(0, 0, b.width, b.height).data]; })()`);
+    assert.deepEqual(pixels, [2, 1, 255, 0, 0, 255, 0, 0, 255, 255], 'the same picture');
   }],
   ['a clipboard BMP is redrawn and stamped', (p) => image(p, { files: [['image.bmp', 'image/bmp', 'bmp']] }, STAMPED)],
   ['an image the browser can\'t decode uploads nothing and says so', async (p) => {
@@ -243,6 +254,34 @@ each('names', [
   }],
 ]);
 
+// A file dropped on the page, as the drop's own code takes it.
+const drop = (p, name) => p.ev(`(() => { const d = new DataTransfer(); d.items.add(new File(['dropped'], ${JSON.stringify(name)}, { type: 'image/png' })); document.body.dispatchEvent(new DragEvent('drop', { dataTransfer: d, bubbles: true, cancelable: true })); })()`);
+on('paste rules: a drop on the page still uploads, pastes and says Sent, after a paste too', async (t) => {
+  const p = await open(t);
+  await image(p, { files: [SHOT] }, STAMPED);
+  await drop(p, 'plan.png');
+  await p.wait('window.pasted.length === 2', 'the dropped path pasted');
+  const s = await p.state();
+  assert.match(s.pasted[1], /\/plan\.png$/);
+  assert.equal(fs.readFileSync(s.pasted[1], 'utf8'), 'dropped');
+  assert.ok(s.note.startsWith('Sent to the focused pane.'), s.note);
+});
+on('paste rules: pastes upload one at a time, in order, and one that can\'t be read leaves the rest', async (t) => {
+  const p = await open(t);
+  await p.ev(`(() => { const s = XMLHttpRequest.prototype.send; window.held = []; XMLHttpRequest.prototype.send = function (b) { window.held.push(() => s.call(this, b)); }; })()`);
+  await p.paste({ files: [['image.tiff', 'image/tiff', 'not a picture'], ['a.png', 'image/png', 'png']] });
+  await p.paste({ files: [['b.png', 'image/png', 'png']] });
+  await p.wait('window.held.length > 0', 'the first upload');
+  await sleep(700);
+  assert.deepEqual(await p.ev('window.posts'), ['POST /upload?name=a.png'], 'the second waits for the first');
+  await p.ev('window.held[0]()');
+  await p.wait('window.held.length === 2', 'the second upload');
+  const s = await p.state();
+  assert.match(s.pasted[0] ?? '', /\/a\.png$/, 'the first is pasted');
+  await p.ev('window.held[1]()');
+  await p.wait('window.pasted.length === 2', 'the second path pasted');
+  assert.match((await p.state()).pasted[1], /\/b\.png$/);
+});
 on('paste offline: a paste while the socket is down is stored, said, and pasted once it is back; busy until then', async (t) => {
   const p = await open(t);
   // the upload held, so busy is seen before it is answered
@@ -310,6 +349,11 @@ for (const [os, who] of [['Windows', WINDOWS], ['Linux', LINUX]]) {
     assert.deepEqual([await p.ev('window.posts'), (await p.state()).note], [[], '']);
   });
 }
+on('paste chord: Linux, Insert alone still reaches the terminal', async (t) => {
+  const p = await open(t, LINUX);
+  await p.key('Insert', 'Insert', 45, 0);
+  await p.wait(`window.sent.join('') === '\\x1b[2~'`, 'Insert sent');
+});
 on('paste chord: Linux, Ctrl+Alt+V still reaches the terminal', async (t) => {
   const p = await open(t, LINUX);
   await p.key('v', 'KeyV', 86, 3);
