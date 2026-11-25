@@ -1026,6 +1026,908 @@
           "zorbly.example"
         ]
       }
+    },
+    {
+      "file": "cases/public-host-user-comma.md",
+      "doc": "exterior",
+      "shows": "a host after a user holding a comma",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "one.zorbly.example",
+          "two.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-user-semicolon.md",
+      "doc": "exterior",
+      "shows": "a host after a user holding a semicolon",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "one.zorbly.example",
+          "two.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-user-apostrophe.md",
+      "doc": "exterior",
+      "shows": "a host after a user holding an apostrophe",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "one.zorbly.example",
+          "two.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-entity.md",
+      "doc": "exterior",
+      "shows": "a host written with a character reference",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-entity-slashes.md",
+      "doc": "exterior",
+      "shows": "slashes written as character references",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-entity-named.md",
+      "doc": "exterior",
+      "shows": "a dot written as a named character reference",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-reference-tight.md",
+      "doc": "exterior",
+      "shows": "a reference whose definition has no space after the colon",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-three-slashes.md",
+      "doc": "exterior",
+      "shows": "three slashes before the host",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-backslash.md",
+      "doc": "exterior",
+      "shows": "a slash and a backslash before the host",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-href-break.md",
+      "doc": "exterior",
+      "shows": "a line break inside an href",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-mailto-second.md",
+      "doc": "exterior",
+      "shows": "each address of a mailto:, the second too",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "one.zorbly.example",
+          "two.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-email-autolink.md",
+      "doc": "exterior",
+      "shows": "an e-mail autolink",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-email-bare.md",
+      "doc": "exterior",
+      "shows": "a bare e-mail address, which GitHub links",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-email-version.md",
+      "doc": "exterior",
+      "shows": "a dependency's version after @ is named, and a word after @ is no address",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": []
+      }
+    },
+    {
+      "file": "cases/public-host-user-brackets.md",
+      "doc": "exterior",
+      "shows": "a host after a user holding brackets or parentheses",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "one.zorbly.example",
+          "two.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-escaped.md",
+      "doc": "exterior",
+      "shows": "an @, a dot or a bracket written as a backslash escape",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "one.zorbly.example",
+          "a.two.zorbly.example",
+          "three.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-reference-escaped.md",
+      "doc": "exterior",
+      "shows": "a reference definition's escaped dot",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "notes.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-email-autolink-local.md",
+      "doc": "exterior",
+      "shows": "an e-mail autolink with CommonMark's wider local part",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "one.zorbly.example",
+          "two.zorbly.example",
+          "three.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-href-after-break.md",
+      "doc": "exterior",
+      "shows": "an attribute's quoted value after a line break at =",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "a.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-href-unquoted.md",
+      "doc": "exterior",
+      "shows": "an unquoted attribute value holding a line break as a reference",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "a.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-href-no-semicolon.md",
+      "doc": "exterior",
+      "shows": "numeric references with no ; in an attribute",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "a.one.zorbly.example",
+          "two.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-heading-not-a-link.md",
+      "doc": "exterior",
+      "shows": "a heading whose brackets are no link keeps its words",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [
+          "[Ledgerpad](zorbly is a rival)"
+        ],
+        "held": [],
+        "hosts": []
+      }
+    },
+    {
+      "file": "cases/public-heading-line-separator.md",
+      "doc": "exterior",
+      "shows": "a heading holding a line separator",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [
+          "Ledgerpad zorbly"
+        ],
+        "held": [],
+        "hosts": []
+      }
+    },
+    {
+      "file": "cases/public-heading-lone-cr.md",
+      "doc": "exterior",
+      "shows": "a document whose lines end in a lone CR",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [
+          "Ledgerpad zorbly"
+        ],
+        "held": [],
+        "hosts": []
+      }
+    },
+    {
+      "file": "cases/public-host-user-space.md",
+      "doc": "exterior",
+      "shows": "a host after a user holding a space, in an angle-bracket destination, an attribute and a definition",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "one.zorbly.example",
+          "two.zorbly.example",
+          "three.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-user-reference-space.md",
+      "doc": "exterior",
+      "shows": "a host after a user holding a reference to white space",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "one.zorbly.example",
+          "two.zorbly.example",
+          "three.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-long-user.md",
+      "doc": "exterior",
+      "shows": "a host after a user over 500 characters",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-user-unicode-space.md",
+      "doc": "exterior",
+      "shows": "a host after a user holding a no-break, em or ideographic space",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "one.zorbly.example",
+          "three.zorbly.example",
+          "two.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/self-part-unicode-space.md",
+      "doc": "self",
+      "shows": "a no-break space is no end of a link target: the link is read",
+      "expect": {
+        "errors": [
+          "part link ../shop/ x points to nothing"
+        ],
+        "parts": [
+          "docs/shop/ x",
+          "docs/app"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-user-angle-bracket.md",
+      "doc": "exterior",
+      "shows": "a host after a user holding < or >",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "one.zorbly.example",
+          "two.zorbly.example",
+          "three.zorbly.example",
+          "four.zorbly.example",
+          "five.zorbly.example",
+          "six.zorbly.example",
+          "seven.zorbly.example",
+          "eight.zorbly.example",
+          "nine.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-user-angle-bracket-breaks.md",
+      "doc": "exterior",
+      "shows": "a host after a user holding < or >, the destination after a CR, a CRLF or a quote marker",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "one.zorbly.example",
+          "two.zorbly.example",
+          "three.zorbly.example",
+          "four.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-user-angle-bracket-feed.md",
+      "doc": "exterior",
+      "shows": "a host after a user holding < or >, the destination after a form feed or vertical tab",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "one.zorbly.example",
+          "two.zorbly.example",
+          "three.zorbly.example",
+          "four.zorbly.example",
+          "five.zorbly.example",
+          "six.zorbly.example",
+          "seven.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-heading-span-in-tail.md",
+      "doc": "exterior",
+      "shows": "a heading whose link's tail holds a code span is no link",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [
+          "[Ledgerpad](x zorbly)"
+        ],
+        "held": [],
+        "hosts": []
+      }
+    },
+    {
+      "file": "cases/public-heading-span-in-angle-tail.md",
+      "doc": "exterior",
+      "shows": "the same after an angle-bracket destination",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [
+          "[Ledgerpad](<x> zorbly)"
+        ],
+        "held": [],
+        "hosts": []
+      }
+    },
+    {
+      "file": "cases/public-heading-code-span.md",
+      "doc": "exterior",
+      "shows": "a heading whose link sits in a code span",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [
+          "[Ledgerpad](zorbly)"
+        ],
+        "held": [],
+        "hosts": []
+      }
+    },
+    {
+      "file": "cases/public-heading-paren-title.md",
+      "doc": "exterior",
+      "shows": "a heading whose ( title holds a ( is no link",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [
+          "[Ledgerpad](x (( zorbly is a rival))"
+        ],
+        "held": [],
+        "hosts": []
+      }
+    },
+    {
+      "file": "cases/public-heading-backslash-space.md",
+      "doc": "exterior",
+      "shows": "a backslash before a space escapes nothing",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [
+          "[Ledgerpad](zorbly\\ is)"
+        ],
+        "held": [],
+        "hosts": []
+      }
+    },
+    {
+      "file": "cases/self-part-backslash-space.md",
+      "doc": "self",
+      "shows": "a backslash before a space ends no link: prose",
+      "expect": {
+        "errors": [],
+        "parts": [
+          "docs/app"
+        ]
+      }
+    },
+    {
+      "file": "cases/self-part-list-fence.md",
+      "doc": "self",
+      "shows": "a fence opened on a list item's line, closed in the item",
+      "expect": {
+        "errors": [],
+        "parts": [
+          "docs/app"
+        ]
+      }
+    },
+    {
+      "file": "cases/self-part-list-fence-open.md",
+      "doc": "self",
+      "shows": "a fence opened on a list item's line, never closed, ends with the item",
+      "expect": {
+        "errors": [],
+        "parts": [
+          "docs/app"
+        ]
+      }
+    },
+    {
+      "file": "cases/self-part-list-fence-deep.md",
+      "doc": "self",
+      "shows": "a fence opened after a wide list marker closes indented as far as the item's text",
+      "expect": {
+        "errors": [],
+        "parts": [
+          "docs/app"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-heading-after-list-fence.md",
+      "doc": "exterior",
+      "shows": "a heading after a fence opened on a list item's line",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [
+          "Zorbly"
+        ],
+        "held": [
+          "Zorbly"
+        ],
+        "hosts": []
+      }
+    },
+    {
+      "file": "cases/public-heading-after-ordered-interrupt.md",
+      "doc": "exterior",
+      "shows": "a 2. after paragraph text starts no list, so no fence",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [
+          "Zorbly"
+        ],
+        "held": [
+          "Zorbly"
+        ],
+        "hosts": []
+      }
+    },
+    {
+      "file": "cases/public-heading-after-nested-list-fence.md",
+      "doc": "exterior",
+      "shows": "a heading after a fence in an outer item's text, after an inner list",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [
+          "Zorbly"
+        ],
+        "held": [
+          "Zorbly"
+        ],
+        "hosts": []
+      }
+    },
+    {
+      "file": "cases/public-heading-angle-link.md",
+      "doc": "exterior",
+      "shows": "a heading's link with an angle-bracket destination reads as its words",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": []
+      }
+    },
+    {
+      "file": "cases/public-heading-after-indented-continuation.md",
+      "doc": "exterior",
+      "shows": "a paragraph goes on through a line indented four, so a 2. after it starts no list",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [
+          "Zorbly"
+        ],
+        "held": [
+          "Zorbly"
+        ],
+        "hosts": []
+      }
+    },
+    {
+      "file": "cases/public-heading-after-empty-item-in-paragraph.md",
+      "doc": "exterior",
+      "shows": "an empty item cannot interrupt a paragraph, so a 2. after it starts no list",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [
+          "Zorbly"
+        ],
+        "held": [
+          "Zorbly"
+        ],
+        "hosts": []
+      }
+    },
+    {
+      "file": "cases/public-heading-after-one-line-nested-fence.md",
+      "doc": "exterior",
+      "shows": "a fence in the outer item's text after a line of two markers",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [
+          "Zorbly"
+        ],
+        "held": [
+          "Zorbly"
+        ],
+        "hosts": []
+      }
+    },
+    {
+      "file": "cases/public-heading-after-empty-item-fence.md",
+      "doc": "exterior",
+      "shows": "an empty item's text starts one past its marker",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [
+          "Zorbly"
+        ],
+        "held": [
+          "Zorbly"
+        ],
+        "hosts": []
+      }
+    },
+    {
+      "file": "cases/public-heading-after-item-fence.md",
+      "doc": "exterior",
+      "shows": "a heading after a fence opened on an item's later line, never closed",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [
+          "Zorbly"
+        ],
+        "held": [
+          "Zorbly"
+        ],
+        "hosts": []
+      }
+    },
+    {
+      "file": "cases/public-heading-after-item-fence-wide.md",
+      "doc": "exterior",
+      "shows": "a heading after an item's fence whose close is four past the item's text",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [
+          "Zorbly"
+        ],
+        "held": [
+          "Zorbly"
+        ],
+        "hosts": []
+      }
+    },
+    {
+      "file": "cases/self-part-item-fence-deep.md",
+      "doc": "self",
+      "shows": "a fence on a wide item's later line, indented as far as its text",
+      "expect": {
+        "errors": [],
+        "parts": [
+          "docs/app"
+        ]
+      }
+    },
+    {
+      "file": "cases/exterior-entry-ends-at-section.md",
+      "doc": "exterior",
+      "shows": "an entry ends at the next ## section",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [
+          "\"Ledgerpad\" has no dated source"
+        ],
+        "refused": [],
+        "held": [],
+        "hosts": []
+      }
+    },
+    {
+      "file": "cases/public-one-letter.md",
+      "doc": "exterior",
+      "shows": "a capital letter alone is no name",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": []
+      }
+    },
+    {
+      "file": "cases/self-part-md-capital.md",
+      "doc": "self",
+      "shows": "an .MD beside it is a reference too",
+      "expect": {
+        "errors": [],
+        "parts": [
+          "docs/app"
+        ]
+      }
+    },
+    {
+      "file": "cases/self-part-long-tail.md",
+      "doc": "self",
+      "shows": "a link whose tail is over 500 characters is prose",
+      "expect": {
+        "errors": [],
+        "parts": [
+          "docs/app"
+        ]
+      }
+    },
+    {
+      "file": "cases/self-part-link-in-link.md",
+      "doc": "self",
+      "shows": "a link inside a link's words: the inner one is the link",
+      "expect": {
+        "errors": [],
+        "parts": [
+          "docs/app"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-www-in-path.md",
+      "doc": "exterior",
+      "shows": "www. inside a path is no host",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": []
+      }
+    },
+    {
+      "file": "cases/self-part-after-break.md",
+      "doc": "self",
+      "shows": "indented code after a thematic break is code",
+      "expect": {
+        "errors": [],
+        "parts": [
+          "docs/app"
+        ]
+      }
+    },
+    {
+      "file": "cases/self-part-in-image.md",
+      "doc": "self",
+      "shows": "a link inside an image's words is no part",
+      "expect": {
+        "errors": [],
+        "parts": [
+          "docs/app"
+        ]
+      }
     }
   ]
 }
