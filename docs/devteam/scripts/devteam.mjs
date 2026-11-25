@@ -7164,6 +7164,52 @@ function seedWorktree(wt, { setup = true, repo: R = repo('home'), session = fals
     }
   }
 }
+// git dies on a sibling's .git/worktrees/<name>/commondir that is there and still empty: another
+// worktree add, between making the file and filling it. Every add and fetch reads them all. run
+// (which returns at least { ok, err }) is tried again once that file is filled or gone, for 5 s in all
+// (clock shares the 5 s between calls); any other failure is returned at once. A commondir that can't
+// be read is another failure, and so is one once the worktree (wt) is there: a hook's; so is one that
+// names this add's own entry, which its gitdir tells, or one that was never there. The path in git's
+// line is matched, not its words, which follow the locale. before() is called before each try and
+// after() once it failed; stop() says, after a wait, why not to try again. Returned: run's answer,
+// with waited (whether any wait was) and note (a line to add to git's words, or '').
+function pastHalfMade(run, { common, wt = null, clock = {}, before = () => {}, after = () => {}, stop = () => null }) {
+  const LIMIT_S = 5;
+  const dir = path.join(common, 'worktrees');
+  const half = (name) => { try { return fs.readFileSync(path.join(dir, name, 'commondir'), 'utf8') === ''; } catch (e) { return e.code === 'ENOENT' ? false : null; } };
+  const entries = () => { try { return fs.readdirSync(dir); } catch { return []; } };
+  const own = (name) => { if (!wt) return false; const at = path.join(dir, name); try { return realPathMade(path.resolve(at, fs.readFileSync(path.join(at, 'gitdir'), 'utf8').trim())) === realPathMade(path.join(wt, '.git')); } catch { return false; } };
+  for (let waited = false; ;) {
+    before();
+    const listed = entries();
+    const r = run();
+    if (r.ok) return { ...r, waited, note: '' };
+    after();
+    const name = /worktrees\/([^/\n]+)\/commondir/.exec(r.err ?? '')?.[1];
+    const seen = name !== undefined && (listed.includes(name) || entries().includes(name)) && !own(name);
+    if (!seen || (wt && fs.existsSync(wt)) || half(name) === null) return { ...r, waited, note: '' };
+    waited = true;
+    clock.end ??= performance.now() + LIMIT_S * 1000;
+    do Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50); while (half(name) && performance.now() < clock.end);
+    const why = stop();
+    if (performance.now() < clock.end && !why) continue;
+    return { ...r, waited, note: why ? `\n${why}` : half(name) ? `\nthe entry ${name} in ${dir} was still half made after ${LIMIT_S} s (its commondir is empty): another git may be making that worktree, or stopped while it did` : '' };
+  }
+}
+// git worktree add past a sibling's half-made entry, dying as gitOrDie does. args: the add's, or a
+// function that gives them anew for each try (a failed one can leave its branch).
+function worktreeAddOrDie(args, wt, { root, common }) {
+  let last;
+  const r = pastHalfMade(() => {
+    last = typeof args === 'function' ? args() : args;
+    try { execFileSync('git', last, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); return { ok: true }; } catch (e) { return { ok: false, err: e.stderr, words: (e.stderr || e.message).toString().trim() }; }
+  }, { common, wt });
+  if (!r.ok) die(`git ${last.join(' ')} failed: ${r.words}${r.note}`);
+}
+// a fetch past the same state, for a start that carries on when the fetch fails
+function fetchPastHalfMade(args, clock) {
+  return pastHalfMade(() => { const r = gitRun(args); return { ...r, ok: r.status === 0 }; }, { common: commonDir, clock });
+}
 // What a killed process left behind: its exit hook never ran (a restart, a timeout, a kill), so its
 // temp checkouts stay under home's .worktrees and pile up. Only ones that are ours: on git's own
 // list, directly under .worktrees, named tmp-<name>-<pid>, and that pid gone. A pid reused since
@@ -7188,7 +7234,7 @@ function detachedWorktree(sha, name, R = repo('home'), { seed = true } = {}) {
   if (!holder) sweepDeadTempWorktrees(R);
   const wt = holder ? path.join(holder, `tmp-${name}`) : path.join(mainRoot, '.worktrees', `tmp-${name}-${process.pid}`);
   // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
-  R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
+  worktreeAddOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--detach', wt, sha], wt, { root: R.root, common: R.commonDir });
   process.once('exit', () => {
     if (fs.existsSync(wt)) R.git(['worktree', 'remove', '--force', wt], R.root);
     // the empty holder only (rmdir refuses anything with files left in it)
@@ -7245,7 +7291,7 @@ function cmdReviewWorktree() {
   const wt = path.join(root, `review-${short}-${sha.slice(0, 8)}${suffix ? `-${suffix}` : ''}`);
   if (fs.existsSync(wt)) die(`${wt} exists; give this reviewer its own --name, or remove it: devteam.mjs review-worktree --remove ${wt}`);
   // both checkouts with -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
-  R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
+  worktreeAddOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--detach', wt, sha], wt, { root: R.root, common: R.commonDir });
   seedWorktree(wt, { repo: R });
   out(wt);
   // records in home: a detached checkout of home's ticket/<id> beside it, whose full sha the
@@ -7256,7 +7302,7 @@ function cmdReviewWorktree() {
     if (!rsha) warn(`no records for ${id} in home (home's ticket/${id}), so no records checkout was made`);
     else {
       const rwt = `${wt}-records`;
-      gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--detach', rwt, rsha], mainRoot);
+      worktreeAddOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--detach', rwt, rsha], rwt, { root: mainRoot, common: commonDir });
       out(`records: ${rwt} (${rsha})`);
     }
   }
@@ -17068,7 +17114,7 @@ function runMeasureCheck(g) {
   let sha = null;
   const R = repo(m.source === 'repo' ? m.link ?? 'home' : 'home'); // an act: fails fast on a missing checkout
   if (m.source === 'repo') {
-    if (R.name === 'home') { R.git(['fetch', '--quiet', 'origin'], R.root); mainRefCache = undefined; } else fetchLinkMain(R, 'refusing to read the measure on a stale main');
+    if (R.name === 'home') { fetchPastHalfMade(['fetch', '--quiet', 'origin']); mainRefCache = undefined; } else fetchLinkMain(R, 'refusing to read the measure on a stale main');
     sha = R.git(['rev-parse', `${R.mainRef() ?? die(`no main branch${R.name === 'home' ? '' : ` in ${R.name}`} to read the measure on`)}^{commit}`], R.root) ?? die('cannot resolve main');
     cwd = detachedWorktree(sha, 'reading', R);
   }
@@ -17633,52 +17679,35 @@ function choreWorktree(slugName, { reset = false, setup = false, responder = fal
   if (repoRoot !== mainRoot && !(responder && logWriter() === 'responder' && [undefined, '', 'responder'].includes(process.env.DEVTEAM_ROLE))) die(`run this from the main checkout (${mainRoot})`);
   const wt = path.join(mainRoot, '.worktrees', `chore-${slugName}`);
   const main = loadSettings().main_branch;
-  if (!flags['dry-run']) git(['fetch', '--quiet', 'origin', main]);
+  if (!flags['dry-run']) fetchPastHalfMade(['fetch', '--quiet', 'origin', main]);
   const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
   const existed = fs.existsSync(wt);
   // add and reset with -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
   if (!existed) {
     const add = ['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, start ?? base];
-    // git dies on a sibling's .git/worktrees/<name>/commondir that is there and still empty: another
-    // worktree add, between making the file and filling it. Waited for and tried again, for 5 s in
-    // all; any other failure dies at once (a commondir that can't be read is another, and so is a
-    // failure once the worktree is there: a hook's; so is one that names this add's own entry, which
-    // its gitdir tells, or one that was never there). The path in git's line is matched, not its
-    // words, which follow the locale.
-    const LIMIT_S = 5;
     const ref = `refs/heads/chore-${slugName}`;
     const branchConfig = () => git(['config', '--local', '--get-regexp', `^branch\\.chore-${slugName.replaceAll('.', '\\.')}\\.[^.]+$`], mainRoot);
     const was = { tip: resolveCommit(ref), config: branchConfig() };
-    const half = (name) => { try { return fs.readFileSync(path.join(commonDir, 'worktrees', name, 'commondir'), 'utf8') === ''; } catch (e) { return e.code === 'ENOENT' ? false : null; } };
-    const entries = () => { try { return fs.readdirSync(path.join(commonDir, 'worktrees')); } catch { return []; } };
-    const own = (name) => { const dir = path.join(commonDir, 'worktrees', name); try { return realPathMade(path.resolve(dir, fs.readFileSync(path.join(dir, 'gitdir'), 'utf8').trim())) === realPathMade(path.join(wt, '.git')); } catch { return false; } };
-    for (let end = null, set = null; ;) {
-      let words, name;
-      const before = resolveCommit(ref), from = resolveCommit(start ?? base), listed = entries();
-      try { execFileSync('git', add, { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); break; }
-      catch (e) { words = (e.stderr || e.message).toString().trim(); name = /worktrees\/([^/\n]+)\/commondir/.exec(e.stderr ?? '')?.[1]; }
+    let set = null, tip, from;
+    const r = pastHalfMade(() => {
+      try { execFileSync('git', add, { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); return { ok: true }; } catch (e) { return { ok: false, err: e.stderr, words: (e.stderr || e.message).toString().trim() }; }
+    }, {
+      common: commonDir, wt,
+      before: () => { tip = resolveCommit(ref); from = resolveCommit(start ?? base); },
       // where this try moved the branch, read now: origin's main can move during the wait. Only to
       // the commit this start asked for: any other move is another hand's
-      const after = resolveCommit(ref);
-      if (after !== before && (after === from || after === resolveCommit(start ?? base))) set = after;
-      const seen = name !== undefined && (listed.includes(name) || entries().includes(name)) && !own(name);
-      const state = !seen || fs.existsSync(wt) ? null : half(name);
-      if (state !== null) {
-        end ??= performance.now() + LIMIT_S * 1000;
-        do Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50); while (half(name) && performance.now() < end);
-        // -B would set a branch another hand moved meanwhile back to where this start began
-        const moved = resolveCommit(ref) !== (set ?? was.tip);
-        if (performance.now() < end && !moved) continue;
-        if (moved) words += `\nchore-${slugName} moved meanwhile and is left where it is: start it again`;
-        else if (half(name)) words += `\nthe entry ${name} in ${path.join(commonDir, 'worktrees')} was still half made after ${LIMIT_S} s (its commondir is empty): another git may be making that worktree, or stopped while it did`;
-      }
+      after: () => { const now = resolveCommit(ref); if (now !== tip && (now === from || now === resolveCommit(start ?? base))) set = now; },
+      // -B would set a branch another hand moved meanwhile back to where this start began
+      stop: () => (resolveCommit(ref) !== (set ?? was.tip) ? `chore-${slugName} moved meanwhile and is left where it is: start it again` : null),
+    });
+    if (!r.ok) {
       // -B sets the branch before it checks out, so a try that met a half-made entry can leave it:
       // put back, unless it moved since, or the worktree or its entry is there now (another start's)
-      if (end !== null && !fs.existsSync(wt) && !fs.existsSync(path.join(commonDir, 'worktrees', `chore-${slugName}`))) {
+      if (r.waited && !fs.existsSync(wt) && !fs.existsSync(path.join(commonDir, 'worktrees', `chore-${slugName}`))) {
         if (set && set !== was.tip) git(['update-ref', ...(was.tip ? [ref, was.tip, set] : ['-d', ref, set])], mainRoot);
         if (!was.tip && !was.config && branchConfig() && !resolveCommit(ref)) git(['config', '--local', '--remove-section', `branch.chore-${slugName}`], mainRoot);
       }
-      die(`git ${add.join(' ')} failed: ${words}`);
+      die(`git ${add.join(' ')} failed: ${r.words}${r.note}`);
     }
     seedWorktree(wt, { setup, session: true });
   }
@@ -17710,7 +17739,7 @@ function choreBranch(slugName) {
   if (!flags['dry-run'] && git(['config', '--get', 'remote.origin.url']) !== null) {
     const ls = gitRun(['ls-remote', '--exit-code', 'origin', `refs/heads/${ref}`]);
     if (ls.status === 0) {
-      const f = gitRun(['fetch', '--quiet', 'origin', `+refs/heads/${ref}:${remote}`]);
+      const f = fetchPastHalfMade(['fetch', '--quiet', 'origin', `+refs/heads/${ref}:${remote}`]);
       if (f.status !== 0) warn(`couldn't fetch ${ref} from origin (${firstLine(f.err) || `exit ${f.status}`}); reading the refs as they are`);
     } else if (ls.status === 2) gone = true; // not on origin: a stale copy of it says nothing (and stays)
     else warn(`couldn't ask origin for ${ref} (${firstLine(ls.err) || `exit ${ls.status}`}); reading the refs as they are`);
@@ -29013,12 +29042,15 @@ function ensureRecordsWorktree(id) {
   if (fs.existsSync(rw)) return rw;
   const branch = `ticket/${id}`;
   const mb = loadSettings().main_branch;
-  git(['fetch', '--quiet', 'origin', mb]);
-  git(['fetch', '--quiet', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
+  const clock = {}; // one 5 s for both fetches
+  fetchPastHalfMade(['fetch', '--quiet', 'origin', mb], clock);
+  fetchPastHalfMade(['fetch', '--quiet', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`], clock);
   // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
-  if (resolveCommit(`refs/heads/${branch}`)) gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', rw, branch], mainRoot);
-  else if (resolveCommit(`refs/remotes/origin/${branch}`)) gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--track', '-b', branch, rw, `origin/${branch}`], mainRoot);
-  else gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-b', branch, rw, resolveCommit(`origin/${mb}`) ? `origin/${mb}` : mb], mainRoot);
+  const add = ['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet'];
+  // asked anew for each try: a failed one leaves the branch it made
+  worktreeAddOrDie(() => (resolveCommit(`refs/heads/${branch}`) ? [...add, rw, branch]
+    : resolveCommit(`refs/remotes/origin/${branch}`) ? [...add, '--track', '-b', branch, rw, `origin/${branch}`]
+      : [...add, '-b', branch, rw, resolveCommit(`origin/${mb}`) ? `origin/${mb}` : mb]), rw, { root: mainRoot, common: commonDir });
   return rw;
 }
 function removeWorkerWorktree(id) {
@@ -29398,8 +29430,8 @@ function makeSession(role) {
     // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
     const headOf = () => { const h = responderGit(['rev-parse', '--verify', '--quiet', 'HEAD'], wt); return h.status === 0 ? short(h.stdout.trim()) : 'no commit'; };
     const leftWords = (left) => (left ? `, but ${left}${unfinished() ? '. If git gave no reason above, a post-checkout hook may have failed: mend it first' : ''}` : fs.existsSync(wt) && fs.readdirSync(wt).length ? `; ${wt} is there, made by another start or left by this one (a post-checkout hook that unlocked it), at ${headOf()}: look at its commit before resuming it` : '');
-    const added = gitRun(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--no-guess-remote', '--lock', '--reason', mine, wt, branch], R.root);
-    if (added.status !== 0) die(`git worktree add ${branch} failed: ${redactUrl(firstLine(added.err.split('\n').find((l) => /^fatal: /.test(l)) ?? added.err).replace(/^fatal: /, '')) || `exit ${added.status}`}; nothing was started${leftWords(leftAt())}${/is already locked/.test(added.err) ? '; a post-checkout hook may not lock the worktree while a start makes it' : ''}`);
+    const added = pastHalfMade(() => { const r = gitRun(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--no-guess-remote', '--lock', '--reason', mine, wt, branch], R.root); return { ...r, ok: r.status === 0 }; }, { common: R.commonDir, wt });
+    if (added.status !== 0) die(`git worktree add ${branch} failed: ${redactUrl(firstLine(added.err.split('\n').find((l) => /^fatal: /.test(l)) ?? added.err).replace(/^fatal: /, '')) || `exit ${added.status}`}; nothing was started${leftWords(leftAt())}${/is already locked/.test(added.err) ? '; a post-checkout hook may not lock the worktree while a start makes it' : ''}${added.note}`);
     // The add checks the branch out by name, so a session moving it meanwhile would win: what landed is
     // read back, and the worktree undone if it isn't the sha expected, on the branch (its full name: a
     // tag of the same name makes git print a longer short one). A branch still where this launch put it
@@ -31647,12 +31679,12 @@ const recurringRunDue = Object.freeze({
     if (hook) fs.writeFileSync(wt, 'kit-163 test hook\n');
     // no hook runs there: a tracked core.hooksPath (husky) would run a command no entry names (final-2 F3)
     // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
-    const add = recurringRegistry.git(['-c', 'core.useReplaceRefs=false', '-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '--quiet', '--detach', wt, sha], { cwd: mainRoot });
+    const add = pastHalfMade(() => recurringRegistry.git(['-c', 'core.useReplaceRefs=false', '-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '--quiet', '--detach', wt, sha], { cwd: mainRoot }), { common: commonDir, wt });
     if (hook) try { fs.unlinkSync(wt); } catch {}
     if (!add.ok) {
       // git's first error line, with the checkout's path made short so the excerpt keeps all of it
       const first = (add.err.split('\n').find((l) => l.trim()) ?? recurringRegistry.why(add)).trim().split(wt).join(path.relative(mainRoot, wt));
-      const tail = R.scrub(`the checkout could not be made: ${first}`, false);
+      const tail = R.scrub(`the checkout could not be made: ${first}${add.note && '; still half made at the limit'}`, false);
       return { status: 'error', seconds: seconds(), noCheckout: true, excerpt: R.excerpt(tail), tail };
     }
     R.state.current = { wt };
@@ -38435,8 +38467,8 @@ function cmdResponder() {
   if (!found) {
     // removed by hand: git's record of it goes first (final-1b F4)
     responderGit(['worktree', 'prune']);
-    const add = responderGit(['worktree', 'add', '--quiet', '--detach', wt, sha]);
-    if (add.status !== 0) die(`${wt}: could not add it at ${sha.slice(0, 8)}: ${String(add.stderr ?? '').trim() || `exit ${add.status}`}`);
+    const add = pastHalfMade(() => { const r = responderGit(['worktree', 'add', '--quiet', '--detach', wt, sha]); return { ...r, ok: r.status === 0, err: r.stderr }; }, { common: commonDir, wt });
+    if (add.status !== 0) die(`${wt}: could not add it at ${sha.slice(0, 8)}: ${String(add.stderr ?? '').trim() || `exit ${add.status}`}${add.note}`);
   } else {
     const bad = responderWorktreeProblem(wt);
     if (bad) die(bad);
