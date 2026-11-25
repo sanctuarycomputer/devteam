@@ -215,7 +215,7 @@ test('C7 each list over the design’s bound is refused, and passes at it', () =
     fill(a.claude, 'accounts', 40, a.claude.accounts[0]); fill(a.claude, 'points', 360, { ...row, room: 3.125 }); fill(a.claude.projection, 'points', 400, { ...row, room: 3.125 });
   });
   assert.equal(full, null, 'a full answer');
-  const big = (n) => health((a) => fill(a.headroom, 'ready_unknown', n, 'x'.repeat(1000)));
+  const big = (n) => health((a) => { delete a.headroom.starts; fill(a.headroom, 'ready_unknown', n, 'x'.repeat(1000)); });
   names(big(1100), 'answer', 'over 1 MB');
   const text = JSON.stringify(answer('laptop'));
   assert.equal(boxHealthProblem(text + ' '.repeat(1048576 - text.length)), null, 'a body of exactly 1 MB');
@@ -452,7 +452,7 @@ test('C19 why there is no token forecast, and why no Claude limit: one word each
 test('C20 every field refuses what is just outside its kind, and takes what is just inside', () => {
   // each kind: what it refuses, and what it takes; NaN, null and other types are C4's and C5's
   const KIND = {
-    count: [[1.5, -1, 2 ** 53], [0, 7]], least1: [[0, 1.5, -1], [1, 7]], whole: [[1.5], [-3, 0]], amount: [[-0.1, Infinity, NaN], [0, 0.5]], more: [[0, -1, Infinity], [0.5]], signed: [[Infinity, NaN], [-5.5, 0]],
+    count: [[1.5, -1, 2 ** 53], [0, 7]], hour: [[0, 1, 3599, 3601, 7200, '3600'], [3600]], least1: [[0, 1.5, -1], [1, 7]], whole: [[1.5], [-3, 0]], amount: [[-0.1, Infinity, NaN], [0, 0.5]], more: [[0, -1, Infinity], [0.5]], signed: [[Infinity, NaN], [-5.5, 0]],
     percent: [[-0.1, 100.1], [0, 100, 0.5]], share: [[-0.1, 1.1], [0, 1, 0.5]], ceiling: [[0.4, 0.96], [0.5, 0.95]], hours: [[-0.1, 6.1], [0, 6]], time: [['', '2026-02-30T00:00:00Z', '2026-11-24', '2026-11-24T18:40:00+01:00'], ['2026-11-24T18:40:00Z', '2026-11-24T18:40:00.123Z']],
     text: [[''], ['x'.repeat(200)]], title: [['', 'x'.repeat(81)], ['x'.repeat(80), 'an @']], label: [['', 'a@b'], ['x']], word: [['', 'Two', 'a b', 'x'.repeat(41)], ['ok', 'a-b_c']], port: [[0, 65536, 1.5], [1, 65535]],
     price: [[-0.1, Infinity], [0, 0.5, null]], bool: [[0, 'true'], []], yes: [[false, 1], [true]], one: [[0, 2, '1'], [1]], goal: [[-1, 0.5, 20], [0]],
@@ -467,7 +467,7 @@ test('C20 every field refuses what is just outside its kind, and takes what is j
   ];
   const NAMES = Object.fromEntries(Object.entries({
     count: 'used max available swap_used swap_max free total inodes_free inodes mem swap disk room starts claude ready workers planners cap rss n new cached reviews_new oldest_s most_that_lasts measured now memory_full_at cpu_full_at oom_kills left limit new_hour reviews_new_hour',
-    least1: 'window_s', whole: 'priority', amount: 'cpu load per_hour rate safe_rate', signed: 'bytes_per_hour', percent: 'some10 some60 full60 week_left five_left', share: 'throttled share', ceiling: 'ceiling', hours: 'rate_hours',
+    hour: 'window_s', whole: 'priority', amount: 'cpu load per_hour rate safe_rate', signed: 'bytes_per_hour', percent: 'some10 some60 full60 week_left five_left', share: 'throttled share', ceiling: 'ceiling', hours: 'rate_hours',
     time: 'at since disk_at left_at runs_out_at paused_until week_resets_at five_resets_at next_reset_at started_at resets_at hour_end', text: 'name project phase fleet id', title: 'title', label: 'label', word: 'status', port: 'port',
     price: 'usd_hour reviews_usd_hour', bool: 'agent active lasts enough', yes: 'shared', one: 'v', goal: 'goal', reason: 'reason', state: 'state', binds: 'binds', host: 'load_scope', strayKind: 'kind',
   }).flatMap(([k, l]) => l.split(' ').map((n) => [n, k])));
@@ -525,4 +525,38 @@ test('C18 the fake route: the answer, a bad time or unknown parameter is 400, an
   assert.deepEqual(JSON.parse(respond('normal', `/box-health.json?after=${encodeURIComponent(iso(-60000))}`).body), answer('normal', { after: iso(-60000) }));
   for (const q of ['after=', 'after=yesterday', 'after=2026-02-30T00:00:00Z', 'since=1h', `since=${NOW}`, `after=${NOW}&zz=1`, `after=${NOW}&after=${NOW}`]) assert.equal(respond('normal', `/box-health.json?${q}`).status, 400, q);
   assert.equal(respond('normal', '/box-health.jsonx').status, 404);
+});
+
+test('C21 (kit-878) starts goes with every fleet known, steps with at most 60 workers', () => {
+  const cpu = (c) => health((a) => { a.now.cpu = c; });
+  // a first reading has load and no host_cores: shared, which is about those, may be absent
+  for (const ok of [{ load: [1, 2, 3], load_scope: 'host' }, { shared: true }, {}]) assert.equal(cpu(ok), null, JSON.stringify(ok));
+  const room = (h) => health((a) => { a.headroom = h; });
+  for (const ok of [{ starts: 2 }, { starts: 2, ready_unknown: [] }, { ready_unknown: ['website'] }]) assert.equal(room(ok), null, JSON.stringify(ok));
+  names(room({ starts: 2, ready_unknown: ['website'] }), 'headroom.starts', 'with an unknown fleet');
+  names(room({ starts: 2, ready_unknown: ['website'], claude: 0, claude_why: 'lasts' }), 'headroom.starts', 'before claude_why');
+  const whatIf = (w) => health((a) => { a.pool.what_if = w; });
+  for (const ok of [{ now: 60, steps: [{ workers: 0 }] }, { now: 61 }]) assert.equal(whatIf(ok), null, JSON.stringify(ok));
+  names(whatIf({ now: 61, steps: [{ workers: 0 }] }), 'pool.what_if.steps', 'over 60 workers');
+  names(whatIf({ now: 61, steps: [] }), 'pool.what_if.steps', 'even none of them');
+  names(whatIf({ now: 61, steps: [{ workers: 0, lasts: true }], why: 'too-many' }), 'pool.what_if.steps', 'before why');
+});
+
+test('C22 (kit-878) the comments state the limits the checks keep', () => {
+  const b = flat(boxComment()).replace(/ +/g, ' '), q = flat(poolComment()).replace(/ +/g, ' ');
+  for (const s of ['Every other number is 0 or more, but bytes_per_hour, which may be below zero', 'Text is never empty, and a title is at most 80 characters', "A word (`status`, what_if's `why`, `claude_why`) is at most 40 of a-z, 0-9, _ and -, the first a letter", '3600, always', "`limit` (the box's own cap, over 0)", '"long-test"), `n`* (1 or more)', 'at most 40: `n`* (1 or more)', '`status` (a word)',
+    'absent with a name in ready_unknown', 'absent with now over 60', 'not checked, since a first reading has `load` and no `host_cores`', '`oldest_s` (whole)', '`mem_some` percent', 'no `starts` with a name in `ready_unknown`', "no `steps` with what_if's `now` over 60", 'no `claude_why` beside `claude`', "no `why` beside a step's `lasts`", '`runs_out_at` and `paused_until` by `lasts`', "a tokens row's fields by its `state`", "is the producer's to keep"]) assert.ok(b.includes(s), `box-health@1's comment says ${s}`);
+  for (const s of ["Times are as box-health@1's", 'Counts are whole, 0 or more', 'dollars 0 or more', 'text is never empty', 'a title is at most 80 characters', '`priority`? (whole, of either sign)']) assert.ok(q.includes(s), `pool@1's comment says ${s}`);
+});
+
+test('C23 (kit-878) a text far over the limit is refused without counting it to its end', () => {
+  const real = String.prototype.charCodeAt;
+  for (const [check, root, max] of [[boxHealthProblem, 'answer', 1048576], [poolProblem, 'pool', 262144]]) {
+    const text = ' '.repeat(8 * max);
+    let looked = 0, got;
+    String.prototype.charCodeAt = function (i) { looked++; return real.call(this, i); };
+    try { got = check(text); } finally { String.prototype.charCodeAt = real; }
+    names(got, root);
+    assert.ok(looked <= max + 1, `${root}: ${looked} characters looked at, of a limit of ${max}`);
+  }
 });
