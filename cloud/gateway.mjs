@@ -2716,13 +2716,14 @@ export function createGateway(opts = {}) {
   const onlyNames = (text, html, files) => {
     const line = text.replace(/[\\r\\n]+$/, '');
     if (!line) return true;
-    if (/[\\r\\n]/.test(line)) return false;
+    // every line break there is, not only the ones a browser writes
+    if (/[\\r\\n\\v\\f\\x85\\u2028\\u2029]/.test(line)) return false;
     if (html) {
       const body = new DOMParser().parseFromString(html, 'text/html').body;
       const els = Array.from(body.querySelectorAll('*')).filter((e) => e.tagName !== 'META');
       if (els.length !== 1 || els[0].tagName !== 'IMG' || body.textContent.trim()) return false;
     }
-    return /^(https?|file|data):/i.test(line) || /\\.(png|jpe?g|gif|webp|heic|tiff?|bmp)$/i.test(line) || files.some((f) => f.name && line.endsWith(f.name));
+    return /^(https?|file|data):\\S+$/i.test(line) || /\\.(png|jpe?g|gif|webp|heic|tiff?|bmp)$/i.test(line) || files.some((f) => f.name && line.endsWith(f.name));
   };
   const pastedName = (file, at) => {
     if (file.name && !/^image\\.[a-z0-9]+$/i.test(file.name)) return file;

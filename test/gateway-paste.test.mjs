@@ -180,6 +180,7 @@ each('rules', [
   ['an img with words beside it pastes its text (P1)', (p) => text(p, { files: [SHOT], text: URL1, html: `${IMG} see this` })],
   ['one word and an image pastes the word (P1)', (p) => text(p, { files: [SHOT], text: 'hello' })],
   ['two lines, the first an address, paste as text (P1)', (p) => text(p, { files: [SHOT], text: `${URL1}\nlook` })],
+  ['two lines, the last a file name, paste as text (P1)', (p) => text(p, { files: [SHOT], text: 'look\nholiday.png' })],
   ['a PDF with words pastes the words (P1)', (p) => text(p, { files: [['a.pdf', 'application/pdf', '%PDF']], text: 'two words' })],
   ['a PNG with a PDF: the image goes and the note says the rest did not (P2b)', async (p) => {
     const at = await image(p, { files: [SHOT, ['a.pdf', 'application/pdf', '%PDF']] }, STAMPED, { note: ONLY });
@@ -208,7 +209,13 @@ each('rules', [
   }],
   ['each text that only names its files, and each that only looks like one (P2, P1)', async (p) => {
     for (const named of ['http://x.test/a', 'https://x.test/a', 'HTTPS://x.test/a', 'file:///a', 'data:image/png;base64,AA', 'image.png\r\n', ...['png', 'jpg', 'jpeg', 'gif', 'webp', 'heic', 'tif', 'tiff', 'bmp'].map((e) => `holiday.${e}`)]) assert.equal(await p.paste({ files: [SHOT], text: named }), true, `names its image: ${named}`);
-    for (const words of ['see https://x.test/a', 'holiday.png is nice', 'holiday.pdf', 'ftp://x.test/a', 'holiday.tiffany']) assert.equal(await p.paste({ files: [SHOT], text: words }), false, `is text: ${words}`);
+    // every one that is taken for a name, so one run shows them all
+    const taken = [];
+    for (const words of ['see https://x.test/a', 'holiday.png is nice', 'holiday.pdf', 'ftp://x.test/a', 'holiday.tiffany',
+      'https://x.test/a is down, please look', 'http: server closed the connection', 'https: see below', 'file: not found', 'data: 3 rows failed to load', 'https:',
+      'https://x.test/a\tb', 'https://x.test/a b', 'https://x.test/a\u000bb', 'https://x.test/a b', 'https://x.test/a\fb', 'look holiday.png', 'look\u000bholiday.png', 'https://x.test/a\u0085holiday.png']) if (await p.paste({ files: [SHOT], text: words })) taken.push(words);
+    assert.deepEqual(taken, [], 'taken for a name, and their words lost');
+    assert.equal(await p.paste({ files: [SHOT], text: 'https://x.test/a is down, look', html: IMG }), false, 'words after an address, beside HTML of a lone img');
   }],
   ['an address with no file pastes as text', (p) => text(p, { text: URL1 })],
   ['an empty paste does nothing (P4)', async (p) => {
@@ -238,6 +245,14 @@ each('names', [
   ['a clipboard WebP goes as it is, byte for byte', (p) => image(p, { files: [['image.webp', 'image/webp', 'RIFF, a webp']] }, /^pasted-\d{8}-\d{6}\.webp$/, { bytes: Buffer.from('RIFF, a webp') })],
   ['a clipboard image with no name is stamped', (p) => image(p, { files: [['', 'image/png', 'png']] }, STAMPED)],
   ['a clipboard JPEG is named .jpg', (p) => image(p, { files: [['image.jpg', 'image/jpeg', 'png']] }, /^pasted-\d{8}-\d{6}\.jpg$/)],
+  ['a JPEG named shot.jfif keeps its name, and arrives as a path with the drop\'s space', async (p) => {
+    await p.paste({ files: [['shot.jfif', 'image/jpeg', 'png']] });
+    await p.wait('window.sent.length === 2', 'the path and its space');
+    const s = await p.state();
+    assert.equal(PATH.exec(s.pasted[0])[1], 'shot.jfif');
+    assert.deepEqual(s.sent, [s.pasted[0], ' ']);
+    assert.ok(fs.statSync(s.pasted[0]).size > 0, 'stored');
+  }],
   ['a BMP is redrawn as PNG, under its own name', async (p) => {
     const at = await image(p, { files: [['scan.bmp', 'image/bmp', 'bmp']] }, /^scan\.png$/);
     const png = fs.readFileSync(at);
