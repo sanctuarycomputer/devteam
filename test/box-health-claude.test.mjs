@@ -23,13 +23,13 @@ const near = (a, b, msg, eps = 1e-6) => assert.ok(Math.abs(a - b) < eps, `${msg 
 
 function load() {
   const proc = { env: {}, pid: 4242, memoryUsage: { rss: () => 1 } };
-  const hang = new Set(), held = [];
+  const hang = new Set(), held = [], opens = [];
   let opened = 0;
-  const promises = new Proxy(fs.promises, { get: (o, k) => (k !== 'open' ? o[k] : (p, ...a) => { opened++; return [...hang].some((h) => String(p).includes(h)) ? new Promise((res) => held.push(res)).then(() => o.open(p, ...a)) : o.open(p, ...a); }) });
+  const promises = new Proxy(fs.promises, { get: (o, k) => (k !== 'open' ? o[k] : (p, ...a) => { opened++; opens.push(String(p)); return [...hang].some((h) => String(p).includes(h)) ? new Promise((res) => held.push(res)).then(() => o.open(p, ...a)) : o.open(p, ...a); }) });
   const ffs = new Proxy(fs, { get: (o, k) => (k === 'promises' ? promises : o[k]) });
   const names = { fs: ffs, path, Buffer, process: proc };
   const code = `'use strict';\n${['box-memory', 'box-health-contract', 'box-health-sampler', 'box-health-claude'].map((n) => regionOf(n, src)).join('\n')}\nconst named = (f) => (typeof f === "function" ? f : undefined);\nreturn { boxHealthClaude, projectClaude: named(typeof projectClaude === "undefined" ? undefined : projectClaude), claudeSafeRate: named(typeof claudeSafeRate === "undefined" ? undefined : claudeSafeRate), claudeThin: named(typeof claudeThin === "undefined" ? undefined : claudeThin) };`;
-  return { ...new Function(...Object.keys(names), code)(...Object.values(names)), hang, pending: () => held.length, opened: () => opened, release: () => { hang.clear(); held.splice(0).forEach((res) => res()); } };
+  return { ...new Function(...Object.keys(names), code)(...Object.values(names)), hang, pending: () => held.length, opened: () => opened, opensOf: (h) => opens.filter((x) => x.includes(h)).length, lastOpen: () => opens.at(-1), release: () => { hang.clear(); held.splice(0).forEach((res) => res()); } };
 }
 // The part started with a fake ctx: read() runs the 15 s interval as it fires; real() may run apart
 // from now(), as it does with DEVTEAM_BOX_HEALTH_FAST.
@@ -254,6 +254,8 @@ test('P7: tier multipliers weigh accounts when every one names one, else they we
   const list = projectionCase('tiers').list.map((a) => (a.n === 2 ? { ...a, tier: undefined } : a));
   const equal = project('tiers', load(), { list });
   assert.equal(equal.lasts, true, 'weighed equally: 150 points, 37.5 hours');
+  const big = projectionCase('tiers').list.map((a) => (a.n === 2 ? { ...a, tier: 1000 } : a));
+  assert.deepEqual(project('tiers', load(), { list: big }), equal, 'a tier of 1000 is no tier (1 to 999), so they weigh equally (final-1 F3)');
 });
 
 test('P8: at most 400 points: the first, the last and every change of direction, then evenly', () => {
@@ -339,6 +341,22 @@ test('P12: a reset time years ahead (a garbled record) ends the steps at 8 days;
   assert.notEqual(s.projectClaude(list, 1e9, T0), null, '1e9 is still a rate');
 });
 
+test('P13: a reset far in the past (a garbled record) rolls on in one step: year 1000 costs a read no more than last week', () => {
+  const s = load();
+  const list = (back) => Array.from({ length: 40 }, (_, i) => row(i + 1, { active: i === 0, week_pct: 50, five_pct: 10, week_resets_at: back, five_resets_at: back }));
+  const recent = list(at(-DAY)), garbled = list('1000-01-01T00:00:00.000Z');
+  const r = s.projectClaude(garbled, 30, T0);
+  assert.equal(r.points[0].room, 40, 'every account restored now');
+  assert.ok(Date.parse(r.next_reset_at) > T0 && Date.parse(r.next_reset_at) <= T0 + 7 * DAY, `the next reset is within a week: ${r.next_reset_at}`);
+  assert.equal(s.projectClaude(recent, 30, T0).points[0].room, 40);
+  const t = process.hrtime.bigint();
+  s.claudeSafeRate(garbled, T0);
+  const ms = Number(process.hrtime.bigint() - t) / 1e6;
+  // a period at a time, year 1000 is about 1.8 million steps an account in each of some 45 projections:
+  // seconds to tens of seconds; in one step, milliseconds
+  assert.ok(ms < 3000, `claudeSafeRate with resets in year 1000 took ${ms.toFixed(0)} ms`);
+});
+
 // ===== done-when 3: the record =====
 
 test('R1: the freshest record with a list wins', async () => {
@@ -405,13 +423,16 @@ test('R4: no email appears in the answer: a label that is an address is "Account
     { ...row(1, { week_pct: 10, label: 'someone@example.com' }), email: 'someone@example.com', token: 'sk-ant-made-up' },
     row(2, { week_pct: 20, label: 'wide＠example.com' }),
     row(3, { week_pct: 30, label: 'Spare' }),
+    row(4, { week_pct: 40, label: 'bell\u0007' }),
+    row(5, { week_pct: 50, label: 'x'.repeat(41) }),
+    row(6, { week_pct: 60, label: 'y'.repeat(40) }),
   ];
   write(A, T0, list, { email: 'someone@example.com' });
   await p.read();
   const got = p.part();
   const text = JSON.stringify(got);
   assert.doesNotMatch(text, /[@＠]|example|sk-ant/);
-  assert.deepEqual(got.answer.claude.accounts.map((a) => a.label), ['Account 1', 'Account 2', 'Spare']);
+  assert.deepEqual(got.answer.claude.accounts.map((a) => a.label), ['Account 1', 'Account 2', 'Spare', 'Account 4', 'Account 5', 'y'.repeat(40)], 'a control character or over 40 characters is "Account n" too (final-1 F3)');
   assert.equal(boxHealthProblem(whole(got)), null);
 });
 
@@ -435,6 +456,29 @@ test('R5: at most two reads are out at once; a read that can\'t start keeps the 
   assert.equal(s.pending(), 2);
   assert.ok(p.said.some((w) => /two file reads are out/.test(w)));
   assert.equal(p.part().answer.claude.accounts[0].label, 'L0', 'the last values stand');
+  s.release();
+});
+
+test('R8: one hung accounts.json is opened once however many reads pass; the other root is read each time', async () => {
+  const H = newRoot(), G = newRoot();
+  const s = load();
+  const p = started([H, G], s);
+  s.hang.add(H);
+  // each 2 s race is set just after its open: fire only the hung file's, as real time would
+  const timeout = p.ctx.timeout;
+  p.ctx.timeout = (ms, fn) => { const end = timeout(ms, fn); p.timers.at(-1).file = s.lastOpen(); return end; };
+  const timeouts = () => p.timers.filter((t) => t.kind === 'timeout' && !t.ended && !t.fired && t.file?.includes(H));
+  for (let i = 0; i < 4; i++) {
+    write(H, p.clock.real, [row(1, { label: `H${i}`, week_pct: 10 })]);
+    write(G, p.clock.real, [row(1, { label: `G${i}`, week_pct: 10 })]);
+    const reading = p.read();
+    for (let k = 0; k < 20; k++) { await new Promise((r) => setImmediate(r)); for (const t of timeouts()) { t.fired = true; t.fn(); } }
+    await reading;
+    assert.equal(p.part()?.answer.claude.accounts[0].label, `G${i}`, `read ${i + 1}: the good root's new record`);
+    p.pass(MIN);
+  }
+  assert.equal(s.opensOf(H), 1, 'the hung file is opened once, never again while it is out (final-1 F2)');
+  assert.equal(s.pending(), 1);
   s.release();
 });
 

@@ -25479,9 +25479,12 @@ function claudeState(rows, now) {
   });
   return { acc, at_least: known.length < live.length };
 }
+// the next reset after now, a whole number of periods on, in one step however far back a garbled time
+// is (final-1 F1)
+const claudeRoll = (at, period, now) => at + Math.ceil((now - at + 1) / period) * period;
 function claudeRestore(x, now) {
-  while (x.weekAt !== undefined && x.weekAt <= now) { x.week = 0; x.weekAt += CLAUDE_WEEK_MS; }
-  while (x.fiveAt !== undefined && x.fiveAt <= now) { x.five = 0; x.fiveAt += CLAUDE_FIVE_MS; }
+  if (x.weekAt !== undefined && x.weekAt <= now) { x.week = 0; x.weekAt = claudeRoll(x.weekAt, CLAUDE_WEEK_MS, now); }
+  if (x.fiveAt !== undefined && x.fiveAt <= now) { x.five = 0; x.fiveAt = claudeRoll(x.fiveAt, CLAUDE_FIVE_MS, now); }
   if (x.models !== undefined && x.models <= now) delete x.models;
 }
 const claudeHasRoom = (x) => x.week < 100 && x.five < 100 && x.models === undefined;
@@ -25509,6 +25512,11 @@ function claudeThin(points) {
 function projectClaude(accounts, rate, now) {
   const rows = claudeRows(accounts);
   if (!rows || !(typeof rate === 'number' && rate >= 0 && rate <= CLAUDE_RATE_MAX) || !Number.isFinite(now)) return null;
+  return claudeProject(rows, rate, now, false);
+}
+// the steps of projectClaude over rows already rebuilt; quick (claudeSafeRate's trials) keeps no points
+// or switches and stops at the first shortfall, giving only { lasts } (final-1 F4)
+function claudeProject(rows, rate, now, quick) {
   const { acc, at_least } = claudeState(rows, now);
   const ahead = acc.flatMap((x) => [x.weekAt, x.fiveAt, x.models]).filter((t) => Number.isFinite(t) && t > now);
   if (!ahead.length) return null;
@@ -25531,7 +25539,7 @@ function projectClaude(accounts, rate, now) {
   let cur = acc.find((x) => x.active), lasts = true, runsOut, pausedUntil, was = null;
   for (let ts = now; ; ts = Math.min(ts + CLAUDE_STEP_MS, end)) {
     for (const x of acc) claudeRestore(x, ts);
-    points.push({ at: iso(ts), room: claudeRawRoom(acc) });
+    if (!quick) points.push({ at: iso(ts), room: claudeRawRoom(acc) });
     if (!lasts && pausedUntil === undefined && acc.some(claudeHasRoom)) pausedUntil = ts;
     if (ts >= end) break;
     const step = Math.min(CLAUDE_STEP_MS, end - ts);
@@ -25540,7 +25548,7 @@ function projectClaude(accounts, rate, now) {
     for (let guard = 0; need > 1e-9 && guard < 2 * acc.length + 2; guard++) {
       cur = pick(cur);
       if (!cur) break;
-      if (cur !== was) { switches.push({ at: iso(ts), n: cur.n }); was = cur; }
+      if (cur !== was && !quick) { switches.push({ at: iso(ts), n: cur.n }); was = cur; }
       const line = binding(cur) < CLAUDE_LINE ? CLAUDE_LINE : 100;
       const take = Math.min(need, (line - cur.week) * cur.w);
       if (take <= 0) { cur = null; continue; }
@@ -25548,14 +25556,18 @@ function projectClaude(accounts, rate, now) {
       need -= take;
     }
     if (need > 1e-9 && lasts) { lasts = false; runsOut = ts + Math.round(step * (1 - need / need0)); }
+    if (quick && !lasts) return { lasts };
   }
+  if (quick) return { lasts };
   return boxHealthPresent({
     lasts, runs_out_at: lasts ? undefined : iso(runsOut), paused_until: pausedUntil === undefined ? undefined : iso(pausedUntil),
     next_reset_at: weekly.length ? iso(Math.min(...weekly)) : undefined, points: claudeThin(points), switches, at_least,
   });
 }
 function claudeSafeRate(accounts, now) {
-  const lasts = (tenths) => projectClaude(accounts, tenths / 10, now)?.lasts === true;
+  const rows = claudeRows(accounts);
+  if (!rows || !Number.isFinite(now)) return undefined;
+  const lasts = (tenths) => claudeProject(rows, tenths / 10, now, true)?.lasts === true;
   if (!lasts(1)) return undefined;
   let lo = 1, hi = 2;
   while (lasts(hi)) { lo = hi; hi *= 2; if (hi > 1e7) return lo / 10; }
