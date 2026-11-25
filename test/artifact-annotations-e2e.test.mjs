@@ -318,6 +318,146 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
     assert.equal(s2.sha, tip, "step 6b L2: shot.sha is origin main's head");
   }, { timeout: 240000 });
 
+  // ---- step 7: the stepper, the pictures, the crossings; then Resolve and the replies (step 8 after) ----
+  // state after step 6: N1 ready, N2 and N4 to check (N4 marked again in C5f), N3 open with plan-pricing
+  const TOCHECK = ['N1', 'N2', 'N4'];
+  const idOfKey = (key) => notes[key].id;
+  const cardUp = (key) => `TL.open === ${J(idOfKey(key))} && !document.getElementById('tl-card').hidden`;
+  const rectOf = (V, sel) => V.p.ev(`(() => { const e = document.querySelector(${J(sel)}); if (!e) return null; e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+  // a real press on the first element sel finds (what: the click target's id or tag, as the harness names it); a guarded
+  // control (Resolve) is pressed only once avStep.ready says it has sat still, found again by sel on every try
+  const pressSel = async (V, sel, what, { guard = null } = {}) => {
+    const cond = guard ?? `!!document.querySelector(${J(sel)})`;
+    await V.soon(cond, `setup: ${sel} is there${guard ? ' and settled under the press guard' : ''}`);
+    await V.p.ev(FRAMES);
+    const at = await rectOf(V, sel);
+    assert.ok(at, `setup: ${sel} has a box to press`);
+    await V.press(at.x, at.y, what);
+  };
+  // one real press on ‹ or ›, and the wait for the step to land: the note's card open, its page there, no step under way
+  const stepBy = async (V, id, key, what) => {
+    await pressSel(V, `#${id}`, id);
+    await V.soon(`${cardUp(key)} && TS.ready && !avStep.want`, `${what}: ${id === 'av-next' ? '›' : '‹'} lands on ${key}'s card`);
+  };
+  const landsOn = async (V, key, file, hash, what) => {
+    await V.soon(`TS.ready && TS.path === ${J(file)} && TS.hash === ${J(hash)} && ${cardUp(key)}`, `${what}: the viewer lands on ${file}${hash} with ${key}'s card (it is on ' + ' ${'${TS.path}'}`);
+    const want = idOfKey(key);
+    await V.p.ev(FRAMES);
+    const seen = await V.settle(`[...document.querySelectorAll('#av-pins [data-tl-pin]')].some((b) => b.dataset.tlPin === ${J(want)} && b.getBoundingClientRect().width > 0 && getComputedStyle(b).visibility !== 'hidden')`, 5000);
+    assert.ok(seen, `${what}: ${key}'s pin is shown on ${file}${hash} (shown: ${J(await pins(V))})`);
+    assert.equal(await V.p.ev('TS.path'), file, `${what}: TS.path`);
+    assert.equal(await V.p.ev('TS.hash'), hash, `${what}: TS.hash`);
+    assert.equal(await V.p.ev('TL.open'), want, `${what}: TL.open is ${key}`);
+  };
+  // Show me on a note's row in the Threads panel (the panel the page was opened with)
+  const showMeOnRow = async (V, key) => {
+    const sel = `#tl-list [data-tl-show="${idOfKey(key)}"]`;
+    await pressSel(V, sel, 'BUTTON');
+  };
+  // the draft opened with the Threads panel up (th=open), for the crossing that needs the panel beside the viewer
+  const openDraftWithPanel = async () => { const V = await visit('#library?th=open', WIN); await openDraft(V); return V; };
+
+  await step('step 7 (a): the stepper on To check reads "- / 3"', async () => {
+    const V = await visit('#library', WIN);
+    await openDraft(V);
+    await V.soon(`document.getElementById('av-stepn').textContent === '– / 3'`, 'C5b (a): #av-stepn reads – / 3');
+    assert.equal(await V.p.ev("document.getElementById('av-filter').value"), 'check', 'C5b (a): #av-filter is To check');
+    assert.equal(await V.p.ev("document.getElementById('av-stepn').textContent"), '– / 3', 'C5b (a): the stepper reads – / 3');
+  }, { timeout: 180000 });
+
+  await step('step 7 (b): each to-check card shows its picture beside Show me', async () => {
+    const V = await visit('#library', WIN);
+    await openDraft(V);
+    for (const key of TOCHECK) {
+      await stepBy(V, 'av-next', key, `C7a (b) ${key}`);
+      const img = `#tl-card .tl-shot img`;
+      assert.ok(await V.settle(`(() => { const i = document.querySelector(${J(img)}); return !!i && i.complete && i.naturalWidth > 0; })()`, 10000), `C7a (b) ${key}: the card shows a loaded .tl-shot img (${J(await V.p.ev(`(() => { const i = document.querySelector(${J(img)}); return i ? [i.complete, i.naturalWidth] : null; })()`))})`);
+      assert.equal(await V.p.ev(`!!document.querySelector('#tl-card .tl-addr [data-tl-show="${idOfKey(key)}"]') && document.querySelector('#tl-card .tl-shot').closest('.tl-addr') === document.querySelector('#tl-card [data-tl-show]').closest('.tl-addr')`), true, `C7a (b) ${key}: the picture is beside [data-tl-show]`);
+    }
+  }, { timeout: 180000 });
+
+  await step('step 7 (c): a click on each picture opens #av-shot at the PNG\'s width; Escape closes it', async () => {
+    const V = await visit('#library', WIN);
+    await openDraft(V);
+    for (const key of TOCHECK) {
+      await stepBy(V, 'av-next', key, `C7b (c) ${key}`);
+      await V.soon(`(() => { const i = document.querySelector('#tl-card .tl-shot img'); return !!i && i.complete && i.naturalWidth > 0; })()`, `C7b (c) ${key}: the card's picture loaded`);
+      await pressSel(V, '#tl-card .tl-shot img', 'IMG');
+      await V.soon(`!!document.getElementById('av-shot')`, `C7b (c) ${key}: a click on the picture opens #av-shot`);
+      const want = png(fs.readFileSync(shots[key].file)).w;
+      assert.ok(await V.settle(`(() => { const i = document.querySelector('#av-shot img'); return !!i && i.complete && i.naturalWidth === ${want}; })()`, 10000), `C7b (c) ${key}: #av-shot's image is ${want}px wide, the PNG's (it is ${await V.p.ev("document.querySelector('#av-shot img')?.naturalWidth")})`);
+      await V.p.key('Escape');
+      assert.ok(await V.settle(`!document.getElementById('av-shot')`, 3000), `C7b (c) ${key}: Escape closes #av-shot`);
+      assert.equal(await V.p.ev(`${VIEWER_UP}`), true, `C7b (c) ${key}: the viewer is still up after the picture closes`);
+    }
+  }, { timeout: 180000 });
+
+  await step('step 7 (d): Show me on N2\'s Threads row, the viewer closed, lands on a.html#tab2', async () => {
+    const V = await visit('#library?th=open', WIN);
+    await pressSel(V, `#tl-list [data-tl-show="${idOfKey('N2')}"]`, 'BUTTON');
+    assert.ok(await V.settle(`location.hash === ${J(HEAD_P)}`, 8000), `C6c (d): Show me on N2 opens ${HEAD_P}, not ${await V.p.ev('location.hash')}`);
+    await landsOn(V, 'N2', 'a.html', '#tab2', 'C6c (d)');
+  }, { timeout: 180000 });
+
+  await step('step 7 (e): from N4\'s card on b.html, ‹ lands on a.html#tab2 with N2\'s pin and card', async () => {
+    const V = await visit('#library', WIN);
+    await openDraft(V);
+    for (const key of TOCHECK) await stepBy(V, 'av-next', key, `C6e (i) (e) stepping to ${key}`);
+    await V.soon(`TS.path === 'b.html'`, 'C6e (i) (e): N4\'s card is open on b.html');
+    await stepBy(V, 'av-prev', 'N2', 'C6e (i) (e)');
+    await landsOn(V, 'N2', 'a.html', '#tab2', 'C6e (i) (e)');
+  }, { timeout: 180000 });
+
+  await step('step 7 (f): from b.html, Show me on N2\'s Threads row lands on a.html#tab2 with N2\'s pin and card', async () => {
+    const V = await openDraftWithPanel();
+    await V.frameClick('to-b', 'pricing/b.html');
+    await V.soon(`TS.path === 'b.html' && TL.open === null`, 'C6e (ii) (f): the viewer is up on b.html with no card open');
+    await showMeOnRow(V, 'N2');
+    await landsOn(V, 'N2', 'a.html', '#tab2', 'C6e (ii) (f)');
+  }, { timeout: 180000 });
+
+  // the state changes: Resolve N4 once its guard is ready, then a reply on N1 and one on N3
+  const NOTE_N4 = 'The cancel question is answered at the top now';
+  const poll = async (fn, ms = 15000) => { const end = Date.now() + ms; for (;;) { const v = fn(); if (v || Date.now() > end) return v; await new Promise((r) => setTimeout(r, 100)); } };
+  const reply = async (V, key, text) => {
+    await pressSel(V, '#tl-c-text', 'tl-c-text');
+    await V.p.type(text);
+    await V.soon(`document.getElementById('tl-c-text').value === ${J(text)} && ${cardUp(key)}`, `C6b: ${key}'s composer holds the reply on ${key}'s card`);
+    await pressSel(V, '#tl-card [data-tl-send]', 'BUTTON');
+  };
+  await step('step 7 (g): Resolve N4; a reply on N1 and one on N3', async () => {
+    const V = await visit('#library', WIN);
+    await openDraft(V);
+    for (const key of TOCHECK) await stepBy(V, 'av-next', key, `C6a stepping to ${key}`);
+    // Resolve: the control found again with TL.open and the guard read in one look, then pressed
+    const resolveSel = '#tl-card .tl-addr [data-tl-accept]';
+    await pressSel(V, resolveSel, 'BUTTON', { guard: `${cardUp('N4')} && (() => { const e = document.querySelector(${J(resolveSel)}); return !!e && avStep.ready(e) !== null && !e.classList.contains('waiting'); })()` });
+    const resolved = await poll(() => { const th = JSON.parse(ok(F, 'owner', ['thread', 'show', idOfKey('N4'), '--json'])); return th.status === 'resolved' ? th : null; }, 20000);
+    assert.ok(resolved, 'C6a: Resolve on N4 leaves thread show N4 resolved');
+    assert.equal(resolved.status, 'resolved', 'C6a: N4 is resolved');
+    assert.equal(resolved.outcome, NOTE_N4, "C6a: N4's outcome is its addressed note");
+    // N1 (to check, its card by ›) then N3 (open, its pin on a.html#tab2)
+    await stepBy(V, 'av-next', 'N1', 'C6b N1');
+    await reply(V, 'N1', 'not yet');
+    assert.ok(await poll(() => noteStates()[idOfKey('N1')] === 'open', 20000), `C6b: after the reply on N1 its state is open (${noteStates()[idOfKey('N1')]})`);
+    await stepBy(V, 'av-next', 'N2', 'C6b stepping to N2 for N3\'s pin');
+    await landsOn(V, 'N2', 'a.html', '#tab2', 'C6b setup N2');
+    await pressSel(V, `#av-pins [data-tl-pin="${idOfKey('N3')}"]`, 'tl-pin');
+    await V.soon(cardUp('N3'), "C6b: N3's pin opens its card");
+    await reply(V, 'N3', 'Still the empty half; look again');
+    assert.ok(await poll(() => noteStates()[idOfKey('N3')] === 'open', 20000), `C6b: after the reply on N3 its state is open (${noteStates()[idOfKey('N3')]})`);
+    assert.equal(noteStates()[idOfKey('N1')], 'open', 'C6b: N1 is still open');
+  }, { timeout: 240000 });
+
+  await step('step 8: Hand over (2); the version\'s open notes are N1 and N3', async () => {
+    const V = await visit('#library', WIN);
+    await openDraft(V);
+    await V.soon(`document.getElementById('av-handover').textContent === 'Hand over (2)'`, 'C6d: #av-handover reads Hand over (2)');
+    assert.equal(await V.p.ev("document.getElementById('av-handover').textContent"), 'Hand over (2)', 'C6d: the bar reads Hand over (2)');
+    const open = Object.entries(noteStates()).filter(([, s]) => s === 'open').map(([id]) => id).sort();
+    assert.deepEqual(open, [idOfKey('N1'), idOfKey('N3')].sort(), "C6d: the version's open notes are exactly N1 and N3");
+  }, { timeout: 180000 });
+
   // step 7b stays after T6's step 7 subtests
   // Show me on a faq note from a fresh visit with the viewer closed: where the viewer lands and what the framed page says
   const copies = [];
