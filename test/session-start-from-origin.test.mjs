@@ -1017,6 +1017,7 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
       assert.notEqual(r.status, 0, `X29: the first refused: ${r.out}`);
       assert.equal(git(['diff', '--cached', '--name-only'], wt('ch-58-v')), '', 'X29: no reversions staged under the other start');
       assert.equal(git(['rev-parse', 'HEAD'], wt('ch-58-v')), at, 'X29: the branch where it was');
+      assert.ok(!fs.existsSync(path.join(old, '.git/worktrees/ch-58-v/devteam-start-filling')), 'X29: no mark left');
     });
     await t.test('X18: a lock a post-checkout hook put on the worktree in place of the start\'s stays', tmux, () => {
       ticket('ch-64-i');
@@ -1044,6 +1045,9 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
       assert.match(r.err, /while it was made, so the undo left it, and ticket\/.* at [0-9a-f]{8}: look in it before resuming it/, `X21: says so: ${r.err}`);
       assert.equal(git(['rev-parse', 'HEAD'], wt('ch-67-l')), at, 'X21: the branch where it was');
       assert.equal(fs.readFileSync(path.join(old, '.git/worktrees/ch-67-l/locked'), 'utf8').trim(), 'mine', 'X21: the hook\'s lock stays');
+      assert.ok(!fs.existsSync(path.join(old, '.git/worktrees/ch-67-l/devteam-start-filling')), 'X21: no mark left, the branch never moved');
+      const again = run(old, ['worker', 'ch-67-l', '--resume'], SUP);
+      assert.equal(again.status, 0, `X21: the retry resumes at the old commit: ${again.err}`);
     });
     await t.test('X22: an undo leaves a worktree another start made there after the first was cleared', tmux, () => {
       behind('ch-68-m', 'X22');
