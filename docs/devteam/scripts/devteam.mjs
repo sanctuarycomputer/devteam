@@ -1069,19 +1069,37 @@ function loadSettings({ origin = false, until = null } = {}) {
     };
     // git's own words: its first fatal line (a missing remote's last line is only "and the repository exists.")
     const why = (r) => { const said = String(r.stderr ?? '').split('\n').map((l) => l.trim()).filter(Boolean); return r.status === 124 ? 'it did not answer in time' : (said.find((l) => /^fatal: /.test(l)) ?? said.at(-1) ?? `git exited ${r.status}`).replace(/^fatal: /, '').slice(0, 200); };
-    const ls = toOrigin(['ls-remote', '--symref', 'origin', 'HEAD']);
-    if (ls.status !== 0) no(why(ls));
-    const rows = String(ls.stdout ?? '').split('\n').map((l) => l.split('\t'));
-    const branch = rows.find(([a, b]) => b === 'HEAD' && a.startsWith('ref: refs/heads/'))?.[0].slice('ref: refs/heads/'.length);
-    const sha = rows.find(([a, b]) => b === 'HEAD' && /^[0-9a-f]{40,64}$/.test(a))?.[0];
-    if (!branch || !sha) no('it names no default branch');
-    // always fetched, into the tracking ref by name: a new worktree is based on origin/<main>, so it
-    // is put back where origin has it before anything reads it
-    const f = toOrigin(['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
-    if (f.status !== 0) no(why(f));
     // read here only, never fetched on the side (a partial clone's lazy fetch would run outside the deadline)
     const local = (args) => responderGit(args, mainRoot, { GIT_NO_LAZY_FETCH: '1' });
-    if (local(['cat-file', '-e', `${sha}^{commit}`]).status !== 0) no(`${sha.slice(0, 8)} did not arrive`);
+    let branch;
+    let sha;
+    for (let tries = 1; ; tries += 1) {
+      // the tracking refs before origin is read: which one is main's, origin says
+      const was = new Map(String(local(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/remotes/origin/']).stdout ?? '').split('\n').map((l) => l.split(' ')));
+      const ls = toOrigin(['ls-remote', '--symref', 'origin', 'HEAD']);
+      if (ls.status !== 0) no(why(ls));
+      const rows = String(ls.stdout ?? '').split('\n').map((l) => l.split('\t'));
+      branch = rows.find(([a, b]) => b === 'HEAD' && a.startsWith('ref: refs/heads/'))?.[0].slice('ref: refs/heads/'.length);
+      sha = rows.find(([a, b]) => b === 'HEAD' && /^[0-9a-f]{40,64}$/.test(a))?.[0];
+      if (!branch || !sha) no('it names no default branch');
+      // Always put where origin has it, before anything reads it. Into no ref: a fetch writes through a
+      // symbolic tracking ref. Then by sha, not following one, and only from what it was before origin
+      // was read: a push that moved it meanwhile isn't set back, and origin is read again (kit-856).
+      const f = toOrigin(['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--refmap=', 'origin', `refs/heads/${branch}`]);
+      if (f.status !== 0) no(why(f));
+      if (local(['cat-file', '-e', `${sha}^{commit}`]).status !== 0) no(`${sha.slice(0, 8)} did not arrive`);
+      const tracking = `refs/remotes/origin/${branch}`;
+      const isAt = () => { const now = local(['show-ref', '--verify', '--hash', tracking]); return now.status === 0 ? now.stdout.trim() : '0'.repeat(sha.length); };
+      if (isAt() === sha) break; // already right: a lock left on it stops nothing
+      const old = was.get(tracking) ?? '0'.repeat(sha.length);
+      // inside the deadline too: git waits on a lock left on the ref as long as core.filesRefLockTimeout says (final-1b F3)
+      const ms = Math.floor(end - Date.now());
+      const set = ms < 100 ? { status: 124, stderr: '' } : spawnSync('git', [...RESPONDER_GIT, 'update-ref', '--no-deref', tracking, sha, old], { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: ms, env: { ...process.env, GIT_NO_LAZY_FETCH: '1' } });
+      if (set.status === null) set.status = 124;
+      if (set.status === 0) break;
+      if (isAt() === old) no(why(set));
+      if (tries === 3) no(`origin/${branch} here kept moving while it was read`);
+    }
     const ref = `origin's ${branch} (${sha.slice(0, 8)})`;
     // before settings.md first lands on main (adoption), the working tree is all there is, as below;
     // only a settings.md git says isn't there, never one git failed to read
@@ -2455,23 +2473,34 @@ function fetchLinkMain(R, refusing = 'refusing to judge against a stale main', {
     if (r.status !== 0) no(r.status === 124 ? 'it did not answer in time' : redactUrl(firstLine(r.stderr).replace(/^fatal: /, '')) || `exit ${r.status}`);
     return String(r.stdout ?? '');
   };
-  const at = {};
-  // ls-remote matches a pattern against the end of a ref's name, so only an exact name counts
-  for (const [sha, ref] of toOrigin(['ls-remote', 'origin', `refs/heads/${rb}`, `refs/heads/${start}`]).split('\n').map((l) => l.split('\t'))) {
-    for (const b of [rb, start]) if (/^[0-9a-f]{40,64}$/.test(sha) && ref === `refs/heads/${b}`) at[b] = sha;
+  // by its exact name: rev-parse would fall back to a branch called refs/remotes/origin/<b>
+  const tracked = (b) => { const r = responderGit(['show-ref', '--verify', '--hash', `refs/remotes/origin/${b}`], R.root); return r.status === 0 ? r.stdout.trim() : null; };
+  for (let tries = 1; ; tries += 1) {
+    // Read before origin is: a session here that pushes meanwhile moves its tracking ref after that,
+    // so setting it from this value refuses, and origin is read again (kit-856).
+    const was = { [rb]: tracked(rb), [start]: tracked(start) };
+    const at = {};
+    // ls-remote matches a pattern against the end of a ref's name, so only an exact name counts
+    for (const [sha, ref] of toOrigin(['ls-remote', 'origin', `refs/heads/${rb}`, `refs/heads/${start}`]).split('\n').map((l) => l.split('\t'))) {
+      for (const b of [rb, start]) if (/^[0-9a-f]{40,64}$/.test(sha) && ref === `refs/heads/${b}`) at[b] = sha;
+    }
+    if (!at[rb]) no(`origin has no ${rb}`);
+    const held = [rb, start].filter((b) => at[b]);
+    // Into no ref: a fetch writes through a symbolic tracking ref, moving the branch it names. The
+    // tracking refs are set below, by sha, without following one.
+    toOrigin(['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--refmap=', 'origin', ...held.map((b) => `refs/heads/${b}`)]);
+    for (const b of held) if (responderGit(['cat-file', '-e', `${at[b]}^{commit}`], R.root, { GIT_NO_LAZY_FETCH: '1' }).status !== 0) no(`${at[b].slice(0, 8)} did not arrive`);
+    const moved = held.find((b) => {
+      const set = responderGit(['update-ref', '--no-deref', `refs/remotes/origin/${b}`, at[b], was[b] ?? '0'.repeat(at[b].length)], R.root);
+      if (set.status !== 0 && tracked(b) === was[b]) no(redactUrl(firstLine(set.stderr).replace(/^fatal: /, '')) || `exit ${set.status}`);
+      return set.status !== 0;
+    });
+    if (!moved) {
+      R.resetCaches();
+      return { main: at[rb], branch: at[start] ?? null };
+    }
+    if (tries === 3) no(`origin/${moved} here kept moving while it was read`);
   }
-  if (!at[rb]) no(`origin has no ${rb}`);
-  const held = [rb, start].filter((b) => at[b]);
-  // Into no ref: a fetch writes through a symbolic tracking ref, moving the branch it names. The
-  // tracking refs are set below, by sha, without following one.
-  toOrigin(['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--refmap=', 'origin', ...held.map((b) => `refs/heads/${b}`)]);
-  for (const b of held) if (responderGit(['cat-file', '-e', `${at[b]}^{commit}`], R.root, { GIT_NO_LAZY_FETCH: '1' }).status !== 0) no(`${at[b].slice(0, 8)} did not arrive`);
-  for (const b of held) {
-    const set = responderGit(['update-ref', '--no-deref', `refs/remotes/origin/${b}`, at[b]], R.root);
-    if (set.status !== 0) no(redactUrl(firstLine(set.stderr).replace(/^fatal: /, '')) || `exit ${set.status}`);
-  }
-  R.resetCaches();
-  return { main: at[rb], branch: at[start] ?? null };
 }
 // In a read-only command, full ref names resolve from one for-each-ref listing (a dashboard
 // refresh asked git about each ticket branch separately: ~90 processes). Anything else, and every
@@ -12976,8 +13005,10 @@ async function shotLaunch({ noSandbox = false, extraArgs = [], cap }) {
   const child = launch.child = spawn(bin, [
     '--headless=new', '--remote-debugging-pipe', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync', '--hide-scrollbars',
-    // the artifact's frame in its page's own process, laid out and asked with it
-    '--disable-features=IsolateSandboxedIframes',
+    // the artifact's frame in its page's own process, laid out and asked with it; and a page's WebRTC
+    // joins no mDNS group and asks the network for no .local name (kit-813, as the browser's kit-805).
+    // One list: of two --disable-features Chrome keeps only the last.
+    '--disable-features=IsolateSandboxedIframes,WebRtcHideLocalIpsWithMdns',
     // no dump of a page that crashed is kept
     '--disable-breakpad', '--disable-crash-reporter',
     '--renderer-process-limit=2', '--js-flags=--max-old-space-size=256', ...['', 'force-'].map((f) => `--${f}webrtc-ip-handling-policy=disable_non_proxied_udp`), '--disable-quic',
@@ -24655,8 +24686,343 @@ function boxHealth(log, scan, { parts = boxHealthParts(), real = () => Date.now(
 }
 /* box-health-sampler end */
 /* box-health-processes start */
-// CPU and memory by worktree, and strays (kit-837's).
-const boxHealthProcesses = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+// CPU and memory by worktree, test runs apart, and what was left behind (kit-837): a walk of
+// ctx.proc every 15 s of now(), the first 15 s after start (by then the sampler has read the roots
+// once), its last whole result given to the parts after it. Linux only:
+// where ctx.proc can't be listed it gives nothing, and the parts after it leave CPU, memory, test
+// runs, strays, others and agent absent.
+//
+// The walk, never two at once, stopped at 2 s of real():
+//   0. pids   when ctx.roots() gives a new list (the sampler reads them every minute), the pids each
+//             root's run/ records (below), read async before the 2 s begin, for at most 2 s; one
+//             still out when that ends goes on alone, the last pids are kept meanwhile, and no
+//             second read starts while it is out (final-1 F2)
+//   1. stat   one read of <proc>/<pid>/stat a process, synchronous, in batches of 100 with a turn of
+//             the event loop between (ctx.turn): its own and its reaped children's CPU ticks, resident
+//             pages, parent, start time and comm. Then <proc>/uptime and <cgroup>/cpu.stat.
+//   2. info   for a (pid, start time) not seen before, or last read 5 minutes of real() ago or more:
+//             its cmdline (at most 64 KB) and cwd, read async, classified at once and the words
+//             dropped. At most two processes' reads are ever out, across walks, and never two for
+//             one process, so a read that hangs (a process whose memory is locked) holds at most
+//             one of the threads every file read shares, and only while it hangs (final-1 F1).
+//             What is left of the 2 s ends the reading, not the walk: a process not read yet
+//             counts as unknown (outside, never a stray) until its read settles. Only the kind, whether it starts a test run, whether it is devteam's or tmux,
+//             and its cwd are kept, and only in this region. One whose cmdline can't be read is
+//             known as nothing (outside, never a stray) until it is read again. environ is never read.
+// A walk whose stat reads are cut off at 2 s gives nothing: the part gives undefined until two whole walks have run
+// again, since a change is worked out only between two whole walks one after the other.
+//
+// Where a process counts: the longest known root (ctx.roots()) holding its cwd, then the worktree
+// under it (<root>/.worktrees/<name>); a cwd in no root, or one that can't be read, is outside. A
+// deleted cwd ("… (deleted)") counts where it was.
+// CPU between two whole walks, in cores over real() between them: its own ticks' change, plus the
+// rise in its reaped children's ticks less the whole time (own plus reaped) that its children which
+// have since gone, and their gone descendants, had at the first walk; each part never below zero, so
+// a child that came and went between walks counts for its parent and nothing counts twice. The
+// rise in pid 1's reaped time, and a systemd's, init's or tini's (by comm), is left out: a child
+// re-parented there is lost to unattributed, and a child reaped by no one (its parent ignores
+// SIGCHLD) adds nothing to its parent's reaped time, so its time since the first walk is lost too.
+// A new process counts all its time.
+// A test run is a process whose cmdline is devteam.mjs gate, node with --test before its script,
+// one of PROC_TESTS by its executable's or its script's name (a .js, .mjs, .cjs, .py or .rb
+// extension aside, or a script under node_modules/<name>/ or node_modules/@playwright/test/),
+// python -m pytest, or go test or cargo test; its tree is the processes under it, itself included,
+// and its top the highest of them.
+//
+// part(ctx, parts) gives undefined, or the last whole walk's result (a new object each walk):
+//   at            now() when the walk ended
+//   over_s        seconds of real() between the two walks CPU is from; absent with no CPU yet
+//   places        one a (root, worktree or none) holding a process, in the order first seen:
+//                 { root, project (the root's name), worktree (its folder's name; absent for the
+//                 root itself), n (processes), agents (claude, codex, opencode), cpu (cores; absent
+//                 with no CPU yet), rss (bytes), tests: { n (test runs whose top is here), cpu, rss },
+//                 own: { n, cpu, rss } (devteam's own commands and tmux, below) }
+//   outside       { n, agents, cpu, rss }: in no root, or cwd unreadable
+//   unattributed  { cpu }: the cgroup's CPU over the same time (cpu.stat usage_usec) less every
+//                 process's above, never below zero; absent with no cpu.stat or no CPU yet
+//   strays        box-health@1's strays: at most 40 groups by project, kind and why, most memory first
+// Strays, processes over 10 minutes old (from their start time and uptime) of kind agent, browser
+// (memoryClassify's, and chrome-headless-shell and chromium-browser), node (memoryClassify's) or
+// test (in a test run's tree), the first that holds of:
+//   folder-gone   its cwd is deleted
+//   parent-gone   kind browser, node or test, and its parent is pid 1 or a process whose comm is
+//                 systemd, init or tini; left out: devteam's own commands (node running devteam.mjs
+//                 or gateway.mjs), tmux, the pids a known root's run/ records (browser/state.json's
+//                 daemon_pid and chrome_pid, supervisor-up.json's pid, sensors/<name>/stream.pid,
+//                 each at most 64 KB), and any process under one of those
+//   long-test     kind test, and its run's top is over 60 minutes old
+// A stray whose cwd is in no root has no project. Nothing is killed, signalled or started here.
+const PROC_EVERY_MS = 15000, PROC_BUDGET_MS = 2000, PROC_BATCH = 100, PROC_INFO_MS = 300000;
+const PROC_READS = 2, PROC_HZ = 100, PROC_STRAY_S = 600, PROC_LONG_TEST_S = 3600, PROC_STRAYS = 40, PROC_FILE_MAX = 65536;
+const PROC_REAPERS = ['systemd', 'init', 'tini'];
+const PROC_TESTS = ['vitest', 'jest', 'mocha', 'rspec', 'pytest', 'playwright'];
+const PROC_BROWSERS = ['chrome-headless-shell', 'chromium-browser'];
+// /proc/<pid>/stat's text: { ppid, comm, cpu, reaped, start, pages }, or null. comm may hold spaces
+// and parentheses, so the fields are counted from its last ")".
+function procStat(text) {
+  const open = text.indexOf('('), close = text.lastIndexOf(')');
+  if (open < 0 || close < open) return null;
+  const f = text.slice(close + 2).split(' ');
+  const n = (i) => (/^-?\d+$/.test(f[i] ?? '') ? Number(f[i]) : NaN);
+  const [ppid, ut, st, cut, cst, start, pages] = [1, 11, 12, 13, 14, 19, 21].map(n);
+  if (![ppid, ut, st, cut, cst, start, pages].every(Number.isSafeInteger) || ppid < 0 || start < 0) return null;
+  return { ppid, comm: text.slice(open + 1, close), cpu: Math.max(0, ut + st), reaped: Math.max(0, cut + cst), start, pages: Math.max(0, pages) };
+}
+// A cmdline's words: what of it is kept, { kind, test, own }. kind is agent, browser, node or null.
+function procClassify(words) {
+  if (!words.length) return { kind: null, test: false, own: false };
+  const exe = memoryBase(words[0]);
+  const bare = (w) => memoryBase(w).replace(/\.(?:m?js|cjs|py|rb)$/, '');
+  const tool = (w) => PROC_TESTS.includes(bare(w)) || PROC_TESTS.some((t) => w.includes(`/node_modules/${t}/`)) || w.includes('/node_modules/@playwright/test/');
+  const { kind } = memoryClassify(words, new Set());
+  const script = words.findIndex((w, j) => j > 0 && !w.startsWith('-'));
+  let test = PROC_TESTS.includes(bare(words[0])) || ((exe === 'go' || exe === 'cargo') && words[1] === 'test');
+  if (exe === 'node') {
+    test = words.slice(1, script < 0 ? undefined : script).includes('--test')
+      || (script > 0 && (memoryBase(words[script]) === 'devteam.mjs' ? words[script + 1] === 'gate' : tool(words[script])));
+  } else if (/^python[\d.]*$/.test(exe)) test = test || (words[1] === '-m' && words[2] === 'pytest') || (script > 0 && tool(words[script]));
+  else if (exe === 'ruby' && script > 0) test = test || tool(words[script]);
+  const own = kind === 'devteam' || exe === 'tmux' || (exe === 'node' && script > 0 && memoryBase(words[script]) === 'gateway.mjs');
+  const named = kind === 'agent' || kind === 'browser' || kind === 'node' ? kind : PROC_BROWSERS.includes(exe) ? 'browser' : null;
+  return { kind: named, test, own };
+}
+// Where a cwd counts: { root, project, worktree? } by the longest root holding it, or null.
+function procPlace(cwd, roots) {
+  if (typeof cwd !== 'string') return null;
+  const dir = cwd.endsWith(' (deleted)') ? cwd.slice(0, -' (deleted)'.length) : cwd;
+  let best = null;
+  for (const r of roots) if ((dir === r.root || dir.startsWith(`${r.root}/`)) && (!best || r.root.length > best.root.length)) best = r;
+  if (!best) return null;
+  const m = /^\.worktrees\/([^/]+)/.exec(dir.slice(best.root.length + 1));
+  return m ? { root: best.root, project: best.name, worktree: m[1] } : { root: best.root, project: best.name };
+}
+const boxHealthProcesses = (() => {
+  let run = null;
+  const read = (...p) => { try { return fs.readFileSync(path.join(...p), 'utf8'); } catch { return null; } };
+  // a small file's text, async, or null
+  const readSmall = async (file) => {
+    let fh = null;
+    try {
+      fh = await fs.promises.open(file, fs.constants.O_RDONLY);
+      const buf = Buffer.alloc(PROC_FILE_MAX);
+      const { bytesRead } = await fh.read(buf, 0, PROC_FILE_MAX, 0);
+      return buf.toString('utf8', 0, bytesRead);
+    } catch { return null; } finally { await fh?.close().catch(() => {}); }
+  };
+  // the pids the known roots' run/ folders record
+  const readPids = async (ctx, r, roots) => {
+    const pids = new Set();
+    const add = (v) => { if (Number.isSafeInteger(v) && v > 1) pids.add(v); };
+    const json = async (f) => { try { const o = JSON.parse(await readSmall(f) ?? 'null'); return memoryIsMap(o) ? o : null; } catch { return null; } };
+    for (const { root } of roots) {
+      const dir = path.join(root, 'docs', 'devteam', 'run');
+      const b = await json(path.join(dir, 'browser', 'state.json'));
+      add(b?.daemon_pid); add(b?.chrome_pid);
+      add((await json(path.join(dir, 'supervisor-up.json')))?.pid);
+      let sensors = [];
+      try { sensors = await fs.promises.readdir(path.join(dir, 'sensors')); } catch { sensors = []; }
+      for (const s of sensors) { const t = (await readSmall(path.join(dir, 'sensors', s, 'stream.pid')))?.trim(); if (/^\d+$/.test(t ?? '')) add(Number(t)); }
+    }
+    if (run === r) { r.pids = pids; r.pidsOf = roots; }
+  };
+  // readPids, one at a time, waited for at most 2 s; a late one sets the pids when it ends
+  const pidsFor = async (ctx, r, roots) => {
+    if (!r.pidsOut) r.pidsOut = readPids(ctx, r, roots).finally(() => { r.pidsOut = null; });
+    let end = () => {};
+    const late = new Promise((res) => { end = ctx.timeout(PROC_BUDGET_MS, () => res(true)); });
+    const was = await Promise.race([r.pidsOut.then(() => false), late]);
+    end();
+    if (was) ctx.say("a root's run/ files did not answer within 2 s: the last pids are kept");
+  };
+  // a process's info: { cwd, kind, test, own }; one whose cmdline can't be read is known as nothing
+  const readInfo = async (ctx, pid) => {
+    const dir = path.join(ctx.proc, String(pid));
+    const text = await readSmall(path.join(dir, 'cmdline'));
+    if (text === null) return { cwd: null, kind: null, test: false, own: false, none: true };
+    const cwd = await fs.promises.readlink(path.join(dir, 'cwd')).catch(() => null);
+    return { cwd, ...procClassify(memoryWords(text)) };
+  };
+  const walk = async (ctx, r) => {
+    const roots = ctx.roots();
+    if (r.pidsOf !== roots && !r.pidsOut) { await pidsFor(ctx, r, roots); if (ctx.stopped() || run !== r) return; }
+    const began = ctx.real();
+    let names = null;
+    try { names = fs.readdirSync(ctx.proc); } catch { names = null; }
+    if (names === null) { ctx.say("the processes can't be listed: no CPU or memory by worktree"); r.base = null; r.result = undefined; return; }
+    const pids = names.filter((n) => /^\d+$/.test(n));
+    const procs = new Map();
+    let cut = false;
+    for (let i = 0; i < pids.length && !cut; i += PROC_BATCH) {
+      if (i > 0) { await ctx.turn(); if (ctx.stopped() || run !== r) return; if (ctx.real() - began >= PROC_BUDGET_MS) { cut = true; break; } }
+      for (const pid of pids.slice(i, i + PROC_BATCH)) {
+        const text = read(ctx.proc, pid, 'stat');
+        const s = text === null ? null : procStat(text);
+        if (s) procs.set(Number(pid), s);
+      }
+    }
+    const t = ctx.real();
+    const uptime = Number((read(ctx.proc, 'uptime') ?? '').split(' ')[0]);
+    const usage = boxHealthField(read(ctx.cgroup, 'cpu.stat'), 'usage_usec');
+    // the processes whose info is new or old and has no read out, read at most PROC_READS at once,
+    // within what is left of the 2 s; a read still out then goes on alone and keeps its slot
+    const keyOf = (pid, s) => `${pid}:${s.start}`;
+    if (!cut) {
+      const need = [...procs].filter(([pid, s]) => { const k = keyOf(pid, s), i = r.info.get(k); return !r.out.has(k) && (!i || ctx.real() - i.at >= PROC_INFO_MS); });
+      let over = false;
+      const worker = async () => {
+        while (need.length && !over && run === r && !ctx.stopped()) {
+          const [pid, s] = need.shift(), k = keyOf(pid, s);
+          r.out.add(k);
+          try {
+            const info = await readInfo(ctx, pid);
+            if (run === r) r.info.set(k, { at: ctx.real(), ...info });
+          } finally { r.out.delete(k); }
+        }
+      };
+      const left = PROC_BUDGET_MS - (ctx.real() - began);
+      if (left > 0 && need.length) {
+        let end = () => {};
+        const late = new Promise((res) => { end = ctx.timeout(left, () => { over = true; res(); }); });
+        await Promise.race([Promise.all(Array.from({ length: Math.max(0, PROC_READS - r.out.size) }, worker)), late]);
+        end();
+        over = true;
+        if (ctx.stopped() || run !== r) return;
+      }
+      if (r.out.size && !r.slow) ctx.say('a process did not answer within 2 s: it counts outside until it does');
+      r.slow = r.out.size > 0;
+    }
+    if (cut) { ctx.say('a walk was cut off at 2 s: no CPU until two whole walks have run'); r.base = null; r.result = undefined; return; }
+    // forget what is gone
+    const live = new Set([...procs].map(([pid, s]) => keyOf(pid, s)));
+    for (const k of r.info.keys()) if (!live.has(k)) r.info.delete(k);
+    const me = procs.get(process.pid);
+    const page = memoryPageSize(me?.pages, process.memoryUsage.rss());
+    const infoOf = (pid) => { const s = procs.get(pid); return s ? r.info.get(keyOf(pid, s)) : undefined; };
+    // each process's chain, memoised: its test run's top, and whether it is under one of devteam's own
+    const top = new Map(), kept = new Map();
+    const topOf = (pid, seen = new Set()) => {
+      if (top.has(pid)) return top.get(pid);
+      const s = procs.get(pid);
+      if (!s || seen.has(pid)) return null;
+      seen.add(pid);
+      const up = s.ppid > 0 && s.ppid !== pid ? topOf(s.ppid, seen) : null;
+      const got = up ?? (infoOf(pid)?.test ? pid : null);
+      top.set(pid, got);
+      return got;
+    };
+    const ownOf = (pid, seen = new Set()) => {
+      if (kept.has(pid)) return kept.get(pid);
+      const s = procs.get(pid);
+      if (!s || seen.has(pid)) return false;
+      seen.add(pid);
+      const got = !!infoOf(pid)?.own || r.pids.has(pid) || (s.ppid > 0 && s.ppid !== pid && ownOf(s.ppid, seen));
+      kept.set(pid, got);
+      return got;
+    };
+    // CPU: only between two whole walks one after the other
+    const base = r.base;
+    const over = base ? (t - base.t) / 1000 : 0;
+    const cpuOf = new Map();
+    if (base && over > 0) {
+      // the whole time of each gone process at the first walk, given to the nearest of its ancestors
+      // still here (through gone ones only)
+      const gone = new Map();
+      for (const [pid, s] of base.procs) {
+        const now = procs.get(pid);
+        if (now && now.start === s.start) continue;
+        let up = base.procs.get(s.ppid), hops = 0;
+        while (up && hops++ < 4096) {
+          const here = procs.get(up.pid);
+          if (here && here.start === up.start) { gone.set(up.pid, (gone.get(up.pid) ?? 0) + s.cpu + s.reaped); break; }
+          up = base.procs.get(up.ppid);
+        }
+      }
+      for (const [pid, s] of procs) {
+        const was = base.procs.get(pid);
+        const same = was && was.start === s.start;
+        const own = Math.max(0, s.cpu - (same ? was.cpu : 0));
+        const reaper = pid === 1 || PROC_REAPERS.includes(s.comm);
+        const reaped = reaper ? 0 : Math.max(0, s.reaped - (same ? was.reaped : 0) - (same ? gone.get(pid) ?? 0 : 0));
+        cpuOf.set(pid, (own + reaped) / PROC_HZ / over);
+      }
+    }
+    const hasCpu = !!base && over > 0;
+    const places = new Map(), outside = { n: 0, agents: 0, rss: 0 };
+    if (hasCpu) outside.cpu = 0;
+    const tops = new Map();
+    let attributed = 0;
+    for (const [pid, s] of procs) {
+      const info = infoOf(pid);
+      const place = info && !info.none ? procPlace(info.cwd, roots) : null;
+      let into = outside;
+      if (place) {
+        const k = `${place.root}\0${place.worktree ?? ''}`;
+        if (!places.has(k)) places.set(k, { ...place, n: 0, agents: 0, ...(hasCpu ? { cpu: 0 } : {}), rss: 0, tests: { n: 0, ...(hasCpu ? { cpu: 0 } : {}), rss: 0 }, own: { n: 0, ...(hasCpu ? { cpu: 0 } : {}), rss: 0 } });
+        into = places.get(k);
+      }
+      const rss = s.pages * page, cpu = cpuOf.get(pid) ?? 0;
+      into.n++; into.rss += rss;
+      if (info?.kind === 'agent') into.agents++;
+      if (hasCpu) { into.cpu += cpu; attributed += cpu; }
+      if (info?.own && into.own) { into.own.n++; into.own.rss += rss; if (hasCpu) into.own.cpu += cpu; }
+      const t0 = topOf(pid);
+      if (t0 !== null && into.tests) {
+        into.tests.rss += rss;
+        if (hasCpu) into.tests.cpu += cpu;
+        if (t0 === pid) into.tests.n++;
+      }
+      if (t0 !== null) tops.set(pid, t0);
+    }
+    // strays
+    const groups = new Map();
+    if (Number.isFinite(uptime) && uptime > 0) {
+      const age = (s) => Math.max(0, uptime - s.start / PROC_HZ);
+      for (const [pid, s] of procs) {
+        const info = infoOf(pid);
+        if (!info || info.none || age(s) <= PROC_STRAY_S) continue;
+        const t0 = tops.get(pid);
+        const kind = t0 !== undefined ? 'test' : info.kind;
+        if (!kind) continue;
+        const parent = procs.get(s.ppid);
+        const orphan = s.ppid === 1 || (parent && PROC_REAPERS.includes(parent.comm));
+        const why = info.cwd?.endsWith(' (deleted)') ? 'folder-gone'
+          : kind !== 'agent' && orphan && !ownOf(pid) ? 'parent-gone'
+          : kind === 'test' && age(procs.get(t0)) > PROC_LONG_TEST_S ? 'long-test' : null;
+        if (!why) continue;
+        const project = procPlace(info.cwd, roots)?.project;
+        const k = `${project ?? ''}\0${kind}\0${why}`;
+        const g = groups.get(k) ?? groups.set(k, { ...(project === undefined ? {} : { project }), kind, why, n: 0, oldest_s: 0, rss: 0, ...(hasCpu ? { cpu: 0 } : {}) }).get(k);
+        g.n++;
+        g.oldest_s = Math.max(g.oldest_s, Math.floor(age(s)));
+        g.rss += s.pages * page;
+        if (hasCpu) g.cpu += cpuOf.get(pid) ?? 0;
+      }
+    }
+    const result = { at: ctx.now() };
+    if (hasCpu) result.over_s = over;
+    result.places = [...places.values()];
+    result.outside = outside;
+    if (hasCpu && Number.isFinite(usage) && Number.isFinite(base.usage) && usage >= base.usage) result.unattributed = { cpu: Math.max(0, (usage - base.usage) / 1e6 / over - attributed) };
+    result.strays = [...groups.values()].sort((a, b) => b.rss - a.rss || b.n - a.n).slice(0, PROC_STRAYS);
+    r.base = { t, procs: new Map([...procs].map(([pid, s]) => [pid, { pid, ...s }])), usage };
+    r.result = result;
+  };
+  return {
+    start(ctx) {
+      const r = { base: null, result: undefined, info: new Map(), out: new Set(), slow: false, pids: new Set(), pidsOf: null, pidsOut: null, walking: false };
+      run = r;
+      const once = async () => {
+        if (r.walking || run !== r) return;
+        r.walking = true;
+        try { await walk(ctx, r); } finally { r.walking = false; }
+      };
+      r.walk = once;
+      ctx.every(PROC_EVERY_MS, once);
+    },
+    part(ctx, parts) { return run?.result; },
+    stop() { run = null; },
+  };
+})();
 /* box-health-processes end */
 /* box-health-disk start */
 // Each worktree's disk (kit-838's).
@@ -28607,7 +28973,55 @@ function makeSession(role) {
   // a planner's is home's. s stays home's for the session, the agent and its policy.
   const R = role === 'worker' ? repoOfTicket(tickets().get(id)) : repo('home');
   const mb = R.settings.main_branch;
-  if (!fs.existsSync(wt)) {
+  // A start makes its worktree locked, with this reason, and unlocks it once it is whole: one that is
+  // still locked was left by a start that stopped, or is being made now (kit-856).
+  const making = `devteam: a start of ${name} is making this worktree`;
+  // this start's own: those words and a token, so no start takes another's lock for its own (final-1 F1)
+  const mine = `${making} (${process.pid}.${Date.now().toString(36)}.${crypto.randomBytes(3).toString('hex')})`;
+  // the reason wt is locked with ('' for none), or null when it isn't locked. From git's list, so a
+  // folder that is empty or gone counts too.
+  const lockOf = () => {
+    const at = path.join(realPath(path.dirname(wt)), path.basename(wt));
+    const list = R.git(['worktree', 'list', '--porcelain'], R.root);
+    // another worktree's broken record fails the list: then this one's own says
+    if (list === null) return readText(path.join(/^gitdir: (.*)$/m.exec(readText(path.join(wt, '.git')) ?? '')?.[1] ?? wt, 'locked'))?.trim() ?? null;
+    const l = list.split('\n\n').map((b) => b.split('\n')).find((ls) => ls.includes(`worktree ${at}`))?.find((x) => x === 'locked' || x.startsWith('locked '));
+    return l === undefined ? null : l.slice('locked '.length);
+  };
+  // locked by a start, this one or another
+  const startsLock = (why) => why === making || (why ?? '').startsWith(`${making} (`);
+  const unfinished = () => startsLock(lockOf());
+  // git's record of a worktree a start is adding now: git writes its lock before the folder, and its
+  // gitdir (what the list reads) after, so in between only the record says (final-1 F3)
+  const beingMade = () => {
+    const dir = path.join(R.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], R.root) ?? path.join(R.root, '.git'), 'worktrees');
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch {}
+    return names.map((n) => path.join(dir, n)).find((d) => !fs.existsSync(path.join(d, 'gitdir')) && startsLock(readText(path.join(d, 'locked'))?.trim() ?? null)) ?? null;
+  };
+  // what is at wt, in words, or null when it is a worktree of its own, or nothing. The commands clear
+  // only a locked one: unlock refuses on a worktree a start has finished since (kit-856).
+  const inRepo = `git -C ${shq(R.root)} worktree`;
+  const leftAt = () => {
+    const there = fs.existsSync(wt);
+    if (there && !fs.statSync(wt).isDirectory()) return `${wt} is a file, where the worktree goes: move it away`;
+    const rec = beingMade();
+    if (rec) return `git is making a worktree for ${wt} (its record ${rec} has no gitdir yet): if no other start is making it, remove that record`;
+    const locked = unfinished();
+    if (!there) return locked ? `git still holds a worktree for ${wt}, whose folder is gone: if no other start is making it, clear it (${inRepo} unlock ${shq(wt)} && ${inRepo} remove --force ${shq(wt)})` : null;
+    if (!locked && !fs.readdirSync(wt).length) return null;
+    const top = responderGit(['rev-parse', '--show-toplevel'], wt);
+    if (top.status !== 0 && fs.existsSync(path.join(wt, '.git'))) return `git can't read ${wt} as a worktree (${firstLine(top.stderr).replace(/^fatal: /, '') || `exit ${top.status}`}), and it may hold work: ${inRepo} repair ${shq(wt)} mends one that moved; if it holds nothing to keep, move it away`;
+    if (top.status !== 0 || realPath(top.stdout.trim()) !== realPath(wt)) return `${wt} is no worktree git knows: look in it, then move it away`;
+    if (!locked) return null;
+    const head = responderGit(['rev-parse', '--verify', '--quiet', 'HEAD'], wt);
+    return `the worktree ${wt} is there, ${head.status === 0 ? `at ${head.stdout.trim().slice(0, 8)}` : 'with no commit git can read'}: if no other start is making it and it holds nothing to keep, remove it (${inRepo} unlock ${shq(wt)} && ${inRepo} remove --force ${shq(wt)})`;
+  };
+  // read before the look: a worktree another start adds after this fails the add below, never a resume
+  const there = fs.existsSync(wt);
+  const leftBefore = leftAt();
+  if (leftBefore) die(`${name}'s start isn't finished, so nothing was started: ${leftBefore}, then start it again`);
+  if (!there) {
     // what origin holds, by sha: main, and the branch if it was pushed (a moved fleet continues from
     // it, never from main). Every local ref is any session's to write without a push (kit-790).
     const at = fetchLinkMain(R, 'refusing to start a ticket on a stale main', { start: branch });
@@ -28649,22 +29063,26 @@ function makeSession(role) {
     // its commits are in the start, or under a ref of their own. A symbolic one holds none.
     const tracking = `refs/remotes/origin/${branch}`;
     const keptAt = `refs/devteam/kept/${branch}/`;
-    const raw = at.branch ? null : R.git(['rev-parse', '--verify', '--quiet', tracking], R.root); // read once: a tag's own object too
+    const exact = at.branch ? null : responderGit(['show-ref', '--verify', '--hash', tracking], R.root);
+    const raw = exact?.status === 0 ? exact.stdout.trim() : null; // read once: a tag's own object too
     const peeled = raw && responderGit(['rev-parse', '--verify', '--quiet', `${raw}^{commit}`], R.root);
     const stale = peeled && peeled.status === 0 ? peeled.stdout.trim() : null;
     let keptNow = null;
+    let keptUntil = null; // this start's own kept ref for commits the new worktree will hold
     if (stale) {
       const symbolic = R.git(['symbolic-ref', '--quiet', tracking], R.root) !== null;
-      const keep = !symbolic && !anc(stale, sha);
+      // the branch can be moved back before the checkout: only origin's main holds them whatever happens
+      const keep = !symbolic && !anc(stale, at.main);
       if (keep) keptNow = `${keptAt}${stale}`;
+      if (keep && anc(stale, sha) && responderGit(['show-ref', '--verify', '--quiet', keptNow], R.root).status !== 0) keptUntil = keptNow;
       if (keep) write(['update-ref', '--no-deref', `${keptAt}${stale}`, stale], `keep ${stale} under ${keptAt}`);
-      warn(`origin has no ${branch}: its tracking ref here (${short(stale)}) is ignored and removed${keep ? `, its commits kept at ${keptAt}${stale}` : ''}${sha === at.main ? `, and the branch starts from origin's ${mb} (${short(at.main)})` : ''}`);
+      warn(`origin has no ${branch}: its tracking ref here (${short(stale)}) is ignored and removed${keep ? `, its commits kept at ${keptAt}${stale}${keptUntil ? ' until the worktree holds them' : ''}` : ''}${sha === at.main ? `, and the branch starts from origin's ${mb} (${short(at.main)})` : ''}`);
       write(['update-ref', '--no-deref', '-d', tracking, raw], `remove ${tracking}`);
     }
     // read back, so a retry's act names what a stopped launch kept
     const found = (R.git(['for-each-ref', '--format=%(refname)', keptAt], R.root) ?? '').split('\n').filter((r) => r.startsWith(keptAt) && /^[0-9a-f]{40,64}$/.test(r.slice(keptAt.length)));
-    const keptRefs = [...new Set([...(keptNow ? [keptNow] : []), ...found])];
-    if (keptRefs.length) keptWords += `; commits kept at ${keptRefs.slice(0, 3).join(', ')}${keptRefs.length > 3 ? ` and ${keptRefs.length - 3} more` : ''}`;
+    let keptRefs = [...new Set([...(keptNow ? [keptNow] : []), ...found])];
+    const sayKept = () => { if (keptRefs.length) keptWords += `; commits kept at ${keptRefs.slice(0, 3).join(', ')}${keptRefs.length > 3 ? ` and ${keptRefs.length - 3} more` : ''}`; };
     // set by config: --track fails where the checkout's fetch refspec is blank
     // set again when it is main's and origin holds the branch now: a launch refused below leaves it written
     const merge = R.git(['config', '--get', `branch.${branch}.merge`], R.root);
@@ -28681,15 +29099,26 @@ function makeSession(role) {
       if (made.status !== 0) die(`could not make ${branch}: ${redactUrl(firstLine(made.stderr).replace(/^fatal: /, '')) || `exit ${made.status}`}; nothing was started`);
     }
     // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
-    const added = gitRun(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--no-guess-remote', wt, branch], R.root);
-    if (added.status !== 0) die(`git worktree add ${branch} failed: ${redactUrl(firstLine(added.err.split('\n').find((l) => /^fatal: /.test(l)) ?? added.err).replace(/^fatal: /, '')) || `exit ${added.status}`}; nothing was started`);
+    const headOf = () => { const h = responderGit(['rev-parse', '--verify', '--quiet', 'HEAD'], wt); return h.status === 0 ? short(h.stdout.trim()) : 'no commit'; };
+    const leftWords = (left) => (left ? `, but ${left}${unfinished() ? '. If git gave no reason above, a post-checkout hook may have failed: mend it first' : ''}` : fs.existsSync(wt) && fs.readdirSync(wt).length ? `; ${wt} is there, made by another start or left by this one (a post-checkout hook that unlocked it), at ${headOf()}: look at its commit before resuming it` : '');
+    const added = gitRun(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--no-guess-remote', '--lock', '--reason', mine, wt, branch], R.root);
+    if (added.status !== 0) die(`git worktree add ${branch} failed: ${redactUrl(firstLine(added.err.split('\n').find((l) => /^fatal: /.test(l)) ?? added.err).replace(/^fatal: /, '')) || `exit ${added.status}`}; nothing was started${leftWords(leftAt())}${/is already locked/.test(added.err) ? '; a post-checkout hook may not lock the worktree while a start makes it' : ''}`);
     // The add checks the branch out by name, so a session moving it meanwhile would win: what landed is
     // read back, and the worktree undone if it isn't the sha expected, on the branch (its full name: a
     // tag of the same name makes git print a longer short one). A branch still where this launch put it
     // goes back; one that moved keeps what landed on it.
     const read = (args, cwd) => { const r = responderGit(args, cwd); return r.status === 0 ? r.stdout.trim() : null; };
     const undo = (why) => {
-      R.git(['worktree', 'remove', '--force', wt], R.root);
+      // only while the lock is this start's own: one locked, unlocked or made again by anything else
+      // since is theirs, and the branch stays where it is (final-1 F1, final-1b F1)
+      const now = lockOf();
+      if (now !== mine) die(`${why}, so nothing was started; ${!fs.existsSync(wt) && now === null ? `${wt} went` : `something else ${now === null ? 'unlocked' : 'locked'} ${wt}`} while it was made, so the undo left it, and ${branch} at ${short(read(['rev-parse', '--verify', '--quiet', ref], R.root) ?? 'no commit')}: look in it before resuming it, since it may hold an older commit's files, then start it again`);
+      gitRun(['worktree', 'remove', '--force', '--force', wt], R.root); // forced twice: this start's own lock
+      // the branch stays under a worktree that is still there, or its files would read as changes to it
+      // an empty folder would be taken as a session's: with a file in it, it is refused
+      if (fs.existsSync(wt) && !fs.readdirSync(wt).length) { try { fs.writeFileSync(path.join(wt, 'start-unfinished.txt'), 'A start that failed could not remove this folder.\n'); } catch {} }
+      const left = leftAt() ?? (fs.existsSync(wt) ? `${wt} is still there, unlocked: look in it, then move it away` : null);
+      if (left) die(`${why}, so nothing was started; the undo couldn't remove it all, and ${branch} stays at ${short(read(['rev-parse', '--verify', '--quiet', ref], R.root) ?? 'no commit')}: ${left}, then start it again`);
       if (local !== sha) responderGit(['update-ref', '--no-deref', ...(local ? [ref, local, sha] : ['-d', ref, sha])], R.root);
       die(`${why}, so nothing was started; try again`);
     };
@@ -28707,8 +29136,20 @@ function makeSession(role) {
       if (filled.status !== 0) undo(`could not check out ${short(sha)}: ${redactUrl(firstLine(filled.err).replace(/^(fatal|error): /, '')) || `exit ${filled.status}`}`);
       landed(sha);
     }
+    // only its own lock: one a hook or a person put on it in its place is theirs, and stays (final-1 F2, final-1b F4)
+    const lockNow = lockOf();
+    // unlocked by something else, or locked by another start, so another start may be in it: the undo leaves it
+    if (lockNow === null || (lockNow !== mine && startsLock(lockNow))) undo(`the new worktree was ${lockNow === null ? 'unlocked' : 'locked by another start'} while it was made`);
+    const unlocked = lockNow === mine ? responderGit(['worktree', 'unlock', wt], R.root) : { status: 0 };
+    if (unlocked.status !== 0) undo(`could not unlock the new worktree: ${redactUrl(firstLine(unlocked.stderr).replace(/^(fatal|error): /, '')) || `exit ${unlocked.status}`}`);
+    // the worktree's branch holds them now
+    if (keptUntil && responderGit(['update-ref', '--no-deref', '-d', keptUntil, stale], R.root).status === 0) keptRefs = keptRefs.filter((r) => r !== keptUntil);
+    sayKept();
     madeWorktree = true;
   }
+  // looked at again before anything is written there: another start's add into a folder that was
+  // there, empty, may have locked it since the look (final-1 F3)
+  if (there && (unfinished() || beingMade())) die(`${name}'s start isn't finished, so nothing was started: ${leftAt() ?? `another start is making ${wt}`}, then start it again`);
   // A harness keeps its sessions by directory on its own machine: a worktree made just now has no
   // session to continue (a new machine, or the worktree was removed), so start fresh, with the
   // handoff note if there is one, and say so.

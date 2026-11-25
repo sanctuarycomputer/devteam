@@ -169,7 +169,14 @@ test('priority-inversion: a goal waiting on unstarted work well below it, until 
     // while the fleet drains nothing starts, so it is quiet (as idle-capacity is)
     const snap = F.snapLog();
     const stamp = (ago) => { const d = new Date(Date.now() - ago).toISOString(); return `${d.slice(0, 10).replace(/-/g, '')}-${d.slice(11, 23).replace(/[:.]/g, '')}`; };
-    F.hand('supervisor', { id: `a-${stamp(1000)}-supervisor`, type: 'act', class: 'drain', what: 'drained the fleet on here: a pause' }, 1000);
+    // its id is picked by the clock, so it must be one no line has: the fold drops a second line with
+    // an id it has seen, and a real act dated about a second ago (this case's own goal holds) would
+    // win, leaving no drain in force
+    const taken = new Set(fs.readdirSync(F.logDir).flatMap((f) => fs.readFileSync(path.join(F.logDir, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l).id)));
+    let ago = 1000;
+    let drainId;
+    while (taken.has(drainId = `a-${stamp(ago)}-supervisor`)) ago += 1;
+    F.hand('supervisor', { id: drainId, type: 'act', class: 'drain', what: 'drained the fleet on here: a pause' }, ago);
     assert.equal(findings().find((x) => x.kind === 'idle-capacity'), undefined, 'the drain is in force');
     assert.deepEqual(inversions(), []);
     F.restoreLog(snap);
