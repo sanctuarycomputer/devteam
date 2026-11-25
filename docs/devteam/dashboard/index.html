@@ -1092,6 +1092,11 @@ try {
   .tl-compose textarea { margin-top: 6px; }
   .tl-compose .row-inline { align-items: center; }
   @media (max-width: 640px) { .tl-card:not(.sheet) { width: calc(100vw - 32px); } }
+  /* a short window (kit-882): the floating card's floors give way, the box to one line, the note's words to two */
+  @media (max-height: 480px) {
+    .tl-card:not(.in-panel) #tl-c-text { min-height: 34px; height: 34px; }
+    .tl-card:not(.in-panel) .tl-words { min-height: 40px; }
+  }
   /* under the scrim (20) and what opens over it (the drawer, a review, an artifact), over the page's own (at most 6) */
   .tl-pins { position: absolute; left: 0; top: 0; width: 0; height: 0; }
   .tl-pin { position: absolute; z-index: 10; width: 22px; height: 22px; padding: 0; margin: 0; border-radius: 50%; border: 2px solid #fff; background: var(--blue); color: #fff; font: 600 11px/18px var(--sans); text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
@@ -10400,12 +10405,41 @@ function tlPlaceCard(t) {
   if (TL.pressed && card.contains(TL.pressed)) return;
   // nor under the owner's pointer or focus while a page is up (kit-145): it would never rest on a page that moves
   if (avStep.stays(t, card)) return;
+  // in the window (kit-882): hung from its top, the card is capped by the room down to the window's bottom (8px in);
+  // where its floors need more than that, it rises as far as they need (an 8px margin at the top), and a card standing on
+  // the bottom (the dock, the sheet) grows up as far. A window with the stylesheet's cap of room changes nothing.
+  card.style.maxHeight = '';
+  const fit = () => {
+    const sheet = card.classList.contains('sheet'), dock = card.classList.contains('in-dock'), hung = !sheet && !dock;
+    const low = innerHeight - (sheet ? 0 : dock ? 16 : 8), top = card.getBoundingClientRect().top;
+    if (hung && low - top < parseFloat(getComputedStyle(card).maxHeight)) card.style.maxHeight = `${Math.max(0, low - top)}px`;
+    // past its bottom: the composer's end (the last of it), under the card's own padding and border
+    const box = card.getBoundingClientRect(), cs = getComputedStyle(card), end = card.querySelector(':scope > .tl-compose');
+    const over = end ? end.getBoundingClientRect().bottom + parseFloat(cs.paddingBottom) + parseFloat(cs.borderBottomWidth) - box.bottom : 0;
+    if (!(over > 0.5)) return;
+    const need = Math.min(box.height + over, low - 8);
+    if (hung && box.top + need > low) card.style.top = `${parseFloat(card.style.top) - (box.top + need - low)}px`;
+    card.style.maxHeight = `${Math.ceil(need)}px`;
+  };
+  // what grows once the card is placed (the terminal's ask, drawn after it; a picture loading; a turn) fits it again
+  // where it stands, on the next frame, under the pointer or focus too: a framed page can't make the card grow, and a
+  // control that moved waits out its second before a press counts (kit-145). Its flex items are watched, from each place.
+  TL.fitting ??= typeof ResizeObserver === 'function' ? new ResizeObserver(() => requestAnimationFrame(() => {
+    if (!card.hidden && !card.classList.contains('in-panel') && !(TL.pressed && card.contains(TL.pressed))) fit();
+  })) : null;
+  const watch = () => {
+    if (!TL.fitting) return;
+    TL.fitting.disconnect();
+    for (const e of [card, ...card.querySelectorAll(':scope > *, #tl-c-note > div, .tl-words, .tl-addr > .row-inline')]) TL.fitting.observe(e);
+  };
   // a note a step opened whose element isn't showing on this view (kit-145): the stage's top right corner
   if (innerWidth >= 640 && avStep.unseen(t)) {
     const st = $('av-stage').getBoundingClientRect();
     card.classList.remove('sheet', 'in-dock', 'in-threads');
     card.style.left = `${st.right - 8 - (card.offsetWidth || 360) + scrollX}px`;
     card.style.top = `${st.top + 8 + scrollY}px`;
+    fit();
+    watch();
     return;
   }
   // in the panel it is the slot's: nothing to place
@@ -10435,6 +10469,8 @@ function tlPlaceCard(t) {
   card.classList.toggle('in-dock', !p.sheet && !!p.dock);
   card.style.left = p.sheet || p.dock ? '' : `${p.left + (fixed ? 0 : scrollX)}px`;
   card.style.top = p.sheet || p.dock ? '' : `${p.top + (fixed ? 0 : scrollY)}px`;
+  fit();
+  watch();
 }
 // The pins and a floating card placed again where their subjects now are, nothing redrawn: on a scroll of #th-body,
 // the panel's slide ending and a change of tab (kit-100 spec §2.6); a resize redraws the lot.
