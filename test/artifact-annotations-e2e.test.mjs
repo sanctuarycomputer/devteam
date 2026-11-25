@@ -2,14 +2,18 @@
 // One top-level test, a subtest per step, each reading what the last left (a failed step fails the rest).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { canDrive } from './lib/chrome.mjs';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { canDrive, chromePath } from './lib/chrome.mjs';
 import { harness, J, FRAMES, VIEWER_UP } from './fixtures/artifact-viewer/harness.mjs';
-import { buildStack, ok, logLines, SLUG, FAQ, PLAN, CHORE, OLD } from './fixtures/artifact-annotations-e2e/stack.mjs';
+import { buildStack, cli, ok, logLines, markLine, draftChange, writeNoSandboxChrome, png, near, ringAt, SLUG, FAQ, PLAN, CHORE, OLD } from './fixtures/artifact-annotations-e2e/stack.mjs';
 
 const WIN = { width: 1100, height: 800 };
 const HEAD_P = `#artifact/wt/${PLAN}/${SLUG}`;
 
 test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 900000 }, async (t) => {
+  const fileAt = Date.now();
   const H = await harness(t, 'ann-e2e');
   const { F, visit, AV_A, AV_B, PV } = H;
   const times = {};
@@ -203,5 +207,92 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
     await staysHidden(V, 'C4c: a close after Hand over shows no reminder');
   });
 
-  void stack;
+  // ---- step 6: the pricing marks and the kit's pictures ----
+  const rgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  const frameOf = (key) => JSON.parse(ok(F, 'owner', ['thread', 'show', notes[key].id, '--json'])).frame;
+  const noteStates = () => Object.fromEntries(JSON.parse(ok(F, 'planner', ['artifact', 'notes', SLUG, '--at', PLAN, '--json'])).map((n) => [n.id, n.state]));
+  // what a mark printed and wrote: the picture's path, the log line naming it by its stamp, the line's shot
+  const marked = (key, out) => {
+    const m = /^picture: (\S+-light\.png)/m.exec(out);
+    assert.ok(m, `C5c ${key}: the mark prints its picture's path: ${out}`);
+    const file = m[1];
+    const stamp = path.basename(file).replace(/-light\.png$/, '');
+    const line = markLine(F, notes[key].id, stamp);
+    assert.ok(line?.shot, `C5c ${key}: a log line for ${notes[key].id} carries the shot stamped ${stamp}`);
+    return { file, shot: line.shot };
+  };
+  const shots = {};
+  let head = null;
+
+  await step('step 6: the planner marks N2 (without the sandbox) and N4; the supervisor proposes N1 ready', async () => {
+    assert.ok(chromePath, 'setup: a Chrome to wrap');
+    head = draftChange(F, stack.WT);
+    const wrapper = writeNoSandboxChrome(F.base, chromePath);
+    const r2 = cli(F, 'planner', ['artifact', 'addressed', notes.N2.id, '--note', 'The annual price now shows the saving'], { CHROME_PATH: wrapper });
+    assert.equal(r2.status, 0, `C1b: the planner's mark on N2 through the no-sandbox wrapper succeeds: ${r2.err || r2.out}`);
+    assert.match(r2.out, /Chrome's sandbox didn't start here; took the picture without it \(DEVTEAM_CHROME_NO_SANDBOX=1\)/, 'C1b: N2\'s mark says it took the picture without the sandbox');
+    shots.N2 = marked('N2', r2.out);
+    shots.N4 = marked('N4', ok(F, 'planner', ['artifact', 'addressed', notes.N4.id, '--note', 'The cancel question is answered first now']));
+    shots.N1 = marked('N1', ok(F, 'supervisor', ['thread', 'ready', notes.N1.id, '--outcome', 'The monthly plan stands out in draft 2']));
+  }, { timeout: 240000 });
+
+  // each mark's picture: the file, its sum, where it was taken from, its width, the ring at the anchor's box (S33)
+  const BOX = { N1: { x: 60, y: 60, w: 200, h: 80 }, N2: { x: 60, y: 60, w: 200, h: 80 }, N4: { x: 40, y: 60, w: 240, h: 60 } };
+  const FILL = { N1: '#dde3f0', N2: '#1a7f37' };
+  await step('C5c: each pricing mark has its picture, from plan-pricing at its HEAD, the frame wide, the ring at the box', async () => {
+    for (const key of ['N1', 'N2', 'N4']) {
+      const s = shots[key];
+      assert.ok(s, `C5c ${key}: marked in step 6`);
+      assert.ok(fs.existsSync(s.file), `C5c ${key}: the printed picture ${s.file} exists`);
+      const buf = fs.readFileSync(s.file);
+      assert.equal(crypto.createHash('sha256').update(buf).digest('hex'), s.shot.sum?.light, `C5c ${key}: the picture's SHA-256 is shot.sum.light`);
+      assert.equal(s.shot.src, PLAN, `C5c ${key}: shot.src`);
+      assert.equal(s.shot.sha, head, `C5c ${key}: shot.sha is the worktree's HEAD`);
+      const fw = frameOf(key).w;
+      assert.equal(s.shot.w, fw, `C5c ${key}: shot.w is the note's frame.w`);
+      assert.notEqual(s.shot.w, 1400, `C5c ${key}: shot.w isn't the 1400 default`);
+      const p = png(buf);
+      t.diagnostic(`${key} picture ${p.w}x${p.h} anchor ${s.shot.anchor}`);
+      assert.ok(ringAt(p, BOX[key]), `C5c ${key}: the ring is drawn round ${J(BOX[key])} in the ${p.w}x${p.h} picture`);
+      // 20px in from the box's bottom right corner: the fill, clear of the element's text at its top left
+      if (FILL[key]) { const { x, y, w, h } = BOX[key], px = p.px(x + w - 20, y + h - 20); assert.ok(near(px, rgb(FILL[key])), `C5c ${key}: 20px inside the ring is the element's own ${FILL[key]}, not ${J(px)}`); }
+    }
+  });
+
+  await step("C5d: N2 pictured on its view, N4's anchor gone", async () => {
+    assert.ok(shots.N2 && shots.N4, 'C5d: N2 and N4 were marked in step 6');
+    assert.notEqual(shots.N2.shot.anchor, 'hidden', 'C5d N2: shot.anchor is not hidden (pictured on #tab2)');
+    const p = png(fs.readFileSync(shots.N2.file)), { x, y, w, h } = BOX.N2, px = p.px(x + w - 20, y + h - 20);
+    assert.ok(near(px, rgb('#1a7f37')), `C5d N2: the ring encloses #annual-price's #1a7f37, not ${J(px)}`);
+    assert.equal(shots.N4.shot.anchor, 'gone', "C5d N4: shot.anchor is 'gone' (#faq-cancel removed in draft 2)");
+  });
+
+  await step('C5e: no Chrome, no mark: N3 is refused and nothing is written for it', async () => {
+    const id = notes.N3.id;
+    const mine = () => logLines(F).filter((l) => l.includes(id));
+    const before = mine();
+    const r = cli(F, 'planner', ['artifact', 'addressed', id, '--note', 'The empty half shows the annual terms now'], { CHROME_PATH: '/nonexistent' });
+    assert.equal(r.status, 1, `C5e: the mark on N3 with CHROME_PATH=/nonexistent exits 1: ${r.err || r.out}`);
+    assert.match(r.err, /Chrome/, 'C5e: stderr names Chrome');
+    assert.deepEqual(mine(), before, 'C5e: the log lines naming N3 are the same before and after');
+    for (const root of [F.old, stack.WT]) assert.equal(fs.existsSync(path.join(root, 'docs/devteam/run/shots', id)), false, `C5e: no run/shots/${id}/ under ${root}`);
+  });
+
+  await step("C5f: the supervisor withdraws N4's mark; the planner is told and marks it again", async () => {
+    const id = notes.N4.id;
+    const reason = 'the picture shows no cancel answer at all';
+    ok(F, 'supervisor', ['thread', 'unready', id, '--reason', reason]);
+    const told = logLines(F).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter((m) => m && m.type === 'message' && m.kind === 'info' && m.to === PLAN && String(m.text).includes(id) && String(m.text).includes(reason));
+    assert.equal(told.length, 1, `C5f: one info to ${PLAN} naming N4 and the reason (${told.length})`);
+    assert.ok(told[0].text.includes(`artifact notes ${SLUG}`), `C5f: the info names \`artifact notes ${SLUG}\`: ${told[0].text}`);
+    assert.equal(noteStates()[id], `with ${PLAN}`, `C5f: N4 is with ${PLAN} in artifact notes`);
+    const V = await visit('#library?th=open', WIN);
+    const where = `document.querySelector('#tl-list [data-tl-open="${id}"] .th-where')?.textContent ?? null`;
+    const ends = await V.settle(`(${where} ?? '').endsWith('With ${PLAN}')`, 5000);
+    assert.ok(ends, `C5f: N4's Threads row ends "With ${PLAN}": ${J(await V.p.ev(where))}`);
+    ok(F, 'planner', ['artifact', 'addressed', id, '--note', 'The cancel question is answered at the top now']);
+    assert.equal(noteStates()[id], 'to check', 'C5f: N4 is to check once the planner marks it again');
+  });
+
+  t.diagnostic(`file: ${Date.now() - fileAt} ms`);
 });

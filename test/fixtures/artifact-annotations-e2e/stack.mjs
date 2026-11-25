@@ -85,3 +85,9 @@ export function logLines(F) {
   const dirs = [F.logDir, path.join(F.old, '.worktrees', PLAN, 'docs/devteam/run/log')];
   return dirs.filter((d) => fs.existsSync(d)).flatMap((d) => fs.readdirSync(d).filter((f) => f.endsWith('.jsonl')).sort().flatMap((f) => fs.readFileSync(path.join(d, f), 'utf8').split('\n').filter(Boolean)));
 }
+
+// the log line a mark wrote for thread id with the picture stamped stamp (an addressed message, or a ready's set), or null
+export function markLine(F, id, stamp) {
+  const all = logLines(F).map((l) => { try { return JSON.parse(l); } catch { return null; } });
+  return all.find((m) => m && m.shot?.stamp === stamp && ((m.type === 'message' && m.kind === 'addressed' && m.thread === id) || (m.type === 'thread' && m.op === 'set' && m.id === id))) ?? null;
+}
