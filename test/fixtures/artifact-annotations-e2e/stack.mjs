@@ -1,7 +1,8 @@
 // The helpers of test/artifact-annotations-e2e.test.mjs (kit-146): the CLI runner every child goes
 // through, the fixture builder (pricing at its planner's worktree, faq landed on main with a ticket
 // draft and a chore draft), the no-sandbox Chrome wrapper's writer and the log reader. The PNG and ring
-// checks are kit-147's (test/fixtures/artifact-shots/kit.mjs), imported, not copied.
+// checks are kit-147's (test/fixtures/artifact-shots/kit.mjs), imported, not copied: that import also runs
+// its import-time Chrome warm-up (at most 60 s, its spawnSync timeout), which the test file times.
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
@@ -55,7 +56,7 @@ export function buildStack(F) {
   commit(F, WT, 'pricing: draft');
   const landFaq = (copy) => { writeFaq(F.old, copy); commit(F, F.old, `faq: ${copy}`); F.g(['push', '-q', 'origin', 'main'], F.old); };
   landFaq('main-1');
-  F.sup(['ticket', 'add', OLD, '--json', J({ title: 'An older faq', feature: 'chores', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['docs/**'], done_when: ['the faq is older'], notes: 'n' })]);
+  ok(F, 'supervisor', ['ticket', 'add', OLD, '--json', J({ title: 'An older faq', feature: 'chores', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['docs/**'], done_when: ['the faq is older'], notes: 'n' })]);
   for (const [name, branch, copy] of [[OLD, `ticket/${OLD}`, 'old'], [CHORE, 'chore/artifact-faq', 'chore']]) {
     F.g(['worktree', 'add', '-q', '-b', branch, wt(name), 'main'], F.old);
     writeFaq(wt(name), copy);
