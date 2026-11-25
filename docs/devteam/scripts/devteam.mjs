@@ -20769,6 +20769,8 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
   // the machine's memory, a reading a minute (kit-591): started when a listen succeeds, stopped only
   // when the hub is closed for good
   const recorder = memoryRecorder(log, scan);
+  // its live health, a sample every 5 s in this process's memory (kit-836), started and stopped with it
+  const health = boxHealth(log, scan);
   // What holds the hub port: 'hub', 'other' (a clean answer that isn't a hub), or 'unsure' (slow,
   // or gone between the bind and the ask), which is no reason to stop trying.
   const holder = () => new Promise((resolve) => {
@@ -20856,7 +20858,7 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
   const bodyMs = uploadLimits().bodyMs;
   // live presence on the hub's own pages (presence@1): its people, never a changed
   const presence = presenceRelay({ hub: true, okHost: ownHost, ownerCwd: actionCwd });
-  const handle = { close() { stopped = true; clearTimeout(again); recorder.stop(); presence.closeAll(1001); current?.close(); current?.closeIdleConnections?.(); current = null; } };
+  const handle = { close() { stopped = true; clearTimeout(again); recorder.stop(); health.stop(); presence.closeAll(1001); current?.close(); current?.closeIdleConnections?.(); current = null; } };
   const tryListen = () => {
     if (stopped) return;
     const hub = trackRequests(http.createServer(async (req, res) => {
@@ -20898,6 +20900,11 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
         // the detail (it can name the hub's own file) goes to the hub's log, once, never to the page
         try { return await serveMemory(req, send); } catch (e) { recorder.say(`/memory.json: ${e?.message ?? String(e)}`); return send(500, 'application/json', JSON.stringify({ error: 'memory readings unavailable' })); }
       }
+      // the machine's live health (box-health@1), refused as the readings are; off, no route
+      if (health.on && (req.url === '/box-health.json' || req.url.startsWith('/box-health.json?'))) {
+        if (site && !['same-origin', 'none'].includes(site)) return send(403, 'text/plain; charset=utf-8', 'the readings are for the hub\'s own page');
+        try { return health.serve(req, send); } catch (e) { health.fail('sampler', '/box-health.json', e); return send(500, 'application/json', JSON.stringify({ error: 'box health unavailable' })); }
+      }
       // The operator's threads, for the Overview's dock: a GET carries no Origin, so it is refused
       // when the browser says another site's page asks (as a dashboard's /api/threads is).
       if (req.url === '/operator/threads') {
@@ -20931,7 +20938,7 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
       else log(`hub: port ${HUB_PORT} is held by something that isn't a devteam hub; this dashboard won't serve the hub`);
     });
     hub.requestTimeout = UPLOAD_REQUEST_MS;
-    keepAlive(hub).listen(HUB_PORT, '127.0.0.1', () => { log(`hub on http://127.0.0.1:${HUB_PORT}`); recorder.start(); });
+    keepAlive(hub).listen(HUB_PORT, '127.0.0.1', () => { log(`hub on http://127.0.0.1:${HUB_PORT}`); recorder.start(); health.start(); });
   };
   tryListen();
   return handle;
@@ -21073,26 +21080,27 @@ const accountKnownFull = (a) => accountAtLimit(a) || lastReadingFull(a);
 // Each account's numbers, for the machine's hub (box-health@1): built from named fields, never by
 // copying a row, so no email, token or new field of cswap's leaves with it. Text is kept only in a known
 // form: the alias as the label (else "Account n"; an address, in any width of @, or one over 40
-// characters is not kept) and a one-word status; a time is written again in UTC. A percent is of the
-// window used. What can't be read is left out, never zero, but for one: on status ok an absent
-// five-hour window is unused. A disabled account is listed, marked; a row with no slot number isn't.
+// characters is not kept) and a one-word status; a time is written again in UTC (and left out if that
+// leaves the years 0 to 9999). A percent is of the window used. What can't be read is left out, never
+// zero, but for one: on status ok an absent five-hour window is unused. A usage that is a list is no
+// usage. A disabled account is listed, marked; a row with no slot number isn't.
 function capacityList(rows) {
   const pct = (w) => (Number.isFinite(w?.pct) ? Math.min(100, Math.max(0, w.pct)) : undefined);
-  const at = (t) => (typeof t === 'string' && /^\d{4}-\d\d-\d\dT[\d:.]+(Z|[+-]\d\d:\d\d)$/.test(t) && Number.isFinite(Date.parse(t)) ? new Date(t).toISOString() : undefined);
+  const at = (t) => (typeof t === 'string' && /^\d{4}-\d\d-\d\dT[\d:.]+(Z|[+-]\d\d:\d\d)$/.test(t) && Number.isFinite(Date.parse(t)) && /^\d{4}-/.test(new Date(t).toISOString()) ? new Date(t).toISOString() : undefined);
   const label = (a) => {
     const alias = typeof a.alias === 'string' ? a.alias.trim() : '';
     return alias && alias.length <= 40 && !/[@\p{C}]/u.test(alias.normalize('NFKC')) ? alias : `Account ${a.number}`;
   };
   return rows.filter((a) => Number.isSafeInteger(a.number) && a.number > 0).map((a) => {
     const u = a.usage;
-    const unused = a.usageStatus === 'ok' && u && typeof u === 'object' && (u.fiveHour ?? null) === null;
+    const unused = a.usageStatus === 'ok' && u && typeof u === 'object' && !Array.isArray(u) && (u.fiveHour ?? null) === null;
     const tier = Number(/_([1-9]\d{0,2})x$/.exec(typeof a.plan?.tier === 'string' ? a.plan.tier : '')?.[1]);
     return {
       n: a.number, label: label(a), active: a.active === true, disabled: !!a.disabled,
       status: typeof a.usageStatus === 'string' && /^[a-z][a-z_]{0,29}$/.test(a.usageStatus) ? a.usageStatus : undefined,
       week_pct: pct(u?.sevenDay), week_resets_at: at(u?.sevenDay?.resetsAt),
       five_pct: unused ? 0 : pct(u?.fiveHour), five_resets_at: at(u?.fiveHour?.resetsAt),
-      models_full: Array.isArray(u?.scoped) ? u.scoped.filter((x) => x?.pct >= 100).map((x) => ({ resets_at: at(x.resetsAt) })) : [],
+      models_full: Array.isArray(u?.scoped) ? u.scoped.filter((x) => Number.isFinite(x?.pct) && x.pct >= 100).map((x) => ({ resets_at: at(x.resetsAt) })) : [],
       tier: tier || undefined,
     };
   });
@@ -24099,6 +24107,422 @@ function poolProblem(input) {
   return healthProblem(input, 'pool', POOL_SHAPE, POOL_MAX_BYTES);
 }
 /* box-health-contract end */
+/* box-health-sampler start */
+// The hub's sampler: every 5 s one sample of the machine, an hour of them (at most 720) in this
+// process's memory only, served at GET /box-health.json (box-health@1, above). Nothing is written.
+//
+// The switch is the port, as findCswap's is. The machine's own hub is the one on 4320, and a fixture's
+// is on any other, so with DEVTEAM_BOX_HEALTH unset or empty it samples on 4320 only, and no test
+// helper has to turn it off. A hub run by hand on another port needs DEVTEAM_BOX_HEALTH=on. Any other
+// value (off) is off, on 4320 too. Off: no timer, no child, no part is called, and the route is the
+// hub's 404. DEVTEAM_MEMORY_RECORD plays no part in it.
+//
+// A part is one object in a region of its own, { start(ctx), part(ctx, parts), stop() }, in the order
+// of boxHealthParts: processes, disk, state, pool, claude, park, room.
+//   start(ctx)        once, when the hub first listens, before the first tick. It starts its own
+//                     intervals (ctx.every) and reads nothing slow itself
+//   part(ctx, parts)  once a tick (5 s), never for a request, after the parts before it, synchronous:
+//                     slow work is done in an interval and its last result given here. `parts` is a
+//                     fresh object: now (this tick's reading, as in the answer), sample (this tick's,
+//                     with what the parts before added), samples (the hour, oldest first, this tick's
+//                     last), and each part before it by its name, what that part returned. Read only.
+//                     It returns undefined (absent: nothing of it in the answer), or an object with
+//                     anything the parts after it need, and, for the answer itself, any of:
+//       answer        { headroom, pool, claude, box }, each an object of that section's fields. A
+//                     section's fields are joined in the order of the parts, a later part's winning.
+//                     pool and claude are there only when a part has given what they require (pool:
+//                     projects, allocated and recent; claude: accounts); fields a part adds to a
+//                     section no part before it gave are left out with it
+//       sample        fields joined into this tick's sample ({ room }); one the sampler or an earlier part set is kept
+//                     Each is checked against box-health@1 alone, once for each new object, and a copy
+//                     of it is what is sent: one that is refused is left out and said. So return a new
+//                     object when anything in it changed (a change to one already returned is never
+//                     seen), and the same one when nothing did
+//   stop()            once, when the hub closes; not called for a part that was never started. Its
+//                     timers are cleared for it. start can follow (a dashboard whose hand-over failed
+//                     serves the hub again) with a new ctx: keep nothing of the stopped run.
+//                     A child's own limit (ctx.timeout) goes too, so stop kills the child
+// A part that fails (a throw, or a promise start, part, stop or a timer returns that rejects) is said
+// once for each of those in the hub's log and costs only itself: its start's failure leaves it out for
+// good, its part's for that tick. The log gets the error's kind and its line here, never its message: a
+// parse error quotes what it read, and a child's error its arguments and output.
+//
+// A part is any object with the three, named as boxHealthParts names it, whose region reads no clock
+// and sets no timer (test/box-health-sampler.test.mjs checks the text, a child's own timeout option
+// included: ctx.timeout, then kill it).
+//
+// ctx, a part's only clock and only timers (no part reads Date.now or sets a timer itself):
+//   now()           ms. Rings, intervals, rates and forecasts: what the answer's times are in
+//   real()          ms, the machine's clock, never scaled: the age of a file, of a record stamped by
+//                   another process, and of a child or a walk
+//   every(ms, fn)   calls fn every ms of now(); one still running (a promise) is skipped, never
+//                   overlapped. Returns a function that ends it
+//   after(ms, fn)   calls fn once, ms of now() from now. Returns a function that ends it
+//   timeout(ms, fn) calls fn once, ms of real() from now (a walk's 2 s, a child's limit), and returns
+//                   a function that ends it
+//   turn()          a promise of the event loop's next turn, between batches of a walk
+//   roots()         the known roots, [{ root, name }], the machine's registry and the hub's scan
+//                   together, read again every minute of real(); empty until first read, after start
+//   ceiling()       the lowest machine_memory_ceiling among them, undefined until first read
+//   scan()          the hub's own scan, a promise of the dashboards' hellos (root, name, port …)
+//   proc, cgroup    the folders to read (DEVTEAM_PROC, DEVTEAM_CGROUP)
+//   stopped()       true once the hub has closed: slow work that finds it so ends
+//   say(words)      in the hub's log, under the part's name: each line once, 20 lines a part at most.
+//                   The words are the part's own, never text it read
+// With DEVTEAM_BOX_HEALTH_FAST=<n> (1 to 3600, tests; read only when DEVTEAM_BOX_HEALTH is on) now()
+// and its intervals run n times as fast. real() and timeout() never do.
+const BOX_HEALTH_EVERY_MS = 5000, BOX_HEALTH_WINDOW_MS = 3600000, BOX_HEALTH_SAMPLES = 720;
+const BOX_HEALTH_ROOTS_MS = 60000, BOX_HEALTH_TREND_MS = 600000, BOX_HEALTH_STATFS_MS = 2000, BOX_HEALTH_STALE_MS = 15000;
+const boxHealthOn = () => { const v = process.env.DEVTEAM_BOX_HEALTH; return v === 'on' || (!v && HUB_PORT === 4320); };
+const boxHealthParts = () => [
+  ['processes', boxHealthProcesses], ['disk', boxHealthDisk], ['state', boxHealthState], ['pool', boxHealthPool],
+  ['claude', boxHealthClaude], ['park', boxHealthPark], ['room', boxHealthRoom],
+];
+// What a section needs before it is in the answer at all, and stands in for while a part's own fields
+// are checked alone.
+const BOX_HEALTH_BASE = { headroom: {}, pool: { projects: [], allocated: [], recent: [] }, claude: { accounts: [] }, box: {} };
+const boxHealthIso = (ms) => new Date(ms).toISOString();
+// A kernel file's text, or null: missing, unreadable, or pressure that is compiled in and off (its
+// read fails).
+const boxHealthRead = (...p) => { try { return fs.readFileSync(path.join(...p), 'utf8'); } catch { return null; } };
+const boxHealthField = (text, key) => { const m = new RegExp(`^${key}[ \\t]+(\\d+)$`, 'm').exec(text ?? ''); return m ? Number(m[1]) : undefined; };
+// some and full averages of a pressure file, as { some10, some60, full10, full60 } percents.
+const boxHealthPressure = (text) => {
+  const out = {};
+  for (const kind of ['some', 'full']) for (const n of [10, 60]) {
+    const m = new RegExp(`^${kind} .*\\bavg${n}=([\\d.]+)`, 'm').exec(text ?? '');
+    if (m && Number(m[1]) <= 100) out[`${kind}${n}`] = Number(m[1]);
+  }
+  return out;
+};
+// The object without its undefined fields: a field that can't be read is absent, never zero.
+const boxHealthPresent = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
+const boxHealthShare = (n) => Math.min(1, Math.max(0, n));
+// Every counter a rate is worked out from, at one time. A box's own numbers come from its cgroup and
+// from nowhere else: where there is one (cpu.max or memory.current), a missing file is an absent field,
+// and the host's is never given for it. Where there is none (macOS, or a Linux machine's root cgroup),
+// CPU is os.cpus()'s and pressure is /proc/pressure's.
+function boxHealthCounters(ctx) {
+  const boxed = boxHealthRead(ctx.cgroup, 'cpu.max') !== null || boxHealthRead(ctx.cgroup, 'memory.current') !== null;
+  const stat = boxed ? boxHealthRead(ctx.cgroup, 'cpu.stat') : null;
+  const cores = os.cpus().map((c) => { const all = Object.values(c.times).reduce((a, b) => a + b, 0); return { all, busy: all - c.times.idle }; });
+  return { t: ctx.now(), boxed, cores, usage: boxHealthField(stat, 'usage_usec'), periods: boxHealthField(stat, 'nr_periods'), throttled: boxHealthField(stat, 'nr_throttled') };
+}
+// CPU between two readings of the counters (was: null at the first), in cores.
+function boxHealthCpu(ctx, was, is) {
+  const [quota, period] = (is.boxed ? boxHealthRead(ctx.cgroup, 'cpu.max') ?? '' : '').trim().split(/\s+/).map(Number);
+  const count = is.cores.length;
+  const cap = quota > 0 && period > 0 ? quota / period : undefined;
+  const out = { limit: cap !== undefined && (!count || cap < count) ? cap : count || undefined };
+  // a clock set back gives no rate at all
+  if (was && is.t <= was.t) was = null;
+  const ms = was ? is.t - was.t : 0;
+  const shares = was && was.cores.length === count && is.cores.every((c, i) => c.all > was.cores[i].all && c.busy >= was.cores[i].busy)
+    ? is.cores.map((c, i) => boxHealthShare((c.busy - was.cores[i].busy) / (c.all - was.cores[i].all))) : undefined;
+  if (is.boxed) {
+    if (ms > 0 && was.boxed && is.usage >= was.usage) out.used = (is.usage - was.usage) / 1000 / ms;
+    // no period since the last tick is none held; a counter that fell started over
+    if (was?.boxed && is.periods >= was.periods && is.throttled >= was.throttled) out.throttled = is.periods === was.periods ? 0 : boxHealthShare((is.throttled - was.throttled) / (is.periods - was.periods));
+  } else if (shares?.length) out.used = shares.reduce((a, b) => a + b, 0);
+  if (shares?.length) out.host_cores = shares;
+  const load = os.loadavg();
+  if (load.length === 3 && load.every((n) => Number.isFinite(n) && n >= 0)) out.load = load;
+  if (cap !== undefined && cap < count) {
+    if (out.host_cores) out.shared = true;
+    if (out.load) out.load_scope = 'host';
+  }
+  out.some60 = boxHealthPressure(is.boxed ? boxHealthRead(ctx.cgroup, 'cpu.pressure') : boxHealthRead(ctx.proc, 'pressure', 'cpu')).some60;
+  return boxHealthPresent(out);
+}
+// Memory, in use as machineMemory() counts it, so this, the gate and /memory.json agree.
+function boxHealthMemory(ctx, boxed) {
+  const m = machineMemory() ?? { inUse: os.totalmem() - os.freemem(), max: os.totalmem() };
+  const out = { used: m.inUse, max: m.max, available: Math.max(0, m.max - m.inUse), ceiling: ctx.ceiling() };
+  const whole = (t) => (/^\d+$/.test(t?.trim() ?? '') ? Number(t.trim()) : undefined);
+  if (boxed) {
+    out.swap_used = whole(boxHealthRead(ctx.cgroup, 'memory.swap.current'));
+    out.swap_max = whole(boxHealthRead(ctx.cgroup, 'memory.swap.max'));
+  } else {
+    const info = boxHealthRead(process.env.DEVTEAM_MEMINFO ?? path.join(ctx.proc, 'meminfo'));
+    const kb = (k) => { const n = /^\w+:\s+(\d+) kB$/m.exec((info ?? '').split('\n').find((l) => l.startsWith(`${k}:`)) ?? ''); return n ? Number(n[1]) * 1024 : undefined; };
+    const total = kb('SwapTotal'), free = kb('SwapFree');
+    out.swap_max = total;
+    if (total !== undefined && free !== undefined) out.swap_used = Math.max(0, total - free);
+  }
+  out.some60 = boxHealthPressure(boxed ? boxHealthRead(ctx.cgroup, 'memory.pressure') : boxHealthRead(ctx.proc, 'pressure', 'memory')).some60;
+  return boxHealthPresent(out);
+}
+// The sampler: { on, start, stop, serve, fail, tick }. parts and real are the tests' own.
+function boxHealth(log, scan, { parts = boxHealthParts(), real = () => Date.now() } = {}) {
+  // what was said, by its key: one line each, so a value that changes in it adds none
+  const said = new Set();
+  const say = (key, words) => { if (!said.has(key)) { said.add(key); log(`hub: box health: ${words}`); } };
+  const fail = (who, doing, e) => {
+    const word = (v) => (typeof v === 'string' && /^\w{1,40}$/.test(v) ? v : null);
+    // what was thrown may throw as it is read (a getter, a Proxy): each is read once, the value checked
+    // is the value said, and on any throw it is said as an error, with no code or line
+    let name = null, code = null, line;
+    try {
+      name = word(e?.name);
+      code = word(e?.code);
+      const stack = e?.stack;
+      line = typeof stack === 'string' ? /^ +at .*\bdevteam\.mjs:(\d+)/m.exec(stack)?.[1] : undefined;
+    } catch { name = code = line = null; }
+    say(`${who} ${doing}`, `${who}: ${doing} failed: ${name ?? 'an error'}${code ? ` ${code}` : ''}${line ? ` at line ${line}` : ''}`);
+  };
+  const spoken = new Map();
+  const speak = (who, words) => {
+    const lines = spoken.get(who) ?? spoken.set(who, new Set()).get(who);
+    if (lines.size >= 20 || lines.has(words)) return;
+    lines.add(words);
+    log(`hub: box health: ${who}: ${words}`);
+  };
+  const on = boxHealthOn();
+  const asked = process.env.DEVTEAM_BOX_HEALTH === 'on' ? Number(process.env.DEVTEAM_BOX_HEALTH_FAST || 1) : 1;
+  const fast = asked >= 1 && asked <= 3600 ? asked : 1;
+  const began = real();
+  const now = () => began + (real() - began) * fast;
+  let started = false, stopped = false, ticking = false;
+  let roots = [], ceiling;
+  let was = null;
+  // the hour: { t, sample, free: a volume's device to its free bytes }, oldest first
+  let ring = [];
+  let latest = { at: -Infinity, now: {} }, sections = {};
+  // the volumes in the order they were first seen, so a sample's `disk` stays one volume's; each root's
+  // device when it last answered; the roots still being asked
+  let volumes = [];
+  const deviceOf = new Map();
+  const asking = new Set();
+  const live = new Set();
+  const checked = new WeakMap();
+  const timer = (set, clear, ms, fn) => {
+    if (stopped) return () => {};
+    const h = set(fn, ms);
+    h.unref?.();
+    const end = () => { clear(h); live.delete(end); };
+    live.add(end);
+    return end;
+  };
+  const guarded = (who, doing, fn) => async () => { try { await fn(); } catch (e) { fail(who, doing, e); } };
+  const ctxFor = (who) => {
+    const once = (ms, fn) => { const end = timer(setTimeout, clearTimeout, ms, () => { end(); guarded(who, 'a timer', fn)(); }); return end; };
+    return Object.freeze({
+      now, real,
+      every: (ms, fn) => {
+        let busy = false;
+        const run = guarded(who, 'a timer', fn);
+        return timer(setInterval, clearInterval, ms / fast, async () => { if (busy) return; busy = true; try { await run(); } finally { busy = false; } });
+      },
+      after: (ms, fn) => once(ms / fast, fn),
+      timeout: (ms, fn) => once(ms, fn),
+      turn: () => new Promise((r) => setImmediate(r)),
+      roots: () => roots, ceiling: () => ceiling, scan,
+      proc: process.env.DEVTEAM_PROC ?? '/proc', cgroup: process.env.DEVTEAM_CGROUP ?? '/sys/fs/cgroup',
+      stopped: () => stopped,
+      say: (words) => speak(who, String(words)),
+    });
+  };
+  const ctx = ctxFor('sampler');
+  const running = parts.map(([name, part]) => ({ name, part, ctx: ctxFor(name), up: false }));
+  const readRoots = async () => {
+    let list = [];
+    try { list = await scan(); } catch { list = []; }
+    ({ roots, ceiling } = await memoryRoots(list));
+  };
+  // [device, its entry], one a distinct volume. At most two reads are ever out, so a volume that hangs
+  // can't hold the threads every file read shares, and no root of it is asked while one is.
+  const readDisks = async () => {
+    const found = new Map();
+    const queue = roots.map((r) => r.root), waiting = [];
+    let over = false;
+    const one = async (root) => {
+      asking.add(root);
+      try {
+        const { dev } = await fs.promises.stat(root);
+        deviceOf.set(root, dev);
+        if ([...asking].some((r) => r !== root && deviceOf.get(r) === dev)) { waiting.push(root); return; }
+        const s = await fs.promises.statfs(root);
+        if (!found.has(dev)) found.set(dev, s);
+      } catch {} finally { asking.delete(root); }
+    };
+    const worker = async () => {
+      while (queue.length && !over) {
+        const root = queue.shift();
+        const dev = deviceOf.get(root);
+        if (found.has(dev) || asking.has(root)) continue;
+        // its volume is being asked through another root: wait for that answer, which may be that it is gone
+        if (dev !== undefined && [...asking].some((r) => deviceOf.get(r) === dev)) { waiting.push(root); continue; }
+        await one(root);
+        queue.push(...waiting.splice(0));
+      }
+    };
+    let end = () => {};
+    const late = new Promise((r) => { end = ctx.timeout(BOX_HEALTH_STATFS_MS, () => { over = true; r(); }); });
+    await Promise.race([Promise.all(Array.from({ length: Math.max(0, 2 - asking.size) }, worker)), late]);
+    end();
+    if (asking.size) ctx.say('a volume did not answer within 2 s');
+    // every root answered or is gone: a volume with none left is forgotten
+    if (!asking.size && !queue.length) volumes = volumes.filter((dev) => found.has(dev));
+    const got = new Map(found);
+    for (const dev of got.keys()) if (!volumes.includes(dev)) volumes.push(dev);
+    return volumes.flatMap((dev) => {
+      const s = got.get(dev);
+      const free = s && s.bavail * s.bsize, total = s && s.blocks * s.bsize;
+      if (!Number.isSafeInteger(free) || !Number.isSafeInteger(total) || total <= 0) return [];
+      const inodes = s.files > 0 && Number.isSafeInteger(s.files) && Number.isSafeInteger(s.ffree) ? { inodes_free: s.ffree, inodes: s.files } : {};
+      return [[dev, { free, total, ...inodes }]];
+    });
+  };
+  // A part's fields for the answer, as a copy of its own (so a later change to what it returned isn't
+  // sent unchecked), or null: refused. Worked out once for each object in each place.
+  const accepted = (p, obj, what, whole) => {
+    if (!memoryIsMap(obj)) { say(`${p.name} ${what}`, `${p.name}: ${what} is not an object, left out`); return null; }
+    const places = checked.get(obj) ?? checked.set(obj, new Map()).get(obj);
+    if (!places.has(what)) {
+      let copy = null, bad = `${what} can't be written as JSON`;
+      try { copy = JSON.parse(JSON.stringify(obj)); bad = boxHealthProblem(whole(copy)); } catch {}
+      places.set(what, bad ? null : copy);
+      if (bad) say(`${p.name} ${what}`, `${p.name}: ${what} left out: ${bad}`);
+    }
+    return places.get(what);
+  };
+  // a promise a part returned: its rejection is said, and never the process's end
+  const swallow = (p, doing, got, then = () => {}) => { if (typeof got?.then === 'function') Promise.resolve(got).catch((e) => { fail(p.name, doing, e); then(); }); };
+  const tick = async () => {
+    if (ticking || stopped) return;
+    ticking = true;
+    try {
+      const disks = await readDisks();
+      if (stopped) return;
+      const is = boxHealthCounters(ctx);
+      const t = is.t, at = boxHealthIso(t);
+      const reading = { cpu: boxHealthCpu(ctx, was, is), memory: boxHealthMemory(ctx, is.boxed) };
+      was = is;
+      // a clock set back starts again from there, so the hour stays oldest first
+      ring = ring.filter((r) => r.t > t - BOX_HEALTH_WINDOW_MS && r.t < t).slice(1 - BOX_HEALTH_SAMPLES);
+      if (disks.length) reading.disks = disks.map(([dev, d]) => {
+        const first = ring.find((r) => r.free.has(dev));
+        return first && t - first.t >= BOX_HEALTH_TREND_MS ? { ...d, bytes_per_hour: Math.round((d.free - first.free.get(dev)) * 3600000 / (t - first.t)) } : d;
+      });
+      const p = boxHealthPressure(is.boxed ? boxHealthRead(ctx.cgroup, 'io.pressure') : boxHealthRead(ctx.proc, 'pressure', 'io'));
+      const io = boxHealthPresent({ some10: p.some10, some60: p.some60, full60: p.full60 });
+      if (Object.keys(io).length) reading.io = io;
+      // one that didn't answer is a gap in its line, never another volume's
+      const main = disks.find(([dev]) => dev === volumes[0])?.[1];
+      const sample = boxHealthPresent({
+        at, cpu: reading.cpu.used, cpu_some: reading.cpu.some60, throttled: reading.cpu.throttled, load: reading.cpu.load?.[0],
+        mem: reading.memory.used, mem_some: reading.memory.some60, swap: reading.memory.swap_used,
+        disk: main?.free, inodes: main?.inodes_free, io: io.some60,
+      });
+      const entry = { t, sample, free: new Map(disks.map(([dev, d]) => [dev, d.free])) };
+      const joined = {}, results = {};
+      const alone = (more) => ({ v: 1, at, window_s: 3600, now: {}, samples: [], ...more });
+      for (const p of running) {
+        if (!p.up) continue;
+        // what it gave is read inside its own try (a getter or a Proxy may throw there), and kept only
+        // when all of it was read: a throw costs its part, never the tick
+        let mine;
+        try {
+          const got = p.part.part(p.ctx, { now: structuredClone(reading), sample: { ...entry.sample }, samples: [...ring.map((r) => r.sample), { ...entry.sample }], ...results });
+          if (got === undefined || got === null) continue;
+          if (!memoryIsMap(got) || typeof got.then === 'function') { swallow(p, 'part', got); say(`${p.name} shape`, `${p.name}: part gave something other than an object, left out`); continue; }
+          const sections = {};
+          for (const [k, fields] of Object.entries(got.answer ?? {})) {
+            if (!Object.hasOwn(BOX_HEALTH_BASE, k)) { say(`${p.name} section`, `${p.name}: a section box-health@1 does not have, left out`); continue; }
+            const base = BOX_HEALTH_BASE[k];
+            const kept = accepted(p, fields, `answer.${k}`, (c) => alone({ [k]: { ...base, ...c } }));
+            if (kept) sections[k] = kept;
+          }
+          const more = got.sample === undefined ? null : accepted(p, got.sample, 'sample', (c) => alone({ samples: [{ at, ...c }] }));
+          mine = { got, sections, more };
+        } catch (e) { fail(p.name, 'part', e); continue; }
+        results[p.name] = mine.got;
+        for (const [k, kept] of Object.entries(mine.sections)) {
+          const next = { ...joined[k], ...kept };
+          if (Object.keys(BOX_HEALTH_BASE[k]).every((f) => Object.hasOwn(next, f))) joined[k] = next;
+        }
+        // a part adds fields: the sampler's own, and an earlier part's, are never overwritten
+        if (mine.more) entry.sample = { ...mine.more, ...entry.sample };
+      }
+      // a part is given the hour's own samples: none can change them
+      Object.freeze(entry.sample);
+      ring.push(entry);
+      latest = { at: real(), now: reading };
+      sections = joined;
+    } catch (e) {
+      // a gap: no sample, and no reading passed off as now; what the parts last gave stays
+      latest = { at: -Infinity, now: {} };
+      fail('sampler', 'a tick', e);
+    } finally { ticking = false; }
+  };
+  return {
+    on, tick, fail,
+    // a hub that loses its port and listens again doesn't start twice
+    async start() {
+      if (!on || started || stopped) return;
+      started = true;
+      for (const p of running) { try { p.up = true; swallow(p, 'start', p.part.start(p.ctx), () => { p.up = false; }); } catch (e) { p.up = false; fail(p.name, 'start', e); } }
+      ctx.every(BOX_HEALTH_EVERY_MS, tick);
+      ctx.every(BOX_HEALTH_ROOTS_MS * fast, readRoots);
+      await guarded('sampler', 'the roots', readRoots)();
+      await tick();
+    },
+    stop() {
+      if (stopped) return;
+      stopped = true;
+      for (const end of [...live]) end();
+      for (const p of running) if (p.up) { try { swallow(p, 'stop', p.part.stop()); } catch (e) { fail(p.name, 'stop', e); } }
+    },
+    // GET /box-health.json: the last tick's answer, with only the samples and claude.points newer than
+    // after. No part runs here.
+    serve(req, send) {
+      const wrong = (error) => send(400, 'application/json', JSON.stringify({ error }));
+      const given = [...new URL(req.url, 'http://127.0.0.1').searchParams];
+      if (given.some(([k]) => k !== 'after')) return wrong('/box-health.json takes only after');
+      if (given.length > 1) return wrong('after is given more than once: give it once');
+      if (given.length && !memoryAtOk(given[0][1])) return wrong("after should be a sample's at, YYYY-MM-DDTHH:MM:SSZ in UTC");
+      const from = given.length ? Date.parse(given[0][1]) : -Infinity;
+      const newer = (list) => list.filter((x) => Date.parse(x.at) > from);
+      // ticks that stopped (a laptop asleep) leave a reading that is no longer now
+      const reading = real() - latest.at <= BOX_HEALTH_STALE_MS ? latest.now : {};
+      const t = now();
+      const kept = ring.filter((r) => r.t > t - BOX_HEALTH_WINDOW_MS).map((r) => r.sample);
+      const claude = sections.claude?.points ? { claude: { ...sections.claude, points: newer(sections.claude.points) } } : {};
+      const body = JSON.stringify({ v: 1, at: boxHealthIso(t), window_s: BOX_HEALTH_WINDOW_MS / 1000, now: reading, samples: newer(kept), ...sections, ...claude });
+      if (Buffer.byteLength(body) > BOX_HEALTH_MAX_BYTES) { say('size', 'the answer is over 1 MB, so none was given'); return send(500, 'application/json', JSON.stringify({ error: 'box health unavailable' })); }
+      return send(200, 'application/json', body);
+    },
+  };
+}
+/* box-health-sampler end */
+/* box-health-processes start */
+// CPU and memory by worktree, and strays (kit-837's).
+const boxHealthProcesses = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+/* box-health-processes end */
+/* box-health-disk start */
+// Each worktree's disk (kit-838's).
+const boxHealthDisk = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+/* box-health-disk end */
+/* box-health-state start */
+// answer.box: the last restart, OOM kills, GitHub, the kit's release (kit-838's).
+const boxHealthState = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+/* box-health-state end */
+/* box-health-pool start */
+// answer.pool: the workers holding a slot (kit-842's).
+const boxHealthPool = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+/* box-health-pool end */
+/* box-health-claude start */
+// answer.claude: the accounts, the burn rate and the projection (kit-840's).
+const boxHealthClaude = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+/* box-health-claude end */
+/* box-health-park start */
+// answer.claude.park: what to park (kit-843's).
+const boxHealthPark = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+/* box-health-park end */
+/* box-health-room start */
+// answer.headroom, answer.pool.what_if and each sample's room (kit-844's).
+const boxHealthRoom = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+/* box-health-room end */
 // The machine's own caps, not the host's: a platform caps CPU and memory in the cgroup, while
 // /proc/meminfo and the CPU count say what the whole host has (a 4-CPU, 16 GB box reads 32 CPUs, 123 GB).
 function machineLine(last) {
@@ -24705,7 +25129,7 @@ const IMAGE_RUNS = {
     // machine status, tell, alert, pane-state
     'PANE_DIALOG', 'PANE_LIMIT_LINE', 'plainText', 'paneState', 'machineUsage', 'machineSpeaker', 'machineAlert', 'TELL_ENTER_TRIES', 'enterLanded', 'TELL_PREFIX', 'machineTell',
     'notedIn', 'openQuestionsOf', 'machineQuestions', 'utcDay', 'lastReview', 'harvestOf', 'machineKnowledge', 'vParts', 'versionBefore', 'portAnswers', 'hubLine', 'boxStatusLine',
-    'box-memory', 'machineLine', 'statusLastFile', 'partlyHeld', 'SUPERVISOR_IDLE_MS', 'supervisorIdleMinutes', 'OPERATOR_PR_MARK', 'OPERATOR_PR_WAIT_MS', 'operatorPrsLine', 'machineStatus',
+    'box-memory', 'box-health-contract', 'box-health-sampler', 'box-health-processes', 'box-health-disk', 'box-health-state', 'box-health-pool', 'box-health-claude', 'box-health-park', 'box-health-room', 'machineLine', 'statusLastFile', 'partlyHeld', 'SUPERVISOR_IDLE_MS', 'supervisorIdleMinutes', 'OPERATOR_PR_MARK', 'OPERATOR_PR_WAIT_MS', 'operatorPrsLine', 'machineStatus',
     // operator threads
     'OPERATOR_THREAD_ID', 'OPERATOR_SUBJECT_MAX', 'OPERATOR_STARTING_MS', 'box', 'gatewayProofProblem', 'proofBody', 'operatorSession', 'operatorDir', 'operatorThreadsFile', 'operatorId', 'OPERATOR_PARTS',
     'operatorSubjectProblem', 'operatorLines', 'operatorThreads', 'operatorAppend', 'operatorLocked', 'tmuxAsk', 'OPERATOR_PANE_FORMAT', 'OPERATOR_MARK', 'operatorPaneRows', 'operatorPanes',
@@ -34945,15 +35369,19 @@ async function browserWatchTabs(ctx) {
   cdp.on('Page.loadEventFired', (p, sid) => bySession(sid)?.loaded?.());
   // A page's JS dialog (kit-329), on any tab: answered at once with its stated default, so no verb,
   // load or view frame waits behind it; kept for the next plain-text answer.
-  cdp.on('Page.javascriptDialogOpening', ({ type, message }, sid) => {
+  // While the owner has the browser (kit-770) all but an alert is theirs to answer, in the view.
+  cdp.on('Page.javascriptDialogOpening', ({ type, message, url, defaultPrompt }, sid) => {
     if (!sid) return;
+    if (browserOwnerDialog(ctx, { type, message, url, defaultPrompt, sid, top: bySession(sid)?.frameUrl })) return;
     cdp.send('Page.handleJavaScriptDialog', { accept: browserDialogAccept(type) }, sid).catch(() => {});
     browserDialogSeen(ctx, type, message);
   });
+  cdp.on('Page.javascriptDialogClosed', (p, sid) => browserOwnerDialogGone(ctx, sid));
   cdp.on('Target.targetDestroyed', ({ targetId }) => {
     const i = ctx.tabs.findIndex((x) => x.targetId === targetId);
     if (i < 0) return;
     const [gone] = ctx.tabs.splice(i, 1);
+    if (gone.sessionId) browserOwnerDialogGone(ctx, gone.sessionId);
     if (ctx.active === gone) ctx.active = ctx.tabs.at(-1) ?? null;
   });
   await cdp.send('Target.setDiscoverTargets', { discover: true });
@@ -34972,15 +35400,69 @@ const BROWSER_DIALOG_HOLD_MS = 250;
 const browserDialogAccept = (type) => type === 'alert' || type === 'beforeunload';
 function browserDialogSeen(ctx, type, message) {
   const d = ctx.dialogs, now = Date.now();
-  if (ctx.held) return;
+  if (ctx.held || ctx.pending || ctx.closing || !ctx.ready) return; // a close not handled yet: still the owner's pages
   if (!ctx.dialogHold || now - ctx.dialogHold.at >= BROWSER_DIALOG_HOLD_MS) {
     let held;
-    try { held = !!browserHeld(browserHandovers()); } catch { held = true; }
+    try { const hs = browserHandovers(); held = !!browserHeld(hs) || browserUnhandled(ctx, hs).length > 0; } catch { held = true; }
     ctx.dialogHold = { at: now, held };
   }
   if (ctx.dialogHold.held) return;
   if (d.shown.length >= BROWSER_DIALOGS_SHOWN) d.more++;
   else d.shown.push({ type: Object.hasOwn(BROWSER_DIALOG_ANSWERS, type) ? type : 'dialog', text: String(message ?? '').slice(0, 300) });
+}
+// The owner's dialogs (kit-770): a confirm, prompt or beforeunload that opens while the owner holds the
+// browser (read from the log as browserDialogSeen does; a failed read, or a close pending, is no hold) is
+// left open and sent to the view, and to a viewer who connects later; only browserOwnerAnswer, from that
+// view's socket, answers it, with no timeout. ctx.ownerDialogs: session id → { id, kind, url, text,
+// default?, frame? }, at most one a tab, in memory only: never logged, stored or told to the agent.
+const BROWSER_OWNER_KINDS = ['confirm', 'prompt', 'beforeunload'];
+const BROWSER_OWNER_TEXT = 2000;
+const browserOwnerCut = (s) => String(s ?? '').slice(0, BROWSER_OWNER_TEXT).toWellFormed();
+// Who asks, masked: the frame's URL; for a frame with none of its own (srcdoc, blob, data), which can be
+// another site's, the page it is in, said to be a frame there; never the URL the tab was opening.
+const browserOwnerAsker = (url, top) => {
+  const web = (x) => typeof x === 'string' && browserHttp(x);
+  return web(url) ? { url: browserMask(url) } : web(top) ? { url: browserMask(top), frame: true } : { url: 'about:blank' };
+};
+function browserOwnerDialog(ctx, { type, message, url, defaultPrompt, sid, top }) {
+  if (!BROWSER_OWNER_KINDS.includes(type) || !ctx.ready || ctx.stopping || ctx.closing) return false;
+  // a page asking in a loop with no hold doesn't fold the log for every dialog
+  if (Date.now() - ctx.ownerNone < BROWSER_DIALOG_HOLD_MS) return false;
+  try {
+    browserKeepHeld(ctx, browserHandovers()); // kept: the owner's answer is judged by this read, not the watch's last
+    if (!ctx.held || ctx.pending) { ctx.ownerNone = Date.now(); return false; }
+  } catch { return false; }
+  const def = type === 'prompt' ? browserOwnerCut(defaultPrompt) : '';
+  const o = { id: `d-${crypto.randomBytes(8).toString('hex')}`, kind: type, ...browserOwnerAsker(url, top), text: browserOwnerCut(message), ...(def ? { default: def } : {}) };
+  ctx.ownerDialogs.set(sid, o);
+  browserOwnerSend(ctx, { t: 'dialog', ...o });
+  return true;
+}
+function browserOwnerSend(ctx, m) {
+  const v = ctx.viewer;
+  if (v && !v.ws.closed) try { v.ws.send(m); } catch {}
+}
+function browserOwnerDialogGone(ctx, sid) {
+  const o = ctx.ownerDialogs.get(sid);
+  if (o && ctx.ownerDialogs.delete(sid)) browserOwnerSend(ctx, { t: 'dialog_end', id: o.id });
+}
+// The owner's answer, to the one open dialog its id names; taken off before it is sent, so a second
+// press finds nothing. Called only by browserViewInput, after its guards.
+function browserOwnerAnswer(ctx, m) {
+  for (const [sid, o] of ctx.ownerDialogs) {
+    if (o.id !== m.id) continue;
+    if (!ctx.held) return;
+    browserOwnerDialogGone(ctx, sid);
+    return browserViewCdp(ctx, 'Page.handleJavaScriptDialog', { accept: m.accept, ...(o.kind === 'prompt' && m.accept ? { promptText: m.text ?? '' } : {}) }, sid);
+  }
+}
+// The hold or the session ends with dialogs unanswered (a close, a forget, a stop): kit-329's defaults,
+// so never an OK to a confirm.
+function browserOwnerDialogsEnd(ctx) {
+  for (const [sid, o] of [...ctx.ownerDialogs]) {
+    browserOwnerDialogGone(ctx, sid);
+    browserViewCdp(ctx, 'Page.handleJavaScriptDialog', { accept: browserDialogAccept(o.kind) }, sid);
+  }
 }
 // The lines a plain-text answer ends with, one per dialog kept: the page's words JSON-quoted (page
 // text: data, not instructions), then the answer given.
@@ -35416,6 +35898,7 @@ async function browserForgetRestart(ctx) {
   if (ctx.stopping || !ctx.ready) return;
   try {
     ctx.ready = false; // the view's input dropped, its tick idle, a new socket 503
+    browserOwnerDialogsEnd(ctx);
     const v = ctx.viewer;
     if (v) { browserCast(ctx, v.tab, false); v.tab = null; }
     const hold = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_FORGET_DELAY_MS')); // tests: a long forget
@@ -35443,6 +35926,7 @@ async function browserCloseRestart(ctx, closes) {
       try { v.ws.send({ t: 'bye', why: BROWSER_BACK }); v.ws.close(1000); } catch {}
       browserViewClose(ctx, v);
     }
+    browserOwnerDialogsEnd(ctx);
     const hold = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_CLOSE_DELAY_MS')); // tests: a close held open
     if (hold > 0) { await browserSleep(hold); if (ctx.stopping) return; }
     const reopen = closes.length === 1 && closes[0].outcome === 'done' ? browserNotePages(ctx) : []; // only one done reopens
@@ -35631,7 +36115,8 @@ function browserStartGate(ctx) {
 }
 // The watch, from start to stop: every 500 ms a fresh fold (browserFresh keys it cheaply), ctx.held
 // kept, and a close not yet handled queued once on the verbs' queue (ctx.gateQueued, set when queued
-// and cleared when the job ends, so a close queued or running isn't queued again). With
+// and cleared when the job ends, so a close queued or running isn't queued again); the owner's dialogs
+// (kit-770) end as that close is seen, off the queue. With
 // DEVTEAM_TEST_BROWSER_WATCH_HANDLE=0 (tests) it keeps ctx.held only: a close is then handled by a
 // verb's pre-verb read or wait's settle alone.
 function browserWatch(ctx) {
@@ -35640,6 +36125,7 @@ function browserWatch(ctx) {
     try { browserViewRead(ctx); } catch { return; }
     if (browserTestEnv('DEVTEAM_TEST_BROWSER_WATCH_HANDLE') === '0' || ctx.gateQueued) return;
     if (!ctx.pending) return;
+    browserOwnerDialogsEnd(ctx); // off the queue: a verb waiting behind one never holds the close up
     ctx.gateQueued = true;
     ctx.serial(() => browserGate(ctx)).finally(() => { ctx.gateQueued = false; });
   }, Number(browserTestEnv('DEVTEAM_TEST_BROWSER_WATCH_MS')) || 500); // the hook: tests, a slowed watch
@@ -35671,6 +36157,7 @@ function browserShutdown(ctx, why, detail) {
     clearTimeout(ctx.idle);
     clearInterval(ctx.renew);
     clearInterval(ctx.watch);
+    browserOwnerDialogsEnd(ctx);
     try { ctx.viewer?.ws.close(1001); } catch {} // the view's socket closes with the daemon (no bye)
     await browserEndChrome(ctx.cdp, ctx.chrome?.pid);
     try { browserDeleteSession(ctx.profile); } catch {}
@@ -36020,6 +36507,7 @@ const BROWSER_FROM_PAGE = {
   nav: { req: ['url'], f: { url: { type: 'str', min: 1, max: 2048 } } },
   back: { req: [], f: {} },
   forget: { req: [], f: {} },
+  dialog: { req: ['id', 'accept'], f: { id: { type: 'str', min: 18, max: 18, re: /^d-[0-9a-f]{16}$/ }, accept: { enum: [true, false] }, text: { type: 'str', min: 0, max: 10000 } } },
 };
 function browserViewMessage(m) {
   if (!m || typeof m !== 'object' || Array.isArray(m) || typeof m.t !== 'string' || !Object.hasOwn(BROWSER_FROM_PAGE, m.t)) return null;
@@ -36033,7 +36521,7 @@ function browserViewMessage(m) {
     if (s.type === 'str') {
       if (typeof x !== 'string' || x.length < s.min || x.length > 2 * s.max) return null; // UTF-16 length bounds code points both ways
       const n = [...x].length;
-      if (n < s.min || n > s.max) return null;
+      if (n < s.min || n > s.max || (s.re && !s.re.test(x))) return null;
     } else if (typeof x !== 'number' || !Number.isFinite(x) || (s.type === 'int' && !Number.isInteger(x)) || x < s.min || x > s.max) return null;
   }
   return m;
@@ -36064,8 +36552,10 @@ function browserViewInput(ctx, v, text) {
     ctx.forgetting = true;
     return void ctx.serial(() => browserForgetRestart(ctx)).finally(() => { ctx.forgetting = false; });
   }
+  if (m.t === 'dialog') return browserOwnerAnswer(ctx, m);
   const sid = ctx.active?.sessionId;
   if (!sid) return; // a tab with no session: dropped
+  if (ctx.ownerDialogs.has(sid) && m.type !== 'up') return; // a dialog is up: Chrome would keep the input and land it after the answer
   const cdp = (method, params) => browserViewCdp(ctx, method, params, sid);
   const scale = v.scale > 0 ? v.scale : 1;
   switch (m.t) {
@@ -36150,6 +36640,7 @@ function browserViewServer(ctx) {
       if (ctx.viewer) { v.ws.send({ t: 'bye', why: 'The browser is already open in another window.' }); return v.ws.close(1000); }
       ctx.viewer = v;
       browserViewHeld(ctx, v); // the current hold, from the fold just read
+      for (const o of ctx.ownerDialogs.values()) v.ws.send({ t: 'dialog', ...o }); // still open: the owner's to answer
       browserViewTick(ctx, v);
       v.timer = setInterval(() => browserViewTick(ctx, v), 250);
       v.timer.unref?.();
@@ -36163,7 +36654,7 @@ function browserViewServer(ctx) {
 // port another preview took fails this daemon and browserEnsure relaunches, and only a daemon that
 // got its port may kill a leftover Chrome or clear a lock, so the one that comes up reports them.
 async function browserServe({ chrome: bin }) {
-  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, renew: null, stopping: null, after: null, viewer: null, ready: false, state: null, serial: null, forgetting: false, handled: new Map(), held: null, folded: [], pending: false, foldAt: 0, closing: false, gateQueued: false, watch: null, dialogs: { shown: [], more: 0 }, dialogHold: null };
+  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, renew: null, stopping: null, after: null, viewer: null, ready: false, state: null, serial: null, forgetting: false, handled: new Map(), held: null, folded: [], pending: false, foldAt: 0, closing: false, gateQueued: false, watch: null, dialogs: { shown: [], more: 0 }, dialogHold: null, ownerDialogs: new Map(), ownerNone: 0 };
   for (const s of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(s, () => browserShutdown(ctx, 'signal'));
   browserIsDaemon = true;
   const viewPort = Number(process.env.PORT);
