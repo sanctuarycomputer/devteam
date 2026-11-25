@@ -3,9 +3,10 @@
 // libraryFixture()'s /api/data parts; then the page in real headless Chrome over a real dashboard on a
 // bare project whose /api/data is patched in the page with libraryFixture() (skipped where Chrome can't
 // run).
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
@@ -265,20 +266,71 @@ async function backTo(p, soon, from, to, what, landed = `location.hash === ${JSO
   await soon(landed, what);
 }
 
-// The box (kit-92 T3): a page whose requests to http://<n>.box.localhost:<port>/ (Chrome sends *.localhost to
-// loopback; the dashboard answers only its own Host) are paused over a second DevTools connection (the helper's
-// own drops events) and fulfilled from http://127.0.0.1:<port>, method, body, headers and status passed through,
-// with x-devteam-public: <header> added to /api/data's answer, as the gateway adds it. header is the gateway's
-// served map, { [project]: { root, port, artifacts: { slug: tree } } }. Its close() closes both connections.
-async function boxPage(chrome, port, { n = 4321, header }) {
+// One Chrome for the file (kit-925). Each Chrome costs its start and its stop, and on CI's runner image
+// 20261122.9.1 each cost about 3 s more; at one per test (40) that took this file past run.mjs's 300 s
+// watchdog. A test still has its own tab, and its own dashboard on its own port, so its own origin, that
+// origin's storage cleared before its page loads (a port, and so an origin, can come round again). The tabs
+// a test opened are closed after it. A Chrome that has exited is started again for the next test.
+// FILE.opened counts the Chromes started.
+const FILE = { chrome: null, opened: 0 };
+after(() => FILE.chrome?.close());
+async function fileChrome() {
+  const c = FILE.chrome;
+  if (c && c.proc.exitCode === null && c.proc.signalCode === null) return c;
+  FILE.chrome = null;
+  if (c) await c.close();
+  FILE.opened++;
+  return (FILE.chrome = await openChrome());
+}
+// a Chrome's own endpoint (/json/...), from the port it wrote in its profile
+async function devtoolsOf(chrome) {
   const dir = chrome.proc.spawnargs.find((a) => a.startsWith('--user-data-dir=')).slice('--user-data-dir='.length);
   const portFile = path.join(dir, 'DevToolsActivePort');
   for (let i = 0; !(fs.existsSync(portFile) && /^\d+\n/.test(fs.readFileSync(portFile, 'utf8'))); i++) {
     if (i > 200) throw new Error('no DevToolsActivePort');
     await new Promise((r) => setTimeout(r, 50));
   }
-  const dt = fs.readFileSync(portFile, 'utf8').split('\n')[0];
-  const list = async () => (await fetch(`http://127.0.0.1:${dt}/json/list`)).json();
+  return `http://127.0.0.1:${fs.readFileSync(portFile, 'utf8').split('\n')[0]}`;
+}
+const tabsOf = async (dt) => (await (await fetch(`${dt}/json/list`)).json()).filter((x) => x.type === 'page').map((x) => x.id);
+// close the tabs opened since `had` (the test's own, and any its page opened), and wait until Chrome no
+// longer lists them (/json/close answers before the tab is gone). One still listed after 5 s fails the test,
+// and takes the file's Chrome with it first, so a wedged tab can't hold the renderer later tests share (the
+// last test then fails on the count of Chromes).
+async function closeTabs(dt, had) {
+  const mine = (await tabsOf(dt)).filter((id) => !had.has(id));
+  await Promise.all(mine.map((id) => fetch(`${dt}/json/close/${id}`).then((r) => r.arrayBuffer())));
+  for (let i = 0; ; i++) {
+    const left = (await tabsOf(dt)).filter((id) => mine.includes(id));
+    if (!left.length) return;
+    if (i >= 50) {
+      const c = FILE.chrome;
+      FILE.chrome = null;
+      await c?.close();
+      throw new Error(`tabs still open 5 s after their close: ${left.join(', ')}`);
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+// a page's origin with nothing kept from an earlier test on it
+const freshOrigin = (p, origin) => p.send('Storage.clearDataForOrigin', { origin, storageTypes: 'all' });
+// a test's tab in the file's Chrome, for the dashboard on port: the page `page` gives, a box page (box: its
+// header, boxPage) or a plain one; its origin (at) cleared before anything loads. { p, at }
+async function tabOn(chrome, port, { box = null, page = null } = {}) {
+  const p = page ? await page(chrome, port) : box ? await boxPage(chrome, port, { header: box }) : await chrome.newPage();
+  const at = box ? p.origin : `http://127.0.0.1:${port}`;
+  await freshOrigin(p, at);
+  return { p, at };
+}
+
+// The box (kit-92 T3): a page whose requests to http://<n>.box.localhost:<port>/ (Chrome sends *.localhost to
+// loopback; the dashboard answers only its own Host) are paused over a second DevTools connection (the helper's
+// own drops events) and fulfilled from http://127.0.0.1:<port>, method, body, headers and status passed through,
+// with x-devteam-public: <header> added to /api/data's answer, as the gateway adds it. header is the gateway's
+// served map, { [project]: { root, port, artifacts: { slug: tree } } }. Its close() closes both connections.
+async function boxPage(chrome, port, { n = 4321, header }) {
+  const dt = await devtoolsOf(chrome);
+  const list = async () => (await fetch(`${dt}/json/list`)).json();
   const before = new Set((await list()).map((x) => x.id));
   const p = await chrome.newPage();
   const target = (await list()).find((x) => x.type === 'page' && !before.has(x.id));
@@ -338,12 +390,13 @@ async function libraryOn(t, { width = 1440, height = 900, init, box = null, page
   const made = setup ? setup(root, env) : null;
   const { dash, port } = await dashboardOnFreePort(root, env);
   later(() => dash.stop());
-  const chrome = await openChrome();
-  later(() => chrome.close());
+  const chrome = await fileChrome();
+  const dt = await devtoolsOf(chrome);
+  const had = new Set(await tabsOf(dt));
+  later(() => closeTabs(dt, had));
   if (typeof box === 'function') box = box(made, port);
-  const p = page ? await page(chrome, port) : box ? await boxPage(chrome, port, { header: box }) : await chrome.newPage();
+  const { p, at } = await tabOn(chrome, port, { box, page });
   later(() => p.close());
-  const at = box ? p.origin : `http://127.0.0.1:${port}`;
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
@@ -879,14 +932,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // session it came from; children: also auto-attached to child frame targets (flatten), Fetch on each, so a
 // sandboxed frame in its own process is held too. Its close() closes both connections.
 async function tapPage(chrome, { patterns, paused, children = false }) {
-  const dir = chrome.proc.spawnargs.find((a) => a.startsWith('--user-data-dir=')).slice('--user-data-dir='.length);
-  const portFile = path.join(dir, 'DevToolsActivePort');
-  for (let i = 0; !(fs.existsSync(portFile) && /^\d+\n/.test(fs.readFileSync(portFile, 'utf8'))); i++) {
-    if (i > 200) throw new Error('no DevToolsActivePort');
-    await sleep(50);
-  }
-  const dt = fs.readFileSync(portFile, 'utf8').split('\n')[0];
-  const list = async () => (await fetch(`http://127.0.0.1:${dt}/json/list`)).json();
+  const dt = await devtoolsOf(chrome);
+  const list = async () => (await fetch(`${dt}/json/list`)).json();
   const before = new Set((await list()).map((x) => x.id));
   const p = await chrome.newPage();
   const target = (await list()).find((x) => x.type === 'page' && !before.has(x.id));
@@ -1677,4 +1724,41 @@ test('a preview\'s Start and Stop', { ...CHROME, timeout: 300000 }, async (t) =>
   assert.deepEqual((await p.ev(RUN)).run, ['Stop'], 'Stop alone, never Starting…');
   assert.equal(await p.ev(VIEWING), true, 'the viewer stays open');
   assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+// Last in the file (kit-925): every test before this one ran in the file's one Chrome and left none of its
+// tabs open; and an origin an earlier page used starts with nothing in its storage. Run alone (a name
+// pattern), no test ran before it, and the first two hold trivially.
+test('one Chrome for the file: no tab left behind, and an origin used before starts empty (kit-925)', { ...CHROME, timeout: 300000 }, async (t) => {
+  assert.ok(FILE.opened <= 1, `one Chrome for every test before this one, not ${FILE.opened}`);
+  if (FILE.chrome) assert.deepEqual((await tabsOf(await devtoolsOf(FILE.chrome))).length, 1, 'no tab left but the one Chrome opened with');
+  const { p, go, at, port } = await libraryOn(t);
+  await go('#library');
+  assert.equal(await p.ev("(localStorage.setItem('kit-925', 'kept'), localStorage.getItem('kit-925'))"), 'kept');
+  // a second tab on the same dashboard, so the same origin, made as libraryOn makes one: its storage starts empty
+  const { p: q, at: qAt } = await tabOn(FILE.chrome, port);
+  try {
+    assert.equal(qAt, at, 'the same origin');
+    await q.send('Page.navigate', { url: `${at}/` });
+    const got = await soonIn(q)("document.readyState === 'complete' && location.origin !== 'null' && JSON.stringify(localStorage.getItem('kit-925'))", 'the second tab on the origin');
+    assert.equal(got, 'null', 'nothing kept from the earlier page');
+  } finally { q.close(); }
+  // closeTabs returns only once Chrome no longer lists what it closed (Chrome answers /json/close before the tab
+  // goes, at its own pace): against a DevTools stand-in that lists a closed tab for two more looks
+  const listed = new Set(['before', 'mine']);
+  let looks = 0, closedAt = null;
+  const stand = http.createServer((req, res) => {
+    if (req.url === '/json/list') {
+      looks++;
+      if (closedAt !== null && looks - closedAt > 2) listed.delete('mine');
+      res.end(JSON.stringify([...listed].map((id) => ({ id, type: 'page' }))));
+    } else if (req.url === '/json/close/mine') { closedAt = looks; res.end('Target is closing'); } else { res.statusCode = 404; res.end(); }
+  });
+  await new Promise((resolve) => stand.listen(0, '127.0.0.1', resolve));
+  try {
+    await closeTabs(`http://127.0.0.1:${stand.address().port}`, new Set(['before']));
+    assert.equal(closedAt, 1, 'closeTabs closed the tab it opened');
+    assert.ok(!listed.has('mine'), 'closeTabs returned only once the closed tab was no longer listed');
+  } finally { stand.close(); }
+  assert.equal(FILE.opened, 1, 'still the one Chrome');
 });
