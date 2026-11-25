@@ -299,6 +299,29 @@ test('W2e: a pool.json read that hangs costs only its project: the others are re
   assert.deepEqual(got.answer.headroom, { ready: 4 }, 'read once it settled');
 });
 
+test('W2f: at most two file reads are ever out: with three pool.json reads hung, a project whose read can\'t start keeps its last read', { timeout: 20000 }, async () => {
+  const hung = [1, 2, 3].map((i) => projectRoot(path.join(newDir(), `stuck${i}`), { file: 'shop' }));
+  const A = projectRoot(newDir(), { file: 'shop' });
+  const s = load();
+  const roots = [...hung.map((root, i) => ({ root, name: `stuck${i + 1}` })), { root: A, name: 'shop' }];
+  const p = started(roots, roots.map((x, i) => hello(x.root, x.name, 4321 + i)), s, 30);
+  await p.read();
+  assert.deepEqual(p.part().answer.headroom, { ready: 8 }, 'all four read before any hangs');
+  s.hang.add(`${path.sep}stuck`);
+  const file = path.join(A, 'docs/devteam/run/cache/pool.json');
+  fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('"ready": 2', '"ready": 3'));
+  for (let i = 0; i < 2; i++) {
+    p.pass(MIN); await p.read();
+    assert.equal(s.pending(), 2, 'never more than two reads out');
+    assert.deepEqual(p.part().answer.headroom, { ready: 8 }, 'each project keeps its last read');
+  }
+  assert.ok(p.said.some((w) => /two file reads are out/.test(w)));
+  s.release();
+  await new Promise((res) => setTimeout(res, 50));
+  p.pass(MIN); await p.read();
+  assert.deepEqual(p.part().answer.headroom, { ready: 9 }, 'read again once they settled');
+});
+
 // ===== done-when 3: agent, points, no /proc =====
 
 test('W3a: agent is false when the walk sees no agent in the worktree', async () => {
@@ -373,15 +396,33 @@ test('W4a: projects, allocated and recent rows carry the project\'s port, absent
   assert.ok(of('none').every((x) => x.port === undefined), 'no row of a project with no dashboard has a port');
 });
 
-test('W4b: two projects of one name keep their own rows and ports', async () => {
+test('W4b: two projects of one name keep their own rows and ports, one root a prefix of the other\'s too', async () => {
   const A = projectRoot(newDir(), { file: 'shop' });
-  const B = projectRoot(newDir(), { file: 'shop' });
+  // B's root is A's with a 2 after it: a prefix, never its folder (final-1 F3)
+  fs.mkdirSync(`${A}2`);
+  const B = projectRoot(`${A}2`, { file: 'shop' });
   const p = started([{ root: A, name: 'shop' }, { root: B, name: 'shop' }], [hello(A, 'shop', 4321), hello(B, 'shop', 4322)]);
   await p.read();
-  const got = p.part({ processes: processes([place(A, 'shop', 'shop-1-api', { agents: 1, cpu: 0.5, rss: 200 }), place(B, 'shop', 'shop-1-api', { agents: 1, cpu: 0.1, rss: 20 })]) });
+  const procs = processes([place(A, 'shop', 'shop-1-api', { agents: 1, cpu: 0.5, rss: 200 }), place(B, 'shop', 'shop-1-api', { agents: 1, cpu: 0.1, rss: 20 })]);
+  const d = disk([[B, 'shop-1-api', 6000, '2026-11-25T11:52:00Z'], [A, 'shop-1-api', 5000, '2026-11-25T11:50:00Z']]);
+  const got = p.part({ processes: procs, disk: d });
   assert.equal(boxHealthProblem(whole(got)), null);
-  assert.deepEqual(got.answer.pool.projects.map((x) => [x.name, x.port, x.rss]), [['shop', 4321, 200], ['shop', 4322, 20]]);
+  assert.deepEqual(got.answer.pool.projects.map((x) => [x.name, x.port, x.rss]), [['shop', 4321, 200], ['shop', 4322, 20]], "a root's use is its own, not a longer root's beginning with it");
   assert.deepEqual([row(got, 'shop-1-api', 4321).cpu, row(got, 'shop-1-api', 4322).cpu], [0.5, 0.1]);
+  assert.deepEqual([row(got, 'shop-1-api', 4321).disk, row(got, 'shop-1-api', 4322).disk], [5000, 6000], 'disk joined by root and worktree');
+  assert.deepEqual([4321, 4322].map((port) => row(got, 'shop-1-api', port).points.map((x) => [x.cpu, x.disk])), [[[0.5, 5000]], [[0.1, 6000]]], 'points kept by root');
   assert.deepEqual(got.answer.pool.recent.map((x) => x.port), [4321, 4322]);
   assert.deepEqual(got.answer.headroom, { ready: 4 });
+  // the worker of both leaves: each recent row has its own root's last
+  for (const root of [A, B]) {
+    const file = path.join(root, 'docs/devteam/run/cache/pool.json');
+    const o = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const [w] = o.workers.splice(0, 1);
+    o.recent.unshift({ name: w.name, left_at: '2026-11-25T12:00:20Z', why: 'done', tokens: { state: 'none-yet' } });
+    fs.writeFileSync(file, JSON.stringify(o));
+  }
+  p.pass(MIN); await p.read();
+  const after = p.part({ processes: processes([]), disk: disk([]) });
+  const last = (port) => after.answer.pool.recent.find((x) => x.name === 'shop-1-api' && x.port === port).last;
+  assert.deepEqual([last(4321), last(4322)], [{ cpu: 0.5, rss: 200, disk: 5000 }, { cpu: 0.1, rss: 20, disk: 6000 }], "recent's last kept by root");
 });

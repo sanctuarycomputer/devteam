@@ -25042,7 +25042,9 @@ const boxHealthState = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
 // <root>/docs/devteam/run/cache/pool.json (at most 256 KB + 1 read; poolProblem judges it) and, for
 // a root no hello answers for, whether its dashboard is slow or gone (below). Each file read is raced
 // with 2 s of real(): one that hasn't answered keeps that root's last read (its at still ages it), and
-// isn't asked again until it settles, so a hung mount holds no other project's read.
+// isn't asked again until it settles. At most two reads are out at once, across every project: while
+// two are, a root whose read can't start keeps its last read too, so hung files never hold more than
+// two of the hub's file threads.
 //
 // A project's dashboard, from the hub's scan (which can't tell a refused port from a slow one):
 //   up     a hello names the root: its port and its fleet's mode are the hello's
@@ -25086,7 +25088,7 @@ const boxHealthState = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
 // low and outside high for a walk or two after the hub starts.
 const POOL_EVERY_MS = 15000, POOL_READ_MS = 60000, POOL_STALE_MS = 900000, POOL_KNOCK_MS = 1000, POOL_FILE_MS = 2000;
 const POOL_POINT_MS = 60000, POOL_POINTS = 60, POOL_HOUR_MS = 3600000, POOL_DAY_MS = 86400000;
-const POOL_ALLOCATED = 60, POOL_RECENT = 20;
+const POOL_ALLOCATED = 60, POOL_RECENT = 20, POOL_READS = 2;
 const boxHealthPool = (() => {
   let run = null;
   // a file's text, at most max bytes and one more (so poolProblem sees one over its size), or null
@@ -25099,11 +25101,14 @@ const boxHealthPool = (() => {
       return buf.toString('utf8', 0, bytesRead);
     } catch { return null; } finally { await fh?.close().catch(() => {}); }
   };
-  // a file read raced with 2 s of real(): its text, null, or late. A read still out from before is
-  // late at once and never started twice, so a hung mount holds one of the shared threads per file.
+  // a file read raced with 2 s of real(): its text, null, or late. At most two reads are ever out,
+  // across every project and read (final-1 F1): a read still out goes on alone and keeps its place,
+  // and one that can't start (its own still out, or two out) is late at once. So hung files hold at
+  // most two of the threads every file read in the hub shares, as the sampler's volumes and the
+  // processes walk do.
   const LATE = Symbol('late');
   const settled = (ctx, r, file, max) => {
-    if (r.out.has(file)) return Promise.resolve(LATE);
+    if (r.out.has(file) || r.out.size >= POOL_READS) { ctx.say("two file reads are out: a project whose read can't start keeps its last read"); return Promise.resolve(LATE); }
     r.out.add(file);
     const p = readCapped(file, max).finally(() => r.out.delete(file));
     let end = () => {};
