@@ -21073,9 +21073,10 @@ const accountKnownFull = (a) => accountAtLimit(a) || lastReadingFull(a);
 // Each account's numbers, for the machine's hub (box-health@1): built from named fields, never by
 // copying a row, so no email, token or new field of cswap's leaves with it. Text is kept only in a known
 // form: the alias as the label (else "Account n"; an address, in any width of @, or one over 40
-// characters is not kept) and a one-word status; a time is written again in UTC (and left out if that leaves the years 0 to 9999). A percent is of the
-// window used. What can't be read is left out, never zero, but for one: on status ok an absent
-// five-hour window is unused. A usage that is a list is no usage. A disabled account is listed, marked; a row with no slot number isn't.
+// characters is not kept) and a one-word status; a time is written again in UTC (and left out if that
+// leaves the years 0 to 9999). A percent is of the window used. What can't be read is left out, never
+// zero, but for one: on status ok an absent five-hour window is unused. A usage that is a list is no
+// usage. A disabled account is listed, marked; a row with no slot number isn't.
 function capacityList(rows) {
   const pct = (w) => (Number.isFinite(w?.pct) ? Math.min(100, Math.max(0, w.pct)) : undefined);
   const at = (t) => (typeof t === 'string' && /^\d{4}-\d\d-\d\dT[\d:.]+(Z|[+-]\d\d:\d\d)$/.test(t) && Number.isFinite(Date.parse(t)) && /^\d{4}-/.test(new Date(t).toISOString()) ? new Date(t).toISOString() : undefined);
