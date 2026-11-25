@@ -2439,6 +2439,10 @@ function fetchLinkMain(R, refusing = 'refusing to judge against a stale main', {
     if (start) no('it has no origin url');
     return;
   }
+  // git fetches from the first of several urls, and repo() checks the last
+  const urls = start && R.git(['config', '-z', '--get-all', 'remote.origin.url'], R.root)?.split('\0').filter(Boolean);
+  if (start && !urls) no('git could not read its origin urls');
+  if (start && urls.length > 1) no(`its origin has ${urls.length} urls (git config --get-all remote.origin.url), and only one can be the repo checked; keep one`);
   if (!start) {
     const fr = gitRun(['fetch', '--quiet', 'origin', `+refs/heads/${rb}:refs/remotes/origin/${rb}`], R.root);
     if (fr.status !== 0) no(redactUrl(firstLine(fr.err)) || `exit ${fr.status}`);
@@ -2458,8 +2462,14 @@ function fetchLinkMain(R, refusing = 'refusing to judge against a stale main', {
   }
   if (!at[rb]) no(`origin has no ${rb}`);
   const held = [rb, start].filter((b) => at[b]);
-  toOrigin(['fetch', '--quiet', '--no-tags', 'origin', ...held.map((b) => `+refs/heads/${b}:refs/remotes/origin/${b}`)]);
+  // Into no ref: a fetch writes through a symbolic tracking ref, moving the branch it names. The
+  // tracking refs are set below, by sha, without following one.
+  toOrigin(['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--refmap=', 'origin', ...held.map((b) => `refs/heads/${b}`)]);
   for (const b of held) if (responderGit(['cat-file', '-e', `${at[b]}^{commit}`], R.root, { GIT_NO_LAZY_FETCH: '1' }).status !== 0) no(`${at[b].slice(0, 8)} did not arrive`);
+  for (const b of held) {
+    const set = responderGit(['update-ref', '--no-deref', `refs/remotes/origin/${b}`, at[b]], R.root);
+    if (set.status !== 0) no(redactUrl(firstLine(set.stderr).replace(/^fatal: /, '')) || `exit ${set.status}`);
+  }
   R.resetCaches();
   return { main: at[rb], branch: at[start] ?? null };
 }
@@ -27670,31 +27680,70 @@ function makeSession(role) {
       warn(`${branch} starts at ${short(local)}, ${commits}: this ${role === 'worker' ? 'ticket' : 'plan'} ran here, and its unpushed work is kept`);
       keptWords = `, at ${short(local)}: ${commits}`;
     }
-    // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
-    // -B only over a branch that was read: -b refuses one a failed read called missing
-    R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', local ? '-B' : '-b', branch, wt, sha], R.root);
-    // The add sets the branch and then checks it out by name, so a session moving it in between would
-    // win: what landed is read back, and undone if it isn't the sha chosen, on the branch (its full
-    // name: a tag of the same name makes git print a longer short one). The branch goes back to where
-    // it was before the add, unless it moves again after this read.
-    const read = (args, cwd) => { const r = responderGit(args, cwd); return r.status === 0 ? r.stdout.trim() : null; };
-    const seen = read(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], R.root);
-    const head = read(['rev-parse', '--verify', '--quiet', 'HEAD'], wt);
-    if (head !== sha || read(['symbolic-ref', 'HEAD'], wt) !== `refs/heads/${branch}`) {
-      R.git(['worktree', 'remove', '--force', wt], R.root);
-      if (local) R.git(['update-ref', '--no-deref', `refs/heads/${branch}`, local, seen ?? '0'.repeat(local.length)], R.root);
-      else if (seen) R.git(['update-ref', '--no-deref', '-d', `refs/heads/${branch}`, seen], R.root);
-      die(`the new worktree ${head === sha ? `isn't on ${branch}` : `holds ${head ? short(head) : 'no commit'}, not ${short(sha)}`}: something moved ${branch} while it was checked out, so nothing was started; try again`);
-    }
-    const stale = at.branch ? null : R.resolveCommit(`refs/remotes/origin/${branch}`);
+    // Everything that can fail is written before the worktree: a launch that stops here leaves none, so
+    // its retry does all of it again, and nothing is taken for an earlier session's (kit-807).
+    const write = (args, what) => { const r = responderGit(args, R.root); if (r.status !== 0) die(`could not ${what}: ${redactUrl(firstLine(r.stderr).replace(/^(fatal|error): /, '')) || `exit ${r.status}`}; nothing was started`); };
+    // A tracking ref for a branch origin lacks can be the last ref on pushed work: it goes only once
+    // its commits are in the start, or under a ref of their own. A symbolic one holds none.
+    const tracking = `refs/remotes/origin/${branch}`;
+    const keptAt = `refs/devteam/kept/${branch}/`;
+    const raw = at.branch ? null : R.git(['rev-parse', '--verify', '--quiet', tracking], R.root); // read once: a tag's own object too
+    const peeled = raw && responderGit(['rev-parse', '--verify', '--quiet', `${raw}^{commit}`], R.root);
+    const stale = peeled && peeled.status === 0 ? peeled.stdout.trim() : null;
+    let keptNow = null;
     if (stale) {
-      warn(`origin has no ${branch}: its tracking ref here (${short(stale)}) is ignored and removed${sha === at.main ? `, and the branch starts from origin's ${mb} (${short(at.main)})` : ''}`);
-      R.gitOrDie(['update-ref', '--no-deref', '-d', `refs/remotes/origin/${branch}`], R.root);
+      const symbolic = R.git(['symbolic-ref', '--quiet', tracking], R.root) !== null;
+      const keep = !symbolic && !anc(stale, sha);
+      if (keep) keptNow = `${keptAt}${stale}`;
+      if (keep) write(['update-ref', '--no-deref', `${keptAt}${stale}`, stale], `keep ${stale} under ${keptAt}`);
+      warn(`origin has no ${branch}: its tracking ref here (${short(stale)}) is ignored and removed${keep ? `, its commits kept at ${keptAt}${stale}` : ''}${sha === at.main ? `, and the branch starts from origin's ${mb} (${short(at.main)})` : ''}`);
+      write(['update-ref', '--no-deref', '-d', tracking, raw], `remove ${tracking}`);
     }
+    // read back, so a retry's act names what a stopped launch kept
+    const found = (R.git(['for-each-ref', '--format=%(refname)', keptAt], R.root) ?? '').split('\n').filter((r) => r.startsWith(keptAt) && /^[0-9a-f]{40,64}$/.test(r.slice(keptAt.length)));
+    const keptRefs = [...new Set([...(keptNow ? [keptNow] : []), ...found])];
+    if (keptRefs.length) keptWords += `; commits kept at ${keptRefs.slice(0, 3).join(', ')}${keptRefs.length > 3 ? ` and ${keptRefs.length - 3} more` : ''}`;
     // set by config: --track fails where the checkout's fetch refspec is blank
-    if (R.git(['config', '--get', `branch.${branch}.merge`], R.root) === null) {
-      R.gitOrDie(['config', `branch.${branch}.remote`, 'origin'], R.root);
-      R.gitOrDie(['config', `branch.${branch}.merge`, `refs/heads/${at.branch ? branch : mb}`], R.root);
+    // set again when it is main's and origin holds the branch now: a launch refused below leaves it written
+    const merge = R.git(['config', '--get', `branch.${branch}.merge`], R.root);
+    if (merge === null || (at.branch && merge === `refs/heads/${mb}` && R.git(['config', '--get', `branch.${branch}.remote`], R.root) === 'origin')) {
+      write(['config', '--replace-all', `branch.${branch}.remote`, 'origin'], `set ${branch}'s upstream`);
+      write(['config', '--replace-all', `branch.${branch}.merge`, `refs/heads/${at.branch ? branch : mb}`], `set ${branch}'s upstream`);
+    }
+    const ref = `refs/heads/${branch}`;
+    // A branch that was read is checked out where it is, so git itself refuses one another worktree has
+    // (mid-rebase too), and only then moved, from what was read: git's own -B drops a commit that
+    // landed since. A new one is made only if it still isn't there.
+    if (!local) {
+      const made = responderGit(['update-ref', '--no-deref', ref, sha, '0'.repeat(sha.length)], R.root);
+      if (made.status !== 0) die(`could not make ${branch}: ${redactUrl(firstLine(made.stderr).replace(/^fatal: /, '')) || `exit ${made.status}`}; nothing was started`);
+    }
+    // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
+    const added = gitRun(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--no-guess-remote', wt, branch], R.root);
+    if (added.status !== 0) die(`git worktree add ${branch} failed: ${redactUrl(firstLine(added.err.split('\n').find((l) => /^fatal: /.test(l)) ?? added.err).replace(/^fatal: /, '')) || `exit ${added.status}`}; nothing was started`);
+    // The add checks the branch out by name, so a session moving it meanwhile would win: what landed is
+    // read back, and the worktree undone if it isn't the sha expected, on the branch (its full name: a
+    // tag of the same name makes git print a longer short one). A branch still where this launch put it
+    // goes back; one that moved keeps what landed on it.
+    const read = (args, cwd) => { const r = responderGit(args, cwd); return r.status === 0 ? r.stdout.trim() : null; };
+    const undo = (why) => {
+      R.git(['worktree', 'remove', '--force', wt], R.root);
+      if (local !== sha) responderGit(['update-ref', '--no-deref', ...(local ? [ref, local, sha] : ['-d', ref, sha])], R.root);
+      die(`${why}, so nothing was started; try again`);
+    };
+    const landed = (want) => {
+      const head = read(['rev-parse', '--verify', '--quiet', 'HEAD'], wt);
+      const on = read(['symbolic-ref', 'HEAD'], wt) === ref;
+      if (head !== want || !on) undo(`the new worktree ${head === want ? `isn't on ${branch}` : `holds ${head ? short(head) : 'no commit'}, not ${short(want)}`}: something moved ${branch} while it was checked out`);
+    };
+    landed(local ?? sha);
+    if (local && local !== sha) {
+      const moved = responderGit(['update-ref', '--no-deref', ref, sha, local], R.root);
+      if (moved.status !== 0) undo(`could not move ${branch} to ${short(sha)}: something moved it while it was checked out`);
+      // as worktree add fills one: no time limit (a filter or a lazy fetch can be slow), no submodules
+      const filled = gitRun([...RESPONDER_GIT, 'read-tree', '--reset', '-u', '--no-recurse-submodules', sha], wt);
+      if (filled.status !== 0) undo(`could not check out ${short(sha)}: ${redactUrl(firstLine(filled.err).replace(/^(fatal|error): /, '')) || `exit ${filled.status}`}`);
+      landed(sha);
     }
     madeWorktree = true;
   }
