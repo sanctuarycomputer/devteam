@@ -24,14 +24,26 @@ const MIN = 60000;
 const PAGE = 4096;
 const near = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-9, `${msg ?? ''}: ${a} is not ${b}`);
 
-// The region with what it reads: fs counted (stat, cmdline, cwd and environ reads by kind).
+// The region with what it reads: fs counted (stat, cmdline, cwd and environ reads by kind, and each
+// async read by its folder's name). An async read in a folder named in hang (a pid, or a run/ folder)
+// doesn't settle until release(), as a /proc read doesn't while that process's memory is locked.
 function load() {
   const reads = { stat: 0, cmdline: 0, cwd: 0, environ: 0, other: 0 };
-  const hang = new Set();
+  const hang = new Set(), held = [], by = new Map(), out = { now: 0, most: 0 };
   const kindOf = (p) => { const b = path.basename(String(p)); return b in reads ? b : 'other'; };
+  const held1 = (p, go) => {
+    const dir = path.basename(path.dirname(String(p)));
+    by.set(dir, (by.get(dir) ?? 0) + 1);
+    out.now++; out.most = Math.max(out.most, out.now);
+    const done = (v) => { out.now--; return v; };
+    const fail = (e) => { out.now--; throw e; };
+    if (!hang.has(dir)) return go().then(done, fail);
+    return new Promise((res) => held.push(res)).then(() => go()).then(done, fail);
+  };
+  const release = () => { hang.clear(); held.splice(0).forEach((res) => res()); };
   const promises = new Proxy(fs.promises, { get: (o, k) => {
-    if (k === 'open') return (p, ...a) => { reads[kindOf(p)]++; return o.open(p, ...a); };
-    if (k === 'readlink') return (p, ...a) => { reads[kindOf(p)]++; return hang.has(path.basename(path.dirname(String(p)))) ? new Promise(() => {}) : o.readlink(p, ...a); };
+    if (k === 'open') return (p, ...a) => { reads[kindOf(p)]++; return held1(p, () => o.open(p, ...a)); };
+    if (k === 'readlink') return (p, ...a) => { reads[kindOf(p)]++; return held1(p, () => o.readlink(p, ...a)); };
     if (k === 'readFile') return (p, ...a) => { reads[kindOf(p)]++; return o.readFile(p, ...a); };
     return o[k];
   } });
@@ -43,7 +55,7 @@ function load() {
   const proc = { env: {}, pid: 4242, memoryUsage: { rss: () => 50 * 1024 * 1024 } };
   const names = { fs: ffs, path, Buffer, process: proc };
   const code = `'use strict';\n${['box-memory', 'box-health-contract', 'box-health-sampler', 'box-health-processes'].map((n) => regionOf(n, src)).join('\n')}\nreturn { boxHealthProcesses, procClassify, procStat };`;
-  return { ...new Function(...Object.keys(names), code)(...Object.values(names)), reads, hang };
+  return { ...new Function(...Object.keys(names), code)(...Object.values(names)), reads, hang, release, by, out };
 }
 // A fake ctx: its clocks are set by the test, its timers are kept and never fire by themselves.
 function ctxOf(box, list) {
@@ -53,7 +65,8 @@ function ctxOf(box, list) {
     now: () => clock.now, real: () => clock.real,
     every: (ms, fn) => { const t = { kind: 'every', ms, fn }; timers.push(t); return () => { t.ended = true; }; },
     after: (ms, fn) => { const t = { kind: 'after', ms, fn }; timers.push(t); return () => { t.ended = true; }; },
-    timeout: (ms, fn) => { const t = { kind: 'timeout', ms, fn }; timers.push(t); if (turn.late) setImmediate(fn); return () => { t.ended = true; }; },
+    // with turn.late, a timeout fires 100 ms of real time on, unless ended: what is out by then is late
+    timeout: (ms, fn) => { const t = { kind: 'timeout', ms, fn }; timers.push(t); if (turn.late) setTimeout(() => { if (!t.ended) fn(); }, 100); return () => { t.ended = true; }; },
     turn: async () => { turn.each(); },
     roots: () => roots.list, ceiling: () => 0.8, scan: async () => [],
     proc: box.proc, cgroup: box.cgroup, stopped: () => false, say: (w) => said.push(String(w)),
@@ -266,13 +279,67 @@ test('P9: after a walk cut off at 2 s no change is worked out until two whole wa
   await s.walk();
   assert.equal(s.part().over_s, 15);
   near(place(s.part(), 'alpha', undefined).cpu, 250);
-  // a cut in the reads of cmdline and cwd: a read that never settles
+  // a read of cmdline and cwd that never settles ends the reading, not the walk (final-1 F1)
   b.add({ pid: 3000, ppid: 2, argv: ['node', 'y.mjs'], cwd: '/w/a' });
   s.hang.add('3000');
   s.turn.late = true;
   await s.walk();
-  assert.equal(s.part(), undefined, 'cut while reading');
   assert.ok(s.timers.some((t) => t.kind === 'timeout' && t.ms > 0 && t.ms <= 2000), "the reads race what is left of the walk's 2 s");
+  assert.equal(s.part().over_s, 15, 'the walk is whole');
+  assert.equal(s.part().outside.n, 1, 'the process not read yet counts outside');
+  s.release();
+});
+
+test('P19: a cmdline or cwd read that never settles is started once across walks, at most two reads are out, and the walks go on', async () => {
+  const b = fakeProc(newDir());
+  const roots = [{ root: '/w/a', name: 'alpha' }];
+  b.add({ pid: 10, ppid: 2, argv: ['node', 'a.mjs'], cwd: '/w/a', cpu: 0 });
+  const s = await started(b, roots);
+  s.turn.late = true;
+  await s.first();
+  for (const pid of [3000, 3001]) { b.add({ pid, ppid: 2, argv: ['node', 'y.mjs'], cwd: '/w/a' }); s.hang.add(String(pid)); }
+  b.add({ pid: 3002, ppid: 2, argv: ['node', 'z.mjs'], cwd: '/w/a' });
+  for (let i = 1; i <= 6; i++) {
+    b.set(10, { cpu: i * 15 * HZ });
+    await s.walk();
+    const r = s.part();
+    assert.ok(r, `walk ${i} gives a result`);
+    near(place(r, 'alpha', undefined).cpu, 1, `walk ${i}: CPU goes on`);
+    assert.equal(r.outside.n, 3, `walk ${i}: the processes not read yet count outside`);
+    assert.ok(s.out.most <= 2, `walk ${i}: at most two reads out (${s.out.most})`);
+  }
+  assert.deepEqual([s.by.get('3000'), s.by.get('3001'), s.by.get('3002') ?? 0], [1, 1, 0], 'each hung read started once in 6 walks; a third waits for a slot');
+  assert.equal(s.said.filter((w) => /did not answer within 2 s/.test(w)).length, 1, 'said once');
+  s.release();
+  await new Promise((res) => setTimeout(res, 20));
+  await s.walk();
+  await s.walk();
+  const r = s.part();
+  assert.equal(r.outside.n, 0, 'once they answer, they are read and placed');
+  assert.equal(place(r, 'alpha', undefined).n, 4);
+});
+
+test('P20: a run/ file that never answers is waited for 2 s, once; the walks go on with the last pids', async () => {
+  const { s, A } = await strayBox();
+  const has = () => s.part().strays.some((g) => g.kind === 'browser' && g.why === 'parent-gone' && g.n === 2);
+  assert.equal(has(), false, 'the recorded chrome is no stray');
+  fs.writeFileSync(path.join(A, 'docs', 'devteam', 'run', 'browser', 'state.json'), JSON.stringify({ browser: 1 }));
+  s.hang.add('browser');
+  s.turn.late = true;
+  const was = s.by.get('browser');
+  for (let i = 1; i <= 5; i++) {
+    s.roots.list = [...s.roots.list];
+    await s.walk();
+    assert.ok(s.part().over_s, `walk ${i} gives a result with CPU`);
+    assert.equal(has(), false, `walk ${i}: the last pids are kept`);
+  }
+  assert.equal(s.by.get('browser') - was, 1, 'one read of state.json started in 5 walks');
+  assert.equal(s.said.filter((w) => /run\/ files did not answer/.test(w)).length, 1, 'said when it was late');
+  s.release();
+  await new Promise((res) => setTimeout(res, 20));
+  s.roots.list = [...s.roots.list];
+  await s.walk();
+  assert.equal(has(), true, 'once it answers, the new pids hold');
 });
 
 // ===== 3: strays =====

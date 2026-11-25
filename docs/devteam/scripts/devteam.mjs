@@ -24692,16 +24692,22 @@ function boxHealth(log, scan, { parts = boxHealthParts(), real = () => Date.now(
 //
 // The walk, never two at once, stopped at 2 s of real():
 //   0. pids   when ctx.roots() gives a new list (the sampler reads them every minute), the pids each
-//             root's run/ records (below), read async before the 2 s begin
+//             root's run/ records (below), read async before the 2 s begin, for at most 2 s; one
+//             still out when that ends goes on alone, the last pids are kept meanwhile, and no
+//             second read starts while it is out (final-1 F2)
 //   1. stat   one read of <proc>/<pid>/stat a process, synchronous, in batches of 100 with a turn of
 //             the event loop between (ctx.turn): its own and its reaped children's CPU ticks, resident
 //             pages, parent, start time and comm. Then <proc>/uptime and <cgroup>/cpu.stat.
 //   2. info   for a (pid, start time) not seen before, or last read 5 minutes of real() ago or more:
 //             its cmdline (at most 64 KB) and cwd, read async, classified at once and the words
-//             dropped. Only the kind, whether it starts a test run, whether it is devteam's or tmux,
+//             dropped. At most two processes' reads are ever out, across walks, and never two for
+//             one process, so a read that hangs (a process whose memory is locked) holds at most
+//             one of the threads every file read shares, and only while it hangs (final-1 F1).
+//             What is left of the 2 s ends the reading, not the walk: a process not read yet
+//             counts as unknown (outside, never a stray) until its read settles. Only the kind, whether it starts a test run, whether it is devteam's or tmux,
 //             and its cwd are kept, and only in this region. One whose cmdline can't be read is
 //             known as nothing (outside, never a stray) until it is read again. environ is never read.
-// A walk cut off at 2 s gives nothing: the part gives undefined until two whole walks have run
+// A walk whose stat reads are cut off at 2 s gives nothing: the part gives undefined until two whole walks have run
 // again, since a change is worked out only between two whole walks one after the other.
 //
 // Where a process counts: the longest known root (ctx.roots()) holding its cwd, then the worktree
@@ -24745,7 +24751,7 @@ function boxHealth(log, scan, { parts = boxHealthParts(), real = () => Date.now(
 //   long-test     kind test, and its run's top is over 60 minutes old
 // A stray whose cwd is in no root has no project. Nothing is killed, signalled or started here.
 const PROC_EVERY_MS = 15000, PROC_BUDGET_MS = 2000, PROC_BATCH = 100, PROC_INFO_MS = 300000;
-const PROC_HZ = 100, PROC_STRAY_S = 600, PROC_LONG_TEST_S = 3600, PROC_STRAYS = 40, PROC_FILE_MAX = 65536;
+const PROC_READS = 2, PROC_HZ = 100, PROC_STRAY_S = 600, PROC_LONG_TEST_S = 3600, PROC_STRAYS = 40, PROC_FILE_MAX = 65536;
 const PROC_REAPERS = ['systemd', 'init', 'tini'];
 const PROC_TESTS = ['vitest', 'jest', 'mocha', 'rspec', 'pytest', 'playwright'];
 const PROC_BROWSERS = ['chrome-headless-shell', 'chromium-browser'];
@@ -24817,6 +24823,15 @@ const boxHealthProcesses = (() => {
     }
     if (run === r) { r.pids = pids; r.pidsOf = roots; }
   };
+  // readPids, one at a time, waited for at most 2 s; a late one sets the pids when it ends
+  const pidsFor = async (ctx, r, roots) => {
+    if (!r.pidsOut) r.pidsOut = readPids(ctx, r, roots).finally(() => { r.pidsOut = null; });
+    let end = () => {};
+    const late = new Promise((res) => { end = ctx.timeout(PROC_BUDGET_MS, () => res(true)); });
+    const was = await Promise.race([r.pidsOut.then(() => false), late]);
+    end();
+    if (was) ctx.say("a root's run/ files did not answer within 2 s: the last pids are kept");
+  };
   // a process's info: { cwd, kind, test, own }; one whose cmdline can't be read is known as nothing
   const readInfo = async (ctx, pid) => {
     const dir = path.join(ctx.proc, String(pid));
@@ -24827,7 +24842,7 @@ const boxHealthProcesses = (() => {
   };
   const walk = async (ctx, r) => {
     const roots = ctx.roots();
-    if (r.pidsOf !== roots) { await readPids(ctx, r, roots); if (ctx.stopped() || run !== r) return; }
+    if (r.pidsOf !== roots && !r.pidsOut) { await pidsFor(ctx, r, roots); if (ctx.stopped() || run !== r) return; }
     const began = ctx.real();
     let names = null;
     try { names = fs.readdirSync(ctx.proc); } catch { names = null; }
@@ -24846,21 +24861,33 @@ const boxHealthProcesses = (() => {
     const t = ctx.real();
     const uptime = Number((read(ctx.proc, 'uptime') ?? '').split(' ')[0]);
     const usage = boxHealthField(read(ctx.cgroup, 'cpu.stat'), 'usage_usec');
-    // the processes whose info is new or old, read in batches within what is left of the 2 s
+    // the processes whose info is new or old and has no read out, read at most PROC_READS at once,
+    // within what is left of the 2 s; a read still out then goes on alone and keeps its slot
     const keyOf = (pid, s) => `${pid}:${s.start}`;
-    const need = cut ? [] : [...procs].filter(([pid, s]) => { const i = r.info.get(keyOf(pid, s)); return !i || ctx.real() - i.at >= PROC_INFO_MS; });
-    for (let i = 0; i < need.length && !cut; i += PROC_BATCH) {
+    if (!cut) {
+      const need = [...procs].filter(([pid, s]) => { const k = keyOf(pid, s), i = r.info.get(k); return !r.out.has(k) && (!i || ctx.real() - i.at >= PROC_INFO_MS); });
+      let over = false;
+      const worker = async () => {
+        while (need.length && !over && run === r && !ctx.stopped()) {
+          const [pid, s] = need.shift(), k = keyOf(pid, s);
+          r.out.add(k);
+          try {
+            const info = await readInfo(ctx, pid);
+            if (run === r) r.info.set(k, { at: ctx.real(), ...info });
+          } finally { r.out.delete(k); }
+        }
+      };
       const left = PROC_BUDGET_MS - (ctx.real() - began);
-      if (left <= 0) { cut = true; break; }
-      let end = () => {};
-      const late = new Promise((res) => { end = ctx.timeout(left, () => res(true)); });
-      const batch = Promise.all(need.slice(i, i + PROC_BATCH).map(async ([pid, s]) => {
-        const info = await readInfo(ctx, pid);
-        if (run === r) r.info.set(keyOf(pid, s), { at: ctx.real(), ...info });
-      })).then(() => false);
-      cut = await Promise.race([batch, late]);
-      end();
-      if (ctx.stopped() || run !== r) return;
+      if (left > 0 && need.length) {
+        let end = () => {};
+        const late = new Promise((res) => { end = ctx.timeout(left, () => { over = true; res(); }); });
+        await Promise.race([Promise.all(Array.from({ length: Math.max(0, PROC_READS - r.out.size) }, worker)), late]);
+        end();
+        over = true;
+        if (ctx.stopped() || run !== r) return;
+      }
+      if (r.out.size && !r.slow) ctx.say('a process did not answer within 2 s: it counts outside until it does');
+      r.slow = r.out.size > 0;
     }
     if (cut) { ctx.say('a walk was cut off at 2 s: no CPU until two whole walks have run'); r.base = null; r.result = undefined; return; }
     // forget what is gone
@@ -24980,7 +25007,7 @@ const boxHealthProcesses = (() => {
   };
   return {
     start(ctx) {
-      const r = { base: null, result: undefined, info: new Map(), pids: new Set(), pidsOf: null, walking: false };
+      const r = { base: null, result: undefined, info: new Map(), out: new Set(), slow: false, pids: new Set(), pidsOf: null, pidsOut: null, walking: false };
       run = r;
       const once = async () => {
         if (r.walking || run !== r) return;
