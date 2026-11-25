@@ -1041,11 +1041,11 @@ function uploadType(name) {
   const ext = path.extname(name);
   return Object.hasOwn(UPLOAD_IMAGES, ext) ? { type: UPLOAD_IMAGES[ext], attachment: false } : { type: 'application/octet-stream', attachment: true };
 }
-// What the owner is told after a drop. The paths stay on screen: a paste can still go astray.
-export function dropNote(paths) {
+// What the owner is told after a drop, or ("Pasted") a paste. The paths stay on screen: a paste can still go astray.
+export function dropNote(paths, verb = 'Sent') {
   const images = paths.filter(isDropImage).length;
   const how = images === paths.length ? 'images arrive as attachments' : images ? 'images arrive as attachments, PDFs and other files as a path' : 'PDFs and other files arrive as a path';
-  return `Sent to the focused pane. In Claude Code, ${how}.\n${paths.join('\n')}`;
+  return `${verb} to the focused pane. In Claude Code, ${how}.\n${paths.join('\n')}`;
 }
 
 // --- the server ---------------------------------------------------------------------------------
@@ -2624,8 +2624,26 @@ export function createGateway(opts = {}) {
       return blob ? new File([blob], file.name.replace(/\\.[^.]*$/, '') + '.jpg', { type: 'image/jpeg' }) : file;
     } catch { return file; }
   };
+  // A paste's image: the kinds Claude Code attaches go as they are, any other is redrawn as a PNG here.
+  const ASIS = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
+  const toPng = async (file) => {
+    if (Object.hasOwn(ASIS, file.type)) return file;
+    let blob = null;
+    try {
+      const bitmap = await createImageBitmap(file);
+      const canvas = document.createElement('canvas');
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      canvas.getContext('2d').drawImage(bitmap, 0, 0);
+      bitmap.close();
+      blob = await new Promise((r) => canvas.toBlob(r, 'image/png'));
+    } catch {}
+    if (!blob) throw Object.assign(new Error("That image can't be read here. Save it and drop the file."), { whole: true });
+    return new File([blob], file.name.replace(/\\.[^.]*$/, '') + '.png', { type: 'image/png' });
+  };
   // Stored but not yet pasted. Tried again until the terminal is back, and on screen until then.
   let waiting = [];
+  let verb = 'Sent';
   let trouble = [];
   let active = 0;
   window.devteamDropBusy = () => active > 0 || waiting.length > 0;
@@ -2640,14 +2658,14 @@ export function createGateway(opts = {}) {
     window.term.paste(dropPaste(paths));
     if (dropSpace(paths)) window.term.input(' ');
     window.term.focus();
-    say(trouble.concat(dropNote(paths)).join('\\n'), trouble.length > 0);
+    say(trouble.concat(dropNote(paths, verb)).join('\\n'), trouble.length > 0);
     trouble = [];
     return true;
   };
   setInterval(flush, 500);
-  const take = async (picks) => {
+  const take = async (picks, skipped) => {
     const paths = [];
-    const failed = [];
+    const failed = skipped ? [skipped] : [];
     for (const [i, p] of picks.entries()) {
       const name = p.file ? p.file.name : 'that item';
       try {
@@ -2655,10 +2673,12 @@ export function createGateway(opts = {}) {
         if (p.file.size > MAX) throw new Error('is over the ' + Math.floor(MAX / 1048576) + ' MB limit');
         const label = (picks.length > 1 ? (i + 1) + '/' + picks.length + ' ' : '') + name;
         say(label + ' 0%');
-        paths.push(await send(await toJpeg(p.file), label));
-      } catch (e) { failed.push(name + ': ' + e.message); }
+        paths.push(await send(await (p.pasted ? toPng : toJpeg)(p.file), label));
+      } catch (e) { failed.push(e.whole ? e.message : name + ': ' + e.message); }
     }
     trouble = failed;
+    // a drop and a paste waiting together are told as a drop
+    if (paths.length) verb = picks[0].pasted && (!waiting.length || verb === 'Pasted') ? 'Pasted' : 'Sent';
     waiting.push(...paths);
     if (flush()) return;
     if (waiting.length) say(trouble.concat('terminal not connected: stored at ' + dropPaste(waiting) + '\\nIt pastes when the terminal reconnects.').join('\\n'), true);
@@ -2667,6 +2687,10 @@ export function createGateway(opts = {}) {
   const hasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files');
   let hide = 0;
   let queue = Promise.resolve();
+  const enqueue = (picks, skipped) => {
+    active++;
+    queue = queue.then(() => take(picks, skipped)).catch((err) => say(String(err && err.message || err), true)).finally(() => { active--; });
+  };
   addEventListener('dragover', (e) => {
     if (!hasFiles(e)) return;
     e.preventDefault();
@@ -2683,8 +2707,48 @@ export function createGateway(opts = {}) {
     veil.style.display = 'none';
     // only while the event lasts: the list is empty afterwards
     const picks = Array.from(e.dataTransfer.items).filter((i) => i.kind === 'file').map((i) => { const entry = i.webkitGetAsEntry && i.webkitGetAsEntry(); return { file: i.getAsFile(), dir: Boolean(entry && entry.isDirectory) }; });
-    active++;
-    queue = queue.then(() => take(picks)).catch((err) => say(String(err && err.message || err), true)).finally(() => { active--; });
+    enqueue(picks);
+  }, true);
+  // --- a pasted image: only in the owner's own paste, and never in place of text ---
+  const IMAGES_ONLY = 'Only images paste here. Drop other files instead.';
+  // The text of a paste that only names its files: a copied image's address, or a copied file's name.
+  // Browsers wrap a copied image's HTML differently, so it is judged by what is left in its body.
+  const onlyNames = (text, html, files) => {
+    const line = text.replace(/[\\r\\n]+$/, '');
+    if (!line) return true;
+    if (/[\\r\\n]/.test(line)) return false;
+    if (html) {
+      const body = new DOMParser().parseFromString(html, 'text/html').body;
+      const els = Array.from(body.querySelectorAll('*')).filter((e) => e.tagName !== 'META');
+      if (els.length !== 1 || els[0].tagName !== 'IMG' || body.textContent.trim()) return false;
+    }
+    return /^(https?|file|data):/i.test(line) || /\\.(png|jpe?g|gif|webp|heic|tiff?|bmp)$/i.test(line) || files.some((f) => f.name && line.endsWith(f.name));
+  };
+  const pastedName = (file, at) => {
+    if (file.name && !/^image\\.[a-z0-9]+$/i.test(file.name)) return file;
+    const two = (n) => String(n).padStart(2, '0');
+    const stamp = at.getFullYear() + two(at.getMonth() + 1) + two(at.getDate()) + '-' + two(at.getHours()) + two(at.getMinutes()) + two(at.getSeconds());
+    return new File([file], 'pasted-' + stamp + '.' + (Object.hasOwn(ASIS, file.type) ? ASIS[file.type] : 'png'), { type: file.type });
+  };
+  addEventListener('paste', (e) => {
+    const data = e.clipboardData;
+    const files = data ? Array.from(data.files) : [];
+    if (!files.length || !onlyNames(data.getData('text/plain'), data.getData('text/html'), files)) return;
+    // before xterm.js, which would type the clipboard's text
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    const images = files.filter((f) => /^image\\//i.test(f.type));
+    if (!images.length) return void enqueue([], IMAGES_ONLY);
+    const at = new Date();
+    enqueue(images.map((f) => ({ file: pastedName(f, at), dir: false, pasted: true })), images.length < files.length ? IMAGES_ONLY : '');
+  }, true);
+  // Off a Mac, xterm.js types Ctrl+V as ^V and prevents the browser's paste. These keys never reach it,
+  // and the browser pastes. keyCode follows the keyboard's layout, as the browser's own shortcut does.
+  // On a Mac, Cmd+V pastes and Ctrl+V stays ^V.
+  const mac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
+  addEventListener('keydown', (e) => {
+    if (mac || e.altKey || e.metaKey) return;
+    if (e.ctrlKey ? e.keyCode === 86 : e.shiftKey && e.keyCode === 45) e.stopPropagation();
   }, true);
 })();</script>`);
   const TERM_CSP = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; font-src data:; img-src data:; connect-src 'self' ${TERM.replace(/^http/, 'ws')}; frame-ancestors ${PUB}; base-uri 'none'; form-action 'none'`;
