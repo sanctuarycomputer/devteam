@@ -409,6 +409,42 @@ test('S15: fields box-health@1 refuses are left out and said, with nothing of wh
   assert.ok(s.logs.every((l) => !l.includes(label)), 'no address in the log');
 });
 
+test('S22: a native promise whose own then was replaced, rejected from start, part or stop, is said and costs only its part (kit-888)', async () => {
+  const none = [];
+  const onNone = (e) => none.push(e);
+  process.on('unhandledRejection', onNone);
+  try {
+    // its own then: one that attaches nothing (final-3 probe Y4), one that throws, a value that is no function
+    const odd = (then) => () => { const q = Promise.reject(new Error('odd')); q.then = then; return q; };
+    const nothing = odd(function () { return this; }), throws = odd(() => { throw new Error('then'); }), none1 = odd(1);
+    let ctx;
+    // a part whose start failed is left out for good: what its part would give is never seen
+    const boxed = () => ({ answer: { box: { oom_kills: 1 } } });
+    const parts = [['processes', { start: throws, part: boxed, stop() {} }], ['disk', { start: nothing, part: boxed, stop() {} }],
+      ['state', { start() {}, part: nothing, stop: nothing }], ['pool', { start() {}, part: throws, stop: throws }],
+      ['claude', { start() {}, part: none1, stop: none1 }], ['park', { start: none1, part: boxed, stop() {} }],
+      ['room', { start: (c) => { ctx = c; }, part: () => ({ answer: { headroom: { room: 1 } } }), stop() {} }]];
+    const s = load({ env: nowhere(), parts });
+    await s.health.start();
+    // a timer's own promise is awaited, so it is caught already; it stays so
+    ctx.after(1, nothing);
+    s.timers.list.find((h) => h.kind === 'once' && h.ms === 1).fn();
+    await step(s);
+    s.health.stop();
+    await sleep(20);
+    assert.deepEqual(none, [], 'no rejection is left unhandled');
+    const a = answer(s.health);
+    ok(a);
+    assert.equal(a.json.samples.length, 2, 'every tick sampled');
+    assert.deepEqual(a.json.headroom, { room: 1 }, 'a later part is kept');
+    assert.equal(a.json.box, undefined, 'a part whose start failed is left out');
+    const said = s.logs.map((l) => l.replace(/ at line \d+$/, '')).sort();
+    assert.deepEqual(said, ['claude: part failed: Error', 'claude: part gave something other than an object, left out', 'claude: stop failed: Error',
+      'disk: start failed: Error', 'park: start failed: Error', 'pool: part failed: Error', 'pool: part gave something other than an object, left out', 'pool: stop failed: Error',
+      'processes: start failed: Error', 'room: a timer failed: Error', 'state: part failed: Error', 'state: part gave something other than an object, left out', 'state: stop failed: Error'].map((l) => `hub: box health: ${l}`));
+  } finally { process.off('unhandledRejection', onNone); }
+});
+
 // ===== 5: the clocks =====
 
 test('S15b: a value that changes is said once, and an error\'s own text never', async (t) => {
@@ -559,6 +595,42 @@ test('S18: no part reads the clock or sets a timer itself, and the sampler does 
   assert.doesNotMatch(body, /\bnew Date\(\s*\)|\bperformance\b|\bhrtime\b/);
   for (const bad of ['Date.now()', 'new Date()', 'setTimeout(f, 1)', 'new Date', 'Date()', 'performance.now()', 'AbortSignal.timeout(5)', 'execFile(a, b, { timeout: 5 })']) assert.match(bad, forbidden);
   for (const good of ['new Date(ctx.now()).toISOString()', 'Date.parse(at)', 'ctx.timeout(2000, f)']) assert.doesNotMatch(good, forbidden);
+});
+
+test('S23: with DEVTEAM_BOX_HEALTH_FAST the first sample waits for the roots\' first read, or 5 s of ticks while that read hangs (kit-888)', async () => {
+  const fast = (scan) => load({ env: nowhere({ DEVTEAM_BOX_HEALTH: 'on', DEVTEAM_BOX_HEALTH_FAST: '720' }), port: 20002, roots: [scratch], settings: { scan } });
+  const interval = (s) => s.timers.list.find((h) => h.kind === 'every' && h.ms === 5000 / 720);
+  // the roots come in after a second of the machine's: the ticks before that sample nothing
+  let open;
+  const s = fast(() => new Promise((r) => { open = r; }));
+  const started = s.health.start();
+  for (let i = 0; i < 3; i++) { s.clock.t += 300; await interval(s).fn(); }
+  assert.equal(answer(s.health).json.samples.length, 0, 'no sample before the roots are read');
+  open([]);
+  await started;
+  const first = answer(s.health).json.samples;
+  assert.equal(first.length, 1);
+  assert.equal(typeof first[0].disk, 'number', 'the first sample has the roots\' disk');
+  s.clock.t += 5000 / 720;
+  await interval(s).fn();
+  assert.equal(answer(s.health).json.samples.length, 2, 'then each tick samples');
+  // a read of the roots that hangs holds the samples 720 ticks of the interval, 5 s, no longer; the
+  // machine's clock plays no part
+  const h = fast(() => new Promise(() => {}));
+  h.health.start();
+  for (let i = 0; i < 719; i++) await interval(h).fn();
+  assert.equal(answer(h.health).json.samples.length, 0, 'under 5 s, none');
+  await interval(h).fn();
+  const late = answer(h.health).json.samples;
+  assert.equal(late.length, 1, 'at 5 s it samples without the roots');
+  assert.equal(late[0].disk, undefined, 'and without their disks');
+  h.health.stop();
+  // with no FAST, the first tick of the interval samples, as it always has
+  const one = load({ env: nowhere({ DEVTEAM_BOX_HEALTH: 'on' }), port: 20002, roots: [scratch], settings: { scan: () => new Promise(() => {}) } });
+  one.health.start();
+  await one.timers.list.find((x) => x.kind === 'every' && x.ms === 5000).fn();
+  assert.equal(answer(one.health).json.samples.length, 1, 'at FAST=1 the first interval tick samples');
+  one.health.stop();
 });
 
 // ===== 6: disks =====
@@ -725,7 +797,7 @@ async function startHub(t, { env = {}, script = plainKit(), roots = [] } = {}) {
   t.after(() => { try { w.kill('SIGKILL'); } catch {} return p.exitCode !== null || p.signalCode !== null ? undefined : new Promise((r) => { p.once('exit', r); try { process.kill(-p.pid, 'SIGKILL'); } catch { r(); } }); });
   await until(async () => { try { return (await get(port, '/instances.json')).status === 200; } catch { return p.exitCode !== null; } }, `the hub on ${port}`);
   assert.equal(p.exitCode, null, `the hub runs (${out})`);
-  return { port, out: () => out };
+  return { port, out: () => out, gone: () => p.exitCode !== null || p.signalCode !== null };
 }
 const ON = { DEVTEAM_BOX_HEALTH: 'on' };
 const sampled = (h, n) => until(async () => (await get(h.port, '/box-health.json')).json?.samples?.length >= n, `${n} samples`);
@@ -806,6 +878,16 @@ test('H4: fakes in the regions\' places run in the hub: they add to claude, pool
   const mid = r.json.claude.points[5].at;
   const later = (await get(h.port, `/box-health.json?after=${mid}`)).json;
   assert.ok(later.claude.points.length >= 4 && later.claude.points.every((p) => p.at > mid) && later.samples.every((s) => s.at > mid));
+});
+
+test('H5: a hub lives through a part\'s native promise whose own then was replaced, rejected each tick, and says it once (kit-888)', async (t) => {
+  // from its 10th tick on, once the hub is up and answering
+  const odd = 'boxHealthState.n = (boxHealthState.n ?? 0) + 1; if (boxHealthState.n < 10) return; const q = Promise.reject(new Error(\'odd\')); q.then = function () { return this; }; return q;';
+  const script = kitCopy({ state: `{ start(ctx) {}, part() { ${odd} }, stop() {} }` });
+  const h = await startHub(t, { env: { ...ON, DEVTEAM_BOX_HEALTH_FAST: '50' }, script });
+  await until(async () => { if (h.gone()) return true; try { return (await get(h.port, '/box-health.json')).json?.samples?.length >= 15; } catch { return false; } }, '15 samples, or the hub gone');
+  assert.equal(h.gone(), false, `the hub lives (${h.out()})`);
+  assert.equal(h.out().split('hub: box health: state: part failed: Error').length - 1, 1, h.out());
 });
 
 // ===== 7: the image =====

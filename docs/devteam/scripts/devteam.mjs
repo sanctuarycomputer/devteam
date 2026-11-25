@@ -24867,6 +24867,9 @@ const boxHealthParts = () => [
 // What a section needs before it is in the answer at all, and stands in for while a part's own fields
 // are checked alone.
 const BOX_HEALTH_BASE = { headroom: {}, pool: { projects: [], allocated: [], recent: [] }, claude: { accounts: [] }, box: {} };
+// the engine's own then, and the call that applies it, taken once as the region loads: it attaches to a
+// native promise whatever that promise's own then is, and nothing patched later changes it
+const boxHealthThen = Promise.prototype.then, boxHealthApply = Reflect.apply;
 const boxHealthIso = (ms) => new Date(ms).toISOString();
 // A kernel file's text, or null: missing, unreadable, or pressure that is compiled in and off (its
 // read fails).
@@ -25072,8 +25075,19 @@ function boxHealth(log, scan, { kit = null, parts = boxHealthParts(), real = () 
     }
     return places.get(what);
   };
-  // a promise a part returned: its rejection is said, and never the process's end
-  const swallow = (p, doing, got, then = () => {}) => { if (typeof got?.then === 'function') Promise.resolve(got).catch((e) => { fail(p.name, doing, e); then(); }); };
+  // a promise a part returned: its rejection is said, and never the process's end. True when got is
+  // one. A native promise is held by the engine's own then, never its own (which a part may have
+  // replaced: kit-888), and any other thenable through Promise.resolve. Not defended: a native one
+  // whose constructor was replaced too, so that no then can be attached to it at all, and a Proxy
+  // around one, whose then is called on the Proxy and so never reaches the promise.
+  const swallow = (p, doing, got, then = () => {}) => {
+    const caught = (e) => { fail(p.name, doing, e); then(); };
+    // throws at once, reading nothing, for anything that isn't a native promise
+    try { boxHealthApply(boxHealthThen, got, [undefined, caught]); return true; } catch {}
+    if (typeof got?.then !== 'function') return false;
+    Promise.resolve(got).catch(caught);
+    return true;
+  };
   const tick = async () => {
     if (ticking || stopped) return;
     ticking = true;
@@ -25111,7 +25125,7 @@ function boxHealth(log, scan, { kit = null, parts = boxHealthParts(), real = () 
         try {
           const got = p.part.part(p.ctx, { now: structuredClone(reading), sample: { ...entry.sample }, samples: [...ring.map((r) => r.sample), { ...entry.sample }], ...results });
           if (got === undefined || got === null) continue;
-          if (!memoryIsMap(got) || typeof got.then === 'function') { swallow(p, 'part', got); say(`${p.name} shape`, `${p.name}: part gave something other than an object, left out`); continue; }
+          if (swallow(p, 'part', got) || !memoryIsMap(got)) { say(`${p.name} shape`, `${p.name}: part gave something other than an object, left out`); continue; }
           const sections = {};
           for (const [k, fields] of Object.entries(got.answer ?? {})) {
             if (!Object.hasOwn(BOX_HEALTH_BASE, k)) { say(`${p.name} section`, `${p.name}: a section box-health@1 does not have, left out`); continue; }
@@ -25148,9 +25162,13 @@ function boxHealth(log, scan, { kit = null, parts = boxHealthParts(), real = () 
       if (!on || started || stopped) return;
       started = true;
       for (const p of running) { try { p.up = true; swallow(p, 'start', p.part.start(p.ctx), () => { p.up = false; }); } catch (e) { p.up = false; fail(p.name, 'start', e); } }
-      ctx.every(BOX_HEALTH_EVERY_MS, tick);
+      // the first sample waits for the roots' first read, which under FAST can outlast a tick; a read
+      // that hangs holds it fast ticks of the interval, 5 s, as the first tick at FAST=1 is (kit-888)
+      let rooted = false, waited = 0;
+      ctx.every(BOX_HEALTH_EVERY_MS, () => (rooted || ++waited >= fast ? tick() : undefined));
       ctx.every(BOX_HEALTH_ROOTS_MS * fast, readRoots);
       await guarded('sampler', 'the roots', readRoots)();
+      rooted = true;
       await tick();
     },
     stop() {
