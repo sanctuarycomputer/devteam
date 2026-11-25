@@ -527,6 +527,8 @@ test('a page\'s dialog: who asks, its words as text, and each answer names it on
     assert.deepEqual(await sent(c, async () => { await p.ev(`document.getElementById('ask').close()`); await until(() => askOpen(p), 'opened again'); await press(p, at); }, 200), [], 'opened again');
     // a key held from before doesn't answer, a fresh one does
     await armed(p);
+    await p.ev(`document.getElementById('ask-from').focus()`);
+    await keyEvent(p, 'keyDown', 'Enter', 'Enter', { text: '\r', windowsVirtualKeyCode: 13 }); // pressed afresh, on neither answer, then held
     await p.ev(`document.getElementById('ask-yes').focus()`);
     assert.deepEqual(await sent(c, () => keyEvent(p, 'keyDown', 'Enter', 'Enter', { text: '\r', windowsVirtualKeyCode: 13, autoRepeat: true }), 200), [], 'a repeating key');
     assert.deepEqual(await sent(c, () => keyEvent(p, 'keyDown', 'Enter', 'Enter', { text: '\r', windowsVirtualKeyCode: 13 }), 200), [{ t: 'dialog', id: 'd-4444444444444444', accept: true }]);
