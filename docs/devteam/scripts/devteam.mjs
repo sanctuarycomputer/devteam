@@ -17417,7 +17417,43 @@ function choreWorktree(slugName, { reset = false, setup = false, responder = fal
   const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
   const existed = fs.existsSync(wt);
   // add and reset with -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
-  if (!existed) { gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, start ?? base], mainRoot); seedWorktree(wt, { setup, session: true }); }
+  if (!existed) {
+    const add = ['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, start ?? base];
+    // git dies on a sibling's .git/worktrees/<name>/commondir that is there and still empty: another
+    // worktree add, between making the file and filling it. Waited for and tried again, for 5 s in
+    // all; any other failure dies at once (a commondir that can't be read is another, and so is a
+    // failure once the worktree is there: a hook's). The path in git's line is matched, not its
+    // words, which follow the locale.
+    const LIMIT_S = 5;
+    const ref = `refs/heads/chore-${slugName}`;
+    const branchConfig = () => git(['config', '--local', '--get-regexp', `^branch\\.chore-${slugName.replaceAll('.', '\\.')}\\.[^.]+$`], mainRoot);
+    const was = { tip: resolveCommit(ref), config: branchConfig() };
+    const half = (name) => { try { return fs.readFileSync(path.join(commonDir, 'worktrees', name, 'commondir'), 'utf8') === ''; } catch (e) { return e.code === 'ENOENT' ? false : null; } };
+    for (let end = null, set = null; ;) {
+      let words, name;
+      const before = resolveCommit(ref);
+      try { execFileSync('git', add, { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); break; }
+      catch (e) { words = (e.stderr || e.message).toString().trim(); name = /worktrees\/([^/\n]+)\/commondir/.exec(e.stderr ?? '')?.[1]; }
+      // where this try moved the branch, read now: origin's main can move during the wait
+      const after = resolveCommit(ref);
+      if (after !== before) set = after;
+      const state = name === undefined || fs.existsSync(wt) ? null : half(name);
+      if (state !== null) {
+        end ??= Date.now() + LIMIT_S * 1000;
+        do Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50); while (half(name) && Date.now() < end);
+        if (Date.now() < end) continue;
+        if (half(name)) words += `\nthe entry ${name} in ${path.join(commonDir, 'worktrees')} was still half made after ${LIMIT_S} s (its commondir is empty): another git may be making that worktree, or stopped while it did`;
+      }
+      // -B sets the branch before it checks out, so a try that met a half-made entry can leave it:
+      // put back, unless it moved since, or the worktree or its entry is there now (another start's)
+      if (end !== null && !fs.existsSync(wt) && !fs.existsSync(path.join(commonDir, 'worktrees', `chore-${slugName}`))) {
+        if (set && set !== was.tip) git(['update-ref', ...(was.tip ? [ref, was.tip, set] : ['-d', ref, set])], mainRoot);
+        if (!was.tip && !was.config && branchConfig() && !resolveCommit(ref)) git(['config', '--local', '--remove-section', `branch.chore-${slugName}`], mainRoot);
+      }
+      die(`git ${add.join(' ')} failed: ${words}`);
+    }
+    seedWorktree(wt, { setup, session: true });
+  }
   else if (reset) gitOrDie(['-c', 'core.useReplaceRefs=false', 'checkout', '--quiet', '-B', `chore-${slugName}`, base], wt);
   else if (responder) die(`.worktrees/chore-${slugName} appeared meanwhile: responder draft again`);
   // in use again: the tick's tidy leaves a worktree alone until it has been quiet a while
