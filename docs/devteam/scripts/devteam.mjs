@@ -36834,6 +36834,91 @@ function browserLastError(detail) {
   } catch {}
 }
 const browserReadLastError = () => { try { return fs.readFileSync(browserErrorFile(), 'utf8').split('\n')[0].replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, 330) || null; } catch { return null; } };
+// kit-877: a failed delete of the session files said, never swallowed, by one rule for the shutdown and
+// the reaper. reason: why the daemon ended, as last-error already says it (or null). No reason: msg
+// alone. A reason that already says the delete failed: nothing added. Else the reason, cut to fit, and
+// the delete's message whole, within last-error's 300 characters.
+function browserReportDelete(reason, msg) {
+  if (!reason) return browserLastError(msg);
+  if (reason.includes("couldn't delete")) return;
+  const join = "; the session files stay: ";
+  browserLastError(`${reason.slice(0, Math.max(0, 300 - join.length - msg.length))}${join}${msg}`);
+}
+// kit-877, the reaper: once Chrome is up the daemon starts sh blocked reading a pipe only the daemon
+// holds; when the daemon ends, however it ends (kill -9 too), the pipe closes and sh runs browser reap.
+// Detached, so it outlives the daemon's window. DEVTEAM_TEST_BROWSER_REAP=0 (tests) starts none.
+function browserReaper(ctx) {
+  if (browserTestEnv('DEVTEAM_TEST_BROWSER_REAP') === '0') return;
+  try {
+    const r = spawn('sh', ['-c', 'cat >/dev/null; exec "$0" "$1" browser reap', process.execPath, fileURLToPath(import.meta.url)], { stdio: ['pipe', 'ignore', 'ignore'], detached: true, cwd: process.cwd(), env: process.env });
+    r.on('error', () => {});
+    r.stdin.on('error', () => {});
+    r.unref();
+    r.stdin.unref?.();
+    ctx.reaper = r; // never written to: only its close matters
+  } catch {}
+}
+const browserCmdlineOf = (pid) => {
+  try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').join(' '); } catch {}
+  if (fs.existsSync('/proc/self/cmdline')) return '';
+  const r = spawnSync('ps', ['-ww', '-o', 'command=', '-p', String(pid)], { encoding: 'utf8' });
+  return r.status === 0 ? r.stdout.trim() : '';
+};
+const browserPgidOf = (pid) => {
+  try { const st = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[2]); } catch {}
+  if (fs.existsSync('/proc/self/stat')) return null;
+  const r = spawnSync('ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf8' });
+  return r.status === 0 ? Number(r.stdout.trim()) || null : null;
+};
+// browser reap (internal): the dead daemon's Chrome given 3 s to end, then killed (its group, and each
+// process on the profile in that group); the session files deleted once no process holds the profile,
+// or the failure said in last-error. It stands down, on any pass, when the profile is gone, a live
+// daemon runs (state.json's daemon_pid, a browser serve), or a start holds the start lock. It makes no
+// folder. DEVTEAM_TEST_BROWSER_REAP_DONE=<file> (tests): "done <exit code>" appended as it ends.
+async function browserReap() {
+  let code = 1;
+  try { code = await browserReapRun(); } catch {}
+  const done = browserTestEnv('DEVTEAM_TEST_BROWSER_REAP_DONE');
+  if (done) { try { fs.appendFileSync(done, `done ${code}\n`); } catch {} }
+  process.exit(code);
+}
+async function browserReapRun() {
+  const profile = path.join(browserHome(), browserKey());
+  const owner = path.join(BROWSER_DIR(), 'start.lock', 'owner');
+  const standDown = () => {
+    if (!fs.existsSync(profile)) return true;
+    const st = browserRawState();
+    if (st && browserAlive(st.daemon_pid) && browserCmdlineOf(st.daemon_pid).includes('browser serve')) return true;
+    let t = null;
+    try { t = fs.readFileSync(owner, 'utf8'); } catch {}
+    const p = /^([1-9]\d*)-/.exec(t ?? '')?.[1];
+    return !!p && browserAlive(Number(p));
+  };
+  const report = (msg) => {
+    if (!fs.existsSync(BROWSER_DIR()) || standDown()) return 1;
+    browserReportDelete(browserReadLastError()?.replace(/^\S+ /, '') ?? null, msg);
+    return 1;
+  };
+  if (standDown()) return 0;
+  const cp = browserRawState()?.chrome_pid;
+  if (Number.isInteger(cp) && cp > 0) {
+    if (browserAlive(cp) && browserProofPid(cp, profile)) {
+      await browserGone(cp, 3000);
+      if (standDown()) return 0;
+      if (browserAlive(cp) && browserProofPid(cp, profile)) { try { process.kill(-cp, 'SIGKILL'); } catch {} }
+    }
+    for (const p of browserProcsOn(profile) ?? []) if (browserPgidOf(p) === cp) { try { process.kill(p, 'SIGKILL'); } catch {} }
+  }
+  for (const end = Date.now() + 5000; ; await browserSleep(50)) {
+    if (standDown()) return 0;
+    const procs = browserProcsOn(profile);
+    if (procs === null) return report("browser: couldn't list this machine's processes after the daemon ended, so the session files stay");
+    if (!procs.length) {
+      try { browserDeleteSession(profile); return 0; } catch (e) { return report(String(e?.message ?? e)); }
+    }
+    if (Date.now() > end) return report(`browser: a process (pid ${procs[0]}) still carried the profile 5 s after the daemon ended, so the session files stay`);
+  }
+}
 // The stop path: Browser.close, then the group signalled (SIGTERM, SIGKILL 2 s later) if Chrome
 // hasn't gone in 5 s; the session files deleted; state.json removed when it is this daemon's; the
 // guard and servers closed; exit. Once a signal came, a dead pty can't end it early.
@@ -37366,6 +37451,7 @@ async function browserServe({ chrome: bin }) {
     const { cdp } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
     if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return; } // a signal came while it launched
     ctx.cdp = cdp;
+    browserReaper(ctx); // kit-877: the session files deleted after this daemon, however it ends
     browserWatchChrome(ctx, ctx.chrome, cdp);
     await browserWatchTabs(ctx);
     for (let i = 0; i < 100 && !ctx.tabs.some((t) => t.sessionId); i++) await browserSleep(100);
@@ -37552,12 +37638,13 @@ async function browserWait() {
 // Which gates each verb runs: status, profiles and stop skip Chrome; the memory check is browserEnsure's.
 const BROWSER_VERBS = {
   ...Object.fromEntries(['start', 'open', 'snapshot', 'click', 'type', 'press', 'scroll', 'back', 'tabs', 'tab', 'screenshot', 'forget', 'serve', 'handover', 'wait'].map((v) => [v, { chrome: true }])),
-  status: { chrome: false }, stop: { chrome: false }, profiles: { chrome: false },
+  status: { chrome: false }, stop: { chrome: false }, profiles: { chrome: false }, reap: { chrome: false },
 };
 async function cmdBrowser() {
   const verb = positional[0];
   if (!Object.hasOwn(BROWSER_VERBS, verb ?? '')) die(`usage: ${BROWSER_USAGE}`);
   if (verb === 'serve' && process.env.DEVTEAM_BROWSER_SERVE !== '1') die('browser serve is internal: browser start runs it in its own window');
+  if (verb === 'reap' && process.env.DEVTEAM_BROWSER_SERVE !== '1') die('browser reap is internal: the daemon runs it when it ends');
   const { chrome } = browserGates(BROWSER_VERBS[verb]);
   // the hold, before anything starts: no daemon touched, no stdin read, no profile removed
   if (BROWSER_HELD_VERBS.includes(verb)) {
@@ -37574,6 +37661,7 @@ async function cmdBrowser() {
     return browserForgetOther(browserKey());
   }
   if (verb === 'serve') return browserServe({ chrome });
+  if (verb === 'reap') return browserReap();
   if (verb === 'status') return browserStatus();
   if (verb === 'stop') return browserStop();
   if (verb === 'start') { const s = await browserEnsure({ headed: !!flags.headed }); return out(`browser running (preview ${s.preview}, profile ${browserKey()})`); }
