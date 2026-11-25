@@ -1176,6 +1176,19 @@ try {
   .viewer .threads { z-index: 23; }
   /* a note on an artifact (kit-145): what there is to check, a mark withdrawn, where a step landed */
   .tl-addr { margin: 6px 0; padding: 6px 8px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--surface)); font-size: 12px; }
+  /* on a capped card what can be long scrolls, down to a floor, and what is pressed never does: the note's words (with what
+     is said above and below them), an open context, the terminal's ask; the turns give way first */
+  #tl-c-note { display: flex; flex-direction: column; flex: 0 1 auto; min-height: 0; }
+  #tl-c-note > div { display: flex; flex-direction: column; flex: 0 1 auto; min-height: 0; }
+  #tl-c-note > div:first-child { overflow-y: auto; }
+  #tl-c-note > div:first-child:not(:empty) { min-height: 36px; }
+  #tl-c-note > div:first-child > * { flex: none; }
+  .tl-addr { display: flex; flex-direction: column; min-height: 0; }
+  .tl-words { flex: 0 1 auto; min-height: 54px; overflow-y: auto; }
+  .tl-addr > .row-inline { flex: none; }
+  #tl-c-ask:not(:empty), #tl-c-ctx:has(details[open]) { flex: 0 1 auto; min-height: 44px; overflow-y: auto; }
+  #tl-c-ctx:not(:has(details[open])) { flex: none; }
+  .tl-card:has(.tl-addr) .tl-turns, .tl-card:has(#tl-c-ask:not(:empty)) .tl-turns { min-height: 0; padding: 0; }
   .tl-addr .by { color: var(--muted); }
   .tl-addr [data-tl-accept].waiting { opacity: .55; }
   #av-held { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 70; max-width: min(90vw, 480px); padding: 8px 14px; border-radius: 8px; background: var(--fg); color: var(--bg); font-size: 13px; pointer-events: none; }
@@ -1183,7 +1196,7 @@ try {
   .tl-addr .tx, .tl-wd .tx { max-width: var(--av-measure); overflow-wrap: anywhere; }
   .tl-nview { max-width: var(--av-measure); }
   button.tl-shot { display: block; width: auto; height: auto; margin: 6px 0 2px; padding: 0; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
-  .tl-shot img { display: block; width: 160px; height: auto; }
+  .tl-shot img { display: block; width: 160px; height: auto; max-height: 120px; object-fit: contain; }
   .tl-shot-cap { font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
   .th-check { display: flex; align-items: center; gap: 6px; padding: 0 6px 8px 26px; }
   .th-check .badge, .th-check button { margin: 0; flex: none; }
@@ -7097,8 +7110,6 @@ function tNoteState(t) {
 // The shown version's open notes, as their pins are numbered: those placed on it; on main also a published
 // tree's, and a worktree's the Library lists no more; and on any version the notes to check whose change is
 // there (Show me opens it). Fields of kit-143's rows only: nothing here is worked out from the log.
-// what the bar says of Hand over: cut where there is no room, whole in its title
-avNotes.say = (words) => { $('e-avn').textContent = words; $('e-avn').title = words; };
 function avNotes() {
   if (!AV || AV.preview || TS.kind !== 'artifact') return [];
   const listed = DATA?.library?.artifacts ?? null;
@@ -7108,6 +7119,8 @@ function avNotes() {
   return TL.threads.filter((t) => t.subject?.kind === 'artifact' && tNoteState(t) !== 'resolved' && here(t.subject, t))
     .sort((a, b) => (at.get(a.id) ?? Infinity) - (at.get(b.id) ?? Infinity));
 }
+// what the bar says of Hand over: cut where there is no room, whole in its title
+avNotes.say = (words) => { $('e-avn').textContent = words; $('e-avn').title = words; };
 // The bar's group drawn from them: the stepper, Hand over (N open notes; none, no button) and who has the rest.
 // A hand-over just answered is believed until a read shows it (or 10 s have gone): the notes it took are with
 // that session. What was said of a version goes when another is shown.
@@ -10149,14 +10162,16 @@ function tlCardBody(t) {
   const sha = check && t.check === 'addressed' && /^[0-9a-f]{7,40}$/.test(check.sha ?? '') ? ` · ${check.sha.slice(0, 7)}` : '';
   // each part redrawn on its own, so where a step landed (the page's word) never takes a press from Resolve
   const draw = (el, html) => { if (el && el.said !== html) { el.said = html; el.innerHTML = html; } };
-  draw(box0.children[0], [
+  const above = [
     off?.gone && AV?.at === 'main' && '<div class="tl-nview">Showing main: the version with the change is gone.</div>',
     t && avStep.unseen(t) && '<div class="tl-nview">Not on this view</div>',
     t?.unready && s?.kind === 'artifact' && t.status === 'open' && `<div class="tl-wd"><div class="tx">The supervisor withdrew a mark: ${esc(t.unready.reason)}</div></div>`,
-  ].filter(Boolean).join(''));
+  ].filter(Boolean).join('');
+  draw(box0.children[0], check ? '' : above);
   // (named by note and mark: another's block is always a new one, never this one under the pointer)
-  draw(box0.children[1], !check ? '' : `<div class="tl-addr" data-for="${esc(`${t.id} ${check.at}`)}"><div class="by">${t.check === 'addressed' ? `Addressed by ${esc(check.by)}${sha}` : 'Proposed by the supervisor'}</div><div class="tx">${esc(t.check === 'addressed' ? check.note : check.outcome)}</div>${tlOpenWarn(t)}<div class="tl-pic"></div><div class="row-inline">${avShowMe.to(t) ? `<button type="button" class="ghost" data-tl-show="${esc(t.id)}">Show me</button>` : ''}<button type="button" data-tl-accept class="waiting" title="Read it first">Resolve</button></div></div>`);
+  draw(box0.children[1], !check ? '' : `<div class="tl-addr" data-for="${esc(`${t.id} ${check.at}`)}"><div class="tl-words"><div class="tl-said"></div><div class="by">${t.check === 'addressed' ? `Addressed by ${esc(check.by)}${sha}` : 'Proposed by the supervisor'}</div><div class="tx">${esc(t.check === 'addressed' ? check.note : check.outcome)}</div>${tlOpenWarn(t)}<div class="tl-pic"></div></div><div class="row-inline">${avShowMe.to(t) ? `<button type="button" class="ghost" data-tl-show="${esc(t.id)}">Show me</button>` : ''}<button type="button" data-tl-accept class="waiting" title="Read it first">Resolve</button></div></div>`);
   if (check) {
+    draw(box0.querySelector('.tl-said'), above);
     draw(box0.querySelector('.tl-pic'), tShot(t));
     (TL.drawnAt ??= {})[t.id] = check.at;
     avStep.watch();

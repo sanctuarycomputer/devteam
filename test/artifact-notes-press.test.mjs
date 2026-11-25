@@ -424,7 +424,7 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
         for (const tile of [false, true]) for (const x of await bad(tile)) found.push(`${w}${tile ? ' with the tile' : ''} on ${at}: ${x}`);
       }
       await V.p.ev(`(thGo({ th: 'open' }), true)`);
-      for (const w of [1024, 1280, 1512]) {
+      for (const w of [1024, 1280, 1560]) {
         await V.size(w, 800);
         await V.soon(`(() => { const r = document.getElementById('artifact-view').getBoundingClientRect(), k = r.width; const was = window.__vw; window.__vw = k; return was === k && k < ${w} - 300; })()`, `setup: the panel narrows the viewer at ${w}`);
         for (const x of await bad(true)) found.push(`${w} with the panel on ${at}: ${x}`);
@@ -432,9 +432,59 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
       await V.p.ev(`(thGo({}), true)`);
     }
     assert.deepEqual(found, [], 'each control is its own');
+    // with no notes the bar is one row at every width, as a preview's
+    await V.size(700, 800);
+    assert.deepEqual(await V.p.ev(`(() => { const n = document.getElementById('av-notes'), was = n.hidden; n.hidden = true; const b = document.querySelector('.av-bar'), r = [b.getBoundingClientRect().height, getComputedStyle(b).flexWrap, getComputedStyle(document.querySelector('.av-ver-wrap')).minWidth]; n.hidden = was; return r; })()`), [41, 'nowrap', '0px'], 'no notes: one row');
     // cut in the one-row bar
     await V.size(1280, 800);
     await openAt(V, AV_WT, 'plan-pricing');
     assert.ok(await V.p.ev(`(() => { const e = document.getElementById('av-with'); e.hidden = false; e.textContent = 'With ' + 'x'.repeat(80); return e.getBoundingClientRect().width <= 200; })()`), 'With is at most 200px in the one-row bar');
+  });
+
+  await sub('A26: with all it can hold, the card keeps Show me, Resolve, the reply box and Send inside the window', async () => {
+    const long = 'The trial button says what it does now, and the price under it reads as the plan page has it. '.repeat(4).slice(0, 300);
+    plant(N.onMain, V_C11.shot.stamp);
+    const V = await tabOf({ [N.onMain]: ROW.C12({ addressed: ADDR({ note: long }), shot: SHOT({ anchor: 'hidden' }) }) });
+    await openAt(V, AV_MAIN, 'main');
+    await cardOf(V, N.onMain);
+    await holdPoll(V);
+    await V.soon(`!!document.querySelector('#tl-card .tl-shot img') && !!document.querySelector('#tl-card [data-tl-show]')`, 'setup: the picture and Show me');
+    for (const [w, h] of [[1280, 800], [1280, 640], [390, 844], [320, 568]]) {
+      await V.size(w, h);
+      // both lines above, a phone's picture, the context open, the terminal asking
+      await V.p.ev(`(() => {
+        avStep.unseen = () => true; avStep.off = { id: TL.open, av: AV, gone: true };
+        tlDraw();
+        const d = document.querySelector('#tl-c-ctx details'); if (d) d.open = true;
+        document.querySelector('#tl-card .tl-shot img').src = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="390" height="700"><rect width="390" height="700" fill="red"/></svg>');
+        return true; })()`);
+      await V.soon(`document.querySelector('#tl-card .tl-shot img')?.naturalHeight === 700`, 'setup: a tall picture');
+      await V.p.ev(FRAMES);
+      const got = await V.p.ev(`(() => {
+        ASK.q = { kind: 'menu', digest: 'd-26', token: 'tok', question: 'Which of the three should it be, with the words the terminal shows over several lines of it?', options: [1, 2, 3].map((n) => ({ n, label: 'Option ' + n + ', said at some length' })), hint: 'Enter to confirm' };
+        askDraw();
+        const card = document.getElementById('tl-card'), c = card.getBoundingClientRect(), out = [];
+        const lines = [...card.querySelectorAll('.tl-nview')].map((e) => e.textContent);
+        if (lines.length !== 2) out.push('setup: lines ' + JSON.stringify(lines));
+        if (!card.querySelector('#tl-c-ctx details')?.open) out.push('setup: no open context');
+        if (card.querySelectorAll('[data-ask-option]').length !== 3) out.push('setup: no ask');
+        for (const s of ['.tl-addr [data-tl-show]', '.tl-addr [data-tl-accept]', '#tl-c-text', '[data-tl-send]']) {
+          const e = card.querySelector(s), r = e.getBoundingClientRect(), hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+          if (!(r.width > 10 && r.height > 10) || r.top < 0 || r.left < 0 || r.right > innerWidth || r.bottom > innerHeight || r.bottom > c.bottom) out.push(s + ' is at ' + [r.left, r.top, r.right, r.bottom].map(Math.round) + ', the card ' + Math.round(c.top) + ' to ' + Math.round(c.bottom));
+          else if (!e.contains(hit)) out.push(s + ' is under ' + (hit ? hit.id || hit.className || hit.tagName : 'nothing'));
+        }
+        for (const [s, floor] of [['.tl-words', 54], ['#tl-c-ask', 44], ['#tl-c-ctx', 44]]) {
+          const e = card.querySelector(s), r = e?.getBoundingClientRect();
+          if (!r || r.height < floor) { out.push(s + ' is ' + r?.height + ' tall'); continue; }
+          e.scrollTop = 99999;
+          const last = [...e.querySelectorAll('*')].filter((x) => x.getBoundingClientRect().height).reduce((m, x) => Math.max(m, x.getBoundingClientRect().bottom), 0);
+          if (last > r.bottom + 12.5) out.push(s + ' does not scroll to its end: ' + last + ' past ' + r.bottom);
+          e.scrollTop = 0;
+        }
+        const i = card.querySelector('.tl-shot img').getBoundingClientRect();
+        if (i.width !== 160 || i.height > 120) out.push('the picture is ' + i.width + ' by ' + i.height);
+        return out; })()`);
+      assert.deepEqual(got, [], `${w}x${h}`);
+    }
   });
 });

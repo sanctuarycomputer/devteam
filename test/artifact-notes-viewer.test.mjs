@@ -117,6 +117,7 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await V.p.ev(`(window.__replies['artifact-handoff'] = { status: 400, body: { error: 'x' } }, true)`);
     await V.p.click('#av-handover');
     assert.ok(await V.settle(`${text('#e-avn')} === 'Not saved: x'`, 4000), 'a refusal shows Not saved');
+    assert.equal(await V.p.ev(`document.getElementById('e-avn').title`), 'Not saved: x', 'a refusal whole in its title');
     // a refusal that comes once another version is shown is not said there
     await V.rows({ [N.trial]: ROW.C20(), [N.onMain]: ROW.C20() });
     await V.p.ev(`(window.__replies['artifact-handoff'] = { status: 400, body: { error: 'late' }, wait: 800 }, true)`);
