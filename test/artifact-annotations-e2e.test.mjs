@@ -447,7 +447,7 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
     for (const key of TOCHECK) await stepBy(V, 'av-next', key, `C6a stepping to ${key}`);
     // Resolve: the control found again with TL.open and the guard read in one look, then pressed
     const resolveSel = '#tl-card .tl-addr [data-tl-accept]';
-    await pressSel(V, resolveSel, 'BUTTON', { until: `!document.querySelector(${J(resolveSel)})`, guard: `${cardUp('N4')} && (() => { const e = document.querySelector(${J(resolveSel)}); return !!e && avStep.ready(e) !== null && !e.classList.contains('waiting'); })()` });
+    await pressSel(V, resolveSel, 'BUTTON', { guard: `${cardUp('N4')} && (() => { const e = document.querySelector(${J(resolveSel)}); return !!e && avStep.ready(e) !== null && !e.classList.contains('waiting'); })()` });
     const resolved = await poll(() => { const th = JSON.parse(ok(F, 'owner', ['thread', 'show', idOfKey('N4'), '--json'])); return th.status === 'resolved' ? th : null; }, 20000);
     assert.ok(resolved, 'C6a: Resolve on N4 leaves thread show N4 resolved');
     assert.equal(resolved.status, 'resolved', 'C6a: N4 is resolved');
@@ -482,10 +482,7 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
     const btn = `#tl-list [data-tl-show="${L[key]}"]`;
     await V.soon(`!!document.querySelector(${J(btn)})`, `${check}: ${key}'s row has Show me`);
     const n = await V.mark();
-    await V.p.ev(`document.querySelector(${J(btn)}).scrollIntoView({ block: 'center' }); void 0`);
-    await V.p.ev(FRAMES);
-    const at = await V.p.ev(`(() => { const r = document.querySelector(${J(btn)}).getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
-    await V.press(at.x, at.y, 'BUTTON');
+    await pressSel(V, btn, 'BUTTON');
     assert.ok(await V.settle(`location.hash === ${J(head)}`, 8000), `${check}: Show me on ${key} opens ${head}, not ${await V.p.ev('location.hash')}`);
     const said = `window.__own.slice(${n}).some((m) => m.own === 'at' && m.page === 'faq/index.html' && m.copy === ${J(copy)})`;
     const got = await V.settle(said, 10000);
