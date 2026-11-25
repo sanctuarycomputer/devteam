@@ -1,4 +1,5 @@
-// kit-139: project/self.md, what the project is (self@1). The supervisor drafts it from the code and
+// kit-139: project/self.md, what the project is; plain since kit-862 (self@2, its own checks in
+// test/self-plain.test.mjs and test/self-plain-cases.test.mjs; a version 1 file on main still validates). The supervisor drafts it from the code and
 // the strategy; the strategy links it rather than restating it. self show and self check read it,
 // validate refuses one that breaks the contract, a part's path is checked at the draft only (on main a
 // missing one raises self-drift), a capitalised word that main's strategy and dependency files don't
@@ -11,23 +12,28 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { json, kit as KIT, write } from './lib/kit.mjs';
 import { fixture, SUP } from './lib/next-step-fixture.mjs';
+import { checkSelf as refCheckSelf } from './fixtures/world2/check.mjs';
 
 const P = 'docs/devteam/project';
 const SELF = `${P}/self.md`;
 const STRAT = `${P}/strategy.md`;
 const EXT = `${P}/exterior.md`;
 const world = (f) => fs.readFileSync(new URL(`./fixtures/world/${f}`, import.meta.url), 'utf8');
-const SELF_MD = world('self.md');
-const STRATEGY = world('strategy.md');
+const world2 = (f) => fs.readFileSync(new URL(`./fixtures/world2/${f}`, import.meta.url), 'utf8');
+// the plain self.md (self@2) and its strategy; version 1's self.md and its dashboard block
+const SELF_MD = world2('self.md');
+const STRATEGY = world2('strategy.md');
+const V1 = world('self.md');
 const DATA = JSON.parse(world('dashboard-data.json'));
 const CASES = JSON.parse(world('invalid/cases.json')).filter((c) => c.file.startsWith('self-'));
-// the paths the fixture self.md's parts name, as files on main
-const PARTS = { 'app/main.js': 'app\n', 'app/plugins/api.js': 'api\n', 'sync/server.js': 'sync\n', 'deploy/sync.yml': 'deploy\n' };
+// the paths the plain self.md's parts link (cases.json's, its docs/ the fixture's docs/devteam/), and version 1's, as files on main
+const PARTS = Object.fromEntries(JSON.parse(world2('cases.json')).paths.map((p) => [`docs/devteam/${p.slice('docs/'.length)}`, 'x\n']));
+const V1_PARTS = { 'app/main.js': 'app\n', 'app/plugins/api.js': 'api\n', 'sync/server.js': 'sync\n', 'deploy/sync.yml': 'deploy\n' };
 const SRC = fs.readFileSync(path.join(KIT, 'scripts', 'devteam.mjs'), 'utf8');
 const re = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
-// self.md with its prose or its block changed
+// self.md with a paragraph added; version 1's with its block's what changed
 const withProse = (extra) => SELF_MD.replace('It controls its code', `${extra}\n\nIt controls its code`);
-const withBlock = (edit) => SELF_MD.replace(/```self\n([\s\S]*?)\n```/, (_, b) => { const v = JSON.parse(b); edit(v); return `\`\`\`self\n${JSON.stringify(v, null, 2)}\n\`\`\``; });
+const v1What = (what) => V1.replace('"what": "A note app for independent researchers that keeps every note as plain text."', `"what": ${JSON.stringify(what)}`);
 
 // A fixture project: main holds strategy (null: init's template), self.md (null: none) and the
 // parts' files; a gh on PATH answers `gh repo view acme/quillmark` with the visibility set (unknown, or
@@ -98,31 +104,26 @@ const withProject = (name, opts, body) => async (t) => {
 };
 
 test('self show, --json, dashboard-data, search and governance read main\'s self.md (DW1)', withProject('self-show', {}, async (W, check) => {
-  await check('C1 self show prints what it is, what it makes or does, each part with its paths, what it controls and what it does not', () => {
+  await check('C1 self show prints main\'s self.md as it is', () => {
     const s = W.run(['self', 'show']);
     assert.equal(s.status, 0, `C1 self show exits 0\n${s.text}`);
-    for (const want of [
-      'What it is: A note app for independent researchers that keeps every note as plain text.',
-      'What it makes or does: Plain-text notes that sync between a researcher\'s devices.',
-      'app  The app: The editor people write their notes in. (app/)',
-      'sync  Sync service: Keeps notes the same on every device. (sync/, deploy/sync.yml)',
-      'plugin-api  Plugin interface: What plugins build on. (app/plugins/)',
-      'Controls: its code; its releases; its pages',
-      'Does not control: the storage that holds the synced notes',
-    ]) assert.ok(s.out.includes(want), `C1 self show prints "${want}"\n${s.out}`);
+    assert.ok(s.out.includes(SELF_MD.trim()), `C1 self show prints the document\n${s.out}`);
   });
-  await check('C2 self show --json is the contract\'s dashboard-data self block', () => {
+  await check('C2 self show --json: null for a plain self.md, the contract\'s dashboard-data self block for a version 1 one (until kit-868)', () => {
+    assert.equal(W.run(['self', 'show', '--json']).out, 'null', 'C2 null for a plain self.md');
+    W.onMain({ [SELF]: V1, ...V1_PARTS }, 'version 1');
     const j = W.run(['self', 'show', '--json']);
     assert.deepEqual(j.status === 0 ? JSON.parse(j.out) : j.text, DATA.self, 'C2 self show --json is the contract\'s dashboard-data self block');
   });
-  await check('C3 dashboard-data carries main\'s self.md as its self block, not the working tree\'s', () => {
+  await check('C3 dashboard-data carries main\'s version 1 self.md as its self block, not the working tree\'s', () => {
     assert.deepEqual(json(W.ok(['dashboard-data'])).self, DATA.self, 'C3 dashboard-data carries main\'s self.md as its self block');
-    write(path.join(W.old, SELF), withBlock((v) => { v.what = 'Something else entirely.'; }));
+    write(path.join(W.old, SELF), v1What('Something else entirely.'));
     assert.deepEqual(json(W.ok(['dashboard-data'])).self, DATA.self, 'C3 dashboard-data reads main, not the working tree');
     W.g(['checkout', '--', SELF], W.old);
+    W.onMain({ [SELF]: SELF_MD }, 'plain again');
   });
   await check('C4 search finds a word of self.md', () => {
-    const hits = json(W.ok(['search', 'editor', '--json'])).results.map((r) => r.id);
+    const hits = json(W.ok(['search', 'long notes', '--json'])).results.map((r) => r.id);
     assert.ok(hits.some((id) => /^self\.md(#|$)/.test(id)), `C4 search finds a word of self.md\n${JSON.stringify(hits)}`);
   });
   await check('C5 governance lists self.md between strategy.md and exterior.md, written, titled Self', () => {
@@ -155,63 +156,68 @@ test('a project without self.md: show says not drafted yet, check and validate p
   });
 }));
 
+// whether a path is in the fixture repo's working tree by exact case ('' the root)
+const hasIn = (root) => (p) => { let dir = root; for (const x of p === '' ? [] : p.split('/')) { let n; try { n = fs.readdirSync(dir); } catch { return false; } if (!n.includes(x)) return false; dir = path.join(dir, x); } return true; };
 test('self check and validate refuse every self case in test/fixtures/world/invalid/ (DW2)', withProject('self-invalid', {}, async (W, check) => {
-  await check('C6 self check refuses each self case, saying why', () => {
+  await check('C6 self check refuses each version 1 case as a draft, saying why as self@2 does', () => {
     for (const c of CASES) {
-      write(path.join(W.old, SELF), world(`invalid/${c.file}`));
+      const text = world(`invalid/${c.file}`);
+      write(path.join(W.old, SELF), text);
       const r = W.run(['self', 'check']);
       assert.notEqual(r.status, 0, `C6 self check refuses ${c.file}\n${r.text}`);
-      assert.match(r.out, new RegExp(`error: self\\.md: .*${re(c.expect)}`), `C6 self check says why for ${c.file}\n${r.out}`);
+      for (const e of refCheckSelf(text, { root: P, has: hasIn(W.old) }).errors) assert.ok(r.out.includes(`error: self.md: ${e}`), `C6 self check says "${e}" for ${c.file}\n${r.out}`);
     }
     // a self.md saved with CRLF line ends is the same document (fences and JSON read alike)
     write(path.join(W.old, SELF), SELF_MD.replace(/\n/g, '\r\n'));
     const crlf = W.run(['self', 'check']);
     assert.equal(crlf.status, 0, `C6 self check passes the fixture with CRLF line ends\n${crlf.text}`);
   });
-  await check('C7 validate refuses each self case, saying why', () => {
+  await check('C7 validate refuses each self case, saying why: self@1\'s words for a block, self@2\'s for none', () => {
     for (const c of CASES) {
       write(path.join(W.old, SELF), world(`invalid/${c.file}`));
       const v = W.run(['validate']);
       assert.notEqual(v.status, 0, `C7 validate refuses ${c.file}\n${v.text}`);
-      assert.match(v.out, new RegExp(`error: ${re(SELF)}: .*${re(c.expect)}`), `C7 validate says why for ${c.file}\n${v.out}`);
+      const why = c.file === 'self-no-block.md' ? 'no part' : c.expect;
+      assert.match(v.out, new RegExp(`error: ${re(SELF)}: .*${re(why)}`), `C7 validate says why for ${c.file}\n${v.out}`);
     }
   });
-  await check('C6 self show refuses main\'s broken self.md; C3 dashboard-data self is then null', () => {
+  await check('C6 self show prints main\'s broken version 1 self.md as it is; C3 dashboard-data self is then null', () => {
     W.onMain({ [SELF]: world('invalid/self-no-parts.md') });
     const s = W.run(['self', 'show']);
-    assert.notEqual(s.status, 0, 'C6 self show refuses main\'s broken self.md');
-    assert.match(s.text, /self\.parts needs at least 1/, 'C6 self show says why');
+    assert.equal(s.status, 0, `C6 self show prints it\n${s.text}`);
+    assert.ok(s.out.includes(world('invalid/self-no-parts.md').trim()), 'C6 self show prints the document');
     assert.equal(json(W.ok(['dashboard-data'])).self, null, 'C3 dashboard-data self is null when main\'s self.md breaks the contract');
   });
 }));
 
 test('a part\'s path is checked at the draft only: self check, chore pr, check-pr and merge --chore (DW3)', withProject('self-paths', { visibility: 'private' }, async (W, check) => {
   await check('C9 self check refuses a part whose path is gone from the working tree', () => {
-    fs.rmSync(path.join(W.old, 'sync'), { recursive: true, force: true });
+    fs.rmSync(path.join(W.old, 'docs/devteam/services'), { recursive: true, force: true });
     const c = W.run(['self', 'check']);
-    W.g(['checkout', '--', 'sync'], W.old);
+    W.g(['checkout', '--', 'docs/devteam/services'], W.old);
     assert.notEqual(c.status, 0, `C9 self check refuses a part whose path is gone\n${c.text}`);
-    assert.match(c.out, /error: self\.md: part sync's path sync\/ is not in the repo/, 'C9 self check names the part and its path');
+    assert.match(c.out, /error: self\.md: part link \.\.\/services\/sync\/ points to nothing/, 'C9 self check names the part link');
     const ok = W.run(['self', 'check']);
     assert.equal(ok.status, 0, `C9 self check passes while every part's path is there\n${ok.text}`);
   });
-  await check('C32 a part\'s path is normalised alike on disk and in git: ".", "./sync/" and "app//main.js" exist', () => {
-    write(path.join(W.old, SELF), withBlock((v) => { v.parts[0].code = ['.', 'app//main.js']; v.parts[1].code = ['./sync/']; }));
+  await check('C32 a part link is resolved alike on disk and in git: "./../app/", "../services//sync/" and "../../" exist', () => {
+    const dots = withProse('Its parts also read as [the app](./../app/), [the sync service](../services//sync/) and [the whole repo](../../).');
+    write(path.join(W.old, SELF), dots);
     const c = W.run(['self', 'check']);
-    assert.equal(c.status, 0, `C32 self check passes paths that exist, spelled with . and //\n${c.text}`);
-    const q = W.chorePr('dots', (w) => write(path.join(w, SELF), withBlock((v) => { v.parts[0].code = ['.', 'app//main.js']; v.parts[1].code = ['./sync/']; })));
+    assert.equal(c.status, 0, `C32 self check passes links that exist, spelled with . and //\n${c.text}`);
+    const q = W.chorePr('dots', (w) => write(path.join(w, SELF), dots));
     assert.equal(q.status, 0, `C32 chore pr pushes them\n${q.text}`);
     W.g(['checkout', '--', SELF], W.old);
-    write(path.join(W.old, SELF), withBlock((v) => { v.parts[0].code = ['App/']; }));
+    write(path.join(W.old, SELF), withProse('Its app is also [the App](../App/).'));
     const k = W.run(['self', 'check']);
     W.g(['checkout', '--', SELF], W.old);
-    assert.match(k.out, /error: self\.md: part app's path App\/ is not in the repo/, `C32 a path is matched with its case, as git reads it, on any disk\n${k.out}`);
+    assert.match(k.out, /error: self\.md: part link \.\.\/App\/ points to nothing/, `C32 a path is matched with its case, as git reads it, on any disk\n${k.out}`);
   });
   let p = null;
   await check('C10 chore pr refuses a self.md whose part\'s path is gone at its head, even on a private repo, and pushes nothing', () => {
-    p = W.chorePr('gone', (w) => { W.rmPath(w, 'deploy/sync.yml'); write(path.join(w, SELF), withProse('It also keeps a log.')); });
+    p = W.chorePr('gone', (w) => { W.rmPath(w, 'docs/devteam/services'); write(path.join(w, SELF), withProse('It also keeps a log.')); });
     assert.notEqual(p.status, 0, `C10 chore pr refuses a self.md whose part's path is gone\n${p.text}`);
-    assert.match(p.text, /part sync's path deploy\/sync\.yml is not at [0-9a-f]{12}/, 'C10 chore pr names the part and its path');
+    assert.match(p.text, /self\.md: part link \.\.\/services\/sync\/ points to nothing/, 'C10 chore pr names the part link');
     assert.equal(p.pushed(), false, 'C10 chore pr pushes nothing');
   });
   // the branch as pushed by hand: check-pr and merge --chore refuse it too
@@ -219,30 +225,30 @@ test('a part\'s path is checked at the draft only: self check, chore pr, check-p
   await check('C11 check-pr refuses a PR changing self.md whose part\'s path is gone at the head', () => {
     const k = W.checkPr('chore-gone', sha);
     assert.notEqual(k.status, 0, `C11 check-pr refuses it\n${k.text}`);
-    assert.match(k.text, /part sync's path deploy\/sync\.yml is not at [0-9a-f]{12}/, 'C11 check-pr names it');
+    assert.match(k.text, /self\.md breaks self@2 at [0-9a-f]{12}: part link \.\.\/services\/sync\/ points to nothing/, 'C11 check-pr names it');
   });
   await check('C11 merge --chore names it too', () => {
     const m = W.run(['merge', '--chore', 'gone', '--dry-run']);
-    assert.match(m.text, /part sync's path deploy\/sync\.yml is not at [0-9a-f]{12}/, `C11 merge --chore names it\n${m.text}`);
+    assert.match(m.text, /self\.md breaks self@2 at [0-9a-f]{12}: part link \.\.\/services\/sync\/ points to nothing/, `C11 merge --chore names it\n${m.text}`);
   });
 }));
 
 test('on main a part\'s path gone fails nothing: the refactor passes check-pr and metrics raises self-drift once per path (DW3)', withProject('self-drift', { visibility: 'private' }, async (W, check) => {
   await check('C12 a refactor deleting parts\' paths passes check-pr and validate, and metrics raises self-drift once per path', () => {
     assert.deepEqual(W.findings('self-drift'), [], 'C12 no self-drift while every part\'s path is on main');
-    const sha = W.branchOf('chore-refactor', (w) => { W.rmPath(w, 'sync'); W.rmPath(w, 'deploy'); write(path.join(w, 'services/sync.js'), 'moved\n'); });
+    const sha = W.branchOf('chore-refactor', (w) => { W.rmPath(w, 'docs/devteam/services'); W.rmPath(w, 'docs/devteam/plugin api'); write(path.join(w, 'docs/devteam/web/sync.js'), 'moved\n'); });
     const k = W.checkPr('chore-refactor', sha);
     assert.equal(k.status, 0, `C12 a refactor deleting a part's path, self.md untouched, passes check-pr\n${k.text}`);
-    W.onMain({ sync: null, deploy: null, 'services/sync.js': 'moved\n' }, 'refactor');
+    W.onMain({ 'docs/devteam/services': null, 'docs/devteam/plugin api': null, 'docs/devteam/web/sync.js': 'moved\n' }, 'refactor');
     assert.doesNotMatch(W.run(['validate']).out, /self\.md/, 'C12 validate says nothing of a part\'s path on main');
     const f = W.findings('self-drift');
-    assert.deepEqual(f.map((x) => [x.severity, x.subject, x.key]).sort(), [['low', 'self', 'deploy/sync.yml'], ['low', 'self', 'sync/']], `C12 self-drift, low, subject self, once per missing path, keyed by it\n${JSON.stringify(f)}`);
-    assert.match(f[0].detail, /path (sync\/|deploy\/sync\.yml) is not on main/, 'C12 the detail names the path');
+    assert.deepEqual(f.map((x) => [x.severity, x.subject, x.key]).sort(), [['low', 'self', 'docs/devteam/plugin api/index.js'], ['low', 'self', 'docs/devteam/services/sync']], `C12 self-drift, low, subject self, once per missing path, keyed by it\n${JSON.stringify(f)}`);
+    assert.match(f[0].detail, /part docs\/devteam\/(services\/sync|plugin api\/index\.js) is not on main/, 'C12 the detail names the path');
   });
   await check('C28 observe-metrics records each self-drift path as its own observation, its source_key carrying the finding\'s key', () => {
     W.ok(['observe-metrics']);
     const keys = logLines(W).filter((o) => o.type === 'observation' && o.kind === 'self-drift').map((o) => o.source_key).sort();
-    assert.deepEqual(keys, ['metrics:self-drift:self:deploy/sync.yml', 'metrics:self-drift:self:sync/'], `C28 one observation per path\n${JSON.stringify(keys)}`);
+    assert.deepEqual(keys, ['metrics:self-drift:self:docs/devteam/plugin api/index.js', 'metrics:self-drift:self:docs/devteam/services/sync'], `C28 one observation per path\n${JSON.stringify(keys)}`);
   });
 }));
 
@@ -253,15 +259,14 @@ test('the names rule: self check warns on a capitalised word main\'s strategy an
     assert.equal(c.status, 0, `C13 self check passes the fixture\n${c.text}`);
     assert.doesNotMatch(c.out, /warning: self\.md: "/, 'C13 no names warning');
   });
-  await check('C13 self check warns once per word main\'s strategy.md and dependency files lack, not a sentence\'s first word; code, links and comments count; every word of not, controls and a part\'s name counts', () => {
+  await check('C13 self check warns once per word main\'s strategy.md and dependency files lack, not a sentence\'s first word; code, links and comments count; the whole text is read', () => {
     // Postwick is in the working tree's strategy but not main's
     write(path.join(W.old, STRAT), `${STRATEGY}\nMail goes through Postwick.\n`);
-    write(path.join(W.old, SELF), withBlock((v) => { v.not.push('Stripe'); v.parts[1].what = 'Keeps notes the same through Postwick and Ferrous.'; v.parts[2].name = 'Vellum plugins'; })
-      .replace('It controls its code', 'Brightline hosts it. It mails through Postwick, Inkpad and Quillsync, and `Zephyr` runs it.\n\nThe notes sync through\nBrightline today.\n\nIt controls its code'));
+    write(path.join(W.old, SELF), withProse('Brightline hosts it. It mails through Postwick, Inkpad and Quillsync, and `Zephyr` runs it.\n\nThe notes sync through\nBrightline today. Its [Vellum plugins](../app/) keep notes through Postwick and Ferrous, and it does not control Stripe.'));
     const c = W.run(['self', 'check']);
     assert.equal(c.status, 0, `C13 a names warning leaves self check's exit at 0\n${c.text}`);
     const warned = [...c.out.matchAll(/warning: self\.md: "([^"]+)" \(([^)]+)\)/g)].map((m) => `${m[1]} ${m[2]}`);
-    assert.deepEqual(warned, ['Postwick prose', 'Zephyr prose', 'Brightline prose', 'Vellum parts[2].name', 'Stripe not[1]'], `C13 the words warned, each at its first place (code is public too)\n${c.out}`);
+    assert.deepEqual(warned, ['Postwick prose', 'Zephyr prose', 'Brightline prose', 'Vellum prose', 'Stripe prose'], `C13 the words warned, each at its first place (code is public too)\n${c.out}`);
   });
   await check('C18 one function, unknownNames, in the self-model region, says which words', () => {
     assert.equal((SRC.match(/\nfunction unknownNames\(/g) ?? []).length, 1, 'C18 unknownNames is defined once');
@@ -270,13 +275,13 @@ test('the names rule: self check warns on a capitalised word main\'s strategy an
 }));
 
 test('the names hold: chore pr refuses a self.md draft on a public or unknown repo until --names-checked names each word (DW4)', withProject('self-hold', { visibility: 'public' }, async (W, check) => {
-  const draft = (w) => write(path.join(w, SELF), withBlock((v) => { v.not.push('Stripe'); }).replace('It controls its code', 'It mails through Postwick.\n\nIt controls its code'));
+  const draft = (w) => write(path.join(w, SELF), withProse('It mails through Postwick, and it does not control Stripe.'));
   await check('C14 on a public repo chore pr refuses while a warning stands, listing each word, and pushes nothing', () => {
     const p = W.chorePr('a', draft);
     assert.notEqual(p.status, 0, `C14 chore pr refuses on a public repo while a warning stands\n${p.text}`);
     assert.match(p.text, /this repo is public/, 'C14 says the repo is public');
     assert.match(p.text, /"Postwick" \(prose\)/, 'C14 lists Postwick');
-    assert.match(p.text, /"Stripe" \(not\[1\]\)/, 'C14 lists Stripe');
+    assert.match(p.text, /"Stripe" \(prose\)/, 'C14 lists Stripe');
     assert.equal(p.pushed(), false, 'C14 chore pr pushes nothing');
   });
   await check('C34 a refused chore pr undoes its own commit, so rewording the draft clears it and the word is never pushed', () => {
@@ -297,7 +302,7 @@ test('the names hold: chore pr refuses a self.md draft on a public or unknown re
     const part = W.chorePr('a', () => {}, ['--names-checked', 'Stripe']);
     assert.notEqual(part.status, 0, `C15 --names-checked naming only some words is refused\n${part.text}`);
     assert.match(part.text, /"Postwick" \(prose\)/, 'C15 it lists the word left unnamed');
-    assert.doesNotMatch(part.text, /"Stripe" \(not/, 'C15 and not the one named');
+    assert.doesNotMatch(part.text, /"Stripe" \(prose/, 'C15 and not the one named');
     assert.equal(part.pushed(), false, 'C15 nothing pushed');
   });
   await check('C15 --names-checked naming every word pushes, and logs a names-checked act on the chore', () => {
