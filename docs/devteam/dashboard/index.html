@@ -9612,6 +9612,20 @@ function tCardState(t, now, typed, pane, sup = typeof TL !== 'undefined' ? TL.su
   const wAt = Date.parse(w?.at ?? '');
   const has = !!w && (w.stage === 'picked-up' || w.stage === 'responding') && o >= 0 && !!turns[o].id && w.turn === turns[o].id
     && turns.slice(o + 1).every((x) => x.by !== 'owner' && Date.parse(x.at) < wAt);
+  // an artifact note (kit-148): by kit-145's state; the page's other threads are as ever (two tests load threads-core alone)
+  const art = t.subject?.kind === 'artifact' && typeof tNoteState === 'function' && typeof avRecipient === 'function';
+  const ns = art ? tNoteState(t) : null;
+  if (art && !last.pending && !has) {
+    if (ns === 'check') return null;
+    if (ns === 'with') {
+      const to = t.with ?? t.handed?.to;
+      const from = Date.parse(t.handed?.at ?? '');
+      // the supervisor's own turn after the hand-over (writer, else any non-owner turn: the view names them all supervisor)
+      const replied = turns.some((x) => x.by !== 'owner' && Date.parse(x.at) > from && (x.writer ? x.writer === 'supervisor' : true));
+      if (to === 'supervisor' && !replied && now - from > T_WAIT_MS) return "The supervisor hasn't replied yet.";
+      return `With ${to}.`;
+    }
+  }
   if (last.by !== 'owner' && !has) return null;
   if (last.pending) return 'Sending…';
   if (has) {
@@ -9622,6 +9636,8 @@ function tCardState(t, now, typed, pane, sup = typeof TL !== 'undefined' ? TL.su
     const who2 = typeof b !== 'string' || !b ? 'A session' : b === 'supervisor' ? 'The supervisor' : b === 'responder' ? 'The responder' : plan ? `The planner for ${plan[1]}` : named && named !== b ? `${named.charAt(0).toUpperCase()}${named.slice(1)}` : `The session on ${b}`;
     return w.stage === 'responding' ? `${who2} is responding…` : `${who2} picked it up.`;
   }
+  // an open note whose newest words are the owner's and nobody's yet (kit-144): they wait for Hand over
+  if (art && ns === 'open' && last.by === 'owner' && (last.routed_to ?? 'supervisor') === 'supervisor') return `Not handed over yet. Hand over sends it to ${avRecipient(t.subject.at).replace(/^supervisor$/, 'the supervisor')}.`;
   // a turn routed to the responder (kit-104): the landed turn's route says so (a turn in the log is
   // the server's record's to say), else the page's own send; the responder's hold or failed typing
   // stays late until a reply. Never "Not delivered" nor the supervisor's hold for it.
@@ -10344,11 +10360,7 @@ function tlCardBody(t) {
     turns.scrollTop = turns.scrollHeight;
   }
   const said = !t ? '' : t.status === 'resolved' ? `Resolved${t.outcome ? `: ${t.outcome}` : ''}. Writing reopens it.` : tCardState(t, Date.now(), TL.typed[t.id] === 'held' && !askShown() ? true : TL.typed[t.id], TL.pane) ?? '';
-  // an open note's newest words are the owner's and nobody's yet (kit-144): they wait for Hand over, whatever the send
-  // said and after a reload too. Words a session, the responder or a session's record has, or on their way, are as ever.
-  const newest = t?.turns?.at(-1), routed = newest?.routed_to ?? 'supervisor';
-  const kept = s?.kind === 'artifact' && !!newest && newest.by === 'owner' && !newest.pending && routed === 'supervisor' && tNoteState(t) === 'open' && !/ (picked it up\.|is responding…)$/.test(said);
-  const line = kept ? 'Kept with the note: Hand over sends it to the session drawing it.' : said;
+  const line = said;
   // a live region: written only when the words change, so a poll with the same stage announces nothing
   const state = tlEl('tl-c-state');
   if (state.textContent !== line) state.textContent = line;
