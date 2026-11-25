@@ -1622,6 +1622,59 @@
       }
     },
     {
+      "file": "cases/public-host-percent-encoded.md",
+      "doc": "exterior",
+      "shows": "a host percent-encoded after punctuation a host keeps",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "ledgerpad,one.zorbly.example",
+          "ledgerpad(two).zorbly.example",
+          "ledgerpad;three.zorbly.example",
+          "ledgerpad,four.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-mailto-encoded.md",
+      "doc": "exterior",
+      "shows": "a mailto address with %40, a quoted local part or a to field",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "one.zorbly.example",
+          "two.zorbly.example",
+          "three.zorbly.example",
+          "four.zorbly.example",
+          "five.zorbly.example"
+        ]
+      }
+    },
+    {
+      "file": "cases/public-host-long-scheme.md",
+      "doc": "exterior",
+      "shows": "a host after a backslash in the user of a scheme longer than 31 characters",
+      "visibility": "public",
+      "expect": {
+        "errors": [],
+        "warnings": [],
+        "refused": [],
+        "held": [],
+        "hosts": [
+          "one.zorbly.example",
+          "two.zorbly.example"
+        ]
+      }
+    },
+    {
       "file": "cases/public-heading-span-in-tail.md",
       "doc": "exterior",
       "shows": "a heading whose link's tail holds a code span is no link",

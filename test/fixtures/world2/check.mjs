@@ -516,6 +516,23 @@ const values = (t) => {
   }
   return out.join(' ');
 };
+// Every address as a browser reads it: a scheme (at a word's start, any length), a colon, and what
+// follows up to white space, < or >, read by node's URL. Its host, percent-decoded (URL decodes a
+// special scheme's; another's is decoded here); for mailto:, each address of its path and of its
+// to, cc and bcc fields, decoded, past the last @. This closes the class the rules above spell out
+// form by form: a host percent-encoded, behind punctuation a host keeps, or after a long scheme.
+const ADDRESS = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:[^\s<>]*/giu;
+const unpct = (s) => { try { return decodeURIComponent(s); } catch { return s; } };
+function urlHosts(s) {
+  if (!URL.canParse(s)) return [];
+  const u = new URL(s);
+  if (u.protocol !== 'mailto:') return u.hostname ? [unpct(u.hostname)] : [];
+  const out = [];
+  const fields = [u.pathname];
+  for (const [k, v] of u.searchParams) if (/^(?:to|cc|bcc)$/i.test(k)) fields.push(v);
+  for (const f of fields) for (const a of unpct(f).split(',')) { const at = a.lastIndexOf('@'); if (at >= 0) out.push(a.slice(at + 1)); }
+  return out;
+}
 const third = (t) => decode(attrs(angles(dests(t)), true), true).replace(/[^\S\t\n\v\f\r ]/gu, '');
 export function hosts(text) {
   const out = new Set();
@@ -536,6 +553,7 @@ export function hosts(text) {
       else if (m[4] !== undefined) { const h = tail(m[4]).toLowerCase(); if (h.includes('.')) add(h); }
       else if (m[5] !== undefined) add(tail(m[5]).toLowerCase());
     }
+    for (const u of each.matchAll(ADDRESS)) for (const h of urlHosts(u[0])) add(tail(h).toLowerCase());
   }
   return [...out];
 }
