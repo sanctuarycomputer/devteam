@@ -924,6 +924,31 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
       assert.throws(() => cleared(fs.readFileSync(`${other}.err`, 'utf8'), 'X12'), /is not locked/, 'X12: refused');
       assert.equal(git(['rev-parse', 'HEAD'], wt('ch-91-v')), main, 'X12: still there');
     });
+    await t.test('P4: a branch named refs/remotes/origin/<branch> isn\'t read as the tracking ref', tmux, () => {
+      ticket('ch-73-d');
+      git(['update-ref', 'refs/heads/refs/remotes/origin/ticket/ch-73-d', planted(old, git(['rev-parse', 'origin/main'], old))], old);
+      try {
+        const r = run(old, ['worker', 'ch-73-d'], SUP);
+        assert.equal(r.status, 0, `P4: started: ${r.err}`);
+      } finally { git(['update-ref', '-d', 'refs/heads/refs/remotes/origin/ticket/ch-73-d'], old); }
+    });
+    await t.test('K10: a stale tracking ref\'s commits stay held when the branch that held them is moved back before the checkout', tmux, () => {
+      const head = ranWithWork('ch-82-m');
+      git(['update-ref', 'refs/remotes/origin/ticket/ch-82-m', head], old);
+      const b = before('git-moves-back', "*' worktree add '*", (g) => `'${g}' update-ref refs/heads/ticket/ch-82-m ${head}~1`);
+      const r = run(old, ['worker', 'ch-82-m', '--resume'], b.env);
+      assert.ok(fs.existsSync(b.said), 'K10: it moved back');
+      assert.notEqual(git(['for-each-ref', '--format=%(refname)', '--contains', head], old), '', 'K10: a ref still holds the commits');
+      assert.notEqual(r.status, 0, `K10: refused: ${r.out}`);
+      assert.match(r.err, new RegExp(`kept at refs/devteam/kept/ticket/ch-82-m/${head}`), 'K10: the full sha');
+    });
+    await t.test('K11: a kept ref from an earlier launch is never dropped', tmux, () => {
+      const head = ranWithWork('ch-83-n');
+      git(['update-ref', 'refs/remotes/origin/ticket/ch-83-n', head], old);
+      git(['update-ref', `refs/devteam/kept/ticket/ch-83-n/${head}`, head], old);
+      ok(old, ['worker', 'ch-83-n', '--resume'], SUP);
+      assert.ok(hasRef(old, `refs/devteam/kept/ticket/ch-83-n/${head}`), 'K11: still there');
+    });
   } finally { F.done(); }
 });
 

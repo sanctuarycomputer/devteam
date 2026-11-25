@@ -27706,22 +27706,26 @@ function makeSession(role) {
     // its commits are in the start, or under a ref of their own. A symbolic one holds none.
     const tracking = `refs/remotes/origin/${branch}`;
     const keptAt = `refs/devteam/kept/${branch}/`;
-    const raw = at.branch ? null : R.git(['rev-parse', '--verify', '--quiet', tracking], R.root); // read once: a tag's own object too
+    const exact = at.branch ? null : responderGit(['show-ref', '--verify', '--hash', tracking], R.root);
+    const raw = exact?.status === 0 ? exact.stdout.trim() : null; // read once: a tag's own object too
     const peeled = raw && responderGit(['rev-parse', '--verify', '--quiet', `${raw}^{commit}`], R.root);
     const stale = peeled && peeled.status === 0 ? peeled.stdout.trim() : null;
     let keptNow = null;
+    let keptUntil = null; // this start's own kept ref for commits the new worktree will hold
     if (stale) {
       const symbolic = R.git(['symbolic-ref', '--quiet', tracking], R.root) !== null;
-      const keep = !symbolic && !anc(stale, sha);
+      // the branch can be moved back before the checkout: only origin's main holds them whatever happens
+      const keep = !symbolic && !anc(stale, at.main);
       if (keep) keptNow = `${keptAt}${stale}`;
+      if (keep && anc(stale, sha) && responderGit(['show-ref', '--verify', '--quiet', keptNow], R.root).status !== 0) keptUntil = keptNow;
       if (keep) write(['update-ref', '--no-deref', `${keptAt}${stale}`, stale], `keep ${stale} under ${keptAt}`);
-      warn(`origin has no ${branch}: its tracking ref here (${short(stale)}) is ignored and removed${keep ? `, its commits kept at ${keptAt}${stale}` : ''}${sha === at.main ? `, and the branch starts from origin's ${mb} (${short(at.main)})` : ''}`);
+      warn(`origin has no ${branch}: its tracking ref here (${short(stale)}) is ignored and removed${keep ? `, its commits kept at ${keptAt}${stale}${keptUntil ? ' until the worktree holds them' : ''}` : ''}${sha === at.main ? `, and the branch starts from origin's ${mb} (${short(at.main)})` : ''}`);
       write(['update-ref', '--no-deref', '-d', tracking, raw], `remove ${tracking}`);
     }
     // read back, so a retry's act names what a stopped launch kept
     const found = (R.git(['for-each-ref', '--format=%(refname)', keptAt], R.root) ?? '').split('\n').filter((r) => r.startsWith(keptAt) && /^[0-9a-f]{40,64}$/.test(r.slice(keptAt.length)));
-    const keptRefs = [...new Set([...(keptNow ? [keptNow] : []), ...found])];
-    if (keptRefs.length) keptWords += `; commits kept at ${keptRefs.slice(0, 3).join(', ')}${keptRefs.length > 3 ? ` and ${keptRefs.length - 3} more` : ''}`;
+    let keptRefs = [...new Set([...(keptNow ? [keptNow] : []), ...found])];
+    const sayKept = () => { if (keptRefs.length) keptWords += `; commits kept at ${keptRefs.slice(0, 3).join(', ')}${keptRefs.length > 3 ? ` and ${keptRefs.length - 3} more` : ''}`; };
     // set by config: --track fails where the checkout's fetch refspec is blank
     // set again when it is main's and origin holds the branch now: a launch refused below leaves it written
     const merge = R.git(['config', '--get', `branch.${branch}.merge`], R.root);
@@ -27772,6 +27776,9 @@ function makeSession(role) {
     }
     const unlocked = responderGit(['worktree', 'unlock', wt], R.root);
     if (unlocked.status !== 0) undo(`could not unlock the new worktree: ${redactUrl(firstLine(unlocked.stderr).replace(/^(fatal|error): /, '')) || `exit ${unlocked.status}`}`);
+    // the worktree's branch holds them now
+    if (keptUntil && responderGit(['update-ref', '--no-deref', '-d', keptUntil, stale], R.root).status === 0) keptRefs = keptRefs.filter((r) => r !== keptUntil);
+    sayKept();
     madeWorktree = true;
   }
   // A harness keeps its sessions by directory on its own machine: a worktree made just now has no
