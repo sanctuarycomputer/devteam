@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { canDrive } from './lib/chrome.mjs';
 import { harness, J, FRAMES, VIEWER_UP } from './fixtures/artifact-viewer/harness.mjs';
-import { buildStack, ok, SLUG, FAQ, PLAN, CHORE, OLD } from './fixtures/artifact-annotations-e2e/stack.mjs';
+import { buildStack, ok, logLines, SLUG, FAQ, PLAN, CHORE, OLD } from './fixtures/artifact-annotations-e2e/stack.mjs';
 
 const WIN = { width: 1100, height: 800 };
 const HEAD_P = `#artifact/wt/${PLAN}/${SLUG}`;
@@ -146,6 +146,61 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
     await V.appLink();
     await V.close('x');
     await V.closedOn('#library', 'a preview after a route change');
+  });
+
+  // ---- step 5: the reminder and Hand over ----
+  const centre = (V, id) => V.p.ev(`(() => { const r = document.getElementById(${J(id)}).getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+  const shown = `(() => { const c = document.getElementById('av-remind'); return !!c && !c.hidden; })()`;
+  // a real press on a control the press guard holds (kit-145): wait, by polling the page's own avStep.ready, until the
+  // control has sat still and uncovered for the guard's second; never on time
+  const pressGuarded = async (V, id) => {
+    await V.soon(`avStep.ready(document.getElementById(${J(id)})) !== null`, `setup: #${id} settled under the press guard`);
+    const at = await centre(V, id);
+    await V.press(at.x, at.y, id);
+  };
+  // the reminder shows as the close lands; a window of polls in which it would have, if it were going to
+  const staysHidden = async (V, what) => assert.equal(await V.settle(shown, 1500), false, what);
+
+  await step('step 5: the first close shows the reminder; Not now hides it and the next close shows none', async () => {
+    const V = await visit('#library', WIN);
+    await openDraft(V);
+    await V.soon(`document.getElementById('av-handover').textContent === 'Hand over (4)'`, 'setup: the bar reads Hand over (4) before the close');
+    await V.close('x');
+    await V.closedOn('#library', 'step 5 first close');
+    // merged avRemindShow's template for 4 notes: the title the Library's, plan-pricing the draft's session
+    const sentence = "4 notes on Pricing mock aren't handed over. plan-pricing, the session drawing it, won't start on them until you do.";
+    assert.ok(await V.settle(shown, 3000), 'C4a: the first close of pricing shows #av-remind');
+    assert.equal(await V.p.ev("document.querySelector('#av-remind .tx').textContent"), sentence, "C4a: the reminder's sentence");
+    await V.p.ev(FRAMES);
+    const at = await centre(V, 'av-remind-later');
+    await V.press(at.x, at.y, 'av-remind-later');
+    assert.ok(await V.settle(`!(${shown})`, 3000), 'C4b: Not now hides the reminder');
+    await openDraft(V);
+    await V.soon(`document.getElementById('av-handover').textContent === 'Hand over (4)'`, 'setup: the draft opened again with its four notes');
+    await V.close('x');
+    await V.closedOn('#library', 'step 5 second close');
+    await staysHidden(V, 'C4b: after Not now the next close shows no reminder');
+  });
+
+  await step('step 5: Hand over (4) sends one message to plan-pricing; no reminder after', async () => {
+    const V = await visit('#library', WIN);
+    await openDraft(V);
+    await V.soon(`document.getElementById('av-handover').textContent === 'Hand over (4)'`, 'C5a: the bar reads Hand over (4) on a fresh visit');
+    await pressGuarded(V, 'av-handover');
+    // before anything on the page: the log, then the planner's own read of the notes
+    const NAMES = 'artifact notes pricing --at plan-pricing';
+    const mine = () => logLines(F).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter((m) => m && m.type === 'message' && m.kind === 'info' && m.to === PLAN && String(m.text).includes(NAMES));
+    let msgs = [];
+    for (let i = 0; i < 200 && !msgs.length; i++) { msgs = mine(); if (!msgs.length) await new Promise((r) => setTimeout(r, 100)); }
+    assert.equal(msgs.length, 1, `C5a: exactly one info message to ${PLAN} naming \`${NAMES}\` is in the log (${msgs.length})`);
+    assert.equal(msgs[0].by, 'owner', "C5a: the message is the owner's");
+    const list = JSON.parse(ok(F, 'planner', ['artifact', 'notes', SLUG, '--at', PLAN, '--json']));
+    assert.deepEqual(list.map((n) => n.id).sort(), Object.values(notes).map((n) => n.id).sort(), 'C5a: the planner lists N1-N4');
+    for (const n of list) assert.equal(n.state, `with ${PLAN}`, `C5a: ${n.id} is with ${PLAN}`);
+    await V.soon(`document.getElementById('av-with').textContent === 'With ${PLAN}'`, 'step 5: #av-with reads With plan-pricing');
+    await V.close('x');
+    await V.closedOn('#library', 'step 5 close after Hand over');
+    await staysHidden(V, 'C4c: a close after Hand over shows no reminder');
   });
 
   void stack;
