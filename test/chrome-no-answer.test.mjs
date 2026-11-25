@@ -6,6 +6,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { canDrive, openChrome } from './lib/chrome.mjs';
+import fs from 'node:fs';
+import { closeTab, oneTab } from './fixtures/artifact-viewer/harness.mjs';
 
 // a call's error and how long it took to come
 const failing = async (call) => { const t = Date.now(); const e = await call.then(() => null, (x) => x); return { e, ms: Date.now() - t }; };
@@ -73,5 +75,82 @@ test('a call with no answer says what Chrome was doing', { skip: canDrive ? fals
         assert.match(r.e.message, /^Runtime\.evaluate: no answer from Chrome in 30 s; tab [0-9A-F]{8} \(Chrome's list of tabs: no answer in 2 s\); last heard on its socket: nothing; Chrome running; Chrome's endpoint: no answer in 2 s$/);
       } finally { await chrome.close(); }
     }),
+    // kit-918: the artifact viewer's harness closes each case's tab with closeTab (Page.close runs the page's beforeunload)
+    t.test('a tab close the page holds with a dialog fails its caller, saying what Chrome was doing', async () => {
+      const chrome = await openChrome();
+      try {
+        const p = await chrome.newPage();
+        await p.send('Page.enable');
+        // the page always asks before it goes; a user gesture lets it ask
+        await p.send('Runtime.evaluate', { expression: "addEventListener('beforeunload', (e) => { e.preventDefault(); e.returnValue = ''; }); 1", userGesture: true });
+        const r = await failing(closeTab(p));
+        assert.ok(r.e, 'the close fails');
+        assert.ok(r.ms >= 30000 && r.ms < 36500, `took ${r.ms} ms`);
+        assert.match(r.e.message, /^closing the tab: still open after Page\.close; Runtime\.evaluate: no answer from Chrome in 30 s; tab [0-9A-F]{8} at about:blank; a beforeunload dialog \("", at about:blank\) open on this tab for \d+\.\d s; /);
+      } finally { await chrome.close(); }
+    }),
+    t.test('a tab still saving is closed once the save ends, with no dialog', async () => {
+      const chrome = await openChrome();
+      try {
+        const p = await chrome.newPage();
+        await p.send('Page.enable');
+        // the dashboard's guard (index.html's SAVING and beforeunload), the save ending 1.5 s on
+        await p.send('Runtime.evaluate', { expression: "var SAVING = 1; addEventListener('beforeunload', (e) => { if (SAVING) { e.preventDefault(); e.returnValue = ''; } }); setTimeout(() => { SAVING = 0; }, 1500); 1", userGesture: true });
+        const r = await failing(closeTab(p));
+        assert.equal(r.e, null, 'the close succeeds');
+        assert.ok(r.ms >= 1400 && r.ms < 10000, `took ${r.ms} ms`);
+      } finally { await chrome.close(); }
+    }),
+    t.test('a tab saving past the bound fails its close, saying so, and opens no dialog', async () => {
+      const chrome = await openChrome();
+      try {
+        const p = await chrome.newPage();
+        await p.send('Page.enable');
+        await p.send('Runtime.evaluate', { expression: "var SAVING = 2; addEventListener('beforeunload', (e) => { if (SAVING) { e.preventDefault(); e.returnValue = ''; } }); 1", userGesture: true });
+        const r = await failing(closeTab(p, { saving: 1000 }));
+        assert.ok(r.e, 'the close fails');
+        assert.ok(r.ms < 5000, `took ${r.ms} ms`);
+        assert.equal(r.e.message, 'closing the tab: the page still saving (SAVING 2) after 1 s; closing it would open its beforeunload dialog');
+      } finally { await chrome.close(); }
+    }),
   ]);
+});
+
+// kit-918: closeTab's order and bounds, on a page of its own making (no Chrome): what it was asked, and what it says.
+const fakePage = (answer) => { const asked = []; return { asked, ev: async (x) => { asked.push(`ev ${x}`); return 0; }, send: async (m) => { asked.push(m); return answer(m, asked); }, close: () => asked.push('socket closed') }; };
+const gone = () => { throw new Error("Runtime.evaluate: Chrome's page connection closed (code 1006)"); };
+test('closeTab: nothing saving, closed, then called until its socket closes', async () => {
+  const p = fakePage((m, asked) => (m === 'Runtime.evaluate' && asked.filter((a) => a === m).length === 2 ? gone() : {}));
+  await closeTab(p);
+  assert.deepEqual(p.asked, ["ev typeof SAVING === 'number' ? SAVING : 0", 'Page.close', 'Runtime.evaluate', 'Runtime.evaluate', 'socket closed']);
+});
+test('closeTab: a tab still answering after Page.close fails its caller, saying so', async () => {
+  const p = fakePage(() => ({}));
+  await assert.rejects(closeTab(p, { gone: 300 }), { message: 'closing the tab: still open 0.3 s after Page.close' });
+  assert.equal(p.asked.at(-1), 'socket closed');
+});
+test('closeTab: an error from Page.close other than the socket closing fails its caller', async () => {
+  const p = fakePage((m) => { if (m === 'Page.close') throw new Error('Page.close: Not attached to an active page'); return {}; });
+  await assert.rejects(closeTab(p), { message: 'closing the tab: Page.close: Not attached to an active page' });
+  assert.equal(p.asked.at(-1), 'socket closed');
+});
+test('the harness closes each case\'s tab with closeTab: the last one before the next, and the last at the end', async () => {
+  const pages = [];
+  const chrome = { newPage: async () => { const p = fakePage((m, asked) => (m === 'Runtime.evaluate' ? gone() : {})); pages.push(p); return p; } };
+  const tabs = oneTab(chrome);
+  const a = await tabs.next();
+  assert.deepEqual(a.asked, [], 'a new tab is not closed');
+  const b = await tabs.next();
+  assert.deepEqual(a.asked, ["ev typeof SAVING === 'number' ? SAVING : 0", 'Page.close', 'Runtime.evaluate', 'socket closed'], 'the last tab closed by closeTab before the next');
+  assert.deepEqual(b.asked, []);
+  await tabs.done();
+  assert.deepEqual(b.asked.slice(-2), ['Runtime.evaluate', 'socket closed'], 'the last tab closed at the end');
+  await tabs.done();
+  assert.equal(pages.length, 2);
+  // visit and the teardown take their tabs from oneTab, and nothing else in the harness closes a tab
+  const src = fs.readFileSync(new URL('./fixtures/artifact-viewer/harness.mjs', import.meta.url), 'utf8');
+  assert.equal(src.match(/'Page\.close'/g).length, 1, "the harness sends Page.close only in closeTab");
+  assert.equal(src.match(/chrome\.newPage\(\)/g).length, 1, 'the harness opens a tab only in oneTab');
+  assert.match(src, /const tabs = oneTab\(chrome\);\n  later\(\(\) => tabs\.done\(\)\);/);
+  assert.match(src, /async function visit\([^)]*\) \{\n    const p = await tabs\.next\(\);/);
 });
