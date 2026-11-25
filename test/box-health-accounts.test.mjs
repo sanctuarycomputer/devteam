@@ -38,8 +38,9 @@ test('a row keeps the named fields and nothing else', () => {
 });
 
 test('an email, a token-like value and an unknown key leave nothing in the JSON', () => {
-  const answer = capacityOf([leaky()]);
-  assert.equal(answer.list?.length, 1, 'the row is listed');
+  // with no alias, or one that is an address, the label falls back to nothing else the row holds
+  const answer = capacityOf(['studio', undefined, 'mira@corp.test'].map((alias) => ({ ...leaky(), alias })));
+  assert.equal(answer.list?.length, 3, 'each row is listed');
   const said = JSON.stringify(answer);
   for (const x of ['@', 'mira', 'corp.test', 'sk-ant', 'zz_unknown', 'zz-value', 'org-uuid', 'notareal']) assert.ok(!said.includes(x), `${x} is in the answer`);
 });
