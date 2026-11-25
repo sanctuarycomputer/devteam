@@ -7704,7 +7704,8 @@ worldFileFails.actOf = (ref) => {
 
 /* self-plain start */
 // self@2's reader (log.schema.json#self2): test/fixtures/world2/check.mjs's self rules, rule for rule
-// (its reading of lines, fences, code, comments and links; parts; the title; checkSelf), so the kit
+// (its reading of lines, fences, code, comments and links; parts; the title; checkSelf; selfHeld, the
+// names rule's words), so the kit
 // gives every case of test/fixtures/world2/cases.json the result it lists. One closure, so none of
 // its names meets another of this file's; it reads nothing but its arguments and path (a test runs
 // this region alone). kit-863 may read exterior.md with it too.
@@ -7923,7 +7924,7 @@ const selfPlain = (() => {
   }
   const words = (s) => unlink(s).replace(/[*`]|(?<![\p{L}\p{N}])_+|_+(?![\p{L}\p{N}])/gu, '').replace(/\s+/g, ' ').trim();
 
-  // The inline links of text outside code: [{ target, index }]. [words](target "title"), brackets in the
+  // The inline links of text outside code: [{ target, index, close }] (index its [, close its ]). [words](target "title"), brackets in the
   // words and parentheses in the target balanced, the target with no space; what follows ]( is at most
   // 500 characters. An image, an escaped [, a reference-style or an angle-bracket link is none, though
   // a link's words may hold an image.
@@ -7947,9 +7948,10 @@ const selfPlain = (() => {
         if (gone) dead = stack.length;
         const d = o && t[i + 1] === '(' ? dest(t, i + 2) : null;
         if (!d) continue;
+        const close = i;
         i += 1 + d.size;
         if (o.image) while (out.length && out[out.length - 1].index > o.i) out.pop();
-        else if (!gone) { out.push({ target: d.target, index: o.i }); dead = stack.length; }
+        else if (!gone) { out.push({ target: d.target, index: o.i, close }); dead = stack.length; }
       }
     }
     return out.sort((a, b) => a.index - b.index);
@@ -8055,7 +8057,63 @@ const selfPlain = (() => {
     return { errors, parts: all.filter((p) => p.path !== null).map((p) => p.path) };
   }
 
-  return { version, checkSelf, scan, plain, headings, links, parts };
+  // A word: letters, digits, ' ’ and -, starting with a letter. A word as the names rule reads it: a
+  // trailing 's dropped (then any trailing ' ’ or -), upper-case first, two letters or more; else null.
+  const WORD = /\p{L}[\p{L}\p{N}'’-]*/gu;
+  function capWord(m) {
+    const c = m.codePointAt(0);
+    if (c < 128 ? c < 65 || c > 90 : !/^\p{Lu}/u.test(m)) return null; // upper case first, or no word
+    let w = m.replace(/['’]s$/, '');
+    let end = w.length;
+    while (end && "'’-".includes(w[end - 1])) end -= 1;
+    w = w.slice(0, end);
+    return /^\p{Lu}/u.test(w) && [...w].length >= 2 ? w : null;
+  }
+  // self.md's capitalised words for the names rule, each once in order (kit-862). Every word counts but
+  // a prose sentence's first: prose is a paragraph's text outside code, comments and a link's words; a
+  // sentence starts a paragraph or follows . ! or ? and a space. A heading, a list item (its lines up to
+  // a blank one), a table row (a line holding | outside code), code (a fence, indented code, a span), a
+  // comment and a link's words count whole, their first word too: a part's name stands there.
+  function selfHeld(text) {
+    const src = lines(text);
+    const read = readable(text);
+    const pl = plain(text).split('\n');
+    const at = [];
+    pl.reduce((o, l, i) => { at[i] = o; return o + l.length + 1; }, 0);
+    const inLink = links(text).map((k) => [k.index, k.close]);
+    const out = new Set();
+    const add = (w) => { const c = capWord(w); if (c) out.add(c); };
+    let item = false; // in a list item, until a blank line
+    let start = true; // the next prose word starts a sentence
+    let gap = '';
+    src.forEach((s, i) => {
+      const l = read[i];
+      if (l === null || !l.trim() || HEAD.test(l) || BREAK.test(l) || LIST.test(l) || item || pl[i].includes('|')) {
+        if (l !== null && !l.trim()) item = false;
+        else if (l !== null && LIST.test(l)) item = true;
+        else if (l !== null && (HEAD.test(l) || BREAK.test(l))) item = false;
+        for (const m of s.matchAll(WORD)) add(m[0]);
+        start = true;
+        gap = '';
+        return;
+      }
+      const p = pl[i];
+      let prev = 0;
+      for (const m of s.matchAll(WORD)) {
+        gap += p.slice(prev, m.index);
+        prev = m.index + m[0].length;
+        const o = at[i] + m.index;
+        const whole = p.slice(m.index, prev) !== m[0] || inLink.some(([a, b]) => o > a && o < b);
+        if (whole || !(start || /[.!?]\s/.test(gap))) add(m[0]);
+        start = false;
+        gap = '';
+      }
+      gap += `${p.slice(prev)}\n`;
+    });
+    return [...out];
+  }
+
+  return { version, checkSelf, selfHeld, scan, plain, headings, links, parts };
 })();
 // 1 when a fence's info string is exactly self or exterior (version 1), else 2.
 const selfPlainVersion = selfPlain.version;
@@ -8221,8 +8279,9 @@ function namesAllowedText(ref = mainRef()) {
   const at = (rel) => (projectInRepo && ref ? git(['show', `${ref}:${rel}`]) : readText(path.join(projectRoot, rel))) ?? '';
   return [strategyRel, 'package.json', 'Gemfile', 'requirements.txt'].map(at).join('\n');
 }
-// The capitalised words of pieces that allowed doesn't name (as a whole word, ignoring case). The
-// one names function: self check, chore pr and check-pr use it, and kit-135 for exterior.md.
+// The capitalised words of pieces that allowed doesn't name (as a whole word, ignoring case): self
+// check, chore pr and check-pr read a version 1 block's pieces with it (selfWords; a plain self.md's
+// words come from the self-plain region's selfHeld), and kit-135 exterior.md's.
 function unknownNames(pieces, allowed) {
   return capitalisedWords(pieces).filter((w) => !namesWhole(allowed, w.word));
 }
@@ -8230,9 +8289,8 @@ function unknownNames(pieces, allowed) {
 // every other fenced block is in it), then the block's what, makes and each part's what (with
 // sentences), each part's name, controls[i] and not[i] (every word). The ids are left out, and so is
 // each code path has(partPath(p)) finds: it names a file already in the repo. One it doesn't (an
-// earlier blob's) is read like any text. With no parsed block, the whole file is one prose piece.
+// earlier blob's) is read like any text.
 function selfPieces(text, block, has) {
-  if (!block) return [{ where: 'prose', text: String(text), sentences: true }];
   const lines = String(text).split(/\r?\n/);
   const b = fencedBlocks(text).blocks.find((x) => x.info === 'self');
   // the block's lines, opening fence to closing, become one blank line
@@ -8250,10 +8308,14 @@ function selfPieces(text, block, has) {
   block.not.forEach((c, i) => add(`not[${i}]`, c, false));
   return pieces;
 }
-// One self.md blob's unknown words: its pieces (the whole text as prose when the contract fails, so
-// a broken draft's words still count), less what allowed names.
+// One self.md blob's unknown words, less what allowed names: a version 1 block's pieces, or with no
+// parsed block (a plain document, or a draft whose contract fails, so its words still count) the
+// self-plain region's selfHeld, each word at 'prose': a heading, a list item, a table row, a link's
+// words, code and a comment read whole, a prose sentence's first word skipped (kit-862 final-1b F1).
 function selfWords(text, has, allowed) {
-  return unknownNames(selfPieces(text, selfDoc(text).block, has), allowed);
+  const { block } = selfDoc(text);
+  if (!block) return selfPlain.selfHeld(text).filter((word) => !namesWhole(allowed, word)).map((word) => ({ word, where: 'prose' }));
+  return unknownNames(selfPieces(text, block, has), allowed);
 }
 // Whether a strategy links self.md: in its prose (outside every fenced block), an inline link to
 // self.md or ./self.md (an optional #anchor and "title"), or a reference definition naming it.

@@ -218,7 +218,7 @@ function unlink(s) {
 }
 const words = (s) => unlink(s).replace(/[*`]|(?<![\p{L}\p{N}])_+|_+(?![\p{L}\p{N}])/gu, '').replace(/\s+/g, ' ').trim();
 
-// The inline links of text outside code: [{ target, index }]. [words](target "title"), brackets in the
+// The inline links of text outside code: [{ target, index, close }] (index its [, close its ]). [words](target "title"), brackets in the
 // words and parentheses in the target balanced, the target with no space; what follows ]( is at most
 // 500 characters. An image, an escaped [, a reference-style or an angle-bracket link is none, though
 // a link's words may hold an image.
@@ -242,9 +242,10 @@ export function links(text) {
       if (gone) dead = stack.length;
       const d = o && t[i + 1] === '(' ? dest(t, i + 2) : null;
       if (!d) continue;
+      const close = i;
       i += 1 + d.size;
       if (o.image) while (out.length && out[out.length - 1].index > o.i) out.pop();
-      else if (!gone) { out.push({ target: d.target, index: o.i }); dead = stack.length; }
+      else if (!gone) { out.push({ target: d.target, index: o.i, close }); dead = stack.length; }
     }
   }
   return out.sort((a, b) => a.index - b.index);
@@ -406,6 +407,62 @@ export function checkSelf(text, { root, has }) {
   return { errors, parts: all.filter((p) => p.path !== null).map((p) => p.path) };
 }
 
+// A word: letters, digits, ' ’ and -, starting with a letter. A word as the names rule reads it: a
+// trailing 's dropped (then any trailing ' ’ or -), upper-case first, two letters or more; else null.
+const WORD = /\p{L}[\p{L}\p{N}'’-]*/gu;
+function capWord(m) {
+  const c = m.codePointAt(0);
+  if (c < 128 ? c < 65 || c > 90 : !/^\p{Lu}/u.test(m)) return null; // upper case first, or no word
+  let w = m.replace(/['’]s$/, '');
+  let end = w.length;
+  while (end && "'’-".includes(w[end - 1])) end -= 1;
+  w = w.slice(0, end);
+  return /^\p{Lu}/u.test(w) && [...w].length >= 2 ? w : null;
+}
+// self.md's capitalised words for the names rule, each once in order (kit-862). Every word counts but
+// a prose sentence's first: prose is a paragraph's text outside code, comments and a link's words; a
+// sentence starts a paragraph or follows . ! or ? and a space. A heading, a list item (its lines up to
+// a blank one), a table row (a line holding | outside code), code (a fence, indented code, a span), a
+// comment and a link's words count whole, their first word too: a part's name stands there.
+export function selfHeld(text) {
+  const src = lines(text);
+  const read = readable(text);
+  const pl = plain(text).split('\n');
+  const at = [];
+  pl.reduce((o, l, i) => { at[i] = o; return o + l.length + 1; }, 0);
+  const inLink = links(text).map((k) => [k.index, k.close]);
+  const out = new Set();
+  const add = (w) => { const c = capWord(w); if (c) out.add(c); };
+  let item = false; // in a list item, until a blank line
+  let start = true; // the next prose word starts a sentence
+  let gap = '';
+  src.forEach((s, i) => {
+    const l = read[i];
+    if (l === null || !l.trim() || HEAD.test(l) || BREAK.test(l) || LIST.test(l) || item || pl[i].includes('|')) {
+      if (l !== null && !l.trim()) item = false;
+      else if (l !== null && LIST.test(l)) item = true;
+      else if (l !== null && (HEAD.test(l) || BREAK.test(l))) item = false;
+      for (const m of s.matchAll(WORD)) add(m[0]);
+      start = true;
+      gap = '';
+      return;
+    }
+    const p = pl[i];
+    let prev = 0;
+    for (const m of s.matchAll(WORD)) {
+      gap += p.slice(prev, m.index);
+      prev = m.index + m[0].length;
+      const o = at[i] + m.index;
+      const whole = p.slice(m.index, prev) !== m[0] || inLink.some(([a, b]) => o > a && o < b);
+      if (whole || !(start || /[.!?]\s/.test(gap))) add(m[0]);
+      start = false;
+      gap = '';
+    }
+    gap += `${p.slice(prev)}\n`;
+  });
+  return [...out];
+}
+
 // The ### entries: [{ name, body }], body up to the next heading of level 3 or less.
 export function entries(text) {
   const h = headings(text).filter((x) => x.level <= 3);
@@ -427,14 +484,9 @@ const webRefs = (text) => new Set([...plain(text).matchAll(/^ {0,3}\[([^[\]\n]+)
 // ' ’ and -, starting with a letter, a trailing 's dropped, upper-case first, two letters or more.
 export function capitalised(text) {
   const out = new Set();
-  for (const m of String(text).matchAll(/\p{L}[\p{L}\p{N}'’-]*/gu)) {
-    const c = m[0].codePointAt(0);
-    if (c < 128 ? c < 65 || c > 90 : !/^\p{Lu}/u.test(m[0])) continue; // upper case first, or no word
-    let w = m[0].replace(/['’]s$/, '');
-    let end = w.length;
-    while (end && "'’-".includes(w[end - 1])) end -= 1;
-    w = w.slice(0, end);
-    if (/^\p{Lu}/u.test(w) && [...w].length >= 2) out.add(w);
+  for (const m of String(text).matchAll(WORD)) {
+    const w = capWord(m[0]);
+    if (w) out.add(w);
   }
   return [...out];
 }

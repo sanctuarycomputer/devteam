@@ -11,14 +11,15 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { json, kit as KIT, write } from './lib/kit.mjs';
 import { fixture, SUP } from './lib/next-step-fixture.mjs';
-import { checkSelf as refCheckSelf, version as refVersion } from './fixtures/world2/check.mjs';
+import { checkSelf as refCheckSelf, version as refVersion, selfHeld as refSelfHeld, namesWhole as refNamesWhole } from './fixtures/world2/check.mjs';
 
 const P = 'docs/devteam/project';
 const SELF = `${P}/self.md`;
 const STRAT = `${P}/strategy.md`;
 const world = (f) => fs.readFileSync(new URL(`./fixtures/world/${f}`, import.meta.url), 'utf8');
 const world2 = (f) => fs.readFileSync(new URL(`./fixtures/world2/${f}`, import.meta.url), 'utf8');
-const V1 = world('self.md');
+// version 1's self.md, with a prose link to a path main lacks: a version 1 file is never read for part links (final-1 F2)
+const V1 = world('self.md').replace('It controls its code', 'An old part was [the old app](../gone/).\n\nIt controls its code');
 const V1_PARTS = { 'app/main.js': 'app\n', 'app/plugins/api.js': 'api\n', 'sync/server.js': 'sync\n', 'deploy/sync.yml': 'deploy\n' };
 const W2 = JSON.parse(world2('cases.json'));
 const CASES = W2.cases.filter((c) => c.doc === 'self');
@@ -242,6 +243,30 @@ test('S the names hold reads the whole plain text; self show prints it; its data
   });
 }));
 
+test('N the names hold reads a heading, a list item, a table row, a link\'s words, code and a comment whole, their first word too; only a prose sentence\'s first word is skipped (final-1b F1)', withProject('names', {}, async (W, check) => {
+  await check('N1 the reference and the self-plain region give each names case of cases.json its words', () => {
+    const region = SRC.match(/\/\* self-plain start \*\/([\s\S]*?)\/\* self-plain end \*\//)?.[1] ?? '';
+    const { held } = vm.runInContext(`${region}\n;({ held: selfPlain.selfHeld })`, vm.createContext({ path }));
+    assert.equal(W2.names.length, 8, 'N1 eight names cases');
+    for (const c of W2.names) {
+      assert.deepEqual(refSelfHeld(world2(c.file)), c.words, `N1 the reference on ${c.file}`);
+      assert.equal(typeof held, 'function', 'N1 the region has selfHeld');
+      assert.deepEqual(JSON.parse(JSON.stringify(held(world2(c.file)))), c.words, `N1 the region on ${c.file}`);
+    }
+  });
+  await check('N2 self check warns, in order, on each names case\'s words that main\'s strategy lacks: the word first in a heading, a list item, a bold list item, a link, a code span, a table cell, a comment and a fence', () => {
+    for (const c of W2.names) {
+      write(path.join(W.old, SELF), world2(c.file));
+      const r = W.run(['self', 'check']);
+      W.g(['checkout', '--', SELF], W.old);
+      assert.equal(r.status, 0, `N2 ${c.file} passes\n${r.text}`);
+      const warned = [...r.out.matchAll(/warning: self\.md: "([^"]+)" \(prose\)/g)].map((m) => m[1]);
+      const want = c.words.filter((w) => !refNamesWhole(STRATEGY, w));
+      assert.ok(want.length > 0, `N2 ${c.file} names a word the strategy lacks`);
+      assert.deepEqual(warned, want, `N2 ${c.file}\n${r.out}`);
+    }
+  });
+}));
 test('X1 a project outside its repo: its own folder stands in for the repo', async (t) => {
   const F = fixture('x-outside');
   try {
