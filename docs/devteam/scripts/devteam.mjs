@@ -25803,7 +25803,8 @@ const boxHealthState = (() => {
 // with 2 s of real(): one that hasn't answered keeps that root's last read (its at still ages it), and
 // isn't asked again until it settles. At most two reads are out at once, across every project: while
 // two are, a root whose read can't start keeps its last read too, so hung files never hold more than
-// two of the hub's file threads.
+// two of the hub's file threads. Each is a read of the hub's budget (boxHealthIo, kit-919) as well: one
+// the budget can't start is late at once, the same way.
 //
 // A project's dashboard, from the hub's scan (which can't tell a refused port from a slow one):
 //   up     a hello names the root: its port and its fleet's mode are the hello's
@@ -25869,8 +25870,11 @@ const boxHealthPool = (() => {
   const LATE = Symbol('late');
   const settled = (ctx, r, file, max) => {
     if (r.out.has(file) || r.out.size >= POOL_READS) { ctx.say("two file reads are out: a project whose read can't start keeps its last read"); return Promise.resolve(LATE); }
+    // and a read of the hub's budget (kit-919): one that can't start is late too
+    const read = boxHealthIo(file, () => readCapped(file, max));
+    if (read === null) { if (boxHealthIoFull()) ctx.say(BOX_HEALTH_FULL); return Promise.resolve(LATE); }
     r.out.add(file);
-    const p = readCapped(file, max).finally(() => r.out.delete(file));
+    const p = read.finally(() => r.out.delete(file));
     let end = () => {};
     const late = new Promise((res) => { end = ctx.timeout(POOL_FILE_MS, () => res(LATE)); });
     return Promise.race([p, late]).finally(() => end());
@@ -26081,8 +26085,8 @@ const boxHealthPool = (() => {
 // Every 15 s of now() it reads again once a minute of now() has passed since the last read (the first
 // read follows the sampler's first read of the roots). A read: for each known root, one at a time,
 // <root>/docs/devteam/run/accounts.json (at most 256 KB + 1), raced with 2 s of real(). At most two
-// reads are out at once, never two of one file: a read that can't start, or hasn't answered in 2 s,
-// keeps that file's last read. The record used is the freshest (by its at) whose capacity.list is a
+// reads are out at once, never two of one file: a read that can't start (here, or in the hub's budget,
+// boxHealthIo: kit-919), or hasn't answered in 2 s, keeps that file's last read. The record used is the freshest (by its at) whose capacity.list is a
 // list, among those within 5 minutes of real() (one older, or ahead: a wrong clock, is dropped); with none, claude is absent (no cswap,
 // an older kit's record, or a stopped tick). Each read that finds one adds a reading to the ring.
 //
@@ -26302,8 +26306,11 @@ const boxHealthClaude = (() => {
   // raced with 2 s of real(); at most two out, never two of one file: one that can't start is late
   const settled = (ctx, r, file) => {
     if (r.out.has(file) || r.out.size >= CLAUDE_READS) { ctx.say("two file reads are out: a project whose accounts.json read can't start keeps its last read"); return Promise.resolve(LATE); }
+    // and a read of the hub's budget (kit-919): one that can't start is late too
+    const read = boxHealthIo(file, () => readCapped(file, CLAUDE_MAX_BYTES));
+    if (read === null) { if (boxHealthIoFull()) ctx.say(BOX_HEALTH_FULL); return Promise.resolve(LATE); }
     r.out.add(file);
-    const p = readCapped(file, CLAUDE_MAX_BYTES).finally(() => r.out.delete(file));
+    const p = read.finally(() => r.out.delete(file));
     let end = () => {};
     const late = new Promise((res) => { end = ctx.timeout(CLAUDE_FILE_MS, () => res(LATE)); });
     return Promise.race([p, late]).finally(() => end());

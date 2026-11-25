@@ -1210,3 +1210,29 @@ test('S34: a volume whose read can\'t start is a gap, and is not forgotten: its 
   const j = answer(s.health).json;
   assert.deepEqual([j.samples.at(-1).disk, j.now.disks?.map((d) => d.free)], [undefined, [7]], "the first volume's line has a gap, never the other's free");
 });
+
+test('S27b: the pool keeps its last read of a project while the budget can\'t start it, and reads it again after (kit-919)', async (t) => {
+  const a = newDir();
+  const file = path.join(a, 'docs', 'devteam', 'run', 'cache', 'pool.json');
+  const shop = JSON.parse(fs.readFileSync(path.join(kit, '..', '..', 'test', 'fixtures', 'box-health', 'pool', 'shop.json'), 'utf8'));
+  const write = (n) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify({ ...shop, workers: shop.workers.slice(0, n) })); };
+  assert.ok(shop.workers.length >= 2);
+  write(shop.workers.length);
+  const s = loadWith(t, { roots: [a], make: () => NOWHERE });
+  await s.health.start();
+  const p = partTimers(s);
+  const workers = async () => {
+    await Promise.race([p.pool.fn(), sleep(1000)]);
+    await step(s);
+    s.clock.t += MIN;
+    return answer(s.health).json.pool?.projects?.[0]?.workers;
+  };
+  const was = await workers();
+  write(1);
+  const free = hold(s);
+  const held = await workers();
+  free();
+  await sleep(5);
+  const after = await workers();
+  assert.deepEqual([was, held, after], [shop.workers.length, shop.workers.length, 1], 'its last read while the budget is held, the new one after');
+});
