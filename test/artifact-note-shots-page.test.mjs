@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { chromePath } from './lib/chrome.mjs';
-import { HOSTS, MIDDLE, NINE, OTHER, SRC, TMP, body, count, cut, each, fake, openers, lit, near, png, reached, region, ringAt, said, seenFile, sha256, shotKit } from './fixtures/artifact-shots/kit.mjs';
+import { HOSTS, MIDDLE, NINE, OTHER, SRC, TMP, body, count, cut, each, fake, openers, lit, near, png, reached, region, ringAt, said, seenFile, sha256, shotKit, tcp, udp } from './fixtures/artifact-shots/kit.mjs';
 
 test('C1c the page file fails with no Chrome', () => {
   assert.ok(chromePath, 'no Chrome: install Chrome or Chromium, or set CHROME_PATH');
@@ -64,6 +64,8 @@ test('C7e the proxy flags: dead but for the capture and the allowed hosts', asyn
     for (const f of ['--webrtc-ip-handling-policy=disable_non_proxied_udp', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp']) assert.ok(a.includes(f), f);
     assert.deepEqual(a.join(' ').match(/--host-resolver-rules=(.*?) (?:--|about:)/)?.[1].split(',').map((x) => x.trim()), ['MAP * ~NOTFOUND', 'EXCLUDE 127.0.0.1', ...HOSTS.map((h) => `EXCLUDE ${h}`)], 'no name resolved but the allowed hosts\'');
     assert.ok(!a.some((x) => x === `--proxy-server=http://${bypass[1]}`), 'the dead proxy is not the capture server');
+    // kit-813: mDNS off in the one list Chrome keeps
+    assert.deepEqual(a.filter((x) => x.startsWith('--disable-features=')), ['--disable-features=IsolateSandboxedIframes,WebRtcHideLocalIpsWithMdns']);
   }
 });
 
@@ -277,4 +279,71 @@ test('a picture\'s stamp is its thread\'s own, and shots itself may be no symlin
   fs.symlinkSync(away, path.join(runDir, 'shots'));
   assert.throws(() => shotWrite('t-1', Buffer.from('x'), null, now), /isn't a plain folder/);
   assert.deepEqual(fs.readdirSync(away), []);
+});
+
+// kit-813: a page's WebRTC under the picture's Chrome, counted as kit-805 counts the browser's. While the
+// page holds WebRTC open (its fonts are ready only once it has told), the UDP sockets on 5353 (mDNS)
+// that Chrome's group holds; what reaches this file's listeners; and what the page was given.
+const procNet = (f) => { try { return fs.readFileSync(`/proc/net/${f}`, 'utf8').split('\n').slice(1).map((l) => l.trim().split(/\s+/)).filter((c) => c.length > 1); } catch { return []; } };
+// the socket inodes of every process whose group is leader's
+function groupSockets(leader) {
+  const held = new Set();
+  for (const d of fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x))) {
+    try {
+      const st = fs.readFileSync(`/proc/${d}/stat`, 'utf8');
+      if (Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[2]) !== leader) continue;
+      for (const fd of fs.readdirSync(`/proc/${d}/fd`)) { const m = /^socket:\[(\d+)\]$/.exec(fs.readlinkSync(`/proc/${d}/fd/${fd}`)); if (m) held.add(m[1]); }
+    } catch {}
+  }
+  return { mdns: ['udp', 'udp6'].flatMap(procNet).filter((c) => c[1].endsWith(':14E9') && held.has(c[9])).length, tcp: ['tcp', 'tcp6'].flatMap(procNet).filter((c) => held.has(c[9])).length };
+}
+const RTC_PAGE = `<!doctype html><title>RTC</title><button id="buy">Start trial</button><script>
+let told;
+Object.defineProperty(document, 'fonts', { value: { ready: new Promise((r) => { told = r; }) } });
+(async () => {
+  const turn = (urls) => ({ urls, username: 'u', credential: 'c' });
+  const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:127.0.0.1:${udp.address().port}' }, { urls: 'stun:rtc-stun.local:3478' }, turn('turn:127.0.0.1:${tcp.address().port}?transport=tcp'), turn('turn:rtc-turn.local:3478?transport=tcp'), turn('turn:rtc-turn.invalid:3478')] });
+  pc.createDataChannel('x');
+  await pc.setLocalDescription(await pc.createOffer());
+  const peer = new RTCPeerConnection();
+  await peer.setRemoteDescription(pc.localDescription);
+  await peer.setLocalDescription(await peer.createAnswer());
+  await pc.setRemoteDescription(peer.localDescription);
+  let added = 0;
+  for (const c of ['udp 2122260223 127.0.0.1 ${udp.address().port} typ host', 'tcp 2122260222 127.0.0.1 ${tcp.address().port} typ host tcptype passive', 'udp 2122260221 rtc-ice.local 9 typ host', 'udp 2122260220 RTC-UP.LOCAL. 9 typ host']) { await pc.addIceCandidate({ candidate: 'candidate:1 1 ' + c, sdpMid: '0' }); added++; }
+  await new Promise((r) => setTimeout(r, 2500));
+  const shown = [...(await pc.getStats()).values()].filter((x) => x.type === 'local-candidate' && x.address && x.address !== '0.0.0.0' && x.address !== '::').map((x) => x.address);
+  fetch('rtc-done-' + added + '-' + pc.localDescription.sdp.split('\\n').filter((l) => l.startsWith('a=candidate')).length + '-' + (shown.join('_') || 'none')).finally(told);
+})().catch((e) => fetch('rtc-done-' + encodeURIComponent(e)).finally(told));
+</script>`;
+
+test('K1 a page\'s WebRTC joins no mDNS group and sends nothing round the dead proxy (kit-813)', async () => {
+  const k = shotKit();
+  fs.writeFileSync(path.join(k.arts, 'pricing', 'rtc.html'), RTC_PAGE);
+  k.F.g(['add', '-A'], k.F.old);
+  k.F.g(['commit', '-qm', 'rtc'], k.F.old);
+  k.F.g(['push', '-q', 'origin', 'main'], k.F.old);
+  // Chrome as the kit runs it; the wrapper's pid is the group's leader, as exec keeps it
+  const pids = path.join(TMP, 'rtc-chrome.pid'), wrap = path.join(TMP, 'rtc-chrome.sh');
+  fs.writeFileSync(wrap, `#!/bin/sh\necho "$$" >> '${pids}'\nexec '${chromePath}' "$@"\n`, { mode: 0o755 });
+  const linux = fs.existsSync('/proc/net/udp');
+  const held = { mdns: 0, read: !linux };
+  let over = false;
+  const watch = (async () => {
+    while (!over) {
+      for (const p of fs.existsSync(pids) ? fs.readFileSync(pids, 'utf8').trim().split('\n').map(Number) : []) { const g = groupSockets(p); held.mdns = Math.max(held.mdns, g.mdns); held.read ||= g.tcp > 0; }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  })();
+  reached.length = 0;
+  const hook = seenFile();
+  let r;
+  try { r = await k.readyOn(k.subject({ path: 'rtc.html' }), { CHROME_PATH: wrap, DEVTEAM_TEST_SHOT_SEEN: hook }); } finally { over = true; await watch; }
+  assert.equal(r.status, 0, r.out);
+  const told = k.seen(hook).filter((l) => l.startsWith('serve /rtc-done-')).map((l) => l.split(' ')[1].slice('/rtc-done-'.length));
+  assert.equal(told.length, 1, `the page told once: ${told.join(' | ')}`);
+  const [added, candidates, shown] = told[0].split('-');
+  assert.equal(added, '4', `the page offered, and added its four candidates: ${told[0]}`);
+  assert.ok(held.read, "the sockets of Chrome's network process can be read");
+  assert.deepEqual({ mdns: held.mdns, reached: [...reached], candidates, shown }, { mdns: 0, reached: [], candidates: '0', shown: 'none' });
 });
