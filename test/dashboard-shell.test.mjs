@@ -1,4 +1,4 @@
-// The dashboard shell (dashboard-shell@1, test/contracts/shell.md): its two blocks are
+// The dashboard shell (dashboard-shell@2, test/contracts/shell.md): its two blocks are
 // byte-identical in index.html and hub.html, scoped so today's pages can't change, and their
 // builders, binders and URL rules do what the contract says (run in vm, over a tiny DOM of their
 // own HTML); and the measure check (test/lib/measure.mjs) passes on the fixture page built only from
@@ -417,17 +417,26 @@ test("the router's table: page ids and link kinds disjoint, and every legacy hea
   assert.ok(kinds.size >= 20, 'the kinds were read');
   for (const k of kinds) assert.ok(Object.hasOwn(R.links, k), `the table has ${k}`);
   const HOME = { ticket: 'board', feature: 'board', story: 'board', release: 'board', wave: 'board', milestone: 'board', planner: 'board', thread: 'board', goal: 'goals', q: 'overview', act: 'loop', decision: 'loop', lesson: 'loop', problem: 'loop', signal: 'loop', learning: 'loop', observation: 'loop', sensor: 'sensors', retro: 'retros', artifact: 'library', preview: 'library', review: 'library', 'review-preview': 'library', talk: 'overview' };
+  // what p may open (@2): every peek kind the dashboard draws (TYPE_META's) and the two viewers, all link kinds
+  const meta = INDEX.slice(INDEX.indexOf('const TYPE_META = {'), INDEX.indexOf('\n};', INDEX.indexOf('const TYPE_META = {')));
+  const metaKinds = [...meta.matchAll(/(?:^|[{,\s])([a-z]+): \[/g)].map((m) => m[1]);
+  assert.ok(metaKinds.length >= 20, 'the peek kinds were read');
+  assert.deepEqual([...(R.peeks || [])].sort(), [...metaKinds, 'artifact', 'preview'].sort(), 'SHELL_ROUTES.peeks: every TYPE_META kind and the two viewers');
+  for (const k of R.peeks) assert.ok(Object.hasOwn(R.links, k), `a peek kind ${k} has a home`);
+  for (const k of ['talk', 'review', 'review-preview']) assert.ok(!R.peeks.includes(k), `${k} stays a link head`);
   for (const [k, home] of Object.entries(HOME)) {
     const p = S.parseHead(k === 'review-preview' ? '#review-preview?path=x' : `#${k}/some-id`, R);
+    if (R.peeks.includes(k)) { assert.equal(p.page, home, `${k} opens over ${home}`); assert.equal(p.legacy, true); continue; }
     assert.equal(p.kind, k);
     assert.equal(p.home, home, `${k} opens over ${home}`);
   }
-  assert.equal(S.parseHead('#artifact/main/the-mock', R).link, 'artifact/main/the-mock', 'the rest of a link is kept');
-  assert.equal(S.parseHead('#file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md&title=Quality', R).home, 'governance');
-  assert.equal(S.parseHead('#file?path=docs%2Fdevteam%2Fprocess%2Fworker.md', R).home, 'governance');
-  assert.equal(S.parseHead('#file?path=docs%2Fdevteam%2Fproject%2Fstrategy.md&title=Strategy', R).home, 'governance');
-  assert.equal(S.parseHead('#file?path=docs%2Fdevteam%2Fproject%2Fdesigns%2Fx.md', R).home, 'library');
+  assert.equal(S.parseHead('#talk/t-1?u=u-1', R).link, 'talk/t-1?u=u-1', 'the rest of a link is kept');
+  assert.equal(S.parseHead('#file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md&title=Quality', R).page, 'governance');
+  assert.equal(S.parseHead('#file?path=docs%2Fdevteam%2Fprocess%2Fworker.md', R).page, 'governance');
+  assert.equal(S.parseHead('#file?path=docs%2Fdevteam%2Fproject%2Fstrategy.md&title=Strategy', R).page, 'governance');
+  assert.equal(S.parseHead('#file?path=docs%2Fdevteam%2Fproject%2Fdesigns%2Fx.md', R).page, 'library');
   assert.equal(S.parseHead('#nothing-here/x', R).home, 'overview', 'anything else over overview');
+  assert.equal(S.parseHead('#nothing-here/x', R).link, 'nothing-here/x', 'a head of no kind stays a link head');
   // today's section anchors are page heads, and the two that move redirect
   for (const s of ['overview', 'goals', 'progress', 'board', 'library', 'loop', 'trust', 'retros']) assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead(`#${s}`, R))), { page: s, state: {} });
   assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#monitoring', R))), { page: 'sensors', state: {}, redirected: true });
@@ -451,8 +460,9 @@ test("the router's table: page ids and link kinds disjoint, and every legacy hea
 test('parseHead and headFor round-trip every page head and link head', () => {
   const heads = ['#overview', '#overview?th=open&t=t-1', '#board?goal=g-1&feat=f&repo=kit&att=1&th=resolved', '#progress?goal=g-1&narrow=features&show=all', '#library?kind=Mock&goal=g-2', '#goals?gt=met', '#goals?gt=letgo', '#sensors?st=fleet', '#loop?lt=orient&kind=lesson&orient=1', '#trust', '#retros', '#settings', '#overview?th=inbox', '#board?goal=g-1&th=inbox'];
   for (const p of R.pages) heads.push(`#${p}`, `#${p}?th=open&t=t-20261115-1`);
-  for (const k of Object.keys(R.links)) heads.push(k === 'review-preview' ? '#review-preview?path=a.html&ref=ticket%2Fx' : `#${k}/an-id`);
-  heads.push('#file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md&title=Quality&ref=main', '#artifact/main/slug', '#talk/t-1');
+  // the link heads that stay link heads (@2): talk/ (with a turn too), review/ and review-preview
+  for (const k of Object.keys(R.links).filter((k) => !(R.peeks || []).includes(k))) heads.push(k === 'review-preview' ? '#review-preview?path=a.html&ref=ticket%2Fx' : `#${k}/an-id`);
+  heads.push('#talk/t-1', '#talk/t-1?u=u-1');
   for (const h of heads) assert.equal(S.headFor(S.parseHead(h, R)), h, h);
   // parseHead keeps only the page's own keys; headFor writes them in STATE_KEYS order, whatever order it is given
   assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#goals?goal=g&gt=met&lt=act', R))), { page: 'goals', state: { gt: 'met' } });
@@ -461,6 +471,103 @@ test('parseHead and headFor round-trip every page head and link head', () => {
   assert.equal(S.headFor(S.parseHead('#board?t=x&repo=r&gt=met&goal=g', R)), '#board?goal=g&repo=r&t=x');
   assert.equal(S.headFor({ page: 'board', state: { goal: 'a b&c' } }), '#board?goal=a+b%26c');
   assert.equal(S.parseHead(S.headFor({ page: 'board', state: { goal: 'a b&c' } }), R).state.goal, 'a b&c');
+});
+
+// ---- dashboard-shell@2 (§6-§8): p, i and u ----
+const plain2 = (o) => JSON.parse(JSON.stringify(o));
+const pq = (v) => new URLSearchParams({ p: v }).toString();
+const HEX40 = 'a'.repeat(40), HEX64 = 'b'.repeat(64);
+// one canonical head per peek kind: a file by its path, an artifact and a preview by their own grammar
+const PEEK_HEAD = (k) => (k === 'file' ? 'file?path=docs%2Fx.md&ref=main' : k === 'artifact' ? 'artifact/main/the-mock' : k === 'preview' ? 'preview/bold-otter' : `${k}/an-id`);
+const PEEK_HOME = (k) => (k === 'file' ? 'library' : R.links[k]);
+
+test('@2 round-trip: p of every peek kind on every page, t with u, th=inbox with i, the viewers, a turn in talk/, a pinned head with empty values', () => {
+  const heads = [];
+  for (const page of R.pages) {
+    for (const k of R.peeks || ['ticket']) heads.push(`#${page}?${pq(PEEK_HEAD(k))}`);
+    heads.push(`#${page}?th=open&t=t-1&u=u-1`, `#${page}?th=inbox&i=q-1`, `#${page}?th=inbox&i=k-1`);
+  }
+  heads.push('#board?goal=g-1&th=open&t=t-1&u=u-1&p=ticket%2Fkit-1', '#overview?th=open&t=t-1&u=u-1', '#overview?th=inbox&i=q-1', '#goals?th=inbox&i=k-1&p=lesson%2Fk-1');
+  heads.push(`#library?${pq('artifact/main/the-mock')}`, `#library?${pq('artifact/wt/kit-267-shell-url-contract/the-mock')}`, `#progress?goal=g-1&${pq(`artifact/tree/${HEX40}/the-mock?path=b.html`)}`, `#library?${pq(`artifact/tree/${HEX64}/the-mock?path=docs%2Fb.html`)}`, `#library?${pq('preview/bold-otter?route=%2Fsettings%3Ftab%3D2')}`);
+  heads.push('#talk/t-1?u=u-1', '#board?goal=&feat=&repo=&att=&th=&p=ticket%2Fkit-1');
+  // the pinned head's parse first, so its own line is what a dropped empty value fails on
+  assert.deepEqual(plain2(S.parseHead('#board?goal=&feat=&repo=&att=&th=&p=ticket%2Fkit-1', R)), { page: 'board', state: { goal: '', feat: '', repo: '', att: '', th: '', p: 'ticket/kit-1' } }, 'each empty key kept, present with the value ""');
+  for (const h of heads) assert.equal(S.headFor(S.parseHead(h, R)), h, h);
+});
+
+test('@2 legacy heads: every peek kind and the two viewers open over their home with themselves as p', () => {
+  for (const k of R.peeks || ['ticket']) {
+    const h = `#${PEEK_HEAD(k)}`;
+    assert.deepEqual(plain2(S.parseHead(h, R)), { page: PEEK_HOME(k), state: { p: PEEK_HEAD(k) }, legacy: true }, h);
+    assert.equal(S.headFor(S.parseHead(h, R)), `#${PEEK_HOME(k)}?${pq(PEEK_HEAD(k))}`, `${h} canonical`);
+  }
+  for (const v of ['artifact/main/the-mock', 'artifact/wt/kit-1/the-mock', 'preview/bold-otter']) assert.deepEqual(plain2(S.parseHead(`#${v}`, R)), { page: 'library', state: { p: v }, legacy: true }, v);
+  assert.deepEqual(plain2(S.parseHead('#file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md&title=Quality', R)), { page: 'governance', state: { p: 'file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md&title=Quality' }, legacy: true }, 'a file by its path');
+});
+
+test('@2 p of an unknown kind, or an artifact with a bad slug, is dropped', () => {
+  for (const v of ['nothing/x', 'talk/t-1', 'review/q-1', 'review-preview?path=a.html', 'ticket', 'ticket/', 'file?title=x', 'artifact/main/Bad_Slug', 'artifact/main/', 'artifact/tree/' + HEX40 + '/-x', 'preview/a/b']) {
+    assert.deepEqual(plain2(S.parseHead(`#board?goal=g-1&${pq(v)}`, R)), { page: 'board', state: { goal: 'g-1' } }, v);
+  }
+  assert.deepEqual(plain2(S.parseHead('#artifact/main/Bad_Slug', R)), { page: 'library', state: {}, legacy: true }, 'a legacy viewer head naming no artifact: its home, no p');
+});
+
+test('@2 i is kept only with th=inbox', () => {
+  assert.deepEqual(plain2(S.parseHead('#board?th=open&i=q-1', R)), { page: 'board', state: { th: 'open' } });
+  assert.deepEqual(plain2(S.parseHead('#board?i=q-1', R)), { page: 'board', state: {} });
+  assert.deepEqual(plain2(S.parseHead('#board?th=inbox&i=q-1', R)), { page: 'board', state: { th: 'inbox', i: 'q-1' } });
+});
+
+test("@2 an artifact's version: tree/<id> only with 40 or 64 lower-case hex, anything else but main and wt/<w> is main", () => {
+  const got = (v) => S.parseHead(`#library?${pq(v)}`, R).state.p;
+  for (const at of [`tree/${'a'.repeat(39)}`, `tree/${'A'.repeat(40)}`, 'tree/', 'tree', `tree/${HEX40}x`, 'origin/main', 'wt', 'wt/.x', 'wt/a/b', 'draft']) {
+    assert.equal(got(`artifact/${at}/the-mock?path=b.html`), 'artifact/main/the-mock?path=b.html', at);
+  }
+  assert.equal(got(`artifact/tree/${HEX40}/the-mock`), `artifact/tree/${HEX40}/the-mock`);
+  assert.equal(got('artifact/wt/kit-1.x_y/the-mock'), 'artifact/wt/kit-1.x_y/the-mock');
+  assert.equal(S.headFor(S.parseHead(`#library?${pq(`artifact/tree/${'a'.repeat(39)}/the-mock`)}`, R)), `#library?${pq('artifact/main/the-mock')}`, 'headFor writes the normalised head');
+});
+
+test("@2 p's own query is read with URLSearchParams: a preview's route holding ? & = # round-trips", () => {
+  const h = `#library?p=${encodeURIComponent(`preview/app?route=${encodeURIComponent('/a?b=1&c=2#d')}`)}`;
+  const p = S.parseHead(h, R).state.p;
+  assert.equal(new URLSearchParams(String(p).slice(String(p).indexOf('?') + 1)).get('route'), '/a?b=1&c=2#d');
+  assert.equal(S.headFor(S.parseHead(h, R)), h);
+  assert.equal(S.parseHead(`#library?${pq('preview/app?route=%2F')}`, R).state.p, 'preview/app', "the route '/' is the default, left out");
+});
+
+test("@2 an artifact's page: kept when the server can serve it, else dropped with the version kept", () => {
+  const v = (page) => `artifact/tree/${HEX40}/the-mock?${new URLSearchParams({ path: page })}`;
+  assert.equal(S.parseHead(`#library?${pq(v('docs/b.html'))}`, R).state.p, `artifact/tree/${HEX40}/the-mock?path=docs%2Fb.html`, 'docs/b.html is kept');
+  for (const bad of ['..', '.x/y.html', 'a//b', 'b c.html', '%2e%2e/x.html', 'a\\b', '/abs.html', 'a/', 'index.html']) {
+    const h = `#library?${pq(v(bad))}`;
+    assert.equal(S.parseHead(h, R).state.p, `artifact/tree/${HEX40}/the-mock`, `${bad}: dropped, the version kept`);
+    assert.equal(S.headFor(S.parseHead(h, R)), `#library?${pq(`artifact/tree/${HEX40}/the-mock`)}`, `${bad}: the normalised head`);
+  }
+});
+
+test('@2 stampFor on a p head: its own page, cold or warm', () => {
+  const h = '#progress?goal=g-1&p=ticket%2Fkit-1';
+  const cold = S.stampFor({ hash: h, state: null }, null, true, R);
+  assert.deepEqual(plain2(cold), { page: '#progress?goal=g-1', depth: 1, openedHere: false }, 'cold');
+  assert.deepEqual(plain2(S.closeTarget(cold)), { replace: '#progress?goal=g-1' });
+  assert.deepEqual(plain2(S.stampFor({ hash: h, state: null }, { page: '#board', depth: 0, openedHere: true }, false, R)), { page: '#progress?goal=g-1', depth: 1, openedHere: false }, 'warm over another page');
+  assert.deepEqual(plain2(S.stampFor({ hash: h, state: null }, { page: '#progress?goal=g-1', depth: 0, openedHere: true }, false, R)), { page: '#progress?goal=g-1', depth: 1, openedHere: true }, 'warm over its own page');
+  assert.deepEqual(plain2(S.stampFor({ hash: h, state: null }, { page: '#progress?goal=g-1', depth: 1, openedHere: false }, false, R)), { page: '#progress?goal=g-1', depth: 2, openedHere: false }, 'from a peek over its own page');
+});
+
+test('@2 rememberedFilters: a fresh head with p says what it shows', () => {
+  const stored = { goal: 'g-1' };
+  const keys = (h) => Object.keys(S.parseHead(h, R).state);
+  assert.equal(S.rememberedFilters('board', keys('#board?p=ticket%2Fkit-1'), true, stored), null, 'a head with p');
+  assert.equal(S.rememberedFilters('board', keys('#board?th=open&p=ticket%2Fkit-1'), true, stored), null, 'with p and th');
+  assert.deepEqual(plain2(S.rememberedFilters('board', keys('#board?th=open'), true, stored)), { goal: 'g-1' }, 'without p the store fills in');
+});
+
+test('@2 rememberedFilters: an empty value is a value', () => {
+  const stored = { goal: 'g-1', kind: 'Mock' };
+  const keys = (h) => Object.keys(S.parseHead(h, R).state);
+  for (const [page, h] of [['board', '#board?goal='], ['board', '#board?att='], ['progress', '#progress?goal='], ['library', '#library?kind=']]) assert.equal(S.rememberedFilters(page, keys(h), true, stored), null, h);
 });
 
 test('stampFor, closeTarget and rememberedFilters', () => {
