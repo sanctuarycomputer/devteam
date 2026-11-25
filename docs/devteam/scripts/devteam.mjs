@@ -8174,7 +8174,8 @@ function selfMainText() {
   return projectInRepo && mainRef() ? git(['show', `${mainRef()}:${selfRel()}`]) : readText(path.join(projectDir, 'self.md'));
 }
 // dashboard-data's self block (log.schema.json#self@1 dashboard): main's self.md as check.mjs's
-// dashboardSelf gives it, or null when main has none or it breaks the contract.
+// dashboardSelf gives it, or null when main has none, breaks the contract or is plain (self@2: the
+// page reads the document; kit-868 drops the key).
 function selfDashboard() {
   const text = selfMainText();
   const b = text === null ? null : selfDoc(text).block;
@@ -8449,29 +8450,20 @@ function selfDraftLines(base, sha, branch) {
   return { fails: [...fails, ...names.fails], warns: names.warns };
 }
 const SELF_NOT_DRAFTED = 'self.md is not drafted yet: the supervisor drafts it from the code and the strategy (supervisor.md, Monitoring)';
-// self show [--json]: main's self.md. self check: the working tree's, the draft, against the
-// contract and each part's path on disk (errors, exit 1), then the names rule and whether main's
-// strategy links self.md (warnings, the exit unchanged).
+// self show [--json]: main's self.md, printed as it is, either version (--json: selfDashboard, a
+// version 1 block or null). self check: the working tree's, the draft, against self@2 with each part
+// link on disk (selfDraftErrors: errors, exit 1), then the names rule and whether main's strategy
+// links self.md (warnings, the exit unchanged).
 function cmdSelf() {
   const sub = positional[0];
   if (sub === 'show') {
     gitReadCache = new Map();
     const text = selfMainText();
     if (text === null) return flags.json ? json(null) : out(SELF_NOT_DRAFTED);
-    const { block: b, errors } = selfDoc(text);
-    if (errors.length) {
-      for (const e of errors) out(`error: self.md: ${e}`);
-      process.exit(1);
-    }
     if (flags.json) return json(selfDashboard());
-    const list = (xs) => (xs.length ? xs.join('; ') : 'nothing listed');
     out(`Self: ${selfRel()} ${projectInRepo && mainRef() ? 'on main' : 'in the working tree'}`);
-    out(`What it is: ${b.what}`);
-    out(`What it makes or does: ${b.makes}`);
-    out('Parts:');
-    for (const p of b.parts) out(`  ${p.id}  ${p.name}: ${p.what} (${p.code.join(', ')})`);
-    out(`Controls: ${list(b.controls)}`);
-    out(`Does not control: ${list(b.not)}`);
+    out('');
+    out(String(text).replace(/\s+$/, ''));
     return;
   }
   if (sub === 'check') {
@@ -39329,8 +39321,8 @@ const HELP_OBSERVE = `Observe and orient
   ack <finding-kind> <subject> --reason r [--owner]   set a finding aside for finding_ack_hours (a merge commit: for good)
   timeline <ticket-id> [--json]   the ticket and every log line, review and file that bears on it
   governance [--json]   the kit's governance and process files and the project's strategy, Self and exterior: title, last change, changed here
-  self show [--json]   main's project/self.md, what the project is: what it is, makes, its parts with their paths, what it controls and what not; --json is the dashboard's self block, null when not drafted
-  self check   the working tree's self.md against self@1, each part's path on disk, and the names rule; errors exit 1, warnings don't
+  self show [--json]   main's project/self.md, what the project is, printed as it is; --json is the dashboard's self block, null when not drafted or plain (self@2)
+  self check   the working tree's self.md against self@2 (a plain document; a fenced self block is refused), each part link on disk, and the names rule; errors exit 1, warnings don't
   exterior show [--json] | exterior check   the working tree's project/exterior.md, what the project relates to, by relation, with each entity's signals and scores (--json the dashboard's exterior block, null when not drafted); check: the working tree's against exterior@1, its blobs and quotes at the draft, and the names rule; errors exit 1
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
   search "<words>" [--type <log type>|doc]… [--since <date>] [--limit n] [--json]   what the project already wrote about it, best first, quoted as data (supervisor.md §6)

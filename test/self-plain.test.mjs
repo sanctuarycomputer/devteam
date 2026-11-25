@@ -256,13 +256,13 @@ test('S the names hold reads the whole plain text; self show prints it; its data
     assert.equal(json(W.ok(['dashboard-data'])).self, null, 'S4b dashboard-data self is null');
   });
   await check('S1c an existing part\'s link target is held like any word', () => {
-    write(path.join(W.old, 'docs/devteam/Sync/x'), 'x\n');
-    write(path.join(W.old, SELF), SELF_MD.replace('It controls its code', 'Its [sync service](../Sync/) keeps notes alike.\n\nIt controls its code'));
+    write(path.join(W.old, 'docs/devteam/Kestrelbox/x'), 'x\n');
+    write(path.join(W.old, SELF), SELF_MD.replace('It controls its code', 'Its [sync service](../Kestrelbox/) keeps notes alike.\n\nIt controls its code'));
     const c = W.run(['self', 'check']);
     W.g(['checkout', '--', SELF], W.old);
-    fs.rmSync(path.join(W.old, 'docs/devteam/Sync'), { recursive: true, force: true });
+    fs.rmSync(path.join(W.old, 'docs/devteam/Kestrelbox'), { recursive: true, force: true });
     assert.equal(c.status, 0, `S1c the draft passes\n${c.text}`);
-    assert.match(c.out, /warning: self\.md: "Sync" \(prose\)/, `S1c Sync is held\n${c.out}`);
+    assert.match(c.out, /warning: self\.md: "Kestrelbox" \(prose\)/, `S1c Kestrelbox is held\n${c.out}`);
   });
   await check('S5 the page reads no self key of dashboard-data', () => {
     const page = fs.readFileSync(path.join(KIT, 'dashboard', 'index.html'), 'utf8');
