@@ -5,9 +5,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { canDrive } from './lib/chrome.mjs';
+import { canDrive, openChrome } from './lib/chrome.mjs';
 import { a, browser, ok, viewer, ws, within, readState, sleep } from './lib/browser-view-fixture.mjs';
-import { MARK, TEXT, dsite, dialogsFile, up, later, asked, LATER, isDialog, hold, release, heldDialog, pageGot, allow, byHand } from './lib/browser-dialogs-fixture.mjs';
+import { MARK, TEXT, dsite, dialogsFile, up, later, asked, LATER, s1Close, isDialog, hold, release, heldDialog, pageGot, allow, byHand } from './lib/browser-dialogs-fixture.mjs';
 
 // CI's Node 22 and 24 jobs have Chrome: there the file must run, never skip.
 const mustRun = !!process.env.CI && Number(process.versions.node.split('.')[0]) >= 22;
@@ -251,4 +251,30 @@ test('H17 an answer dropped on a failed read leaves the dialog up, and the next 
   await pageGot('true');
   await release(qid);
   await browser(a, ['stop']);
+});
+
+test('H10 the view page itself, in real Chrome: the owner presses OK and the page in the browser gets true', opts, async () => {
+  await up();
+  s1Close();
+  const chrome = await openChrome();
+  try {
+    const p = await chrome.newPage();
+    await p.send('Page.enable');
+    await p.send('Page.navigate', { url: `http://127.0.0.1:${readState(a).view_port}/` });
+    await within(10000, () => p.ev(`document.getElementById('chip').textContent === 'Live'`), 'the view live');
+    dsite.go = false;
+    dsite.answered = null;
+    await ok(a, ['open', `${dsite.origin}/hconfirm`]);
+    const qid = await hold();
+    dsite.go = true;
+    await within(8000, () => p.ev(`document.getElementById('ask').open`), 'the dialog in the view');
+    assert.equal(await p.ev(`document.getElementById('ask-said').textContent`), TEXT.later);
+    await within(5000, () => p.ev(`!document.getElementById('ask-yes').disabled`), 'OK armed');
+    const r = await p.ev(`(() => { const b = document.getElementById('ask-yes').getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 }; })()`);
+    for (const type of ['mousePressed', 'mouseReleased']) await p.send('Input.dispatchMouseEvent', { type, ...r, button: 'left', clickCount: 1 });
+    await pageGot('true');
+    await within(3000, () => p.ev(`!document.getElementById('ask').open`), 'taken down');
+    await release(qid);
+    p.close();
+  } finally { await chrome.close(); }
 });

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-DDpsdbxQXFZ9wLTGXW9F8PnmQ068Ay5c5txm2XpplTw='; style-src 'sha256-cqYYaeELvHFgB3LEIGD5/i37pu/j+tY+GNvrwVFT1xw='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-wRdUmEp8+DZCPzFhG8KU/Eb5koW3JfllgmaJZTDX7LU='; style-src 'sha256-JSPtZ5R78Dn/uizI/hTh3Brb1pSvWTwVtabppCXPnng='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Supervisor's browser</title>
@@ -42,6 +42,11 @@
   dialog { width: min(var(--text), calc(100vw - 32px)); max-width: none; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--fg); padding: 16px; }
   dialog::backdrop { background: rgba(0, 0, 0, 0.4); }
   dialog p { margin: 0 0 14px; }
+  #ask { overscroll-behavior: contain; }
+  #ask .from { font-weight: 600; overflow-wrap: anywhere; }
+  #ask .said { max-height: 40vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; unicode-bidi: isolate; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--chip); }
+  #ask input { width: 100%; font: inherit; margin: 0 0 14px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--fg); }
+  #ask [hidden] { display: none; }
   .actions { display: flex; justify-content: flex-end; gap: 8px; }
 </style>
 </head>
@@ -71,6 +76,15 @@
   <div class="actions">
     <button type="button" class="btn" id="cancel">Cancel</button>
     <button type="button" class="btn danger" id="forget">Sign out of every site</button>
+  </div>
+</dialog>
+<dialog id="ask" aria-labelledby="ask-from" aria-describedby="ask-said">
+  <p class="from" id="ask-from" tabindex="-1"></p>
+  <p class="said" id="ask-said" dir="auto"></p>
+  <input id="ask-text" aria-label="Your answer" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="10000">
+  <div class="actions">
+    <button type="button" class="btn" id="ask-no"></button>
+    <button type="button" class="btn" id="ask-yes"></button>
   </div>
 </dialog>
 <script>
@@ -149,6 +163,14 @@
     if (!m || typeof m !== 'object' || Array.isArray(m)) return;
     if (m.t === 'frame') draw(m, sock);
     else if (m.t === 'url') { if (closed(m, ['t', 'url']) && typeof m.url === 'string' && MASKED.test(m.url)) showUrl(m.url); }
+    else if (m.t === 'dialog') {
+      if (!closed(m, ['t', 'id', 'kind', 'url', 'text', 'default', 'frame']) || !DIALOG_ID.test(m.id) || !ASKS[m.kind] || typeof m.url !== 'string' || !MASKED.test(m.url) || !words(m.text)) return;
+      if (m.frame !== undefined && m.frame !== true) return;
+      if (m.default !== undefined && (m.kind !== 'prompt' || !words(m.default) || !m.default)) return;
+      if (!asks.some((x) => x.id === m.id)) asks.push(m);
+      showAsk();
+    }
+    else if (m.t === 'dialog_end') { if (closed(m, ['t', 'id']) && DIALOG_ID.test(m.id)) dropAsk(m.id); }
     else if (m.t === 'bye') {
       // 1 to 200 characters, counted as the schema counts them: by code point
       if (!closed(m, ['t', 'why']) || typeof m.why !== 'string' || !int([...m.why].length, 1, 200)) return;
@@ -185,6 +207,8 @@
       press = null;
       held.clear();
       area.classList.add('down');
+      asks.length = 0; // the next socket is sent what is still open
+      showAsk();
       if (ended) return;
       chip(opened ? 'Reconnecting…' : 'Connecting…');
       timer = setTimeout(connect, wait);
@@ -192,11 +216,81 @@
     });
   }
 
+  // ----- a page's confirm, prompt or beforeunload, the owner's to answer ------------------------
+  // The page's words are text, never markup. The page in Chrome picks when its dialog appears, so for
+  // a second after one appears or moves neither a press nor a key answers it, and for a second after
+  // one goes nothing but an up reaches Chrome (send): a press or key meant for what was there lands on
+  // neither.
+  const DIALOG_ID = /^d-[0-9a-f]{16}$/;
+  const ASKS = { confirm: ['Cancel', 'OK'], prompt: ['Cancel', 'OK'], beforeunload: ['Stay', 'Leave'] };
+  const words = (v) => typeof v === 'string' && [...v].length <= 2000;
+  const SETTLE_MS = 1000;
+  const asks = []; // open dialogs, the first one shown
+  let shown = null;
+  let arming = 0;
+  let began = null; // the armed answer this pointer press began on
+  let quietUntil = 0;
+  const ask = $('ask');
+  const quiet = () => performance.now() < quietUntil;
+  function arm() {
+    clearTimeout(arming);
+    began = null;
+    $('ask-no').disabled = $('ask-yes').disabled = true;
+    if (shown) arming = setTimeout(() => { $('ask-no').disabled = $('ask-yes').disabled = false; }, SETTLE_MS);
+  }
+  function showAsk() {
+    const m = asks[0] ?? null;
+    if (m === shown) return;
+    const was = shown;
+    shown = m;
+    if (was) { $('ask-text').value = ''; quietUntil = performance.now() + SETTLE_MS; }
+    if (!m) { arm(); ask.close(); return; }
+    confirm.close(); // Sign out's own question never sits under the page's
+    const host = m.url === 'about:blank' ? 'A page' : `${m.frame ? 'A frame in the page' : 'The page'} at ${new URL(m.url).host}`;
+    $('ask-from').textContent = `${host} ${m.kind === 'beforeunload' ? 'asks before leaving. What you entered may be lost.' : 'says'}`;
+    $('ask-said').textContent = m.text;
+    $('ask-said').hidden = !m.text;
+    $('ask-text').hidden = m.kind !== 'prompt';
+    $('ask-text').value = m.default ?? '';
+    [$('ask-no').textContent, $('ask-yes').textContent] = ASKS[m.kind];
+    arm();
+    if (!ask.open) ask.showModal();
+    $('ask-from').focus(); // neither an answer nor the text field, so what the owner was typing goes nowhere
+  }
+  function dropAsk(id) {
+    const i = asks.findIndex((x) => x.id === id);
+    if (i >= 0) asks.splice(i, 1);
+    showAsk();
+  }
+  function answerAsk(accept) {
+    if (!shown || !socket || socket.readyState !== 1) return;
+    const m = { t: 'dialog', id: shown.id, accept };
+    if (shown.kind === 'prompt' && accept) m.text = $('ask-text').value;
+    send(m);
+    arm(); // up until its dialog_end: an answer the daemon dropped can be pressed again
+  }
+  addEventListener('pointerdown', (e) => { began = e.target.disabled ? null : e.target; }, true);
+  for (const [id, accept] of [['ask-no', false], ['ask-yes', true]]) {
+    $(id).addEventListener('click', (e) => {
+      const ok = e.detail === 0 || began === e.currentTarget; // 0: the keyboard
+      began = null;
+      if (ok) answerAsk(accept);
+    });
+    $(id).addEventListener('keydown', (e) => { if (e.repeat) e.preventDefault(); });
+  }
+  // Escape is no answer; a browser that closes the modal anyway has it opened again
+  ask.addEventListener('cancel', (e) => e.preventDefault());
+  ask.addEventListener('close', () => { if (shown) { ask.showModal(); arm(); } });
+  addEventListener('resize', () => { if (shown) arm(); });
+  document.addEventListener('visibilitychange', () => { if (shown) arm(); });
+
   // ----- the owner's input, on the canvas only -----------------------------------------------
   // send is the only way out, and it drops what finds no open socket: nothing is queued, so a
   // password typed during a reconnect is never replayed into whatever page is up by then. What the
   // owner types or pastes lives only in the handler that sends it.
-  const send = (m) => { if (socket && socket.readyState === 1) socket.send(JSON.stringify(m)); };
+  // In the quiet second after a page's dialog goes, only an up, an answer or Sign out
+  // (which asks first) is sent.
+  const send = (m) => { if (quiet() && m.t !== 'dialog' && m.t !== 'forget' && m.type !== 'up') return; if (socket && socket.readyState === 1) socket.send(JSON.stringify(m)); };
   const MODS = (e) => (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
   const withMods = (m, e) => { const k = MODS(e); if (k) m.mods = k; return m; };
   const BUTTONS = ['left', 'middle', 'right'];
@@ -219,6 +313,7 @@
   const queue = (m) => { queued = m; if (!raf) raf = requestAnimationFrame(flush); };
 
   canvas.addEventListener('pointerdown', (e) => {
+    if (quiet()) return;
     canvas.focus();
     const button = BUTTONS[e.button];
     if (!frame || press || !button) return;
@@ -338,6 +433,7 @@
     return { url };
   }
   // with no socket an entry or Back would go nowhere: say so rather than drop it silently
+  const SOON = 'A page was just asking: not sent. Try again in a second.';
   const live = () => socket && socket.readyState === 1;
   $('go').addEventListener('submit', (e) => {
     e.preventDefault();
@@ -345,11 +441,12 @@
     const r = toNav(addr.value);
     if (r.refuse) return note(r.refuse);
     if (!live()) return note('Not connected: not sent.');
+    if (quiet()) return note(SOON);
     note('');
     send({ t: 'nav', url: r.url });
     addr.blur();
   });
-  $('back').addEventListener('click', () => { if (!live()) return note('Not connected: not sent.'); note(''); send({ t: 'back' }); });
+  $('back').addEventListener('click', () => { if (!live()) return note('Not connected: not sent.'); if (quiet()) return note(SOON); note(''); send({ t: 'back' }); });
   $('again').addEventListener('click', () => {
     ended = false;
     $('bye').hidden = true;
