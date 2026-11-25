@@ -8122,11 +8122,30 @@ function worldDocErrors(text, doc) {
   }
   return errs;
 }
-// A self.md's text in: its parsed self block (null unless it holds) and its contract errors.
+// The folder a self.md's part links resolve from, from the repo root: the project folder's. A project
+// outside its repo has no repo for a part to be in, so its own folder stands in for one ('').
+const selfRoot = () => (projectInRepo ? projectRel : '');
+// A self.md's text in, as validate reads it: { version, block, errors }. Version 1 (a fenced self or
+// exterior block, selfPlainVersion) against self@1, its block parsed when it holds; one whose block
+// self@1's reader can't find (a ~~~ fence, one indented or in a list item) gets self@2's block error,
+// so validate and self check say the same. Version 2 against self@2's form, no repo needed: the
+// title, at least one part, none leaving the repo or with a bad escape. Whether each part is there
+// is the draft's check (selfDraftErrors); on main a part gone is self-drift.
 function selfDoc(text) {
+  const version = selfPlainVersion(text);
+  const plain = () => ({ version, block: null, errors: selfPlainCheck(text, { root: selfRoot(), has: () => true }).errors });
+  if (version === 2) return plain();
+  const b = fencedBlocks(text);
+  if (!b.unclosed && !b.blocks.some((x) => x.info === 'self' || x.info === 'exterior')) return plain();
   const errors = worldDocErrors(text, 'self');
-  if (errors.length) return { block: null, errors };
-  return { block: JSON.parse(fencedBlocks(text).blocks.find((x) => x.info === 'self').body), errors };
+  if (errors.length) return { version, block: null, errors };
+  return { version, block: JSON.parse(b.blocks.find((x) => x.info === 'self').body), errors };
+}
+// A draft self.md's errors (self@2, log.schema.json#self2): the one judgment self check, chore pr and
+// check-pr make. A version 1 block is refused, alone; else the title, then the parts, each part link
+// resolved from selfRoot() and looked for with has(path) (the disk, or a commit's tree).
+function selfDraftErrors(text, has) {
+  return selfPlainCheck(text, { root: selfRoot(), has }).errors;
 }
 // A part's code path as the disk and git checks both read it: split on /, empty and . segments
 // dropped, joined. '' is the repo root. (The schema refuses a leading / and any .. segment.)
@@ -8145,10 +8164,11 @@ function selfPathsMissing(block, has) {
   }
   return missing;
 }
-// Whether a normalised path is on disk under the repo root, each segment matched by its exact case
-// (as git reads it), so App/ is missing beside app/ on a disk that folds case too.
+// Whether a normalised path is on disk under the repo root (the project folder, for a project outside
+// its repo: selfRoot), each segment matched by its exact case (as git reads it), so App/ is missing
+// beside app/ on a disk that folds case too.
 function hasOnDisk(n) {
-  let dir = projectRoot;
+  let dir = projectInRepo ? projectRoot : projectDir;
   for (const seg of n === '' ? [] : n.split('/')) {
     let names;
     try { names = fs.readdirSync(dir); } catch { return false; }
@@ -8392,10 +8412,8 @@ function choreSelfHold(slug, base, head, named, exteriorChanged = false) {
   const rel = selfRel();
   if (!projectInRepo || !draftBlobs(base, head, rel).length) return named && !exteriorChanged ? 'chore pr: --names-checked is for a chore changing self.md or exterior.md' : null;
   if (git(['cat-file', '-e', `${head}:${rel}`], mainRoot) !== null) {
-    const { block, errors } = selfDoc(git(['show', `${head}:${rel}`], mainRoot) ?? '');
-    if (errors.length) return `chore pr: self.md breaks self@1: ${errors.join('; ')}; run self check`;
-    const missing = selfPathsMissing(block, hasAt(head));
-    if (missing.length) return missing.map((m) => `chore pr: part ${m.part}'s path ${m.path} is not at ${head.slice(0, 12)}`).join('\n');
+    const errors = selfDraftErrors(git(['show', `${head}:${rel}`], mainRoot) ?? '', hasAt(head));
+    if (errors.length) return [...errors.map((e) => `chore pr: self.md: ${e}`), `chore pr: self.md breaks self@2 at ${head.slice(0, 12)}; run self check`].join('\n');
   }
   const allowed = namesAllowedText();
   const words = draftWords(base, head, rel, (text, has) => selfWords(text, has, allowed));
@@ -8427,9 +8445,8 @@ function selfDraftLines(base, sha, branch) {
   if (!projectInRepo || !draftBlobs(base, sha, rel).length) return { fails: [], warns: [] };
   const fails = [];
   if (git(['cat-file', '-e', `${sha}:${rel}`], mainRoot) !== null) {
-    const { block, errors } = selfDoc(git(['show', `${sha}:${rel}`], mainRoot) ?? '');
-    fails.push(...errors.map((e) => `${rel} breaks self@1 at ${sha.slice(0, 12)}: ${e}`));
-    if (block) fails.push(...selfPathsMissing(block, hasAt(sha)).map((m) => `${rel}: part ${m.part}'s path ${m.path} is not at ${sha.slice(0, 12)}`));
+    const errors = selfDraftErrors(git(['show', `${sha}:${rel}`], mainRoot) ?? '', hasAt(sha));
+    fails.push(...errors.map((e) => `${rel} breaks self@2 at ${sha.slice(0, 12)}: ${e}`));
   }
   const allowed = namesAllowedText();
   const words = draftWords(base, sha, rel, (text, has) => selfWords(text, has, allowed));
@@ -8468,14 +8485,12 @@ function cmdSelf() {
   if (sub === 'check') {
     const text = readText(path.join(projectDir, 'self.md'));
     if (text === null) return out(SELF_NOT_DRAFTED);
-    const { block, errors } = selfDoc(text);
+    const errors = selfDraftErrors(text, hasOnDisk);
     for (const e of errors) out(`error: self.md: ${e}`);
-    const missing = block ? selfPathsMissing(block, hasOnDisk) : [];
-    for (const m of missing) out(`error: self.md: part ${m.part}'s path ${m.path} is not in the repo`);
     gitReadCache = new Map();
     for (const w of selfWords(text, hasOnDisk, namesAllowedText())) out(`warning: self.md: "${w.word}" (${w.where}) is in neither main's strategy.md nor its package.json, Gemfile or requirements.txt: on a repo not known to be private, the draft is public once its branch is pushed`);
     if (selfMainText() !== null && !linksSelf(strategyMainText())) out('warning: main\'s strategy.md does not link self.md: propose a strategy-change adding [self.md](./self.md), in its own PR');
-    process.exit(errors.length || missing.length ? 1 : 0);
+    process.exit(errors.length ? 1 : 0);
   }
   die('usage: self show [--json] | self check');
 }
