@@ -1093,9 +1093,19 @@ function loadSettings({ origin = false, until = null } = {}) {
       if (isAt() === sha) break; // already right: a lock left on it stops nothing
       const old = was.get(tracking) ?? '0'.repeat(sha.length);
       // inside the deadline too: git waits on a lock left on the ref as long as core.filesRefLockTimeout says (final-1b F3)
-      const ms = Math.floor(end - Date.now());
-      const set = ms < 100 ? { status: 124, stderr: '' } : spawnSync('git', [...RESPONDER_GIT, 'update-ref', '--no-deref', tracking, sha, old], { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: ms, env: { ...process.env, GIT_NO_LAZY_FETCH: '1' } });
-      if (set.status === null) set.status = 124;
+      // A ref lock another git process holds (two starts at once, each setting it: kit-910) goes in
+      // moments, but git gives up on it after 100 ms: while git says the lock file exists and the ref is
+      // still as it was, try again, for 5 s at most and never past a second before the deadline, so a
+      // lock no one lets go refuses in git's own words. Any other failure refuses on the first try.
+      const lockedUntil = Math.min(Date.now() + 5000, end - 1000);
+      let set;
+      for (;;) {
+        const ms = Math.floor(end - Date.now());
+        set = ms < 100 ? { status: 124, stderr: '' } : spawnSync('git', [...RESPONDER_GIT, 'update-ref', '--no-deref', tracking, sha, old], { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: ms, env: { ...process.env, GIT_NO_LAZY_FETCH: '1' } });
+        if (set.status === null) set.status = 124;
+        if (set.status === 0 || !/Unable to create '[^']*\.lock': File exists/.test(set.stderr ?? '') || Date.now() >= lockedUntil || isAt() !== old) break;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      }
       if (set.status === 0) break;
       if (isAt() === old) no(why(set));
       if (tries === 3) no(`origin/${branch} here kept moving while it was read`);
