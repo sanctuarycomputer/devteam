@@ -36279,14 +36279,16 @@ function browserRenew(ctx, port) {
 // This checkout's browser preview record (label browser), or undefined.
 const browserPreviewRec = () => readPreviews().find((r) => r.project === previewProject() && r.session === logWriter() && r.label === 'browser');
 // A retry's view port (kit-877): a random one of PREVIEW_PICK that no other record of this project
-// holds, that previewPortOk allows and that is free now, never the one just lost; previewPickPort's
-// refusal when none is.
+// holds, that previewPortOk allows and that is free now, never one this start has lost (lost, a Set);
+// with none left, a refusal in words, never a lost port again (kit-923).
+// DEVTEAM_TEST_BROWSER_RETRY_POOL=<port,port,...> narrows the retries to those ports of the range in tests.
 async function browserRetryPort(name, lost) {
   const held = new Set(readPreviews().filter((r) => r.name !== name).map((r) => r.port));
-  const left = PREVIEW_PICK.filter((p) => p !== lost && !held.has(p) && previewPortOk(p) === true);
+  const pool = browserTestEnv('DEVTEAM_TEST_BROWSER_RETRY_POOL')?.split(',').map(Number).filter((p) => PREVIEW_PICK.includes(p)) ?? PREVIEW_PICK;
+  const left = pool.filter((p) => !lost.has(p) && !held.has(p) && previewPortOk(p) === true);
   for (let i = left.length - 1; i > 0; i--) { const j = crypto.randomInt(i + 1); [left[i], left[j]] = [left[j], left[i]]; }
   for (const p of left) if (await portFree(p)) return p;
-  return previewPickPort(name);
+  die(`browser: no free view port left in ${PREVIEW_PICK[0]}-${PREVIEW_PICK.at(-1)} to retry on: this start lost ${[...lost].join(', ')} to other servers' binds; try again once one is free`);
 }
 // A live daemon, or one started: in the browser preview's window, under the start lock, the memory
 // check and the profile first (so a refused start claims nothing).
@@ -36307,7 +36309,8 @@ async function browserEnsure({ headed = false } = {}) {
     const end = Date.now() + 45000;
     // Another project's preview can take the picked view port before the daemon binds it (the picker
     // sees only this project's records): then a fresh port, random in the same range (kit-877: a lowest-
-    // free retry races the same starters again), up to four tries in all.
+    // free retry races the same starters again) and never one this start lost (kit-923), up to four tries in all.
+    const lost = new Set();
     launch: for (let tries = 0; ; tries++) {
       const rec = launchPreviewWindow(previewFresh({ v: 1, name, project: previewProject(), session, label: 'browser', port, cwd: mainRoot, run: { cmd, window: null, env: browserRunEnv({ headed }) } }));
       if (!rec) die('browser: could not open a tmux window for its daemon (is tmux installed?)');
@@ -36315,7 +36318,7 @@ async function browserEnsure({ headed = false } = {}) {
         const s = browserState();
         if (s?.preview === name && (await browserLive())) return s;
         const text = sh('tmux', ['capture-pane', '-p', '-J', '-t', rec.run.window]);
-        if (text?.includes(PREVIEW_EXITED) && tries < 3 && /EADDRINUSE/.test(text)) { killPreviewWindow(rec); port = await browserRetryPort(name, port); continue launch; }
+        if (text?.includes(PREVIEW_EXITED) && tries < 3 && /EADDRINUSE/.test(text)) { killPreviewWindow(rec); lost.add(port); port = await browserRetryPort(name, lost); continue launch; }
         if (text === null || text.includes(PREVIEW_EXITED)) {
           const tail = (text ?? '').split('\n').filter((l) => !l.includes(PREVIEW_EXITED)).join('\n').trimEnd().split('\n').slice(-20).join('\n');
           process.stderr.write(`devteam: browser: the daemon stopped before it was up:\n${tail}\n`);
