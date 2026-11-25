@@ -7396,9 +7396,11 @@ avStep.ready = (c) => { avStep.sample(); for (const [k, rec] of avStep.press.see
 avStep.forget = () => { for (const [k, rec] of avStep.press.seen) if (rec.el.matches('[data-tl-accept]')) avStep.press.seen.delete(k); };
 avStep.watch = () => {
   const P = avStep.press;
+  avStep.clear();
   if (P.on) return;
   P.on = true;
   const tick = () => {
+    avStep.clear();
     const card = document.getElementById('tl-card');
     if (!avStep.up() && !(card && !card.hidden && card.querySelector('.tl-addr')) && !avStep.reminds()) { P.on = false; P.seen.clear(); return; }
     avStep.sample();
@@ -7415,6 +7417,13 @@ avStep.stays = (t, card) => {
   const { clientWidth: w, clientHeight: h } = document.documentElement;
   return r.left >= 0 && r.top >= 0 && r.right <= w && r.bottom <= h;
 };
+// kit-916: while the reminder card shows, each frame of the guard's watch sets the held words and View only's
+// just above it; with no card, '' hands them back to their own CSS.
+avStep.clear = () => {
+  const r = document.querySelector('#av-remind:not([hidden])')?.getBoundingClientRect();
+  const at = r && r.height > 0 ? `${Math.round(document.documentElement.clientHeight - r.top + 8)}px` : '';
+  for (const id of ['av-held', 'view-only-toast']) { const e = document.getElementById(id); if (e && e.style.bottom !== at) e.style.bottom = at; }
+};
 avStep.say = () => {
   let e = document.getElementById('av-held');
   if (!e) { e = document.createElement('div'); e.id = 'av-held'; e.setAttribute('role', 'status'); document.body.append(e); }
@@ -7422,6 +7431,7 @@ avStep.say = () => {
   e.textContent = '';
   requestAnimationFrame(() => { e.textContent = 'That moved just now. Press again in a second.'; });
   e.hidden = false;
+  avStep.clear();
   clearTimeout(e._hide);
   e._hide = setTimeout(() => { e.hidden = true; }, 4000);
 };
@@ -9293,6 +9303,7 @@ function viewToast() {
   }
   t.textContent = VIEW_TOAST;
   t.hidden = false;
+  avStep.clear();
   clearTimeout(t._hide);
   t._hide = setTimeout(() => { t.hidden = true; }, 2500);
 }
