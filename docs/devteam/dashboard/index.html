@@ -7534,7 +7534,7 @@ tShot.tab = (e) => {
   if (!el || $('artifact-view').hidden) return;
   const all = [...el.querySelectorAll('button')], i = all.indexOf(document.activeElement);
   e.preventDefault();
-  all[i < 0 ? 0 : (i + (e.shiftKey ? -1 : 1) + all.length) % all.length].focus();
+  all[i < 0 ? (e.shiftKey ? all.length - 1 : 0) : (i + (e.shiftKey ? -1 : 1) + all.length) % all.length].focus();
 };
 // before every other listener of these (the card's and the viewer's Escape): the picture alone closes
 window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && tShot.close()) { e.preventDefault(); e.stopImmediatePropagation(); } else if (e.key === 'Tab') tShot.tab(e); }, true);

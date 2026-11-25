@@ -560,6 +560,11 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
     for (let i = 0; i < 4; i++) went.push(await tab(false));
     for (let i = 0; i < 4; i++) went.push(await tab(true));
     assert.deepEqual(went, ['close', 'light', 'dark', 'close', 'light', 'close', 'dark', 'light', 'close'], 'Tab and Shift+Tab stay in the dialog');
+    // from none of its buttons: Tab to the first, Shift+Tab to the last
+    for (const [back, to] of [[false, 'light'], [true, 'close']]) {
+      await V.p.ev('(document.activeElement.blur(), true)');
+      assert.equal(await tab(back), to, 'from outside, ' + (back ? 'back' : 'on'));
+    }
   });
 
   await sub('A27: words that were not typed are said, whole or in the title, until 10 s, the next press or a refusal', async () => {
@@ -596,6 +601,14 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
     assert.ok(await V.settle(`${said}[0] === ${J(WORDS)} && window.__timers.length > 0`, 3000), 'said once more');
     await V.p.ev('(window.__timers.forEach((f) => f()), true)');
     assert.deepEqual(await V.p.ev(said), ['', ''], 'gone after 10 s');
+    // an answer that comes once another version is shown is not said there
+    await hand(no, { wait: 800 });
+    await V.p.ev(`showArtifact('pricing', 'main', { picked: true }); void 0`);
+    await V.soon(`AV?.at === 'main'`, 'setup: main is shown');
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.deepEqual(await V.p.ev(said), ['', ''], 'a late answer is not said of another version');
+    await V.p.ev(`showArtifact('pricing', 'plan-pricing', { picked: true }); void 0`);
+    await has(V, '#av-handover', 'the pill again');
     // a count of none says nothing of typing
     await hand({ to: 'plan-pricing', typed: false, count: 0 });
     await V.soon(`${text('#av-with')} === 'Nothing to hand over'`, 'setup: none');
