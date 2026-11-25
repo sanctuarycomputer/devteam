@@ -892,6 +892,23 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
       ok(old, ['worker', 'ch-89-t', '--resume'], SUP);
       assert.equal(git(['rev-parse', 'HEAD'], wt('ch-89-t')), main, 'X10: then at origin\'s main');
     });
+    await t.test('X15: a worktree another start adds just after the look is not resumed', tmux, () => {
+      behind('ch-95-z', 'X15');
+      const b = before('git-adds-after-look', `*' worktree list --porcelain '*`, (g) => `{ '${g}' "$@"; '${g}' -C '${old}' worktree add --quiet --lock --reason 'devteam: a start of ch-95-z is making this worktree' '${wt('ch-95-z')}' ticket/ch-95-z >/dev/null 2>&1; echo done > "$0.added"; exit 0; }`);
+      const r = run(old, ['worker', 'ch-95-z', '--resume'], b.env);
+      assert.ok(fs.existsSync(path.join(F.base, 'git-adds-after-look/git.added')), 'X15: it was added');
+      assert.notEqual(r.status, 0, `X15: refused: ${r.out}`);
+      assert.match(r.err, /is there, at [0-9a-f]{8}: if no other start is making it/, 'X15: named');
+    });
+    await t.test('X16: a start whose worktree something unlocked meanwhile leaves it', tmux, () => {
+      ticket('ch-96-a');
+      const b = before('git-unlocks', `*' worktree unlock '*`, (g) => `'${g}' -C '${old}' worktree unlock '${wt('ch-96-a')}'`);
+      const r = run(old, ['worker', 'ch-96-a'], b.env);
+      assert.ok(fs.existsSync(b.said), 'X16: it was unlocked');
+      assert.notEqual(r.status, 0, `X16: refused: ${r.out}`);
+      assert.ok(fs.existsSync(wt('ch-96-a')), 'X16: the worktree stays');
+      assert.match(r.err, /something unlocked .*ch-96-a while it was made/, 'X16: says so');
+    });
     await t.test('X13: when git can\'t list its worktrees, a killed start is still found', tmux, () => {
       behind('ch-93-x', 'X13');
       run(old, ['worker', 'ch-93-x', '--resume'], before('git-kills-X13', `*' read-tree '*`, () => '{ kill -9 $PPID; exit 9; }').env);

@@ -27640,7 +27640,7 @@ function makeSession(role) {
   const making = `devteam: a start of ${name} is making this worktree`;
   // Is wt locked with that reason? From git's list, so a folder that is empty or gone counts too.
   const unfinished = () => {
-    const at = path.join(realPath(path.dirname(wt)), name);
+    const at = path.join(realPath(path.dirname(wt)), path.basename(wt));
     const list = R.git(['worktree', 'list', '--porcelain'], R.root);
     // another worktree's broken record fails the list: then this one's own says
     if (list === null) return readText(path.join(/^gitdir: (.*)$/m.exec(readText(path.join(wt, '.git')) ?? '')?.[1] ?? wt, 'locked'))?.trim() === making;
@@ -27662,9 +27662,11 @@ function makeSession(role) {
     const head = responderGit(['rev-parse', '--verify', '--quiet', 'HEAD'], wt);
     return `the worktree ${wt} is there, ${head.status === 0 ? `at ${head.stdout.trim().slice(0, 8)}` : 'with no commit git can read'}: if no other start is making it and it holds nothing to keep, remove it (${inRepo} unlock ${shq(wt)} && ${inRepo} remove --force ${shq(wt)})`;
   };
+  // read before the look: a worktree another start adds after this fails the add below, never a resume
+  const there = fs.existsSync(wt);
   const leftBefore = leftAt();
   if (leftBefore) die(`${name}'s start isn't finished, so nothing was started: ${leftBefore}, then start it again`);
-  if (!fs.existsSync(wt)) {
+  if (!there) {
     // what origin holds, by sha: main, and the branch if it was pushed (a moved fleet continues from
     // it, never from main). Every local ref is any session's to write without a push (kit-790).
     const at = fetchLinkMain(R, 'refusing to start a ticket on a stale main', { start: branch });
@@ -27775,6 +27777,8 @@ function makeSession(role) {
       landed(sha);
     }
     const unlocked = responderGit(['worktree', 'unlock', wt], R.root);
+    // unlocked by something else, so another start may be in it: left as it is, whole
+    if (unlocked.status !== 0 && !unfinished()) die(`something unlocked ${wt} while it was made, so nothing was started here: look whether another start is in it, then start it again`);
     if (unlocked.status !== 0) undo(`could not unlock the new worktree: ${redactUrl(firstLine(unlocked.stderr).replace(/^(fatal|error): /, '')) || `exit ${unlocked.status}`}`);
     // the worktree's branch holds them now
     if (keptUntil && responderGit(['update-ref', '--no-deref', '-d', keptUntil, stale], R.root).status === 0) keptRefs = keptRefs.filter((r) => r !== keptUntil);
