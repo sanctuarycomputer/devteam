@@ -618,6 +618,20 @@ test('a press or key held across a page\'s dialog never reaches Chrome; Sign out
       await sleep(1200);
     }, 300, { all: true });
     assert.deepEqual(drag.filter((m) => m.t === 'mouse' && m.type !== 'move').map((m) => m.type), ['down', 'up'], 'the drag ends');
+    // one finger held across it, another pressed after: lifting the first sends nothing of the second's
+    const touch = (type, pts) => p.send('Input.dispatchTouchEvent', { type, touchPoints: pts });
+    const A = { x: at.x - 40, y: at.y, id: 1 }, B = { x: at.x + 40, y: at.y, id: 2 };
+    const fingers = await sent(c, async () => {
+      await touch('touchStart', [A]);
+      c.send({ ...ASK, id: 'd-6666666666666666' });
+      await until(() => askOpen(p), 'the dialog');
+      await down('d-6666666666666666');
+      await sleep(1200);
+      await touch('touchStart', [A, B]);
+      await touch('touchEnd', [A]);
+    }, 300, { all: true });
+    assert.deepEqual(fingers.filter((m) => m.t === 'mouse' && m.type !== 'move'), [], 'the first finger lifted');
+    await touch('touchEnd', []);
     // Enter pressed while one was up and still held when it goes: its repeats reach nothing
     const keys = await sent(c, async () => {
       c.send({ ...ASK, id: 'd-2222222222222222' });
@@ -628,6 +642,21 @@ test('a press or key held across a page\'s dialog never reaches Chrome; Sign out
       await keyEvent(p, 'keyDown', 'Enter', 'Enter', { text: '\r', windowsVirtualKeyCode: 13, autoRepeat: true });
     }, 300, { all: true });
     assert.deepEqual(keys.filter((m) => m.t === 'key'), [], 'a held key');
+    // the same pressed first in the quiet second, or held with focus on Back
+    const later = await sent(c, async () => {
+      c.send({ ...ASK, id: 'd-5555555555555555' });
+      await until(() => askOpen(p), 'the dialog');
+      await down('d-5555555555555555');
+      await p.ev(`document.getElementById('screen').focus()`);
+      await keyEvent(p, 'keyDown', 'Enter', 'Enter', { text: '\r', windowsVirtualKeyCode: 13 });
+      await sleep(1200);
+      await keyEvent(p, 'keyDown', 'Enter', 'Enter', { text: '\r', windowsVirtualKeyCode: 13, autoRepeat: true });
+      await p.ev(`document.getElementById('back').focus()`);
+      await keyEvent(p, 'keyDown', 'Enter', 'Enter', { text: '\r', windowsVirtualKeyCode: 13, autoRepeat: true });
+    }, 300, { all: true });
+    assert.deepEqual(later.filter((m) => m.t === 'key' || m.t === 'back'), [], 'held from the quiet second, or on Back');
+    await keyEvent(p, 'keyUp', 'Enter', 'Enter', { windowsVirtualKeyCode: 13 });
+    await p.ev(`document.getElementById('screen').focus()`);
     const fresh = await sent(c, () => keyEvent(p, 'keyDown', 'Enter', 'Enter', { text: '\r', windowsVirtualKeyCode: 13 }), 300);
     assert.deepEqual(fresh.map((m) => m.t), ['key'], 'a fresh press');
     // Sign out's question goes when one arrives, and Sign out is sent even in the quiet second
