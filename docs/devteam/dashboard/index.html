@@ -1076,7 +1076,7 @@ try {
   .tl-ctx summary { display: flex; gap: 6px; align-items: center; cursor: pointer; list-style: none; }
   .tl-ctx summary b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
   .tl-ctx .kv code { overflow-wrap: anywhere; }
-  .tl-turns { overflow-y: auto; flex: 1; min-height: 60px; display: flex; flex-direction: column; gap: 8px; padding: 4px 0; }
+  .tl-turns { overflow-y: auto; flex: 1 100000 auto; min-height: 60px; display: flex; flex-direction: column; gap: 8px; padding: 4px 0; }
   .tl-turn .tl-text { max-width: var(--av-measure); white-space: pre-wrap; overflow-wrap: anywhere; }
   .tl-turn.owner { align-self: flex-end; max-width: 88%; background: color-mix(in srgb, var(--blue) 10%, var(--surface)); border-radius: 8px; padding: 6px 8px; }
   .tl-refs { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 2px; font-size: 12px; }
@@ -1175,19 +1175,16 @@ try {
   .viewer .shell:not(.threads-open) #tt-peek { visibility: visible; opacity: 1; pointer-events: auto; transition: opacity var(--dur) var(--ease), visibility 0s; }
   .viewer .threads { z-index: 23; }
   /* a note on an artifact (kit-145): what there is to check, a mark withdrawn, where a step landed */
-  .tl-addr { margin: 6px 0; padding: 6px 8px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--surface)); font-size: 12px; }
   /* on a capped card what can be long scrolls, down to a floor, and what is pressed never does: the note's words (with what
-     is said above and below them), an open context, the terminal's ask; the turns give way first */
-  #tl-c-note { display: flex; flex-direction: column; flex: 0 1 auto; min-height: 0; }
-  #tl-c-note > div { display: flex; flex-direction: column; flex: 0 1 auto; min-height: 0; }
-  #tl-c-note > div:first-child { overflow-y: auto; }
-  #tl-c-note > div:first-child:not(:empty) { min-height: 36px; }
-  #tl-c-note > div:first-child > * { flex: none; }
-  .tl-addr { display: flex; flex-direction: column; min-height: 0; }
-  .tl-words { flex: 0 1 auto; min-height: 54px; overflow-y: auto; }
-  .tl-addr > .row-inline { flex: none; }
+     is said above and below them) over their row of presses, an open context, the terminal's ask. Each is the card's own
+     flex item, so none can fall under what it holds; the turns give way first */
+  #tl-c-note, #tl-c-note > div:last-child, .tl-addr { display: contents; }
+  #tl-c-note > div:first-child:not(:empty) { flex: 0 1 auto; min-height: 36px; overflow-y: auto; }
+  .tl-words, .tl-addr > .row-inline { border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--surface)); font-size: 12px; }
+  .tl-words { flex: 0 1 auto; min-height: 61px; margin-top: 6px; padding: 6px 8px 0; border-bottom: 0; border-radius: 6px 6px 0 0; overflow-y: auto; }
+  .tl-addr > .row-inline { flex: none; margin: 0 0 6px; padding: 8px 8px 6px; border-top: 0; border-radius: 0 0 6px 6px; }
   #tl-c-ask:not(:empty), #tl-c-ctx:has(details[open]) { flex: 0 1 auto; min-height: 44px; overflow-y: auto; }
-  #tl-c-ctx:not(:has(details[open])) { flex: none; }
+  #tl-c-ctx:not(:has(details[open])), .tl-compose, .tl-head { flex: none; }
   .tl-card:has(.tl-addr) .tl-turns, .tl-card:has(#tl-c-ask:not(:empty)) .tl-turns { min-height: 0; padding: 0; }
   .tl-addr .by { color: var(--muted); }
   .tl-addr [data-tl-accept].waiting { opacity: .55; }

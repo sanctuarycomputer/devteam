@@ -450,7 +450,7 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     const V = await tabOf({ [N.trial]: ROW.C12() });
     await openAt(V, AV_WT, 'plan-pricing');
     await cardOf(V, N.trial);
-    await has(V, '#tl-card .tl-addr', 'the addressed block');
+    await has(V, '#tl-card .tl-addr .tl-words', 'the addressed block');
     await holdPoll(V);
     assert.equal(await V.p.ev(text('#tl-card .tl-addr .by')), 'Addressed by plan-pricing · 3f7c2a9', 'who, and the commit');
     assert.equal(await V.p.ev(text('#tl-card .tl-addr .tx')), V_C12.addressed.note, 'the note');
@@ -471,7 +471,7 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     const V = await tabOf({ [N.trial]: ROW.C12() });
     await openAt(V, AV_WT, 'plan-pricing');
     await cardOf(V, N.trial);
-    await has(V, '#tl-card .tl-addr', 'the addressed block');
+    await has(V, '#tl-card .tl-addr .tl-words', 'the addressed block');
     await holdPoll(V);
     await new Promise((r) => setTimeout(r, ARMED));
     await V.rows({ [N.trial]: ROW.C12({ addressed: ADDR({ at: NEWER, note: 'Swapped in', sha: null }) }) });

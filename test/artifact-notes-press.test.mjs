@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { canDrive } from './lib/chrome.mjs';
 import { J, FRAMES, CLOSED } from './fixtures/artifact-viewer/harness.mjs';
-import { notes, AT, SHOT, ADDR, ROW, withFrame, V_C11, NEWER } from './fixtures/artifact-notes-viewer/kit.mjs';
+import { notes, AT, SHOT, ADDR, ROW, withFrame, V_C11, V_C12, NEWER } from './fixtures/artifact-notes-viewer/kit.mjs';
 
 test('the viewer: what a framed page cannot do to a press, the bar, the card', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
   const X = await notes(t, 'artifact-notes-press');
@@ -236,7 +236,7 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
     await V.soon(CLOSED, 'setup: no viewer');
     await cardOf(V, N.trial);
     await holdPoll(V);
-    await has(V, '#tl-card .tl-addr', 'the block');
+    await has(V, '#tl-card .tl-addr .tl-words', 'the block');
     await settled(V);
     await V.rows({ [N.trial]: withFrame(ROW.C12({ addressed: ADDR({ at: NEWER, note: 'Swapped in', sha: null }) }), '') });
     await V.soon(`${text('#tl-card .tl-addr .tx')} === 'Swapped in'`, 'the new note drawn');
@@ -444,48 +444,81 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
 
   await sub('A26: with all it can hold, the card keeps Show me, Resolve, the reply box and Send inside the window', async () => {
     const long = 'The trial button says what it does now, and the price under it reads as the plan page has it. '.repeat(4).slice(0, 300);
+    const said = (n) => Array.from({ length: n }, (_, i) => ({ id: `u-${i}`, by: i % 2 ? 'supervisor' : 'owner', at: V_C12.addressed.at, refs: [], text: 'What is said here of the note is about as long as people write, some hundred and sixty characters of it, over a few lines of the card at its width, or so.' }));
     plant(N.onMain, V_C11.shot.stamp);
-    const V = await tabOf({ [N.onMain]: ROW.C12({ addressed: ADDR({ note: long }), shot: SHOT({ anchor: 'hidden' }) }) });
+    const note = (turns, o = {}) => ({ ...ROW.C12({ addressed: ADDR({ note: long }), shot: SHOT({ anchor: 'hidden' }), ...o }), turns: said(turns) });
+    const short = { addressed: ADDR({ note: 'Done.' }), shot: null, noshot: 'no-change' };
+    const V = await tabOf({ [N.onMain]: note(2) });
     await openAt(V, AV_MAIN, 'main');
     await cardOf(V, N.onMain);
     await holdPoll(V);
-    await V.soon(`!!document.querySelector('#tl-card .tl-shot img') && !!document.querySelector('#tl-card [data-tl-show]')`, 'setup: the picture and Show me');
+    await V.p.ev(`(window.__replies['thread-accept-addressed'] = { body: { ok: true, out: '' } }, true)`);
+    // a case: [its name, its row, what else is open in the card]
+    const CASES = [
+      ['all of it', note(2), { ask: true, ctx: true, pic: true, above: true }],
+      ['a conversation', note(16), { ask: true, ctx: true, pic: true, above: true }],
+      ['a conversation, its context open', note(16), { ctx: true, pic: true }],
+      ['a conversation alone', note(16), { pic: true }],
+      ['a short mark, one turn, the ask', note(1, short), { ask: true }],
+      ['a short mark, sixteen turns', note(16, short), {}],
+      ['no check, the ask', { ...ROW.C20(), turns: said(16) }, { ask: true, open: true }],
+      ['no check, the context open', { ...ROW.C20(), turns: said(16) }, { ctx: true, open: true }],
+      ['withdrawn', { ...ROW.C13(), unready: { ...ROW.C13().unready, reason: long }, turns: said(16) }, { open: true }],
+    ];
+    const bad = [];
     for (const [w, h] of [[1280, 800], [1280, 640], [390, 844], [320, 568]]) {
       await V.size(w, h);
-      // both lines above, a phone's picture, the context open, the terminal asking
-      await V.p.ev(`(() => {
-        avStep.unseen = () => true; avStep.off = { id: TL.open, av: AV, gone: true };
-        tlDraw();
-        const d = document.querySelector('#tl-c-ctx details'); if (d) d.open = true;
-        document.querySelector('#tl-card .tl-shot img').src = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="390" height="700"><rect width="390" height="700" fill="red"/></svg>');
-        return true; })()`);
-      await V.soon(`document.querySelector('#tl-card .tl-shot img')?.naturalHeight === 700`, 'setup: a tall picture');
-      await V.p.ev(FRAMES);
-      const got = await V.p.ev(`(() => {
-        ASK.q = { kind: 'menu', digest: 'd-26', token: 'tok', question: 'Which of the three should it be, with the words the terminal shows over several lines of it?', options: [1, 2, 3].map((n) => ({ n, label: 'Option ' + n + ', said at some length' })), hint: 'Enter to confirm' };
-        askDraw();
-        const card = document.getElementById('tl-card'), c = card.getBoundingClientRect(), out = [];
-        const lines = [...card.querySelectorAll('.tl-nview')].map((e) => e.textContent);
-        if (lines.length !== 2) out.push('setup: lines ' + JSON.stringify(lines));
-        if (!card.querySelector('#tl-c-ctx details')?.open) out.push('setup: no open context');
-        if (card.querySelectorAll('[data-ask-option]').length !== 3) out.push('setup: no ask');
-        for (const s of ['.tl-addr [data-tl-show]', '.tl-addr [data-tl-accept]', '#tl-c-text', '[data-tl-send]']) {
-          const e = card.querySelector(s), r = e.getBoundingClientRect(), hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-          if (!(r.width > 10 && r.height > 10) || r.top < 0 || r.left < 0 || r.right > innerWidth || r.bottom > innerHeight || r.bottom > c.bottom) out.push(s + ' is at ' + [r.left, r.top, r.right, r.bottom].map(Math.round) + ', the card ' + Math.round(c.top) + ' to ' + Math.round(c.bottom));
-          else if (!e.contains(hit)) out.push(s + ' is under ' + (hit ? hit.id || hit.className || hit.tagName : 'nothing'));
-        }
-        for (const [s, floor] of [['.tl-words', 54], ['#tl-c-ask', 44], ['#tl-c-ctx', 44]]) {
-          const e = card.querySelector(s), r = e?.getBoundingClientRect();
-          if (!r || r.height < floor) { out.push(s + ' is ' + r?.height + ' tall'); continue; }
-          e.scrollTop = 99999;
-          const last = [...e.querySelectorAll('*')].filter((x) => x.getBoundingClientRect().height).reduce((m, x) => Math.max(m, x.getBoundingClientRect().bottom), 0);
-          if (last > r.bottom + 12.5) out.push(s + ' does not scroll to its end: ' + last + ' past ' + r.bottom);
-          e.scrollTop = 0;
-        }
-        const i = card.querySelector('.tl-shot img').getBoundingClientRect();
-        if (i.width !== 160 || i.height > 120) out.push('the picture is ' + i.width + ' by ' + i.height);
-        return out; })()`);
-      assert.deepEqual(got, [], `${w}x${h}`);
+      for (const [name, row, o] of CASES) {
+        await V.rows({ [N.onMain]: row });
+        await V.p.ev(`(() => {
+          avStep.unseen = () => ${!!o.above}; avStep.off = ${o.above ? '{ id: TL.open, av: AV, gone: true }' : 'null'};
+          tlDraw();
+          const d = document.querySelector('#tl-c-ctx details'); if (d) d.open = ${!!o.ctx};
+          const i = document.querySelector('#tl-card .tl-shot img');
+          if (i) i.src = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="390" height="700"><rect width="390" height="700" fill="red"/></svg>');
+          return true; })()`);
+        if (o.pic) await V.soon(`document.querySelector('#tl-card .tl-shot img')?.naturalHeight === 700`, `setup: a tall picture (${name})`);
+        await V.p.ev(FRAMES);
+        for (const x of await V.p.ev(`(() => {
+          ASK.q = ${o.ask ? `{ kind: 'menu', digest: 'd-26', token: 'tok', question: 'Which of the three should it be, with the words the terminal shows over several lines of it?', options: [1, 2, 3].map((n) => ({ n, label: 'Option ' + n + ', said at some length' })), hint: 'Enter to confirm' }` : 'null'};
+          askDraw(); tlDraw();
+          const card = document.getElementById('tl-card'), c = card.getBoundingClientRect(), out = [], $ = (s) => card.querySelector(s);
+          if (card.querySelectorAll('.tl-nview').length !== ${o.above ? 2 : 0}) out.push('setup: the lines above');
+          if (!!$('#tl-c-ctx details')?.open !== ${!!o.ctx}) out.push('setup: the context');
+          if (card.querySelectorAll('[data-ask-option]').length !== ${o.ask ? 3 : 0}) out.push('setup: the ask');
+          if (card.querySelectorAll('.tl-turn').length !== ${row.turns.length}) out.push('setup: the turns');
+          if (!!$('.tl-addr') === ${!!o.open}) out.push('setup: the block');
+          // (a held Resolve is see-through, and drawn above what covers it: asked as it is once settled)
+          $('[data-tl-accept]')?.classList.remove('waiting');
+          for (const s of [...${o.open ? '[]' : `['.tl-addr [data-tl-show]', '.tl-addr [data-tl-accept]']`}, '#tl-c-text', '[data-tl-send]']) {
+            const e = $(s), r = e.getBoundingClientRect();
+            if (!(r.width > 10 && r.height > 10) || r.top < 0 || r.left < 0 || r.right > innerWidth || r.bottom > innerHeight || r.bottom > c.bottom) { out.push(s + ' is at ' + [r.left, r.top, r.right, r.bottom].map(Math.round) + ', the card ' + Math.round(c.top) + ' to ' + Math.round(c.bottom)); continue; }
+            for (const f of [0.15, 0.5, 0.85]) { const hit = document.elementFromPoint(r.left + r.width * f, r.top + r.height * f); if (!e.contains(hit)) { out.push(s + ' is under ' + (hit ? hit.id || hit.className || hit.tagName : 'nothing')); break; } }
+          }
+          const turns = $('.tl-turns').getBoundingClientRect().height, least = ${o.open && !o.ask ? 60 : 0};
+          const parts = [${o.open ? '' : `['.tl-words', 54], `}${o.ask ? `['#tl-c-ask', 44], ` : ''}${o.ctx ? `['#tl-c-ctx', 44], ` : ''}${name === 'withdrawn' ? `['#tl-c-note > div', 36]` : ''}];
+          for (const [s, floor] of parts) {
+            const e = $(s), r = e?.getBoundingClientRect();
+            if (!r || r.height < floor) { out.push(s + ' is ' + r?.height + ' tall'); continue; }
+            if (e.scrollHeight > e.clientHeight + 1 && turns > least + 1) out.push(s + ' scrolls while the turns have ' + turns);
+            e.scrollTop = 99999;
+            const last = [...e.querySelectorAll('*')].reduce((m, x) => Math.max(m, x.getBoundingClientRect().height ? x.getBoundingClientRect().bottom : 0), 0);
+            if (last > r.bottom + 0.5) out.push(s + ' does not scroll to its end: ' + last + ' past ' + r.bottom);
+            e.scrollTop = 0;
+          }
+          // one part after another, none over the next
+          const blocks = ['#tl-c-note > div', '.tl-words', '.tl-addr > .row-inline', '#tl-c-ask', '#tl-c-ctx', '.tl-turns', '.tl-compose'].map($).filter((e) => e && e.getBoundingClientRect().height > 0);
+          for (const e of blocks) for (const x of blocks) { const a = e.getBoundingClientRect(), b = x.getBoundingClientRect(); if (e !== x && !e.contains(x) && !x.contains(e) && a.top < b.top && a.bottom > b.top + 0.5) out.push((e.id || e.className) + ' lies over ' + (x.id || x.className)); }
+          const i = $('.tl-shot img')?.getBoundingClientRect();
+          if (${!!o.pic} && (i?.width !== 160 || i.height > 120)) out.push('the picture is ' + i?.width + ' by ' + i?.height);
+          return out; })()`)) bad.push(`${w}x${h}, ${name}: ${x}`);
+      }
     }
+    assert.deepEqual(bad, [], 'in reach at every size');
+    // and Resolve takes a real press there
+    await V.size(1280, 800);
+    await V.rows({ [N.onMain]: note(16) });
+    await V.p.ev(`(avStep.unseen = () => false, avStep.off = null, tlDraw(), document.querySelector('#tl-c-ctx details').open = true, true)`);
+    await counts(V, '#tl-card [data-tl-accept]', `window.__posts.some((x) => x.action === 'thread-accept-addressed')`, 'a conversation, its context open: Resolve posts');
   });
 });
