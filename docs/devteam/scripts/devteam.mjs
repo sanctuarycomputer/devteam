@@ -36469,6 +36469,48 @@ async function browserEndChrome(cdp, pid) {
   if (pid) { try { process.kill(-pid, 'SIGKILL'); } catch {} } // its helpers, if any outlived it
   cdp?.close();
 }
+// kit-877: a close ends Chrome by a deadline, so its cookies are carried across in memory. The jar:
+// Storage.getCookies on the browser target, raced against 500 ms of its own; the cookies or null, an
+// error dropped. Never written, logged or printed.
+async function browserCookieJar(cdp) {
+  if (!cdp) return null;
+  let t;
+  const r = await Promise.race([cdp.send('Storage.getCookies').then((x) => x?.cookies ?? null, () => null), new Promise((res) => { t = setTimeout(() => res(null), 500); })]);
+  clearTimeout(t);
+  return Array.isArray(r) ? r : null;
+}
+// A Cookie as the CookieParam that sets it again: a host-only cookie by url (its scheme from secure),
+// a domain cookie (leading dot) by domain; expires only for a cookie that isn't a session one.
+function browserCookieParam(c) {
+  const p = { name: c.name, value: c.value, path: c.path, secure: !!c.secure, httpOnly: !!c.httpOnly };
+  if (typeof c.domain === 'string' && c.domain.startsWith('.')) p.domain = c.domain;
+  else p.url = `${c.secure ? 'https' : 'http'}://${c.domain}${c.path || '/'}`;
+  if (!c.session && typeof c.expires === 'number' && c.expires > 0) p.expires = c.expires;
+  for (const k of ['sameSite', 'priority', 'sourceScheme', 'sourcePort', 'partitionKey']) if (c[k] !== undefined) p[k] = c[k];
+  return p;
+}
+// The jar set on the fresh Chrome: one Storage.setCookies with all of it; refused, one call per cookie,
+// skipping the refused ones. Nothing cleared first; every error dropped (never in last-error). The
+// hook DEVTEAM_TEST_BROWSER_COOKIES_BULK_FAILS=1 (tests) treats the one call as refused.
+async function browserCookiesBack(cdp, jar) {
+  if (!cdp || !jar?.length) return;
+  const cookies = jar.map(browserCookieParam);
+  try {
+    if (browserTestEnv('DEVTEAM_TEST_BROWSER_COOKIES_BULK_FAILS') === '1') throw new Error('refused (the test hook)');
+    await cdp.send('Storage.setCookies', { cookies });
+    return;
+  } catch {}
+  for (const c of cookies) { try { await cdp.send('Storage.setCookies', { cookies: [c] }); } catch {} }
+}
+// A close's kill: SIGKILL to Chrome's group, then to each process proven on the profile (this uid,
+// --user-data-dir the profile); up to 2 s for Chrome gone; its pipe closed. (browserKillChrome is
+// the start and stop path's.)
+async function browserKillProfile(ctx, cdp, pid) {
+  if (pid) { try { process.kill(-pid, 'SIGKILL'); } catch {} }
+  for (const p of browserProcsOn(ctx.profile) ?? []) { try { process.kill(p, 'SIGKILL'); } catch {} }
+  if (pid) await browserGone(pid, 2000);
+  cdp?.close();
+}
 // A Chrome and its pipe watched: its exit or its pipe closing stops the daemon only while it is the
 // current Chrome and not retired by a forget (whose old Chrome's end is expected). The view's
 // screencast frames are taken on this pipe.
@@ -36487,14 +36529,25 @@ function browserWatchChrome(ctx, chrome, cdp) {
 // meanwhile wins: after each await, ctx.stopping ends it (browserShutdown kills ctx.chrome, whichever
 // it is). Processes that can't be listed, or one left, and any failure stop the daemon (the next start
 // cleans up). True once the fresh Chrome is up; false when it ended.
-async function browserRelaunch(ctx, { wipe }) {
+async function browserRelaunch(ctx, { wipe, deadline }) {
   try {
     const old = ctx.chrome;
     old.retired = true; // before Browser.close: its exit and pipe close never stop the daemon
-    await browserEndChrome(ctx.cdp, old.pid);
+    let jar = null;
+    if (wipe) await browserEndChrome(ctx.cdp, old.pid);
+    else {
+      // a close (kit-877): the cookies read first, then Chrome's own close until the deadline, then a kill
+      jar = await browserCookieJar(ctx.cdp);
+      if (old.pid && browserAlive(old.pid)) {
+        ctx.cdp?.send('Browser.close').catch(() => {});
+        await browserGone(old.pid, Math.max(0, (deadline ?? Date.now() + 1000) - Date.now()));
+      }
+      await browserKillProfile(ctx, ctx.cdp, old.pid);
+    }
     if (ctx.stopping) return false;
+    const killLeft = (pids) => { if (!wipe) for (const p of pids ?? []) { try { process.kill(p, 'SIGKILL'); } catch {} } }; // a close's wait kills what it still sees
     let procs = browserProcsOn(ctx.profile);
-    for (const end = Date.now() + 5000; procs?.length && Date.now() < end && !ctx.stopping; procs = browserProcsOn(ctx.profile)) await browserSleep(25);
+    for (const end = Date.now() + 5000; procs?.length && Date.now() < end && !ctx.stopping; procs = browserProcsOn(ctx.profile)) { killLeft(procs); await browserSleep(25); }
     if (ctx.stopping) return false;
     if (procs === null || procs.length) { browserShutdown(ctx, 'error', procs === null ? "couldn't list this machine's processes after stopping Chrome" : `a process (pid ${procs[0]}) still carried the profile 5 s after Chrome's stop`); return false; } // nothing removed on a guess
     // the session files go the moment no process holds the profile (a close's secrets leave the disk
@@ -36510,6 +36563,8 @@ async function browserRelaunch(ctx, { wipe }) {
     if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return false; } // launched while it stopped
     ctx.cdp = cdp;
     browserWatchChrome(ctx, ctx.chrome, cdp);
+    if (jar) { await browserCookiesBack(cdp, jar); jar = null; } // before any page is reopened
+    if (ctx.stopping) return false;
     ctx.tabs = [];
     ctx.active = null;
     await browserWatchTabs(ctx);
@@ -36547,6 +36602,10 @@ async function browserForgetRestart(ctx) {
 const BROWSER_BACK = 'The supervisor has the browser again.';
 async function browserCloseRestart(ctx, closes) {
   if (ctx.stopping || !closes.length) return;
+  // kit-877: Chrome gets until 1 s after the earliest close (its answer's time; none parsing reads as
+  // now), held to between now and now + 1 s, fixed here, before the test hold, so a late close is cut short
+  const now = Date.now(), at = closes.map((h) => Date.parse(h.closeAt)).filter(Number.isFinite);
+  const deadline = Math.min(now + 1000, Math.max(now, (at.length ? Math.min(...at) : now) + 1000));
   try {
     ctx.closing = true; // until it ends: a socket opened meanwhile is refused with bye
     ctx.ready = false;
@@ -36559,7 +36618,7 @@ async function browserCloseRestart(ctx, closes) {
     const hold = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_CLOSE_DELAY_MS')); // tests: a close held open
     if (hold > 0) { await browserSleep(hold); if (ctx.stopping) return; }
     const reopen = closes.length === 1 && closes[0].outcome === 'done' ? browserNotePages(ctx) : []; // only one done reopens
-    if (!(await browserRelaunch(ctx, { wipe: false }))) return;
+    if (!(await browserRelaunch(ctx, { wipe: false, deadline }))) return;
     const reopened = reopen.length ? await browserReopen(ctx, reopen) : [];
     if (ctx.stopping) return;
     browserRecordCloses(ctx, closes, reopened);
@@ -36757,7 +36816,7 @@ function browserWatch(ctx) {
     browserOwnerDialogsEnd(ctx); // off the queue: a verb waiting behind one never holds the close up
     ctx.gateQueued = true;
     ctx.serial(() => browserGate(ctx)).finally(() => { ctx.gateQueued = false; });
-  }, Number(browserTestEnv('DEVTEAM_TEST_BROWSER_WATCH_MS')) || 500); // the hook: tests, a slowed watch
+  }, Number(browserTestEnv('DEVTEAM_TEST_BROWSER_WATCH_MS')) || 250); // the hook: tests, a slowed watch (kit-877: 250, so a close starts soon after Done)
   t.unref();
   return t;
 }
