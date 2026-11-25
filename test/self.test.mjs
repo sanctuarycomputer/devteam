@@ -269,12 +269,12 @@ test('the names rule: self check warns on a capitalised word main\'s strategy an
     assert.deepEqual(warned, ['Postwick prose', 'Zephyr prose', 'Brightline prose', 'Vellum prose', 'Stripe prose'], `C13 the words warned, each at its first place (code is public too)\n${c.out}`);
   });
   await check('C13b every word of a part\'s name and of what it controls or not counts, its first too, where a plain draft puts them: a heading, a list item (final-1b F1)', () => {
-    write(path.join(W.old, SELF), withProse('## Vellum plugins\n\nThey extend [the app](../app/).\n\nIt does not control:\n\n- Stripe, which takes payments\n- **Ferrous** storage'));
+    write(path.join(W.old, SELF), withProse('## Vellum plugins\n\nThey extend [the app](../app/).\n\nIt does not control:\n\n- Stripe, which takes payments\n- **Garnock** storage'));
     const c = W.run(['self', 'check']);
     W.g(['checkout', '--', SELF], W.old);
     assert.equal(c.status, 0, `C13b a names warning leaves self check's exit at 0\n${c.text}`);
     const warned = [...c.out.matchAll(/warning: self\.md: "([^"]+)" \(([^)]+)\)/g)].map((m) => `${m[1]} ${m[2]}`);
-    assert.deepEqual(warned, ['Vellum prose', 'Stripe prose', 'Ferrous prose'], `C13b a part's name and what it does not control, each word counted\n${c.out}`);
+    assert.deepEqual(warned, ['Vellum prose', 'Stripe prose', 'Garnock prose'], `C13b a part's name and what it does not control, each word counted\n${c.out}`);
   });
   await check('C18 one function, unknownNames, in the self-model region, says which words', () => {
     assert.equal((SRC.match(/\nfunction unknownNames\(/g) ?? []).length, 1, 'C18 unknownNames is defined once');
