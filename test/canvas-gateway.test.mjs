@@ -3,7 +3,8 @@
 // the person and level it says itself), closes it with the session, and lets a View session hold it;
 // a View session's every POST under /api/canvas/ is refused before it reaches the dashboard. The
 // dashboard is the contract's fake, behind an instance that records what reached it.
-// Ports: hub +0, instances +1 (alpha) and +2 (devteam-dev, a project name shaped like a preview's).
+// Ports: hub +0, instances +1 (alpha) and +2 (devteam-dev, a project name shaped like a preview's), the
+// gateway +40 (past the instances the hub's list may name).
 // Run: node --test --test-concurrency=1 test/canvas-gateway.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -28,6 +29,7 @@ process.on('exit', () => fs.rmSync(tmp, { recursive: true, force: true }));
 const HUB = PORTS;
 const ALPHA = PORTS + 1;
 const SHAPED = PORTS + 2;
+const GATEWAY = PORTS + 40;
 
 const sha = (b) => crypto.createHash('sha256').update(b).digest();
 const u = (b) => Buffer.from(b).toString('base64url');
@@ -54,8 +56,9 @@ function seeded(dir) {
 
 // A dashboard that records each request and upgrade and hands both to the fake, Host and Origin said
 // for the fake's port. The answer to an upgrade carries a cookie and the gateway's own header.
-async function recorder(port, json = null) {
+async function recorder(port, closers, json = null) {
   const fake = await startCanvasFake({ canvases: { board: DOC } });
+  closers.push(() => fake.close());
   const ups = [];
   const reqs = [];
   let silent = false;
@@ -85,22 +88,26 @@ async function recorder(port, json = null) {
     sock.pipe(back);
     back.once('data', (d) => { sock.write(d.toString('latin1').replace('\r\n', '\r\nset-cookie: devteam_session=evil\r\nx-devteam-public: {}\r\n'), 'latin1'); back.pipe(sock); });
   });
+  const drop = () => { for (const c of open) c.destroy(); };
   await listen(srv, port);
-  return { ups, reqs, fake, hush: (v) => { silent = v; }, srv, drop: () => { for (const c of open) c.destroy(); }, close: async () => { for (const c of open) c.destroy(); await new Promise((r) => srv.close(r)); await fake.close(); } };
+  closers.push(() => { drop(); return new Promise((r) => srv.close(r)); });
+  return { ups, reqs, fake, hush: (v) => { silent = v; }, srv, drop };
 }
 
 async function box(t, opts = {}) {
   const dir = fs.mkdtempSync(path.join(tmp, 'box-'));
   const { cookies, hashes } = seeded(dir);
-  const alpha = await recorder(ALPHA);
-  const shaped = await recorder(SHAPED);
+  // before anything listens: a port that can't be had fails this test alone, not every one after it
+  const closers = [];
+  t.after(async () => { for (const close of closers.reverse()) await close(); });
+  const alpha = await recorder(ALPHA, closers);
+  const shaped = await recorder(SHAPED, closers);
   const listed = [['alpha', ALPHA], ['devteam-dev', SHAPED]].map(([name, port]) => ({ devteam: 1, root: `/srv/${name}`, port, name, previews: [] }));
-  const hub = await recorder(HUB, { hub: 1, instances: listed });
+  const hub = await recorder(HUB, closers, { hub: 1, instances: listed });
   const ttyd = net.createServer((c) => { c.on('error', () => {}); c.once('data', () => c.write('HTTP/1.1 101 Switching Protocols\r\nconnection: Upgrade\r\nupgrade: websocket\r\n\r\n')); });
   const ttydPort = await listen(ttyd, 0);
-  const probe = net.createServer();
-  const port = await listen(probe, 0);
-  await new Promise((r) => probe.close(r));
+  closers.push(() => ttyd.close());
+  const port = GATEWAY;
   const uploadsDir = path.join(dir, 'uploads');
   fs.mkdirSync(uploadsDir, { mode: 0o750 });
   const ttydPage = path.join(dir, 'ttyd.html');
@@ -109,13 +116,8 @@ async function box(t, opts = {}) {
   const held = new Set();
   g.server.on('connection', (c) => { held.add(c); c.on('close', () => held.delete(c)); });
   await listen(g.server, port);
+  closers.push(() => { for (const c of held) c.destroy(); return new Promise((r) => g.server.close(r)); });
   const host = `box.localhost:${port}`;
-  t.after(async () => {
-    for (const c of held) c.destroy();
-    await new Promise((r) => g.server.close(r));
-    ttyd.close();
-    for (const x of [alpha, shaped, hub]) await x.close();
-  });
   const file = path.join(dir, 'state.json');
   const state = () => JSON.parse(fs.readFileSync(file, 'utf8'));
   const write = (s) => { fs.writeFileSync(`${file}.t`, JSON.stringify(s)); fs.renameSync(`${file}.t`, file); };
@@ -232,18 +234,24 @@ test('canvas gateway: the box\'s own name has no canvas, and no reading of the p
 });
 test('canvas gateway: an upstream with no canvas socket is told by its status, and nothing more of the browser\'s reaches it', async (t) => {
   const B = await box(t);
-  const got = [];
+  const conns = [];
   const held = new Set();
-  // a kit from before presence: no upgrade listener, so it answers and reads on
-  const old = http.createServer((q, r) => { got.push(`${q.method} ${q.url}`); q.resume(); r.writeHead(404, { 'content-length': 2 }); r.end('no'); });
-  old.on('connection', (c) => { held.add(c); });
+  // a kit from before presence answers as to a plain request and reads on; the bytes of each
+  // connection, as a server's parser would hide the ones that come with the handshake
+  const old = net.createServer((c) => {
+    const x = { bytes: '' };
+    conns.push(x);
+    held.add(c);
+    c.on('error', () => {});
+    c.on('data', (d) => { if (!x.bytes) c.write('HTTP/1.1 404 Not Found\r\ncontent-length: 2\r\n\r\nno'); x.bytes += d; });
+  });
   await new Promise((r) => B.alpha.srv.close(r) && B.alpha.drop());
   await listen(old, ALPHA);
   try {
     const smuggled = 'POST /api/canvas/image?slug=board HTTP/1.1\r\nhost: 127.0.0.1\r\nx-devteam-person: p-owner;name=Boss\r\nx-devteam-level: full\r\ncontent-length: 0\r\n\r\n';
     const shake = `GET /canvas?slug=board HTTP/1.1\r\nhost: alpha.${B.host}\r\norigin: http://alpha.${B.host}\r\ncookie: ${B.cookies.ana}\r\nconnection: Upgrade\r\nupgrade: websocket\r\nsec-websocket-version: 13\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n`;
-    for (const early of [true, false]) {
-      got.length = 0;
+    for (const early of [false, true]) {
+      conns.length = 0;
       const answer = await new Promise((resolve) => {
         const c = net.connect(B.port, '127.0.0.1', () => c.write(shake + (early ? smuggled : '')));
         let x = '';
@@ -253,7 +261,9 @@ test('canvas gateway: an upstream with no canvas socket is told by its status, a
         setTimeout(() => c.destroy(), 1500);
       });
       await sleep(200);
-      assert.deepEqual(got, ['GET /canvas?slug=board'], early ? 'nothing sent with the handshake went on' : 'nothing sent after the answer went on');
+      const mine = conns.filter((x) => x.bytes.startsWith('GET /canvas?slug=board HTTP/1.1\r\n'));
+      assert.equal(mine.length, 1, 'the handshake went on');
+      assert.equal(mine[0].bytes.indexOf('\r\n\r\n'), mine[0].bytes.length - 4, early ? 'nothing sent with the handshake went on' : 'nothing sent after the answer went on');
       assert.match(answer, /^HTTP\/1\.1 404 /, 'the browser is told its status');
       assert.equal((answer.match(/HTTP\/1\.1/g) ?? []).length, 1, 'and nothing after it');
     }
