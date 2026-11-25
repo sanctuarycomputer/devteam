@@ -85,6 +85,8 @@ async function started(box, roots, s = load()) {
   const walk = async (ms = 15000) => { c.clock.real += ms; c.clock.now += ms; await every(15000).fn(); };
   return { ...s, ...c, walk, first: () => every(15000).fn(), part: () => s.boxHealthProcesses.part(c.ctx, {}) };
 }
+// release the hung reads and wait until none is out (at most 5 s)
+const settled = async (s) => { s.release(); for (let i = 0; i < 500 && s.out.now > 0; i++) await new Promise((res) => setTimeout(res, 10)); await new Promise((res) => setTimeout(res, 10)); };
 const place = (r, project, worktree) => r.places.find((p) => p.project === project && p.worktree === worktree);
 
 // ===== 1: where a process counts, its CPU, its test runs, unattributed =====
@@ -297,9 +299,22 @@ test('P19: a cmdline or cwd read that never settles is started once across walks
   const s = await started(b, roots);
   s.turn.late = true;
   await s.first();
-  for (const pid of [3000, 3001]) { b.add({ pid, ppid: 2, argv: ['node', 'y.mjs'], cwd: '/w/a' }); s.hang.add(String(pid)); }
+  // one hung read and a free slot: the free slot never starts it again
+  b.add({ pid: 3000, ppid: 2, argv: ['node', 'y.mjs'], cwd: '/w/a' });
+  s.hang.add('3000');
+  for (let i = 1; i <= 3; i++) {
+    b.set(10, { cpu: i * 15 * HZ });
+    await s.walk();
+    assert.equal(s.part().outside.n, 1, `walk ${i}: the process not read yet counts outside`);
+    near(place(s.part(), 'alpha', undefined).cpu, 1, `walk ${i}: CPU goes on`);
+  }
+  assert.equal(s.by.get('3000'), 1, 'a hung read started once in 3 walks, though a slot was free');
+  // two hung: a third waits for a slot
+  b.add({ pid: 3001, ppid: 2, argv: ['node', 'y.mjs'], cwd: '/w/a' });
+  s.hang.add('3001');
+  await s.walk();
   b.add({ pid: 3002, ppid: 2, argv: ['node', 'z.mjs'], cwd: '/w/a' });
-  for (let i = 1; i <= 6; i++) {
+  for (let i = 4; i <= 6; i++) {
     b.set(10, { cpu: i * 15 * HZ });
     await s.walk();
     const r = s.part();
@@ -308,10 +323,9 @@ test('P19: a cmdline or cwd read that never settles is started once across walks
     assert.equal(r.outside.n, 3, `walk ${i}: the processes not read yet count outside`);
     assert.ok(s.out.most <= 2, `walk ${i}: at most two reads out (${s.out.most})`);
   }
-  assert.deepEqual([s.by.get('3000'), s.by.get('3001'), s.by.get('3002') ?? 0], [1, 1, 0], 'each hung read started once in 6 walks; a third waits for a slot');
+  assert.deepEqual([s.by.get('3000'), s.by.get('3001'), s.by.get('3002') ?? 0], [1, 1, 0], 'each hung read started once in 7 walks; a third waits for a slot');
   assert.equal(s.said.filter((w) => /did not answer within 2 s/.test(w)).length, 1, 'said once');
-  s.release();
-  await new Promise((res) => setTimeout(res, 20));
+  await settled(s);
   await s.walk();
   await s.walk();
   const r = s.part();
@@ -335,8 +349,7 @@ test('P20: a run/ file that never answers is waited for 2 s, once; the walks go 
   }
   assert.equal(s.by.get('browser') - was, 1, 'one read of state.json started in 5 walks');
   assert.equal(s.said.filter((w) => /run\/ files did not answer/.test(w)).length, 1, 'said when it was late');
-  s.release();
-  await new Promise((res) => setTimeout(res, 20));
+  await settled(s);
   s.roots.list = [...s.roots.list];
   await s.walk();
   assert.equal(has(), true, 'once it answers, the new pids hold');
