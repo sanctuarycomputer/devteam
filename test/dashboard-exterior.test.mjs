@@ -20,8 +20,9 @@ const SELF = `${PROJ}/self.md`, EXT = `${PROJ}/exterior.md`, STRAT = `${PROJ}/st
 const V1SELF = 'v1/self.md', V1EXT = 'v1/exterior.md';
 // the self@2 and exterior@2 fixtures, with links of each kind the page must judge: an .md outside self.md's folder
 // and one inside it (parts and references, as test/fixtures/world2/check.mjs's parts() resolves them), an anchor,
-// a reference and a folder in the Exterior
-const SELF2 = `${fixture('world2', 'self.md')}\nIts notes: [the readme](../README.md), [a plan](notes/plan.md), [the strategy again](../project/strategy.md) and [its values](#values).\n`;
+// a root path and one that climbs out of the repo and back into self.md's folder (neither a part nor a reference:
+// kit-909), a reference and a folder in the Exterior
+const SELF2 = `${fixture('world2', 'self.md')}\nIts notes: [the readme](../README.md), [a plan](notes/plan.md), [the strategy again](../project/strategy.md) and [its values](#values).\nNot its notes: [the root](/strategy.md), [from the root](/docs/devteam/project/strategy.md) and [the climb](../../../../docs/devteam/project/strategy.md).\n`;
 const EXT2 = `${fixture('world2', 'exterior.md')}\nIt is drawn against [the Self](self.md), beside [the docs](../docs/).\n`;
 const SELF1 = fixture('world', 'self.md'), EXT1 = fixture('world', 'exterior.md');
 const row = (p, title, at) => ({ group: 'project', path: p, title, last_change: at, differs: null, written: true, state: null });
@@ -202,6 +203,10 @@ test('self.md and exterior.md beside the strategy, as documents', { skip: canDri
     // only an .md in self.md's own folder is a reference: one elsewhere is a part, and an anchor has no page here
     assert.deepEqual(ls.filter(([w]) => ['the readme', 'a plan', 'its values'].includes(w)), [], 'an .md elsewhere and an anchor: words');
     assert.ok((await paras()).some((x) => x.includes('the readme, a plan, the strategy again and its values.')), 'their words show');
+    // a root path, and a climb past the repo's root back into self.md's folder, are neither part nor reference (kit-909)
+    assert.deepEqual(ls.filter(([w]) => ['the root', 'from the root'].includes(w)), [], 'a root path: words');
+    assert.deepEqual(ls.filter(([w]) => w === 'the climb'), [], 'a climb out of the repo: words');
+    assert.ok((await paras()).some((x) => x.includes('Not its notes: the root, from the root and the climb.')), 'those words show');
     // the references to strategy.md, as written and by a path through its folder, open the strategy's peek at main
     for (const words of ['the strategy', 'the strategy again']) {
       const ref = ls.find(([w]) => w === words);
