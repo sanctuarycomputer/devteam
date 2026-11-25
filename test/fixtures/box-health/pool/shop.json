@@ -1,0 +1,156 @@
+{
+ "v": 1,
+ "at": "2026-11-25T11:59:00Z",
+ "hour_end": "2026-11-25T11:59:00Z",
+ "cap": 4,
+ "ready": 2,
+ "planners": 1,
+ "goals": [
+  {
+   "id": "g-orders",
+   "title": "Orders keep their order",
+   "priority": 3,
+   "usd_hour": 2.5,
+   "new_hour": 500000
+  }
+ ],
+ "workers": [
+  {
+   "name": "shop-1-api",
+   "title": "The API answers",
+   "goal": 0,
+   "phase": "build",
+   "since": "2026-11-25T10:00:00Z",
+   "tokens": {
+    "state": "measured",
+    "new": 900000,
+    "cached": 8000000,
+    "usd_hour": 1.5,
+    "new_hour": 300000,
+    "points": [
+     {
+      "at": "2026-11-25T10:00:00Z",
+      "new": 75000
+     },
+     {
+      "at": "2026-11-25T10:10:00Z",
+      "new": 75000
+     },
+     {
+      "at": "2026-11-25T10:20:00Z",
+      "new": 75000
+     },
+     {
+      "at": "2026-11-25T10:30:00Z",
+      "new": 75000
+     },
+     {
+      "at": "2026-11-25T10:40:00Z",
+      "new": 75000
+     },
+     {
+      "at": "2026-11-25T10:50:00Z",
+      "new": 75000
+     },
+     {
+      "at": "2026-11-25T11:00:00Z",
+      "new": 75000
+     },
+     {
+      "at": "2026-11-25T11:10:00Z",
+      "new": 75000
+     },
+     {
+      "at": "2026-11-25T11:20:00Z",
+      "new": 75000
+     },
+     {
+      "at": "2026-11-25T11:30:00Z",
+      "new": 75000
+     },
+     {
+      "at": "2026-11-25T11:40:00Z",
+      "new": 75000
+     },
+     {
+      "at": "2026-11-25T11:50:00Z",
+      "new": 75000
+     }
+    ],
+    "reviews_new": 120000,
+    "reviews_usd_hour": 0.25,
+    "reviews_new_hour": 40000
+   }
+  },
+  {
+   "name": "shop-2-ui",
+   "title": "The page loads",
+   "phase": "spec",
+   "since": "2026-11-25T11:50:00Z",
+   "tokens": {
+    "state": "none-yet"
+   }
+  },
+  {
+   "name": "shop-3-docs",
+   "phase": "plan",
+   "since": "2026-11-25T09:00:00Z",
+   "tokens": {
+    "state": "not-measured",
+    "reason": "no-reader",
+    "reviews_new": 5000
+   }
+  }
+ ],
+ "recent": [
+  {
+   "name": "shop-0-old",
+   "title": "The old page goes",
+   "left_at": "2026-11-25T11:00:00Z",
+   "why": "merged",
+   "tokens": {
+    "state": "measured",
+    "new": 400000,
+    "cached": 3000000,
+    "points": [
+     {
+      "at": "2026-11-25T08:00:00Z",
+      "new": 66666
+     },
+     {
+      "at": "2026-11-25T08:10:00Z",
+      "new": 66666
+     },
+     {
+      "at": "2026-11-25T08:20:00Z",
+      "new": 66666
+     },
+     {
+      "at": "2026-11-25T08:30:00Z",
+      "new": 66666
+     },
+     {
+      "at": "2026-11-25T08:40:00Z",
+      "new": 66666
+     },
+     {
+      "at": "2026-11-25T08:50:00Z",
+      "new": 66666
+     }
+    ]
+   }
+  },
+  {
+   "name": "shop-9-ancient",
+   "left_at": "2026-11-24T10:00:00Z",
+   "why": "stopped",
+   "tokens": {
+    "state": "not-measured"
+   }
+  }
+ ],
+ "other": {
+  "usd_hour": 0.75,
+  "new_hour": 160000
+ }
+}
