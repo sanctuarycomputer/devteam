@@ -174,3 +174,10 @@ test('a diagnosis\'s last looks: each form chrome.mjs gives is taken, anything e
   assert.match(at('its page answers a second session in 3 ms; renderers: 12 100% cpu'), looks(ANY));
   for (const tail of ['its page answers a second session in 3 ms; renderers: 12 0% cpu', 'its page gives a second session no answer in 2 s', 'renderers: 12 0% cpu', 'its page gives a second session no answer in 2 s; renderers: garbled', 'garbled; diagnosis cut at 6 s', 'its page gives a second session no answer in 2 s; renderers: 12 0% cpu; diagnosis cut at 6 s', "Chrome's endpoint: something else", "Chrome's endpoint: no answer in 2 s; renderers: 12 0% cpu", 'its page gives a second session no answer in 2 s; renderers: none']) assert.doesNotMatch(at(tail), looks(HELD), tail);
 });
+test('closeTab: a tab whose SAVING read gets no answer fails its caller at once, and is never sent Page.close', async () => {
+  const held = 'Runtime.evaluate: no answer from Chrome in 30 s; tab 0123ABCD at about:blank; a beforeunload dialog ("", at about:blank) open on this tab for 30.0 s';
+  const p = fakePage(() => ({}));
+  p.ev = async (x) => { p.asked.push(`ev ${x}`); throw new Error(held); };
+  await assert.rejects(closeTab(p), { message: `closing the tab: ${held}` });
+  assert.deepEqual(p.asked, ["ev typeof SAVING === 'number' ? SAVING : 0", 'socket closed']);
+});
