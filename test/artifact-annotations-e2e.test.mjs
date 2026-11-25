@@ -332,11 +332,17 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
     await V.soon(`!!document.querySelector(${J(sel)})`, `setup: ${sel} is there`);
     await rectOf(V, sel);
     if (guard) await V.soon(guard, `setup: ${sel} settled under the press guard`);
+    // the control's box the same on four reads running (a picture arriving late pushes the composer down)
+    await V.soon(`(() => { const e = document.querySelector(${J(sel)}); if (!e) return false; const r = e.getBoundingClientRect(), k = [r.left, r.top, r.width, r.height].join(), s = window.__still; window.__still = s && s.k === k ? { k, n: s.n + 1 } : { k, n: 0 }; return window.__still.n >= 4; })()`, `setup: ${sel} at rest`);
     await V.p.ev(FRAMES);
     const at = await rectOf(V, sel, false);
     assert.ok(at, `setup: ${sel} has a box to press`);
     assert.ok(at.on, `setup: the point at ${sel} (${at.x},${at.y}) is covered by ${at.hit}`);
-    await V.press(at.x, at.y, what);
+    try { await V.press(at.x, at.y, what); } catch (e) {
+      const now = await V.p.ev(`(() => { const e = document.querySelector(${J(sel)}); const r = e?.getBoundingClientRect(); const h = r && document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return { clicks: window.__clicks.slice(-6), box: r && [r.left, r.top, r.width, r.height], hit: h ? h.id || h.className || h.tagName : null, open: TL.open, ready: e ? avStep.ready(e) : 'n/a' }; })()`).catch(() => null);
+      e.message += ` [${sel} was at ${at.x},${at.y}; now ${J(now)}]`;
+      throw e;
+    }
   };
   // one real press on ‹ or ›, and the wait for the step to land: the note's card open, its page there, no step under way
   const stepBy = async (V, id, key, what) => {
