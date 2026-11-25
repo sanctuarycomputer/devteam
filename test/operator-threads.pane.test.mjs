@@ -7,6 +7,10 @@ import path from 'node:path';
 import { bareProject, hasTmux, until, write } from './lib/kit.mjs';
 import { agentProgram, bin, box, KIT, machine, nowhere, OP, prompt, seat, shown, stubShell, SUBJECT, tmp, tmuxSh } from './lib/operator-threads-fixture.mjs';
 
+// A stand-in's record of how it was run: its file is there before its text (the shell opens it, then
+// writes), and a long record is several writes. All of it is there once it ends its line.
+const recorded = (f) => fs.existsSync(f) && fs.readFileSync(f, 'utf8').endsWith('\n');
+
 // An owner turn is typed into the operator's pane as one line, the owner's words between a prefix
 // and a suffix of the kit's own: nothing in them ends the line, reaches the terminal as a control,
 // or is a second tmux command.
@@ -88,7 +92,8 @@ test('on a box the operator is window 0 of home: typed into when it is there, ne
 // own, as the box starts its own, and never a second time.
 test('a laptop\'s operator is started once: by the first words or by start, in its own session, with operator.md as its prompt', { skip: !hasTmux }, async () => {
   const M = machine();
-  const calls = () => (fs.existsSync(path.join(M.dir, '.claude-calls')) ? fs.readFileSync(path.join(M.dir, '.claude-calls'), 'utf8').trim().split('\n').filter(Boolean) : []);
+  const record = path.join(M.dir, '.claude-calls');
+  const calls = () => (fs.existsSync(record) ? fs.readFileSync(record, 'utf8').trim().split('\n').filter(Boolean) : []);
   const windows = () => (tmuxSh(['list-windows', '-t', `=${M.session}`, '-F', '#W']).stdout ?? '').split('\n').filter(Boolean);
   try {
     let st = JSON.parse(M.ok(['status', '--json']));
@@ -97,7 +102,7 @@ test('a laptop\'s operator is started once: by the first words or by start, in i
     const said = M.ok(['new', 'what is stuck?']).split('\n');
     // a first start can stop at Claude Code's own dialog, which only the owner answers: the reply says where
     assert.equal(said[1], `recorded; the operator is starting for the first time here. If Claude Code asks whether to trust its folder, answer it in its terminal (tmux attach -t devteam-home-${M.hub}); it reads this once it is up`);
-    await until(() => calls().length === 1, 'the operator\'s agent');
+    await until(() => calls().length === 1 && recorded(record), 'the operator\'s agent');
     // role|kit|arguments: operator.md has bars of its own (its tables)
     const [, role, kitPath, args] = /^([^|]*)\|([^|]*)\|(.*)$/.exec(calls()[0]);
     assert.equal(role, 'operator', 'DEVTEAM_ROLE=operator');
@@ -128,7 +133,7 @@ test('a laptop\'s operator is started once: by the first words or by start, in i
     assert.equal(JSON.parse(M.ok(['status', '--json'])).can_start, true);
     assert.match(M.ok(['start']), /^started on its own conversation/);
     assert.match(M.ok(['start']), /^already running/, 'a shell that was just given the command is not started again');
-    await until(() => calls().length === 2, 'the operator again');
+    await until(() => calls().length === 2 && recorded(record), 'the operator again');
     assert.ok(calls()[1].split('|')[2].startsWith('--dangerously-skip-permissions --continue --append-system-prompt '), 'resumed');
     assert.deepEqual(windows(), ['operator']);
   } finally { tmuxSh(['kill-session', '-t', `=${M.session}`]); }
@@ -141,7 +146,7 @@ test('a laptop\'s operator is started once: by the first words or by start, in i
   try {
     assert.match(N.ok(['start'], { DEVTEAM_OPERATOR_COMMAND: 'codexish --yolo' }), /^started fresh \(tmux attach -t devteam-home-/);
     const f = path.join(N.dir, '.other-calls');
-    await until(() => fs.existsSync(f), 'the other agent');
+    await until(() => recorded(f), 'the other agent');
     assert.match(fs.readFileSync(f, 'utf8'), /^operator\|--yolo # You are this machine's operator .*## On a laptop.*operator-thread list --waiting/);
   } finally { tmuxSh(['kill-session', '-t', `=${N.session}`]); }
 });
