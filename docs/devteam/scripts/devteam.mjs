@@ -23934,7 +23934,7 @@ function healthBytes(s) {
 //                   it equals the last step's workers the page adds "or over"), `measured` (of now),
 //                   `steps` (0 to now + 20, at most 81; absent over 60 workers: `workers`*, `lasts`
 //                   (absent with no token forecast), `runs_out_at` (always, and only, when it doesn't
-//                   last), `paused_until`), `memory_full_at`, `cpu_full_at` (the first count past each),
+//                   last), `paused_until` (only then)), `memory_full_at`, `cpu_full_at` (the first count past each),
 //                   `why` (only when no step has lasts: the first of these that holds)
 //                   "no-cswap" (claude is absent): Token use isn't forecast without cswap's numbers.
 //                   "measuring" (under 30 minutes of burn readings): The token forecast needs more readings.

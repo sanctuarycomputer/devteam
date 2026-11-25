@@ -22,9 +22,9 @@ const names = (got, field, label = field) => {
   assert.equal(typeof got, 'string', `${label}: refused`);
   assert.ok(got.startsWith(`${field} `), `${label}: names ${field}: ${got}`);
 };
-// An answer with its samples and measured points cut to three: the tests that change every field in
+// An answer with its samples and every points list cut to three: the tests that change every field in
 // turn check it some thousands of times.
-const short = (state) => { const a = answer(state); a.samples.length = 3; if (a.claude) a.claude.points.length = 3; return a; };
+const short = (state) => { const a = answer(state); a.samples.length = 3; for (const [, o] of [...objects(a)]) if (o.points?.length > 3) o.points.length = 3; return a; };
 // Every object in a value, as [path, object], and every leaf as [path, holder, key, value].
 function* objects(v, p = '') {
   if (Array.isArray(v)) { for (let i = 0; i < v.length; i++) yield* objects(v[i], `${p}[${i}]`); return; }
@@ -447,6 +447,51 @@ test('C19 why there is no token forecast, and why no Claude limit: one word each
   assert.equal(park('park-no-rate'), undefined);
   assert.equal(said.get('park-no-rate').claude.projection.safe_rate, undefined);
   for (const s of ['claude-runs-out', 'park-together', 'park-not-enough']) for (const p of said.get(s).claude.park) assert.equal(p.enough, said.get(s).claude.rate * (1 - p.share) <= said.get(s).claude.projection.safe_rate, `${s}: ${p.fleet} ${p.port}`);
+});
+
+test('C20 every field refuses what is just outside its kind, and takes what is just inside', () => {
+  // each kind: what it refuses, and what it takes; NaN, null and other types are C4's and C5's
+  const KIND = {
+    count: [[1.5, -1, 2 ** 53], [0, 7]], least1: [[0, 1.5, -1], [1, 7]], whole: [[1.5], [-3, 0]], amount: [[-0.1, Infinity, NaN], [0, 0.5]], more: [[0, -1, Infinity], [0.5]], signed: [[Infinity, NaN], [-5.5, 0]],
+    percent: [[-0.1, 100.1], [0, 100, 0.5]], share: [[-0.1, 1.1], [0, 1, 0.5]], ceiling: [[0.4, 0.96], [0.5, 0.95]], hours: [[-0.1, 6.1], [0, 6]], time: [['', '2026-02-30T00:00:00Z', '2026-11-24', '2026-11-24T18:40:00+01:00'], ['2026-11-24T18:40:00Z', '2026-11-24T18:40:00.123Z']],
+    text: [[''], ['x'.repeat(200)]], title: [['', 'x'.repeat(81)], ['x'.repeat(80), 'an @']], label: [['', 'a@b'], ['x']], word: [['', 'Two', 'a b', 'x'.repeat(41)], ['ok', 'a-b_c']], port: [[0, 65536, 1.5], [1, 65535]],
+    price: [[-0.1, Infinity], [0, 0.5, null]], bool: [[0, 'true'], []], yes: [[false, 1], [true]], one: [[0, 2, '1'], [1]], goal: [[-1, 0.5, 20], [0]],
+    reason: [['', 'zz'], []], state: [['', 'zz'], []], ended: [['', 'zz', 'lost'], ['merged', 'done', 'parked', 'held', 'stopped']], binds: [['', 'disk'], ['memory', 'cpu', 'claude', 'ready']], host: [['', 'box'], ['host']],
+    strayKind: [['', 'other'], ['agent', 'browser', 'node', 'test']], strayWhy: [['', 'old'], ['parent-gone', 'folder-gone', 'long-test']],
+  };
+  // a field's kind by its path first, then by its name
+  const PATHS = [
+    [/^headroom\.(memory|cpu)$/, 'count'], [/^headroom\.ready_unknown\[\]$/, 'text'], [/^now\.cpu\.limit$/, 'more'], [/^now\.cpu\.used$/, 'amount'], [/^(claude|claude\.projection)\.points\[\]\.room$/, 'amount'], [/^(samples\[\]|now\.cpu\.load\[\]).*load|^now\.cpu\.load\[\]$/, 'amount'],
+    [/^(claude\.accounts|pool\.strays)\[\]\.n$/, 'least1'], [/^pool\.strays\[\]\.why$/, 'strayWhy'], [/^pool\.what_if\.why$|^headroom\.claude_why$/, 'word'], [/^(samples\[\]|now\.memory|now\.io)\..*some|^samples\[\]\.io$/, 'percent'],
+    [/^claude\.park\[\]\.goals\[\]\.title$/, 'title'], [/^box\.(kit|latest)$/, 'text'], [/^now\.cpu\.host_cores\[\]$/, 'share'], [/recent\[\]\.why$/, 'ended'], [/^now$|^pool$/, null],
+  ];
+  const NAMES = Object.fromEntries(Object.entries({
+    count: 'used max available swap_used swap_max free total inodes_free inodes mem swap disk room starts claude ready workers planners cap rss n new cached reviews_new oldest_s most_that_lasts measured now memory_full_at cpu_full_at oom_kills left limit new_hour reviews_new_hour',
+    least1: 'window_s', whole: 'priority', amount: 'cpu load per_hour rate safe_rate', signed: 'bytes_per_hour', percent: 'some10 some60 full60 week_left five_left', share: 'throttled share', ceiling: 'ceiling', hours: 'rate_hours',
+    time: 'at since disk_at left_at runs_out_at paused_until week_resets_at five_resets_at next_reset_at started_at resets_at hour_end', text: 'name project phase fleet id', title: 'title', label: 'label', word: 'status', port: 'port',
+    price: 'usd_hour reviews_usd_hour', bool: 'agent active lasts enough', yes: 'shared', one: 'v', goal: 'goal', reason: 'reason', state: 'state', binds: 'binds', host: 'load_scope', strayKind: 'kind',
+  }).flatMap(([k, l]) => l.split(' ').map((n) => [n, k])));
+  // a field is swept once, in the first answer or file that holds it
+  const sweep = (value, check, label, done) => {
+    for (const [p, o] of objects(value)) for (const [k, was] of Object.entries(o)) {
+      const list = Array.isArray(was);
+      if (list ? was.length === 0 || (was[0] !== null && typeof was[0] === 'object') : was !== null && typeof was === 'object') continue;
+      const field = at(p, k), id = `${field.replace(/\[\d+\]/g, '[]')}${list ? '[]' : ''}`;
+      if (done.has(id)) continue;
+      done.add(id);
+      const kind = (PATHS.find(([re]) => re.test(id)) ?? [])[1] ?? NAMES[k];
+      assert.ok(KIND[kind], `${label}: ${id} has a kind`);
+      const put = (x) => { if (list) was[0] = x; else o[k] = x; };
+      const first = list ? was[0] : was;
+      for (const bad of KIND[kind][0]) { put(bad); names(check(value), list ? `${field}[0]` : field, `${label} ${id} = ${String(bad).slice(0, 30)}`); }
+      for (const good of KIND[kind][1]) { put(good); assert.equal(check(value), null, `${label} ${id} takes ${String(good).slice(0, 30)}`); }
+      put(first);
+    }
+  };
+  const box = new Set(), pl = new Set();
+  for (const s of [...STATES, ...MORE]) sweep(short(s), boxHealthProblem, s, box);
+  for (const n of POOLS) sweep(pool(n), poolProblem, n, pl);
+  assert.ok(box.size > 100 && pl.size > 25, `${box.size} and ${pl.size} fields swept`);
 });
 
 test('C17 the fake answer: after gives only newer samples and claude.points, and nothing else changes', () => {
