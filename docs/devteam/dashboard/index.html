@@ -1053,6 +1053,14 @@ try {
      else of the dashboard shows */
   .viewer .app, .viewer .scrim, .viewer #av-close, .viewer #av-tab { display: none !important; }
   .viewer #artifact-view:not([hidden]) { inset: var(--bar-h) 0 0; border: 0; border-radius: 0; box-shadow: none; }
+  /* the reminder on close (kit-148): a card at the bottom centre over the page, under the scrim (20), a peek (21) and
+     the Threads panel (22); beside the open panel above 900px, under it at 900px and below, where it is the whole window */
+  #av-remind:not([hidden]) { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 19; width: min(440px, calc(100vw - 32px)); box-sizing: border-box; display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.18); font-size: 13px; }
+  #av-remind .tx { margin: 0; }
+  .av-remind-do:not([hidden]) { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+  .av-remind-do button { margin: 0; }
+  #e-avr:empty { display: none; }
+  @media (min-width: 901px) { body.threads-open #av-remind { left: calc((100% - var(--threads-w)) / 2); } }
 /* css-viewer end */
 /* css-threads start */
   /* threads: the layer over the page (Shift and point at anything), outside <main> */
@@ -6824,6 +6832,8 @@ function tsSet(kind, info = {}) {
 // picked: a version picked from the bar's list ({ at, label, earlier }), which keeps the versions this open has read.
 // anchor: '#…' to frame the page at (a viewer tab's own hash, kit-106), kept by a live reload.
 function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp = null, picked = null, anchor = '' } = {}) {
+  // a viewer opening ends the reminder of the last close (kit-148)
+  avRemindHide();
   const src = artSrc(slug, at) + anchor;
   const keep = picked && AV?.slug === slug ? AV : null;
   AV = { at, slug, picked, vers: keep?.vers ?? null, known: keep?.known ?? null };
@@ -7002,6 +7012,8 @@ function tsBar() {
 // its address to keep), and says it is doing so ('reload'); the stage here says to reload rather than
 // reloading the whole dashboard.
 function showPreview(name, info) {
+  // a viewer opening ends the reminder of the last close (kit-148)
+  avRemindHide();
   const seen = `devteam.preview.reloaded.${name}`;
   if (info?.opened && VIEWER) { try { if (!sessionStorage.getItem(seen)) { sessionStorage.setItem(seen, '1'); location.reload(); return 'reload'; } } catch {} }
   else { try { sessionStorage.removeItem(seen); } catch {} }
@@ -7151,7 +7163,17 @@ avNotes.draw = () => {
 };
 // Hand over: the version's open notes to the session the server picks (kit-144). One request at a time (press
 // would queue a second behind the first), and its answer written only while that version is still shown.
-async function avHandOver() {
+// opts ({slug, at, done}: the reminder's press, kit-148): that version's, its reply or {error} handed to done,
+// neither AV nor the bar touched. Any hand-over that succeeds ends that artifact's reminder hold.
+async function avHandOver(opts) {
+  if (opts) {
+    const { slug, at, done } = opts;
+    return press('avn', {
+      build: () => ({ action: 'artifact-handoff', body: { slug, at } }),
+      onOk: (out) => { AV_REMIND.held.delete(slug); done(out); tlRefresh(); },
+      onError: (error) => done({ error }),
+    });
+  }
   const av = AV;
   if (!av || av.preview || av.notesBusy) return;
   const ids = avNotes().filter((t) => tNoteState(t) === 'open').map((t) => t.id);
@@ -7163,6 +7185,7 @@ async function avHandOver() {
       build: () => ({ action: 'artifact-handoff', body: { slug: av.slug, at: av.at } }),
       apply: () => { avNotes.say(''); av.handed = null; },
       onOk: (out) => {
+        AV_REMIND.held.delete(av.slug);
         if (out.count > 0) say(`With ${out.to}`, ids); else say('Nothing to hand over', []);
         if (out.count > 0 && out.typed === false && AV === av) avNotes.say(`Not typed: ${out.to} has no pane. It reads this when it next checks.`, 10000);
         tlRefresh();
@@ -7549,8 +7572,99 @@ document.addEventListener('error', (e) => {
   tlDraw();
 }, true);
 /* tShot end */
+/* avRemind start */
+// The reminder when the viewer closes on a version with notes nobody handed over (kit-148): a card at the bottom of
+// the window, Not now and Hand over. Not now holds the artifact for this page load only (nothing stored): held maps
+// a slug to the ids of the notes open at each Not now, and the subject keys of those still saving (pending-…),
+// added to, never replaced. Any hand-over that succeeds, the bar's or the card's, ends the slug's hold (avHandOver).
+// taken: what the close the card shows took; busy: the card's press on its way; timer: its result's.
+const AV_REMIND = { held: new Map(), busy: false, timer: 0, taken: null };
+const AV_REMIND_MS = 4000;
+// Who Hand over sends a version's notes to, by kit-144's rule as the page sees it: a planner's draft, or a ticket's
+// in the graph, that the Library lists (its worktree is there), else the supervisor. The press's reply names the real one.
+function avRecipient(at) {
+  const listed = (DATA?.library?.artifacts ?? []).some((x) => x.at === at);
+  return (/^plan-[a-z0-9-]+$/.test(at) || ticketMap().has(at)) && listed ? at : 'supervisor';
+}
+// What a close takes of the artifact it lets go of, while AV and the lens are still its own: the bar's Hand over (N),
+// the version's open notes less those the bar believes just handed; their ids, and the subject keys of those still
+// saving; its title and who would get them. Nothing of a preview, a dropped image or a viewer tab. The title is the
+// Library's for the version, else for another of the artifact's (a draft the Library lists no more), else the bar's.
+function avRemindTake() {
+  if (!AV?.slug || AV.preview || AV.upload || VIEWER) return null;
+  const given = AV.handed?.ids ?? [];
+  const open = avNotes().filter((t) => tNoteState(t) === 'open' && !given.includes(t.id));
+  const saving = (t) => String(t.id).startsWith('pending-');
+  const lib = DATA?.library?.artifacts ?? [];
+  const title = (lib.find((x) => x.slug === AV.slug && x.at === AV.at) ?? lib.find((x) => x.slug === AV.slug && x.title))?.title || $('av-title').textContent;
+  return { slug: AV.slug, at: AV.at, title, n: open.length, ids: open.filter((t) => !saving(t)).map((t) => t.id), keys: open.filter(saving).map((t) => tKey(t.subject)), to: avRecipient(AV.at) };
+}
+// The card, made on first use; never focused by the page
+function avRemindCard() {
+  let c = document.getElementById('av-remind');
+  if (c) return c;
+  c = document.createElement('div');
+  c.id = 'av-remind';
+  c.hidden = true;
+  c.setAttribute('role', 'status');
+  c.setAttribute('aria-live', 'polite');
+  c.innerHTML = '<p class="tx"></p><div class="av-remind-do"><button type="button" class="ghost" id="av-remind-later">Not now</button><button type="button" id="av-remind-hand"></button></div><span class="err" id="e-avr"></span>';
+  document.body.append(c);
+  return c;
+}
+// Shown after a close when it took open notes and one of them is not held (its id, nor its subject key). Its words
+// are set as text: the title is a session's.
+function avRemindShow(taken) {
+  if (!taken || !(taken.n > 0)) return;
+  const held = AV_REMIND.held.get(taken.slug);
+  const keyOf = (id) => { const t = TL.threads.find((x) => x.id === id); return t ? tKey(t.subject) : null; };
+  if (held && taken.ids.every((id) => held.ids.has(id) || held.keys.has(keyOf(id))) && taken.keys.every((k) => held.keys.has(k))) return;
+  clearTimeout(AV_REMIND.timer);
+  AV_REMIND.taken = taken;
+  const c = avRemindCard(), one = taken.n === 1, sup = taken.to === 'supervisor';
+  c.querySelector('.tx').textContent = `${one ? '1 note' : `${taken.n} notes`} on ${taken.title} ${one ? 'isn\'t' : 'aren\'t'} handed over. ${sup ? 'The supervisor' : `${taken.to}, the session drawing it,`} won't start on ${one ? 'it' : 'them'} until you do.`;
+  $('av-remind-hand').textContent = `Hand over to ${sup ? 'the supervisor' : taken.to}`;
+  c.querySelector('.av-remind-do').hidden = false;
+  $('e-avr').textContent = '';
+  c.hidden = false;
+}
+function avRemindHide() {
+  clearTimeout(AV_REMIND.timer);
+  AV_REMIND.taken = null;
+  const c = document.getElementById('av-remind');
+  if (c) c.hidden = true;
+}
+// Not now: the notes it named held. Hand over: one press at a time; its result in place of the words, the buttons
+// gone, then the card goes after AV_REMIND_MS; a refusal under the buttons, which stay.
+document.addEventListener('click', (e) => {
+  const b = e.target.closest?.('#av-remind-later, #av-remind-hand'), t = AV_REMIND.taken;
+  if (!b || !t) return;
+  if (b.id === 'av-remind-later') {
+    const h = AV_REMIND.held.get(t.slug) ?? { ids: new Set(), keys: new Set() };
+    for (const id of t.ids) h.ids.add(id);
+    for (const k of t.keys) h.keys.add(k);
+    AV_REMIND.held.set(t.slug, h);
+    avRemindHide();
+    return;
+  }
+  if (AV_REMIND.busy) return;
+  AV_REMIND.busy = true;
+  $('e-avr').textContent = '';
+  avHandOver({ slug: t.slug, at: t.at, done: (out) => {
+    if (AV_REMIND.taken !== t) return;
+    if (out?.error) { $('e-avr').textContent = `Not saved: ${out.error}`; return; }
+    const c = avRemindCard();
+    c.querySelector('.tx').textContent = out?.count > 0 ? `With ${out.to}` : 'Nothing to hand over';
+    c.querySelector('.av-remind-do').hidden = true;
+    clearTimeout(AV_REMIND.timer);
+    AV_REMIND.timer = setTimeout(avRemindHide, AV_REMIND_MS);
+  } }).finally(() => { AV_REMIND.busy = false; });
+});
+/* avRemind end */
 function closeArtifact() {
   if (!AV) return false;
+  // what the reminder needs of the artifact let go of (kit-148), while it is still the one shown
+  const taken = avRemindTake();
   AV = null;
   tsSet(null);
   tsPins();
@@ -7565,6 +7679,8 @@ function closeArtifact() {
   document.body.classList.remove('av-open');
   if (!peekIsOpen() && !RV) { $('scrim').hidden = true; document.body.style.overflow = ''; }
   avFocus?.focus?.();
+  // the reminder after the focus is back where the close put it: it takes none
+  avRemindShow(taken);
   return true;
 }
 // After a frame move, where the close lands, in place of the viewer's entry: over a page, that page as it was
