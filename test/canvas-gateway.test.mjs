@@ -264,6 +264,7 @@ test('canvas gateway: an upstream with no canvas socket is told by its status, a
       const mine = conns.filter((x) => x.bytes.startsWith('GET /canvas?slug=board HTTP/1.1\r\n'));
       assert.equal(mine.length, 1, 'the handshake went on');
       assert.equal(mine[0].bytes.indexOf('\r\n\r\n'), mine[0].bytes.length - 4, early ? 'nothing sent with the handshake went on' : 'nothing sent after the answer went on');
+      assert.ok(!conns.some((x) => x.bytes.includes('/api/canvas/image')), 'nor on a connection of its own');
       assert.match(answer, /^HTTP\/1\.1 404 /, 'the browser is told its status');
       assert.equal((answer.match(/HTTP\/1\.1/g) ?? []).length, 1, 'and nothing after it');
     }
