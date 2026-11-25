@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { canDrive, openChrome } from './lib/chrome.mjs';
-import { freePort, json, line, PORTS, startDashboard, until, write } from './lib/kit.mjs';
+import { dashboardOnFreePort, json, line, PORTS, until, write } from './lib/kit.mjs';
 import { fixture, raw, SUP, yesNo } from './lib/next-step-fixture.mjs';
 
 test('findings: no strategy, an unrated question once rating has begun, ratings that are all 3', () => {
@@ -237,12 +237,13 @@ test('the Inbox shows the order: the next best step on top with its reason, what
   const unrated = ask('Unrated one?');
   const gate = ask('Should we build it at all?', '--goal', G, ...yesNo, '--stake', '3', '--urgency', '1', '--settles', detail, '--settles-if', "Don't build it");
   ok(old, ['knowledge', 'add', '--kind', 'lesson', '--statement', 'a lesson to keep', '--scope', 'project', '--evidence', detail, '--for-owner', '--plain', 'A lesson that would change how you set the goals.'], SUP);
-  const port = await freePort();
-  const dash = startDashboard(old, F.env({ DEVTEAM_HUB_PORT: String(PORTS + 10), DEVTEAM_PORT_BASE: String(PORTS + 11) }), ['--port', String(port)]);
-  const chrome = await openChrome();
-  const p = await chrome.newPage();
+  // the port freePort finds can be taken before the dashboard binds it (a pinned one then exits on
+  // EADDRINUSE): dashboardOnFreePort starts it again on another, and resolves once it listens
+  let dash, port, chrome, p;
   try {
-    await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
+    ({ dash, port } = await dashboardOnFreePort(old, F.env({ DEVTEAM_HUB_PORT: String(PORTS + 10), DEVTEAM_PORT_BASE: String(PORTS + 11) })));
+    chrome = await openChrome();
+    p = await chrome.newPage();
     await p.send('Page.enable');
     await p.send('Runtime.enable');
     await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#questions` });
@@ -291,9 +292,9 @@ test('the Inbox shows the order: the next best step on top with its reason, what
     await until(() => json(ok(old, ['goal', 'show', G])).impact.level === 4, 'the owner\'s value');
     assert.deepEqual([json(ok(old, ['goal', 'show', G])).impact.by, json(ok(old, ['goal', 'show', G])).impact.rationale], ['owner', 'the launch blocker']);
   } finally {
-    p.close();
-    await chrome.close();
-    await dash.stop();
+    p?.close();
+    await chrome?.close();
+    await dash?.stop();
     F.done();
   }
 });
