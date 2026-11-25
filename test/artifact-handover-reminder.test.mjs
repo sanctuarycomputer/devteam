@@ -308,7 +308,10 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     await V.settle(`location.hash.startsWith(${J(link.href)})`, 3000);
     assert.ok((await V.p.ev('location.hash')).startsWith(link.href), 'R6: the page behind navigates');
     assert.equal(await V.p.ev(REMIND), true, 'R6: the reminder stays');
-    assert.equal(await V.p.ev('history.length'), len + 1, 'R6: only the nav link added an entry');
+    assert.equal(await V.p.ev('history.length'), len, 'R6: the nav click took the forward entry X left');
+    await V.p.ev('history.back(); void 0');
+    await V.settle(`location.hash === '#library'`, 3000);
+    assert.equal(await V.p.ev('location.hash'), '#library', 'R6: only the nav link added an entry');
     // a viewer opening hides it
     const W = await visit('#library');
     await openW(W, 'plan-rem');
