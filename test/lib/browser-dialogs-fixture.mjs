@@ -51,7 +51,7 @@ export const PAGES = {
   '/many': page('Many', `<script>const T = ${JSON.stringify(MANY)}; for (const t of T) alert(t); document.getElementById('r').textContent = 'seven alerts done';</script>`),
 };
 export let dsite = null, other = null;
-// The file's hooks start when the file calls this at its top (no work at import).
+// The hooks start when a file calls this at its top; importing this starts no server.
 export function dialogsFile() {
   viewFile();
   before(async () => {

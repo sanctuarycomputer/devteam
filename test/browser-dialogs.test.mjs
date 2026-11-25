@@ -2,7 +2,7 @@
 // with the stated defaults (alert OK, confirm Cancel, prompt Cancel, beforeunload Leave), so neither
 // the verbs nor the live view's frames stop behind one, and the verb that was running names each
 // dialog it answered. Each check is the spec's (docs/devteam/project/tickets/kit-329-browser-js-dialogs/
-// spec.md, home), named by its id. The fixture pages are this file's own server's, allowed beside the
+// spec.md, home), named by its id. The fixture pages are its fixture's own server's, allowed beside the
 // shared fixture site's.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

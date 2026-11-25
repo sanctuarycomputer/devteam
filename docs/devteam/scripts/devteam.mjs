@@ -34889,10 +34889,10 @@ const BROWSER_DIALOG_HOLD_MS = 250;
 const browserDialogAccept = (type) => type === 'alert' || type === 'beforeunload';
 function browserDialogSeen(ctx, type, message) {
   const d = ctx.dialogs, now = Date.now();
-  if (ctx.held) return;
+  if (ctx.held || ctx.pending || ctx.closing || !ctx.ready) return; // a close not handled yet: still the owner's pages
   if (!ctx.dialogHold || now - ctx.dialogHold.at >= BROWSER_DIALOG_HOLD_MS) {
     let held;
-    try { held = !!browserHeld(browserHandovers()); } catch { held = true; }
+    try { const hs = browserHandovers(); held = !!browserHeld(hs) || browserUnhandled(ctx, hs).length > 0; } catch { held = true; }
     ctx.dialogHold = { at: now, held };
   }
   if (ctx.dialogHold.held) return;
@@ -34943,6 +34943,14 @@ function browserOwnerAnswer(ctx, m) {
     if (!ctx.held) return;
     browserOwnerDialogGone(ctx, sid);
     return browserViewCdp(ctx, 'Page.handleJavaScriptDialog', { accept: m.accept, ...(o.kind === 'prompt' && m.accept ? { promptText: m.text ?? '' } : {}) }, sid);
+  }
+}
+// The hold or the session ends with dialogs unanswered (a close, a forget, a stop): kit-329's defaults,
+// so never an OK to a confirm.
+function browserOwnerDialogsEnd(ctx) {
+  for (const [sid, o] of [...ctx.ownerDialogs]) {
+    browserOwnerDialogGone(ctx, sid);
+    browserViewCdp(ctx, 'Page.handleJavaScriptDialog', { accept: browserDialogAccept(o.kind) }, sid);
   }
 }
 // The lines a plain-text answer ends with, one per dialog kept: the page's words JSON-quoted (page
@@ -35379,6 +35387,7 @@ async function browserForgetRestart(ctx) {
   if (ctx.stopping || !ctx.ready) return;
   try {
     ctx.ready = false; // the view's input dropped, its tick idle, a new socket 503
+    browserOwnerDialogsEnd(ctx);
     const v = ctx.viewer;
     if (v) { browserCast(ctx, v.tab, false); v.tab = null; }
     const hold = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_FORGET_DELAY_MS')); // tests: a long forget
@@ -35406,6 +35415,7 @@ async function browserCloseRestart(ctx, closes) {
       try { v.ws.send({ t: 'bye', why: BROWSER_BACK }); v.ws.close(1000); } catch {}
       browserViewClose(ctx, v);
     }
+    browserOwnerDialogsEnd(ctx);
     const hold = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_CLOSE_DELAY_MS')); // tests: a close held open
     if (hold > 0) { await browserSleep(hold); if (ctx.stopping) return; }
     const reopen = closes.length === 1 && closes[0].outcome === 'done' ? browserNotePages(ctx) : []; // only one done reopens
@@ -35603,6 +35613,7 @@ function browserWatch(ctx) {
     try { browserViewRead(ctx); } catch { return; }
     if (browserTestEnv('DEVTEAM_TEST_BROWSER_WATCH_HANDLE') === '0' || ctx.gateQueued) return;
     if (!ctx.pending) return;
+    browserOwnerDialogsEnd(ctx); // off the queue: a verb waiting behind one never holds the close up
     ctx.gateQueued = true;
     ctx.serial(() => browserGate(ctx)).finally(() => { ctx.gateQueued = false; });
   }, Number(browserTestEnv('DEVTEAM_TEST_BROWSER_WATCH_MS')) || 500); // the hook: tests, a slowed watch
@@ -35634,6 +35645,7 @@ function browserShutdown(ctx, why, detail) {
     clearTimeout(ctx.idle);
     clearInterval(ctx.renew);
     clearInterval(ctx.watch);
+    browserOwnerDialogsEnd(ctx);
     try { ctx.viewer?.ws.close(1001); } catch {} // the view's socket closes with the daemon (no bye)
     await browserEndChrome(ctx.cdp, ctx.chrome?.pid);
     try { browserDeleteSession(ctx.profile); } catch {}
