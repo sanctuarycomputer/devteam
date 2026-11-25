@@ -24697,8 +24697,343 @@ function boxHealth(log, scan, { parts = boxHealthParts(), real = () => Date.now(
 }
 /* box-health-sampler end */
 /* box-health-processes start */
-// CPU and memory by worktree, and strays (kit-837's).
-const boxHealthProcesses = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+// CPU and memory by worktree, test runs apart, and what was left behind (kit-837): a walk of
+// ctx.proc every 15 s of now(), the first 15 s after start (by then the sampler has read the roots
+// once), its last whole result given to the parts after it. Linux only:
+// where ctx.proc can't be listed it gives nothing, and the parts after it leave CPU, memory, test
+// runs, strays, others and agent absent.
+//
+// The walk, never two at once, stopped at 2 s of real():
+//   0. pids   when ctx.roots() gives a new list (the sampler reads them every minute), the pids each
+//             root's run/ records (below), read async before the 2 s begin, for at most 2 s; one
+//             still out when that ends goes on alone, the last pids are kept meanwhile, and no
+//             second read starts while it is out (final-1 F2)
+//   1. stat   one read of <proc>/<pid>/stat a process, synchronous, in batches of 100 with a turn of
+//             the event loop between (ctx.turn): its own and its reaped children's CPU ticks, resident
+//             pages, parent, start time and comm. Then <proc>/uptime and <cgroup>/cpu.stat.
+//   2. info   for a (pid, start time) not seen before, or last read 5 minutes of real() ago or more:
+//             its cmdline (at most 64 KB) and cwd, read async, classified at once and the words
+//             dropped. At most two processes' reads are ever out, across walks, and never two for
+//             one process, so a read that hangs (a process whose memory is locked) holds at most
+//             one of the threads every file read shares, and only while it hangs (final-1 F1).
+//             What is left of the 2 s ends the reading, not the walk: a process not read yet
+//             counts as unknown (outside, never a stray) until its read settles. Only the kind, whether it starts a test run, whether it is devteam's or tmux,
+//             and its cwd are kept, and only in this region. One whose cmdline can't be read is
+//             known as nothing (outside, never a stray) until it is read again. environ is never read.
+// A walk whose stat reads are cut off at 2 s gives nothing: the part gives undefined until two whole walks have run
+// again, since a change is worked out only between two whole walks one after the other.
+//
+// Where a process counts: the longest known root (ctx.roots()) holding its cwd, then the worktree
+// under it (<root>/.worktrees/<name>); a cwd in no root, or one that can't be read, is outside. A
+// deleted cwd ("… (deleted)") counts where it was.
+// CPU between two whole walks, in cores over real() between them: its own ticks' change, plus the
+// rise in its reaped children's ticks less the whole time (own plus reaped) that its children which
+// have since gone, and their gone descendants, had at the first walk; each part never below zero, so
+// a child that came and went between walks counts for its parent and nothing counts twice. The
+// rise in pid 1's reaped time, and a systemd's, init's or tini's (by comm), is left out: a child
+// re-parented there is lost to unattributed, and a child reaped by no one (its parent ignores
+// SIGCHLD) adds nothing to its parent's reaped time, so its time since the first walk is lost too.
+// A new process counts all its time.
+// A test run is a process whose cmdline is devteam.mjs gate, node with --test before its script,
+// one of PROC_TESTS by its executable's or its script's name (a .js, .mjs, .cjs, .py or .rb
+// extension aside, or a script under node_modules/<name>/ or node_modules/@playwright/test/),
+// python -m pytest, or go test or cargo test; its tree is the processes under it, itself included,
+// and its top the highest of them.
+//
+// part(ctx, parts) gives undefined, or the last whole walk's result (a new object each walk):
+//   at            now() when the walk ended
+//   over_s        seconds of real() between the two walks CPU is from; absent with no CPU yet
+//   places        one a (root, worktree or none) holding a process, in the order first seen:
+//                 { root, project (the root's name), worktree (its folder's name; absent for the
+//                 root itself), n (processes), agents (claude, codex, opencode), cpu (cores; absent
+//                 with no CPU yet), rss (bytes), tests: { n (test runs whose top is here), cpu, rss },
+//                 own: { n, cpu, rss } (devteam's own commands and tmux, below) }
+//   outside       { n, agents, cpu, rss }: in no root, or cwd unreadable
+//   unattributed  { cpu }: the cgroup's CPU over the same time (cpu.stat usage_usec) less every
+//                 process's above, never below zero; absent with no cpu.stat or no CPU yet
+//   strays        box-health@1's strays: at most 40 groups by project, kind and why, most memory first
+// Strays, processes over 10 minutes old (from their start time and uptime) of kind agent, browser
+// (memoryClassify's, and chrome-headless-shell and chromium-browser), node (memoryClassify's) or
+// test (in a test run's tree), the first that holds of:
+//   folder-gone   its cwd is deleted
+//   parent-gone   kind browser, node or test, and its parent is pid 1 or a process whose comm is
+//                 systemd, init or tini; left out: devteam's own commands (node running devteam.mjs
+//                 or gateway.mjs), tmux, the pids a known root's run/ records (browser/state.json's
+//                 daemon_pid and chrome_pid, supervisor-up.json's pid, sensors/<name>/stream.pid,
+//                 each at most 64 KB), and any process under one of those
+//   long-test     kind test, and its run's top is over 60 minutes old
+// A stray whose cwd is in no root has no project. Nothing is killed, signalled or started here.
+const PROC_EVERY_MS = 15000, PROC_BUDGET_MS = 2000, PROC_BATCH = 100, PROC_INFO_MS = 300000;
+const PROC_READS = 2, PROC_HZ = 100, PROC_STRAY_S = 600, PROC_LONG_TEST_S = 3600, PROC_STRAYS = 40, PROC_FILE_MAX = 65536;
+const PROC_REAPERS = ['systemd', 'init', 'tini'];
+const PROC_TESTS = ['vitest', 'jest', 'mocha', 'rspec', 'pytest', 'playwright'];
+const PROC_BROWSERS = ['chrome-headless-shell', 'chromium-browser'];
+// /proc/<pid>/stat's text: { ppid, comm, cpu, reaped, start, pages }, or null. comm may hold spaces
+// and parentheses, so the fields are counted from its last ")".
+function procStat(text) {
+  const open = text.indexOf('('), close = text.lastIndexOf(')');
+  if (open < 0 || close < open) return null;
+  const f = text.slice(close + 2).split(' ');
+  const n = (i) => (/^-?\d+$/.test(f[i] ?? '') ? Number(f[i]) : NaN);
+  const [ppid, ut, st, cut, cst, start, pages] = [1, 11, 12, 13, 14, 19, 21].map(n);
+  if (![ppid, ut, st, cut, cst, start, pages].every(Number.isSafeInteger) || ppid < 0 || start < 0) return null;
+  return { ppid, comm: text.slice(open + 1, close), cpu: Math.max(0, ut + st), reaped: Math.max(0, cut + cst), start, pages: Math.max(0, pages) };
+}
+// A cmdline's words: what of it is kept, { kind, test, own }. kind is agent, browser, node or null.
+function procClassify(words) {
+  if (!words.length) return { kind: null, test: false, own: false };
+  const exe = memoryBase(words[0]);
+  const bare = (w) => memoryBase(w).replace(/\.(?:m?js|cjs|py|rb)$/, '');
+  const tool = (w) => PROC_TESTS.includes(bare(w)) || PROC_TESTS.some((t) => w.includes(`/node_modules/${t}/`)) || w.includes('/node_modules/@playwright/test/');
+  const { kind } = memoryClassify(words, new Set());
+  const script = words.findIndex((w, j) => j > 0 && !w.startsWith('-'));
+  let test = PROC_TESTS.includes(bare(words[0])) || ((exe === 'go' || exe === 'cargo') && words[1] === 'test');
+  if (exe === 'node') {
+    test = words.slice(1, script < 0 ? undefined : script).includes('--test')
+      || (script > 0 && (memoryBase(words[script]) === 'devteam.mjs' ? words[script + 1] === 'gate' : tool(words[script])));
+  } else if (/^python[\d.]*$/.test(exe)) test = test || (words[1] === '-m' && words[2] === 'pytest') || (script > 0 && tool(words[script]));
+  else if (exe === 'ruby' && script > 0) test = test || tool(words[script]);
+  const own = kind === 'devteam' || exe === 'tmux' || (exe === 'node' && script > 0 && memoryBase(words[script]) === 'gateway.mjs');
+  const named = kind === 'agent' || kind === 'browser' || kind === 'node' ? kind : PROC_BROWSERS.includes(exe) ? 'browser' : null;
+  return { kind: named, test, own };
+}
+// Where a cwd counts: { root, project, worktree? } by the longest root holding it, or null.
+function procPlace(cwd, roots) {
+  if (typeof cwd !== 'string') return null;
+  const dir = cwd.endsWith(' (deleted)') ? cwd.slice(0, -' (deleted)'.length) : cwd;
+  let best = null;
+  for (const r of roots) if ((dir === r.root || dir.startsWith(`${r.root}/`)) && (!best || r.root.length > best.root.length)) best = r;
+  if (!best) return null;
+  const m = /^\.worktrees\/([^/]+)/.exec(dir.slice(best.root.length + 1));
+  return m ? { root: best.root, project: best.name, worktree: m[1] } : { root: best.root, project: best.name };
+}
+const boxHealthProcesses = (() => {
+  let run = null;
+  const read = (...p) => { try { return fs.readFileSync(path.join(...p), 'utf8'); } catch { return null; } };
+  // a small file's text, async, or null
+  const readSmall = async (file) => {
+    let fh = null;
+    try {
+      fh = await fs.promises.open(file, fs.constants.O_RDONLY);
+      const buf = Buffer.alloc(PROC_FILE_MAX);
+      const { bytesRead } = await fh.read(buf, 0, PROC_FILE_MAX, 0);
+      return buf.toString('utf8', 0, bytesRead);
+    } catch { return null; } finally { await fh?.close().catch(() => {}); }
+  };
+  // the pids the known roots' run/ folders record
+  const readPids = async (ctx, r, roots) => {
+    const pids = new Set();
+    const add = (v) => { if (Number.isSafeInteger(v) && v > 1) pids.add(v); };
+    const json = async (f) => { try { const o = JSON.parse(await readSmall(f) ?? 'null'); return memoryIsMap(o) ? o : null; } catch { return null; } };
+    for (const { root } of roots) {
+      const dir = path.join(root, 'docs', 'devteam', 'run');
+      const b = await json(path.join(dir, 'browser', 'state.json'));
+      add(b?.daemon_pid); add(b?.chrome_pid);
+      add((await json(path.join(dir, 'supervisor-up.json')))?.pid);
+      let sensors = [];
+      try { sensors = await fs.promises.readdir(path.join(dir, 'sensors')); } catch { sensors = []; }
+      for (const s of sensors) { const t = (await readSmall(path.join(dir, 'sensors', s, 'stream.pid')))?.trim(); if (/^\d+$/.test(t ?? '')) add(Number(t)); }
+    }
+    if (run === r) { r.pids = pids; r.pidsOf = roots; }
+  };
+  // readPids, one at a time, waited for at most 2 s; a late one sets the pids when it ends
+  const pidsFor = async (ctx, r, roots) => {
+    if (!r.pidsOut) r.pidsOut = readPids(ctx, r, roots).finally(() => { r.pidsOut = null; });
+    let end = () => {};
+    const late = new Promise((res) => { end = ctx.timeout(PROC_BUDGET_MS, () => res(true)); });
+    const was = await Promise.race([r.pidsOut.then(() => false), late]);
+    end();
+    if (was) ctx.say("a root's run/ files did not answer within 2 s: the last pids are kept");
+  };
+  // a process's info: { cwd, kind, test, own }; one whose cmdline can't be read is known as nothing
+  const readInfo = async (ctx, pid) => {
+    const dir = path.join(ctx.proc, String(pid));
+    const text = await readSmall(path.join(dir, 'cmdline'));
+    if (text === null) return { cwd: null, kind: null, test: false, own: false, none: true };
+    const cwd = await fs.promises.readlink(path.join(dir, 'cwd')).catch(() => null);
+    return { cwd, ...procClassify(memoryWords(text)) };
+  };
+  const walk = async (ctx, r) => {
+    const roots = ctx.roots();
+    if (r.pidsOf !== roots && !r.pidsOut) { await pidsFor(ctx, r, roots); if (ctx.stopped() || run !== r) return; }
+    const began = ctx.real();
+    let names = null;
+    try { names = fs.readdirSync(ctx.proc); } catch { names = null; }
+    if (names === null) { ctx.say("the processes can't be listed: no CPU or memory by worktree"); r.base = null; r.result = undefined; return; }
+    const pids = names.filter((n) => /^\d+$/.test(n));
+    const procs = new Map();
+    let cut = false;
+    for (let i = 0; i < pids.length && !cut; i += PROC_BATCH) {
+      if (i > 0) { await ctx.turn(); if (ctx.stopped() || run !== r) return; if (ctx.real() - began >= PROC_BUDGET_MS) { cut = true; break; } }
+      for (const pid of pids.slice(i, i + PROC_BATCH)) {
+        const text = read(ctx.proc, pid, 'stat');
+        const s = text === null ? null : procStat(text);
+        if (s) procs.set(Number(pid), s);
+      }
+    }
+    const t = ctx.real();
+    const uptime = Number((read(ctx.proc, 'uptime') ?? '').split(' ')[0]);
+    const usage = boxHealthField(read(ctx.cgroup, 'cpu.stat'), 'usage_usec');
+    // the processes whose info is new or old and has no read out, read at most PROC_READS at once,
+    // within what is left of the 2 s; a read still out then goes on alone and keeps its slot
+    const keyOf = (pid, s) => `${pid}:${s.start}`;
+    if (!cut) {
+      const need = [...procs].filter(([pid, s]) => { const k = keyOf(pid, s), i = r.info.get(k); return !r.out.has(k) && (!i || ctx.real() - i.at >= PROC_INFO_MS); });
+      let over = false;
+      const worker = async () => {
+        while (need.length && !over && run === r && !ctx.stopped()) {
+          const [pid, s] = need.shift(), k = keyOf(pid, s);
+          r.out.add(k);
+          try {
+            const info = await readInfo(ctx, pid);
+            if (run === r) r.info.set(k, { at: ctx.real(), ...info });
+          } finally { r.out.delete(k); }
+        }
+      };
+      const left = PROC_BUDGET_MS - (ctx.real() - began);
+      if (left > 0 && need.length) {
+        let end = () => {};
+        const late = new Promise((res) => { end = ctx.timeout(left, () => { over = true; res(); }); });
+        await Promise.race([Promise.all(Array.from({ length: Math.max(0, PROC_READS - r.out.size) }, worker)), late]);
+        end();
+        over = true;
+        if (ctx.stopped() || run !== r) return;
+      }
+      if (r.out.size && !r.slow) ctx.say('a process did not answer within 2 s: it counts outside until it does');
+      r.slow = r.out.size > 0;
+    }
+    if (cut) { ctx.say('a walk was cut off at 2 s: no CPU until two whole walks have run'); r.base = null; r.result = undefined; return; }
+    // forget what is gone
+    const live = new Set([...procs].map(([pid, s]) => keyOf(pid, s)));
+    for (const k of r.info.keys()) if (!live.has(k)) r.info.delete(k);
+    const me = procs.get(process.pid);
+    const page = memoryPageSize(me?.pages, process.memoryUsage.rss());
+    const infoOf = (pid) => { const s = procs.get(pid); return s ? r.info.get(keyOf(pid, s)) : undefined; };
+    // each process's chain, memoised: its test run's top, and whether it is under one of devteam's own
+    const top = new Map(), kept = new Map();
+    const topOf = (pid, seen = new Set()) => {
+      if (top.has(pid)) return top.get(pid);
+      const s = procs.get(pid);
+      if (!s || seen.has(pid)) return null;
+      seen.add(pid);
+      const up = s.ppid > 0 && s.ppid !== pid ? topOf(s.ppid, seen) : null;
+      const got = up ?? (infoOf(pid)?.test ? pid : null);
+      top.set(pid, got);
+      return got;
+    };
+    const ownOf = (pid, seen = new Set()) => {
+      if (kept.has(pid)) return kept.get(pid);
+      const s = procs.get(pid);
+      if (!s || seen.has(pid)) return false;
+      seen.add(pid);
+      const got = !!infoOf(pid)?.own || r.pids.has(pid) || (s.ppid > 0 && s.ppid !== pid && ownOf(s.ppid, seen));
+      kept.set(pid, got);
+      return got;
+    };
+    // CPU: only between two whole walks one after the other
+    const base = r.base;
+    const over = base ? (t - base.t) / 1000 : 0;
+    const cpuOf = new Map();
+    if (base && over > 0) {
+      // the whole time of each gone process at the first walk, given to the nearest of its ancestors
+      // still here (through gone ones only)
+      const gone = new Map();
+      for (const [pid, s] of base.procs) {
+        const now = procs.get(pid);
+        if (now && now.start === s.start) continue;
+        let up = base.procs.get(s.ppid), hops = 0;
+        while (up && hops++ < 4096) {
+          const here = procs.get(up.pid);
+          if (here && here.start === up.start) { gone.set(up.pid, (gone.get(up.pid) ?? 0) + s.cpu + s.reaped); break; }
+          up = base.procs.get(up.ppid);
+        }
+      }
+      for (const [pid, s] of procs) {
+        const was = base.procs.get(pid);
+        const same = was && was.start === s.start;
+        const own = Math.max(0, s.cpu - (same ? was.cpu : 0));
+        const reaper = pid === 1 || PROC_REAPERS.includes(s.comm);
+        const reaped = reaper ? 0 : Math.max(0, s.reaped - (same ? was.reaped : 0) - (same ? gone.get(pid) ?? 0 : 0));
+        cpuOf.set(pid, (own + reaped) / PROC_HZ / over);
+      }
+    }
+    const hasCpu = !!base && over > 0;
+    const places = new Map(), outside = { n: 0, agents: 0, rss: 0 };
+    if (hasCpu) outside.cpu = 0;
+    const tops = new Map();
+    let attributed = 0;
+    for (const [pid, s] of procs) {
+      const info = infoOf(pid);
+      const place = info && !info.none ? procPlace(info.cwd, roots) : null;
+      let into = outside;
+      if (place) {
+        const k = `${place.root}\0${place.worktree ?? ''}`;
+        if (!places.has(k)) places.set(k, { ...place, n: 0, agents: 0, ...(hasCpu ? { cpu: 0 } : {}), rss: 0, tests: { n: 0, ...(hasCpu ? { cpu: 0 } : {}), rss: 0 }, own: { n: 0, ...(hasCpu ? { cpu: 0 } : {}), rss: 0 } });
+        into = places.get(k);
+      }
+      const rss = s.pages * page, cpu = cpuOf.get(pid) ?? 0;
+      into.n++; into.rss += rss;
+      if (info?.kind === 'agent') into.agents++;
+      if (hasCpu) { into.cpu += cpu; attributed += cpu; }
+      if (info?.own && into.own) { into.own.n++; into.own.rss += rss; if (hasCpu) into.own.cpu += cpu; }
+      const t0 = topOf(pid);
+      if (t0 !== null && into.tests) {
+        into.tests.rss += rss;
+        if (hasCpu) into.tests.cpu += cpu;
+        if (t0 === pid) into.tests.n++;
+      }
+      if (t0 !== null) tops.set(pid, t0);
+    }
+    // strays
+    const groups = new Map();
+    if (Number.isFinite(uptime) && uptime > 0) {
+      const age = (s) => Math.max(0, uptime - s.start / PROC_HZ);
+      for (const [pid, s] of procs) {
+        const info = infoOf(pid);
+        if (!info || info.none || age(s) <= PROC_STRAY_S) continue;
+        const t0 = tops.get(pid);
+        const kind = t0 !== undefined ? 'test' : info.kind;
+        if (!kind) continue;
+        const parent = procs.get(s.ppid);
+        const orphan = s.ppid === 1 || (parent && PROC_REAPERS.includes(parent.comm));
+        const why = info.cwd?.endsWith(' (deleted)') ? 'folder-gone'
+          : kind !== 'agent' && orphan && !ownOf(pid) ? 'parent-gone'
+          : kind === 'test' && age(procs.get(t0)) > PROC_LONG_TEST_S ? 'long-test' : null;
+        if (!why) continue;
+        const project = procPlace(info.cwd, roots)?.project;
+        const k = `${project ?? ''}\0${kind}\0${why}`;
+        const g = groups.get(k) ?? groups.set(k, { ...(project === undefined ? {} : { project }), kind, why, n: 0, oldest_s: 0, rss: 0, ...(hasCpu ? { cpu: 0 } : {}) }).get(k);
+        g.n++;
+        g.oldest_s = Math.max(g.oldest_s, Math.floor(age(s)));
+        g.rss += s.pages * page;
+        if (hasCpu) g.cpu += cpuOf.get(pid) ?? 0;
+      }
+    }
+    const result = { at: ctx.now() };
+    if (hasCpu) result.over_s = over;
+    result.places = [...places.values()];
+    result.outside = outside;
+    if (hasCpu && Number.isFinite(usage) && Number.isFinite(base.usage) && usage >= base.usage) result.unattributed = { cpu: Math.max(0, (usage - base.usage) / 1e6 / over - attributed) };
+    result.strays = [...groups.values()].sort((a, b) => b.rss - a.rss || b.n - a.n).slice(0, PROC_STRAYS);
+    r.base = { t, procs: new Map([...procs].map(([pid, s]) => [pid, { pid, ...s }])), usage };
+    r.result = result;
+  };
+  return {
+    start(ctx) {
+      const r = { base: null, result: undefined, info: new Map(), out: new Set(), slow: false, pids: new Set(), pidsOf: null, pidsOut: null, walking: false };
+      run = r;
+      const once = async () => {
+        if (r.walking || run !== r) return;
+        r.walking = true;
+        try { await walk(ctx, r); } finally { r.walking = false; }
+      };
+      r.walk = once;
+      ctx.every(PROC_EVERY_MS, once);
+    },
+    part(ctx, parts) { return run?.result; },
+    stop() { run = null; },
+  };
+})();
 /* box-health-processes end */
 /* box-health-disk start */
 // Each worktree's disk (kit-838's).
