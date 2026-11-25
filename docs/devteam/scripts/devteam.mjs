@@ -25435,6 +25435,56 @@ function claudeRows(list) {
   }
   return out;
 }
+// each account's weight: 1, or its tier over the mean tier when every enabled account names one
+function claudeWeights(rows) {
+  const live = rows.filter((a) => !a.disabled);
+  if (!live.length || !live.every((a) => a.tier)) return () => 1;
+  const mean = live.reduce((s, a) => s + a.tier, 0) / live.length;
+  return (a) => (a.tier ? a.tier / mean : 1);
+}
+// the burn in the ring, weighted, for the accounts of the latest rows
+function claudeBurn(ring, rows) {
+  const w = claudeWeights(rows);
+  let burn = 0;
+  for (const a of rows) {
+    if (a.disabled) continue;
+    let hi, reset;
+    for (const x of ring) {
+      const r = x.rows.find((y) => y.n === a.n);
+      if (r?.week_pct === undefined) continue;
+      const at = r.week_resets_at === undefined ? reset : Date.parse(r.week_resets_at);
+      if (hi === undefined || (at !== undefined && reset !== undefined && at - reset > CLAUDE_JUMP_MS)) hi = r.week_pct;
+      else if (r.week_pct > hi) { burn += (r.week_pct - hi) * w(a); hi = r.week_pct; }
+      reset = at;
+    }
+  }
+  return burn;
+}
+// the accounts as the projection spends them: readable, enabled, with ok usage
+function claudeState(rows, now) {
+  const w = claudeWeights(rows);
+  const t = (s) => (s === undefined ? undefined : Date.parse(s));
+  const live = rows.filter((a) => !a.disabled);
+  const known = live.filter((a) => a.status === 'ok' && a.week_pct !== undefined);
+  const acc = known.map((a) => {
+    const x = { n: a.n, w: w(a), active: a.active, week: a.week_pct, weekAt: t(a.week_resets_at), five: a.five_pct ?? 0, fiveAt: t(a.five_resets_at) };
+    if (a.models_full.length) x.models = a.models_full.every((m) => m.resets_at) ? Math.max(...a.models_full.map((m) => t(m.resets_at))) : Infinity;
+    // a reset already past has happened: restored now, the next one a period on
+    claudeRestore(x, now);
+    return x;
+  });
+  return { acc, at_least: known.length < live.length };
+}
+function claudeRestore(x, now) {
+  while (x.weekAt !== undefined && x.weekAt <= now) { x.week = 0; x.weekAt += CLAUDE_WEEK_MS; }
+  while (x.fiveAt !== undefined && x.fiveAt <= now) { x.five = 0; x.fiveAt += CLAUDE_FIVE_MS; }
+  if (x.models !== undefined && x.models <= now) delete x.models;
+}
+const claudeHasRoom = (x) => x.week < 100 && x.five < 100 && x.models === undefined;
+const claudeRawRoom = (acc) => acc.reduce((s, x) => s + (claudeHasRoom(x) ? (x.w * (100 - x.week)) / 100 : 0), 0);
+const claudeRound = (n) => Number(n.toFixed(3));
+// the room of a reading, in accounts' worth
+const claudeRoom = (rows, now) => claudeRound(claudeRawRoom(claudeState(rows, now).acc));
 const boxHealthClaude = (() => {
   let run = null;
   const LATE = Symbol('late');
@@ -25466,12 +25516,22 @@ const boxHealthClaude = (() => {
     return rows ? { at: o.at, rows } : null;
   };
   const build = (ctx, r, rec) => {
+    const now = ctx.now();
+    const ring = r.ring;
+    const span = ring.length ? ring.at(-1).t - ring[0].t : 0;
     const accounts = rec.rows.filter((a) => !a.disabled).slice(0, CLAUDE_ACCOUNTS).map((a) => boxHealthPresent({
       n: a.n, label: a.label, active: a.active,
       week_left: a.week_pct === undefined ? undefined : 100 - a.week_pct, five_left: a.five_pct === undefined ? undefined : 100 - a.five_pct,
       week_resets_at: a.week_resets_at, five_resets_at: a.five_resets_at, status: a.status,
     }));
-    return { answer: { claude: { accounts } }, rows: rec.rows };
+    const claude = { accounts, rate_hours: Number((span / CLAUDE_HOUR_MS).toFixed(2)), points: ring.map((x) => ({ at: boxHealthIso(x.t), room: x.room })) };
+    const measuring = span < CLAUDE_MEASURING_MS;
+    let rate;
+    if (!measuring) {
+      rate = Number((claudeBurn(ring, rec.rows) / (span / CLAUDE_HOUR_MS)).toFixed(2));
+      claude.rate = rate;
+    }
+    return { answer: { claude }, rows: rec.rows, rate, measuring };
   };
   const read = async (ctx, r) => {
     r.readAt = ctx.now();
@@ -25488,12 +25548,15 @@ const boxHealthClaude = (() => {
       if (rec && Math.abs(ctx.real() - Date.parse(rec.at)) <= CLAUDE_FRESH_MS && (!best || Date.parse(rec.at) > Date.parse(best.at))) best = rec;
     }
     for (const f of r.files.keys()) if (!files.has(f)) r.files.delete(f);
+    const now = ctx.now();
+    r.ring = r.ring.filter((x) => x.t >= now - CLAUDE_RING_MS);
     if (!best) { r.given = undefined; return; }
+    r.ring.push({ t: now, rows: best.rows, room: claudeRoom(best.rows, now) });
     r.given = build(ctx, r, best);
   };
   return {
     start(ctx) {
-      const r = { files: new Map(), out: new Set(), readAt: -Infinity, reading: false, given: undefined };
+      const r = { files: new Map(), out: new Set(), ring: [], readAt: -Infinity, reading: false, given: undefined };
       run = r;
       ctx.every(CLAUDE_EVERY_MS, async () => {
         if (r.reading || run !== r || ctx.now() - r.readAt < CLAUDE_READ_MS) return;
