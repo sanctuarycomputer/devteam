@@ -1168,7 +1168,7 @@ async function unreadableAndUndeletable(P, label, hooks) {
 }
 // the whole line: RL2's reason whole, the join once, the delete's message whole (task 6: a rewrite that cuts
 // the reason to fit, as a reaper joining twice would, is caught here, not by the count alone)
-const READ_THEN_DELETE = /^last error: \S+ browser: couldn't read the log during a handover, so the session was ended; the session files stay: browser: couldn't delete \S+ \(EACCES\): Chrome would bring its tabs back$/m;
+const READ_THEN_DELETE = /^last error: \S+ browser: couldn't read the log during a handover, so the session was ended; the session files stay: browser: couldn't delete \S.* \(EACCES\): Chrome would bring its tabs back$/m; // a path may hold a space (Current Session)
 const closeAfter = async (P, q) => {
   await ok(P, ['start']);
   await freshViewer(P);
