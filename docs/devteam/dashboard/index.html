@@ -2514,7 +2514,7 @@ let SENSOR_TAB = 'production';
 bindTabBar($('monitoring'), { onSelect: (id) => {
   if (!['production', 'fleet'].includes(id)) return;
   const cur = parseHead(location.hash, SHELL_ROUTES);
-  const state = cur.link === undefined && cur.page === 'sensors' ? { ...cur.state } : {};
+  const state = cur.link === undefined && !cur.legacy && cur.page === 'sensors' ? { ...cur.state } : {};
   if (id === 'fleet') state.st = 'fleet'; else delete state.st;
   SENSOR_TAB = id;
   if (DATA) renderMonitoring(DATA);
@@ -2912,7 +2912,7 @@ function narrowViews(p, goal) {
 // The page head in force: the hash's, or under a link (a peek) the head in its stamp.
 function pageHeadNow() {
   const h = parseHead(location.hash, SHELL_ROUTES);
-  return h.link === undefined ? h : parseHead(typeof history.state?.page === 'string' ? history.state.page : '#overview', SHELL_ROUTES);
+  return h.link === undefined && !h.legacy ? h : parseHead(typeof history.state?.page === 'string' ? history.state.page : '#overview', SHELL_ROUTES);
 }
 // A page's filters as the head in force has them (none when another page shows), with a goal naming no goal
 // a filter can pick, a Narrow outside the goal's views and a Show that isn't one dropped: the controls then show
@@ -3005,7 +3005,7 @@ function drawFilterPage(page) {
 // stamp's page head with it, so a peek opened over it closes back to the filtered head.
 function filterHead(fresh) {
   let p = parseHead(location.hash, SHELL_ROUTES);
-  if (p.link !== undefined || p.redirected || !FILTER_PAGES.includes(p.page)) return;
+  if (p.link !== undefined || p.legacy || p.redirected || !FILTER_PAGES.includes(p.page)) return;
   const r = fresh ? rememberedFilters(p.page, Object.keys(p.state), true) : null;
   if (r) p = { page: p.page, state: { ...p.state, ...r } };
   const head = headFor(p);
@@ -4798,7 +4798,7 @@ window.addEventListener('keydown', (e) => {
 bindTabBar($('goals'), { onSelect: (id) => {
   if (!GOALS_TABS.includes(id)) return;
   const cur = parseHead(location.hash, SHELL_ROUTES);
-  const state = cur.link === undefined && cur.page === 'goals' ? { ...cur.state } : {};
+  const state = cur.link === undefined && !cur.legacy && cur.page === 'goals' ? { ...cur.state } : {};
   if (id === 'active') delete state.gt; else state.gt = id;
   GOALS_TAB = id;
   renderGoals();
@@ -7758,12 +7758,12 @@ function closeArtifact() {
 // cold stampFor (a ticket peek would go over #board, without th).
 function avReturn() {
   const now = history.state?.page || '#library', r = parseHead(AV_RET || '#library', SHELL_ROUTES);
-  if (r.link !== undefined) return { head: AV_RET, stamp: { page: now, depth: 1, openedHere: false } };
+  if (r.link !== undefined || r.legacy) return { head: AV_RET, stamp: { page: now, depth: 1, openedHere: false } };
   const c = parseHead(now, SHELL_ROUTES), s = { ...r.state };
   delete s.th;
   delete s.t;
-  if (c.link === undefined && c.state.th !== undefined) s.th = c.state.th;
-  if (c.link === undefined && c.state.t !== undefined) s.t = c.state.t;
+  if (c.link === undefined && !c.legacy && c.state.th !== undefined) s.th = c.state.th;
+  if (c.link === undefined && !c.legacy && c.state.t !== undefined) s.t = c.state.t;
   const head = headFor({ page: r.page, state: s });
   return { head, stamp: { page: head, depth: 0, openedHere: false } };
 }
@@ -7886,7 +7886,7 @@ function routeHead({ fresh = false, carry = null } = {}) {
   // leaving a talk/ entry (a route to any other head) closes the card it opened
   if (TL.route && raw !== `talk/${encodeURIComponent(TL.route)}` && raw !== `talk/${TL.route}`) tlLeave();
   // a link opens over the page in its stamp: the one it was clicked on, or on a cold load its kind's home
-  if (p.link !== undefined) showHead(parseHead(HERE.page, SHELL_ROUTES));
+  if (p.link !== undefined || p.legacy) showHead(parseHead(HERE.page, SHELL_ROUTES));
   // before anything that hides the drawer, the scrim or a review: the viewer opens over them
   // (a viewer opening takes the head it is over, and counts the frame's moves from none)
   if (raw.startsWith('preview/')) { if (!AV) { AV_RET = ROUTED ? LAST_HEAD : null; AV_NAVS = 0; AV_FRAME_ESC = false; } openPreview(raw.slice(8)); ROUTED = true; return; }
@@ -7914,7 +7914,7 @@ function routeHead({ fresh = false, carry = null } = {}) {
   if (h.startsWith('file?')) return void openFile(new URLSearchParams(location.hash.slice(6)));
   hideDrawer();
   // a page head: its page; an unknown or empty head, or a redirect, is replaced in place (#overview, #monitoring → #sensors)
-  if (p.link !== undefined) return;
+  if (p.link !== undefined || p.legacy) return;
   if (p.redirected || raw.split('?')[0] !== p.page) history.replaceState(history.state, '', headFor(p));
   showHead(p);
 }
@@ -10102,7 +10102,7 @@ function tlInboxHome(t) {
   const s = t?.subject;
   if (VIEWER || !s) return false;
   if (s.kind === 'item') return inInbox(tlHome(s));
-  if (s.kind === 'page') { const p = parseHead(String(s.view ?? ''), SHELL_ROUTES); return p.link === undefined && p.state?.th === 'inbox'; }
+  if (s.kind === 'page') { const p = parseHead(String(s.view ?? ''), SHELL_ROUTES); return p.link === undefined && !p.legacy && p.state?.th === 'inbox'; }
   return false;
 }
 // A Settings row's element, as Settings draws it (null when it isn't drawn).
@@ -10191,9 +10191,9 @@ function subjectHead(s) {
   }
   if (s?.kind === 'page') {
     const p = parseHead(String(s.view ?? ''), SHELL_ROUTES);
-    if (p.link === undefined) return headFor(p);
+    if (p.link === undefined && !p.legacy) return headFor(p);
     // a view with a path the table doesn't redirect (#loop/<other>): its page, if it is one
-    return headFor(parseHead(SHELL_ROUTES.pages.includes(p.kind) ? p.kind : p.home, SHELL_ROUTES));
+    return headFor(parseHead(p.legacy ? p.page : SHELL_ROUTES.pages.includes(p.kind) ? p.kind : p.home, SHELL_ROUTES));
   }
   return '#overview';
 }
@@ -11094,7 +11094,7 @@ bindTabBar($('th-tabs'), { onSelect: (id) => { thSync(); if (id !== (TH.th === '
 // talk/) the page head under it, history.state.page.
 function thHead() {
   const p = parseHead(location.hash, SHELL_ROUTES);
-  if (p.link === undefined) return headFor(p);
+  if (p.link === undefined && !p.legacy) return headFor(p);
   return typeof history.state?.page === 'string' ? history.state.page : '#overview';
 }
 // TH as the page head in force has it. A head thGo writes (a card's ×: a new entry) is in force at once, but routed
@@ -11133,7 +11133,8 @@ function thGo({ th = null, t, focus = false } = {}) {
   if (t) state.t = t;
   const next = headFor({ page: p.page, state });
   if (next === head) return void thRoute();
-  if (parseHead(location.hash, SHELL_ROUTES).link !== undefined) {
+  const at = parseHead(location.hash, SHELL_ROUTES);
+  if (at.link !== undefined || at.legacy) {
     // under a talk/ head a change of t replaces the talk/ entry with the page head (stamped): one card, one thread
     if (location.hash.startsWith('#talk/') && (t || null) !== (p.state.t || null)) return void goHead(next, { replace: true });
     history.replaceState(withPage(history.state, next), '', location.href);
@@ -11162,7 +11163,8 @@ const thReady = () => TL.have > 0 && !!DATA;
 // The page head in force changed in place, stamped: the entry's own head (hash and stamp), or under a link head
 // the page under it (withPage), the link left as it is.
 function thReplace(next) {
-  if (parseHead(location.hash, SHELL_ROUTES).link === undefined) history.replaceState(withPage(history.state, next), '', next);
+  const at = parseHead(location.hash, SHELL_ROUTES);
+  if (at.link === undefined && !at.legacy) history.replaceState(withPage(history.state, next), '', next);
   else history.replaceState(withPage(history.state, next), '');
   HERE = history.state;
 }
@@ -11175,7 +11177,7 @@ function thUnknown(t) {
 function thDecide() {
   const head = thHead();
   const p = parseHead(head, SHELL_ROUTES);
-  if (p.link !== undefined) return;
+  if (p.link !== undefined || p.legacy) return;
   const s = { ...p.state };
   // bad values (the block's parseHead keeps any): th open or resolved, t a thread id
   if (s.th !== undefined && !TH_LISTS.includes(s.th)) delete s.th;
@@ -11214,7 +11216,7 @@ function thRemember() {
   if (VIEWER) return;
   const head = thHead();
   const p = parseHead(head, SHELL_ROUTES);
-  if (p.link !== undefined || p.state.th !== undefined || p.state.t !== undefined) return;
+  if (p.link !== undefined || p.legacy || p.state.th !== undefined || p.state.t !== undefined) return;
   const v = thStored();
   if (v) thReplace(headFor({ page: p.page, state: { ...p.state, ...v } }));
 }
@@ -11223,7 +11225,7 @@ function thRemember() {
 // A page head without its t.
 function thWithout(head) {
   const p = parseHead(head, SHELL_ROUTES);
-  if (p.link !== undefined || p.state.t === undefined) return head;
+  if (p.link !== undefined || p.legacy || p.state.t === undefined) return head;
   const s = { ...p.state };
   delete s.t;
   return headFor({ page: p.page, state: s });
@@ -11237,7 +11239,7 @@ function thFreshness() {
 function thCarry(page) {
   const head = thHead();
   const p = parseHead(head, SHELL_ROUTES), c = parseHead(page, SHELL_ROUTES);
-  if (p.link !== undefined || c.link !== undefined || p.page !== c.page) return;
+  if (p.link !== undefined || p.legacy || c.link !== undefined || c.legacy || p.page !== c.page) return;
   const s = { ...p.state };
   delete s.th;
   delete s.t;

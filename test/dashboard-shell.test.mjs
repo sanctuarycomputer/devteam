@@ -495,6 +495,14 @@ test('@2 round-trip: p of every peek kind on every page, t with u, th=inbox with
   for (const h of heads) assert.equal(S.headFor(S.parseHead(h, R)), h, h);
 });
 
+// until the router adopts p (kit-268), it routes a legacy head exactly as @1 routed its link head: every test of a
+// parse result's link outside the block reads legacy too, so a legacy head is never taken for a page head
+test('@2 the router reads legacy wherever it reads link', () => {
+  const lines = without(INDEX, 'devteam-shell-js').split('\n').filter((l) => /\.link [!=]== undefined/.test(l));
+  assert.ok(lines.length >= 15, `the router's link tests were read: ${lines.length}`);
+  for (const l of lines) assert.match(l, /\.legacy\b/, `reads legacy: ${l.trim()}`);
+});
+
 test('@2 legacy heads: every peek kind and the two viewers open over their home with themselves as p', () => {
   for (const k of R.peeks || ['ticket']) {
     const h = `#${PEEK_HEAD(k)}`;
