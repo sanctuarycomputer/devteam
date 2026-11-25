@@ -60,6 +60,9 @@ const REQUESTS = (F) => ({
   'hub /upload/*': [[{ laptop: 200, box: 404 }, `/upload/${F.upload}`], [404, `/upload/2020-01-01-${'0'.repeat(24)}/none.txt`]],
   'hub /memory.json': [[200, '/memory.json']],
   'hub /memory.json?*': [[200, '/memory.json?since=8d'], [200, `/memory.json?after=${new Date(Date.now() - 3600000).toISOString().replace(/\.\d{3}Z$/, 'Z')}`]],
+  // the machine's live health (kit-836): off on a fixture port with no switch, so the route is the hub's 404
+  'hub /box-health.json': [[404, '/box-health.json']],
+  'hub /box-health.json?*': [[404, `/box-health.json?after=${new Date(Date.now() - 3600000).toISOString().replace(/\.\d{3}Z$/, 'Z')}`]],
   // the thread written into this run's store, folded and answered (on a box, the boxed fold)
   'hub /operator/threads': [[200, '/operator/threads', SAME, new RegExp(OPERATOR_THREAD)]],
 });
@@ -70,7 +73,7 @@ const REQUESTS = (F) => ({
 const LAPTOP_PARTS = [
   ['dash /upload/*', 'dash /api/hello', 'dash /', 'dash /index.html', 'dash /api/data*', 'dash re:^\\/view\\/artifact\\/([^/]+)$', 'dash re:^\\/view\\/preview\\/([^/]+)$', 'dash /api/artifact-fp', 'dash /api/view', 'dash /api/artifact-versions', 'dash /api/artifact-remote', 'dash /api/threads'],
   ['dash /api/fleet', 'dash /api/record', 'dash /api/peek', 'dash /api/sensor', 'dash /api/schema', 'dash /api/timeline', 'dash /api/governance', 'dash /api/file', 'dash /api/review', 'dash /public-manifest/*'],
-  ['dash re:^\\/api\\/shot\\/(t-\\d{8}-\\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*)\\/(\\d{8}-\\d{9}-(?:light|dark)\\.png)$', 'dash /artifact/*', 'dash re:^\\/review\\/([^/]+)\\/([^/]*)$', 'dash /presence', 'dash /presence?*', 'term /api/term/token', 'term re:^\\/api\\/term\\/(supervisor|shell)\\/(screen|history|keys)$', 'hub /presence', 'hub /presence?*', 'hub /', 'hub /instances.json', 'hub /upload/*', 'hub /memory.json', 'hub /memory.json?*', 'hub /operator/threads'],
+  ['dash re:^\\/api\\/shot\\/(t-\\d{8}-\\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*)\\/(\\d{8}-\\d{9}-(?:light|dark)\\.png)$', 'dash /artifact/*', 'dash re:^\\/review\\/([^/]+)\\/([^/]*)$', 'dash /presence', 'dash /presence?*', 'term /api/term/token', 'term re:^\\/api\\/term\\/(supervisor|shell)\\/(screen|history|keys)$', 'hub /presence', 'hub /presence?*', 'hub /', 'hub /instances.json', 'hub /upload/*', 'hub /memory.json', 'hub /memory.json?*', 'hub /box-health.json', 'hub /box-health.json?*', 'hub /operator/threads'],
 ];
 const PARTS = { laptop: LAPTOP_PARTS, box: [LAPTOP_PARTS.flat()] };
 
