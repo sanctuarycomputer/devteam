@@ -3607,7 +3607,17 @@ export function createGateway(opts = {}) {
   const holdPresence = (socket, { session, person }) => {
     holdSocket(socket, person);
     heldSockets.set(socket, { person: person?.id ?? null, session, level: levelOf(person) });
-    const end = setTimeout(endPresence, Math.min(Math.max(session.expires - Date.now(), 0) + 1, 2 ** 31 - 1));
+    // The session's end, by the wall clock its liveness is read by (liveSession). A timer runs on the
+    // monotonic clock and can fire a little before the wall clock gets there, while the session still
+    // reads live: it is then set again for what is left, so an early timer never leaves the close to
+    // the next poll (kit-927).
+    let end = null;
+    const atEnd = () => {
+      const left = session.expires - Date.now();
+      if (left > 0) { end = setTimeout(atEnd, Math.min(left + 1, 2 ** 31 - 1)); end.unref(); return; }
+      endPresence();
+    };
+    end = setTimeout(atEnd, Math.min(Math.max(session.expires - Date.now(), 0) + 1, 2 ** 31 - 1));
     end.unref();
     socket.once('close', () => clearTimeout(end));
     if (!presencePoll) { presencePoll = setInterval(endPresence, PRESENCE_POLL_MS); presencePoll.unref(); }
