@@ -308,6 +308,23 @@ test('canvas gateway: a session\'s canvas closes at its end, not before, when th
   assert.ok(await Promise.race([c.closed.then(() => false), sleep(Math.max(ends - 25 - real(), 0)).then(() => true)]), 'the session: closed before its end');
   await closes(c, 'the session at its end', Math.max(ends + 400 - real(), 0));
 });
+test('canvas gateway: a session\'s canvas closes at its end when the expiry timer fires only a few ms early', async (t) => {
+  const B = await box(t);
+  const s = B.state();
+  const expires = Date.now() + 1200;
+  B.write({ ...s, peopleSessions: s.peopleSessions.map((x) => (x.hash === B.hashes.jo ? { ...x, expires } : x)) });
+  const c = opened(await B.up('alpha', { as: 'jo' }), 'alpha');
+  // As the test above, with the drift CI saw: Date.now steps back 5 ms, 100 ms before the end, so the
+  // gateway's timer (due 1 ms past the end) fires with about 4 ms of the session left by the wall
+  // clock, and only a timer that sets itself again for those ms closes it at the end (kit-927). A
+  // timer that runs 4 ms or more late finds the session over and closes it anyway, so a loaded runner
+  // can't fail a correct gateway here, only miss a regression.
+  const real = Date.now;
+  t.after(() => { Date.now = real; });
+  await sleep(Math.max(expires - 100 - real(), 0));
+  Date.now = () => real() - 5;
+  await closes(c, 'the session a few ms past its end', Math.max(expires + 5 + 400 - real(), 0));
+});
 test('canvas gateway: removing the person closes every canvas of theirs', async (t) => {
   const B = await box(t);
   const [a, b, ana] = [opened(await B.up('alpha', { as: 'jo' }), 'one'), opened(await B.up('devteam-dev', { as: 'jo2' }), 'two'), opened(await B.up('alpha', { as: 'ana' }), 'Ana')];
