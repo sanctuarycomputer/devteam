@@ -21,6 +21,8 @@ if (process.env.DEVTEAM_TEST_GITLEAKS === '1') assert.ok(hasGitleaks, 'DEVTEAM_T
 const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 const fake = (n, seed) => { let x = seed, s = ''; for (let i = 0; i < n; i++) { x = (x * 1103515245 + 12345) % 2147483648; s += ALNUM[x % ALNUM.length]; } return s; };
 const genericKey = fake(32, 7);
+// lowercase, dash-joined and starting like an id: shaped as a key's segments, not as words
+const dashed = 'zq-81734-7k2m9x4c-3p8w5t1h-9d4f2j6v';
 const githubPat = `${'gh'}p_${fake(36, 11)}`;
 
 const at = '2026-11-11T16:16:36.488Z';
@@ -31,6 +33,8 @@ const kitLines = [
   obs('o-20261111-170235760-supervisor', { detail: 'p95 over target for 3 checks', source_key: 'incident-2026-11-11-api-p95' }),
   obs('o-20261111-170235761-supervisor', { detail: 'one resend', source_key: 'resent-enter2 pane:w1 3f2a9b8c7d6e' }),
   obs('o-20261111-170235762-supervisor', { detail: 'a slow suite', source_key: 'slow:auth-suite' }),
+  // refs naming ticket ids, one with "secrets" in its slug (a real project log's shape)
+  obs('o-20261111-170235768-supervisor', { detail: 'app-45 now depends on app-41.', refs: ['app-41-secrets-gate,ops-43-ci-floor-gates'] }),
 ];
 // A real secret on a log line: in free text, in a sensor's sample, under a key the kit doesn't
 // write, and as a source_key value that isn't a slug
@@ -40,30 +44,38 @@ const leakLines = {
   nested: obs('o-20261111-170235765-supervisor', { detail: 'x', my_source_key: genericKey }),
   value: obs('o-20261111-170235766-supervisor', { detail: 'x', source_key: genericKey }),
   pat: obs('o-20261111-170235767-supervisor', { detail: 'x', source_key: githubPat }),
+  // a key where the second ticket id would be, as it is and as a lowercase dash-joined value
+  afterId: obs('o-20261111-170235769-supervisor', { detail: 'x', refs: [`app-41-secrets-gate,${genericKey}`] }),
+  dashedAfterId: obs('o-20261111-170235770-supervisor', { detail: 'x', refs: [`app-41-secrets-gate,${dashed}`] }),
 };
 
-test('the kit config allowlists only generic-api-key, only on the source_key JSON key', () => {
+test('the kit config allowlists only generic-api-key, only on the source_key JSON key and runs of kit ticket ids', () => {
   assert.match(config, /^\[extend\]\nuseDefault = true$/m, "it keeps gitleaks' default rules");
   const body = config.replace(/^#.*\n/gm, '');
   assert.equal(body.match(/^\[\[rules\]\]$/gm)?.length, 1, 'one rule');
   assert.match(body, /^\[\[rules\]\]\nid = "generic-api-key"\n\[\[rules\.allowlists\]\]\n/m, 'an allowlist on the generic rule only: every specific rule still sees the value');
   assert.doesNotMatch(body, /^(regex|path|entropy|keywords) =/m, "the default rule's regex, entropy and keywords stay as they are");
   assert.equal(body.match(/allowlists\]\]$/gm)?.length, 1, 'one allowlist, no global one');
+  assert.equal(allows.length, 2, 'two shapes: a source_key slug, and a run of ticket ids');
   assert.match(body, /^regexTarget = "match"$/m, 'matched on the finding, key name included, never the whole line');
   assert.doesNotMatch(config, /^\s*(paths|stopwords|commits)\s*=/m, 'no path, stopword or commit allowlist: a log file is scanned like any other');
 });
 
 // The allowlist's regex as gitleaks applies it, to a generic-api-key finding's match.
-const allow = new RegExp(/regexes = \['''(.+)'''\]/.exec(config)[1]);
+const allows = [...config.matchAll(/^\s*'''(.+)''',?$/gm)].map((m) => new RegExp(m[1]));
+const allow = { test: (m) => allows.some((r) => r.test(m)) };
 test('the allowlist regex: a source_key slug passes, anything else on the line does not', (t) => {
   if (!hasGitleaks) t.diagnostic('gitleaks is not on PATH: checking the regex only (the next test runs gitleaks itself where it is)');
   // the matches gitleaks reports for the kit's lines (the value up to its terminator)
-  for (const m of ['source_key":"anthropic-spend-spike-nov9-10"', 'source_key":"incident-2026-11-11-api-p95"', 'source_key":"resent-enter2 ', 'source_key": "fix_2026.11.9"']) assert.match(m, allow, m);
+  for (const m of ['source_key":"anthropic-spend-spike-nov9-10"', 'source_key":"incident-2026-11-11-api-p95"', 'source_key":"resent-enter2 ', 'source_key": "fix_2026.11.9"']) assert.ok(allow.test(m), m);
   for (const m of [
     `api_key=${genericKey} `, `auth_token": "${genericKey}"`, `my_source_key":"${genericKey}"`, `source_key":"${genericKey}"`,
     // base64's + / =, a run over 20, a value cut where gitleaks cuts it, another key name
     'source_key":"abc+def/ghi=12345"', `source_key":"spike-${fake(21, 3)}"`, 'source_key":"abc-12345;', 'SOURCE_KEY":"abc-12345"', 'detail":"abc-12345"',
-  ]) assert.doesNotMatch(m, allow, m);
+  ]) assert.ok(!allow.test(m), m);
+  // two kit ticket ids, one with "secrets" in its slug: what a refs list of a real log carried
+  for (const m of ['app-41-secrets-gate,ops-43-ci-floor-gates"', 'ops-12-api-keys, app-7-token-cache-v2 ']) assert.ok(allow.test(m), m);
+  for (const m of [`app-41-secrets-gate,${genericKey}"`, 'app-41-secrets-gate,ops-43-ci-Floor-gates"', `app-41-secrets-gate,ops-43-${fake(21, 5).toLowerCase()}"`, 'app-41-secrets-gate"', `app-41-secrets-gate,${dashed}"`, 'xx=app-41-secrets-gate,ops-43-ci-floor-gates"', 'app-41-secrets-gate,ops-43-a-b-c-d-e-f-g-h"']) assert.ok(!allow.test(m), m);
 });
 
 const scan = (dir, args = []) => {
