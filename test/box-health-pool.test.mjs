@@ -11,7 +11,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { checks, regionOf } from './fixtures/box-health/contract/check.mjs';
-import { projectRoot, place, processes, disk } from './fixtures/box-health/pool/fake-parts.mjs';
+import { projectRoot, place, processes, disk, poolText } from './fixtures/box-health/pool/fake-parts.mjs';
 import { kit } from './lib/kit.mjs';
 
 const { boxHealthProblem } = checks();
@@ -77,6 +77,15 @@ function started(list, hellos = [], s = load(), late = null) {
     pass: (ms) => { clock.now += ms; clock.real += ms; },
     part: (parts = {}) => s.boxHealthPool.part(ctx, parts),
   };
+}
+// after s.release(): read again (a new list of roots, so no time passes) until want(part), at most 2 s;
+// a released read may still be out for a moment on a busy machine
+async function settles(p, want) {
+  for (let i = 0; i < 40; i++) {
+    await new Promise((res) => setTimeout(res, 50));
+    p.state.list = [...p.state.list]; await p.read();
+    if (want(p.part())) return;
+  }
 }
 const hello = (root, name, port, mode = 'run') => ({ devteam: 1, root, name, port, fleet: { mode } });
 // the whole answer the sampler would send with this part's sections in it
@@ -293,8 +302,7 @@ test('W2e: a pool.json read that hangs costs only its project: the others are re
   assert.deepEqual(p.part().answer.headroom, { ready: 2, ready_unknown: ['hung'] }, 'still out: the others still read');
   assert.equal(s.pending(), 1, 'one read of it out, not asked again');
   s.release();
-  await new Promise((res) => setTimeout(res, 50));
-  p.pass(MIN); await p.read();
+  p.pass(MIN); await settles(p, (g) => g.answer.headroom.ready === 4);
   got = p.part();
   assert.deepEqual(got.answer.headroom, { ready: 4 }, 'read once it settled');
 });
@@ -317,8 +325,7 @@ test('W2f: at most two file reads are ever out: with three pool.json reads hung,
   }
   assert.ok(p.said.some((w) => /two file reads are out/.test(w)));
   s.release();
-  await new Promise((res) => setTimeout(res, 50));
-  p.pass(MIN); await p.read();
+  p.pass(MIN); await settles(p, (g) => g.answer.headroom.ready === 9);
   assert.deepEqual(p.part().answer.headroom, { ready: 9 }, 'read again once they settled');
 });
 
@@ -425,4 +432,55 @@ test('W4b: two projects of one name keep their own rows and ports, one root a pr
   const after = p.part({ processes: processes([]), disk: disk([]) });
   const last = (port) => after.answer.pool.recent.find((x) => x.name === 'shop-1-api' && x.port === port).last;
   assert.deepEqual([last(4321), last(4322)], [{ cpu: 0.5, rss: 200, disk: 5000 }, { cpu: 0.1, rss: 20, disk: 6000 }], "recent's last kept by root");
+});
+
+test('W2g: with two other projects\' reads hung, a project whose run/dashboard-port read can\'t start keeps its last dashboard, port and mode, and its ready counts as before (final-2 F1)', { timeout: 20000 }, async () => {
+  const slow = await slowPort();
+  const hung = [1, 2].map((i) => projectRoot(path.join(newDir(), `stuck${i}`), { file: 'shop' }));
+  const W = projectRoot(newDir(), { file: 'shop', port: slow });
+  const s = load();
+  const roots = [...hung.map((root, i) => ({ root, name: `stuck${i + 1}` })), { root: W, name: 'slow' }];
+  const p = started(roots, hung.map((root, i) => hello(root, `stuck${i + 1}`, 4321 + i)), s, 30);
+  await p.read();
+  const before = p.part();
+  assert.deepEqual([proj(before, 'slow').port, proj(before, 'slow').ready, before.answer.headroom], [slow, 2, { ready: 6 }], 'its slow dashboard known from its run/dashboard-port');
+  s.hang.add(`${path.sep}stuck`);
+  for (let i = 0; i < 2; i++) {
+    p.pass(MIN); await p.read();
+    assert.equal(s.pending(), 2, 'two reads out: its own reads can\'t start');
+    const got = p.part();
+    assert.equal(boxHealthProblem(whole(got)), null);
+    const by = got.projects.find((x) => x.name === 'slow');
+    assert.deepEqual([by.dashboard, by.port, by.mode], ['slow', slow, 'run'], 'its last dashboard, port and mode');
+    assert.deepEqual([proj(got, 'slow').port, proj(got, 'slow').ready, got.answer.headroom], [slow, 2, { ready: 6 }], 'its ready counts as before');
+  }
+  // its dashboard goes while its reads are still late: the kept port is knocked, refused, and none
+  servers.find((x) => x.address()?.port === slow).close();
+  p.pass(MIN); await p.read();
+  const gone = p.part();
+  const was = gone.projects.find((x) => x.name === 'slow');
+  assert.deepEqual([was.dashboard, was.port, proj(gone, 'slow').ready, gone.answer.headroom], ['none', undefined, undefined, { ready: 4 }], 'a kept port that now refuses is no dashboard');
+  s.release();
+  await new Promise((res) => setTimeout(res, 50));
+});
+
+test('W4c: with reads late, two projects of one name each keep their own last pool and port, by root (final-2 F2)', { timeout: 20000 }, async () => {
+  const [pa, pb] = [await slowPort(), await slowPort()];
+  const hung = [1, 2].map((i) => projectRoot(path.join(newDir(), `stuck${i}`), { file: 'shop' }));
+  const A = projectRoot(newDir(), { file: 'shop', port: pa });
+  const B = projectRoot(newDir(), { text: poolText('shop').replace('"ready": 2', '"ready": 3'), port: pb });
+  const s = load();
+  const roots = [...hung.map((root, i) => ({ root, name: `stuck${i + 1}` })), { root: A, name: 'shop' }, { root: B, name: 'shop' }];
+  const p = started(roots, hung.map((root, i) => hello(root, `stuck${i + 1}`, 4321 + i)), s, 30);
+  await p.read();
+  const mine = (got) => got.projects.filter((x) => x.name === 'shop').map((x) => [x.port, x.ready]);
+  assert.deepEqual(mine(p.part()), [[pa, 2], [pb, 3]], 'each read its own');
+  s.hang.add(`${path.sep}stuck`);
+  p.pass(MIN); await p.read();
+  assert.equal(s.pending(), 2, 'two reads out: both projects\' reads are late');
+  const got = p.part();
+  assert.deepEqual(mine(got), [[pa, 2], [pb, 3]], 'each keeps its own root\'s last pool and port, not the first of its name\'s');
+  assert.deepEqual(got.answer.headroom, { ready: 9 });
+  s.release();
+  await new Promise((res) => setTimeout(res, 50));
 });
