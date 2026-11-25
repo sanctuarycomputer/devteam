@@ -10,17 +10,19 @@ import { notes, AT, SHOT, ADDR, ROW, withFrame, V_C11, NEWER } from './fixtures/
 test('the viewer: what a framed page cannot do to a press, the bar, the card', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
   const X = await notes(t, 'artifact-notes-press');
   const { sub } = X;
-  const { N, AV_WT, plant, openAt, shown, text, has, tabOf, cardOf, holdPoll, ARMED, at, press, settled, enter, forge, spot, SETTLE, acts, heldShown, byArrow, tapOn } = X;
-  // a press that must count: made once its control is live, and again only if it was held (frames that stall on a busy
-  // box begin its second again)
+  const { N, AV_WT, plant, openAt, shown, text, has, tabOf, cardOf, holdPoll, LIVE, ARMED, at, press, settled, enter, forge, spot, SETTLE, acts, heldShown, byArrow, tapOn } = X;
+  // a press that must count, on a control that is live: made again only if its second began again meanwhile, as frames that
+  // stall on a busy box make it; a live control's press that doesn't count is red
   const counts = async (V, sel, done, what, how = press) => {
-    for (let k = 0; k < 6 && !(await V.p.ev(done)); k++) {
-      await V.soon(`(() => { const e = document.querySelector(${J(sel)}); return ${done} || (!!e && avStep.ready(e) !== null); })()`, `${what}: it is live`);
-      if (await V.p.ev(done)) return;
+    const el = `document.querySelector(${J(sel)})`, since = `([...avStep.press.seen.values()].find((r) => r.el === ${el})?.since ?? null)`;
+    for (let k = 0; k < 6; k++) {
+      await V.soon(LIVE(el), `${what}: it is live`);
+      const was = await V.p.ev(since);
       await how(V, sel);
       if (await V.settle(done, 1500)) return;
+      assert.notEqual(await V.p.ev(since), was, `${what}: a live control's press counts`);
     }
-    assert.ok(await V.p.ev(done), what);
+    assert.fail(what);
   };
   await sub('A24: a page that moves Resolve under the pointer gets no press', async () => {
     const V = await byArrow();
@@ -257,9 +259,7 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
     await V.p.send('Emulation.setTouchEmulationEnabled', { enabled: true });
     await new Promise((r) => setTimeout(r, ARMED));
     await settled(V);
-    await V.soon(`avStep.ready(document.getElementById('zz-q')) !== null`, 'setup: the answer is live');
-    await tapOn(V, '#zz-q');
-    await V.soon('window.__q === 1', 'a tap on a settled answer');
+    await counts(V, '#zz-q', 'window.__q === 1', 'a tap on a settled answer', tapOn);
     await counts(V, '#av-handover', `window.__posts.some((x) => x.action === 'artifact-handoff')`, 'a tap on a settled Hand over posts', tapOn);
     await settled(V);
     await counts(V, '#tl-card [data-tl-accept]', `window.__posts.some((x) => x.action === 'thread-accept-addressed')`, 'a tap on the settled Resolve posts', tapOn);
@@ -324,11 +324,8 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
       await V.p.clickAt(s.x, s.y);
     }
     assert.deepEqual(await V.p.ev('window.__zz'), [], 'moved just now: none gets through');
-    // (frames that stall on a busy box start a second again: each is pressed once it is live, and again if it stalled between)
-    for (const [i, s] of (await spots()).entries()) for (let k = 0; k < 5 && (await V.p.ev('window.__zz.length')) === i; k++) {
-      await V.soon(`avStep.ready(document.querySelectorAll('.zz')[${i}]) !== null`, `${s.n} is live`);
-      await V.p.clickAt(s.x, s.y);
-    }
+    // (frames that stall on a busy box start a second again: each is pressed once it is live)
+    for (const [i, x] of (await spots()).entries()) await counts(V, `.zz[data-zz="${x.n}"]`, `window.__zz.length > ${i}`, 'settled: each gets through', () => V.p.clickAt(x.x, x.y));
     assert.deepEqual(await V.p.ev('window.__zz'), names, 'settled: each gets through');
     // another lesson's button in the same place
     await V.p.ev(`(window.__zz = [], document.querySelectorAll('.zz[data-zz="two"]').forEach((e) => { e.dataset.oaKnow = 'l-2'; }), true)`);

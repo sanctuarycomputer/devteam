@@ -147,6 +147,8 @@ export async function notes(t, name) {
   const tabOf = async (rows, hash = '#library', size = {}) => { const V = await visit(hash, size); V.rows = (r) => rowsIn(V, r); await V.p.send('Page.addScriptToEvaluateOnNewDocument', { source: STUB }); await V.p.ev(STUB); await V.rows(rows); V.p.click = pressAt(V); return V; };
   // a real press once the element is shown and at rest: a fixed card moves after a scroll or its picture's answer,
   // and p.click's own scrollIntoView would move the card itself
+  // the control has settled, by the page's own frames: avStep.ready would take the sample itself, and hide a page that takes none
+  const LIVE = (el) => `(() => { const el = ${el}; return !!el && [...avStep.press.seen.values()].some((r) => r.el === el && avStep.settled(r)); })()`;
   const pressAt = (V) => async (sel) => {
     await V.soon(`!!document.querySelector(${J(sel)})`, `setup: ${sel} is there`);
     const rect = `(() => { const e = document.querySelector(${J(sel)}); if (!e) return null; const r = e.getBoundingClientRect(); return r.width ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null; })()`;
@@ -154,7 +156,7 @@ export async function notes(t, name) {
     for (let i = 0; i < 60; i++) {
       await new Promise((r) => setTimeout(r, 60));
       const at = await V.p.ev(rect);
-      if (at && was && at.x === was.x && at.y === was.y && await V.p.ev(`(() => { const e = document.querySelector(${J(sel)}); return !window.avStep?.held?.(e) || avStep.ready(e) !== null; })()`)) { await V.p.clickAt(at.x, at.y); return; }
+      if (at && was && at.x === was.x && at.y === was.y && await V.p.ev(`(() => { const e = document.querySelector(${J(sel)}); return !window.avStep?.held?.(e) || ${LIVE('e')}; })()`)) { await V.p.clickAt(at.x, at.y); return; }
       was = at;
     }
     throw new Error(`${sel} never came to rest`);
@@ -197,5 +199,5 @@ export async function notes(t, name) {
     return V;
   }
   const tapOn = async (V, sel) => { const { x, y } = await at(V, sel); await V.p.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] }); await V.p.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] }); };
-  return { sub, F, N, AV_WT, SHOTS, PNG, plant, rowsIn, openAt, shown, text, has, tabOf, pressAt, cardOf, holdPoll, ARMED, at, press, settled, enter, forge, spot, SETTLE, acts, HELD, heldShown, byArrow, tapOn, AV_MAIN };
+  return { sub, F, N, AV_WT, SHOTS, PNG, plant, rowsIn, openAt, shown, text, has, tabOf, pressAt, cardOf, holdPoll, LIVE, ARMED, at, press, settled, enter, forge, spot, SETTLE, acts, HELD, heldShown, byArrow, tapOn, AV_MAIN };
 }
