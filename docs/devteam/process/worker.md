@@ -118,6 +118,8 @@ A thread about your ticket (its subject is `ticket:<your id>`, or a preview you 
 - A turn routed to you with no reply for 5 minutes, or a `--pending` reply with nothing after it for 10, raises `session-overdue`, and your threads go to the responder or the supervisor until each is answered.
 - You reply only in threads bound to you: anywhere else `thread reply` refuses ("this thread isn't about your work"), so send the supervisor what you have instead.
 
+**Artifact notes handed to you.** The owner hands notes on an artifact you draw to you as an `info` message from the owner. Read them with the `artifact notes` command it names, which also prints the files the owner dropped (each kept 7 days; a file gone by then is asked for again through the supervisor), change the draft, commit, and mark each note with `devteam.mjs artifact addressed <t-id> --note "<what changed>"`. A mark says what changed for that note ("the Start trial button is primary"), never "done" or "see the artifact". Look at the picture it prints before going on; if it doesn't show the change, fix the page and mark the note again. A mark the supervisor has withdrawn arrives as a message: fix the change and mark the note again. `thread list --with <your id>` lists the notes you still have.
+
 ## 8. Finishing
 
 1. Merge `origin/main` into your branch; resolve conflicts; re-run the gates; check every ruling is in your spec or plan.

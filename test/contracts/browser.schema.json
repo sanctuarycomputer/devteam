@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "devteam/browser.schema.json",
   "title": "devteam browser@1",
-  "description": "The browser@1 contract (the supervisor's browser; design supervisors-can-use-a-browser-with-the-o, Contracts): the JSON devteam.mjs browser prints (status --json, snapshot --json, tabs, profiles, wait), run/browser/state.json and run/browser/resets.json, the egress guard's refusal, and the live view's socket messages. Each JSON shape is $defs.shapes.<name> and carries browser: 1; each socket message is $defs.view.from_server.<t> or $defs.view.from_page.<t>, chosen by its t, and a t with no entry is not in the contract. Every shape uses only the JSON Schema keywords the kit's own checker reads (schemaErrors in devteam.mjs: type, enum, const, pattern, minLength, maxLength, minimum, maximum, minItems, maxItems, items, properties, required, additionalProperties), so devteam.mjs and test/fixtures/browser/check.mjs validate it with no dependency; every object is closed (additionalProperties false), so no cookie, value or lock field can appear unnoticed. Adding an optional field keeps browser: 1, as does making a field of state (run/browser/state.json) optional when no reader but devteam.mjs browser itself needs it and its description says so; any other change bumps browser and this file's @ version. Fixtures: test/fixtures/browser/. The fixture site every browser test browses: test/lib/sites.mjs. A validation error repeats up to 40 characters of the value it refused (schemaErrors' form), which can be an unmasked URL or the control secret: a consumer reports such an error by its field, never by printing the error text to the agent, the log or a tmux window.",
+  "description": "The browser@1 contract (the supervisor's browser; design supervisors-can-use-a-browser-with-the-o, Contracts): the JSON devteam.mjs browser prints (status --json, snapshot --json, tabs, profiles, wait), run/browser/state.json and run/browser/resets.json, the egress guard's refusal, and the live view's socket messages. Each JSON shape is $defs.shapes.<name> and carries browser: 1; each socket message is $defs.view.from_server.<t> or $defs.view.from_page.<t>, chosen by its t, and a t with no entry is not in the contract. Every shape uses only the JSON Schema keywords the kit's own checker reads (schemaErrors in devteam.mjs: type, enum, const, pattern, minLength, maxLength, minimum, maximum, minItems, maxItems, items, properties, required, additionalProperties), so devteam.mjs and test/fixtures/browser/check.mjs validate it with no dependency; every object is closed (additionalProperties false), so no cookie, value or lock field can appear unnoticed. Adding an optional field keeps browser: 1, as does adding a live-view message type (a new t under $defs.view: the daemon serves the page it talks to, and each side ignores a t it doesn't know), as does making a field of state (run/browser/state.json) optional when no reader but devteam.mjs browser itself needs it and its description says so; any other change bumps browser and this file's @ version. Fixtures: test/fixtures/browser/. The fixture site every browser test browses: test/lib/sites.mjs. A validation error repeats up to 40 characters of the value it refused (schemaErrors' form), which can be an unmasked URL or the control secret: a consumer reports such an error by its field, never by printing the error text to the agent, the log or a tmux window.",
   "x-masked-url": "^(?:about:blank|https?://[^/?#@\\s]+(?:/(?:•••|(?=(?:[^/?#\\s\\d]*\\d){0,3}[^/?#\\s\\d]*(?:[/?]|$))[^/?#\\s]{0,19}(?=[/?]|$)))*(?:\\?(?:(?:[^=&#\\s•]+=•••|•••)(?:&(?:[^=&#\\s•]+=•••|•••))*)?)?)$",
   "x-masked-url-notes": "The browser mask (design, Security) as a pattern: about:blank, or http(s):// with a host holding no @, path segments each ••• or at most 19 characters with at most 3 digits, a query whose items are each name=••• or ••• (a bare key is masked whole, since it can be a token), and no fragment. Left unmasked, by design: host names (a token in a subdomain passes), query names of any length, and a path token under 20 characters with at most 3 digits. A tab on an error page (chrome-error://, a refused CONNECT, a network error) is printed as the URL it was opening, masked; no other scheme is ever printed.",
   "x-masked-fields": [
@@ -12,7 +12,8 @@
     "shapes.tabs.tabs[].url",
     "shapes.wait.reopened[]",
     "shapes.resets.resets[].reopened[]",
-    "view.from_server.url.url"
+    "view.from_server.url.url",
+    "view.from_server.dialog.url"
   ],
   "x-unmasked-fields": [
     "view.from_page.nav.url"
@@ -639,6 +640,77 @@
               "maxLength": 200
             }
           }
+        },
+        "dialog": {
+          "description": "A page's confirm, prompt or beforeunload, open in Chrome while the owner holds the browser, for the owner to answer. Page words: data, shown as plain text. Sent when it opens and again to a viewer that connects while it is open. Never logged or stored.",
+          "type": "object",
+          "required": [
+            "t",
+            "id",
+            "kind",
+            "url",
+            "text"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "t": {
+              "description": "The message type: dialog.",
+              "const": "dialog"
+            },
+            "id": {
+              "description": "The dialog's id: the daemon's own, new for every dialog.",
+              "type": "string",
+              "pattern": "^d-[0-9a-f]{16}$"
+            },
+            "kind": {
+              "description": "Which dialog.",
+              "enum": [
+                "confirm",
+                "prompt",
+                "beforeunload"
+              ]
+            },
+            "url": {
+              "description": "The URL of the page that asks, masked (x-masked-url); with frame, of the page the asking frame is in.",
+              "type": "string",
+              "pattern": "^(?:about:blank|https?://[^/?#@\\s]+(?:/(?:•••|(?=(?:[^/?#\\s\\d]*\\d){0,3}[^/?#\\s\\d]*(?:[/?]|$))[^/?#\\s]{0,19}(?=[/?]|$)))*(?:\\?(?:(?:[^=&#\\s•]+=•••|•••)(?:&(?:[^=&#\\s•]+=•••|•••))*)?)?)$"
+            },
+            "text": {
+              "description": "The page's words, cut to 2000 characters; empty when it gave none.",
+              "type": "string",
+              "maxLength": 2000
+            },
+            "default": {
+              "description": "A prompt's default text, cut to 2000 characters; only on a prompt that gave one.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            },
+            "frame": {
+              "description": "Present when a frame with no web address of its own asks (about:srcdoc, blob:, data:): it can be another site's, so url names only the page it is in.",
+              "const": true
+            }
+          }
+        },
+        "dialog_end": {
+          "description": "That dialog is no longer open (answered, or gone with its page): the page takes it down.",
+          "type": "object",
+          "required": [
+            "t",
+            "id"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "t": {
+              "description": "The message type: dialog_end.",
+              "const": "dialog_end"
+            },
+            "id": {
+              "description": "The dialog's id: the daemon's own, new for every dialog.",
+              "type": "string",
+              "pattern": "^d-[0-9a-f]{16}$"
+            }
+          }
         }
       },
       "from_page": {
@@ -864,6 +936,36 @@
             "t": {
               "description": "The message type: forget.",
               "const": "forget"
+            }
+          }
+        },
+        "dialog": {
+          "description": "The owner's answer to the one dialog id names. Any other id is dropped. Never logged, stored or echoed.",
+          "type": "object",
+          "required": [
+            "t",
+            "id",
+            "accept"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "t": {
+              "description": "The message type: dialog.",
+              "const": "dialog"
+            },
+            "id": {
+              "description": "The dialog's id: the daemon's own, new for every dialog.",
+              "type": "string",
+              "pattern": "^d-[0-9a-f]{16}$"
+            },
+            "accept": {
+              "description": "true is OK (Leave, for a beforeunload); false is Cancel (Stay).",
+              "type": "boolean"
+            },
+            "text": {
+              "description": "A prompt's text, with accept true; ignored otherwise.",
+              "type": "string",
+              "maxLength": 10000
             }
           }
         }

@@ -93,9 +93,18 @@ function cbor(v) {
   if (v instanceof Map) return Buffer.concat([head(5, v.size), ...[...v].flatMap(([k, x]) => [cbor(k), cbor(x)])]);
   throw new Error(`cbor: ${typeof v}`);
 }
+function ecdhJwk() {
+  const ecdh = crypto.createECDH('prime256v1');
+  ecdh.generateKeys();
+  const point = ecdh.getPublicKey(); // 04, then x and y, 32 bytes each
+  const d = Buffer.concat([Buffer.alloc(32), ecdh.getPrivateKey()]).subarray(-32); // left-padded: it can come short
+  return { kty: 'EC', crv: 'P-256', x: u(point.subarray(1, 33)), y: u(point.subarray(33)), d: u(d) };
+}
 function authenticator() {
-  const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
-  const jwk = publicKey.export({ format: 'jwk' });
+  // never KeyObject.export({ format: 'jwk' }): on Node 20 it can deadlock the process (kit-873), and no
+  // timer here could end or name that
+  const { d, ...jwk } = ecdhJwk();
+  const privateKey = crypto.createPrivateKey({ format: 'jwk', key: { ...jwk, d } });
   const cose = new Map([[1, 2], [3, -7], [-1, 1], [-2, Buffer.from(jwk.x, 'base64url')], [-3, Buffer.from(jwk.y, 'base64url')]]);
   const id = crypto.randomBytes(16);
   let count = 0;
@@ -138,8 +147,51 @@ function seedPeople(state, people) {
   return { state: { ...state, people: [...(state.people ?? []), ...rows] }, rows };
 }
 
+// --- limits: no request or close waits for the runner's 300 s kill; one that passes its limit says which -
+// A request's is past the gateway's own longest wait for a read (hubDeadlineMs, 15 s); a close's is past
+// its keep-alive (65 s), which a close can wait out on Node 19+ and which is no failure.
+const REQUEST_LIMIT_MS = 20000;
+const CLOSE_LIMIT_MS = 80000;
+// a dashboard's: its first /api/data waits for a whole build; under the 120 s of the tests that ask one
+const DASHBOARD_LIMIT_MS = 100000;
+// the whole warm-up of a box's fakes
+const WARM_LIMIT_MS = 60000;
+const within = (ms, what, p, stop) => new Promise((resolve, reject) => {
+  const t = setTimeout(() => {
+    const e = new Error(`${what}: still waiting after ${ms / 1000} s`);
+    fs.writeSync(2, `${e.message}\n`); // now: an error after this one (a close's, in a finally) can replace it
+    reject(e);
+    stop();
+  }, ms);
+  p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); if (e instanceof Error) e.message = `${what}: ${e.message}`; reject(e); });
+});
+// a server's close; past its limit its connections are cut and it is unref'd, so the failure is reported
+// and the process is not held open after it
+const connectionsOf = (server) => { const all = new Set(); server.on('connection', (c) => { all.add(c); c.on('close', () => all.delete(c)); }); return all; };
+const closing = (server, what, conns) => { let idle; return within(CLOSE_LIMIT_MS, `close of ${what}`, new Promise((r) => {
+  // A stranger's kept-alive connection (a hosting platform probes new ports) would hold the close for the
+  // gateway's 65 s: idle connections are dropped while it waits. One with a request in flight is not.
+  idle = setInterval(() => server.closeIdleConnections?.(), 100);
+  server.close(() => { clearInterval(idle); r(); });
+}), () => { clearInterval(idle); for (const c of conns) c.destroy(); server.unref(); }); };
+// a listen: its error is the test's (not an uncaught one that leaves the wait), and it has a limit too
+const listening = (server, port, what) => within(REQUEST_LIMIT_MS, `listen of ${what}`, new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve(); }); }), () => server.unref());
+// an answer read to its end: one cut off after its head is an error, not a wait
+const answerOf = (res, resolve, reject) => {
+  let b = '';
+  res.on('data', (c) => { b += c; });
+  res.on('end', () => resolve(b));
+  res.on('error', reject);
+  res.on('close', () => { if (!res.complete) reject(new Error('the answer was cut off before its end')); });
+};
+// every close runs, whatever one before it did; then the first failure is thrown
+// (together, so one limit bounds them all, not their sum)
+const closeEach = async (...closes) => { const bad = (await Promise.allSettled(closes.map(async (c) => c()))).find((r) => r.status === 'rejected'); if (bad) throw bad.reason; };
+// a setup that fails closes what it opened: left listening, it would hold the process to the kill
+const orClose = async (close, f) => { try { return await f(); } catch (e) { await close().catch(() => {}); throw e; } };
+
 // --- a gateway on a free port, and a browser's requests to it -------------------------------------
-const freePort = () => new Promise((resolve, reject) => { const v = net.createServer(); v.on('error', reject); v.listen(0, '127.0.0.1', () => { const { port } = v.address(); v.close(() => resolve(port)); }); });
+const freePort = () => { const v = net.createServer((c) => c.destroy()); return within(REQUEST_LIMIT_MS, 'a free port', new Promise((resolve, reject) => { v.on('error', reject); v.listen(0, '127.0.0.1', () => { const { port } = v.address(); v.close(() => resolve(port)); }); }), () => v.unref()); };
 let made = 0;
 // extra.https: a box served over HTTPS (publicUrl https://box.localhost, requests sent to the free
 // port with Host: box.localhost, as test/gateway.test.mjs's https test). extra.dir: reopen a state.
@@ -158,28 +210,33 @@ async function gateway(name, extra = {}) {
   const logs = [];
   const dir = opts.dir ?? path.join(tmp, tag);
   const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubPage: HUB_PAGE, log: (m) => logs.push(m), methodTypes: { stub }, ...opts });
-  await new Promise((r) => g.server.listen(port, '127.0.0.1', r));
+  const conns = connectionsOf(g.server);
+  const close = () => closing(g.server, `${tag}'s gateway`, conns);
+  await listening(g.server, port, `${tag}'s gateway`);
   const token = /claim#([\w-]+)/.exec(logs.join('\n'))?.[1];
   const file = path.join(dir, 'state.json');
   const state = () => JSON.parse(fs.readFileSync(file, 'utf8'));
   // write-to-tmp-then-rename, so the store sees a replaced file and re-reads it
   const write = (s) => { const t = `${file}.test.tmp`; fs.writeFileSync(t, JSON.stringify(s, null, 2), { mode: 0o600 }); fs.renameSync(t, file); };
-  const raw = (method, route, { body, cookie = '', headers = {} } = {}) => new Promise((resolve, reject) => {
+  // the gateway's signing key, as vapid() keeps it: it would make its own by the same export
+  // (test/gateway.test.mjs's 'behind the gateway the kit runs as on a laptop' checks the key it makes)
+  await orClose(close, async () => {
+    if (state().vapid) return; // a reopened state keeps its own
+    const v = ecdhJwk();
+    write({ ...state(), vapid: { jwk: v, publicKey: u(Buffer.concat([Buffer.from([4]), Buffer.from(v.x, 'base64url'), Buffer.from(v.y, 'base64url')])) } });
+  });
+  const raw = (method, route, { body, cookie = '', headers = {} } = {}) => { let r; return within(REQUEST_LIMIT_MS, `${tag}: ${method} ${headers.host ?? host}${route}`, new Promise((resolve, reject) => {
     // a body always framed: node sends a DELETE's unchunked, so without a length its bytes read as a second request
     const h = { host, ...(method !== 'GET' ? { origin: publicUrl, 'content-type': 'application/json' } : {}), ...(cookie ? { cookie } : {}), ...(body === undefined ? {} : { 'content-length': Buffer.byteLength(JSON.stringify(body)) }), ...headers };
-    const r = http.request({ host: '127.0.0.1', port, method, path: route, headers: h }, (res) => {
-      let b = '';
-      res.on('data', (c) => { b += c; });
-      res.on('end', () => {
-        let j = null;
-        try { j = JSON.parse(b); } catch {}
-        resolve({ status: res.statusCode, headers: res.headers, cookies: res.headers['set-cookie'] ?? [], body: b, json: j });
-      });
-    });
+    r = http.request({ host: '127.0.0.1', port, method, path: route, headers: h }, (res) => answerOf(res, (b) => {
+      let j = null;
+      try { j = JSON.parse(b); } catch {}
+      resolve({ status: res.statusCode, headers: res.headers, cookies: res.headers['set-cookie'] ?? [], body: b, json: j });
+    }, reject));
     r.on('error', reject);
     r.end(body === undefined ? undefined : JSON.stringify(body));
-  });
-  return { g, port, publicUrl, host, inst, logs, token, dir, file, state, write, raw, close: () => new Promise((r) => g.server.close(r)) };
+  }), () => r.destroy()); };
+  return { g, port, publicUrl, host, inst, logs, token, dir, file, state, write, raw, close };
 }
 
 const FLOW_NAME = /^(__Host-)?devteam_flow=/;
@@ -284,14 +341,16 @@ const VIEW_TERM = 'View only: there is no terminal for view-only people.';
 // A claimed box with Ana (member, View, two passkeys) and Jo (member, Full), each with a session.
 async function viewSetup(name, extra) {
   const gw = await gateway(name, extra);
-  const { owner } = await claim(gw);
-  const anaKey = authenticator();
-  const anaKey2 = authenticator();
-  const joKey = authenticator();
-  const [ana, jo] = seed(gw, [{ name: 'Ana', level: 'view', methods: [anaKey.method(), anaKey2.method('passkey 2')] }, { name: 'Jo', level: 'full', methods: [joKey.method()] }]);
-  const view = browser(gw, { session: mintSession(gw, ana.id, ana.methods[0].id) });
-  const full = browser(gw, { session: mintSession(gw, jo.id, jo.methods[0].id) });
-  return { gw, owner, ana, jo, view, full };
+  return orClose(gw.close, async () => {
+    const { owner } = await claim(gw);
+    const anaKey = authenticator();
+    const anaKey2 = authenticator();
+    const joKey = authenticator();
+    const [ana, jo] = seed(gw, [{ name: 'Ana', level: 'view', methods: [anaKey.method(), anaKey2.method('passkey 2')] }, { name: 'Jo', level: 'full', methods: [joKey.method()] }]);
+    const view = browser(gw, { session: mintSession(gw, ana.id, ana.methods[0].id) });
+    const full = browser(gw, { session: mintSession(gw, jo.id, jo.methods[0].id) });
+    return { gw, owner, ana, jo, view, full };
+  });
 }
 // 403 view-only, as JSON ({ error, code }) or, for a navigation, the sentence as text
 const isView = (r, what) => {
@@ -317,30 +376,61 @@ async function boxWithInstance(name) {
   const track = (srv) => { srv.on('connection', (c) => { held.add(c); c.on('close', () => held.delete(c)); }); return srv; };
   const seen = [];
   const inst = track(http.createServer((q, s) => { q.resume(); q.on('end', () => { seen.push({ method: q.method, url: q.url, h: q.headers }); s.writeHead(200, { 'content-type': 'application/json' }); s.end('{"ok":true}'); }); }));
-  await new Promise((r) => inst.listen(INSTANCE, '127.0.0.1', r));
+  const up = []; // what listens so far: a later listen that fails closes it
+  const open = (srv, port, what) => orClose(() => closeEach(...up.map((x) => () => closing(x, `${name}: a fake, after a failed setup`, held))), async () => { await listening(srv, port, what); up.push(srv); });
+  await open(inst, INSTANCE, 'the fake dashboard');
   const devSeen = [];
   const dev = track(http.createServer((q, s) => { q.resume(); devSeen.push({ method: q.method, url: q.url, h: q.headers }); s.writeHead(200, { 'content-type': 'text/plain' }); s.end('the app'); }));
   dev.on('upgrade', (q, sock) => { devSeen.push({ method: 'UPGRADE', url: q.url, h: q.headers }); sock.on('error', () => {}); sock.write('HTTP/1.1 101 Switching Protocols\r\nconnection: Upgrade\r\nupgrade: websocket\r\n\r\n'); });
-  await new Promise((r) => dev.listen(0, '127.0.0.1', r));
+  await open(dev, 0, 'the fake app');
   const ttyd = track(net.createServer((sock) => { sock.on('error', () => {}); sock.once('data', () => sock.write('HTTP/1.1 101 Switching Protocols\r\nconnection: Upgrade\r\nupgrade: websocket\r\n\r\n')); }));
-  await new Promise((r) => ttyd.listen(0, '127.0.0.1', r));
+  await open(ttyd, 0, 'the ttyd stand-in');
   const list = [{ devteam: 1, root: '/srv/alpha', port: INSTANCE, name: 'alpha', previews: [{ name: 'cool-tiger', port: dev.address().port, project: 'alpha', session: 'api-01-x', label: 'admin', at: '2026-11-10', up: true, run: false }] }];
   const hub = track(http.createServer((q, s) => { q.resume(); s.writeHead(200, { 'content-type': 'application/json' }); s.end(JSON.stringify(q.url.startsWith('/operator/') ? { threads: [] } : { hub: 1, instances: list })); }));
-  await new Promise((r) => hub.listen(PORTS, '127.0.0.1', r));
-  const V = await viewSetup(name, { ttydPort: ttyd.address().port });
+  await open(hub, PORTS, 'the fake hub');
+  const closeFakes = async () => {
+    for (const c of held) c.destroy();
+    await closeEach(...[['the fake dashboard', inst], ['the fake app', dev], ['the fake hub', hub], ['the ttyd stand-in', ttyd]].map(([what, x]) => async () => {
+      x.closeAllConnections?.();
+      await closing(x, `${name}: ${what}`, held);
+    }));
+  };
+  const V = await orClose(closeFakes, () => viewSetup(name, { ttydPort: ttyd.address().port }));
   track(V.gw.g.server);
   const close0 = V.gw.close;
-  const close = async () => { for (const c of held) c.destroy(); V.gw.g.server.closeAllConnections?.(); await close0(); for (const x of [inst, dev, hub, ttyd]) { x.closeAllConnections?.(); await new Promise((r) => x.close(r)); } };
+  const close = async () => { for (const c of held) c.destroy(); V.gw.g.server.closeAllConnections?.(); await closeEach(close0, closeFakes); };
   const alpha = `alpha.${V.gw.host}`;
   const pv = `cool-tiger.${V.gw.host}`;
   const at = (b, h, method, route, o = {}) => b.req(method, route, { ...o, headers: { host: h, ...(method !== 'GET' && method !== 'HEAD' ? { origin: `http://${h}` } : {}), ...o.headers } });
-  for (let i = 0; i < 100; i++) { const r = await at(V.full, alpha, 'GET', '/api/hello'); const p = await at(V.full, pv, 'GET', '/'); if (r.status === 200 && p.status === 200) break; await sleep(100); }
+  await orClose(close, async () => {
+    for (const end = Date.now() + WARM_LIMIT_MS; ;) {
+      const r = await at(V.full, alpha, 'GET', '/api/hello'); const p = await at(V.full, pv, 'GET', '/');
+      if (r.status === 200 && p.status === 200) return;
+      if (Date.now() > end) assert.fail(`${name}: the warm-up: the fakes still not answering after ${WARM_LIMIT_MS / 1000} s (dashboard ${r.status}, app ${p.status})`);
+      await sleep(100);
+    }
+  });
   seen.length = 0; devSeen.length = 0;
   return { ...V, seen, devSeen, alpha, pv, at, close };
 }
 const onBox = (name, f) => test(name, async () => { const B = await boxWithInstance(name.replace(/\W+/g, '-').slice(0, 24)); try { await f(B); } finally { await B.close(); } });
 const PUSH = { endpoint: 'https://push.example/x', keys: { p256dh: 'a', auth: 'b' } };
 
+test('the authenticator\'s keys are what the gateway reads and verifies', () => {
+  for (let i = 0; i < 20; i++) {
+    const m = authenticator().method();
+    assert.deepEqual(keysOf(m.data.jwk), ['crv', 'kty', 'x', 'y'], 'a public JWK, no d');
+    assert.deepEqual([m.data.jwk.x, m.data.jwk.y].map((v) => Buffer.from(v, 'base64url').length), [32, 32]);
+    const k = authenticator();
+    const { jwk } = k.method().data;
+    const made = k.create({ user: { id: 'x' }, challenge: 'c', rp: { id: 'box.localhost' } }, 'http://box.localhost');
+    const at = G.parseAuthData(G.cborDecode(Buffer.from(made.attestationObject, 'base64url')).value.get('authData'));
+    assert.deepEqual(G.coseToJwk(at.cose), { jwk, alg: -7 }, 'the gateway reads the same key');
+    const got = k.get({ challenge: 'c', rpId: 'box.localhost' }, 'http://box.localhost');
+    const [ad, cd, sig] = [got.authenticatorData, got.clientDataJSON, got.signature].map((v) => Buffer.from(v, 'base64url'));
+    assert.equal(G.verifySignature({ jwk, alg: -7 }, Buffer.concat([ad, sha(cd)]), sig), true, 'its signature verifies');
+  }
+});
 test('org-access A12: a view session is refused every operator post', async () => {
   const { gw, view } = await viewSetup('c1');
   try { for (const a of ['thread-new', 'thread-say', 'thread-close', 'thread-reopen', 'start']) isView(await view.post(`/operator/${a}`, { id: 't-1', text: 'hi' }), a); } finally { await gw.close(); }
@@ -531,12 +621,14 @@ const CHROME_OK = { skip: canDrive ? false : 'needs Chrome and a Node with WebSo
 // The owner, Kai (an admin), Jo (Full), Ana (View), Pam (invited, not joined), each signed in now.
 async function peopleSetup(name, extra) {
   const V = await viewSetup(name, extra);
-  const kaiKey = authenticator();
-  const [kai, pam] = seed(V.gw, [{ name: 'Kai', role: 'admin', level: 'full', methods: [kaiKey.method()] }, { name: 'Pam', level: 'full', methods: [] }]);
-  seedInvite(V.gw, pam.id);
-  const admin = browser(V.gw, { session: mintSession(V.gw, kai.id, kai.methods[0].id) });
-  const ownerRow = V.gw.state().people.find((p) => p.role === 'owner');
-  return { ...V, kai, pam, admin, ownerRow };
+  return orClose(V.gw.close, async () => {
+    const kaiKey = authenticator();
+    const [kai, pam] = seed(V.gw, [{ name: 'Kai', role: 'admin', level: 'full', methods: [kaiKey.method()] }, { name: 'Pam', level: 'full', methods: [] }]);
+    seedInvite(V.gw, pam.id);
+    const admin = browser(V.gw, { session: mintSession(V.gw, kai.id, kai.methods[0].id) });
+    const ownerRow = V.gw.state().people.find((p) => p.role === 'owner');
+    return { ...V, kai, pam, admin, ownerRow };
+  });
 }
 const move = (gw, b, id, level, rev = rowOf(gw, id).rev) => b.post('/auth/people/level', { id, rev, level });
 const refusedCode = (r, status, code, what) => {
@@ -571,7 +663,7 @@ test('org-access A14: the owner and an admin move a member to View and back', as
     assert.equal(rowOf(gw, pam.id).level, 'full', 'Pam is still her invite\'s level');
   } finally { await gw.close(); }
 });
-test('org-access A14: a move to View closes their terminal and preview sockets and drops their push subscriptions', { timeout: 20000 }, async () => {
+test('org-access A14: a move to View closes their terminal and preview sockets and drops their push subscriptions', { timeout: 150000 }, async () => {
   const B = await boxWithInstance('c19');
   try {
     const { gw, owner, full, jo, pv } = B;
@@ -597,8 +689,9 @@ const subscribing = (endpoint) => { const ecdh = crypto.createECDH('prime256v1')
 // The hub on PORTS, for the gateway's poller: its list is whatever `list()` says now.
 const listHub = async (list) => {
   const hub = http.createServer((q, s) => { q.resume(); s.writeHead(200, { 'content-type': 'application/json' }); s.end(JSON.stringify({ hub: 1, instances: list() })); });
-  await new Promise((r) => hub.listen(PORTS, '127.0.0.1', r));
-  return { close: () => { hub.closeAllConnections?.(); return new Promise((r) => hub.close(r)); } };
+  const conns = connectionsOf(hub);
+  await listening(hub, PORTS, 'the fake hub');
+  return { close: () => { hub.closeAllConnections?.(); return closing(hub, 'the listing hub', conns); } };
 };
 // A POST whose body is held back: its headers and first bytes go now, the rest on finish().
 // answered() is its answer if one came already, else null.
@@ -607,22 +700,19 @@ function heldPost(gw, cookie, route, body) {
   let got = null;
   let r = null;
   const done = new Promise((resolve, reject) => {
-    r = http.request({ host: '127.0.0.1', port: gw.port, method: 'POST', path: route, headers: { host: gw.host, origin: gw.publicUrl, 'content-type': 'application/json', cookie, 'content-length': Buffer.byteLength(text) } }, (res) => {
-      let b = '';
-      res.on('data', (c) => { b += c; });
-      res.on('end', () => { let j = null; try { j = JSON.parse(b); } catch {} got = { status: res.statusCode, body: b, json: j }; resolve(got); });
-    });
+    r = http.request({ host: '127.0.0.1', port: gw.port, method: 'POST', path: route, headers: { host: gw.host, origin: gw.publicUrl, 'content-type': 'application/json', cookie, 'content-length': Buffer.byteLength(text) } }, (res) => answerOf(res, (b) => { let j = null; try { j = JSON.parse(b); } catch {} got = { status: res.statusCode, body: b, json: j }; resolve(got); }, reject));
     r.on('error', reject);
   });
+  done.catch(() => {}); // an error before finish() is finish()'s to throw
   r.write(text.slice(0, 5));
-  return { answered: () => got, finish: () => { r.end(text.slice(5)); return done; } };
+  return { answered: () => got, finish: () => { r.end(text.slice(5)); return within(REQUEST_LIMIT_MS, `a held POST ${route}`, done, () => r.destroy()); } };
 }
 test('org-access A14: a push subscribe still being read when its person is moved to View saves nothing and is never sent to', async () => {
   const sent = [];
   const pushFetch = async (endpoint) => { sent.push(endpoint); return { status: 201 }; };
   const { gw, owner, full, jo } = await viewSetup('c19b', { pushFetch });
   let list = [{ devteam: 1, root: '/r/one', name: 'one', port: INSTANCE, inbox: 1 }];
-  const hub = await listHub(() => list);
+  const hub = await orClose(gw.close, () => listHub(() => list));
   try {
     await gw.g.pollPush();
     assert.deepEqual(sent, [], 'the backlog is recorded');
@@ -636,14 +726,14 @@ test('org-access A14: a push subscribe still being read when its person is moved
     list = list.map((x) => ({ ...x, inbox: x.inbox + 1 }));
     await gw.g.pollPush();
     assert.deepEqual(sent, [], 'no notification sent to it');
-  } finally { await hub.close(); await gw.close(); }
+  } finally { await closeEach(hub.close, gw.close); }
 });
 test('org-access A14: the sender skips a View person\'s subscriptions', async () => {
   const sent = [];
   const pushFetch = async (endpoint) => { sent.push(endpoint); return { status: 201 }; };
   const { gw, ana, jo } = await viewSetup('c19c', { pushFetch });
   let list = [{ devteam: 1, root: '/r/one', name: 'one', port: INSTANCE, inbox: 1 }];
-  const hub = await listHub(() => list);
+  const hub = await orClose(gw.close, () => listHub(() => list));
   try {
     await gw.g.pollPush();
     assert.deepEqual(sent, [], 'the backlog is recorded');
@@ -655,7 +745,7 @@ test('org-access A14: the sender skips a View person\'s subscriptions', async ()
     list = list.map((x) => ({ ...x, inbox: x.inbox + 1 }));
     await gw.g.pollPush();
     assert.deepEqual(sent, ['https://web.push.apple.com/jo'], 'Jo\'s device alone: none of Ana\'s');
-  } finally { await hub.close(); await gw.close(); }
+  } finally { await closeEach(hub.close, gw.close); }
 });
 test('org-access A14: People lists the level action on every joined member, for the owner and an admin', async () => {
   const { gw, owner, admin, jo, ana, kai, pam, ownerRow } = await peopleSetup('c20');
@@ -704,7 +794,7 @@ test('org-access A14: the invite page tells a View invite they change only their
 });
 test('org-access A14: in Chrome, the invite page says view only for a View invite', CHROME_OK, async () => {
   const gw = await gateway('c21b');
-  const chrome = await openChrome();
+  const chrome = await orClose(gw.close, () => openChrome());
   try {
     const { owner } = await claim(gw);
     const p = await chrome.newPage();
@@ -727,7 +817,7 @@ test('org-access A14: in Chrome, the invite page says view only for a View invit
     assert.equal(view, `You're invited to ${gw.host}, Vi, as ${INVITE_VIEW}`);
     const full = await said('full', 'Fu');
     assert.equal(full, `You're invited to ${gw.host}, Fu, as Full: you can do everything on the box except manage people.`);
-  } finally { await chrome.close(); await gw.close(); }
+  } finally { await closeEach(() => chrome.close(), gw.close); }
 });
 
 // --- the dashboard learns the level: /api/data's viewer and /api/hello's level (T3) ---------------
@@ -741,16 +831,12 @@ async function realDashboard(name, extra = {}) {
   return { base, root, dash, port, close: async () => { await dash.stop(); fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } };
 }
 // a GET with these raw header lines (a header named twice is sent twice)
-const getWith = (port, route, lines = []) => new Promise((resolve, reject) => {
+const getWith = (port, route, lines = []) => { let r; return within(DASHBOARD_LIMIT_MS, `the dashboard: GET ${route}`, new Promise((resolve, reject) => {
   const headers = {};
   for (const [k, v] of lines) headers[k] = Object.hasOwn(headers, k) ? [].concat(headers[k], v) : v;
-  const r = http.get({ host: '127.0.0.1', port, path: route, headers }, (res) => {
-    let b = '';
-    res.on('data', (c) => { b += c; });
-    res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: b }));
-  });
+  r = http.get({ host: '127.0.0.1', port, path: route, headers }, (res) => answerOf(res, (b) => resolve({ status: res.statusCode, headers: res.headers, body: b }), reject));
   r.on('error', reject);
-});
+}), () => r.destroy()); };
 test('org-access A14: /api/data\'s viewer and /api/hello\'s level echo the gateway\'s level, and nothing else', { timeout: 120000 }, async () => {
   const R = await realDashboard('c16');
   try {
@@ -839,7 +925,7 @@ test('org-access A14: a dashboard served at View shows View only and sends no wr
   fs.writeFileSync(path.join(art, 'index.html'), '<!doctype html><html><body><p id="art">the mock</p></body></html>');
   for (const a of [['add', '-A'], ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'artifact: view-mock']]) assert.equal(spawnSync('git', a, { cwd: root, encoding: 'utf8', timeout: 30000 }).status, 0, a.join(' '));
   const { dash, port } = await dashboardOnFreePort(root, env);
-  const chrome = await openChrome();
+  const chrome = await orClose(async () => { await dash.stop(); }, () => openChrome());
   try {
     const at = async (level, route) => {
       const p = await chrome.newPage();
@@ -920,8 +1006,7 @@ test('org-access A14: a dashboard served at View shows View only and sends no wr
     await until(f, `window.__posts.length > 0`, 'the press posts at Full');
     f.close();
   } finally {
-    await chrome.close();
-    await dash.stop();
+    await closeEach(() => chrome.close(), () => dash.stop());
     fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });

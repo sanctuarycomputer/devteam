@@ -1069,19 +1069,37 @@ function loadSettings({ origin = false, until = null } = {}) {
     };
     // git's own words: its first fatal line (a missing remote's last line is only "and the repository exists.")
     const why = (r) => { const said = String(r.stderr ?? '').split('\n').map((l) => l.trim()).filter(Boolean); return r.status === 124 ? 'it did not answer in time' : (said.find((l) => /^fatal: /.test(l)) ?? said.at(-1) ?? `git exited ${r.status}`).replace(/^fatal: /, '').slice(0, 200); };
-    const ls = toOrigin(['ls-remote', '--symref', 'origin', 'HEAD']);
-    if (ls.status !== 0) no(why(ls));
-    const rows = String(ls.stdout ?? '').split('\n').map((l) => l.split('\t'));
-    const branch = rows.find(([a, b]) => b === 'HEAD' && a.startsWith('ref: refs/heads/'))?.[0].slice('ref: refs/heads/'.length);
-    const sha = rows.find(([a, b]) => b === 'HEAD' && /^[0-9a-f]{40,64}$/.test(a))?.[0];
-    if (!branch || !sha) no('it names no default branch');
-    // always fetched, into the tracking ref by name: a new worktree is based on origin/<main>, so it
-    // is put back where origin has it before anything reads it
-    const f = toOrigin(['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
-    if (f.status !== 0) no(why(f));
     // read here only, never fetched on the side (a partial clone's lazy fetch would run outside the deadline)
     const local = (args) => responderGit(args, mainRoot, { GIT_NO_LAZY_FETCH: '1' });
-    if (local(['cat-file', '-e', `${sha}^{commit}`]).status !== 0) no(`${sha.slice(0, 8)} did not arrive`);
+    let branch;
+    let sha;
+    for (let tries = 1; ; tries += 1) {
+      // the tracking refs before origin is read: which one is main's, origin says
+      const was = new Map(String(local(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/remotes/origin/']).stdout ?? '').split('\n').map((l) => l.split(' ')));
+      const ls = toOrigin(['ls-remote', '--symref', 'origin', 'HEAD']);
+      if (ls.status !== 0) no(why(ls));
+      const rows = String(ls.stdout ?? '').split('\n').map((l) => l.split('\t'));
+      branch = rows.find(([a, b]) => b === 'HEAD' && a.startsWith('ref: refs/heads/'))?.[0].slice('ref: refs/heads/'.length);
+      sha = rows.find(([a, b]) => b === 'HEAD' && /^[0-9a-f]{40,64}$/.test(a))?.[0];
+      if (!branch || !sha) no('it names no default branch');
+      // Always put where origin has it, before anything reads it. Into no ref: a fetch writes through a
+      // symbolic tracking ref. Then by sha, not following one, and only from what it was before origin
+      // was read: a push that moved it meanwhile isn't set back, and origin is read again (kit-856).
+      const f = toOrigin(['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--refmap=', 'origin', `refs/heads/${branch}`]);
+      if (f.status !== 0) no(why(f));
+      if (local(['cat-file', '-e', `${sha}^{commit}`]).status !== 0) no(`${sha.slice(0, 8)} did not arrive`);
+      const tracking = `refs/remotes/origin/${branch}`;
+      const isAt = () => { const now = local(['show-ref', '--verify', '--hash', tracking]); return now.status === 0 ? now.stdout.trim() : '0'.repeat(sha.length); };
+      if (isAt() === sha) break; // already right: a lock left on it stops nothing
+      const old = was.get(tracking) ?? '0'.repeat(sha.length);
+      // inside the deadline too: git waits on a lock left on the ref as long as core.filesRefLockTimeout says (final-1b F3)
+      const ms = Math.floor(end - Date.now());
+      const set = ms < 100 ? { status: 124, stderr: '' } : spawnSync('git', [...RESPONDER_GIT, 'update-ref', '--no-deref', tracking, sha, old], { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: ms, env: { ...process.env, GIT_NO_LAZY_FETCH: '1' } });
+      if (set.status === null) set.status = 124;
+      if (set.status === 0) break;
+      if (isAt() === old) no(why(set));
+      if (tries === 3) no(`origin/${branch} here kept moving while it was read`);
+    }
     const ref = `origin's ${branch} (${sha.slice(0, 8)})`;
     // before settings.md first lands on main (adoption), the working tree is all there is, as below;
     // only a settings.md git says isn't there, never one git failed to read
@@ -2455,23 +2473,34 @@ function fetchLinkMain(R, refusing = 'refusing to judge against a stale main', {
     if (r.status !== 0) no(r.status === 124 ? 'it did not answer in time' : redactUrl(firstLine(r.stderr).replace(/^fatal: /, '')) || `exit ${r.status}`);
     return String(r.stdout ?? '');
   };
-  const at = {};
-  // ls-remote matches a pattern against the end of a ref's name, so only an exact name counts
-  for (const [sha, ref] of toOrigin(['ls-remote', 'origin', `refs/heads/${rb}`, `refs/heads/${start}`]).split('\n').map((l) => l.split('\t'))) {
-    for (const b of [rb, start]) if (/^[0-9a-f]{40,64}$/.test(sha) && ref === `refs/heads/${b}`) at[b] = sha;
+  // by its exact name: rev-parse would fall back to a branch called refs/remotes/origin/<b>
+  const tracked = (b) => { const r = responderGit(['show-ref', '--verify', '--hash', `refs/remotes/origin/${b}`], R.root); return r.status === 0 ? r.stdout.trim() : null; };
+  for (let tries = 1; ; tries += 1) {
+    // Read before origin is: a session here that pushes meanwhile moves its tracking ref after that,
+    // so setting it from this value refuses, and origin is read again (kit-856).
+    const was = { [rb]: tracked(rb), [start]: tracked(start) };
+    const at = {};
+    // ls-remote matches a pattern against the end of a ref's name, so only an exact name counts
+    for (const [sha, ref] of toOrigin(['ls-remote', 'origin', `refs/heads/${rb}`, `refs/heads/${start}`]).split('\n').map((l) => l.split('\t'))) {
+      for (const b of [rb, start]) if (/^[0-9a-f]{40,64}$/.test(sha) && ref === `refs/heads/${b}`) at[b] = sha;
+    }
+    if (!at[rb]) no(`origin has no ${rb}`);
+    const held = [rb, start].filter((b) => at[b]);
+    // Into no ref: a fetch writes through a symbolic tracking ref, moving the branch it names. The
+    // tracking refs are set below, by sha, without following one.
+    toOrigin(['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--refmap=', 'origin', ...held.map((b) => `refs/heads/${b}`)]);
+    for (const b of held) if (responderGit(['cat-file', '-e', `${at[b]}^{commit}`], R.root, { GIT_NO_LAZY_FETCH: '1' }).status !== 0) no(`${at[b].slice(0, 8)} did not arrive`);
+    const moved = held.find((b) => {
+      const set = responderGit(['update-ref', '--no-deref', `refs/remotes/origin/${b}`, at[b], was[b] ?? '0'.repeat(at[b].length)], R.root);
+      if (set.status !== 0 && tracked(b) === was[b]) no(redactUrl(firstLine(set.stderr).replace(/^fatal: /, '')) || `exit ${set.status}`);
+      return set.status !== 0;
+    });
+    if (!moved) {
+      R.resetCaches();
+      return { main: at[rb], branch: at[start] ?? null };
+    }
+    if (tries === 3) no(`origin/${moved} here kept moving while it was read`);
   }
-  if (!at[rb]) no(`origin has no ${rb}`);
-  const held = [rb, start].filter((b) => at[b]);
-  // Into no ref: a fetch writes through a symbolic tracking ref, moving the branch it names. The
-  // tracking refs are set below, by sha, without following one.
-  toOrigin(['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--refmap=', 'origin', ...held.map((b) => `refs/heads/${b}`)]);
-  for (const b of held) if (responderGit(['cat-file', '-e', `${at[b]}^{commit}`], R.root, { GIT_NO_LAZY_FETCH: '1' }).status !== 0) no(`${at[b].slice(0, 8)} did not arrive`);
-  for (const b of held) {
-    const set = responderGit(['update-ref', '--no-deref', `refs/remotes/origin/${b}`, at[b]], R.root);
-    if (set.status !== 0) no(redactUrl(firstLine(set.stderr).replace(/^fatal: /, '')) || `exit ${set.status}`);
-  }
-  R.resetCaches();
-  return { main: at[rb], branch: at[start] ?? null };
 }
 // In a read-only command, full ref names resolve from one for-each-ref listing (a dashboard
 // refresh asked git about each ticket branch separately: ~90 processes). Anything else, and every
@@ -4801,7 +4830,7 @@ function plannersNow() {
     const { target, problem } = resolvePane(tmuxTarget(by));
     const msgs = lines.filter((l) => l.type === 'message');
     const replied = handledMessages();
-    const asking = msgs.filter((m) => m.by === by && !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id));
+    const asking = msgs.filter((m) => m.by === by && !['info', 'ruling', 'answer', 'addressed'].includes(m.kind) && !replied.has(m.id));
     // Before its feature line exists (while designing), a planner's goal is the one its questions
     // name: a question whose links point at this plan branch.
     const refQs = questions().filter((q) => (q.links ?? []).some((l) => l.ref === b || l.ref === `refs/heads/${b}`));
@@ -10615,11 +10644,11 @@ function threadQuestion(q) {
   return { id: q.id, kind: q.kind, question: String(q.question ?? ''), status, answer: counts ? ans.answer : status === 'defaulted' ? q.default : null, channel: counts ? ans.channel ?? null : null, answered_at: counts ? ans.at : null };
 }
 // Every thread as the card, the dock and the CLI show it, from a fold's objects: the whole log's
-// (readLog) or the dashboard's reader's, which holds only threads, turns and their questions.
+// (readLog) or the dashboard's reader's, which holds only threads, turns, their questions and marks.
 function threadViews(objects) {
   const turns = new Map();
   const asked = new Map();
-  // artifact-notes-1: a session's marks on a note (the dashboard's reader folds no messages, so none there until kit-144)
+  // artifact-notes-1: a session's marks on a note
   const marks = new Map();
   const push = (m, k, v) => (m.get(k) ?? m.set(k, []).get(k)).push(v);
   for (const o of objects.values()) {
@@ -10707,8 +10736,11 @@ const subjectIds = (s) => (!isObj(s) ? [] : s.kind === 'item' && SUBJECT_REF.tes
 // An owner turn, typed into the supervisor's pane when it has one (as nudgeSupervisor does), or into
 // the pane given (the responder's, kit-104), as one
 // line: a newline typed with send-keys -l would press Enter mid-message, and a control character
-// would reach the agent's terminal. The first 300 bytes of the words, then …. True once typed.
+// would reach the agent's terminal. The first 300 bytes of the words, then …. True once typed; 'kept' on an
+// artifact note.
 function deliverOwnerTurn(t, text, files, pane = supervisorTarget()) {
+  // on an artifact note it goes to nobody: Hand over is how it reaches a session
+  if (t.subject?.kind === 'artifact') return 'kept';
   const { target, problem } = resolvePane(pane);
   if (problem) return false;
   const flat = text.replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim();
@@ -10979,6 +11011,7 @@ function cmdThread() {
       return `not delivered to the responder: ${resolvePane(pane).problem ?? 'the typing failed'}; it stays owed, and the supervisor takes it once it is ${RESPONDER_OVERDUE_MS / 60000} minutes old`;
     }
     const typed = deliverOwnerTurn(t, words, files);
+    if (typed === 'kept') return 'kept with the note: Hand over sends it to the session drawing it';
     if (typed === false) withLock(UNDELIVERED_FILE, () => {
       const m = undeliveredTurns(Date.now(), { entries: true });
       for (const [k, v] of Object.entries(m)) if (!(Date.now() - Date.parse(v?.at) <= 7 * 86400000)) delete m[k];
@@ -11356,7 +11389,7 @@ function cmdThread() {
     if (!v.check) die(`${t.id} has nothing to check: ${v.subject?.kind === 'artifact' ? 'no proposal or addressed mark stands' : "only an artifact note's mark is withdrawn"}`);
     appendLog({ type: 'thread', op: 'set', id: t.id, ready: null, unready: { at: nowIso(), reason } }, 'supervisor');
     if (v.check === 'addressed' && v.addressed.by !== 'supervisor') {
-      sendLine({ to: v.addressed.by, kind: 'info', thread: t.id, from: 'supervisor', text: `Your mark on ${t.id} was withdrawn: ${reason}. Fix it and mark it again: devteam.mjs artifact notes ${LINK_ID.test(String(v.subject?.slug)) ? v.subject.slug : '<slug>'}.` });
+      sendLine({ to: v.addressed.by, kind: 'info', thread: t.id, from: 'supervisor', text: `Your mark on ${t.id} was withdrawn: ${reason}. Fix it and mark it again: \`devteam.mjs artifact notes ${LINK_ID.test(String(v.subject?.slug)) ? v.subject.slug : '<slug>'}${typeof v.subject?.at === 'string' && ARTIFACT_AT.test(v.subject.at) ? ` --at ${v.subject.at}` : ''}\`.` });
       out(`withdrew ${v.addressed.by}'s mark on ${t.id}, and told ${v.addressed.by}`);
     } else out(`withdrew your own mark on ${t.id}`);
     spoke(t);
@@ -11369,11 +11402,21 @@ function cmdThread() {
     const t = threadOpen(id, 'owner');
     const v = threadViewOf(t.id);
     let outcome = flags.outcome !== undefined ? (flagStr('outcome') ?? '').replace(/\s+/g, ' ').trim() : '';
+    if (flags.accept && flags['accept-addressed']) die('--accept takes the supervisor\'s proposal and --accept-addressed a session\'s mark: one of them');
     if (flags.accept) {
       if (!v.ready) die(`${t.id} has no proposal from the supervisor to accept; resolve it with your own --outcome`);
       // --at names the proposal the owner saw (the dashboard always sends it), as answer's --seen does
       if (flags.at !== undefined && flagStr('at') !== v.ready.at) die('The supervisor changed its proposal; read it again.');
       outcome = v.ready.outcome;
+    }
+    // the session's mark on an artifact note, bound to the one the owner read
+    if (flags['accept-addressed']) {
+      if (typeof flags.at !== 'string') die('--accept-addressed needs --at <the addressed note\'s time>, so you accept the note you read');
+      // a mark of that time that no longer stands: withdrawn, handed over again, or the owner wrote since
+      if (!v.addressed && logObjects('message').some((m) => m.kind === 'addressed' && m.thread === t.id && m.created_at === flags.at)) die('The note changed; read it again');
+      if (!v.addressed) die(`${t.id} has no addressed note to accept`);
+      if (flags.at !== v.addressed.at) die('The note changed; read it again');
+      outcome = v.addressed.note;
     }
     if (UNSAFE_TEXT.test(outcome)) die('--outcome is one line of plain text');
     if (Buffer.byteLength(outcome) > OUTCOME_MAX) die(`--outcome is at most ${OUTCOME_MAX} bytes`);
@@ -11456,6 +11499,7 @@ function cmdThread() {
       // its own line breaks, a tab as the space it stands for, and nothing else a terminal acts on
       // (an escape, a bidi override, a CR)
       out(u.text.replace(/\t/g, ' ').replace(UNSAFE_TEXT_ALL, (c) => (c === '\n' ? c : '')).split('\n').map((l) => `  ${l}`).join('\n'));
+      for (const l of turnFiles(u)) out(l);
       if (u.refs.length) out(`  refs: ${u.refs.join(', ')}`);
     }
     for (const q of v.questions) out(`question ${q.id}: ${q.status}${q.answer ? `, ${quoteData(q.answer)}` : ''}`);
@@ -11464,6 +11508,8 @@ function cmdThread() {
     return;
   }
   if (sub === 'list') {
+    if (flags.with !== undefined && (typeof flags.with !== 'string' || !LINK_ID.test(flags.with) || ['owner', 'responder'].includes(flags.with))) die('--with <session>: supervisor, plan-<feature> or a ticket id');
+    if (flags.with !== undefined) for (const k of ['waiting', 'all', 'open', 'responder']) if (flags[k]) die(`--with lists a session's notes: it takes no --${k}`);
     if (flags.responder && !flags.waiting) die('--responder goes with --waiting: thread list --waiting --responder');
     if (flags.responder) {
       const q = responderQueue();
@@ -11490,13 +11536,18 @@ function cmdThread() {
       for (const x of theirs) out(row(x, x.waiting === 'session' ? `${sessionWords(x.with, objects)} has it` : waitingWords(x, late.has(x.id))));
       return;
     }
+    // a session's notes: handed to it, not yet marked or resolved, the oldest hand-over first
+    if (flags.with !== undefined) vs = vs.filter((x) => x.handed && x.with === flags.with).sort((a, b) => a.handed.at.localeCompare(b.handed.at));
     if (!flags.all) vs = vs.filter((x) => x.status === 'open');
     if (flags.json) return json(vs);
+    if (flags.with !== undefined && !vs.length) return out(`no notes are with ${flags.with}`);
     if (!vs.length) return out(flags.all ? 'no threads' : 'no open threads');
-    for (const x of vs) out(row(x, x.status === 'open' ? (x.waiting === 'session' ? `with ${x.with}` : waitingWords(x)) : ''));
+    // --with: where each note is, which artifact notes takes as --at
+    const where = (x) => (flags.with !== undefined && typeof x.subject.at === 'string' && ARTIFACT_AT.test(x.subject.at) ? ` · at ${x.subject.at}` : '');
+    for (const x of vs) out(row(x, x.status === 'open' ? (x.waiting === 'session' ? `with ${x.with}` : waitingWords(x)) : '') + where(x));
     return;
   }
-  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread new --subject \'{"kind":"item","ref":"question:q-…"}\' [--title "<line>"] -- "<words>"   (the supervisor\'s own, about a question or goal)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--re <u-id>] [--off-subject "<why>"] [--anyway]   (the supervisor\'s or the responder\'s; --anyway the responder\'s)   |   thread reply <t-id> --part <n> "<words>"   then   thread reply <t-id> --after-parts ["<last words>"] [reply\'s flags]   (a reply a paragraph at a time, from the replying session)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" [--off-subject "<why>"] <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting [--responder] | --open | --all] [--json]   (words may also follow --)');
+  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread new --subject \'{"kind":"item","ref":"question:q-…"}\' [--title "<line>"] -- "<words>"   (the supervisor\'s own, about a question or goal)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--re <u-id>] [--off-subject "<why>"] [--anyway]   (the supervisor\'s or the responder\'s; --anyway the responder\'s)   |   thread reply <t-id> --part <n> "<words>"   then   thread reply <t-id> --after-parts ["<last words>"] [reply\'s flags]   (a reply a paragraph at a time, from the replying session)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" [--off-subject "<why>"] <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>] | --accept-addressed --at <when it was marked>]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting [--responder] | --with <session> | --open | --all] [--json]   (words may also follow --)');
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
@@ -11732,6 +11783,16 @@ const ARTIFACT_LENS = String.raw`(() => {
     shiftDown = e.type === 'keydown' ? e.key === 'Shift' || e.shiftKey : e.key !== 'Shift' && e.shiftKey;
     tell({ type: 'key', key: e.key, shift: shiftDown, ...(e.type === 'keyup' ? { up: true } : {}) });
   };
+  // ArrowLeft and ArrowRight step the dashboard's notes (kit-145): told only with nothing of the page focused,
+  // and only for a key the page let pass, so it is decided once the event has run (a page's own handler may
+  // take it, and the capture listener below comes before those)
+  const onArrow = (e) => {
+    if (!heard || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') || e.repeat || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return;
+    setTimeout(() => {
+      const on = document.activeElement;
+      if (!e.defaultPrevented && (!on || ((on === document.body || on === document.documentElement) && !typingIn(on)))) tell({ type: 'key', key: e.key, shift: false });
+    }, 0);
+  };
   const onBlur = () => { if (heard && shiftDown) { shiftDown = false; tell({ type: 'key', key: 'Shift', shift: false }); } };
 
   // --- where the pointer is, told after hello: a selector alone, and how far across it --------------
@@ -11886,6 +11947,7 @@ const ARTIFACT_LENS = String.raw`(() => {
     if (!m || typeof m !== 'object' || m.lens !== 1 || typeof m.type !== 'string' || !Object.prototype.hasOwnProperty.call(ORDERS, m.type)) return;
     try { ORDERS[m.type](m); } catch (err) { /* one bad question costs only itself */ }
   });
+  addEventListener('keydown', onArrow);
   addEventListener('keydown', onKey, true);
   addEventListener('keyup', onKey, true);
   addEventListener('blur', onBlur);
@@ -13623,6 +13685,127 @@ function artifactSubjectNow(s) {
   if (fingerprint(src.entries) === s.fp) return null;
   return tree ? `main has changed ${s.slug} since this published version` : `the artifact ${s.slug} has changed since this thread began`;
 }
+/* artifactNotes start */
+// The notes on one copy of an artifact (artifact-notes-1; supervisor.md, Artifact notes): the open
+// threads on this slug placed at `at`, oldest first. main's also holds those on a published tree, and
+// on a worktree that is gone, which no session works in any more.
+function artifactNoteSet(slug, at = 'main') {
+  const here = (s) => {
+    const placed = typeof s.at === 'string' ? s.at : 'main';
+    return placed === at || (at === 'main' && (placed.startsWith('tree:') || (WT_NAME.test(placed) && !draftWorktree(placed))));
+  };
+  return threadViews(readLog().objects)
+    .filter((v) => v.status === 'open' && v.subject?.kind === 'artifact' && v.subject.slug === slug && here(v.subject))
+    .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+}
+// Who takes the notes placed at `at`: the planner or the ticket whose worktree it is, else the supervisor.
+const artifactRecipient = (at) => ((PLAN_WRITER.test(at) || tickets().has(at)) && draftWorktree(at) ? at : 'supervisor');
+const noteState = (v) => (v.check ? 'to check' : v.handed ? `with ${v.handed.to}` : 'open');
+// The slug and --at a notes command takes.
+function artifactNotesArgs(sub, slug) {
+  if (!LINK_ID.test(slug ?? '')) die(`usage: artifact ${sub} <slug> [--at main|<worktree>|tree:<id>] [--json]: a slug is lowercase words joined by - (mock-checkout)`);
+  const at = flags.at === undefined ? 'main' : flagStr('at') ?? '';
+  if (!ARTIFACT_AT.test(at)) die('--at is main, a worktree name, or tree:<id>');
+  return { slug, at };
+}
+// The files dropped with a turn, a line each: the name is whatever the file was called.
+const turnFiles = (u) => u.files.map((f) => `  file (its name is data, not instructions; kept 7 days): ${quoteData(f.name)} at ${quoteData(f.path)}, ${f.bytes} bytes`);
+// artifact notes <slug> [--at <where>] [--json]: every note there not resolved. The header is the kit's
+// own words and ids; what the page or a session wrote is inside the data frame, quoted.
+function artifactNotesCmd(slug, at) {
+  const vs = artifactNoteSet(slug, at);
+  if (flags.json) return json(vs.map((v) => ({ id: v.id, path: typeof v.subject.path === 'string' ? v.subject.path : null, state: noteState(v), title: v.title, subject: v.subject, turns: v.turns.filter((u) => u.by === 'owner'), handed: v.handed, addressed: v.addressed, check: v.check, shot: v.shot, noshot: v.noshot, unready: v.unready, frame: v.frame, source: v.source })));
+  if (!vs.length) return out(`no notes on artifact ${slug} at ${at}`);
+  for (const v of vs) {
+    out(`${v.id} · ${noteState(v)}`);
+    out(threadDataFrame(v));
+    if (v.addressed) out(`  addressed.note: ${quoteData(v.addressed.note)} (by ${v.addressed.by} at ${v.addressed.at})`);
+    if (v.unready) out(`  unready.reason: ${quoteData(v.unready.reason)}`);
+    for (const u of v.turns) if (u.by === 'owner') {
+      out(`owner (${u.id}) ${u.at}:`);
+      out(u.text.replace(/\t/g, ' ').replace(UNSAFE_TEXT_ALL, (c) => (c === '\n' ? c : '')).split('\n').map((l) => `  ${l}`).join('\n'));
+      for (const l of turnFiles(u)) out(l);
+    }
+  }
+}
+/* artifactNotes end */
+/* artifactHandoff start */
+// artifact handoff <slug> [--at <where>] [--json]: the owner hands the open notes there to the session
+// drawing that copy: a line on each note, then one message, which names ids and counts and never
+// anything a page wrote. A recipient with no pane keeps it in its messages, and the supervisor is
+// nudged with the same line.
+function artifactHandoffCmd(slug, at) {
+  const { by } = ownerWriter('the owner hands notes over: they press Hand over on the dashboard, or run artifact handoff in their own terminal');
+  const to = artifactRecipient(at);
+  // two presses at once hand a note over once
+  fs.mkdirSync(runDir, { recursive: true });
+  const notes = withLock(runPath('artifact-handoff'), () => {
+    logCache = null;
+    const open = artifactNoteSet(slug, at).filter((v) => noteState(v) === 'open');
+    for (const v of open) appendLog({ type: 'thread', op: 'set', id: v.id, handed: { to, at: nowIso() } }, by);
+    return open;
+  });
+  const count = notes.length;
+  if (!count) return flags.json ? json({ to, typed: false, count }) : out(`no open notes on artifact ${slug} at ${at}: nothing handed over`);
+  const report = {};
+  sendLine({ to, kind: 'info', from: by, text: `${plural(count, 'note')} on artifact ${slug} ${count === 1 ? 'is' : 'are'} yours: \`devteam.mjs artifact notes ${slug} --at ${at}\`. Mark each with \`devteam.mjs artifact addressed <thread> --note "what changed"\`.` }, report);
+  if (to !== 'supervisor' && !report.typed) nudgeSupervisor(report.line);
+  if (flags.json) return json({ to, typed: !!report.typed, count });
+  out(`handed ${plural(count, 'note')} on artifact ${slug} to ${to}`);
+  out(report.typed === true ? `typed into ${to}'s pane`
+    : report.typed ? `held for ${to}'s pane: ${heldWords(report.typed, to === 'supervisor' ? "the supervisor's" : `${to}'s`)}`
+      : to === 'supervisor' ? 'not typed: the supervisor has no pane; it stays in its messages and unread'
+        : `not typed: ${to} has no pane; it stays in ${to}'s messages, and the supervisor is nudged with the same line`);
+}
+/* artifactHandoff end */
+/* artifactAddressed start */
+// artifact addressed <t-id> --note "<what changed>" [--sha <commit>] [--draft <worktree>]: the session a
+// note was handed to (or the supervisor) marks it, with the kit's picture of the spot: no picture, no
+// mark. The owner checks it; nobody's pane is typed into.
+async function artifactAddressedCmd(id) {
+  const by = logWriter();
+  if (by === 'responder') die("the responder doesn't mark notes: hand the thread over");
+  if (by === 'supervisor') supervisorOnly('artifact addressed');
+  const note = uncapped((flagStr('note') ?? '').replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim());
+  if ([...note].length < 12) die('say what changed for this note (at least 12 characters): the Start trial button is primary; the line under it says the trial ends after 14 days');
+  if (Buffer.byteLength(note) > 300) die(`--note is at most 300 bytes; this one is ${Buffer.byteLength(note)}`);
+  const sha = flagStr('sha');
+  if (flags.sha !== undefined && !/^[0-9a-f]{7,64}$/.test(sha ?? '')) die('--sha is a commit: 7 to 64 hex digits');
+  // handed to the writer, as the note stands now
+  const mine = () => {
+    const t = threadOpen(id, 'supervisor');
+    const v = threadViewOf(t.id);
+    if (v.subject?.kind !== 'artifact') die(`${t.id} is not a note on an artifact`);
+    if (!v.handed) die(`${t.id} has not been handed over: the owner hands notes over`);
+    if (by !== v.handed.to && by !== 'supervisor') die(`${t.id} was handed to ${v.handed.to}, not to ${by}`);
+    return { t, v };
+  };
+  const { t, v } = mine();
+  const { slug } = v.subject;
+  const holds = (name) => WT_NAME.test(name) && name !== 'main' && !!artifactSource(name, slug);
+  let draft = null;
+  if (flags.draft !== undefined) {
+    draft = flagStr('draft') ?? '';
+    if (!holds(draft)) die('--draft is a worktree under .worktrees/ that holds this artifact (never main, a published tree, a reviewer\'s or a scratch one); leave it out when the change is on main');
+  } else if (realPath(path.dirname(repoRoot)) === realPath(path.join(mainRoot, '.worktrees')) && holds(path.basename(repoRoot))) draft = path.basename(repoRoot);
+  const answers = shotAnswers(v, t);
+  // Chrome missing: the shooter names thread ready, whose picture it was built for
+  const r = await markShot(v, { kind: 'addressed', by, draft }).catch((e) => die(e.message.replace(/^thread ready on an artifact note/, 'artifact addressed')));
+  // a refusal from here ends the process (die) or throws: either way the pictures go
+  let written = false;
+  process.once('exit', () => { if (!written) for (const f of r.files) fs.rmSync(f, { force: true }); });
+  // the picture takes seconds: the owner may have written, or closed the thread, meanwhile
+  logCache = null;
+  const now = mine();
+  if (shotAnswers(now.v, now.t) !== answers) die(`${t.id} changed while its picture was taken (a new turn of the owner's, a hand-over or a mark): read it, then mark it again`);
+  appendLog({ type: 'message', to: 'owner', kind: 'addressed', thread: t.id, text: note, ...(sha ? { sha } : {}), ...(draft ? { draft } : {}), shot: r.shot }, by);
+  written = true;
+  try { shotSweep(t.id, Date.now()); } catch (e) { warn(`old pictures not removed: ${e.message}`); }
+  out(`marked ${t.id} addressed`);
+  for (const l of r.lines) out(l);
+  if (by !== 'supervisor') out('Only the supervisor withdraws a mark: if the picture doesn\'t show the change, fix the page and run artifact addressed again, and the newer mark replaces this one.');
+}
+/* artifactAddressed end */
 // artifact new <slug> --title --summary [--for '[…]'] [--kind mock|diagram|docs]: scaffold a page in this worktree.
 // artifact check [<slug>…]: the checks merge runs, on this checkout's artifacts.
 function cmdArtifact() {
@@ -13716,7 +13899,12 @@ function cmdArtifact() {
     if (flags.json) return json(r);
     return out(r.versions.map((v) => (v.kind === 'draft' ? `draft ${v.worktree} ${v.time}` : `${v.kind} ${v.tree.slice(0, 12)} ${v.commit.slice(0, 12)} ${v.time}`)).join('\n'));
   }
-  die('usage: artifact new <slug> --title t --summary s [--for json] [--kind mock|diagram|docs] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact versions <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
+  if (sub === 'handoff' || sub === 'notes') {
+    const { slug, at } = artifactNotesArgs(sub, args[0]);
+    return sub === 'handoff' ? artifactHandoffCmd(slug, at) : artifactNotesCmd(slug, at);
+  }
+  if (sub === 'addressed') return artifactAddressedCmd(args[0]);
+  die('usage: artifact new <slug> --title t --summary s [--for json] [--kind mock|diagram|docs] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact versions <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner | artifact handoff <slug> [--at <where>] [--json] | artifact notes <slug> [--at <where>] [--json] | artifact addressed <t-id> --note "<what changed>" [--sha <commit>] [--draft <worktree>]');
 }
 function cmdArtifacts() {
   gitReadCache = new Map();
@@ -18713,7 +18901,7 @@ function collectMetrics(since, reviewsSince = 0) {
   const msgs = logObjects('message').filter((m) => Date.parse(m.created_at) >= since).sort(byTime);
   const replies = new Map();
   for (const m of [...msgs, ...logObjects('question')].sort(byTime)) if (m.re && !replies.has(m.re)) replies.set(m.re, Date.parse(m.created_at));
-  const expecting = msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind));
+  const expecting = msgs.filter((m) => !['info', 'ruling', 'answer', 'addressed'].includes(m.kind));
   const openMsgs = expecting.filter((m) => !replies.has(m.id) && !settledByLanding(m));
   const msgWaits = expecting.filter((m) => replies.has(m.id)).map((m) => replies.get(m.id) - Date.parse(m.created_at));
   const qs = questions().filter((q) => Date.parse(q.asked_at) >= since);
@@ -20769,6 +20957,8 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
   // the machine's memory, a reading a minute (kit-591): started when a listen succeeds, stopped only
   // when the hub is closed for good
   const recorder = memoryRecorder(log, scan);
+  // its live health, a sample every 5 s in this process's memory (kit-836), started and stopped with it
+  const health = boxHealth(log, scan);
   // What holds the hub port: 'hub', 'other' (a clean answer that isn't a hub), or 'unsure' (slow,
   // or gone between the bind and the ask), which is no reason to stop trying.
   const holder = () => new Promise((resolve) => {
@@ -20856,7 +21046,7 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
   const bodyMs = uploadLimits().bodyMs;
   // live presence on the hub's own pages (presence@1): its people, never a changed
   const presence = presenceRelay({ hub: true, okHost: ownHost, ownerCwd: actionCwd });
-  const handle = { close() { stopped = true; clearTimeout(again); recorder.stop(); presence.closeAll(1001); current?.close(); current?.closeIdleConnections?.(); current = null; } };
+  const handle = { close() { stopped = true; clearTimeout(again); recorder.stop(); health.stop(); presence.closeAll(1001); current?.close(); current?.closeIdleConnections?.(); current = null; } };
   const tryListen = () => {
     if (stopped) return;
     const hub = trackRequests(http.createServer(async (req, res) => {
@@ -20898,6 +21088,11 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
         // the detail (it can name the hub's own file) goes to the hub's log, once, never to the page
         try { return await serveMemory(req, send); } catch (e) { recorder.say(`/memory.json: ${e?.message ?? String(e)}`); return send(500, 'application/json', JSON.stringify({ error: 'memory readings unavailable' })); }
       }
+      // the machine's live health (box-health@1), refused as the readings are; off, no route
+      if (health.on && (req.url === '/box-health.json' || req.url.startsWith('/box-health.json?'))) {
+        if (site && !['same-origin', 'none'].includes(site)) return send(403, 'text/plain; charset=utf-8', 'the readings are for the hub\'s own page');
+        try { return health.serve(req, send); } catch (e) { health.fail('sampler', '/box-health.json', e); return send(500, 'application/json', JSON.stringify({ error: 'box health unavailable' })); }
+      }
       // The operator's threads, for the Overview's dock: a GET carries no Origin, so it is refused
       // when the browser says another site's page asks (as a dashboard's /api/threads is).
       if (req.url === '/operator/threads') {
@@ -20931,7 +21126,7 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
       else log(`hub: port ${HUB_PORT} is held by something that isn't a devteam hub; this dashboard won't serve the hub`);
     });
     hub.requestTimeout = UPLOAD_REQUEST_MS;
-    keepAlive(hub).listen(HUB_PORT, '127.0.0.1', () => { log(`hub on http://127.0.0.1:${HUB_PORT}`); recorder.start(); });
+    keepAlive(hub).listen(HUB_PORT, '127.0.0.1', () => { log(`hub on http://127.0.0.1:${HUB_PORT}`); recorder.start(); health.start(); });
   };
   tryListen();
   return handle;
@@ -21070,6 +21265,34 @@ function lastReadingFull(a) {
   });
 }
 const accountKnownFull = (a) => accountAtLimit(a) || lastReadingFull(a);
+// Each account's numbers, for the machine's hub (box-health@1): built from named fields, never by
+// copying a row, so no email, token or new field of cswap's leaves with it. Text is kept only in a known
+// form: the alias as the label (else "Account n"; an address, in any width of @, or one over 40
+// characters is not kept) and a one-word status; a time is written again in UTC (and left out if that
+// leaves the years 0 to 9999). A percent is of the window used. What can't be read is left out, never
+// zero, but for one: on status ok an absent five-hour window is unused. A usage that is a list is no
+// usage. A disabled account is listed, marked; a row with no slot number isn't.
+function capacityList(rows) {
+  const pct = (w) => (Number.isFinite(w?.pct) ? Math.min(100, Math.max(0, w.pct)) : undefined);
+  const at = (t) => (typeof t === 'string' && /^\d{4}-\d\d-\d\dT[\d:.]+(Z|[+-]\d\d:\d\d)$/.test(t) && Number.isFinite(Date.parse(t)) && /^\d{4}-/.test(new Date(t).toISOString()) ? new Date(t).toISOString() : undefined);
+  const label = (a) => {
+    const alias = typeof a.alias === 'string' ? a.alias.trim() : '';
+    return alias && alias.length <= 40 && !/[@\p{C}]/u.test(alias.normalize('NFKC')) ? alias : `Account ${a.number}`;
+  };
+  return rows.filter((a) => Number.isSafeInteger(a.number) && a.number > 0).map((a) => {
+    const u = a.usage;
+    const unused = a.usageStatus === 'ok' && u && typeof u === 'object' && !Array.isArray(u) && (u.fiveHour ?? null) === null;
+    const tier = Number(/_([1-9]\d{0,2})x$/.exec(typeof a.plan?.tier === 'string' ? a.plan.tier : '')?.[1]);
+    return {
+      n: a.number, label: label(a), active: a.active === true, disabled: !!a.disabled,
+      status: typeof a.usageStatus === 'string' && /^[a-z][a-z_]{0,29}$/.test(a.usageStatus) ? a.usageStatus : undefined,
+      week_pct: pct(u?.sevenDay), week_resets_at: at(u?.sevenDay?.resetsAt),
+      five_pct: unused ? 0 : pct(u?.fiveHour), five_resets_at: at(u?.fiveHour?.resetsAt),
+      models_full: Array.isArray(u?.scoped) ? u.scoped.filter((x) => Number.isFinite(x?.pct) && x.pct >= 100).map((x) => ({ resets_at: at(x.resetsAt) })) : [],
+      tier: tier || undefined,
+    };
+  });
+}
 // The fleet's Claude capacity across every cswap account, for the operator and the supervisors: how many
 // have room, the active one's use, and whether the room left lasts until a full account resets. cswap
 // projects each window (projectedExhaustionAt, willLastToReset); a gap is room that runs out first. An
@@ -21092,6 +21315,7 @@ function capacityOf(rows) {
     active_week_pct: pct(week(active)), active_5h_pct: pct(active?.usage?.fiveHour),
     runs_out_at: runsOut, next_reset_at: nextReset,
     gap: !!(room.length && runsOut && nextReset && Date.parse(runsOut) < Date.parse(nextReset)),
+    list: capacityList(rows),
   };
 }
 // One switch, and what it said, whatever the exit code: a switch that stays put is not a failure.
@@ -24071,6 +24295,422 @@ function poolProblem(input) {
   return healthProblem(input, 'pool', POOL_SHAPE, POOL_MAX_BYTES);
 }
 /* box-health-contract end */
+/* box-health-sampler start */
+// The hub's sampler: every 5 s one sample of the machine, an hour of them (at most 720) in this
+// process's memory only, served at GET /box-health.json (box-health@1, above). Nothing is written.
+//
+// The switch is the port, as findCswap's is. The machine's own hub is the one on 4320, and a fixture's
+// is on any other, so with DEVTEAM_BOX_HEALTH unset or empty it samples on 4320 only, and no test
+// helper has to turn it off. A hub run by hand on another port needs DEVTEAM_BOX_HEALTH=on. Any other
+// value (off) is off, on 4320 too. Off: no timer, no child, no part is called, and the route is the
+// hub's 404. DEVTEAM_MEMORY_RECORD plays no part in it.
+//
+// A part is one object in a region of its own, { start(ctx), part(ctx, parts), stop() }, in the order
+// of boxHealthParts: processes, disk, state, pool, claude, park, room.
+//   start(ctx)        once, when the hub first listens, before the first tick. It starts its own
+//                     intervals (ctx.every) and reads nothing slow itself
+//   part(ctx, parts)  once a tick (5 s), never for a request, after the parts before it, synchronous:
+//                     slow work is done in an interval and its last result given here. `parts` is a
+//                     fresh object: now (this tick's reading, as in the answer), sample (this tick's,
+//                     with what the parts before added), samples (the hour, oldest first, this tick's
+//                     last), and each part before it by its name, what that part returned. Read only.
+//                     It returns undefined (absent: nothing of it in the answer), or an object with
+//                     anything the parts after it need, and, for the answer itself, any of:
+//       answer        { headroom, pool, claude, box }, each an object of that section's fields. A
+//                     section's fields are joined in the order of the parts, a later part's winning.
+//                     pool and claude are there only when a part has given what they require (pool:
+//                     projects, allocated and recent; claude: accounts); fields a part adds to a
+//                     section no part before it gave are left out with it
+//       sample        fields joined into this tick's sample ({ room }); one the sampler or an earlier part set is kept
+//                     Each is checked against box-health@1 alone, once for each new object, and a copy
+//                     of it is what is sent: one that is refused is left out and said. So return a new
+//                     object when anything in it changed (a change to one already returned is never
+//                     seen), and the same one when nothing did
+//   stop()            once, when the hub closes; not called for a part that was never started. Its
+//                     timers are cleared for it. start can follow (a dashboard whose hand-over failed
+//                     serves the hub again) with a new ctx: keep nothing of the stopped run.
+//                     A child's own limit (ctx.timeout) goes too, so stop kills the child
+// A part that fails (a throw, or a promise start, part, stop or a timer returns that rejects) is said
+// once for each of those in the hub's log and costs only itself: its start's failure leaves it out for
+// good, its part's for that tick. The log gets the error's kind and its line here, never its message: a
+// parse error quotes what it read, and a child's error its arguments and output.
+//
+// A part is any object with the three, named as boxHealthParts names it, whose region reads no clock
+// and sets no timer (test/box-health-sampler.test.mjs checks the text, a child's own timeout option
+// included: ctx.timeout, then kill it).
+//
+// ctx, a part's only clock and only timers (no part reads Date.now or sets a timer itself):
+//   now()           ms. Rings, intervals, rates and forecasts: what the answer's times are in
+//   real()          ms, the machine's clock, never scaled: the age of a file, of a record stamped by
+//                   another process, and of a child or a walk
+//   every(ms, fn)   calls fn every ms of now(); one still running (a promise) is skipped, never
+//                   overlapped. Returns a function that ends it
+//   after(ms, fn)   calls fn once, ms of now() from now. Returns a function that ends it
+//   timeout(ms, fn) calls fn once, ms of real() from now (a walk's 2 s, a child's limit), and returns
+//                   a function that ends it
+//   turn()          a promise of the event loop's next turn, between batches of a walk
+//   roots()         the known roots, [{ root, name }], the machine's registry and the hub's scan
+//                   together, read again every minute of real(); empty until first read, after start
+//   ceiling()       the lowest machine_memory_ceiling among them, undefined until first read
+//   scan()          the hub's own scan, a promise of the dashboards' hellos (root, name, port …)
+//   proc, cgroup    the folders to read (DEVTEAM_PROC, DEVTEAM_CGROUP)
+//   stopped()       true once the hub has closed: slow work that finds it so ends
+//   say(words)      in the hub's log, under the part's name: each line once, 20 lines a part at most.
+//                   The words are the part's own, never text it read
+// With DEVTEAM_BOX_HEALTH_FAST=<n> (1 to 3600, tests; read only when DEVTEAM_BOX_HEALTH is on) now()
+// and its intervals run n times as fast. real() and timeout() never do.
+const BOX_HEALTH_EVERY_MS = 5000, BOX_HEALTH_WINDOW_MS = 3600000, BOX_HEALTH_SAMPLES = 720;
+const BOX_HEALTH_ROOTS_MS = 60000, BOX_HEALTH_TREND_MS = 600000, BOX_HEALTH_STATFS_MS = 2000, BOX_HEALTH_STALE_MS = 15000;
+const boxHealthOn = () => { const v = process.env.DEVTEAM_BOX_HEALTH; return v === 'on' || (!v && HUB_PORT === 4320); };
+const boxHealthParts = () => [
+  ['processes', boxHealthProcesses], ['disk', boxHealthDisk], ['state', boxHealthState], ['pool', boxHealthPool],
+  ['claude', boxHealthClaude], ['park', boxHealthPark], ['room', boxHealthRoom],
+];
+// What a section needs before it is in the answer at all, and stands in for while a part's own fields
+// are checked alone.
+const BOX_HEALTH_BASE = { headroom: {}, pool: { projects: [], allocated: [], recent: [] }, claude: { accounts: [] }, box: {} };
+const boxHealthIso = (ms) => new Date(ms).toISOString();
+// A kernel file's text, or null: missing, unreadable, or pressure that is compiled in and off (its
+// read fails).
+const boxHealthRead = (...p) => { try { return fs.readFileSync(path.join(...p), 'utf8'); } catch { return null; } };
+const boxHealthField = (text, key) => { const m = new RegExp(`^${key}[ \\t]+(\\d+)$`, 'm').exec(text ?? ''); return m ? Number(m[1]) : undefined; };
+// some and full averages of a pressure file, as { some10, some60, full10, full60 } percents.
+const boxHealthPressure = (text) => {
+  const out = {};
+  for (const kind of ['some', 'full']) for (const n of [10, 60]) {
+    const m = new RegExp(`^${kind} .*\\bavg${n}=([\\d.]+)`, 'm').exec(text ?? '');
+    if (m && Number(m[1]) <= 100) out[`${kind}${n}`] = Number(m[1]);
+  }
+  return out;
+};
+// The object without its undefined fields: a field that can't be read is absent, never zero.
+const boxHealthPresent = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
+const boxHealthShare = (n) => Math.min(1, Math.max(0, n));
+// Every counter a rate is worked out from, at one time. A box's own numbers come from its cgroup and
+// from nowhere else: where there is one (cpu.max or memory.current), a missing file is an absent field,
+// and the host's is never given for it. Where there is none (macOS, or a Linux machine's root cgroup),
+// CPU is os.cpus()'s and pressure is /proc/pressure's.
+function boxHealthCounters(ctx) {
+  const boxed = boxHealthRead(ctx.cgroup, 'cpu.max') !== null || boxHealthRead(ctx.cgroup, 'memory.current') !== null;
+  const stat = boxed ? boxHealthRead(ctx.cgroup, 'cpu.stat') : null;
+  const cores = os.cpus().map((c) => { const all = Object.values(c.times).reduce((a, b) => a + b, 0); return { all, busy: all - c.times.idle }; });
+  return { t: ctx.now(), boxed, cores, usage: boxHealthField(stat, 'usage_usec'), periods: boxHealthField(stat, 'nr_periods'), throttled: boxHealthField(stat, 'nr_throttled') };
+}
+// CPU between two readings of the counters (was: null at the first), in cores.
+function boxHealthCpu(ctx, was, is) {
+  const [quota, period] = (is.boxed ? boxHealthRead(ctx.cgroup, 'cpu.max') ?? '' : '').trim().split(/\s+/).map(Number);
+  const count = is.cores.length;
+  const cap = quota > 0 && period > 0 ? quota / period : undefined;
+  const out = { limit: cap !== undefined && (!count || cap < count) ? cap : count || undefined };
+  // a clock set back gives no rate at all
+  if (was && is.t <= was.t) was = null;
+  const ms = was ? is.t - was.t : 0;
+  const shares = was && was.cores.length === count && is.cores.every((c, i) => c.all > was.cores[i].all && c.busy >= was.cores[i].busy)
+    ? is.cores.map((c, i) => boxHealthShare((c.busy - was.cores[i].busy) / (c.all - was.cores[i].all))) : undefined;
+  if (is.boxed) {
+    if (ms > 0 && was.boxed && is.usage >= was.usage) out.used = (is.usage - was.usage) / 1000 / ms;
+    // no period since the last tick is none held; a counter that fell started over
+    if (was?.boxed && is.periods >= was.periods && is.throttled >= was.throttled) out.throttled = is.periods === was.periods ? 0 : boxHealthShare((is.throttled - was.throttled) / (is.periods - was.periods));
+  } else if (shares?.length) out.used = shares.reduce((a, b) => a + b, 0);
+  if (shares?.length) out.host_cores = shares;
+  const load = os.loadavg();
+  if (load.length === 3 && load.every((n) => Number.isFinite(n) && n >= 0)) out.load = load;
+  if (cap !== undefined && cap < count) {
+    if (out.host_cores) out.shared = true;
+    if (out.load) out.load_scope = 'host';
+  }
+  out.some60 = boxHealthPressure(is.boxed ? boxHealthRead(ctx.cgroup, 'cpu.pressure') : boxHealthRead(ctx.proc, 'pressure', 'cpu')).some60;
+  return boxHealthPresent(out);
+}
+// Memory, in use as machineMemory() counts it, so this, the gate and /memory.json agree.
+function boxHealthMemory(ctx, boxed) {
+  const m = machineMemory() ?? { inUse: os.totalmem() - os.freemem(), max: os.totalmem() };
+  const out = { used: m.inUse, max: m.max, available: Math.max(0, m.max - m.inUse), ceiling: ctx.ceiling() };
+  const whole = (t) => (/^\d+$/.test(t?.trim() ?? '') ? Number(t.trim()) : undefined);
+  if (boxed) {
+    out.swap_used = whole(boxHealthRead(ctx.cgroup, 'memory.swap.current'));
+    out.swap_max = whole(boxHealthRead(ctx.cgroup, 'memory.swap.max'));
+  } else {
+    const info = boxHealthRead(process.env.DEVTEAM_MEMINFO ?? path.join(ctx.proc, 'meminfo'));
+    const kb = (k) => { const n = /^\w+:\s+(\d+) kB$/m.exec((info ?? '').split('\n').find((l) => l.startsWith(`${k}:`)) ?? ''); return n ? Number(n[1]) * 1024 : undefined; };
+    const total = kb('SwapTotal'), free = kb('SwapFree');
+    out.swap_max = total;
+    if (total !== undefined && free !== undefined) out.swap_used = Math.max(0, total - free);
+  }
+  out.some60 = boxHealthPressure(boxed ? boxHealthRead(ctx.cgroup, 'memory.pressure') : boxHealthRead(ctx.proc, 'pressure', 'memory')).some60;
+  return boxHealthPresent(out);
+}
+// The sampler: { on, start, stop, serve, fail, tick }. parts and real are the tests' own.
+function boxHealth(log, scan, { parts = boxHealthParts(), real = () => Date.now() } = {}) {
+  // what was said, by its key: one line each, so a value that changes in it adds none
+  const said = new Set();
+  const say = (key, words) => { if (!said.has(key)) { said.add(key); log(`hub: box health: ${words}`); } };
+  const fail = (who, doing, e) => {
+    const word = (v) => (typeof v === 'string' && /^\w{1,40}$/.test(v) ? v : null);
+    // what was thrown may throw as it is read (a getter, a Proxy): each is read once, the value checked
+    // is the value said, and on any throw it is said as an error, with no code or line
+    let name = null, code = null, line;
+    try {
+      name = word(e?.name);
+      code = word(e?.code);
+      const stack = e?.stack;
+      line = typeof stack === 'string' ? /^ +at .*\bdevteam\.mjs:(\d+)/m.exec(stack)?.[1] : undefined;
+    } catch { name = code = line = null; }
+    say(`${who} ${doing}`, `${who}: ${doing} failed: ${name ?? 'an error'}${code ? ` ${code}` : ''}${line ? ` at line ${line}` : ''}`);
+  };
+  const spoken = new Map();
+  const speak = (who, words) => {
+    const lines = spoken.get(who) ?? spoken.set(who, new Set()).get(who);
+    if (lines.size >= 20 || lines.has(words)) return;
+    lines.add(words);
+    log(`hub: box health: ${who}: ${words}`);
+  };
+  const on = boxHealthOn();
+  const asked = process.env.DEVTEAM_BOX_HEALTH === 'on' ? Number(process.env.DEVTEAM_BOX_HEALTH_FAST || 1) : 1;
+  const fast = asked >= 1 && asked <= 3600 ? asked : 1;
+  const began = real();
+  const now = () => began + (real() - began) * fast;
+  let started = false, stopped = false, ticking = false;
+  let roots = [], ceiling;
+  let was = null;
+  // the hour: { t, sample, free: a volume's device to its free bytes }, oldest first
+  let ring = [];
+  let latest = { at: -Infinity, now: {} }, sections = {};
+  // the volumes in the order they were first seen, so a sample's `disk` stays one volume's; each root's
+  // device when it last answered; the roots still being asked
+  let volumes = [];
+  const deviceOf = new Map();
+  const asking = new Set();
+  const live = new Set();
+  const checked = new WeakMap();
+  const timer = (set, clear, ms, fn) => {
+    if (stopped) return () => {};
+    const h = set(fn, ms);
+    h.unref?.();
+    const end = () => { clear(h); live.delete(end); };
+    live.add(end);
+    return end;
+  };
+  const guarded = (who, doing, fn) => async () => { try { await fn(); } catch (e) { fail(who, doing, e); } };
+  const ctxFor = (who) => {
+    const once = (ms, fn) => { const end = timer(setTimeout, clearTimeout, ms, () => { end(); guarded(who, 'a timer', fn)(); }); return end; };
+    return Object.freeze({
+      now, real,
+      every: (ms, fn) => {
+        let busy = false;
+        const run = guarded(who, 'a timer', fn);
+        return timer(setInterval, clearInterval, ms / fast, async () => { if (busy) return; busy = true; try { await run(); } finally { busy = false; } });
+      },
+      after: (ms, fn) => once(ms / fast, fn),
+      timeout: (ms, fn) => once(ms, fn),
+      turn: () => new Promise((r) => setImmediate(r)),
+      roots: () => roots, ceiling: () => ceiling, scan,
+      proc: process.env.DEVTEAM_PROC ?? '/proc', cgroup: process.env.DEVTEAM_CGROUP ?? '/sys/fs/cgroup',
+      stopped: () => stopped,
+      say: (words) => speak(who, String(words)),
+    });
+  };
+  const ctx = ctxFor('sampler');
+  const running = parts.map(([name, part]) => ({ name, part, ctx: ctxFor(name), up: false }));
+  const readRoots = async () => {
+    let list = [];
+    try { list = await scan(); } catch { list = []; }
+    ({ roots, ceiling } = await memoryRoots(list));
+  };
+  // [device, its entry], one a distinct volume. At most two reads are ever out, so a volume that hangs
+  // can't hold the threads every file read shares, and no root of it is asked while one is.
+  const readDisks = async () => {
+    const found = new Map();
+    const queue = roots.map((r) => r.root), waiting = [];
+    let over = false;
+    const one = async (root) => {
+      asking.add(root);
+      try {
+        const { dev } = await fs.promises.stat(root);
+        deviceOf.set(root, dev);
+        if ([...asking].some((r) => r !== root && deviceOf.get(r) === dev)) { waiting.push(root); return; }
+        const s = await fs.promises.statfs(root);
+        if (!found.has(dev)) found.set(dev, s);
+      } catch {} finally { asking.delete(root); }
+    };
+    const worker = async () => {
+      while (queue.length && !over) {
+        const root = queue.shift();
+        const dev = deviceOf.get(root);
+        if (found.has(dev) || asking.has(root)) continue;
+        // its volume is being asked through another root: wait for that answer, which may be that it is gone
+        if (dev !== undefined && [...asking].some((r) => deviceOf.get(r) === dev)) { waiting.push(root); continue; }
+        await one(root);
+        queue.push(...waiting.splice(0));
+      }
+    };
+    let end = () => {};
+    const late = new Promise((r) => { end = ctx.timeout(BOX_HEALTH_STATFS_MS, () => { over = true; r(); }); });
+    await Promise.race([Promise.all(Array.from({ length: Math.max(0, 2 - asking.size) }, worker)), late]);
+    end();
+    if (asking.size) ctx.say('a volume did not answer within 2 s');
+    // every root answered or is gone: a volume with none left is forgotten
+    if (!asking.size && !queue.length) volumes = volumes.filter((dev) => found.has(dev));
+    const got = new Map(found);
+    for (const dev of got.keys()) if (!volumes.includes(dev)) volumes.push(dev);
+    return volumes.flatMap((dev) => {
+      const s = got.get(dev);
+      const free = s && s.bavail * s.bsize, total = s && s.blocks * s.bsize;
+      if (!Number.isSafeInteger(free) || !Number.isSafeInteger(total) || total <= 0) return [];
+      const inodes = s.files > 0 && Number.isSafeInteger(s.files) && Number.isSafeInteger(s.ffree) ? { inodes_free: s.ffree, inodes: s.files } : {};
+      return [[dev, { free, total, ...inodes }]];
+    });
+  };
+  // A part's fields for the answer, as a copy of its own (so a later change to what it returned isn't
+  // sent unchecked), or null: refused. Worked out once for each object in each place.
+  const accepted = (p, obj, what, whole) => {
+    if (!memoryIsMap(obj)) { say(`${p.name} ${what}`, `${p.name}: ${what} is not an object, left out`); return null; }
+    const places = checked.get(obj) ?? checked.set(obj, new Map()).get(obj);
+    if (!places.has(what)) {
+      let copy = null, bad = `${what} can't be written as JSON`;
+      try { copy = JSON.parse(JSON.stringify(obj)); bad = boxHealthProblem(whole(copy)); } catch {}
+      places.set(what, bad ? null : copy);
+      if (bad) say(`${p.name} ${what}`, `${p.name}: ${what} left out: ${bad}`);
+    }
+    return places.get(what);
+  };
+  // a promise a part returned: its rejection is said, and never the process's end
+  const swallow = (p, doing, got, then = () => {}) => { if (typeof got?.then === 'function') Promise.resolve(got).catch((e) => { fail(p.name, doing, e); then(); }); };
+  const tick = async () => {
+    if (ticking || stopped) return;
+    ticking = true;
+    try {
+      const disks = await readDisks();
+      if (stopped) return;
+      const is = boxHealthCounters(ctx);
+      const t = is.t, at = boxHealthIso(t);
+      const reading = { cpu: boxHealthCpu(ctx, was, is), memory: boxHealthMemory(ctx, is.boxed) };
+      was = is;
+      // a clock set back starts again from there, so the hour stays oldest first
+      ring = ring.filter((r) => r.t > t - BOX_HEALTH_WINDOW_MS && r.t < t).slice(1 - BOX_HEALTH_SAMPLES);
+      if (disks.length) reading.disks = disks.map(([dev, d]) => {
+        const first = ring.find((r) => r.free.has(dev));
+        return first && t - first.t >= BOX_HEALTH_TREND_MS ? { ...d, bytes_per_hour: Math.round((d.free - first.free.get(dev)) * 3600000 / (t - first.t)) } : d;
+      });
+      const p = boxHealthPressure(is.boxed ? boxHealthRead(ctx.cgroup, 'io.pressure') : boxHealthRead(ctx.proc, 'pressure', 'io'));
+      const io = boxHealthPresent({ some10: p.some10, some60: p.some60, full60: p.full60 });
+      if (Object.keys(io).length) reading.io = io;
+      // one that didn't answer is a gap in its line, never another volume's
+      const main = disks.find(([dev]) => dev === volumes[0])?.[1];
+      const sample = boxHealthPresent({
+        at, cpu: reading.cpu.used, cpu_some: reading.cpu.some60, throttled: reading.cpu.throttled, load: reading.cpu.load?.[0],
+        mem: reading.memory.used, mem_some: reading.memory.some60, swap: reading.memory.swap_used,
+        disk: main?.free, inodes: main?.inodes_free, io: io.some60,
+      });
+      const entry = { t, sample, free: new Map(disks.map(([dev, d]) => [dev, d.free])) };
+      const joined = {}, results = {};
+      const alone = (more) => ({ v: 1, at, window_s: 3600, now: {}, samples: [], ...more });
+      for (const p of running) {
+        if (!p.up) continue;
+        // what it gave is read inside its own try (a getter or a Proxy may throw there), and kept only
+        // when all of it was read: a throw costs its part, never the tick
+        let mine;
+        try {
+          const got = p.part.part(p.ctx, { now: structuredClone(reading), sample: { ...entry.sample }, samples: [...ring.map((r) => r.sample), { ...entry.sample }], ...results });
+          if (got === undefined || got === null) continue;
+          if (!memoryIsMap(got) || typeof got.then === 'function') { swallow(p, 'part', got); say(`${p.name} shape`, `${p.name}: part gave something other than an object, left out`); continue; }
+          const sections = {};
+          for (const [k, fields] of Object.entries(got.answer ?? {})) {
+            if (!Object.hasOwn(BOX_HEALTH_BASE, k)) { say(`${p.name} section`, `${p.name}: a section box-health@1 does not have, left out`); continue; }
+            const base = BOX_HEALTH_BASE[k];
+            const kept = accepted(p, fields, `answer.${k}`, (c) => alone({ [k]: { ...base, ...c } }));
+            if (kept) sections[k] = kept;
+          }
+          const more = got.sample === undefined ? null : accepted(p, got.sample, 'sample', (c) => alone({ samples: [{ at, ...c }] }));
+          mine = { got, sections, more };
+        } catch (e) { fail(p.name, 'part', e); continue; }
+        results[p.name] = mine.got;
+        for (const [k, kept] of Object.entries(mine.sections)) {
+          const next = { ...joined[k], ...kept };
+          if (Object.keys(BOX_HEALTH_BASE[k]).every((f) => Object.hasOwn(next, f))) joined[k] = next;
+        }
+        // a part adds fields: the sampler's own, and an earlier part's, are never overwritten
+        if (mine.more) entry.sample = { ...mine.more, ...entry.sample };
+      }
+      // a part is given the hour's own samples: none can change them
+      Object.freeze(entry.sample);
+      ring.push(entry);
+      latest = { at: real(), now: reading };
+      sections = joined;
+    } catch (e) {
+      // a gap: no sample, and no reading passed off as now; what the parts last gave stays
+      latest = { at: -Infinity, now: {} };
+      fail('sampler', 'a tick', e);
+    } finally { ticking = false; }
+  };
+  return {
+    on, tick, fail,
+    // a hub that loses its port and listens again doesn't start twice
+    async start() {
+      if (!on || started || stopped) return;
+      started = true;
+      for (const p of running) { try { p.up = true; swallow(p, 'start', p.part.start(p.ctx), () => { p.up = false; }); } catch (e) { p.up = false; fail(p.name, 'start', e); } }
+      ctx.every(BOX_HEALTH_EVERY_MS, tick);
+      ctx.every(BOX_HEALTH_ROOTS_MS * fast, readRoots);
+      await guarded('sampler', 'the roots', readRoots)();
+      await tick();
+    },
+    stop() {
+      if (stopped) return;
+      stopped = true;
+      for (const end of [...live]) end();
+      for (const p of running) if (p.up) { try { swallow(p, 'stop', p.part.stop()); } catch (e) { fail(p.name, 'stop', e); } }
+    },
+    // GET /box-health.json: the last tick's answer, with only the samples and claude.points newer than
+    // after. No part runs here.
+    serve(req, send) {
+      const wrong = (error) => send(400, 'application/json', JSON.stringify({ error }));
+      const given = [...new URL(req.url, 'http://127.0.0.1').searchParams];
+      if (given.some(([k]) => k !== 'after')) return wrong('/box-health.json takes only after');
+      if (given.length > 1) return wrong('after is given more than once: give it once');
+      if (given.length && !memoryAtOk(given[0][1])) return wrong("after should be a sample's at, YYYY-MM-DDTHH:MM:SSZ in UTC");
+      const from = given.length ? Date.parse(given[0][1]) : -Infinity;
+      const newer = (list) => list.filter((x) => Date.parse(x.at) > from);
+      // ticks that stopped (a laptop asleep) leave a reading that is no longer now
+      const reading = real() - latest.at <= BOX_HEALTH_STALE_MS ? latest.now : {};
+      const t = now();
+      const kept = ring.filter((r) => r.t > t - BOX_HEALTH_WINDOW_MS).map((r) => r.sample);
+      const claude = sections.claude?.points ? { claude: { ...sections.claude, points: newer(sections.claude.points) } } : {};
+      const body = JSON.stringify({ v: 1, at: boxHealthIso(t), window_s: BOX_HEALTH_WINDOW_MS / 1000, now: reading, samples: newer(kept), ...sections, ...claude });
+      if (Buffer.byteLength(body) > BOX_HEALTH_MAX_BYTES) { say('size', 'the answer is over 1 MB, so none was given'); return send(500, 'application/json', JSON.stringify({ error: 'box health unavailable' })); }
+      return send(200, 'application/json', body);
+    },
+  };
+}
+/* box-health-sampler end */
+/* box-health-processes start */
+// CPU and memory by worktree, and strays (kit-837's).
+const boxHealthProcesses = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+/* box-health-processes end */
+/* box-health-disk start */
+// Each worktree's disk (kit-838's).
+const boxHealthDisk = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+/* box-health-disk end */
+/* box-health-state start */
+// answer.box: the last restart, OOM kills, GitHub, the kit's release (kit-838's).
+const boxHealthState = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+/* box-health-state end */
+/* box-health-pool start */
+// answer.pool: the workers holding a slot (kit-842's).
+const boxHealthPool = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+/* box-health-pool end */
+/* box-health-claude start */
+// answer.claude: the accounts, the burn rate and the projection (kit-840's).
+const boxHealthClaude = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+/* box-health-claude end */
+/* box-health-park start */
+// answer.claude.park: what to park (kit-843's).
+const boxHealthPark = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+/* box-health-park end */
+/* box-health-room start */
+// answer.headroom, answer.pool.what_if and each sample's room (kit-844's).
+const boxHealthRoom = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+/* box-health-room end */
 // The machine's own caps, not the host's: a platform caps CPU and memory in the cgroup, while
 // /proc/meminfo and the CPU count say what the whole host has (a 4-CPU, 16 GB box reads 32 CPUs, 123 GB).
 function machineLine(last) {
@@ -24677,7 +25317,7 @@ const IMAGE_RUNS = {
     // machine status, tell, alert, pane-state
     'PANE_DIALOG', 'PANE_LIMIT_LINE', 'plainText', 'paneState', 'machineUsage', 'machineSpeaker', 'machineAlert', 'TELL_ENTER_TRIES', 'enterLanded', 'TELL_PREFIX', 'machineTell',
     'notedIn', 'openQuestionsOf', 'machineQuestions', 'utcDay', 'lastReview', 'harvestOf', 'machineKnowledge', 'vParts', 'versionBefore', 'portAnswers', 'hubLine', 'boxStatusLine',
-    'box-memory', 'machineLine', 'statusLastFile', 'partlyHeld', 'SUPERVISOR_IDLE_MS', 'supervisorIdleMinutes', 'OPERATOR_PR_MARK', 'OPERATOR_PR_WAIT_MS', 'operatorPrsLine', 'machineStatus',
+    'box-memory', 'box-health-contract', 'box-health-sampler', 'box-health-processes', 'box-health-disk', 'box-health-state', 'box-health-pool', 'box-health-claude', 'box-health-park', 'box-health-room', 'machineLine', 'statusLastFile', 'partlyHeld', 'SUPERVISOR_IDLE_MS', 'supervisorIdleMinutes', 'OPERATOR_PR_MARK', 'OPERATOR_PR_WAIT_MS', 'operatorPrsLine', 'machineStatus',
     // operator threads
     'OPERATOR_THREAD_ID', 'OPERATOR_SUBJECT_MAX', 'OPERATOR_STARTING_MS', 'box', 'gatewayProofProblem', 'proofBody', 'operatorSession', 'operatorDir', 'operatorThreadsFile', 'operatorId', 'OPERATOR_PARTS',
     'operatorSubjectProblem', 'operatorLines', 'operatorThreads', 'operatorAppend', 'operatorLocked', 'tmuxAsk', 'OPERATOR_PANE_FORMAT', 'OPERATOR_MARK', 'operatorPaneRows', 'operatorPanes',
@@ -25703,10 +26343,14 @@ function dashboardActions() {
     'thread-reopen': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.text === undefined || b.text === '' || turnOk(b.text)) ? ['thread', 'reopen', b.id, ...(b.text?.trim() ? ['--', b.text.trim()] : [])] : null),
     // bound to the proposal the card showed: a newer one is refused, so the owner reads it first
     'thread-accept': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && typeof b.at === 'string' && READY_AT.test(b.at) ? ['thread', 'resolve', b.id, '--accept', `--at=${b.at}`] : null),
+    'thread-accept-addressed': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && typeof b.at === 'string' && READY_AT.test(b.at) ? ['thread', 'resolve', b.id, '--accept-addressed', `--at=${b.at}`] : null),
+    'artifact-handoff': (b) => (typeof b.slug === 'string' && LINK_ID.test(b.slug) && typeof b.at === 'string' && ARTIFACT_AT.test(b.at) ? ['artifact', 'handoff', b.slug, `--at=${b.at}`, '--json'] : null),
   };
   // An action whose caller has a deadline of its own: the gateway gives the whole answer 15 s.
   const ACTION_MS = { 'artifact-publish': 12000 };
-  return { ID, text, autonomyArgs, turnOk, lineOk, filesArgs, ACTIONS, ACTION_MS };
+  // An action whose reply is what its command printed, a JSON object, and nothing else.
+  const ACTION_JSON = new Set(['artifact-handoff']);
+  return { ID, text, autonomyArgs, turnOk, lineOk, filesArgs, ACTIONS, ACTION_MS, ACTION_JSON };
 }
 // POST /upload; GET/HEAD /upload/…
 async function dashRoutesUpload(D, req, res, q) {
@@ -26185,7 +26829,7 @@ async function dashRoutesReviewPage(D, req, res, q) {
 // every POST /api/<name> (pane-answer, owner-setting, secret, review-draft and review-answer, fleet-check, the ACTIONS), and the 404 for everything else
 async function dashRoutesOwner(D, req, res, q) {
   const { u } = q;
-  const { log, run, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, send, refreshHello, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer } = D;
+  const { log, run, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, ACTION_JSON, send, refreshHello, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer } = D;
   const name = req.method === 'POST' && u.pathname.startsWith('/api/') ? u.pathname.slice(5) : null;
   const isSecret = name === 'secret';
   const isReview = name === 'review-draft' || name === 'review-answer';
@@ -26362,6 +27006,11 @@ async function dashRoutesOwner(D, req, res, q) {
     const r = await runAction(args, { timeout: ACTION_MS[name] ?? 0, person });
     // what the hub lists (the Inbox count, the fleet's mode) follows an owner action at once
     if (r.ok) refreshHello();
+    if (r.ok && ACTION_JSON.has(name)) {
+      let said = null;
+      try { said = JSON.parse(r.stdout); } catch {}
+      return send(res, isObj(said) ? 200 : 500, 'application/json', JSON.stringify(isObj(said) ? said : { error: 'the action printed no JSON' }));
+    }
     send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') }));
   });
   return;
@@ -26407,7 +27056,7 @@ async function cmdDashboard() {
   const versioning = new Map();
   // person: the request's (kit-252), on this child's env alone
   const runAction = (args, { person = null, ...o } = {}) => runOwnerAction(args, { ...o, env: personEnv(ownerEnv, person), log });
-  const { ID, text, autonomyArgs, turnOk, lineOk, filesArgs, ACTIONS, ACTION_MS } = dashboardActions();
+  const { ID, text, autonomyArgs, turnOk, lineOk, filesArgs, ACTIONS, ACTION_MS, ACTION_JSON } = dashboardActions();
   const send = (res, code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', ...extra }); res.end(body); };
   // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 30 s
   // (kit-595; it was 10 s: each run is a child holding about 140 MB, so the hub's pulse is at most
@@ -26789,7 +27438,7 @@ async function cmdDashboard() {
       const live = readText(path.join(liveLogDir(), f));
       const durable = readText(path.join(durableLogDir(), f));
       const text = mergeLogText(live, durable);
-      threadFiles.set(f, { k, lines: parseLines(text, f, { validate: false }).lines.filter((l) => ['thread', 'turn', 'question'].includes(l.type)) });
+      threadFiles.set(f, { k, lines: parseLines(text, f, { validate: false }).lines.filter((l) => ['thread', 'turn', 'question'].includes(l.type) || (l.type === 'message' && l.kind === 'addressed')) });
     }
     const all = [...threadFiles.values()].flatMap((x) => x.lines);
     const asked = new Set(all.filter((l) => l.type === 'question' && l.op === 'new' && typeof l.thread === 'string').map((l) => l.id));
@@ -26919,7 +27568,7 @@ async function cmdDashboard() {
   // ms), and the kept /api/data build is stale (dataEpoch)
   const logWatch = presenceChanged(liveLogDir(), () => { dataEpoch += 1; presence.changed(); });
   every(logWatch.tick, 1000);
-  const D = dashContext({ log, page, pageCsp, run, describing, versioning, remote, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, sessionPrompts, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
+  const D = dashContext({ log, page, pageCsp, run, describing, versioning, remote, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, ACTION_JSON, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, sessionPrompts, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
   const server = http.createServer(async (req, res) => {
     if (draining) res.setHeader('connection', 'close');
     // Node's five minutes for a body, for all but an upload (UPLOAD_REQUEST_MS, and its stall timer)
@@ -27513,7 +28162,9 @@ function cmdSend() {
 }
 // Log one message and type it into the recipient's pane. The log is the record; the pane is
 // delivery. A recipient whose pane is gone catches up with `messages`.
-function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null, thread = null }) {
+// report: an object a caller passes to learn what was typed (typeInto's answer; false when no pane took
+// it) and the line itself.
+function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null, thread = null }, report = null) {
   const target = to === 'supervisor' ? supervisorTarget() : tmuxTarget(to);
   const resolved = resolvePane(target);
   const { target: exact } = resolved;
@@ -27523,7 +28174,9 @@ function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null, 
   if (!problem && sh('tmux', ['display-message', '-p', '-t', exact, '#{window_name}']) === OPERATOR_WINDOW) problem = 'that is the machine\'s operator, which takes no messages from a fleet';
   // thread only on a handoff's line, so every other message's line is as before
   const line = appendLog({ type: 'message', to, kind, text, re, sha, ticket: ticket ?? (tickets().has(to) ? to : null), ...(thread ? { thread } : {}) }, from);
-  const typed = problem ? false : typeInto(exact, `[devteam ${kind} ${line.id} from ${from}${re ? ` re ${re}` : ''}${sha ? ` @ ${sha}` : ''}] ${text}`);
+  const said = `[devteam ${kind} ${line.id} from ${from}${re ? ` re ${re}` : ''}${sha ? ` @ ${sha}` : ''}] ${text}`;
+  const typed = problem ? false : typeInto(exact, said);
+  if (report) Object.assign(report, { typed, line: said });
   if (!typed) warn(`${line.id} recorded but not delivered to "${to}": ${problem ?? `could not type into ${exact}`}; it shows in their \`messages\``);
   else if (typed !== true) warn(`${line.id} ${heldWords(typed, to === 'supervisor' ? "the supervisor's" : `${to}'s`)}`);
   return line;
@@ -27538,6 +28191,8 @@ function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null, 
 // nothing else here (a responder turn or the owner's resolve never settles it; a reply citing it
 // with --re closes it through each reader's replied set, as for any message).
 function settledByLanding(m) {
+  // a session's mark on an artifact note awaits no reply: the owner checks the note
+  if (m.kind === 'addressed') return true;
   if (m.kind === 'handoff') {
     // the supervisor's newest turn per thread, worked out once per fold (readLog's object), not per message per read
     const log = readLog();
@@ -27981,7 +28636,55 @@ function makeSession(role) {
   // a planner's is home's. s stays home's for the session, the agent and its policy.
   const R = role === 'worker' ? repoOfTicket(tickets().get(id)) : repo('home');
   const mb = R.settings.main_branch;
-  if (!fs.existsSync(wt)) {
+  // A start makes its worktree locked, with this reason, and unlocks it once it is whole: one that is
+  // still locked was left by a start that stopped, or is being made now (kit-856).
+  const making = `devteam: a start of ${name} is making this worktree`;
+  // this start's own: those words and a token, so no start takes another's lock for its own (final-1 F1)
+  const mine = `${making} (${process.pid}.${Date.now().toString(36)}.${crypto.randomBytes(3).toString('hex')})`;
+  // the reason wt is locked with ('' for none), or null when it isn't locked. From git's list, so a
+  // folder that is empty or gone counts too.
+  const lockOf = () => {
+    const at = path.join(realPath(path.dirname(wt)), path.basename(wt));
+    const list = R.git(['worktree', 'list', '--porcelain'], R.root);
+    // another worktree's broken record fails the list: then this one's own says
+    if (list === null) return readText(path.join(/^gitdir: (.*)$/m.exec(readText(path.join(wt, '.git')) ?? '')?.[1] ?? wt, 'locked'))?.trim() ?? null;
+    const l = list.split('\n\n').map((b) => b.split('\n')).find((ls) => ls.includes(`worktree ${at}`))?.find((x) => x === 'locked' || x.startsWith('locked '));
+    return l === undefined ? null : l.slice('locked '.length);
+  };
+  // locked by a start, this one or another
+  const startsLock = (why) => why === making || (why ?? '').startsWith(`${making} (`);
+  const unfinished = () => startsLock(lockOf());
+  // git's record of a worktree a start is adding now: git writes its lock before the folder, and its
+  // gitdir (what the list reads) after, so in between only the record says (final-1 F3)
+  const beingMade = () => {
+    const dir = path.join(R.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], R.root) ?? path.join(R.root, '.git'), 'worktrees');
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch {}
+    return names.map((n) => path.join(dir, n)).find((d) => !fs.existsSync(path.join(d, 'gitdir')) && startsLock(readText(path.join(d, 'locked'))?.trim() ?? null)) ?? null;
+  };
+  // what is at wt, in words, or null when it is a worktree of its own, or nothing. The commands clear
+  // only a locked one: unlock refuses on a worktree a start has finished since (kit-856).
+  const inRepo = `git -C ${shq(R.root)} worktree`;
+  const leftAt = () => {
+    const there = fs.existsSync(wt);
+    if (there && !fs.statSync(wt).isDirectory()) return `${wt} is a file, where the worktree goes: move it away`;
+    const rec = beingMade();
+    if (rec) return `git is making a worktree for ${wt} (its record ${rec} has no gitdir yet): if no other start is making it, remove that record`;
+    const locked = unfinished();
+    if (!there) return locked ? `git still holds a worktree for ${wt}, whose folder is gone: if no other start is making it, clear it (${inRepo} unlock ${shq(wt)} && ${inRepo} remove --force ${shq(wt)})` : null;
+    if (!locked && !fs.readdirSync(wt).length) return null;
+    const top = responderGit(['rev-parse', '--show-toplevel'], wt);
+    if (top.status !== 0 && fs.existsSync(path.join(wt, '.git'))) return `git can't read ${wt} as a worktree (${firstLine(top.stderr).replace(/^fatal: /, '') || `exit ${top.status}`}), and it may hold work: ${inRepo} repair ${shq(wt)} mends one that moved; if it holds nothing to keep, move it away`;
+    if (top.status !== 0 || realPath(top.stdout.trim()) !== realPath(wt)) return `${wt} is no worktree git knows: look in it, then move it away`;
+    if (!locked) return null;
+    const head = responderGit(['rev-parse', '--verify', '--quiet', 'HEAD'], wt);
+    return `the worktree ${wt} is there, ${head.status === 0 ? `at ${head.stdout.trim().slice(0, 8)}` : 'with no commit git can read'}: if no other start is making it and it holds nothing to keep, remove it (${inRepo} unlock ${shq(wt)} && ${inRepo} remove --force ${shq(wt)})`;
+  };
+  // read before the look: a worktree another start adds after this fails the add below, never a resume
+  const there = fs.existsSync(wt);
+  const leftBefore = leftAt();
+  if (leftBefore) die(`${name}'s start isn't finished, so nothing was started: ${leftBefore}, then start it again`);
+  if (!there) {
     // what origin holds, by sha: main, and the branch if it was pushed (a moved fleet continues from
     // it, never from main). Every local ref is any session's to write without a push (kit-790).
     const at = fetchLinkMain(R, 'refusing to start a ticket on a stale main', { start: branch });
@@ -28023,22 +28726,26 @@ function makeSession(role) {
     // its commits are in the start, or under a ref of their own. A symbolic one holds none.
     const tracking = `refs/remotes/origin/${branch}`;
     const keptAt = `refs/devteam/kept/${branch}/`;
-    const raw = at.branch ? null : R.git(['rev-parse', '--verify', '--quiet', tracking], R.root); // read once: a tag's own object too
+    const exact = at.branch ? null : responderGit(['show-ref', '--verify', '--hash', tracking], R.root);
+    const raw = exact?.status === 0 ? exact.stdout.trim() : null; // read once: a tag's own object too
     const peeled = raw && responderGit(['rev-parse', '--verify', '--quiet', `${raw}^{commit}`], R.root);
     const stale = peeled && peeled.status === 0 ? peeled.stdout.trim() : null;
     let keptNow = null;
+    let keptUntil = null; // this start's own kept ref for commits the new worktree will hold
     if (stale) {
       const symbolic = R.git(['symbolic-ref', '--quiet', tracking], R.root) !== null;
-      const keep = !symbolic && !anc(stale, sha);
+      // the branch can be moved back before the checkout: only origin's main holds them whatever happens
+      const keep = !symbolic && !anc(stale, at.main);
       if (keep) keptNow = `${keptAt}${stale}`;
+      if (keep && anc(stale, sha) && responderGit(['show-ref', '--verify', '--quiet', keptNow], R.root).status !== 0) keptUntil = keptNow;
       if (keep) write(['update-ref', '--no-deref', `${keptAt}${stale}`, stale], `keep ${stale} under ${keptAt}`);
-      warn(`origin has no ${branch}: its tracking ref here (${short(stale)}) is ignored and removed${keep ? `, its commits kept at ${keptAt}${stale}` : ''}${sha === at.main ? `, and the branch starts from origin's ${mb} (${short(at.main)})` : ''}`);
+      warn(`origin has no ${branch}: its tracking ref here (${short(stale)}) is ignored and removed${keep ? `, its commits kept at ${keptAt}${stale}${keptUntil ? ' until the worktree holds them' : ''}` : ''}${sha === at.main ? `, and the branch starts from origin's ${mb} (${short(at.main)})` : ''}`);
       write(['update-ref', '--no-deref', '-d', tracking, raw], `remove ${tracking}`);
     }
     // read back, so a retry's act names what a stopped launch kept
     const found = (R.git(['for-each-ref', '--format=%(refname)', keptAt], R.root) ?? '').split('\n').filter((r) => r.startsWith(keptAt) && /^[0-9a-f]{40,64}$/.test(r.slice(keptAt.length)));
-    const keptRefs = [...new Set([...(keptNow ? [keptNow] : []), ...found])];
-    if (keptRefs.length) keptWords += `; commits kept at ${keptRefs.slice(0, 3).join(', ')}${keptRefs.length > 3 ? ` and ${keptRefs.length - 3} more` : ''}`;
+    let keptRefs = [...new Set([...(keptNow ? [keptNow] : []), ...found])];
+    const sayKept = () => { if (keptRefs.length) keptWords += `; commits kept at ${keptRefs.slice(0, 3).join(', ')}${keptRefs.length > 3 ? ` and ${keptRefs.length - 3} more` : ''}`; };
     // set by config: --track fails where the checkout's fetch refspec is blank
     // set again when it is main's and origin holds the branch now: a launch refused below leaves it written
     const merge = R.git(['config', '--get', `branch.${branch}.merge`], R.root);
@@ -28055,15 +28762,26 @@ function makeSession(role) {
       if (made.status !== 0) die(`could not make ${branch}: ${redactUrl(firstLine(made.stderr).replace(/^fatal: /, '')) || `exit ${made.status}`}; nothing was started`);
     }
     // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
-    const added = gitRun(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--no-guess-remote', wt, branch], R.root);
-    if (added.status !== 0) die(`git worktree add ${branch} failed: ${redactUrl(firstLine(added.err.split('\n').find((l) => /^fatal: /.test(l)) ?? added.err).replace(/^fatal: /, '')) || `exit ${added.status}`}; nothing was started`);
+    const headOf = () => { const h = responderGit(['rev-parse', '--verify', '--quiet', 'HEAD'], wt); return h.status === 0 ? short(h.stdout.trim()) : 'no commit'; };
+    const leftWords = (left) => (left ? `, but ${left}${unfinished() ? '. If git gave no reason above, a post-checkout hook may have failed: mend it first' : ''}` : fs.existsSync(wt) && fs.readdirSync(wt).length ? `; ${wt} is there, made by another start or left by this one (a post-checkout hook that unlocked it), at ${headOf()}: look at its commit before resuming it` : '');
+    const added = gitRun(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--no-guess-remote', '--lock', '--reason', mine, wt, branch], R.root);
+    if (added.status !== 0) die(`git worktree add ${branch} failed: ${redactUrl(firstLine(added.err.split('\n').find((l) => /^fatal: /.test(l)) ?? added.err).replace(/^fatal: /, '')) || `exit ${added.status}`}; nothing was started${leftWords(leftAt())}${/is already locked/.test(added.err) ? '; a post-checkout hook may not lock the worktree while a start makes it' : ''}`);
     // The add checks the branch out by name, so a session moving it meanwhile would win: what landed is
     // read back, and the worktree undone if it isn't the sha expected, on the branch (its full name: a
     // tag of the same name makes git print a longer short one). A branch still where this launch put it
     // goes back; one that moved keeps what landed on it.
     const read = (args, cwd) => { const r = responderGit(args, cwd); return r.status === 0 ? r.stdout.trim() : null; };
     const undo = (why) => {
-      R.git(['worktree', 'remove', '--force', wt], R.root);
+      // only while the lock is this start's own: one locked, unlocked or made again by anything else
+      // since is theirs, and the branch stays where it is (final-1 F1, final-1b F1)
+      const now = lockOf();
+      if (now !== mine) die(`${why}, so nothing was started; ${!fs.existsSync(wt) && now === null ? `${wt} went` : `something else ${now === null ? 'unlocked' : 'locked'} ${wt}`} while it was made, so the undo left it, and ${branch} at ${short(read(['rev-parse', '--verify', '--quiet', ref], R.root) ?? 'no commit')}: look in it before resuming it, since it may hold an older commit's files, then start it again`);
+      gitRun(['worktree', 'remove', '--force', '--force', wt], R.root); // forced twice: this start's own lock
+      // the branch stays under a worktree that is still there, or its files would read as changes to it
+      // an empty folder would be taken as a session's: with a file in it, it is refused
+      if (fs.existsSync(wt) && !fs.readdirSync(wt).length) { try { fs.writeFileSync(path.join(wt, 'start-unfinished.txt'), 'A start that failed could not remove this folder.\n'); } catch {} }
+      const left = leftAt() ?? (fs.existsSync(wt) ? `${wt} is still there, unlocked: look in it, then move it away` : null);
+      if (left) die(`${why}, so nothing was started; the undo couldn't remove it all, and ${branch} stays at ${short(read(['rev-parse', '--verify', '--quiet', ref], R.root) ?? 'no commit')}: ${left}, then start it again`);
       if (local !== sha) responderGit(['update-ref', '--no-deref', ...(local ? [ref, local, sha] : ['-d', ref, sha])], R.root);
       die(`${why}, so nothing was started; try again`);
     };
@@ -28081,8 +28799,20 @@ function makeSession(role) {
       if (filled.status !== 0) undo(`could not check out ${short(sha)}: ${redactUrl(firstLine(filled.err).replace(/^(fatal|error): /, '')) || `exit ${filled.status}`}`);
       landed(sha);
     }
+    // only its own lock: one a hook or a person put on it in its place is theirs, and stays (final-1 F2, final-1b F4)
+    const lockNow = lockOf();
+    // unlocked by something else, or locked by another start, so another start may be in it: the undo leaves it
+    if (lockNow === null || (lockNow !== mine && startsLock(lockNow))) undo(`the new worktree was ${lockNow === null ? 'unlocked' : 'locked by another start'} while it was made`);
+    const unlocked = lockNow === mine ? responderGit(['worktree', 'unlock', wt], R.root) : { status: 0 };
+    if (unlocked.status !== 0) undo(`could not unlock the new worktree: ${redactUrl(firstLine(unlocked.stderr).replace(/^(fatal|error): /, '')) || `exit ${unlocked.status}`}`);
+    // the worktree's branch holds them now
+    if (keptUntil && responderGit(['update-ref', '--no-deref', '-d', keptUntil, stale], R.root).status === 0) keptRefs = keptRefs.filter((r) => r !== keptUntil);
+    sayKept();
     madeWorktree = true;
   }
+  // looked at again before anything is written there: another start's add into a folder that was
+  // there, empty, may have locked it since the look (final-1 F3)
+  if (there && (unfinished() || beingMade())) die(`${name}'s start isn't finished, so nothing was started: ${leftAt() ?? `another start is making ${wt}`}, then start it again`);
   // A harness keeps its sessions by directory on its own machine: a worktree made just now has no
   // session to continue (a new machine, or the worktree was removed), so start fresh, with the
   // handoff note if there is one, and say so.
@@ -32618,14 +33348,17 @@ function cmdWait() {
       // not the owner's turns routed to the responder, nor the thread line (new, or a reopen) whose
       // first owner turn at or after it is (kit-104): those are the responder's, and an overdue one
       // comes back as responder-overdue. A thread line read before its turn is written wakes once.
-      const ls = readLog().lines.filter((l) => l.by === 'owner');
+      const { lines: all, objects } = readLog();
+      const ls = all.filter((l) => l.by === 'owner');
       const turnsOf = new Map();
       for (const l of ls) if (l.type === 'turn' && typeof l.thread === 'string') (turnsOf.get(l.thread) ?? turnsOf.set(l.thread, []).get(l.thread)).push(l);
       for (const us of turnsOf.values()) us.sort((a, b) => String(a.at).localeCompare(String(b.at)));
       const opens = (l) => l.type === 'thread' && (l.op === 'new' || (l.op === 'set' && l.status === 'open'));
       const notMine = (r) => r === 'responder' || r === 'session';
       const responders = (l) => l.type === 'turn' ? notMine(l.routed_to) : opens(l) && notMine((turnsOf.get(l.id) ?? []).find((u) => u.at >= l.at)?.routed_to);
-      const owner = ls.filter((l) => !responders(l)).map((l) => ({ k: l.id, at: Date.parse(l.at) }));
+      // nor an artifact note's turns and thread lines: the owner hands a note over, with a message
+      const noted = (l) => ['turn', 'thread'].includes(l.type) && objects.get(l.type === 'turn' ? l.thread : l.id)?.subject?.kind === 'artifact';
+      const owner = ls.filter((l) => !responders(l) && !noted(l)).map((l) => ({ k: l.id, at: Date.parse(l.at) }));
       const got = sub(['messages', '--open', '--to', 'supervisor', '--json']);
       const msgs = (got ?? []).map((m) => ({ k: `${m.id} [${m.kind}] from ${m.created_by}: ${String(m.text).slice(0, 160)}`, at: Date.parse(m.created_at) }));
       last = got ? { key, owner, msgs } : null;
@@ -34917,15 +35650,19 @@ async function browserWatchTabs(ctx) {
   cdp.on('Page.loadEventFired', (p, sid) => bySession(sid)?.loaded?.());
   // A page's JS dialog (kit-329), on any tab: answered at once with its stated default, so no verb,
   // load or view frame waits behind it; kept for the next plain-text answer.
-  cdp.on('Page.javascriptDialogOpening', ({ type, message }, sid) => {
+  // While the owner has the browser (kit-770) all but an alert is theirs to answer, in the view.
+  cdp.on('Page.javascriptDialogOpening', ({ type, message, url, defaultPrompt }, sid) => {
     if (!sid) return;
+    if (browserOwnerDialog(ctx, { type, message, url, defaultPrompt, sid, top: bySession(sid)?.frameUrl })) return;
     cdp.send('Page.handleJavaScriptDialog', { accept: browserDialogAccept(type) }, sid).catch(() => {});
     browserDialogSeen(ctx, type, message);
   });
+  cdp.on('Page.javascriptDialogClosed', (p, sid) => browserOwnerDialogGone(ctx, sid));
   cdp.on('Target.targetDestroyed', ({ targetId }) => {
     const i = ctx.tabs.findIndex((x) => x.targetId === targetId);
     if (i < 0) return;
     const [gone] = ctx.tabs.splice(i, 1);
+    if (gone.sessionId) browserOwnerDialogGone(ctx, gone.sessionId);
     if (ctx.active === gone) ctx.active = ctx.tabs.at(-1) ?? null;
   });
   await cdp.send('Target.setDiscoverTargets', { discover: true });
@@ -34944,15 +35681,69 @@ const BROWSER_DIALOG_HOLD_MS = 250;
 const browserDialogAccept = (type) => type === 'alert' || type === 'beforeunload';
 function browserDialogSeen(ctx, type, message) {
   const d = ctx.dialogs, now = Date.now();
-  if (ctx.held) return;
+  if (ctx.held || ctx.pending || ctx.closing || !ctx.ready) return; // a close not handled yet: still the owner's pages
   if (!ctx.dialogHold || now - ctx.dialogHold.at >= BROWSER_DIALOG_HOLD_MS) {
     let held;
-    try { held = !!browserHeld(browserHandovers()); } catch { held = true; }
+    try { const hs = browserHandovers(); held = !!browserHeld(hs) || browserUnhandled(ctx, hs).length > 0; } catch { held = true; }
     ctx.dialogHold = { at: now, held };
   }
   if (ctx.dialogHold.held) return;
   if (d.shown.length >= BROWSER_DIALOGS_SHOWN) d.more++;
   else d.shown.push({ type: Object.hasOwn(BROWSER_DIALOG_ANSWERS, type) ? type : 'dialog', text: String(message ?? '').slice(0, 300) });
+}
+// The owner's dialogs (kit-770): a confirm, prompt or beforeunload that opens while the owner holds the
+// browser (read from the log as browserDialogSeen does; a failed read, or a close pending, is no hold) is
+// left open and sent to the view, and to a viewer who connects later; only browserOwnerAnswer, from that
+// view's socket, answers it, with no timeout. ctx.ownerDialogs: session id → { id, kind, url, text,
+// default?, frame? }, at most one a tab, in memory only: never logged, stored or told to the agent.
+const BROWSER_OWNER_KINDS = ['confirm', 'prompt', 'beforeunload'];
+const BROWSER_OWNER_TEXT = 2000;
+const browserOwnerCut = (s) => String(s ?? '').slice(0, BROWSER_OWNER_TEXT).toWellFormed();
+// Who asks, masked: the frame's URL; for a frame with none of its own (srcdoc, blob, data), which can be
+// another site's, the page it is in, said to be a frame there; never the URL the tab was opening.
+const browserOwnerAsker = (url, top) => {
+  const web = (x) => typeof x === 'string' && browserHttp(x);
+  return web(url) ? { url: browserMask(url) } : web(top) ? { url: browserMask(top), frame: true } : { url: 'about:blank' };
+};
+function browserOwnerDialog(ctx, { type, message, url, defaultPrompt, sid, top }) {
+  if (!BROWSER_OWNER_KINDS.includes(type) || !ctx.ready || ctx.stopping || ctx.closing) return false;
+  // a page asking in a loop with no hold doesn't fold the log for every dialog
+  if (Date.now() - ctx.ownerNone < BROWSER_DIALOG_HOLD_MS) return false;
+  try {
+    browserKeepHeld(ctx, browserHandovers()); // kept: the owner's answer is judged by this read, not the watch's last
+    if (!ctx.held || ctx.pending) { ctx.ownerNone = Date.now(); return false; }
+  } catch { return false; }
+  const def = type === 'prompt' ? browserOwnerCut(defaultPrompt) : '';
+  const o = { id: `d-${crypto.randomBytes(8).toString('hex')}`, kind: type, ...browserOwnerAsker(url, top), text: browserOwnerCut(message), ...(def ? { default: def } : {}) };
+  ctx.ownerDialogs.set(sid, o);
+  browserOwnerSend(ctx, { t: 'dialog', ...o });
+  return true;
+}
+function browserOwnerSend(ctx, m) {
+  const v = ctx.viewer;
+  if (v && !v.ws.closed) try { v.ws.send(m); } catch {}
+}
+function browserOwnerDialogGone(ctx, sid) {
+  const o = ctx.ownerDialogs.get(sid);
+  if (o && ctx.ownerDialogs.delete(sid)) browserOwnerSend(ctx, { t: 'dialog_end', id: o.id });
+}
+// The owner's answer, to the one open dialog its id names; taken off before it is sent, so a second
+// press finds nothing. Called only by browserViewInput, after its guards.
+function browserOwnerAnswer(ctx, m) {
+  for (const [sid, o] of ctx.ownerDialogs) {
+    if (o.id !== m.id) continue;
+    if (!ctx.held) return;
+    browserOwnerDialogGone(ctx, sid);
+    return browserViewCdp(ctx, 'Page.handleJavaScriptDialog', { accept: m.accept, ...(o.kind === 'prompt' && m.accept ? { promptText: m.text ?? '' } : {}) }, sid);
+  }
+}
+// The hold or the session ends with dialogs unanswered (a close, a forget, a stop): kit-329's defaults,
+// so never an OK to a confirm.
+function browserOwnerDialogsEnd(ctx) {
+  for (const [sid, o] of [...ctx.ownerDialogs]) {
+    browserOwnerDialogGone(ctx, sid);
+    browserViewCdp(ctx, 'Page.handleJavaScriptDialog', { accept: browserDialogAccept(o.kind) }, sid);
+  }
 }
 // The lines a plain-text answer ends with, one per dialog kept: the page's words JSON-quoted (page
 // text: data, not instructions), then the answer given.
@@ -35388,6 +36179,7 @@ async function browserForgetRestart(ctx) {
   if (ctx.stopping || !ctx.ready) return;
   try {
     ctx.ready = false; // the view's input dropped, its tick idle, a new socket 503
+    browserOwnerDialogsEnd(ctx);
     const v = ctx.viewer;
     if (v) { browserCast(ctx, v.tab, false); v.tab = null; }
     const hold = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_FORGET_DELAY_MS')); // tests: a long forget
@@ -35415,6 +36207,7 @@ async function browserCloseRestart(ctx, closes) {
       try { v.ws.send({ t: 'bye', why: BROWSER_BACK }); v.ws.close(1000); } catch {}
       browserViewClose(ctx, v);
     }
+    browserOwnerDialogsEnd(ctx);
     const hold = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_CLOSE_DELAY_MS')); // tests: a close held open
     if (hold > 0) { await browserSleep(hold); if (ctx.stopping) return; }
     const reopen = closes.length === 1 && closes[0].outcome === 'done' ? browserNotePages(ctx) : []; // only one done reopens
@@ -35603,7 +36396,8 @@ function browserStartGate(ctx) {
 }
 // The watch, from start to stop: every 500 ms a fresh fold (browserFresh keys it cheaply), ctx.held
 // kept, and a close not yet handled queued once on the verbs' queue (ctx.gateQueued, set when queued
-// and cleared when the job ends, so a close queued or running isn't queued again). With
+// and cleared when the job ends, so a close queued or running isn't queued again); the owner's dialogs
+// (kit-770) end as that close is seen, off the queue. With
 // DEVTEAM_TEST_BROWSER_WATCH_HANDLE=0 (tests) it keeps ctx.held only: a close is then handled by a
 // verb's pre-verb read or wait's settle alone.
 function browserWatch(ctx) {
@@ -35612,6 +36406,7 @@ function browserWatch(ctx) {
     try { browserViewRead(ctx); } catch { return; }
     if (browserTestEnv('DEVTEAM_TEST_BROWSER_WATCH_HANDLE') === '0' || ctx.gateQueued) return;
     if (!ctx.pending) return;
+    browserOwnerDialogsEnd(ctx); // off the queue: a verb waiting behind one never holds the close up
     ctx.gateQueued = true;
     ctx.serial(() => browserGate(ctx)).finally(() => { ctx.gateQueued = false; });
   }, Number(browserTestEnv('DEVTEAM_TEST_BROWSER_WATCH_MS')) || 500); // the hook: tests, a slowed watch
@@ -35643,6 +36438,7 @@ function browserShutdown(ctx, why, detail) {
     clearTimeout(ctx.idle);
     clearInterval(ctx.renew);
     clearInterval(ctx.watch);
+    browserOwnerDialogsEnd(ctx);
     try { ctx.viewer?.ws.close(1001); } catch {} // the view's socket closes with the daemon (no bye)
     await browserEndChrome(ctx.cdp, ctx.chrome?.pid);
     try { browserDeleteSession(ctx.profile); } catch {}
@@ -35992,6 +36788,7 @@ const BROWSER_FROM_PAGE = {
   nav: { req: ['url'], f: { url: { type: 'str', min: 1, max: 2048 } } },
   back: { req: [], f: {} },
   forget: { req: [], f: {} },
+  dialog: { req: ['id', 'accept'], f: { id: { type: 'str', min: 18, max: 18, re: /^d-[0-9a-f]{16}$/ }, accept: { enum: [true, false] }, text: { type: 'str', min: 0, max: 10000 } } },
 };
 function browserViewMessage(m) {
   if (!m || typeof m !== 'object' || Array.isArray(m) || typeof m.t !== 'string' || !Object.hasOwn(BROWSER_FROM_PAGE, m.t)) return null;
@@ -36005,7 +36802,7 @@ function browserViewMessage(m) {
     if (s.type === 'str') {
       if (typeof x !== 'string' || x.length < s.min || x.length > 2 * s.max) return null; // UTF-16 length bounds code points both ways
       const n = [...x].length;
-      if (n < s.min || n > s.max) return null;
+      if (n < s.min || n > s.max || (s.re && !s.re.test(x))) return null;
     } else if (typeof x !== 'number' || !Number.isFinite(x) || (s.type === 'int' && !Number.isInteger(x)) || x < s.min || x > s.max) return null;
   }
   return m;
@@ -36036,8 +36833,10 @@ function browserViewInput(ctx, v, text) {
     ctx.forgetting = true;
     return void ctx.serial(() => browserForgetRestart(ctx)).finally(() => { ctx.forgetting = false; });
   }
+  if (m.t === 'dialog') return browserOwnerAnswer(ctx, m);
   const sid = ctx.active?.sessionId;
   if (!sid) return; // a tab with no session: dropped
+  if (ctx.ownerDialogs.has(sid) && m.type !== 'up') return; // a dialog is up: Chrome would keep the input and land it after the answer
   const cdp = (method, params) => browserViewCdp(ctx, method, params, sid);
   const scale = v.scale > 0 ? v.scale : 1;
   switch (m.t) {
@@ -36122,6 +36921,7 @@ function browserViewServer(ctx) {
       if (ctx.viewer) { v.ws.send({ t: 'bye', why: 'The browser is already open in another window.' }); return v.ws.close(1000); }
       ctx.viewer = v;
       browserViewHeld(ctx, v); // the current hold, from the fold just read
+      for (const o of ctx.ownerDialogs.values()) v.ws.send({ t: 'dialog', ...o }); // still open: the owner's to answer
       browserViewTick(ctx, v);
       v.timer = setInterval(() => browserViewTick(ctx, v), 250);
       v.timer.unref?.();
@@ -36135,7 +36935,7 @@ function browserViewServer(ctx) {
 // port another preview took fails this daemon and browserEnsure relaunches, and only a daemon that
 // got its port may kill a leftover Chrome or clear a lock, so the one that comes up reports them.
 async function browserServe({ chrome: bin }) {
-  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, renew: null, stopping: null, after: null, viewer: null, ready: false, state: null, serial: null, forgetting: false, handled: new Map(), held: null, folded: [], pending: false, foldAt: 0, closing: false, gateQueued: false, watch: null, dialogs: { shown: [], more: 0 }, dialogHold: null };
+  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, renew: null, stopping: null, after: null, viewer: null, ready: false, state: null, serial: null, forgetting: false, handled: new Map(), held: null, folded: [], pending: false, foldAt: 0, closing: false, gateQueued: false, watch: null, dialogs: { shown: [], more: 0 }, dialogHold: null, ownerDialogs: new Map(), ownerNone: 0 };
   for (const s of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(s, () => browserShutdown(ctx, 'signal'));
   browserIsDaemon = true;
   const viewPort = Number(process.env.PORT);
@@ -37142,10 +37942,13 @@ function sessionWords(w, objects = readLog().objects) {
 // Who owes the reply to the owner's next turn in thread t (kit-104; the spine's routing rules 1, 3
 // and 4), worked out once, before the turn is written, and stored on it (routed_to, and delivered
 // for the responder); nothing recomputes it. t may be a thread not yet written ({ subject }).
-// { to: 'supervisor' } or { to: 'responder', delivered: 'typed' | 'queued', target }; why says why
+// { to: 'supervisor' } or { to: 'responder', delivered: 'typed' | 'queued', target }, or no `to` on an
+// artifact note (its owner hands it over); why says why
 // the supervisor's. A subject naming a record not in the log takes the ordinary rules. Every "the
 // owner said it" here is a line's writer, never its text.
 function responderRoute(t, objects = readLog().objects, s = loadSettings(), now = Date.now()) {
+  // an artifact note's turns wait for Hand over: no route is written, and nobody owes a reply
+  if (isObj(t.subject) && t.subject.kind === 'artifact') return { why: 'an artifact note' };
   const ownerCorrected = (r) => (r.updates ?? []).some((u) => u.corrected !== undefined && writerClass(u.by) === 'owner');
   // 1: its own open question asked in the thread, or a subject still the supervisor's
   if (t.id && [...objects.values()].some((o) => o.type === 'question' && o.thread === t.id && threadQuestion(o).status === 'open')) return { to: 'supervisor', why: 'its open question' };
@@ -37229,6 +38032,9 @@ const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   artifact manifest <slug> [--json]   what publishing a landed artifact would put up: main's tree, each file's sha256 (the cloud gateway's confirm page reads it)
   artifact describe <slug> [--at main|<worktree>|tree:<id>] [--json]   what a viewer shows of an artifact there (title, fingerprint) and main's fingerprint (the dashboard's /api/view reads it)
   artifact versions <slug> [--json]   an artifact's versions: its drafts, main's, then earlier ones by date (the dashboard's /api/artifact-versions reads it)
+  artifact handoff <slug> [--at main|<worktree>|tree:<id>] [--json]   (owner) hand the open notes on that copy to the session drawing it (the dashboard's Hand over)
+  artifact notes <slug> [--at main|<worktree>|tree:<id>] [--json]   the notes on that copy not yet resolved: each one's state, the spot as data, the owner's words
+  artifact addressed <t-id> --note "<what changed>" [--sha <commit>] [--draft <worktree>]   (the session a note was handed to, or the supervisor) mark it, with the kit's picture of the spot: look at it
   artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner   the owner's record that a landed artifact went public or came down (the gateway's confirm page runs these; by hand they record intent only)
   artifacts [--json]              landed artifacts, and drafts in session worktrees
   preview <port> [--label "<one line>"]   register a server you are running; prints the link for this machine (a name derived from project, session and label)
@@ -37251,14 +38057,14 @@ const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   unread [--json]   what the owner wrote that the supervisor hasn't dealt with yet (answers, thread turns, decisions), oldest first, each with its ref   |   unread ack <ref> [<ref> …]   (supervisor) dealt with exactly those lines
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
   answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> --said "<whole clauses>" [--at <n>] [--seen-turn <u-id>]   (a question asked with thread ask --turn) | answer <qid> --defaulted   (supervisor)
-  thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --; refused in the supervisor's own pane
+  thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>] | --accept-addressed --at <when it was marked>] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --; refused in the supervisor's own pane
   thread new --subject '{"kind":"item","ref":"question:q-…"}' [--title "<line>"] -- "<words>"   (supervisor)   your own thread about a question or goal (or goal:g-…), for what belongs to no open thread; at most 20 open; nothing is typed anywhere, the owner sees it as from you
   settings set <key> <1..20|none> [--for <act-id>]   (the supervisor sets max_active_tickets or max_active_per_component in its settings chore, .worktrees/chore-settings; none is no limit; --for names the owner's owner-setting act it lands, which must be the latest for the key with this value. It applies once merge --chore settings lands it)
   owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor's own settings, max_active_tickets or max_active_per_component; none is no limit. The dashboard's Settings page runs it on Save; the supervisor lands it with settings set in its settings chore)
   pane question [--json]   (what the supervisor's terminal is asking; the owner answers it on the dashboard's card, which sends that option's digit key and nothing else: no command answers it)
   thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--re <u-id>] [--off-subject "<why>"] [--anyway] | thread reply <t-id> --part <n> "<words>", then thread reply <t-id> --after-parts ["<last words>"] [reply's flags] | thread ask <t-id> --question "…" [--off-subject "<why>"] <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>" | thread unready <t-id> --reason "<line>"   (supervisor; the responder replies too)   reply, ask an Inbox question in it, propose resolving it (on an artifact note it takes a picture of the spot: look at it), withdraw a proposal or a session's mark; a turn nothing waits on (no owner turn owed, no open handoff) names its --refs on the thread's subject, or follows up your --pending turn with --re <that turn>, or says --off-subject "<why>"
   thread working <t-id> [--done]   (the session holding the owner's turn: the card shows it is responding until you reply)
-  thread show <t-id> [--json] | thread list [--waiting [--responder] | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply; --waiting --responder: the owner's turns owed and routed to the responder, oldest first
+  thread show <t-id> [--json] | thread list [--waiting [--responder] | --with <session> | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply; --waiting --responder: the owner's turns owed and routed to the responder, oldest first; --with: the artifact notes handed to that session, not yet marked
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]   questions print in Inbox order: the most valuable first
   ask … --stake 1-3 --urgency 1-3 [--settles <qid>… --settles-if "<answer>"]   rate every question: how much of what the fleet does next rides on the answer, how soon waiting costs, and the open questions one answer would settle (stake 3, same goal or feature)
   rate <qid> [--stake 1-3] [--urgency 1-3] [--settles <qid>… | --settles none] [--unsettles <qid>…] [--settles-if "<answer>"]   supervisor: rate an open question again; --settles adds to what it settles
