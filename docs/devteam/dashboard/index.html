@@ -1178,7 +1178,9 @@ try {
   /* on a capped card what can be long scrolls, down to a floor, and what is pressed never does: the note's words (with what
      is said above and below them) over their row of presses, an open context, the terminal's ask. Each is the card's own
      flex item, so none can fall under what it holds; the turns give way first */
-  #tl-c-note, #tl-c-note > div:last-child, .tl-addr { display: contents; }
+  #tl-c-note:has(.tl-addr), #tl-c-note:has(.tl-addr) > div:last-child, .tl-addr { display: contents; }
+  #tl-c-note:not(:has(.tl-addr)) { display: flex; flex-direction: column; flex: 0 1 auto; }
+  #tl-c-note:not(:has(.tl-addr)):has(> div:first-child:not(:empty)) { min-height: 36px; }
   #tl-c-note > div:first-child:not(:empty) { flex: 0 1 auto; min-height: 36px; overflow-y: auto; }
   .tl-words, .tl-addr > .row-inline { border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--surface)); font-size: 12px; }
   .tl-words { flex: 0 1 auto; min-height: 61px; margin-top: 6px; padding: 6px 8px 0; border-bottom: 0; border-radius: 6px 6px 0 0; overflow-y: auto; }
@@ -7117,7 +7119,13 @@ function avNotes() {
     .sort((a, b) => (at.get(a.id) ?? Infinity) - (at.get(b.id) ?? Infinity));
 }
 // what the bar says of Hand over: cut where there is no room, whole in its title
-avNotes.say = (words) => { $('e-avn').textContent = words; $('e-avn').title = words; };
+// (for: how long, when it isn't until the next)
+avNotes.say = (words, ms) => {
+  clearTimeout(avNotes.said);
+  $('e-avn').textContent = words;
+  $('e-avn').title = words;
+  if (ms) { const t = setTimeout(() => { if (avNotes.said === t) avNotes.say(''); }, ms); avNotes.said = t; } else avNotes.said = null;
+};
 // The bar's group drawn from them: the stepper, Hand over (N open notes; none, no button) and who has the rest.
 // A hand-over just answered is believed until a read shows it (or 10 s have gone): the notes it took are with
 // that session. What was said of a version goes when another is shown.
@@ -7154,7 +7162,11 @@ async function avHandOver() {
     await press('avn', {
       build: () => ({ action: 'artifact-handoff', body: { slug: av.slug, at: av.at } }),
       apply: () => { avNotes.say(''); av.handed = null; },
-      onOk: (out) => { if (out.count > 0) say(`With ${out.to}`, ids); else say('Nothing to hand over', []); tlRefresh(); },
+      onOk: (out) => {
+        if (out.count > 0) say(`With ${out.to}`, ids); else say('Nothing to hand over', []);
+        if (out.count > 0 && out.typed === false && AV === av) avNotes.say(`Not typed: ${out.to} has no pane. It reads this when it next checks.`, 10000);
+        tlRefresh();
+      },
       // a refusal too is said only of the version it was pressed on
       onError: (error) => { if (AV === av) avNotes.say(`Not saved: ${error}`); },
     });
@@ -7174,9 +7186,9 @@ function avStep(by) {
   const i = list.findIndex((t) => t.id === (avStep.want && TL.open === avStep.want.open ? avStep.want.id : TL.open));
   avStep.to(i < 0 ? (by > 0 ? list[0] : list[list.length - 1]) : list[(i + by + list.length) % list.length]);
 }
-// To check, Open or All: as kept in this browser, else To check once any note is.
+// To check, Open or All: as kept in this browser (on this page, where storage refuses), else To check once any note is.
 avStep.filter = (notes = avNotes()) => {
-  const kept = lsGet('devteam.notes.filter');
+  const kept = avStep.chosen ?? lsGet('devteam.notes.filter');
   return ['check', 'open', 'all'].includes(kept) ? kept : notes.some((t) => tNoteState(t) === 'check') ? 'check' : 'open';
 };
 avStep.list = (notes = avNotes()) => {
@@ -7266,7 +7278,7 @@ avStep.unseen = (t) => {
 // Hand over's press and the stepper's
 document.addEventListener('click', (e) => { if (e.target.closest?.('#av-handover')) avHandOver(); });
 document.addEventListener('click', (e) => { const b = e.target.closest?.('#av-prev, #av-next'); if (b) avStep(b.id === 'av-prev' ? -1 : 1); });
-$('av-filter').addEventListener('change', () => { lsSet('devteam.notes.filter', $('av-filter').value); avNotes.draw(); });
+$('av-filter').addEventListener('change', () => { const f = $('av-filter').value; avStep.chosen = lsSet('devteam.notes.filter', f) ? null : f; avNotes.draw(); });
 // ArrowLeft and ArrowRight on the dashboard's own window, with the viewer up and nothing that takes them focused.
 window.addEventListener('keydown', (e) => {
   if ((e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.repeat || e.defaultPrevented) return;
@@ -7456,16 +7468,29 @@ function tShot(t, small = false) {
   const shot = t.shot;
   if (!shot) return small ? '' : `<div class="tl-shot-cap">${t.noshot === 'no-change' ? 'Nothing to picture: proposed with no change' : 'No picture (marked before pictures)'}</div>`;
   const src = tShot.src(t);
-  const got = src && !tShot.missing.has(src);
+  const got = src && !tShot.gone(src);
   if (small) return got ? `<button type="button" class="ghost th-shot" data-shot-of="${esc(t.id)}" aria-label="Open the picture"><img src="${src}" width="48" alt=""></button>` : '';
   const anchor = { gone: 'The noted element is gone; this is where it was.', hidden: 'The noted element is on the page but hidden on this view; this is where it was.', changed: 'Its text has changed since the note.' };
-  const sha = /^[0-9a-f]{7,40}$/.test(shot.sha ?? '') ? ` · ${shot.sha.slice(0, 7)}` : '';
+  const sha = /^[0-9a-f]{7,64}$/.test(shot.sha ?? '') ? ` · ${shot.sha.slice(0, 7)}` : '';
   const cap = `${shot.src === 'main' ? 'From main' : `From ${esc(shot.src)}'s draft`}${sha}${shot.dirty ? ' + uncommitted changes' : ''}${Number.isFinite(shot.w) ? ` · ${shot.w}px wide` : ''}`;
   const said = Object.hasOwn(anchor, shot.anchor) ? `<div class="tl-shot-cap">${anchor[shot.anchor]}</div>` : '';
   if (!got) return '<div class="tl-shot-cap">Picture not on this machine</div><div class="tl-shot-cap">The mark stands; Show me still opens the spot.</div>';
   return `<button type="button" class="ghost tl-shot" data-shot-of="${esc(t.id)}" aria-label="Open the picture"><img src="${src}" width="160" alt="The noted spot"></button><div class="tl-shot-cap">${cap}</div>${said}`;
 }
-tShot.missing = new Set();
+// The ones the server hadn't, with when each was last asked for: 30 s on, a draw asks once more, out of sight (an image
+// put in the card to find out would move Resolve)
+tShot.missing = new Map();
+tShot.gone = (src) => {
+  const at = tShot.missing.get(src);
+  if (at === undefined) return false;
+  if (Date.now() - at >= 30000) {
+    tShot.missing.set(src, Date.now());
+    const img = new Image();
+    img.onload = () => { tShot.missing.delete(src); tlDraw(); };
+    img.src = src;
+  }
+  return true;
+};
 tShot.src = (t, tone = 'light') => (/^t-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(t.id) && /^\d{8}-\d{9}$/.test(t.shot?.stamp ?? '') ? `/api/shot/${t.id}/${t.shot.stamp}-${tone}.png` : null);
 // The picture full size, over the stage: X, Escape and a click outside it close it and nothing else. With no
 // viewer up there is no stage to show it on: Show me first.
@@ -7478,6 +7503,7 @@ tShot.open = (id) => {
   el.id = 'av-shot';
   el.setAttribute('role', 'dialog');
   el.setAttribute('aria-label', 'The picture');
+  el.setAttribute('aria-modal', 'true');
   const tones = t.shot.dark ? '<button type="button" class="ghost av-pill" data-shot="light" aria-pressed="true">Light</button><button type="button" class="ghost av-pill" data-shot="dark" aria-pressed="false">Dark</button>' : '';
   el.innerHTML = `<div class="av-shot-in"><div class="av-shot-bar">${tones}<span class="grow"></span><button type="button" class="ghost icon-btn" data-shot-close aria-label="Close the picture"><i class="icon-x" aria-hidden="true"></i></button></div><img src="${tShot.src(t)}" alt="The noted spot"><div class="tl-shot-cap" hidden>Picture not on this machine</div></div>`;
   el.querySelector('img').addEventListener('error', (e) => { e.target.hidden = true; el.querySelector('.tl-shot-cap').hidden = false; });
@@ -7502,8 +7528,16 @@ tShot.close = (focus = true) => {
   if (focus) (document.querySelector(`#tl-card .tl-shot[data-shot-of="${tShot.of}"]`) ?? document.querySelector(`.th-shot[data-shot-of="${tShot.of}"]`))?.focus();
   return true;
 };
+// Tab goes round in the picture's own buttons
+tShot.tab = (e) => {
+  const el = document.getElementById('av-shot');
+  if (!el || $('artifact-view').hidden) return;
+  const all = [...el.querySelectorAll('button')], i = all.indexOf(document.activeElement);
+  e.preventDefault();
+  all[i < 0 ? 0 : (i + (e.shiftKey ? -1 : 1) + all.length) % all.length].focus();
+};
 // before every other listener of these (the card's and the viewer's Escape): the picture alone closes
-window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && tShot.close()) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && tShot.close()) { e.preventDefault(); e.stopImmediatePropagation(); } else if (e.key === 'Tab') tShot.tab(e); }, true);
 document.addEventListener('click', (e) => {
   if (document.getElementById('av-shot') && (e.target.closest('[data-shot-close]') || !e.target.closest('.av-shot-in'))) { tShot.close(); if (e.target.id === 'av-shot' || e.target.closest('[data-shot-close]')) return; }
   const pic = e.target.closest?.('.tl-shot, .th-shot');
@@ -7511,7 +7545,7 @@ document.addEventListener('click', (e) => {
 });
 document.addEventListener('error', (e) => {
   if (e.target?.tagName !== 'IMG' || !e.target.closest('.tl-shot, .th-shot')) return;
-  tShot.missing.add(e.target.getAttribute('src'));
+  tShot.missing.set(e.target.getAttribute('src'), Date.now());
   tlDraw();
 }, true);
 /* tShot end */
@@ -10156,7 +10190,7 @@ function tlCardBody(t) {
   }
   const check = s?.kind === 'artifact' && !!t && tNoteState(t) === 'check' && !TL.resolving && (t.check === 'addressed' ? t.addressed : t.check === 'ready' ? t.ready : null);
   const off = avStep.off && avStep.off.id === t?.id && avStep.off.av === AV ? avStep.off : null;
-  const sha = check && t.check === 'addressed' && /^[0-9a-f]{7,40}$/.test(check.sha ?? '') ? ` · ${check.sha.slice(0, 7)}` : '';
+  const sha = check && t.check === 'addressed' && /^[0-9a-f]{7,64}$/.test(check.sha ?? '') ? ` · ${check.sha.slice(0, 7)}` : '';
   // each part redrawn on its own, so where a step landed (the page's word) never takes a press from Resolve
   const draw = (el, html) => { if (el && el.said !== html) { el.said = html; el.innerHTML = html; } };
   const above = [

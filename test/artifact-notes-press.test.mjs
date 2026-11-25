@@ -474,6 +474,9 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
           avStep.unseen = () => ${!!o.above}; avStep.off = ${o.above ? '{ id: TL.open, av: AV, gone: true }' : 'null'};
           tlDraw();
           const d = document.querySelector('#tl-c-ctx details'); if (d) d.open = ${!!o.ctx};
+          // (as long as a captured one gets)
+          document.getElementById('zz-ctx')?.remove();
+          if (d && ${!!o.ctx}) d.insertAdjacentHTML('beforeend', '<div id="zz-ctx" style="height:220px">long</div>');
           const i = document.querySelector('#tl-card .tl-shot img');
           if (i) i.src = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="390" height="700"><rect width="390" height="700" fill="red"/></svg>');
           return true; })()`);
@@ -520,5 +523,82 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
     await V.rows({ [N.onMain]: note(16) });
     await V.p.ev(`(avStep.unseen = () => false, avStep.off = null, tlDraw(), document.querySelector('#tl-c-ctx details').open = true, true)`);
     await counts(V, '#tl-card [data-tl-accept]', `window.__posts.some((x) => x.action === 'thread-accept-addressed')`, 'a conversation, its context open: Resolve posts');
+  });
+
+  await sub('A27: the filter without storage; Tab in the picture; a sha of 64; a missing picture asked for again', async () => {
+    const sha64 = '3f7c2a9e1b0d4c5f6a7b8c9d0e1f2a3b4c5d6e7f3f7c2a9e1b0d4c5f6a7b8c9d', stamp = '20261120-100900000';
+    const V = await tabOf({ [N.trial]: ROW.C12({ addressed: ADDR({ sha: sha64 }), shot: SHOT({ sha: sha64, dark: true, stamp }) }), [N.plans]: ROW.C20() });
+    await openAt(V, AV_WT, 'plan-pricing');
+    // storage that refuses
+    await V.p.ev(`(Storage.prototype.setItem = () => { throw new Error('refused'); }, true)`);
+    for (const f of ['all', 'open', 'all']) {
+      await V.p.ev(`(() => { const s = document.getElementById('av-filter'); s.value = ${J(f)}; s.dispatchEvent(new Event('change', { bubbles: true })); tlDraw(); return true; })()`);
+      assert.deepEqual(await V.p.ev(`[avStep.filter(), document.getElementById('av-filter').value]`), [f, f], `the filter's choice (${f}) holds with storage refusing`);
+    }
+    // a picture the server hasn't: said, not asked for again within 30 s, then asked once and shown when it is there
+    await cardOf(V, N.trial);
+    await holdPoll(V);
+    const gone = `${text('#tl-card')}.includes('Picture not on this machine')`, there = `!!document.querySelector('#tl-card .tl-shot img')`;
+    assert.ok(await V.settle(gone, 5000), 'setup: the picture is missing');
+    assert.match(await V.p.ev(text('#tl-card .by')), / · 3f7c2a9$/, 'a sha of 64, cut to 7');
+    await V.p.ev(`(() => { const d = Date.now, I = window.Image; window.__late = 0; Date.now = () => d() + window.__late; window.__asks = 0; window.Image = function () { window.__asks++; return new I(); }; return true; })()`);
+    plant(N.trial, stamp, ['light', 'dark']);
+    await V.p.ev('(window.__late = 28000 - 5000, tlDraw(), tlDraw(), true)');
+    await new Promise((r) => setTimeout(r, 400));
+    assert.deepEqual(await V.p.ev(`[window.__asks, ${there}]`), [0, false], 'not asked for again within 30 s');
+    await V.p.ev('(window.__late = 31000, tlDraw(), tlDraw(), true)');
+    assert.ok(await V.settle(there, 4000), 'asked for again after 30 s, and shown');
+    assert.equal(await V.p.ev('window.__asks'), 1, 'asked once');
+    assert.ok(await V.settle(`${text('#tl-card .tl-shot-cap')}.includes(' · 3f7c2a9 ')`, 2000), "the caption's sha, cut to 7");
+    // Tab stays in the picture's dialog
+    await V.p.click('#tl-card .tl-shot');
+    await has(V, '#av-shot', 'the picture');
+    assert.equal(await V.p.ev(`document.getElementById('av-shot').getAttribute('aria-modal')`), 'true', 'modal');
+    const on = `(() => { const e = document.activeElement; return document.getElementById('av-shot').contains(e) ? e.dataset.shot ?? 'close' : 'out: ' + (e.id || e.tagName); })()`;
+    const tab = async (back) => { const k = { key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, modifiers: back ? 8 : 0 }; await V.p.send('Input.dispatchKeyEvent', { type: 'keyDown', ...k }); await V.p.send('Input.dispatchKeyEvent', { type: 'keyUp', ...k }); return V.p.ev(on); };
+    const went = [await V.p.ev(on)];
+    for (let i = 0; i < 4; i++) went.push(await tab(false));
+    for (let i = 0; i < 4; i++) went.push(await tab(true));
+    assert.deepEqual(went, ['close', 'light', 'dark', 'close', 'light', 'close', 'dark', 'light', 'close'], 'Tab and Shift+Tab stay in the dialog');
+  });
+
+  await sub('A27: words that were not typed are said, whole or in the title, until 10 s, the next press or a refusal', async () => {
+    const V = await tabOf({ [N.trial]: ROW.C20(), [N.plans]: ROW.C20() });
+    await openAt(V, AV_WT, 'plan-pricing');
+    await has(V, '#av-handover', 'the pill');
+    const WORDS = 'Not typed: plan-pricing has no pane. It reads this when it next checks.';
+    const said = `[document.getElementById('e-avn').textContent, document.getElementById('e-avn').title]`;
+    const hand = async (body, o = {}) => { await V.rows({ [N.trial]: ROW.C20(), [N.plans]: ROW.C20() }); await V.p.ev(`(AV.handed = null, window.__replies['artifact-handoff'] = ${J({ body, ...o })}, tlDraw(), true)`); const n = (await acts(V, 'artifact-handoff')).length; await V.p.ev(`(document.getElementById('av-handover').click(), true)`); await V.soon(`window.__posts.filter((x) => x.action === 'artifact-handoff').length > ${n}`, 'setup: posted'); };
+    const no = { to: 'plan-pricing', typed: false, count: 2 };
+    for (const w of [1280, 390]) {
+      await V.size(w, 800);
+      await hand(no);
+      assert.ok(await V.settle(`${said}.join('|') === ${J([WORDS, WORDS].join('|'))}`, 3000), `said at ${w}, its whole words in the title (${J(await V.p.ev(said))})`);
+      assert.equal(await V.p.ev(text('#av-with')), 'With plan-pricing', `With plan-pricing at ${w}`);
+      assert.ok(await V.p.ev(shown('#e-avn')), `it shows at ${w}`);
+    }
+    // the next press: gone as it starts
+    await hand({ to: 'plan-pricing', typed: true, count: 2 }, { wait: 800 });
+    assert.deepEqual(await V.p.ev(said), ['', ''], 'gone at the next press');
+    await V.soon(`${text('#av-with')} === 'With plan-pricing'`, 'setup: answered');
+    assert.deepEqual(await V.p.ev(said), ['', ''], 'typed: nothing said');
+    // a refusal takes its place, and isn't cleared when the words' time is up
+    await V.p.ev(`(() => { const s = window.setTimeout; window.__timers = []; window.setTimeout = (f, ms, ...a) => { if (ms === 10000) window.__timers.push(f); return s(f, ms, ...a); }; return true; })()`);
+    await hand(no);
+    assert.ok(await V.settle(`${said}[0] === ${J(WORDS)} && window.__timers.length > 0`, 3000), 'said again');
+    await hand({ error: 'x' }, { status: 400 });
+    assert.ok(await V.settle(`${said}[0] === 'Not saved: x'`, 3000), 'a refusal takes its place');
+    await V.p.ev('(window.__timers.forEach((f) => f()), true)');
+    assert.deepEqual(await V.p.ev(said), ['Not saved: x', 'Not saved: x'], 'the refusal outlives the words\' 10 s');
+    // 10 s
+    await V.p.ev('(window.__timers = [], true)');
+    await hand(no);
+    assert.ok(await V.settle(`${said}[0] === ${J(WORDS)} && window.__timers.length > 0`, 3000), 'said once more');
+    await V.p.ev('(window.__timers.forEach((f) => f()), true)');
+    assert.deepEqual(await V.p.ev(said), ['', ''], 'gone after 10 s');
+    // a count of none says nothing of typing
+    await hand({ to: 'plan-pricing', typed: false, count: 0 });
+    await V.soon(`${text('#av-with')} === 'Nothing to hand over'`, 'setup: none');
+    assert.deepEqual(await V.p.ev(said), ['', ''], 'none handed over: nothing said of typing');
   });
 });
