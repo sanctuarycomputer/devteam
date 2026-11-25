@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="copy" content="draft-1"><title>Pricing</title>
+<style>
+  body { margin: 0; font: 16px/1.4 sans-serif; }
+  #to-a, #to-b { position: absolute; display: block; box-sizing: border-box; }
+  #to-a { left: 40px; top: 40px; width: 160px; height: 32px; }
+  #to-b { left: 220px; top: 40px; width: 160px; height: 32px; }
+</style></head>
+<body>
+<a id="to-a" href="a.html">Prices</a>
+<a id="to-b" href="b.html">Questions</a>
+<script>
+const IDS = ['to-a', 'to-b'];
+const rects = () => Object.fromEntries(IDS.map((id) => { const r = document.getElementById(id).getBoundingClientRect(); return [id, { x: r.left, y: r.top, w: r.width, h: r.height }]; }));
+const copy = document.querySelector('meta[name=copy]').content;
+const say = () => parent.postMessage({ own: 'at', page: 'pricing/index.html', hash: location.hash, copy, rects: rects() }, '*');
+addEventListener('load', () => { say(); requestAnimationFrame(() => requestAnimationFrame(say)); });
+addEventListener('resize', say);
+</script>
+</body></html>

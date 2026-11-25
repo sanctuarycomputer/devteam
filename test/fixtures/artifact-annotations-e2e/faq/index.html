@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="copy" content="main-1"><title>FAQ</title>
+<style>
+  body { margin: 0; font: 16px/1.4 sans-serif; background: #fff; color: #111; }
+  /* at a fixed place and size, with a solid fill, so a note's picture shows the box where the test looks */
+  #q-refund { position: absolute; display: block; box-sizing: border-box; margin: 0; left: 60px; top: 60px; width: 240px; height: 60px; background: #1f4fd8; color: #fff; }
+</style></head>
+<body>
+<div id="q-refund">Can I get a refund?</div>
+<script>
+const IDS = ['q-refund'];
+const rects = () => Object.fromEntries(IDS.map((id) => { const r = document.getElementById(id).getBoundingClientRect(); return [id, { x: r.left, y: r.top, w: r.width, h: r.height }]; }));
+const copy = document.querySelector('meta[name=copy]').content;
+const say = () => parent.postMessage({ own: 'at', page: 'faq/index.html', hash: location.hash, copy, rects: rects() }, '*');
+addEventListener('load', () => { say(); requestAnimationFrame(() => requestAnimationFrame(say)); });
+addEventListener('resize', say);
+addEventListener('hashchange', say);
+</script>
+</body></html>
