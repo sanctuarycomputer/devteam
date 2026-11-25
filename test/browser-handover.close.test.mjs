@@ -174,10 +174,22 @@ const signInPosts = () => { const p = site.posts().paths; return { login: p['/lo
 // the answer (close: the owner's Done or Can't right now, or the supervisor's withdraw); no secret in
 // any scan from 2 s after the answer on, and none after the first clean one, through wait and once
 // after. The answer's time is its log line's at. { w, ms }: wait's output, and answer to first clean.
-async function closeAndScan(P, q, close, label) {
+// v: the owner's view socket, still open. The close's steps are timed from the answer too, each as a
+// 50 ms poll (running from before the answer command) first saw it, so a miss names its slow step: the view's bye (the daemon took the close,
+// after its 500 ms watch), the old Chrome's exit (Browser.close until it is gone; the session files
+// are deleted only after), and the first clean scan (the process wait and the delete).
+async function closeAndScan(P, q, close, label, v) {
   await codeOnDisk(P, site.code);
+  const oldPid = readState(P)?.chrome_pid;
+  assert.ok(Number.isInteger(oldPid) && alive(oldPid), `${label}: a live Chrome before the answer (state.json's chrome_pid ${oldPid})`);
   const loop = scanLoop(P, [site.password, site.code]);
-  let w, answerAt, clean;
+  let w, answerAt, clean, byeAt = null, goneAt = null;
+  const mark = () => {
+    const now = Date.now();
+    if (byeAt === null && v.msgs.some((m) => m.t === 'bye')) byeAt = now;
+    if (goneAt === null && !alive(oldPid)) goneAt = now;
+  };
+  const tick = setInterval(mark, 50); // from before the answer command, so a bye or exit during it is seen
   try {
     await close();
     const l = logAt(P, q);
@@ -190,15 +202,17 @@ async function closeAndScan(P, q, close, label) {
     }
     clean = loop.firstCleanAfter(answerAt);
     w = await waitJson(P);
-  } finally { await loop.stop(); }
+  } finally { mark(); clearInterval(tick); await loop.stop(); }
   const ms = clean - answerAt;
   let load = '?';
   try { load = fs.readFileSync('/proc/loadavg', 'utf8').split(' ').slice(0, 3).join(' '); } catch {}
   const took = loop.scans.map((s) => s.ms);
   const first = loop.scans.find((s) => s.at === clean);
-  console.log(`# kit-67 ${label}: answer to first clean scan ${ms} ms (by its end ${clean + first.ms - answerAt} ms; ${loop.scans.length} scans, each ${Math.min(...took)}-${Math.max(...took)} ms; load ${load})`);
+  const since = (t) => (t === null ? 'not seen' : `${t - answerAt} ms`);
+  const steps = `from the answer: the view's bye ${since(byeAt)} (the daemon took the close), the old Chrome (pid ${oldPid}) gone ${since(goneAt)} (Browser.close until its exit), the first clean scan ${ms} ms (the process wait and the delete)`;
+  console.log(`# kit-67 ${label}: answer to first clean scan ${ms} ms (by its end ${clean + first.ms - answerAt} ms; ${loop.scans.length} scans, each ${Math.min(...took)}-${Math.max(...took)} ms; load ${load}); ${steps}`);
   const late = loop.scans.filter((s) => s.found.length && (s.at >= answerAt + 2000 || s.at >= clean));
-  assert.deepEqual(late.map((s) => ({ after: s.at - answerAt, found: s.found })), [], `${label}: a secret on disk 2 s after the answer, or after a clean scan`);
+  assert.deepEqual(late.map((s) => ({ after: s.at - answerAt, found: s.found })), [], `${label}: a secret on disk 2 s after the answer, or after a clean scan; ${steps}; load ${load}`);
   return { w, ms };
 }
 // The at of the line that closed question q: its answer (an owner line) or its status set line.
@@ -214,7 +228,7 @@ onD('C12 a login over the view, then Done: the password and code leave the disk 
   await ok(P, ['open', `${site.origin}/login`]);
   const q = await askHandover(P);
   const v = await ownerLogIn(P, { to: `${site.origin}/account` });
-  const { w } = await closeAndScan(P, q, async () => { const a = await owner(P, ['answer', q, '--choice', 'Done']); assert.equal(a.status, 0, a.err || a.out); }, 'C12');
+  const { w } = await closeAndScan(P, q, async () => { const a = await owner(P, ['answer', q, '--choice', 'Done']); assert.equal(a.status, 0, a.err || a.out); }, 'C12', v);
   v.close();
   assert.deepEqual([w.qid, w.outcome, w.reopened], [q, 'done', [`${site.origin}/account`]]);
   const s = await ok(P, ['snapshot']);
@@ -234,7 +248,7 @@ onD('C13 the 200-page variant: the form page (/2fa?variant=•••) is the las
     posts = signInPosts();
     const a = await owner(P, ['answer', q, '--choice', 'Done']);
     assert.equal(a.status, 0, a.err || a.out);
-  }, 'C13');
+  }, 'C13', v);
   v.close();
   assert.deepEqual([w.qid, w.outcome, w.reopened], [q, 'done', [`${site.origin}/2fa?variant=•••`]]);
   assert.deepEqual(signInPosts(), posts, 'a POST was replayed');
@@ -253,7 +267,7 @@ onD('C14 declined and withdrawn after a login: the secrets leave the disk, no ta
     await ok(P, ['open', `${site.origin}/login`]);
     const q = await askHandover(P);
     const v = await ownerLogIn(P, { to: `${site.origin}/account` });
-    const { w } = await closeAndScan(P, q, close(q), label);
+    const { w } = await closeAndScan(P, q, close(q), label, v);
     v.close();
     assert.deepEqual([w.qid, w.outcome, w.reopened], [q, outcome, undefined], label);
     assert.deepEqual(await tabUrls(P), ['about:blank'], label);

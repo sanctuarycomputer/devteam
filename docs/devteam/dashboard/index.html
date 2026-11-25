@@ -6641,39 +6641,6 @@ function refetchFile(url) {
   FILE_FLIGHT.set(url, pr);
   return pr;
 }
-// The Self's or the Exterior's block as lists (kit-137), from its dashboard shape (log.schema.json $defs.self.dashboard,
-// $defs.exterior.dashboard): HTML in which every value from the block is escaped. null is not drafted yet. The
-// Exterior's entities by relation, in the schema's order (other by its word), each in the data's order with its
-// signals by score, highest first.
-function worldBlocks(kind, block) {
-  if (block === null) return `<p>The ${kind === 'self' ? 'Self is not drafted yet: main has no self.md' : 'Exterior is not drafted yet: main has no exterior.md'} that passes its check.</p>`;
-  const list = (xs) => (Array.isArray(xs) ? xs : []);
-  const ul = (items) => `<ul>${items.length ? items.join('') : '<li>None</li>'}</ul>`;
-  const sec = (h, body) => `<h3>${esc(h)}</h3>${body}`;
-  const b = block && typeof block === 'object' ? block : {};
-  if (kind === 'self') {
-    return sec('What it is', `<p>${esc(b.what)}</p>`) + sec('What it makes', `<p>${esc(b.makes)}</p>`)
-      + sec('Its parts', ul(list(b.parts).map((x) => `<li>${esc(x?.name)}: ${esc(x?.what)}${list(x?.code).map((c) => ` <code>${esc(c)}</code>`).join('')}</li>`)))
-      + sec('What it controls', ul(list(b.controls).map((x) => `<li>${esc(x)}</li>`)))
-      + sec('What it touches but does not control', ul(list(b.not).map((x) => `<li>${esc(x)}</li>`)));
-  }
-  const ents = list(b.entities).filter((e) => e && typeof e === 'object');
-  if (!ents.length) return '<p>None</p>';
-  const REL = [['serves', 'It serves'], ['depends_on', 'It depends on'], ['builds_on_it', 'Builds on it'], ['alternative', 'Its alternatives'], ['collaborates', 'It works with'], ['governs', 'Governs it'], ['affects', 'It affects']];
-  const KIND = { organisation: 'an organisation', group: 'a group', work: 'a work' };
-  const score = (s) => (Number.isFinite(s?.score) ? s.score : 0);
-  const entity = (e) => {
-    const sigs = list(e.signals).filter((s) => s && typeof s === 'object').sort((x, y) => score(y) - score(x));
-    return `<li><b>${esc(e.name)}</b>, ${esc(Object.hasOwn(KIND, e.kind) ? KIND[e.kind] : e.kind)}: ${esc(e.matters)}<ul>${sigs.length ? sigs.map((s) => `<li>${esc(s.what)}</li>`).join('') : '<li>None</li>'}</ul></li>`;
-  };
-  const known = new Set(REL.map(([r]) => r));
-  const groups = REL.map(([r, h]) => [h, ents.filter((e) => e.relation === r)]);
-  // other, and a relation this page doesn't know, by its word in first-seen order
-  const words = [];
-  for (const e of ents) if (!known.has(e.relation)) { const w = typeof e.relation_word === 'string' && e.relation_word ? e.relation_word : ''; if (!words.includes(w)) words.push(w); }
-  for (const w of words) groups.push([w ? `Other: ${w}` : 'Other', ents.filter((e) => !known.has(e.relation) && ((typeof e.relation_word === 'string' && e.relation_word) || '') === w)]);
-  return groups.filter(([, es]) => es.length).map(([h, es]) => sec(h, `<ul>${es.map(entity).join('')}</ul>`)).join('');
-}
 function openFile(params) {
   const path = params.get('path'), title = params.get('title') || path, ref = params.get('ref'), repo = params.get('repo');
   drawerFor('file', path, params);
@@ -6685,29 +6652,45 @@ function openFile(params) {
   const tail = historySection(p, path);
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) return showDrawer(`${head}<div class="viewer"><img src="${esc(url)}" alt="${esc(title)}"></div>${tail}`);
   if (['html', 'pdf'].includes(ext)) return showDrawer(`${head}<div class="viewer"><iframe sandbox src="${esc(url)}" title="${esc(title)}"></iframe></div><p class="meta"><a href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open in a new tab</a></p>${tail}`);
-  // The project's self.md or exterior.md read at main (kit-137): its fenced block is drawn as lists from DATA's
-  // dashboard block (self@1, exterior@1), main's like DATA; null there is not drafted yet, and a key DATA lacks
-  // (a server that doesn't carry it) leaves the file as any Markdown file. The project's: the path the page
-  // assumes for the strategy until a governance listing is read, then one that listing shows in its Project section.
+  // The project's self.md or exterior.md read at main (kit-137, kit-866): a plain document (self@2, exterior@2),
+  // rendered as any Markdown file whatever dashboard-data carries, and one main lacks is not drafted yet. The
+  // project's: the path the page assumes for the strategy until a governance listing is read, then one that
+  // listing shows in its Project section.
   const wk = ref || repo || ext !== 'md' ? undefined : ['self', 'exterior'].find((k) => (GOV.files
     ? GOV.files.some((f) => f?.group === 'project' && f.path === path) && (path === `${k}.md` || path.endsWith(`/${k}.md`))
     : path === `docs/devteam/project/${k}.md`));
-  const wb = wk && DATA && Object.hasOwn(DATA, wk) ? worldBlocks(wk, DATA[wk]) : null;
   const txt = FILES.get(url);
   if (txt === undefined) { refetchFile(url); return showDrawer(`${head}<p class="loading">Loading…</p>${tail}`); }
-  if (typeof txt !== 'string') return showDrawer(`${head}${wb !== null && DATA[wk] === null ? `<div class="viewer"><div class="md">${wb}</div></div>` : `<p class="err">${esc(txt.error)}</p>`}${tail}`);
+  if (typeof txt !== 'string') return showDrawer(`${head}${wk && /^not found: /.test(String(txt.error)) ? `<div class="viewer"><div class="md"><p>The ${wk === 'self' ? 'Self' : 'Exterior'} is not drafted yet: main has no ${wk}.md.</p></div></div>` : `<p class="err">${esc(txt.error)}</p>`}${tail}`);
   const where = `<code>${esc(path)}</code>${ref ? ` at <code>${esc(ref)}</code>` : ''}`;
   // Markdown renders (sanitized: agents write these files) with a toggle back to the raw text.
   const isMd = ['md', 'markdown'].includes(ext) && window.marked && window.DOMPurify;
   const mode = (() => { try { return localStorage.getItem('devteam.mdview') || 'rendered'; } catch { return 'rendered'; } })();
   let rendered = isMd ? DOMPurify.sanitize(marked.parse(txt, { gfm: true }), { FORBID_TAGS: ['style', 'form', 'input'], FORBID_ATTR: ['style'] }) : '';
-  if (isMd && wb !== null) {
-    // the lists in the block's place (after the sanitizer: they are built from escaped strings only), else after the prose
-    const doc = document.createElement('template'), lists = document.createElement('template');
+  if (isMd && wk) {
+    // After the sanitizer. A version 1 file's fenced self or exterior block is left out (Raw shows the file as it
+    // is). A link with no scheme has no page here: one to a Markdown file in the same folder (a reference, as
+    // strategy.md) opens that file's peek at main, and any other (a part's folder or file, an anchor) shows as its words.
+    const doc = document.createElement('template');
     doc.innerHTML = rendered;
-    lists.innerHTML = wb;
-    const pre = doc.content.querySelector(`pre > code.language-${wk}`)?.parentElement;
-    if (pre) pre.replaceWith(lists.content); else doc.content.append(lists.content);
+    for (const c of doc.content.querySelectorAll('pre > code.language-self, pre > code.language-exterior')) c.parentElement.remove();
+    const dir = path.split('/').slice(0, -1);
+    for (const a of doc.content.querySelectorAll('a')) {
+      const h = a.getAttribute('href') ?? '';
+      if (/^[a-z][a-z0-9+.-]*:/i.test(h)) continue;
+      // resolved from the file's folder as self@2 resolves a part (its anchor and query dropped, % decoded);
+      // a reference is an .md whose folder is the file's own
+      let to = null;
+      try {
+        const segs = [...dir];
+        for (const s of decodeURIComponent(h.replace(/[#?].*$/, '')).split('/')) {
+          if (s === '..') { if (!segs.length) throw new Error('outside the repo'); segs.pop(); } else if (s && s !== '.') segs.push(s);
+        }
+        if (!h.startsWith('/') && /\.md$/i.test(segs.at(-1) ?? '') && segs.slice(0, -1).join('/') === dir.join('/')) to = segs.join('/');
+      } catch {}
+      if (to) a.setAttribute('href', `#file?${new URLSearchParams({ path: to })}`);
+      else a.replaceWith(...a.childNodes);
+    }
     rendered = doc.innerHTML;
   }
   if (isMd) AFTER.push(() => renderMermaid($('drawer-body').querySelector('.md')));
