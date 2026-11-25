@@ -26567,8 +26567,96 @@ const boxHealthClaude = (() => {
 })();
 /* box-health-claude end */
 /* box-health-park start */
-// answer.claude.park: what to park (kit-843's).
-const boxHealthPark = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+// answer.claude.park (kit-843): when Claude would run out, each project's goals whose parking would
+// make it last. Nothing is read or written here and no timer is set: part() works from what the
+// claude and pool parts gave this tick, and gives the same object while neither changed.
+//
+// parts.claude needs a rate (not measuring) and a projection; else park is absent. A projection that
+// lasts has nothing to park: park is []. One that runs out with no safe_rate (no rate lasts) has park
+// absent: no parking would make it last. One that runs out with a safe_rate has the rows below.
+//
+// The projects are parts.pool's with a pool.json (pool@1). Only one whose file is fresh (at most 15
+// minutes old) gets a row: parking an unknown can't be promised. A stale file's hours, as of its
+// file, are still in the total (spec-1 F5): that project's sessions are using the machine, and leaving
+// them out would raise every share, so a row could read as enough when it isn't.
+//   weight   each hour is usd_hour when every project with a file has every price (no usd_hour,
+//            reviews_usd_hour or other.usd_hour is null), else new_hour. Both count Claude models
+//            only (pool@1).
+//   total    the hour every session used: over every project with a file, each worker's own hour, its reviewers'
+//            hour, and other (supervisors, planners, the responder, ended sessions), each once. A
+//            goal's hour is a second view of that use and isn't added (pool@1). Work that isn't
+//            measured has no hour and is in no share.
+//   share    a goal's hour over the total. A goal's hour is its workers', their reviewers', its
+//            planners' and its ended sessions': its project's supervisor time is in other, so it is
+//            in the total and in no goal's share (F3-3).
+// A goal is offered when a worker holding a slot names it (something of it runs now) and its share
+// is over 0 (parking it would slow the burn). Each project's row takes its goals lowest priority first
+// (the highest priority number first; one with no priority before any with one; then the larger
+// share, then the id) until the burn left, rate × (1 − the row's share), is at or under safe_rate:
+// enough. A row that never gets there holds every goal offered, and is not enough. A project with no
+// goal offered has no row. Rows that are enough come first, fewest goals first (then the larger
+// share); then the rest, larger share first; ties by name, then port. Each row carries its project's
+// port (absent with no dashboard), so two projects of one name keep a row each.
+// It gives { answer: { claude: { park } } } (park [] too when it would run out and no goal can be
+// offered: no fresh project, nothing running, or no measured use), or undefined.
+const boxHealthPark = (() => {
+  let memo = null;
+  const isNum = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  const rows = (claude, pool) => {
+    const known = (Array.isArray(pool?.projects) ? pool.projects : []).filter((p) => memoryIsMap(p) && memoryIsMap(p.pool));
+    const projects = known.filter((p) => p.fresh === true);
+    const priced = known.every(({ pool: f }) => f.other.usd_hour !== null && f.goals.every((g) => g.usd_hour !== null)
+      && f.workers.every((w) => w.tokens.usd_hour !== null && w.tokens.reviews_usd_hour !== null));
+    const k = priced ? 'usd_hour' : 'new_hour', rk = priced ? 'reviews_usd_hour' : 'reviews_new_hour';
+    const hour = (v) => (isNum(v) ? v : 0);
+    let total = 0;
+    for (const { pool: f } of known) {
+      total += hour(f.other[k]);
+      for (const w of f.workers) total += hour(w.tokens[k]) + hour(w.tokens[rk]);
+    }
+    if (!(total > 0)) return [];
+    const { rate, safe_rate: safe } = claude;
+    const out = [];
+    for (const p of projects) {
+      const f = p.pool;
+      const running = new Set(f.workers.map((w) => w.goal).filter((i) => i !== undefined));
+      const rank = (g) => (Number.isSafeInteger(g.priority) ? g.priority : Infinity);
+      const offered = f.goals.map((g, i) => ({ g, i, share: hour(g[k]) / total }))
+        .filter((x) => running.has(x.i) && x.share > 0)
+        .sort((a, b) => (rank(a.g) === rank(b.g) ? 0 : rank(b.g) > rank(a.g) ? 1 : -1) || b.share - a.share || (a.g.id < b.g.id ? -1 : a.g.id > b.g.id ? 1 : 0));
+      if (!offered.length) continue;
+      const goals = [];
+      let share = 0, enough = false;
+      for (const x of offered) {
+        goals.push({ id: x.g.id, title: x.g.title });
+        share += x.share;
+        if (rate * (1 - share) <= safe + 1e-9) { enough = true; break; }
+      }
+      out.push({ fleet: p.name, ...(p.port !== undefined ? { port: p.port } : {}), goals, share: Number(boxHealthShare(share).toFixed(4)), enough, raw: share });
+    }
+    const byName = (a, b) => (a.fleet < b.fleet ? -1 : a.fleet > b.fleet ? 1 : 0) || (a.port ?? 0) - (b.port ?? 0);
+    out.sort((a, b) => (a.enough === b.enough ? 0 : a.enough ? -1 : 1)
+      || (a.enough ? a.goals.length - b.goals.length : 0) || b.raw - a.raw || byName(a, b));
+    return out.map(({ raw, ...r }) => r);
+  };
+  const build = (claude, pool) => {
+    if (!memoryIsMap(claude) || claude.measuring || !isNum(claude.rate) || !memoryIsMap(claude.projection)) return undefined;
+    if (claude.projection.lasts === true) return { answer: { claude: { park: [] } } };
+    if (claude.projection.lasts !== false || !isNum(claude.safe_rate)) return undefined;
+    return { answer: { claude: { park: rows(claude, pool) } } };
+  };
+  return {
+    start() { memo = null; },
+    part(ctx, parts) {
+      const claude = parts.claude, pool = parts.pool;
+      if (memo && memo.claude === claude && memo.pool === pool) return memo.given;
+      const given = build(claude, pool);
+      memo = { claude, pool, given };
+      return given;
+    },
+    stop() { memo = null; },
+  };
+})();
 /* box-health-park end */
 /* box-health-room start */
 // answer.headroom, answer.pool.what_if and each sample's room (kit-844's).

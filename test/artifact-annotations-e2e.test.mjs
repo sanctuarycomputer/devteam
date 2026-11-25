@@ -12,14 +12,33 @@ import { buildStack, cli, ok, logLines, markLine, draftChange, writeNoSandboxChr
 const WIN = { width: 1100, height: 800 };
 const HEAD_P = `#artifact/wt/${PLAN}/${SLUG}`;
 
+// The process's time before the test body: Node's start and every import, kit-147's import-time Chrome warm-up
+// (test/fixtures/artifact-shots/kit.mjs, up to its 60 s spawnSync timeout) included. Under this budget the file
+// keeps more than 100 s of room under its 300 s CI watchdog (test/run.mjs) at CI's ~90 s for the rest.
+const IMPORTS_BUDGET = 75000;
+// a design step's place in §End to end's order (6b and 7b after their step); null for a check's subtest
+const stepAt = (name) => { const m = /^step (\d+)(b?)\b/.exec(name); return m ? Number(m[1]) + (m[2] ? 0.5 : 0) : null; };
+
 test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 900000 }, async (t) => {
+  const imports = Math.round(process.uptime() * 1000);
+  t.diagnostic(`imports: ${imports} ms`);
   const fileAt = Date.now();
   const H = await harness(t, 'ann-e2e');
   const { F, visit, AV_A, AV_B, PV } = H;
+  // From here every CLI child goes through stack.mjs's cli(), with DEVTEAM_CHROME_NO_SANDBOX=1: the fixture's own
+  // runners refuse, and its F.run (cli's) checks the variable on each call.
+  for (const name of ['sup', 'owner', 'ok', 'fails', 'approval', 'checkWith']) F[name] = () => assert.fail(`F.${name}: every CLI child goes through cli() (stack.mjs)`);
+  const fixtureRun = F.run;
+  F.run = (cwd, args, env, ...rest) => { assert.equal(env?.DEVTEAM_CHROME_NO_SANDBOX, '1', `${args.join(' ')}: started without DEVTEAM_CHROME_NO_SANDBOX=1`); return fixtureRun(cwd, args, env, ...rest); };
   const times = {};
+  const ran = [];
   const step = (name, fn, opts = {}) => t.test(name, { timeout: 120000, ...opts }, async (s) => {
     const at = Date.now();
+    ran.push(name);
     try { await fn(s); } finally { times[name] = Date.now() - at; t.diagnostic(`${name}: ${times[name]} ms`); }
+  });
+  await step(`imports: the file's imports, kit-147's Chrome warm-up included, took under ${IMPORTS_BUDGET} ms`, async () => {
+    assert.ok(imports < IMPORTS_BUDGET, `imports: ${imports} ms before the test body, over the ${IMPORTS_BUDGET} ms budget`);
   });
   const stack = buildStack(F);
 
@@ -465,16 +484,7 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
     assert.equal(noteStates()[idOfKey('N1')], 'open', 'C6b: N1 is still open');
   }, { timeout: 240000 });
 
-  await step('step 8: Hand over (2); the version\'s open notes are N1 and N3', async () => {
-    const V = await visit('#library', WIN);
-    await openDraft(V);
-    await V.soon(`document.getElementById('av-handover').textContent === 'Hand over (2)'`, 'C6d: #av-handover reads Hand over (2)');
-    assert.equal(await V.p.ev("document.getElementById('av-handover').textContent"), 'Hand over (2)', 'C6d: the bar reads Hand over (2)');
-    const open = Object.entries(noteStates()).filter(([, s]) => s === 'open').map(([id]) => id).sort();
-    assert.deepEqual(open, [idOfKey('N1'), idOfKey('N3')].sort(), "C6d: the version's open notes are exactly N1 and N3");
-  }, { timeout: 180000 });
-
-  // step 7b stays after T6's step 7 subtests
+  // step 7b: after step 7 and before step 8, as §End to end orders them
   // Show me on a faq note from a fresh visit with the viewer closed: where the viewer lands and what the framed page says
   const copies = [];
   const showMe = async (key, head, copy, check) => {
@@ -500,6 +510,21 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
     await showMe('L2', `#artifact/main/${FAQ}`, 'main-2', 'C5h L2 after the chore draft is gone');
     assert.equal(copies.includes('old'), false, `C5h: the stage's page never said copy: old (${J(copies)})`);
   }, { timeout: 240000 });
+
+  await step('step 8: Hand over (2); the version\'s open notes are N1 and N3', async () => {
+    const V = await visit('#library', WIN);
+    await openDraft(V);
+    await V.soon(`document.getElementById('av-handover').textContent === 'Hand over (2)'`, 'C6d: #av-handover reads Hand over (2)');
+    assert.equal(await V.p.ev("document.getElementById('av-handover').textContent"), 'Hand over (2)', 'C6d: the bar reads Hand over (2)');
+    const open = Object.entries(noteStates()).filter(([, s]) => s === 'open').map(([id]) => id).sort();
+    assert.deepEqual(open, [idOfKey('N1'), idOfKey('N3')].sort(), "C6d: the version's open notes are exactly N1 and N3");
+  }, { timeout: 180000 });
+
+  await step('the design steps ran in order', async () => {
+    const order = ran.map((name) => [name, stepAt(name)]).filter(([, at]) => at !== null);
+    assert.equal(new Set(order.map(([, at]) => at)).size, 10, `the order: ten design steps, 1 to 8 with 6b and 7b (${J(order)})`);
+    order.forEach(([name, at], i) => assert.ok(i === 0 || order[i - 1][1] <= at, `the order: "${name}" ran after "${order[i - 1]?.[0]}"`));
+  });
 
   t.diagnostic(`file: ${Date.now() - fileAt} ms`);
 });
