@@ -13072,9 +13072,9 @@ async function shotLaunch({ noSandbox = false, extraArgs = [], cap }) {
     '--headless=new', '--remote-debugging-pipe', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync', '--hide-scrollbars',
     // the artifact's frame in its page's own process, laid out and asked with it; and a page's WebRTC
-    // joins no mDNS group and asks the network for no .local name (kit-813, as the browser's kit-805).
-    // One list: of two --disable-features Chrome keeps only the last.
-    '--disable-features=IsolateSandboxedIframes,WebRtcHideLocalIpsWithMdns',
+    // joins no mDNS group and asks the network for no .local name (kit-813, as the browser's kit-805);
+    // and no Cast or DIAL discovery (kit-912). One list: of two --disable-features Chrome keeps only the last.
+    '--disable-features=IsolateSandboxedIframes,WebRtcHideLocalIpsWithMdns,MediaRouter',
     // no dump of a page that crashed is kept
     '--disable-breakpad', '--disable-crash-reporter',
     '--renderer-process-limit=2', '--js-flags=--max-old-space-size=256', ...['', 'force-'].map((f) => `--${f}webrtc-ip-handling-policy=disable_non_proxied_udp`), '--disable-quic',
@@ -25273,8 +25273,285 @@ const boxHealthState = (() => {
 })();
 /* box-health-state end */
 /* box-health-pool start */
-// answer.pool: the workers holding a slot (kit-842's).
-const boxHealthPool = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+// answer.pool (kit-842): every project's worker pool, read from its supervisor's
+// run/cache/pool.json (pool@1), with each worker's CPU, memory and disk joined to it.
+//
+// Every 15 s of now() it reads again when a minute of now() has passed since the last read, or when
+// ctx.roots() gives a new list (the first read follows the sampler's first read of the roots). A read,
+// never two at once: ctx.scan() for the dashboards' hellos, then for each known root, one at a time,
+// <root>/docs/devteam/run/cache/pool.json (at most 256 KB + 1 read; poolProblem judges it) and, for
+// a root no hello answers for, whether its dashboard is slow or gone (below). Each file read is raced
+// with 2 s of real(): one that hasn't answered keeps that root's last read (its at still ages it), and
+// isn't asked again until it settles. At most two reads are out at once, across every project: while
+// two are, a root whose read can't start keeps its last read too, so hung files never hold more than
+// two of the hub's file threads.
+//
+// A project's dashboard, from the hub's scan (which can't tell a refused port from a slow one):
+//   up     a hello names the root: its port and its fleet's mode are the hello's
+//   slow   no hello, but its port (the last hello's for the root, else its run/dashboard-port) takes
+//          a TCP connection, or doesn't answer the connection within 1 s of real(): still counted,
+//          with that port and the last hello's mode
+//   none   no port known, the port refuses the connection, or another root's hello holds it: not
+//          counted, and its rows have no port
+// A project's ready, for answer.headroom and the parts after it:
+//   not counted   dashboard none
+//   0             its fleet is parked or drained (the hello's fleet.mode park or drain), whatever its
+//                 file's age
+//   unknown       no file, a file poolProblem refuses, or one whose at is over 15 minutes of real()
+//                 old: its name is in ready_unknown, and its ready counts for nothing. A stale
+//                 file's rows stay, marked by the project's at; a refused file gives none
+//   its file's    otherwise
+//
+// part(ctx, parts) joins the last read with parts.processes (kit-837's result: places by root and
+// worktree, outside, unattributed, strays; undefined without /proc or before two whole walks) and
+// parts.disk ({ worktrees: [{ root, worktree, disk?, disk_at }] }, kit-838's), and gives, as the same
+// object while none of them changed:
+//   answer.pool       box-health@1's projects, allocated, recent, others and strays. A project's cpu
+//                     and rss are every place under its root (worktrees, planners, its supervisor).
+//                     A worker is the place <root>/.worktrees/<its name>: agent is whether the walk
+//                     saw an agent there (false with no process there). others: planners are the
+//                     .worktrees/plan-* places, supervisors the roots' own places, outside and
+//                     unattributed the walk's. Without parts.processes: no cpu, rss, tests, agent,
+//                     others or strays. tokens are pool@1's, its new_hour as per_hour, its prices left
+//                     out. Each allocated worker keeps one point a minute of now() for an hour (at
+//                     most 60: cpu, rss, disk, those known; none is added when no worker has any, so the
+//                     object stays the same); recent rows have last: the CPU and memory of its
+//                     worktree's processes when the walk last saw any there, and the disk when a du
+//                     last gave one, while it held its slot (absent when this run saw none, as after
+//                     a restart or a stop and start). allocated: most CPU first, at most 60; recent: newest first, those
+//                     left in 24 hours of real(), at most 20
+//   answer.headroom   ready (over the projects counted and known), ready_unknown (their names)
+//   projects          [{ root, name, port?, dashboard, mode, fresh, ready?, pool }] for the parts
+//                     after it: pool is the file as read (pool@1), null when missing or refused
+//   ready, ready_unknown   as in answer.headroom
+// A process whose cmdline or cwd isn't read yet counts outside (kit-837), so a worker's figures can be
+// low and outside high for a walk or two after the hub starts.
+const POOL_EVERY_MS = 15000, POOL_READ_MS = 60000, POOL_STALE_MS = 900000, POOL_KNOCK_MS = 1000, POOL_FILE_MS = 2000;
+const POOL_POINT_MS = 60000, POOL_POINTS = 60, POOL_HOUR_MS = 3600000, POOL_DAY_MS = 86400000;
+const POOL_ALLOCATED = 60, POOL_RECENT = 20, POOL_READS = 2;
+const boxHealthPool = (() => {
+  let run = null;
+  // a file's text, at most max bytes and one more (so poolProblem sees one over its size), or null
+  const readCapped = async (file, max) => {
+    let fh = null;
+    try {
+      fh = await fs.promises.open(file, fs.constants.O_RDONLY);
+      const buf = Buffer.alloc(max + 1);
+      const { bytesRead } = await fh.read(buf, 0, max + 1, 0);
+      return buf.toString('utf8', 0, bytesRead);
+    } catch { return null; } finally { await fh?.close().catch(() => {}); }
+  };
+  // a file read raced with 2 s of real(): its text, null, or late. At most two reads are ever out,
+  // across every project and read (final-1 F1): a read still out goes on alone and keeps its place,
+  // and one that can't start (its own still out, or two out) is late at once. So hung files hold at
+  // most two of the threads every file read in the hub shares, as the sampler's volumes and the
+  // processes walk do.
+  const LATE = Symbol('late');
+  const settled = (ctx, r, file, max) => {
+    if (r.out.has(file) || r.out.size >= POOL_READS) { ctx.say("two file reads are out: a project whose read can't start keeps its last read"); return Promise.resolve(LATE); }
+    r.out.add(file);
+    const p = readCapped(file, max).finally(() => r.out.delete(file));
+    let end = () => {};
+    const late = new Promise((res) => { end = ctx.timeout(POOL_FILE_MS, () => res(LATE)); });
+    return Promise.race([p, late]).finally(() => end());
+  };
+  // open (it takes a connection), slow (no answer in 1 s) or refused (anything else)
+  const knock = (ctx, r, port) => new Promise((res) => {
+    let done = false, end = () => {};
+    const s = net.connect({ port, host: '127.0.0.1' });
+    r.sockets.add(s);
+    const settle = (v) => { if (done) return; done = true; end(); r.sockets.delete(s); s.destroy(); res(v); };
+    end = ctx.timeout(POOL_KNOCK_MS, () => settle('slow'));
+    s.once('connect', () => settle('open'));
+    s.once('error', () => settle('refused'));
+  });
+  const portOf = (v) => (Number.isSafeInteger(v) && v >= 1 && v <= 65535 ? v : undefined);
+  const modeOf = (h) => (h?.fleet?.mode === 'park' || h?.fleet?.mode === 'drain' ? h.fleet.mode : 'run');
+  const read = async (ctx, r) => {
+    const roots = ctx.roots();
+    r.readAt = ctx.now(); r.rootsOf = roots;
+    let list = [];
+    try { list = await ctx.scan(); } catch { list = []; }
+    if (run !== r || ctx.stopped()) return;
+    const hellos = new Map();
+    for (const h of Array.isArray(list) ? list : []) if (memoryIsMap(h) && typeof h.root === 'string' && portOf(h.port) && !hellos.has(h.root.replace(/\/+$/, ''))) hellos.set(h.root.replace(/\/+$/, ''), h);
+    for (const [root, h] of hellos) r.hellos.set(root, { port: h.port, mode: modeOf(h) });
+    const held = new Map([...hellos].map(([root, h]) => [h.port, root]));
+    const files = [];
+    for (const { root, name } of roots) {
+      const run_ = path.join(root, 'docs', 'devteam', 'run');
+      const text = await settled(ctx, r, path.join(run_, 'cache', 'pool.json'), POOL_MAX_BYTES);
+      if (run !== r || ctx.stopped()) return;
+      let f;
+      if (text === LATE) {
+        // its last read stands (its at still ages it), or none
+        const was = r.files.find((x) => x.root === root);
+        f = { root, name, pool: was?.pool ?? null, refused: !!was?.refused };
+        ctx.say("a project's pool.json did not answer within 2 s: its last read is kept");
+      } else {
+        const pool = text === null || poolProblem(text) ? null : JSON.parse(text);
+        f = { root, name, pool, refused: text !== null && !pool };
+      }
+      const h = hellos.get(root);
+      if (h) Object.assign(f, { dashboard: 'up', port: h.port, mode: modeOf(h) });
+      else {
+        const last = r.hellos.get(root);
+        let saved;
+        if (last?.port === undefined) { const t = await settled(ctx, r, path.join(run_, 'dashboard-port'), 16); saved = t === LATE ? undefined : portOf(Number(t?.trim())); }
+        const port = last?.port ?? saved;
+        const how = port === undefined || (held.has(port) && held.get(port) !== root) ? 'refused' : await knock(ctx, r, port);
+        if (run !== r || ctx.stopped()) return;
+        Object.assign(f, how === 'refused' ? { dashboard: 'none', mode: last?.mode ?? 'run' } : { dashboard: 'slow', port, mode: last?.mode ?? 'run' });
+      }
+      files.push(f);
+    }
+    r.files = files;
+    r.version++;
+  };
+  // pool@1's tokens as box-health@1's: new_hour is per_hour, prices and review hours are left out
+  const tokensOf = (t) => {
+    const out = { state: t.state };
+    for (const k of ['reason', 'new', 'cached', 'points', 'reviews_new']) if (t[k] !== undefined) out[k] = t[k];
+    if (t.state === 'measured' && t.new_hour !== undefined) out.per_hour = t.new_hour;
+    return out;
+  };
+  const keyOf = (root, name) => `${root}\0${name}`;
+  const build = (ctx, r, procs, disk) => {
+    const real = ctx.real();
+    const places = procs ? procs.places : [];
+    const hasCpu = !!procs && procs.over_s !== undefined;
+    const sum = (list) => {
+      const out = { n: list.length, rss: list.reduce((a, p) => a + p.rss, 0) };
+      if (hasCpu) out.cpu = list.reduce((a, p) => a + (p.cpu ?? 0), 0);
+      return out;
+    };
+    const diskOf = (root, name) => (Array.isArray(disk?.worktrees) ? disk.worktrees.find((d) => d?.root === root && d?.worktree === name) : undefined);
+    const projects = [], allocated = [], recent = [], forParts = [];
+    let ready = 0;
+    const unknown = [];
+    for (const f of r.files) {
+      const fresh = !!f.pool && real - Date.parse(f.pool.at) <= POOL_STALE_MS;
+      const counted = f.dashboard !== 'none';
+      const parked = f.mode === 'park' || f.mode === 'drain';
+      const known = parked || fresh;
+      const own = procs ? sum(places.filter((p) => p.root === f.root)) : null;
+      const row = { name: f.name };
+      if (f.port !== undefined) row.port = f.port;
+      if (f.pool) {
+        row.at = f.pool.at; row.workers = f.pool.workers.length; row.planners = f.pool.planners;
+        if (f.pool.cap !== undefined) row.cap = f.pool.cap;
+      }
+      let mine;
+      if (counted && known) { mine = parked ? 0 : f.pool.ready; row.ready = mine; ready += mine; } else if (counted) unknown.push(f.name);
+      if (own) { if (hasCpu) row.cpu = own.cpu; row.rss = own.rss; }
+      projects.push(row);
+      forParts.push({ root: f.root, name: f.name, ...(f.port !== undefined ? { port: f.port } : {}), dashboard: f.dashboard, mode: f.mode, fresh, ...(mine !== undefined ? { ready: mine } : {}), pool: f.pool });
+      if (!f.pool) continue;
+      const at = f.port !== undefined ? { port: f.port } : {};
+      for (const w of f.pool.workers) {
+        const a = { project: f.name, ...at, name: w.name };
+        for (const k of ['title', 'phase', 'since']) if (w[k] !== undefined) a[k] = w[k];
+        // what the walk and the du saw of it, for recent's last: a worktree with no process gives none
+        const seen = {};
+        if (procs) {
+          const p = places.find((x) => x.root === f.root && x.worktree === w.name);
+          if (p) { if (p.cpu !== undefined) seen.cpu = p.cpu; seen.rss = p.rss; }
+          a.agent = (p?.agents ?? 0) > 0;
+          if (hasCpu) a.cpu = p?.cpu ?? 0;
+          a.rss = p?.rss ?? 0;
+          a.tests = { n: p?.tests.n ?? 0, ...(hasCpu ? { cpu: p?.tests.cpu ?? 0 } : {}), rss: p?.tests.rss ?? 0 };
+        }
+        const d = diskOf(f.root, w.name);
+        if (Number.isSafeInteger(d?.disk) && d.disk >= 0) a.disk = seen.disk = d.disk;
+        if (d && memoryAtOk(d.disk_at)) a.disk_at = d.disk_at;
+        a.tokens = tokensOf(w.tokens);
+        const k = keyOf(f.root, w.name);
+        const pts = r.points.get(k);
+        if (pts?.length) a.points = pts.map((x) => ({ ...x }));
+        allocated.push({ k, a, seen });
+      }
+      for (const w of f.pool.recent) {
+        if (!(real - Date.parse(w.left_at) <= POOL_DAY_MS)) continue;
+        const x = { project: f.name, ...at, name: w.name };
+        if (w.title !== undefined) x.title = w.title;
+        Object.assign(x, { left_at: w.left_at, why: w.why, tokens: tokensOf(w.tokens) });
+        const last = r.last.get(keyOf(f.root, w.name));
+        if (last) x.last = { ...last.use };
+        recent.push(x);
+      }
+    }
+    allocated.sort((x, y) => (y.a.cpu ?? -1) - (x.a.cpu ?? -1) || x.a.project.localeCompare(y.a.project) || x.a.name.localeCompare(y.a.name));
+    recent.sort((x, y) => Date.parse(y.left_at) - Date.parse(x.left_at));
+    const pool = { projects, allocated: allocated.slice(0, POOL_ALLOCATED).map((x) => x.a), recent: recent.slice(0, POOL_RECENT) };
+    if (procs) {
+      const others = {
+        planners: sum(places.filter((p) => p.worktree?.startsWith('plan-'))),
+        supervisors: sum(places.filter((p) => p.worktree === undefined)),
+        outside: { n: procs.outside.n, ...(hasCpu ? { cpu: procs.outside.cpu ?? 0 } : {}), rss: procs.outside.rss },
+      };
+      if (procs.unattributed) others.unattributed = { cpu: procs.unattributed.cpu };
+      pool.others = others;
+      pool.strays = procs.strays;
+    }
+    const headroom = { ready, ...(unknown.length ? { ready_unknown: unknown } : {}) };
+    return { answer: { pool, headroom }, projects: forParts, ready, ready_unknown: unknown, use: allocated };
+  };
+  return {
+    start(ctx) {
+      const r = { files: [], version: 0, readAt: -Infinity, rootsOf: null, reading: false, out: new Set(), hellos: new Map(), sockets: new Set(), points: new Map(), last: new Map(), pointAt: -Infinity, memo: null, given: undefined };
+      run = r;
+      ctx.every(POOL_EVERY_MS, async () => {
+        if (r.reading || run !== r) return;
+        if (ctx.roots() === r.rootsOf && ctx.now() - r.readAt < POOL_READ_MS) return;
+        r.reading = true;
+        try { await read(ctx, r); } finally { r.reading = false; }
+      });
+    },
+    part(ctx, parts) {
+      const r = run;
+      if (!r || !r.files.length) return undefined;
+      const procs = memoryIsMap(parts.processes) && Array.isArray(parts.processes.places) ? parts.processes : undefined;
+      const disk = parts.disk;
+      const now = ctx.now(), real = ctx.real();
+      // a file turns stale with time alone: its freshness is part of what the answer is built from
+      const stale = r.files.map((f) => (f.pool && real - Date.parse(f.pool.at) <= POOL_STALE_MS ? 1 : 0)).join('');
+      const due = now - r.pointAt >= POOL_POINT_MS;
+      const m = r.memo;
+      const same = !!m && m.version === r.version && m.procs === procs && m.disk === disk && m.stale === stale;
+      if (same && !due) return r.given;
+      let got = build(ctx, r, procs, disk);
+      // what was seen of each allocated worker: its last use, for recent, and a point a minute
+      const live = new Set();
+      let added = false;
+      for (const { k, a, seen } of got.use) {
+        live.add(k);
+        const use = {};
+        for (const f of ['cpu', 'rss', 'disk']) if (a[f] !== undefined) use[f] = a[f];
+        if (Object.keys(seen).length) r.last.set(k, { at: real, use: { ...r.last.get(k)?.use, ...seen } });
+        if (due && Object.keys(use).length) {
+          added = true;
+          const list = (r.points.get(k) ?? []).filter((x) => Date.parse(x.at) > now - POOL_HOUR_MS);
+          list.push({ at: boxHealthIso(now), ...use });
+          r.points.set(k, list.slice(-POOL_POINTS));
+        }
+      }
+      for (const k of r.points.keys()) if (!live.has(k)) r.points.delete(k);
+      for (const [k, v] of r.last) if (real - v.at > POOL_DAY_MS) r.last.delete(k);
+      if (due) r.pointAt = now;
+      // a minute with no point to add, and nothing else changed: the same object
+      if (same && !added) return r.given;
+      if (added) got = build(ctx, r, procs, disk);
+      delete got.use;
+      r.memo = { version: r.version, procs, disk, stale };
+      r.given = got;
+      return got;
+    },
+    stop() {
+      if (run) for (const s of run.sockets) s.destroy();
+      run = null;
+    },
+  };
+})();
 /* box-health-pool end */
 /* box-health-claude start */
 // answer.claude: the accounts, the burn rate and the projection (kit-840's).
