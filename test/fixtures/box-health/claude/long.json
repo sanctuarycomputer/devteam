@@ -1,0 +1,39 @@
+{
+ "now": "2026-11-25T12:00:00.000Z",
+ "rate": 3,
+ "list": [
+  {
+   "n": 1,
+   "label": "Account 1",
+   "active": true,
+   "disabled": false,
+   "status": "ok",
+   "five_pct": 0,
+   "models_full": [],
+   "week_pct": 50,
+   "week_resets_at": "2026-11-26T12:00:00.000Z"
+  },
+  {
+   "n": 2,
+   "label": "Account 2",
+   "active": false,
+   "disabled": false,
+   "status": "ok",
+   "five_pct": 0,
+   "models_full": [],
+   "week_pct": 60,
+   "week_resets_at": "2026-11-28T12:00:00.000Z"
+  },
+  {
+   "n": 3,
+   "label": "Account 3",
+   "active": false,
+   "disabled": false,
+   "status": "ok",
+   "five_pct": 0,
+   "models_full": [],
+   "week_pct": 70,
+   "week_resets_at": "2026-12-02T11:00:00.000Z"
+  }
+ ]
+}
