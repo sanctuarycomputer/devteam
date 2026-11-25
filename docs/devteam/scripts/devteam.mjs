@@ -25363,8 +25363,150 @@ const boxHealthPool = (() => {
 })();
 /* box-health-pool end */
 /* box-health-claude start */
-// answer.claude: the accounts, the burn rate and the projection (kit-840's).
-const boxHealthClaude = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+// answer.claude (kit-840): the cswap accounts, the burn rate over six hours, and whether the room
+// lasts to the resets. Nothing is written, and cswap is never run here: accounts-tick's record is read.
+//
+// Every 15 s of now() it reads again once a minute of now() has passed since the last read (the first
+// read follows the sampler's first read of the roots). A read: for each known root, one at a time,
+// <root>/docs/devteam/run/accounts.json (at most 256 KB + 1), raced with 2 s of real(). At most two
+// reads are out at once, never two of one file: a read that can't start, or hasn't answered in 2 s,
+// keeps that file's last read. The record used is the freshest (by its at) whose capacity.list is a
+// list, among those within 5 minutes of real() (one older, or ahead: a wrong clock, is dropped); with none, claude is absent (no cswap,
+// an older kit's record, or a stopped tick). Each read that finds one adds a reading to the ring.
+//
+// A row is copied by named fields only (claudeRows), so no email or token can leave with it: a label
+// with an @ (in any width), a control character or over 40 characters is "Account n".
+//
+// The ring holds the readings of the last six hours of now(), one a read. Burn (claudeBurn) is, per
+// account, the sum of rises of its weekly percent over the highest reading so far of the same window,
+// in points of one account-week. A window is new only when the reset time moves forward by more than
+// an hour: cswap's times shift by a fraction of a second at each fetch, across a minute or an hour. A
+// drop inside a window adds nothing; an absent reset time keeps the last seen; with none ever seen
+// every rise counts. Accounts weigh equally unless every enabled account names a tier multiplier;
+// then each weighs its tier over the mean tier, so "an account" stays the average one. The rate is the
+// weighted burn over the hours the ring covers; under 30 minutes of readings it is measuring (no rate,
+// no projection).
+//
+// projectClaude(accounts, rate, now) is the projection, for this part and the parts after it (park,
+// room): capacity.list rows, points of an account-week an hour, and ms. It steps every 15 minutes to
+// the last known reset, spending accounts as cswap's default best strategy does: the active one until
+// 90%, then the one with the most room (100 less its higher window; on a tie, the sooner reset of
+// that window, then the earliest slot), and
+// the last tenth of each only when none is under 90%. An account is restored at its weekly reset (the
+// next one a week on) and at its five-hour reset; one with a full per-model window, or a full
+// five-hour window now, has no room until that resets (never, with no reset time). Disabled accounts
+// and those that can't be read (no weekly percent, or a status that isn't ok) are left out: at_least
+// is then true. It gives { lasts, runs_out_at, paused_until (the first step after running out with
+// room again), next_reset_at (the earliest weekly reset after now), points [{ at, room }] (room in
+// accounts' worth: the weekly room left of accounts that have room; at most 400: every change of
+// direction, then evenly), switches [{ at, n }], at_least }, or null with no reset ahead or no rate.
+// claudeSafeRate(accounts, now) is the highest rate, to 0.1, at which it lasts, or undefined when not
+// even 0.1 does.
+//
+// part(ctx, parts) gives, as the same object until the next read:
+//   answer.claude   accounts (enabled ones, at most 40: n, label, active, week_left, five_left,
+//                   week_resets_at, five_resets_at, status), rate (absent while measuring),
+//                   rate_hours, points (one a reading: at, room), projection (lasts, runs_out_at,
+//                   next_reset_at, safe_rate, points; absent while measuring or with no reset ahead)
+//   rows            the record's rows (claudeRows), rate, measuring, projection (projectClaude's),
+//                   safe_rate (claudeSafeRate's), has_room (an account has room now)
+const CLAUDE_EVERY_MS = 15000, CLAUDE_READ_MS = 60000, CLAUDE_FRESH_MS = 300000, CLAUDE_FILE_MS = 2000, CLAUDE_READS = 2;
+const CLAUDE_MAX_BYTES = 262144, CLAUDE_RING_MS = 6 * 3600000, CLAUDE_MEASURING_MS = 1800000, CLAUDE_JUMP_MS = 3600000;
+const CLAUDE_STEP_MS = 900000, CLAUDE_POINTS = 400, CLAUDE_ACCOUNTS = 40, CLAUDE_LINE = 90;
+const CLAUDE_WEEK_MS = 7 * 86400000, CLAUDE_FIVE_MS = 5 * 3600000, CLAUDE_HOUR_MS = 3600000;
+// capacity.list's rows, each built again from its named fields; null when it isn't a list
+function claudeRows(list) {
+  if (!Array.isArray(list)) return null;
+  const pct = (v) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100 ? v : undefined);
+  const at = (t) => (memoryAtOk(t) ? t : undefined);
+  const out = [], seen = new Set();
+  for (const a of list) {
+    if (!memoryIsMap(a) || !Number.isSafeInteger(a.n) || a.n < 1 || seen.has(a.n)) continue;
+    seen.add(a.n);
+    const label = typeof a.label === 'string' && a.label.trim() && a.label.length <= 40 && !/[@\p{C}]/u.test(a.label.normalize('NFKC')) ? a.label : `Account ${a.n}`;
+    out.push(boxHealthPresent({
+      n: a.n, label, active: a.active === true, disabled: a.disabled === true,
+      status: typeof a.status === 'string' && /^[a-z][a-z0-9_-]{0,39}$/.test(a.status) ? a.status : undefined,
+      week_pct: pct(a.week_pct), week_resets_at: at(a.week_resets_at),
+      five_pct: pct(a.five_pct), five_resets_at: at(a.five_resets_at),
+      models_full: Array.isArray(a.models_full) ? a.models_full.filter(memoryIsMap).map((m) => boxHealthPresent({ resets_at: at(m.resets_at) })) : [],
+      tier: Number.isSafeInteger(a.tier) && a.tier > 0 && a.tier < 1000 ? a.tier : undefined,
+    }));
+  }
+  return out;
+}
+const boxHealthClaude = (() => {
+  let run = null;
+  const LATE = Symbol('late');
+  // a file's text, at most max bytes and one more, or null
+  const readCapped = async (file, max) => {
+    let fh = null;
+    try {
+      fh = await fs.promises.open(file, fs.constants.O_RDONLY);
+      const buf = Buffer.alloc(max + 1);
+      const { bytesRead } = await fh.read(buf, 0, max + 1, 0);
+      return buf.toString('utf8', 0, bytesRead);
+    } catch { return null; } finally { await fh?.close().catch(() => {}); }
+  };
+  // raced with 2 s of real(); at most two out, never two of one file: one that can't start is late
+  const settled = (ctx, r, file) => {
+    if (r.out.has(file) || r.out.size >= CLAUDE_READS) { ctx.say("two file reads are out: a project whose accounts.json read can't start keeps its last read"); return Promise.resolve(LATE); }
+    r.out.add(file);
+    const p = readCapped(file, CLAUDE_MAX_BYTES).finally(() => r.out.delete(file));
+    let end = () => {};
+    const late = new Promise((res) => { end = ctx.timeout(CLAUDE_FILE_MS, () => res(LATE)); });
+    return Promise.race([p, late]).finally(() => end());
+  };
+  // a record with a list: { at, rows }, else null
+  const recordOf = (text) => {
+    if (typeof text !== 'string' || text.length > CLAUDE_MAX_BYTES) return null;
+    let o;
+    try { o = JSON.parse(text); } catch { return null; }
+    const rows = memoryIsMap(o) && memoryAtOk(o.at) && memoryIsMap(o.capacity) ? claudeRows(o.capacity.list) : null;
+    return rows ? { at: o.at, rows } : null;
+  };
+  const build = (ctx, r, rec) => {
+    const accounts = rec.rows.filter((a) => !a.disabled).slice(0, CLAUDE_ACCOUNTS).map((a) => boxHealthPresent({
+      n: a.n, label: a.label, active: a.active,
+      week_left: a.week_pct === undefined ? undefined : 100 - a.week_pct, five_left: a.five_pct === undefined ? undefined : 100 - a.five_pct,
+      week_resets_at: a.week_resets_at, five_resets_at: a.five_resets_at, status: a.status,
+    }));
+    return { answer: { claude: { accounts } }, rows: rec.rows };
+  };
+  const read = async (ctx, r) => {
+    r.readAt = ctx.now();
+    let best = null;
+    const files = new Set();
+    for (const { root } of ctx.roots()) {
+      const file = path.join(root, 'docs', 'devteam', 'run', 'accounts.json');
+      files.add(file);
+      const text = await settled(ctx, r, file);
+      if (run !== r || ctx.stopped()) return;
+      let rec;
+      if (text === LATE) rec = r.files.get(file) ?? null;
+      else { rec = recordOf(text); r.files.set(file, rec); }
+      if (rec && Math.abs(ctx.real() - Date.parse(rec.at)) <= CLAUDE_FRESH_MS && (!best || Date.parse(rec.at) > Date.parse(best.at))) best = rec;
+    }
+    for (const f of r.files.keys()) if (!files.has(f)) r.files.delete(f);
+    if (!best) { r.given = undefined; return; }
+    r.given = build(ctx, r, best);
+  };
+  return {
+    start(ctx) {
+      const r = { files: new Map(), out: new Set(), readAt: -Infinity, reading: false, given: undefined };
+      run = r;
+      ctx.every(CLAUDE_EVERY_MS, async () => {
+        if (r.reading || run !== r || ctx.now() - r.readAt < CLAUDE_READ_MS) return;
+        // before the sampler's first read of the roots there is nothing to read yet; after it, none is no record
+        if (!ctx.roots().length && r.readAt === -Infinity) return;
+        r.reading = true;
+        try { await read(ctx, r); } finally { r.reading = false; }
+      });
+    },
+    part() { return run?.given; },
+    stop() { run = null; },
+  };
+})();
 /* box-health-claude end */
 /* box-health-park start */
 // answer.claude.park: what to park (kit-843's).
