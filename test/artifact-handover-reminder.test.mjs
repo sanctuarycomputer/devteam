@@ -214,7 +214,7 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     await shownSoon(V, 'R4 busy');
     await wrap(V);
     await V.p.ev("window.__stub['artifact-handoff'] = { status: 200, body: { to: 'supervisor', typed: false, count: 2 }, ms: 1500 }; void 0");
-    await pressId(V, 'av-remind-hand');
+    await pressArmed(V, 'av-remind-hand');
     await V.p.ev(`document.getElementById('av-remind-hand')?.click(); void 0`);
     await V.settle("document.getElementById('av-remind')?.querySelector('.tx')?.textContent === 'With supervisor'", 4000);
     // past the stub's own wait: a second press queued behind the first (press chains them) has posted by now (plan-1 F8)
@@ -228,7 +228,7 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     await closeBy(V, 'x');
     await shownSoon(V, 'R4 real');
     await wrap(V);
-    await pressId(V, 'av-remind-hand');
+    await pressArmed(V, 'av-remind-hand');
     await V.settle("document.getElementById('av-remind')?.querySelector('.tx')?.textContent === 'With supervisor'", 4000);
     assert.equal(await V.p.ev("document.getElementById('av-remind').querySelector('.tx').textContent"), 'With supervisor', 'R4: the real result');
     assert.deepEqual(await V.p.ev("window.__posts.filter((p) => p.action === 'artifact-handoff').map((p) => p.body)"), [{ slug: 'viewer-a', at: 'rem-sup' }], 'R4: the real post');
@@ -247,7 +247,7 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     await shownSoon(V, 'R4 refusal');
     await wrap(V);
     await V.p.ev("window.__stub['artifact-handoff'] = { status: 400, body: { error: 'x' } }; void 0");
-    await pressId(V, 'av-remind-hand');
+    await pressArmed(V, 'av-remind-hand');
     await V.settle("document.getElementById('e-avr')?.textContent === 'Not saved: x'", 3000);
     const s = await V.p.ev(SAYS);
     assert.equal(s.err, 'Not saved: x', 'R4: the refusal');
@@ -261,6 +261,59 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     await pressArmed(V, 'av-handover');
     await V.soon("window.__posts.some((p) => p.action === 'artifact-handoff')", "R4: the bar's press posted");
     assert.deepEqual(await V.p.ev("window.__posts.find((p) => p.action === 'artifact-handoff').body"), { slug: 'viewer-a', at: 'rem-bar' }, "R4: the bar's body is the reminder's");
+  });
+
+  // R4b (final-1 F1): the card's Hand over is under kit-145's press guard (spec §2.1). The card comes up as the
+  // viewer closes, which a framed page can bring about, so a real press as it appears, or just after it moved,
+  // posts nothing and says the guard's words; once it has sat ASK_ARM_MS (the guard's own armed state) it posts.
+  // Each held press is one press, never V.press's retry a second later.
+  await sub('R4b: the card\'s Hand over is under the press guard', async () => {
+    const V = await visit('#library');
+    await openW(V, 'rem-busy');
+    await wrap(V);
+    await V.p.ev("window.__stub['artifact-handoff'] = { status: 200, body: { to: 'supervisor', typed: false, count: 2 } }; void 0");
+    await V.p.ev("window.__downAt = null; window.addEventListener('pointerdown', () => { window.__downAt ??= performance.now(); }, true); void 0");
+    const HELD = "(() => { const e = document.getElementById('av-held'); return !!e && !e.hidden && e.textContent === 'That moved just now. Press again in a second.'; })()";
+    const POSTS = "window.__posts.filter((p) => p.action === 'artifact-handoff').map((p) => p.body)";
+    const centre = "(() => { const b = document.getElementById('av-remind-hand'), r = b.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2; return { x, y, top: !!document.elementFromPoint(x, y)?.closest('#av-remind-hand') }; })()";
+    // (a) the close (as the X's own first way: the entry replaced by the page, then routed), and in the same turn
+    // where the card's Hand over is; one real press there at once
+    const at = await V.p.ev(`(() => { history.replaceState({ page: '#library', depth: 0, openedHere: false }, '', '#library'); route(); const c = ${centre}; return { ...c, closed: performance.now(), shown: ${REMIND} }; })()`);
+    assert.ok(at.shown, 'setup: R4b the card came up with the close');
+    assert.ok(at.top, 'setup: R4b #av-remind-hand is covered');
+    await V.p.clickAt(at.x, at.y);
+    await V.settle(HELD, 2000);
+    await V.p.ev(FRAMES);
+    assert.deepEqual(await V.p.ev(POSTS), [], 'R4b: a press as the card appears posts nothing');
+    assert.equal(await V.p.ev(HELD), true, 'R4b: a press as the card appears shows the held words');
+    const down = await V.p.ev('window.__downAt');
+    assert.ok(down !== null && down - at.closed < await V.p.ev('ASK_ARM_MS'), `setup: R4b pressed within ASK_ARM_MS of the close (${down === null ? 'no press' : Math.round(down - at.closed) + ' ms'})`);
+    // (b) settled, then moved (bottom 24px to 200px), then one real press on it at once
+    await V.soon(ARMED('av-remind-hand'), 'setup: R4b #av-remind-hand settled, by the press guard');
+    const moved = await V.p.ev(`(() => { document.getElementById('av-remind').style.bottom = '200px'; return ${centre}; })()`);
+    assert.ok(moved.top, 'setup: R4b #av-remind-hand is covered after the move');
+    await V.p.ev("document.getElementById('av-held').textContent = ''; void 0");
+    await V.p.clickAt(moved.x, moved.y);
+    await V.settle(HELD, 2000);
+    await V.p.ev(FRAMES);
+    assert.deepEqual(await V.p.ev(POSTS), [], 'R4b: a press just after the card moved posts nothing');
+    assert.equal(await V.p.ev(HELD), true, 'R4b: a press just after the card moved shows the held words');
+    // (c) once armed, it posts once, with the bar's body
+    await pressArmed(V, 'av-remind-hand');
+    await V.settle("document.getElementById('av-remind')?.querySelector('.tx')?.textContent === 'With supervisor'", 4000);
+    assert.deepEqual(await V.p.ev(POSTS), [{ slug: 'viewer-a', at: 'rem-busy' }], 'R4b: a settled press posts once, {slug, at}');
+    // (d) a person who may only look: View only's words, as the bar's Hand over gets, and nothing posted
+    const W = await visit('#library');
+    await openW(W, 'rem-busy');
+    await closeBy(W, 'x');
+    await shownSoon(W, 'R4b view only');
+    await wrap(W);
+    // (kept at view through the page's polls, as kit-145's A24 does)
+    await W.p.ev("window.__stub['artifact-handoff'] = { status: 200, body: { to: 'supervisor', typed: false, count: 2 } }; window.__vo = viewOnly; viewOnly = () => window.__vo('view'); viewOnly(); void 0");
+    await pressArmed(W, 'av-remind-hand');
+    await W.settle("document.getElementById('view-only-toast')?.textContent === 'View only: you can look, but not change anything'", 2000);
+    assert.equal(await W.p.ev("document.getElementById('view-only-toast')?.textContent ?? null"), 'View only: you can look, but not change anything', 'R4b: view only gets its own words');
+    assert.deepEqual(await W.p.ev(POSTS), [], 'R4b: view only posts nothing');
   });
 
   // R5: Not now holds; a new note shows it again; Hand over ends the hold; a reload ends it; no storage.

@@ -1060,6 +1060,7 @@ try {
   .av-remind-do:not([hidden]) { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
   .av-remind-do button { margin: 0; }
   #e-avr:empty { display: none; }
+  body.view-only #av-remind-hand { opacity: .45; cursor: not-allowed; }
   @media (min-width: 901px) { body.threads-open #av-remind { left: calc((100% - var(--threads-w)) / 2); } }
 /* css-viewer end */
 /* css-threads start */
@@ -7318,18 +7319,24 @@ window.addEventListener('keydown', (e) => {
 // seen: each control by its deed, with its box and since when; last: the last sample; down: the deed pressed, settled.
 avStep.press = { seen: new Map(), last: 0, on: false, down: null, closed: -Infinity, closedHidden: false, placed: null };
 avStep.up = () => !$('artifact-view').hidden;
+// The reminder's Hand over (kit-148): it comes up as the viewer closes, which a page can bring about, so it is a
+// decision held like the rest, while its card shows, stage or none. (Its Not now commits nothing: free.)
+avStep.REMIND = '#av-remind:not([hidden]) #av-remind-hand';
+avStep.reminds = () => !!document.querySelector(avStep.REMIND);
 // The decisions: not a field, a link, or Send of plain words (Send on a resolved thread reopens it)
 avStep.decides = (el) => {
-  const c = el?.closest?.(VIEW_WRITES);
+  const c = el?.closest?.(VIEW_WRITES) || el?.closest?.(avStep.REMIND);
   if (!c || c.matches('textarea, input, a') || c.closest('.dropbox')) return null;
   if (c.matches('[data-tl-send]') && TL.threads.find((t) => t.id === TL.open)?.status !== 'resolved') return null;
   return c;
 };
-// In scope: with a stage up, the card's and the bar's; with none, a to-check block's Resolve (no page to move the rest)
+// In scope: with a stage up, the card's and the bar's; with none, a to-check block's Resolve (no page to move the rest);
+// either way, the reminder's Hand over while it shows
 avStep.held = (el) => {
   const c = avStep.decides(el);
   if (!c) return null;
   if (c.matches('[data-tl-accept]') && c.closest('.tl-addr')) return c;
+  if (c.matches(avStep.REMIND)) return c;
   return avStep.up() && c.closest('#tl-card, .av-bar') ? c : null;
 };
 // The deed a control is, whatever its node: what it carries, the thread, the mark, the question, the ask, the stage
@@ -7357,8 +7364,8 @@ avStep.sample = () => {
   // frames that stopped: what stood before them says nothing of now
   if (now - P.last > 250) was.clear();
   P.last = now;
-  const roots = avStep.up() ? '#tl-card, .av-bar' : '#tl-card .tl-addr';
-  for (const root of document.querySelectorAll(roots)) for (const el of root.querySelectorAll(VIEW_WRITES)) {
+  const roots = `${avStep.up() ? '#tl-card, .av-bar' : '#tl-card .tl-addr'}, #av-remind:not([hidden])`;
+  for (const root of document.querySelectorAll(roots)) for (const el of root.querySelectorAll(`${VIEW_WRITES}, #av-remind-hand`)) {
     if (avStep.held(el) !== el) continue;
     const key = avStep.deed(el), n = count.get(key) ?? 0, k = `${n} ${key}`;
     count.set(key, n + 1);
@@ -7388,7 +7395,7 @@ avStep.watch = () => {
   P.on = true;
   const tick = () => {
     const card = document.getElementById('tl-card');
-    if (!avStep.up() && !(card && !card.hidden && card.querySelector('.tl-addr'))) { P.on = false; P.seen.clear(); return; }
+    if (!avStep.up() && !(card && !card.hidden && card.querySelector('.tl-addr')) && !avStep.reminds()) { P.on = false; P.seen.clear(); return; }
     avStep.sample();
     requestAnimationFrame(tick);
   };
@@ -7626,6 +7633,8 @@ function avRemindShow(taken) {
   c.querySelector('.av-remind-do').hidden = false;
   $('e-avr').textContent = '';
   c.hidden = false;
+  // its Hand over under kit-145's press guard while it shows (avStep.REMIND): the guard's frames run until it hides
+  avStep.watch();
 }
 function avRemindHide() {
   clearTimeout(AV_REMIND.timer);
@@ -7646,6 +7655,8 @@ document.addEventListener('click', (e) => {
     avRemindHide();
     return;
   }
+  // a person who may only look: View only's words, as the bar's Hand over gets them (it is not in VIEW_WRITES)
+  if (document.body.classList.contains('view-only')) return void viewToast();
   if (AV_REMIND.busy) return;
   AV_REMIND.busy = true;
   $('e-avr').textContent = '';
