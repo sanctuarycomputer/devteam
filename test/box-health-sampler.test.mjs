@@ -1067,8 +1067,11 @@ async function heldBudget(t) {
   const rows = s2.boxHealthDisk.part();
   const wasLeft = left();
   const looked = s2.dirs.filter((d) => d === path.join(a, '.worktrees')).length;
+  // the clock a minute on from claude's read, however many rounds the budget took to fill, so the
+  // record it keeps is still fresh (5 minutes)
+  const read1 = s2.clock.t;
   await stick(s2, [p.processes, p.pool], 3);
-  s2.clock.t += MIN;
+  s2.clock.t = read1 + MIN;
   fs.writeFileSync(accounts, record(20));
   await Promise.race([p.claude.fn(), sleep(1000)]);
   await Promise.race([p.disk.fn(), sleep(1000)]);
