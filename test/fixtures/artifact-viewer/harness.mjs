@@ -132,6 +132,43 @@ const STATE = `(() => { const v = ${VIEW}; return {
   leaveReplaces: (window.__replaces || []).filter((r) => r.leave).length,
   slug: typeof TS === 'object' ? TS.slug : null, kind: typeof TS === 'object' ? TS.kind : null } })()`;
 
+// A case's tab closed, and seen gone (kit-918). Page.close runs the page's beforeunload, and the
+// dashboard's asks while a press is saving (SAVING > 0): a dialog nobody answers holds the tab, and the
+// renderer it shares with the next one. So the close first waits, up to saving ms, until nothing is
+// saving. Page.close answers at once, even when that dialog then opens, so the tab is gone only once its
+// socket closes: it is called until then. Still answering after gone ms, it never went; a call with no
+// answer (a dialog holds it) fails the caller with what chrome.mjs says Chrome was doing.
+export async function closeTab(p, { saving = 10000, gone = 5000 } = {}) {
+  const closed = (e) => /: Chrome's page connection closed /.test(e.message);
+  const fail = (e, after = '') => { throw new Error(`closing the tab: ${after}${e.message}`, { cause: e }); };
+  const pause = () => new Promise((r) => setTimeout(r, 50));
+  try {
+    const end = Date.now() + saving;
+    for (;;) {
+      // a page that can't say (not the dashboard, or its evaluation threw) has nothing saving; one that gives no answer fails here
+      const n = await p.ev("typeof SAVING === 'number' ? SAVING : 0").catch((e) => (/: no answer from Chrome /.test(e.message) ? fail(e) : 0));
+      if (!n) break;
+      if (Date.now() > end) assert.fail(`closing the tab: the page still saving (SAVING ${n}) after ${saving / 1000} s; closing it would open its beforeunload dialog`);
+      await pause();
+    }
+    if (await p.send('Page.close').then(() => false, (e) => closed(e) || fail(e))) return;
+    const by = Date.now() + gone;
+    for (;;) {
+      if (await p.send('Runtime.evaluate', { expression: '1' }).then(() => false, (e) => closed(e) || fail(e, 'still open after Page.close; '))) return;
+      if (Date.now() > by) assert.fail(`closing the tab: still open ${gone / 1000} s after Page.close`);
+      await pause();
+    }
+  } finally { p.close(); }
+}
+
+// One tab at a time on chrome: next() closes the last one (closeTab) and opens a new one; done()
+// closes the last. The last is let go before its close, so a close that fails isn't tried again.
+export function oneTab(chrome) {
+  let tab = null;
+  const done = async () => { if (!tab) return; const last = tab; tab = null; await closeTab(last); };
+  return { done, next: async () => { await done(); tab = await chrome.newPage(); return tab; } };
+}
+
 // The fixture's artifacts on main, as the supervisor lands one, with an HTML file of the project's
 // (docs/drawer-page.html, for the file drawer's frame; T4's).
 function land(F) {
@@ -186,13 +223,11 @@ export async function harness(t, fixture) {
   const LIB_T = `#library?th=open&t=${T}`, PROG_T = `#progress?th=open&t=${T}`;
 
   // A tab of its own for a case (the last one's closed), at 1280x800, on the dashboard at hash.
-  let tab = null;
-  later(async () => { if (tab) { await tab.send('Page.close').catch(() => {}); tab.close(); } });
+  const tabs = oneTab(chrome);
+  later(() => tabs.done());
   // (a viewer tab, opts.path 'view/artifact/viewer-a', is ready when the page says it is the viewer and has read its threads)
   async function visit(hash, { path = '', width = 1280, height = 800 } = {}) {
-    if (tab) { await tab.send('Page.close').catch(() => {}); tab.close(); tab = null; }
-    const p = await chrome.newPage();
-    tab = p;
+    const p = await tabs.next();
     // the tab in front: a hidden one draws nothing, and the mouse is hit-tested against what it drew
     await p.send('Page.bringToFront');
     await p.send('Page.enable');
