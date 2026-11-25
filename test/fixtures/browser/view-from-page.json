@@ -71,6 +71,17 @@
     "text": "owner@shop.example"
   },
   {
+    "t": "dialog",
+    "id": "d-0123456789abcdef",
+    "accept": true
+  },
+  {
+    "t": "dialog",
+    "id": "d-1123456789abcdef",
+    "accept": true,
+    "text": "Sam Lee"
+  },
+  {
     "t": "nav",
     "url": "https://shop.example/account"
   },

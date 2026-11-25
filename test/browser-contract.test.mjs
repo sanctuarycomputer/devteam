@@ -103,8 +103,8 @@ test('the schema uses only the keywords the kit\'s checker reads', () => {
     walk(def, name);
   }
   assert.deepEqual(Object.keys(S.$defs.shapes).sort(), [...SHAPES].sort());
-  assert.deepEqual(Object.keys(S.$defs.view.from_server).sort(), ['bye', 'frame', 'held', 'url']);
-  assert.deepEqual(Object.keys(S.$defs.view.from_page).sort(), ['back', 'forget', 'key', 'mouse', 'nav', 'paste', 'wheel']);
+  assert.deepEqual(Object.keys(S.$defs.view.from_server).sort(), ['bye', 'dialog', 'dialog_end', 'frame', 'held', 'url']);
+  assert.deepEqual(Object.keys(S.$defs.view.from_page).sort(), ['back', 'dialog', 'forget', 'key', 'mouse', 'nav', 'paste', 'wheel']);
   for (const s of SHAPES) assert.deepEqual(S.$defs.shapes[s].properties.browser.const, 1, `${s} carries browser: 1`);
 });
 
