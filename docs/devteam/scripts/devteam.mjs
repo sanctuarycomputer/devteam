@@ -38006,13 +38006,14 @@ async function browserServe({ chrome: bin }) {
   try {
     ctx.view = browserViewServer(ctx);
     // test hook: the first daemon to find this file missing makes it and fails its bind (T4-1); with
-    // DEVTEAM_TEST_BROWSER_BIND_FAIL_N=<n> (kit-877) the file counts the failed binds, and the first n fail
+    // DEVTEAM_TEST_BROWSER_BIND_FAIL_N=<n> (kit-877) the first n binds fail, and the file lists their
+    // ports, one a line (kit-923)
     const failOnce = browserTestEnv('DEVTEAM_TEST_BROWSER_BIND_FAIL');
     const failN = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_BIND_FAIL_N'));
     if (failOnce && failN > 1) {
       let n = 0;
-      try { n = Number(fs.readFileSync(failOnce, 'utf8')) || 1; } catch {}
-      if (n < failN) { fs.writeFileSync(failOnce, String(n + 1)); throw Object.assign(new Error(`listen EADDRINUSE: address already in use 127.0.0.1:${viewPort}`), { code: 'EADDRINUSE' }); }
+      try { n = fs.readFileSync(failOnce, 'utf8').split('\n').filter(Boolean).length; } catch {}
+      if (n < failN) { fs.appendFileSync(failOnce, `${viewPort}\n`); throw Object.assign(new Error(`listen EADDRINUSE: address already in use 127.0.0.1:${viewPort}`), { code: 'EADDRINUSE' }); }
     } else if (failOnce) { try { fs.writeFileSync(failOnce, '', { flag: 'wx' }); throw Object.assign(new Error(`listen EADDRINUSE: address already in use 127.0.0.1:${viewPort}`), { code: 'EADDRINUSE' }); } catch (e) { if (e.code !== 'EEXIST') throw e; } }
     await browserListen(ctx.view, viewPort);
     ctx.restarted = (await browserPrepareProfile(ctx.profile, ctx.notes)).restarted;
