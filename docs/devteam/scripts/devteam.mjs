@@ -17438,7 +17438,51 @@ function choreWorktree(slugName, { reset = false, setup = false, responder = fal
   const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
   const existed = fs.existsSync(wt);
   // add and reset with -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
-  if (!existed) { gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, start ?? base], mainRoot); seedWorktree(wt, { setup, session: true }); }
+  if (!existed) {
+    const add = ['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, start ?? base];
+    // git dies on a sibling's .git/worktrees/<name>/commondir that is there and still empty: another
+    // worktree add, between making the file and filling it. Waited for and tried again, for 5 s in
+    // all; any other failure dies at once (a commondir that can't be read is another, and so is a
+    // failure once the worktree is there: a hook's; so is one that names this add's own entry, which
+    // its gitdir tells, or one that was never there). The path in git's line is matched, not its
+    // words, which follow the locale.
+    const LIMIT_S = 5;
+    const ref = `refs/heads/chore-${slugName}`;
+    const branchConfig = () => git(['config', '--local', '--get-regexp', `^branch\\.chore-${slugName.replaceAll('.', '\\.')}\\.[^.]+$`], mainRoot);
+    const was = { tip: resolveCommit(ref), config: branchConfig() };
+    const half = (name) => { try { return fs.readFileSync(path.join(commonDir, 'worktrees', name, 'commondir'), 'utf8') === ''; } catch (e) { return e.code === 'ENOENT' ? false : null; } };
+    const entries = () => { try { return fs.readdirSync(path.join(commonDir, 'worktrees')); } catch { return []; } };
+    const own = (name) => { const dir = path.join(commonDir, 'worktrees', name); try { return realPathMade(path.resolve(dir, fs.readFileSync(path.join(dir, 'gitdir'), 'utf8').trim())) === realPathMade(path.join(wt, '.git')); } catch { return false; } };
+    for (let end = null, set = null; ;) {
+      let words, name;
+      const before = resolveCommit(ref), from = resolveCommit(start ?? base), listed = entries();
+      try { execFileSync('git', add, { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); break; }
+      catch (e) { words = (e.stderr || e.message).toString().trim(); name = /worktrees\/([^/\n]+)\/commondir/.exec(e.stderr ?? '')?.[1]; }
+      // where this try moved the branch, read now: origin's main can move during the wait. Only to
+      // the commit this start asked for: any other move is another hand's
+      const after = resolveCommit(ref);
+      if (after !== before && (after === from || after === resolveCommit(start ?? base))) set = after;
+      const seen = name !== undefined && (listed.includes(name) || entries().includes(name)) && !own(name);
+      const state = !seen || fs.existsSync(wt) ? null : half(name);
+      if (state !== null) {
+        end ??= performance.now() + LIMIT_S * 1000;
+        do Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50); while (half(name) && performance.now() < end);
+        // -B would set a branch another hand moved meanwhile back to where this start began
+        const moved = resolveCommit(ref) !== (set ?? was.tip);
+        if (performance.now() < end && !moved) continue;
+        if (moved) words += `\nchore-${slugName} moved meanwhile and is left where it is: start it again`;
+        else if (half(name)) words += `\nthe entry ${name} in ${path.join(commonDir, 'worktrees')} was still half made after ${LIMIT_S} s (its commondir is empty): another git may be making that worktree, or stopped while it did`;
+      }
+      // -B sets the branch before it checks out, so a try that met a half-made entry can leave it:
+      // put back, unless it moved since, or the worktree or its entry is there now (another start's)
+      if (end !== null && !fs.existsSync(wt) && !fs.existsSync(path.join(commonDir, 'worktrees', `chore-${slugName}`))) {
+        if (set && set !== was.tip) git(['update-ref', ...(was.tip ? [ref, was.tip, set] : ['-d', ref, set])], mainRoot);
+        if (!was.tip && !was.config && branchConfig() && !resolveCommit(ref)) git(['config', '--local', '--remove-section', `branch.chore-${slugName}`], mainRoot);
+      }
+      die(`git ${add.join(' ')} failed: ${words}`);
+    }
+    seedWorktree(wt, { setup, session: true });
+  }
   else if (reset) gitOrDie(['-c', 'core.useReplaceRefs=false', 'checkout', '--quiet', '-B', `chore-${slugName}`, base], wt);
   else if (responder) die(`.worktrees/chore-${slugName} appeared meanwhile: responder draft again`);
   // in use again: the tick's tidy leaves a worktree alone until it has been quiet a while
@@ -21037,6 +21081,33 @@ function lastReadingFull(a) {
   });
 }
 const accountKnownFull = (a) => accountAtLimit(a) || lastReadingFull(a);
+// Each account's numbers, for the machine's hub (box-health@1): built from named fields, never by
+// copying a row, so no email, token or new field of cswap's leaves with it. Text is kept only in a known
+// form: the alias as the label (else "Account n"; an address, in any width of @, or one over 40
+// characters is not kept) and a one-word status; a time is written again in UTC. A percent is of the
+// window used. What can't be read is left out, never zero, but for one: on status ok an absent
+// five-hour window is unused. A disabled account is listed, marked; a row with no slot number isn't.
+function capacityList(rows) {
+  const pct = (w) => (Number.isFinite(w?.pct) ? Math.min(100, Math.max(0, w.pct)) : undefined);
+  const at = (t) => (typeof t === 'string' && /^\d{4}-\d\d-\d\dT[\d:.]+(Z|[+-]\d\d:\d\d)$/.test(t) && Number.isFinite(Date.parse(t)) ? new Date(t).toISOString() : undefined);
+  const label = (a) => {
+    const alias = typeof a.alias === 'string' ? a.alias.trim() : '';
+    return alias && alias.length <= 40 && !/[@\p{C}]/u.test(alias.normalize('NFKC')) ? alias : `Account ${a.number}`;
+  };
+  return rows.filter((a) => Number.isSafeInteger(a.number) && a.number > 0).map((a) => {
+    const u = a.usage;
+    const unused = a.usageStatus === 'ok' && u && typeof u === 'object' && (u.fiveHour ?? null) === null;
+    const tier = Number(/_([1-9]\d{0,2})x$/.exec(typeof a.plan?.tier === 'string' ? a.plan.tier : '')?.[1]);
+    return {
+      n: a.number, label: label(a), active: a.active === true, disabled: !!a.disabled,
+      status: typeof a.usageStatus === 'string' && /^[a-z][a-z_]{0,29}$/.test(a.usageStatus) ? a.usageStatus : undefined,
+      week_pct: pct(u?.sevenDay), week_resets_at: at(u?.sevenDay?.resetsAt),
+      five_pct: unused ? 0 : pct(u?.fiveHour), five_resets_at: at(u?.fiveHour?.resetsAt),
+      models_full: Array.isArray(u?.scoped) ? u.scoped.filter((x) => x?.pct >= 100).map((x) => ({ resets_at: at(x.resetsAt) })) : [],
+      tier: tier || undefined,
+    };
+  });
+}
 // The fleet's Claude capacity across every cswap account, for the operator and the supervisors: how many
 // have room, the active one's use, and whether the room left lasts until a full account resets. cswap
 // projects each window (projectedExhaustionAt, willLastToReset); a gap is room that runs out first. An
@@ -21059,6 +21130,7 @@ function capacityOf(rows) {
     active_week_pct: pct(week(active)), active_5h_pct: pct(active?.usage?.fiveHour),
     runs_out_at: runsOut, next_reset_at: nextReset,
     gap: !!(room.length && runsOut && nextReset && Date.parse(runsOut) < Date.parse(nextReset)),
+    list: capacityList(rows),
   };
 }
 // One switch, and what it said, whatever the exit code: a switch that stays put is not a failure.
@@ -23788,7 +23860,7 @@ const HEALTH_TOKENS = healthTokens(60, { may: { per_hour: HEALTH_AMOUNT } });
 const BOX_HEALTH_SHAPE = healthObject({
   v: healthLeaf((v) => v === 1, "1, this contract's version"),
   at: HEALTH_TIME,
-  window_s: healthWhole(1, Infinity, 'a whole number of seconds, 1 or more'),
+  window_s: healthLeaf((v) => v === 3600, '3600, the seconds of an hour'),
   now: healthObject({}, {
     cpu: healthObject({}, {
       limit: healthLeaf((v) => typeof v === 'number' && Number.isFinite(v) && v > 0, 'a number of cores, more than 0'),
@@ -23812,7 +23884,7 @@ const BOX_HEALTH_SHAPE = healthObject({
   headroom: healthObject({}, {
     room: HEALTH_COUNT, starts: HEALTH_COUNT, binds: healthOneOf('memory', 'cpu', 'claude', 'ready'),
     memory: HEALTH_COUNT, cpu: HEALTH_COUNT, claude: HEALTH_COUNT, ready: HEALTH_COUNT, ready_unknown: healthList(healthText()), claude_why: HEALTH_REASON_WORD,
-  }, (v, p) => (v.claude === undefined ? null : healthOnly(v, p, ['claude_why'], 'an absent claude'))),
+  }, (v, p) => (v.ready_unknown?.length ? healthOnly(v, p, ['starts'], 'every fleet known') : null) ?? (v.claude === undefined ? null : healthOnly(v, p, ['claude_why'], 'an absent claude'))),
   pool: healthObject({
     projects: healthList(healthObject({ name: healthText() }, {
       port: HEALTH_PORT, at: HEALTH_TIME, workers: HEALTH_COUNT, planners: HEALTH_COUNT, cap: HEALTH_COUNT, ready: HEALTH_COUNT, cpu: HEALTH_AMOUNT, rss: HEALTH_COUNT,
@@ -23837,7 +23909,7 @@ const BOX_HEALTH_SHAPE = healthObject({
       most_that_lasts: HEALTH_COUNT, measured: HEALTH_COUNT,
       steps: healthList(healthObject({ workers: HEALTH_COUNT }, { lasts: HEALTH_BOOL, runs_out_at: HEALTH_TIME, paused_until: HEALTH_TIME }, healthLasts(['paused_until'])), 81),
       memory_full_at: HEALTH_COUNT, cpu_full_at: HEALTH_COUNT, why: HEALTH_REASON_WORD,
-    }, (v, p) => ((v.steps ?? []).some((s) => s.lasts !== undefined) ? healthOnly(v, p, ['why'], 'every lasts left out') : null)),
+    }, (v, p) => (v.now > 60 ? healthOnly(v, p, ['steps'], 'a pool of at most 60 workers') : null) ?? ((v.steps ?? []).some((s) => s.lasts !== undefined) ? healthOnly(v, p, ['why'], 'every lasts left out') : null)),
   }),
   claude: healthObject({
     accounts: healthList(healthObject({
@@ -23873,7 +23945,7 @@ const POOL_SHAPE = healthObject({
 function healthProblem(input, root, shape, max) {
   let v = input, text = input;
   if (typeof input === 'string') {
-    if (healthBytes(text) > max) return `${root} is over ${max} bytes: it should be at most that`;
+    if (healthOver(text, max)) return `${root} is over ${max} bytes: it should be at most that`;
     try { v = JSON.parse(input); } catch { return `${root} is not JSON: it should be one JSON object`; }
   }
   if (!memoryIsMap(v)) return healthIs(root, v, 'one JSON object');
@@ -23883,10 +23955,12 @@ function healthProblem(input, root, shape, max) {
   if (typeof input !== 'string') {
     try { text = JSON.stringify(v); } catch { text = undefined; }
     if (typeof text !== 'string') return `${root} can't be written as JSON: it should be one JSON object`;
-    if (healthBytes(text) > max) return `${root} is over ${max} bytes: it should be at most that`;
+    if (healthOver(text, max)) return `${root} is over ${max} bytes: it should be at most that`;
   }
   return null;
 }
+// Over max bytes of UTF-8? A text has at least as many bytes as characters, so a long one is not counted.
+const healthOver = (s, max) => s.length > max || healthBytes(s) > max;
 // UTF-8 bytes of a text, without Buffer (the region runs alone).
 function healthBytes(s) {
   let n = s.length;
@@ -23902,11 +23976,15 @@ function healthBytes(s) {
 // gateway too, and what the Overview's strip and `machine health` read. Held in the hub's memory
 // only. A field that can't be read is absent, never zero. Required: `v`, `at`, `window_s`, `now`,
 // `samples`; in an object, the fields marked *. Times are UTC, YYYY-MM-DDTHH:MM:SS(.sss)Z. Bytes and
-// counts are whole, 0 or more; shares are 0 to 1; percents 0 to 100; CPU is in cores.
-//   `v`*  1     `at`*  when it was answered     `window_s`*  seconds `samples` covers: 3600
-//   `now`*      the latest reading. `cpu`: `limit` (the box's own cap), `used`, `host_cores` (a share
+// counts are whole, 0 or more; shares are 0 to 1; percents 0 to 100; CPU is in cores. Every other
+// number is 0 or more, but bytes_per_hour, which may be below zero. Text is never
+// empty, and a title is at most 80 characters (UTF-16 units). A word (`status`, what_if's `why`,
+// `claude_why`) is at most 40 of a-z, 0-9, _ and -, the first a letter.
+//   `v`*  1     `at`*  when it was answered     `window_s`*  seconds `samples` covers: 3600, always
+//   `now`*      the latest reading. `cpu`: `limit` (the box's own cap, over 0), `used`, `host_cores` (a share
 //               a core), `shared` (true: `host_cores` are the host's, whose other boxes share them;
-//               else absent), `load` (1, 5, 15 minutes), `load_scope` ("host", with `shared`),
+//               else absent), `load` (1, 5, 15 minutes), `load_scope` ("host": `load` is the host's;
+//               with `shared`, but not checked, since a first reading has `load` and no `host_cores`),
 //               `some60` (percent of the last minute some task waited), `throttled` (share of periods
 //               held at the limit). `memory`: `used` (as machineMemory counts it), `max`, `available`
 //               in bytes, `ceiling` (the share of max, 0.5 to 0.95, as machine-memory@1), `swap_used`,
@@ -23914,10 +23992,10 @@ function healthBytes(s) {
 //               `free`* and `total`* bytes, `inodes_free`, `inodes`, `bytes_per_hour` (the change in
 //               free; below zero is shrinking). `io`: `some10`, `some60`, `full60` percents.
 //   `samples`*  every 5 s for an hour, oldest first, at most 720: `at`*, `cpu` cores, `cpu_some`
-//               percent, `throttled`, `load` (1 minute), `mem` bytes, `mem_some`, `swap` bytes, `disk`
+//               percent, `throttled`, `load` (1 minute), `mem` bytes, `mem_some` percent, `swap` bytes, `disk`
 //               and `inodes` free on the first of `disks`, `io` (some60), `room`
 //   `headroom`  `room` (how many more workers the box could hold: the least of `memory`, `cpu` and
-//               `claude`), `starts` (the least of room and ready; absent with an unknown fleet),
+//               `claude`), `starts` (the least of room and ready; absent with a name in ready_unknown),
 //               `binds` ("memory", "cpu", "claude" or "ready": what limits it), `memory`, `cpu`,
 //               `claude` (whole; absent when there is no Claude limit to state), `ready` (over known
 //               fleets), `ready_unknown` (the names of fleets whose ready count isn't known), `claude_why`
@@ -23939,11 +24017,12 @@ function healthBytes(s) {
 //     `others`      the same use by role, not added to projects: `planners`, `supervisors`, `outside`
 //                   (in no project), each `n`, `cpu`, `rss`; `unattributed`: `cpu`
 //     `strays`      at most 40 groups: `project` (absent: in none), `kind`* ("agent", "browser",
-//                   "node", "test"), `why`* ("parent-gone", "folder-gone", "long-test"), `n`*,
-//                   `oldest_s`, `rss`, `cpu`
+//                   "node", "test"), `why`* ("parent-gone", "folder-gone", "long-test"), `n`*
+//                   (1 or more),
+//                   `oldest_s` (whole), `rss`, `cpu`
 //     `what_if`     `now`* (workers holding a slot), `most_that_lasts` (absent when no step lasts; when
 //                   it equals the last step's workers the page adds "or over"), `measured` (of now),
-//                   `steps` (0 to now + 20, at most 81; absent over 60 workers: `workers`*, `lasts`
+//                   `steps` (0 to now + 20, at most 81; absent with now over 60: `workers`*, `lasts`
 //                   (absent with no token forecast), `runs_out_at` (always, and only, when it doesn't
 //                   last), `paused_until` (only then)), `memory_full_at`, `cpu_full_at` (the first count past each),
 //                   `why` (only when no step has lasts: the first of these that holds)
@@ -23967,9 +24046,9 @@ function healthBytes(s) {
 //               writes), `cached`* (cached reads), `per_hour`, and `points`* (ten-minute buckets, at
 //               most 60: `at`* its start, `new`*; a bucket left out is zero). Any state may have
 //               `reviews_new` (its ticket's reviews so far). `recent` has the same.
-//   `claude`    absent with no cswap. `accounts`*, at most 40: `n`*, `label`* (the alias when set and
+//   `claude`    absent with no cswap. `accounts`*, at most 40: `n`* (1 or more), `label`* (the alias when set and
 //               not an address, else "Account n"; one with an @ is refused), `active`, `week_left`,
-//               `five_left` percents, `week_resets_at`, `five_resets_at`, `status` (a lowercase word).
+//               `five_left` percents, `week_resets_at`, `five_resets_at`, `status` (a word).
 //               `rate` (points of one account-week an hour; absent while measuring), `rate_hours` (what
 //               it covers, at most 6), `points` (measured: `at`*, `room`* in accounts' worth),
 //               `projection`: `lasts`*, `runs_out_at` (always, and only, when it doesn't last),
@@ -23987,17 +24066,25 @@ function healthBytes(s) {
 // the first bad field's path (answer, for the whole). It never quotes text it was given, and names an
 // unknown key only when it looks like a field's name. Order: size (a text's), JSON, object, v, then
 // each object's unknown keys, its fields in order and what goes with what; a value's size is last.
-// Shape only: it adds nothing up and compares no times. A new field is box-health@2; a new
+// What goes with what: no `starts` with a name in `ready_unknown`; no `claude_why` beside `claude`; no
+// `steps` with what_if's `now` over 60; no `why` beside a step's `lasts`; `runs_out_at` and
+// `paused_until` by `lasts`; a tokens row's fields by its `state`. Limits on a number, a text or a
+// list are checked too. What a field means (an order, a least, how many steps,
+// when a reading is absent) is the producer's to keep: the check is of shape only, adds nothing up,
+// compares no times and can't see the machine. A new field is box-health@2; a new
 // word for `why` or `claude_why` is not, and a page shows its fallback sentence for one.
 function boxHealthProblem(input) {
   return healthProblem(input, 'answer', BOX_HEALTH_SHAPE, BOX_HEALTH_MAX_BYTES);
 }
 // pool@1, a project's worker pool: run/cache/pool.json, written by its supervisor's `metrics` and read
 // by the machine's hub, across projects and kit releases. Required: every field but those marked ?.
+// Times are as box-health@1's. Counts are whole, 0 or more; dollars 0 or more; text is never empty; a
+// title is at most 80 characters.
 //   `v`  1     `at`  when it was written     `hour_end`  the end of the hour the hours below cover
 //   `cap`?      max_active_tickets; absent: no limit
 //   `ready`     the count behind idle-capacity     `planners`  running now
-//   `goals`     at most 20: `id`, `title` (at most 80 characters), `priority`?, `usd_hour`, `new_hour`
+//   `goals`     at most 20: `id`, `title` (at most 80 characters), `priority`? (whole, of
+//               either sign), `usd_hour`, `new_hour`
 //   `workers`   those holding a slot, at most 60; past 60 they are in `other`: `name`, `title`?, `goal`?
 //               (an index into goals; absent for none), `phase`?, `since`?, `tokens`
 //   `recent`    slots that ended in 24 hours, newest first, at most 20: `name`, `title`?, `left_at`,
@@ -34869,15 +34956,19 @@ async function browserWatchTabs(ctx) {
   cdp.on('Page.loadEventFired', (p, sid) => bySession(sid)?.loaded?.());
   // A page's JS dialog (kit-329), on any tab: answered at once with its stated default, so no verb,
   // load or view frame waits behind it; kept for the next plain-text answer.
-  cdp.on('Page.javascriptDialogOpening', ({ type, message }, sid) => {
+  // While the owner has the browser (kit-770) all but an alert is theirs to answer, in the view.
+  cdp.on('Page.javascriptDialogOpening', ({ type, message, url, defaultPrompt }, sid) => {
     if (!sid) return;
+    if (browserOwnerDialog(ctx, { type, message, url, defaultPrompt, sid, top: bySession(sid)?.frameUrl })) return;
     cdp.send('Page.handleJavaScriptDialog', { accept: browserDialogAccept(type) }, sid).catch(() => {});
     browserDialogSeen(ctx, type, message);
   });
+  cdp.on('Page.javascriptDialogClosed', (p, sid) => browserOwnerDialogGone(ctx, sid));
   cdp.on('Target.targetDestroyed', ({ targetId }) => {
     const i = ctx.tabs.findIndex((x) => x.targetId === targetId);
     if (i < 0) return;
     const [gone] = ctx.tabs.splice(i, 1);
+    if (gone.sessionId) browserOwnerDialogGone(ctx, gone.sessionId);
     if (ctx.active === gone) ctx.active = ctx.tabs.at(-1) ?? null;
   });
   await cdp.send('Target.setDiscoverTargets', { discover: true });
@@ -34896,15 +34987,69 @@ const BROWSER_DIALOG_HOLD_MS = 250;
 const browserDialogAccept = (type) => type === 'alert' || type === 'beforeunload';
 function browserDialogSeen(ctx, type, message) {
   const d = ctx.dialogs, now = Date.now();
-  if (ctx.held) return;
+  if (ctx.held || ctx.pending || ctx.closing || !ctx.ready) return; // a close not handled yet: still the owner's pages
   if (!ctx.dialogHold || now - ctx.dialogHold.at >= BROWSER_DIALOG_HOLD_MS) {
     let held;
-    try { held = !!browserHeld(browserHandovers()); } catch { held = true; }
+    try { const hs = browserHandovers(); held = !!browserHeld(hs) || browserUnhandled(ctx, hs).length > 0; } catch { held = true; }
     ctx.dialogHold = { at: now, held };
   }
   if (ctx.dialogHold.held) return;
   if (d.shown.length >= BROWSER_DIALOGS_SHOWN) d.more++;
   else d.shown.push({ type: Object.hasOwn(BROWSER_DIALOG_ANSWERS, type) ? type : 'dialog', text: String(message ?? '').slice(0, 300) });
+}
+// The owner's dialogs (kit-770): a confirm, prompt or beforeunload that opens while the owner holds the
+// browser (read from the log as browserDialogSeen does; a failed read, or a close pending, is no hold) is
+// left open and sent to the view, and to a viewer who connects later; only browserOwnerAnswer, from that
+// view's socket, answers it, with no timeout. ctx.ownerDialogs: session id → { id, kind, url, text,
+// default?, frame? }, at most one a tab, in memory only: never logged, stored or told to the agent.
+const BROWSER_OWNER_KINDS = ['confirm', 'prompt', 'beforeunload'];
+const BROWSER_OWNER_TEXT = 2000;
+const browserOwnerCut = (s) => String(s ?? '').slice(0, BROWSER_OWNER_TEXT).toWellFormed();
+// Who asks, masked: the frame's URL; for a frame with none of its own (srcdoc, blob, data), which can be
+// another site's, the page it is in, said to be a frame there; never the URL the tab was opening.
+const browserOwnerAsker = (url, top) => {
+  const web = (x) => typeof x === 'string' && browserHttp(x);
+  return web(url) ? { url: browserMask(url) } : web(top) ? { url: browserMask(top), frame: true } : { url: 'about:blank' };
+};
+function browserOwnerDialog(ctx, { type, message, url, defaultPrompt, sid, top }) {
+  if (!BROWSER_OWNER_KINDS.includes(type) || !ctx.ready || ctx.stopping || ctx.closing) return false;
+  // a page asking in a loop with no hold doesn't fold the log for every dialog
+  if (Date.now() - ctx.ownerNone < BROWSER_DIALOG_HOLD_MS) return false;
+  try {
+    browserKeepHeld(ctx, browserHandovers()); // kept: the owner's answer is judged by this read, not the watch's last
+    if (!ctx.held || ctx.pending) { ctx.ownerNone = Date.now(); return false; }
+  } catch { return false; }
+  const def = type === 'prompt' ? browserOwnerCut(defaultPrompt) : '';
+  const o = { id: `d-${crypto.randomBytes(8).toString('hex')}`, kind: type, ...browserOwnerAsker(url, top), text: browserOwnerCut(message), ...(def ? { default: def } : {}) };
+  ctx.ownerDialogs.set(sid, o);
+  browserOwnerSend(ctx, { t: 'dialog', ...o });
+  return true;
+}
+function browserOwnerSend(ctx, m) {
+  const v = ctx.viewer;
+  if (v && !v.ws.closed) try { v.ws.send(m); } catch {}
+}
+function browserOwnerDialogGone(ctx, sid) {
+  const o = ctx.ownerDialogs.get(sid);
+  if (o && ctx.ownerDialogs.delete(sid)) browserOwnerSend(ctx, { t: 'dialog_end', id: o.id });
+}
+// The owner's answer, to the one open dialog its id names; taken off before it is sent, so a second
+// press finds nothing. Called only by browserViewInput, after its guards.
+function browserOwnerAnswer(ctx, m) {
+  for (const [sid, o] of ctx.ownerDialogs) {
+    if (o.id !== m.id) continue;
+    if (!ctx.held) return;
+    browserOwnerDialogGone(ctx, sid);
+    return browserViewCdp(ctx, 'Page.handleJavaScriptDialog', { accept: m.accept, ...(o.kind === 'prompt' && m.accept ? { promptText: m.text ?? '' } : {}) }, sid);
+  }
+}
+// The hold or the session ends with dialogs unanswered (a close, a forget, a stop): kit-329's defaults,
+// so never an OK to a confirm.
+function browserOwnerDialogsEnd(ctx) {
+  for (const [sid, o] of [...ctx.ownerDialogs]) {
+    browserOwnerDialogGone(ctx, sid);
+    browserViewCdp(ctx, 'Page.handleJavaScriptDialog', { accept: browserDialogAccept(o.kind) }, sid);
+  }
 }
 // The lines a plain-text answer ends with, one per dialog kept: the page's words JSON-quoted (page
 // text: data, not instructions), then the answer given.
@@ -35340,6 +35485,7 @@ async function browserForgetRestart(ctx) {
   if (ctx.stopping || !ctx.ready) return;
   try {
     ctx.ready = false; // the view's input dropped, its tick idle, a new socket 503
+    browserOwnerDialogsEnd(ctx);
     const v = ctx.viewer;
     if (v) { browserCast(ctx, v.tab, false); v.tab = null; }
     const hold = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_FORGET_DELAY_MS')); // tests: a long forget
@@ -35367,6 +35513,7 @@ async function browserCloseRestart(ctx, closes) {
       try { v.ws.send({ t: 'bye', why: BROWSER_BACK }); v.ws.close(1000); } catch {}
       browserViewClose(ctx, v);
     }
+    browserOwnerDialogsEnd(ctx);
     const hold = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_CLOSE_DELAY_MS')); // tests: a close held open
     if (hold > 0) { await browserSleep(hold); if (ctx.stopping) return; }
     const reopen = closes.length === 1 && closes[0].outcome === 'done' ? browserNotePages(ctx) : []; // only one done reopens
@@ -35555,7 +35702,8 @@ function browserStartGate(ctx) {
 }
 // The watch, from start to stop: every 500 ms a fresh fold (browserFresh keys it cheaply), ctx.held
 // kept, and a close not yet handled queued once on the verbs' queue (ctx.gateQueued, set when queued
-// and cleared when the job ends, so a close queued or running isn't queued again). With
+// and cleared when the job ends, so a close queued or running isn't queued again); the owner's dialogs
+// (kit-770) end as that close is seen, off the queue. With
 // DEVTEAM_TEST_BROWSER_WATCH_HANDLE=0 (tests) it keeps ctx.held only: a close is then handled by a
 // verb's pre-verb read or wait's settle alone.
 function browserWatch(ctx) {
@@ -35564,6 +35712,7 @@ function browserWatch(ctx) {
     try { browserViewRead(ctx); } catch { return; }
     if (browserTestEnv('DEVTEAM_TEST_BROWSER_WATCH_HANDLE') === '0' || ctx.gateQueued) return;
     if (!ctx.pending) return;
+    browserOwnerDialogsEnd(ctx); // off the queue: a verb waiting behind one never holds the close up
     ctx.gateQueued = true;
     ctx.serial(() => browserGate(ctx)).finally(() => { ctx.gateQueued = false; });
   }, Number(browserTestEnv('DEVTEAM_TEST_BROWSER_WATCH_MS')) || 500); // the hook: tests, a slowed watch
@@ -35595,6 +35744,7 @@ function browserShutdown(ctx, why, detail) {
     clearTimeout(ctx.idle);
     clearInterval(ctx.renew);
     clearInterval(ctx.watch);
+    browserOwnerDialogsEnd(ctx);
     try { ctx.viewer?.ws.close(1001); } catch {} // the view's socket closes with the daemon (no bye)
     await browserEndChrome(ctx.cdp, ctx.chrome?.pid);
     try { browserDeleteSession(ctx.profile); } catch {}
@@ -35944,6 +36094,7 @@ const BROWSER_FROM_PAGE = {
   nav: { req: ['url'], f: { url: { type: 'str', min: 1, max: 2048 } } },
   back: { req: [], f: {} },
   forget: { req: [], f: {} },
+  dialog: { req: ['id', 'accept'], f: { id: { type: 'str', min: 18, max: 18, re: /^d-[0-9a-f]{16}$/ }, accept: { enum: [true, false] }, text: { type: 'str', min: 0, max: 10000 } } },
 };
 function browserViewMessage(m) {
   if (!m || typeof m !== 'object' || Array.isArray(m) || typeof m.t !== 'string' || !Object.hasOwn(BROWSER_FROM_PAGE, m.t)) return null;
@@ -35957,7 +36108,7 @@ function browserViewMessage(m) {
     if (s.type === 'str') {
       if (typeof x !== 'string' || x.length < s.min || x.length > 2 * s.max) return null; // UTF-16 length bounds code points both ways
       const n = [...x].length;
-      if (n < s.min || n > s.max) return null;
+      if (n < s.min || n > s.max || (s.re && !s.re.test(x))) return null;
     } else if (typeof x !== 'number' || !Number.isFinite(x) || (s.type === 'int' && !Number.isInteger(x)) || x < s.min || x > s.max) return null;
   }
   return m;
@@ -35988,8 +36139,10 @@ function browserViewInput(ctx, v, text) {
     ctx.forgetting = true;
     return void ctx.serial(() => browserForgetRestart(ctx)).finally(() => { ctx.forgetting = false; });
   }
+  if (m.t === 'dialog') return browserOwnerAnswer(ctx, m);
   const sid = ctx.active?.sessionId;
   if (!sid) return; // a tab with no session: dropped
+  if (ctx.ownerDialogs.has(sid) && m.type !== 'up') return; // a dialog is up: Chrome would keep the input and land it after the answer
   const cdp = (method, params) => browserViewCdp(ctx, method, params, sid);
   const scale = v.scale > 0 ? v.scale : 1;
   switch (m.t) {
@@ -36074,6 +36227,7 @@ function browserViewServer(ctx) {
       if (ctx.viewer) { v.ws.send({ t: 'bye', why: 'The browser is already open in another window.' }); return v.ws.close(1000); }
       ctx.viewer = v;
       browserViewHeld(ctx, v); // the current hold, from the fold just read
+      for (const o of ctx.ownerDialogs.values()) v.ws.send({ t: 'dialog', ...o }); // still open: the owner's to answer
       browserViewTick(ctx, v);
       v.timer = setInterval(() => browserViewTick(ctx, v), 250);
       v.timer.unref?.();
@@ -36087,7 +36241,7 @@ function browserViewServer(ctx) {
 // port another preview took fails this daemon and browserEnsure relaunches, and only a daemon that
 // got its port may kill a leftover Chrome or clear a lock, so the one that comes up reports them.
 async function browserServe({ chrome: bin }) {
-  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, renew: null, stopping: null, after: null, viewer: null, ready: false, state: null, serial: null, forgetting: false, handled: new Map(), held: null, folded: [], pending: false, foldAt: 0, closing: false, gateQueued: false, watch: null, dialogs: { shown: [], more: 0 }, dialogHold: null };
+  const ctx = { chrome: null, cdp: null, guard: null, profile: null, notes: [], restarted: false, tabs: [], active: null, bin, preview: null, view: null, control: null, idle: null, renew: null, stopping: null, after: null, viewer: null, ready: false, state: null, serial: null, forgetting: false, handled: new Map(), held: null, folded: [], pending: false, foldAt: 0, closing: false, gateQueued: false, watch: null, dialogs: { shown: [], more: 0 }, dialogHold: null, ownerDialogs: new Map(), ownerNone: 0 };
   for (const s of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(s, () => browserShutdown(ctx, 'signal'));
   browserIsDaemon = true;
   const viewPort = Number(process.env.PORT);
