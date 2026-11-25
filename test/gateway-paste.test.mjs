@@ -213,7 +213,7 @@ each('rules', [
     const taken = [];
     for (const words of ['see https://x.test/a', 'holiday.png is nice', 'holiday.pdf', 'ftp://x.test/a', 'holiday.tiffany',
       'https://x.test/a is down, please look', 'http: server closed the connection', 'https: see below', 'file: not found', 'data: 3 rows failed to load', 'https:',
-      'https://x.test/a\tb', 'https://x.test/a b', 'https://x.test/a\u000bb', 'https://x.test/a b', 'https://x.test/a\fb', 'look holiday.png', 'look\u000bholiday.png', 'https://x.test/a\u0085holiday.png']) if (await p.paste({ files: [SHOT], text: words })) taken.push(words);
+      'https://x.test/a\tb', 'https://x.test/a b', 'https://x.test/a\u000bb', 'https://x.test/a b', 'https://x.test/a\fb', 'look holiday.png', 'look\u000bholiday.png', 'https://x.test/a\u0085holiday.png', 'look\rholiday.png', 'look\fholiday.png', 'look\u2029holiday.png', 'https://x.test/a\u00a0look', 'https://x.test/a\u2003look']) if (await p.paste({ files: [SHOT], text: words })) taken.push(words);
     assert.deepEqual(taken, [], 'taken for a name, and their words lost');
     assert.equal(await p.paste({ files: [SHOT], text: 'https://x.test/a is down, look', html: IMG }), false, 'words after an address, beside HTML of a lone img');
   }],
