@@ -294,5 +294,58 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
     assert.equal(noteStates()[id], 'to check', 'C5f: N4 is to check once the planner marks it again');
   });
 
+  // ---- step 6b: the landed faq artifact, its notes made at main ----
+  const L = {};
+  // one open note per subject (the kit refuses a second): L1 on the refund question, L2 on the cancel one
+  const FAQ_SUBJECT = (selector, text) => ({ kind: 'artifact', slug: FAQ, at: 'main', path: 'index.html', anchor: { selector, tag: 'div', text, point: { x: 60, y: 20 } } });
+  const FAQ_ON = { L1: FAQ_SUBJECT('#q-refund', 'Can I get a refund?'), L2: FAQ_SUBJECT('#q-cancel', 'Can I cancel?') };
+  await step('step 6b: L1 and L2 on faq at main, handed over; L1 marked from the chore draft, L2 ready after main-2', async () => {
+    for (const [key, text] of [['L1', 'Say how long a refund takes'], ['L2', 'Link the refund policy']]) {
+      const out = ok(F, 'owner', ['thread', 'new', text, '--title', `Refund ${key}`, '--subject', J(FAQ_ON[key]), '--frame', J({ w: 1068, h: 690, hash: '' })]);
+      L[key] = out.split('\n')[0].trim();
+      assert.match(L[key], /^t-/, `setup: the owner's note ${key} was made: ${out}`);
+    }
+    const handed = JSON.parse(ok(F, 'owner', ['artifact', 'handoff', FAQ, '--at', 'main', '--json']));
+    assert.equal(handed.to, 'supervisor', 'step 6b: faq at main is handed to the supervisor');
+    assert.equal(handed.count, 2, 'step 6b: two notes handed over');
+    const keep = (id, out) => { const m = /^picture: (\S+-light\.png)/m.exec(out); assert.ok(m, `step 6b: the mark prints its picture's path: ${out}`); const stamp = path.basename(m[1]).replace(/-light\.png$/, ''); const line = markLine(F, id, stamp); assert.ok(line?.shot, `step 6b: a log line for ${id} carries the shot stamped ${stamp}`); return line.shot; };
+    const s1 = keep(L.L1, ok(F, 'supervisor', ['artifact', 'addressed', L.L1, '--note', 'The answer now says refunds take five days', '--draft', CHORE]));
+    assert.equal(s1.src, CHORE, `step 6b L1: shot.src is ${CHORE}`);
+    stack.landFaq('main-2');
+    const tip = F.g(['rev-parse', 'origin/main'], F.old);
+    const s2 = keep(L.L2, ok(F, 'supervisor', ['thread', 'ready', L.L2, '--outcome', 'The refund policy is linked on main']));
+    assert.equal(s2.src, 'main', 'step 6b L2: shot.src is main');
+    assert.equal(s2.sha, tip, "step 6b L2: shot.sha is origin main's head");
+  }, { timeout: 240000 });
+
+  // step 7b stays after T6's step 7 subtests
+  // Show me on a faq note from a fresh visit with the viewer closed: where the viewer lands and what the framed page says
+  const copies = [];
+  const showMe = async (key, head, copy, check) => {
+    const V = await visit('#library?th=open', WIN);
+    const btn = `#tl-list [data-tl-show="${L[key]}"]`;
+    await V.soon(`!!document.querySelector(${J(btn)})`, `${check}: ${key}'s row has Show me`);
+    const n = await V.mark();
+    await V.p.ev(`document.querySelector(${J(btn)}).scrollIntoView({ block: 'center' }); void 0`);
+    await V.p.ev(FRAMES);
+    const at = await V.p.ev(`(() => { const r = document.querySelector(${J(btn)}).getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+    await V.press(at.x, at.y, 'BUTTON');
+    assert.ok(await V.settle(`location.hash === ${J(head)}`, 8000), `${check}: Show me on ${key} opens ${head}, not ${await V.p.ev('location.hash')}`);
+    const said = `window.__own.slice(${n}).some((m) => m.own === 'at' && m.page === 'faq/index.html' && m.copy === ${J(copy)})`;
+    const got = await V.settle(said, 10000);
+    const seen = await V.p.ev(`[...new Set(window.__own.slice(${n}).filter((m) => m.own === 'at' && m.copy).map((m) => m.copy))]`);
+    copies.push(...seen);
+    assert.ok(got, `${check}: the framed page says copy: ${copy} on ${key} (it said ${J(seen)})`);
+  };
+  await step('step 7b: Show me on L1 and L2, with the chore draft and after it is removed', async () => {
+    await showMe('L1', `#artifact/wt/${CHORE}/${FAQ}`, 'chore', 'C5g L1');
+    await showMe('L2', `#artifact/main/${FAQ}`, 'main-2', 'C5g L2');
+    F.g(['worktree', 'remove', '--force', stack.CHORE], F.old);
+    assert.equal(fs.existsSync(stack.CHORE), false, 'C5h: the chore worktree is removed');
+    await showMe('L1', `#artifact/main/${FAQ}`, 'main-2', 'C5h L1 after the chore draft is gone');
+    await showMe('L2', `#artifact/main/${FAQ}`, 'main-2', 'C5h L2 after the chore draft is gone');
+    assert.equal(copies.includes('old'), false, `C5h: no own message ever said copy: old (${J(copies)})`);
+  }, { timeout: 240000 });
+
   t.diagnostic(`file: ${Date.now() - fileAt} ms`);
 });
