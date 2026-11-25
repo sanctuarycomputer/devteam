@@ -331,7 +331,7 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
   // each try: the control found again, (guarded) settled, its box the same on four reads running (a picture arriving late
   // pushes the card's parts about), then the press; with until, a press that left it false is made again, a press that never
   // reached the page too, after naming what happened (never a second press once until holds)
-  const pressSel = async (V, sel, what, { guard = null, until = null } = {}) => {
+  const pressSel = async (V, sel, what, { guard = null, until = null, check = 'setup' } = {}) => {
     let why = '';
     for (let i = 0; i < 4; i++) {
       if (i && until && await V.settle(until, 100)) return;
@@ -348,7 +348,7 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
       why = `${sel} pressed at ${at.x},${at.y} and ${until} stayed false: clicks ${J(await V.p.ev('window.__clicks.slice(-4)'))}`;
       t.diagnostic(`press ${sel}: ${why}`);
     }
-    assert.fail(`setup: ${why}`);
+    assert.fail(`${check}: ${why}`);
   };
   // one real press on ‹ or ›, and the wait for the step to land: the note's card open, its page there, no step under way
   const stepBy = async (V, id, key, what) => {
@@ -398,7 +398,7 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
     for (const key of TOCHECK) {
       await stepBy(V, 'av-next', key, `C7b (c) ${key}`);
       await V.soon(`(() => { const i = document.querySelector('#tl-card .tl-shot img'); return !!i && i.complete && i.naturalWidth > 0; })()`, `C7b (c) ${key}: the card's picture loaded`);
-      await pressSel(V, '#tl-card .tl-shot img', 'IMG', { until: `!!document.getElementById('av-shot')` });
+      await pressSel(V, '#tl-card .tl-shot img', 'IMG', { until: `!!document.getElementById('av-shot')`, check: `C7b (c) ${key}: a click on the picture opens #av-shot` });
       await V.soon(`!!document.getElementById('av-shot')`, `C7b (c) ${key}: a click on the picture opens #av-shot`);
       const want = png(fs.readFileSync(shots[key].file)).w;
       assert.ok(await V.settle(`(() => { const i = document.querySelector('#av-shot img'); return !!i && i.complete && i.naturalWidth === ${want}; })()`, 10000), `C7b (c) ${key}: #av-shot's image is ${want}px wide, the PNG's (it is ${await V.p.ev("document.querySelector('#av-shot img')?.naturalWidth")})`);
