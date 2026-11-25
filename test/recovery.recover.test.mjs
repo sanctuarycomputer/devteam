@@ -279,9 +279,8 @@ test('recover: two at once on one repo start one supervisor', { skip: !hasTmux }
     F.killSession();
     const dt = path.join(F.root, 'docs/devteam/scripts/devteam.mjs');
     const once = () => new Promise((resolve) => execFile(process.execPath, [dt, 'recover'], { cwd: F.root, env: F.env({ ...asOwner, ...server.env }), encoding: 'utf8' }, (err, stdout, stderr) => resolve({ status: err?.code ?? 0, stdout, stderr })));
-    // recover reads origin before its lock (cmdRecover), so both fetch at once: with origin/main already
-    // current neither fetch writes the ref, and the start claim is what's under test (two recovers racing
-    // one moved origin's ref lock is a product bug, kit-910-recover-ref-lock-race)
+    // fetch first, so with origin/main already current neither recover sets the ref and the start claim
+    // alone is under test; two recovers meeting a moved origin's ref lock is kit-910's test below
     execFileSync('git', ['fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main'], { cwd: F.root });
     const both = await Promise.all([once(), once()]);
     assert.deepEqual(both.map((r) => r.status), [0, 0], both.map((r) => `${r.stdout}${r.stderr}`.trim()).join(' | '));
@@ -293,6 +292,121 @@ test('recover: two at once on one repo start one supervisor', { skip: !hasTmux }
     const windows = spawnSync('tmux', ['list-windows', '-a', '-F', '#W'], { env: { ...process.env, TMUX_TMPDIR: server.dir }, encoding: 'utf8' }).stdout.trim().split('\n');
     assert.deepEqual(windows, ['supervisor']);
   } finally { server.done(); F.done(); }
+});
+
+// kit-910: once origin's main has moved since this checkout last read it, each recover's origin read
+// sets origin/main here, and git holds that ref's lock while one does: the other read finds it held.
+// origin read once, then a commit on main (the fixture's origin is the repo itself): origin moved
+const moveOrigin = (F) => {
+  execFileSync('git', ['fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main'], { cwd: F.root });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'origin moved'], { cwd: F.root });
+  return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: F.root, encoding: 'utf8' }).trim();
+};
+const trackingAt = (F) => execFileSync('git', ['rev-parse', 'refs/remotes/origin/main'], { cwd: F.root, encoding: 'utf8' }).trim();
+// git's own trace (GIT_TRACE2_EVENT): how many update-refs ran and exited non-zero
+const updatesRefused = (trace) => {
+  const events = (fs.existsSync(trace) ? fs.readFileSync(trace, 'utf8') : '').split('\n').flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } });
+  const updates = new Set(events.filter((e) => e.event === 'start' && e.argv?.includes('update-ref')).map((e) => e.sid));
+  return events.filter((e) => e.event === 'exit' && updates.has(e.sid) && e.code !== 0).length;
+};
+
+test('recover: two at once after origin moved both finish, though origin/main\'s lock is held as they set it (kit-910)', { skip: !hasTmux }, async () => {
+  const F = fixture('reclockrace', { resume: CLAUDE_RESUME });
+  const server = privateServer();
+  const lock = path.join(F.root, '.git/refs/remotes/origin/main.lock');
+  try {
+    sessionTranscript(F);
+    await seenUp(F);
+    F.killSession();
+    const main = moveOrigin(F);
+    const traces = [path.join(F.base, 'git-trace-a.json'), path.join(F.base, 'git-trace-b.json')];
+    const dt = path.join(F.root, 'docs/devteam/scripts/devteam.mjs');
+    let ended = 0;
+    const once = (trace) => new Promise((resolve) => execFile(process.execPath, [dt, 'recover'], { cwd: F.root, env: F.env({ ...asOwner, ...server.env, GIT_TRACE2_EVENT: trace }), encoding: 'utf8' }, (err, stdout, stderr) => { ended += 1; resolve({ status: err?.code ?? 0, stdout, stderr }); }));
+    // The race made certain: the lock is held (as the other recover's update holds it) until git has
+    // refused it to a read's update (each recover has its own trace), then until it has refused the other
+    // too or 1 s has passed (well inside the 5 s a read waits on it, on any runner), or until a recover has
+    // ended; git gives up on a held ref lock after 100 ms (core.filesRefLockTimeout), less than a loaded
+    // box's other recover can hold it
+    write(lock, '');
+    const running = Promise.all(traces.map(once));
+    await until(() => ended > 0 || traces.some((t) => updatesRefused(t) >= 1), 'git refused the held lock to a read, or a recover ended');
+    const firstRefused = Date.now();
+    await until(() => ended > 0 || traces.every((t) => updatesRefused(t) >= 1) || Date.now() - firstRefused >= 1000, 'the other read refused too, or 1 s passed');
+    fs.rmSync(lock, { force: true });
+    const both = await running;
+    const said = both.map((r) => `${r.stdout}${r.stderr}`.trim()).join(' | ');
+    assert.deepEqual(both.map((r) => r.status), [0, 0], said);
+    assert.doesNotMatch(said, /could not read main from origin/, 'neither says origin did not answer');
+    assert.equal(both.filter((r) => /^resumed session/.test(r.stdout)).length, 1, said);
+    assert.equal(both.filter((r) => /^already running/.test(r.stdout)).length, 1, said);
+    assert.equal(trackingAt(F), main, 'origin/main here is origin\'s');
+    await until(() => F.claudeCalls().length === 1, 'the stand-in claude ran');
+  } finally { fs.rmSync(lock, { force: true }); server.done(); F.done(); }
+});
+
+test('recover: origin that can\'t be reached is still said as one, and nothing starts (kit-910)', { skip: !hasTmux }, async () => {
+  const F = fixture('recnoorigin', { resume: CLAUDE_RESUME });
+  const server = privateServer();
+  try {
+    sessionTranscript(F);
+    await seenUp(F);
+    F.killSession();
+    moveOrigin(F);
+    execFileSync('git', ['remote', 'set-url', 'origin', path.join(F.base, 'no-such-origin')], { cwd: F.root });
+    const r = recover(F, [], server.env);
+    assert.equal(r.status, 1, `${r.stdout}${r.stderr}`);
+    // git's own words on what it couldn't reach, as before kit-910
+    assert.match(r.stderr, /could not read main from origin \('[^']*no-such-origin' does not appear to be a git repository\), so the owner's settings can't be confirmed and nothing was started/);
+    assert.equal(F.claudeCalls().length, 0, 'nothing started');
+  } finally { server.done(); F.done(); }
+});
+
+test('recover: a lock no one lets go on a moved origin/main still refuses, with git\'s words, inside the deadline (kit-910)', { skip: !hasTmux }, async () => {
+  const F = fixture('recstalelock', { resume: CLAUDE_RESUME });
+  const server = privateServer();
+  const lock = path.join(F.root, '.git/refs/remotes/origin/main.lock');
+  try {
+    sessionTranscript(F);
+    await seenUp(F);
+    F.killSession();
+    moveOrigin(F);
+    const was = trackingAt(F);
+    write(lock, '');
+    const t0 = Date.now();
+    const r = recover(F, [], server.env);
+    const took = Date.now() - t0;
+    assert.equal(r.status, 1, `${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /could not read main from origin \([^)]*(lock|Another git process)[^)]*\)/, 'git\'s own words on the lock');
+    // the wait on a lock ends after 5 s, far inside the 30 s read (the rest is the read and the start)
+    assert.ok(took < 20000, `gave up on the lock after about 5 s, not after ${took} ms`);
+    assert.equal(trackingAt(F), was, 'origin/main here is as it was');
+    assert.equal(F.claudeCalls().length, 0, 'nothing started');
+    // a short deadline (a relaunch's, a restart's budget) ends the wait before it, still in git's words
+    const short = recover(F, [], { ...server.env, DEVTEAM_LAUNCH_ORIGIN_MS: '5000' });
+    assert.equal(short.status, 1, `${short.stdout}${short.stderr}`);
+    assert.match(short.stderr, /could not read main from origin \([^)]*(lock|Another git process)[^)]*\)/, 'git\'s own words on the lock, before a short deadline');
+  } finally { fs.rmSync(lock, { force: true }); server.done(); F.done(); }
+});
+
+// root writes where the mode says it can't, so there it is no other failure
+test('recover: an origin/main here that git can\'t set for another reason refuses at once, tried once (kit-910)', { skip: !hasTmux || process.getuid?.() === 0 }, async () => {
+  const F = fixture('recrefdenied', { resume: CLAUDE_RESUME });
+  const server = privateServer();
+  const refs = path.join(F.root, '.git/refs/remotes/origin');
+  try {
+    sessionTranscript(F);
+    await seenUp(F);
+    F.killSession();
+    moveOrigin(F);
+    const trace = path.join(F.base, 'git-trace.json');
+    fs.chmodSync(refs, 0o555);
+    const r = recover(F, [], { ...server.env, GIT_TRACE2_EVENT: trace });
+    assert.equal(r.status, 1, `${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /could not read main from origin \(update_ref failed for ref 'refs\/remotes\/origin\/main': cannot lock ref/, r.stderr);
+    assert.equal(updatesRefused(trace), 1, 'git was asked once: only a held lock is waited on');
+    assert.equal(F.claudeCalls().length, 0, 'nothing started');
+  } finally { if (fs.existsSync(refs)) fs.chmodSync(refs, 0o755); server.done(); F.done(); }
 });
 
 test('recover: the start is claimed before a window opens, and taken back if nothing started', { skip: !hasTmux }, async () => {
