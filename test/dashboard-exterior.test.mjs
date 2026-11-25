@@ -94,6 +94,8 @@ test('self.md and exterior.md beside the strategy, as documents', { skip: canDri
   write(path.join(root, V1SELF), SELF1);
   write(path.join(root, V1EXT), EXT1);
   write(path.join(root, 'notes/exterior.md'), EXT1);
+  // a name in notes/ that holds self.md but isn't it, so only a whole line of the folder's listing names the file (kit-909)
+  write(path.join(root, 'notes/myself.md'), '# Not the Self\n');
   write(path.join(root, BIG_SELF), big('Self'));
   write(path.join(root, BIG_EXT), big('Exterior'));
   const git = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: root });
@@ -285,7 +287,7 @@ test('self.md and exterior.md beside the strategy, as documents', { skip: canDri
       assert.equal(await p.ev("document.querySelectorAll('#drawer-body .err').length"), 0, `${title}: no error`);
       await closePeek();
     }
-    // a folder main holds without the file: not drafted yet
+    // a folder main holds without the file (only a myself.md): not drafted yet
     await load({}, '#governance', { drop: ['self', 'exterior'], gov: govAt('notes/self.md', EXT) });
     await openPeek('notes/self.md', 'Self');
     assert.equal(await md(`m.textContent.${fold}`), 'The Self is not drafted yet: main has no self.md.', 'a folder without the file: not drafted');
