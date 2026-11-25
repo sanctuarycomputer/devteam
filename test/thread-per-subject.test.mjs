@@ -81,6 +81,8 @@ test("the page's tKey and devteam.mjs's subjectKey give the same key for every s
     { kind: 'artifact', slug: 'viewer-mock', at: 'main', anchor: { text: 'Buy now' } },
     { kind: 'preview', name: 'brisk-otter', anchor: { selector: 'h1' } },
     { kind: 'preview', name: 'brisk-otter' },
+    // a canvas layer's pin (kit-667): keyed by its node on both
+    { kind: 'artifact', slug: 'checkout-canvas', at: 'main', anchor: { node: 'k3f9a2-1' } },
   ];
   for (const s of subjects) assert.equal(subjectKey(s), tKey(s), JSON.stringify(s));
   // the keys as the design names them

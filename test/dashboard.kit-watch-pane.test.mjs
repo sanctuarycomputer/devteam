@@ -129,7 +129,8 @@ test('kit watch: a dashboard that is its own tmux pane respawns it', { skip: has
   const [P1, P2] = [await freePort(), await freePort()];
   const s = kwSession(F, 'kw');
   const run = (p) => `${kwSq(process.execPath)} ${kwSq(F.dt)} dashboard --port ${p}`;
-  assert.equal(kwTmux(['new-session', '-d', '-s', s, '-n', 'a', '-c', F.root, kwInPane(F.env, run(P1))]).status, 0);
+  // exec: tmux runs this with the machine's shell, and dash keeps itself as the pane's process (kit-855)
+  assert.equal(kwTmux(['new-session', '-d', '-s', s, '-n', 'a', '-c', F.root, `exec ${kwInPane(F.env, run(P1))}`]).status, 0);
   assert.equal(kwTmux(['new-window', '-d', '-t', `=${s}:`, '-n', 'b', '-c', F.root, `${kwInPane(F.env, run(P2))}; true`]).status, 0);
   const log = kwLogOf(F.root);
   const starts = kwStartsOf(log);

@@ -1,0 +1,4 @@
+<!doctype html><title>Hashes</title>
+<style>body{margin:0}#buy{position:absolute;left:600px;top:400px;width:100px;height:60px;border:0;background:#00f;color:#fff}</style>
+<button id="buy">Start trial</button>
+<script>let n = 0; setInterval(() => { n++; if (n % 2) location.hash = `h${n}`; else history.replaceState(null, '', `#r${n}`); }, 60);</script>

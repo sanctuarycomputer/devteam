@@ -483,15 +483,15 @@ test('box upload: no session is 401, any Origin but the instance\'s own is 403, 
   }
 });
 
-test('box upload: the box\'s own name and public. still take nothing; term. still does (A3)', async (t) => {
+test('box upload: public. still takes nothing; term. still does, and the box\'s own name takes the hub\'s (A3)', async (t) => {
   const gw = await boxGateway(t);
-  for (const host of [gw.publicUrl, gw.site]) {
+  const no = await boxUpload(gw, 'a.txt', Buffer.from('x'), { host: gw.site });
+  assert.notEqual(no.status, 200, no.text);
+  assert.deepEqual(fs.readdirSync(gw.uploadsDir), [], 'public.: no folder');
+  for (const host of [gw.term, gw.publicUrl]) {
     const r = await boxUpload(gw, 'a.txt', Buffer.from('x'), { host });
-    assert.notEqual(r.status, 200, `${host}: ${r.text}`);
-    assert.deepEqual(fs.readdirSync(gw.uploadsDir), [], `${host}: no folder`);
+    assert.equal(r.status, 200, `${host}: ${r.text}`);
   }
-  const r = await boxUpload(gw, 'a.txt', Buffer.from('x'), { host: gw.term });
-  assert.equal(r.status, 200, r.text);
 });
 
 test('box upload: a failure after the body is read is still answered, 500, and stores nothing (step 8, task review T2-1)', async (t) => {

@@ -19,11 +19,11 @@
 #
 # Render: New > Web Service > this repo (or a fork), Language: Docker, Dockerfile path:
 #   cloud/Dockerfile, build context: the repo root. Instance: Pro (4 GB) or larger; a free one
-#   sleeps, and sleeping stops every agent. Auto-Deploy: Off; the box deploys at each release
+#   sleeps, and sleeping stops every agent. Auto-Deploy: Off; the box deploys at each minor (vX.Y.0)
 #   instead (.github/workflows/box-deploy.yml, with the service's Deploy Hook as the secret
 #   RENDER_DEPLOY_HOOK of the GitHub environment "box", never a repo secret, and that environment
-#   accepting only v* tags, with no approval step: every release deploys by itself, the owner's
-#   choice; the README's "deploy gate" says why. Agents share the owner's gh
+#   accepting only v* tags, with no approval step: each minor deploys by itself, the owner's
+#   choice, and a patch lands in place; the README's "deploy gate" says why. Agents share the owner's gh
 #   login, so this raises the bar and isn't a hard boundary). A deploy restarts the box; each
 #   supervisor that was running comes back at boot (box-recover, ~/.box/recover.log), and brings back its
 #   fleet; the operator (window 0) checks it, and notes what couldn't start in ~/operator/NOTES.md. Disk: mounted at /data. Health check path: /healthz. Environment: DEVTEAM_PUBLIC_URL=https://box.example.com. Custom domains:
@@ -70,7 +70,7 @@ RUN curl -fsSL --retry 5 --retry-all-errors https://www.postgresql.org/media/key
  && rm -rf /var/lib/apt/lists/*
 
 # The box's tools, each pinned only in the ARGs just above the layer that installs it. Bumped by
-# `devteam.mjs box-pins bump` at each release (or by hand), and redeployed with it.
+# `devteam.mjs box-pins bump` at each minor (or by hand), and redeployed with it.
 #   Names: <TOOL>_VERSION, and for a downloaded binary <TOOL>_SHA256_X86_64 and <TOOL>_SHA256_AARCH64
 #   (the release's published sha256 for each arch). One ARG per line, the value unquoted, in that
 #   order, right above the tool's RUN; no version or sum is written anywhere else in this file.
@@ -120,9 +120,9 @@ RUN case "$(uname -m)" in \
  && echo "$sum  /usr/local/bin/mise" | sha256sum -c - && chmod 755 /usr/local/bin/mise
 
 # uv, which brings claude-swap the Python 3.12 it needs (Debian's is older)
-ARG UV_VERSION=0.13.9
-ARG UV_SHA256_X86_64=a7fbaff2b9a271d85c1bdb540941090fd1ce011797b4abeb48e4dcd39c2471d5
-ARG UV_SHA256_AARCH64=0797542018e541a9288855df555c8077eed06f7a47d206362030480e8ecc9f3d
+ARG UV_VERSION=0.13.10
+ARG UV_SHA256_X86_64=bf65ac1a0af10f92c522d91ac096c7c0a39657647b155577e7836c2cbbb4526c
+ARG UV_SHA256_AARCH64=14590f644805a6234ffe071154340669e38137f38e60aa9629690119704107d2
 RUN case "$(uname -m)" in \
       x86_64) sum=$UV_SHA256_X86_64 ;; \
       aarch64) sum=$UV_SHA256_AARCH64 ;; \
@@ -137,7 +137,7 @@ RUN UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_TOOL_DIR=/opt/uv/tools UV_TOOL_BIN_D
  && chmod -R a+rX /opt/uv
 
 # Claude Code (its own updater can't write to /usr/local)
-ARG CLAUDE_CODE_VERSION=2.1.330
+ARG CLAUDE_CODE_VERSION=2.1.331
 RUN npm install -g @anthropic-ai/claude-code@$CLAUDE_CODE_VERSION && npm cache clean --force
 
 # Two users. dev is the owner at the terminal, and every agent: home on the volume. gw runs only
@@ -151,8 +151,8 @@ RUN usermod -l dev -d /data/home node && groupmod -n dev node \
 RUN install -d -m 755 /opt/devteam
 COPY --chmod=644 cloud/gateway.mjs /opt/devteam/gateway.mjs
 COPY --chmod=644 docs/devteam/dashboard/hub.html /opt/devteam/hub.html
-# The kit, whole (it reads its schema beside it), as of the release this image was built for:
-# box-deploy.yml deploys every release, so a repo's kit can be newer than this one, or older. The box's
+# The kit, whole (it reads its schema beside it), as of the minor this image was built for:
+# box-deploy.yml deploys at each minor, so a repo's kit can be newer than this one, or older. The box's
 # own commands (box-status, box-tell, box-alert, box-thread, box-recover) run it against every repo, and need it
 # to be neither: what a repo says about itself comes from that repo's own kit (its help, hello,
 # questions, settings, recover), and this one only reads tmux and the plain files a kit leaves. A
@@ -821,7 +821,7 @@ ENV DEVTEAM_MEMORY_COUNTS_CACHE=1
 # What this image is, for the gateway's /box.json and box-status: the kit release it was cut at (the
 # release-prep PR sets it, and box-pins verify checks it) and the tools' pins above. Last, so a new
 # stamp rebuilds nothing.
-ARG DEVTEAM_RELEASE=v0.82.0
+ARG DEVTEAM_RELEASE=v0.91.0
 ENV DEVTEAM_KIT_RELEASE=$DEVTEAM_RELEASE \
     DEVTEAM_BOX_TOOLS="claude-code=$CLAUDE_CODE_VERSION claude-swap=$CLAUDE_SWAP_VERSION gh=$GH_VERSION ttyd=$TTYD_VERSION mise=$MISE_VERSION uv=$UV_VERSION"
 

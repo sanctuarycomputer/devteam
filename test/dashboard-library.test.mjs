@@ -355,7 +355,10 @@ async function libraryOn(t, { width = 1440, height = 900, init, box = null, page
     await p.send('Page.navigate', { url: 'about:blank' });
     await soon("location.href === 'about:blank'", 'about:blank');
     await p.send('Page.navigate', { url: `${at}/${hash}` });
-    await soon(loaded, 'the page with its data');
+    // and loaded (kit-784): until the load event, Chrome makes a script's hash change with no user gesture (every
+    // p.ev here) replace the entry rather than add one, so a Back or a close after it would land off the page
+    // a test with its own request tap (page) holds a request of the page on purpose, so its load may never come: it keeps the old wait
+    await soon(page ? loaded : `document.readyState === 'complete' && ${loaded}`, 'the page with its data');
   };
   return { p, soon, port, go, at, made, box };
 }
@@ -1643,6 +1646,15 @@ test('a preview\'s Start and Stop', { ...CHROME, timeout: 300000 }, async (t) =>
   await go(`#preview/${name}`);
   await soon(`document.querySelectorAll('#av-run button').length === 2`, 'Start and Stop');
   // refused: the error beside the buttons, the page's only element with that id, kept through polls
+  // a press within a second of its coming up is refused with its words (kit-145); once it has settled, the same press goes
+  const live = `(() => { const b = document.querySelector('${start}'); return !!b && performance.now() - avStep.press.last <= 250 && [...avStep.press.seen.values()].some((r) => r.el === b && avStep.settled(r)); })()`;
+  assert.equal(await p.ev('window.__starts ?? 0'), 0, 'nothing sent yet');
+  // (begun again as the press's own move arrives, so a slow box can't let the second go by in between)
+  await p.ev(`(window.addEventListener('mousemove', () => avStep.press.seen.clear(), { capture: true, once: true }), true)`);
+  await p.click(start);
+  await soon(`document.getElementById('av-held')?.textContent === 'That moved just now. Press again in a second.' && !document.getElementById('av-held').hidden`, 'the press refused, with its words');
+  assert.equal(await p.ev('window.__starts ?? 0'), 0, 'refused: nothing sent');
+  await soon(live, 'Start is live');
   await p.click(start);
   await soon(`document.getElementById('e-preview-${name}')?.textContent === 'Not saved: no'`, 'the refusal in the bar');
   assert.deepEqual(await p.ev(`[document.querySelectorAll('[id="e-preview-${name}"]').length, !!document.getElementById('e-preview-${name}').closest('.av-bar'), !!document.getElementById('e-preview-${name}').closest('#av-run')]`), [1, true, false]);
@@ -1657,6 +1669,7 @@ test('a preview\'s Start and Stop', { ...CHROME, timeout: 300000 }, async (t) =>
   assert.deepEqual(await p.ev(`[document.querySelectorAll('[id="e-preview-${name}"]').length, document.getElementById('e-preview-${name}').textContent]`), [1, ''], 'its error span empty on the new opening');
   // taken: once the preview reads live, Stop alone, within two polls, the viewer still open
   await p.ev('window.__start = 200');
+  await soon(live, 'Start is live again');
   await p.click(start);
   await soon('window.__starts === 2', 'the second Start sent');
   await p.ev(`window.__fx.previews.find((x) => x.name === ${JSON.stringify(name)}).up = true`);

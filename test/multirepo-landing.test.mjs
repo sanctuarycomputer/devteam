@@ -12,6 +12,9 @@ import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { kit, sessionOf, line, write, review, json, multiFixture } from './lib/kit.mjs';
 
+// metrics 3 minutes on: past the grace merged-without-merge gives a merge just made (kit-808)
+const LATE = { NODE_OPTIONS: `--import=data:text/javascript,${encodeURIComponent('const now = Date.now; Date.now = () => now() + 180000;')}` };
+
 test('check-pr --repo checks a sibling PR in that repo, from any checkout of it (--path)', () => {
   const F = multiFixture('check-pr-repo');
   const { old, g, runIn, ticket } = F;
@@ -255,8 +258,8 @@ test('a worker session denies pushes to its own repo\'s main; a merge with no me
     g(['checkout', '-q', 'main'], F.companion);
     g(['merge', '-q', '--no-ff', '-m', 'Merge pull request #1', 'side'], F.companion);
     g(['push', '-q', 'origin', 'main'], F.companion);
-    okIn(old, ['observe-metrics'], { DEVTEAM_ROLE: 'supervisor' });
-    const fs1 = json(okIn(old, ['metrics', '--json'])).findings.filter((x) => x.kind === 'merged-without-merge');
+    okIn(old, ['observe-metrics'], { DEVTEAM_ROLE: 'supervisor' }, LATE);
+    const fs1 = json(okIn(old, ['metrics', '--json'], {}, LATE)).findings.filter((x) => x.kind === 'merged-without-merge');
     const t = fs1.find((x) => x.subject === 'console-01-a');
     assert.ok(t, `a finding for the pushed ticket: ${JSON.stringify(fs1)}`);
     assert.match(t.detail, /console-01-a reached console's main at \w{12} with no merge act/);
@@ -310,7 +313,7 @@ test('merged-without-merge: a merge whose head a merge act names raises nothing,
     write(path.join(w, 'src/main.js'), 'pushed\n');
     g(['commit', '-qam', 'console-01-a: work'], w);
     g(['push', '-q', 'origin', 'HEAD:trunk'], w);
-    const mwm = () => { const m = json(okIn(old, ['metrics', '--json'])); return { raised: m.findings.filter((x) => x.kind === 'merged-without-merge'), acked: m.acknowledged.filter((x) => x.kind === 'merged-without-merge') }; };
+    const mwm = () => { const m = json(okIn(old, ['metrics', '--json'], {}, LATE)); return { raised: m.findings.filter((x) => x.kind === 'merged-without-merge'), acked: m.acknowledged.filter((x) => x.kind === 'merged-without-merge') }; };
     let { raised } = mwm();
     const subj = (x) => x.subject;
     assert.ok(!raised.some((x) => x.detail.includes(rec1.slice(0, 12))), `A: a records-in-home merge its act names raises nothing: ${JSON.stringify(raised.map(subj))}`);
@@ -333,8 +336,8 @@ test('merged-without-merge: a merge whose head a merge act names raises nothing,
     assert.ok(raised.some((x) => x.subject === btn2), `J: a worker's finding-ack of a merge commit lapses, so the merge raises again: ${JSON.stringify(raised.map(subj))}`);
     // ack says how long: for good for a merge commit, the window for anything else
     const SUP = { DEVTEAM_ROLE: 'supervisor' };
-    assert.match(okIn(old, ['ack', 'merged-without-merge', btn2, '--reason', 'checked'], SUP), /set aside for good: a merge commit can't change/, 'K: ack says a merge commit is set aside for good');
-    assert.match(okIn(old, ['ack', 'merged-without-merge', 'console-01-a', '--reason', 'checked'], SUP), /set aside for 24h/, 'K: and the window for a ticket');
+    assert.match(okIn(old, ['ack', 'merged-without-merge', btn2, '--reason', 'checked'], SUP, LATE), /set aside for good: a merge commit can't change/, 'K: ack says a merge commit is set aside for good');
+    assert.match(okIn(old, ['ack', 'merged-without-merge', 'console-01-a', '--reason', 'checked'], SUP, LATE), /set aside for 24h/, 'K: and the window for a ticket');
     // a third forge merge, set aside two days ago by the supervisor with observe (source supervisor,
     // not ack): only ack's own line lasts, so this one lapses
     const [button3] = mergeOn(F.companion, 'main', 'side3', 'app/z.js');
@@ -352,7 +355,7 @@ test('merged-without-merge: a merge whose head a merge act names raises nothing,
     assert.ok(raised.some((x) => x.subject === btn4), `L2: a supervisor's finding-ack of a merge commit with source observe lapses too, so the merge raises again: ${JSON.stringify(raised.map(subj))}`);
     // ack --owner from a worker's or planner's session is refused, whatever DEVTEAM_ROLE says
     for (const env of [{ DEVTEAM_TICKET: 'console-01-a' }, { DEVTEAM_FEATURE: 'feat-x' }, { DEVTEAM_ROLE: 'supervisor', DEVTEAM_TICKET: 'console-01-a' }]) {
-      const r = F.runIn(old, ['ack', 'merged-without-merge', btn3, '--reason', 'mine now', '--owner'], env);
+      const r = F.runIn(old, ['ack', 'merged-without-merge', btn3, '--reason', 'mine now', '--owner'], env, LATE);
       assert.notEqual(r.status, 0, `M: ack --owner with ${JSON.stringify(env)} is refused: ${r.out}`);
       ({ raised } = mwm());
       assert.ok(raised.some((x) => x.subject === btn3), `M: nothing was set aside, with ${JSON.stringify(env)}`);
@@ -360,14 +363,14 @@ test('merged-without-merge: a merge whose head a merge act names raises nothing,
       assert.ok(r.err.includes(`ack --owner is the owner's: it doesn't run in a worker's or planner's session (${named})`), `M: and says why, naming ${named}: ${r.err}`);
     }
     // the session refusal comes before the finding lookup: a finding that doesn't exist gets it too
-    assert.match(F.runIn(old, ['ack', 'merged-without-merge', 'companion:000000000000', '--reason', 'x', '--owner'], { DEVTEAM_TICKET: 'console-01-a' }).err, /ack --owner is the owner's/, 'M5: the session refusal comes before the finding lookup');
+    assert.match(F.runIn(old, ['ack', 'merged-without-merge', 'companion:000000000000', '--reason', 'x', '--owner'], { DEVTEAM_TICKET: 'console-01-a' }, LATE).err, /ack --owner is the owner's/, 'M5: the session refusal comes before the finding lookup');
     // ack --owner from a session that blanked DEVTEAM_TICKET, or from a session's worktree with every
     // variable cleared, is refused by ownerWriter after the finding lookup, and sets nothing aside
     const loose = path.join(old, '.worktrees', 'loose');
     g(['worktree', 'add', '-q', '--detach', loose], old);
     for (const [cwd, env, named] of [[old, { DEVTEAM_TICKET: '' }, /\(DEVTEAM_TICKET=""\)/], [loose, {}, /is under a \.worktrees folder/]]) {
       const where = `${JSON.stringify(env)} at ${path.relative(F.base, cwd)}`;
-      const r = F.runIn(cwd, ['ack', 'merged-without-merge', btn3, '--reason', 'mine now', '--owner'], env);
+      const r = F.runIn(cwd, ['ack', 'merged-without-merge', btn3, '--reason', 'mine now', '--owner'], env, LATE);
       assert.match(r.err, /owner commands don't run in a worker's or planner's session/, `P: ack --owner with ${where} is refused: ${r.err || r.out}`);
       assert.match(r.err, named, `P: and says why, with ${where}`);
       assert.notEqual(r.status, 0, `P: exits non-zero, with ${where}`);
@@ -375,8 +378,61 @@ test('merged-without-merge: a merge whose head a merge act names raises nothing,
       assert.ok(raised.some((x) => x.subject === btn3), `P: nothing was set aside, with ${where}`);
     }
     // the owner's own ack --owner still sets it aside, for good
-    assert.match(okIn(old, ['ack', 'merged-without-merge', btn3, '--reason', 'mine', '--owner']), /set aside for good/, "N: the owner's ack --owner still works");
+    assert.match(okIn(old, ['ack', 'merged-without-merge', btn3, '--reason', 'mine', '--owner'], {}, LATE), /set aside for good/, "N: the owner's ack --owner still works");
     ({ raised, acked } = mwm());
     assert.equal(acked.find((x) => x.subject === btn3)?.ack.until, null, "N: the owner's ack of a merge commit has no end");
+  } finally { F.done(); }
+});
+
+test('merged-without-merge: nothing in the 2 minutes after a merge, while its act is being logged; then, or dated in the future, it raises', () => {
+  const F = multiFixture('merge-act-grace');
+  const { old, g, okIn, ticket } = F;
+  const preload = (js) => ({ NODE_OPTIONS: `--import=data:text/javascript,${encodeURIComponent(js)}` });
+  // a clock that reads ms at each kit command's start, and runs on from there
+  const at = (ms) => preload(`const now = Date.now; const off = ${ms} - now(); Date.now = () => now() + off;`);
+  const raisedWith = (clock) => json(okIn(old, ['metrics', '--json'], {}, clock)).findings.filter((x) => x.kind === 'merged-without-merge').map((x) => x.subject).sort();
+  const raisedAt = (ms) => raisedWith(at(ms));
+  // git run with its commits dated ms
+  const dated = (ms, f) => {
+    const was = process.env.GIT_COMMITTER_DATE;
+    process.env.GIT_COMMITTER_DATE = `${Math.floor(ms / 1000)} +0000`;
+    try { return f(); } finally { if (was === undefined) delete process.env.GIT_COMMITTER_DATE; else process.env.GIT_COMMITTER_DATE = was; }
+  };
+  // a merge commit dated ms on a main, no act: its finding's subject
+  const merge = (name, cwd, branch, ms) => dated(ms, () => {
+    g(['checkout', '-q', '-b', branch], cwd);
+    write(path.join(cwd, `${branch}.txt`), `${branch}\n`);
+    g(['add', '-A'], cwd); g(['commit', '-qm', branch], cwd);
+    g(['checkout', '-q', 'main'], cwd);
+    g(['merge', '-q', '--no-ff', '-m', `Merge ${branch}`, branch], cwd);
+    g(['push', '-q', 'origin', 'main'], cwd);
+    return `${name}:${g(['rev-parse', 'HEAD'], cwd).slice(0, 12)}`;
+  });
+  // a ticket pushed straight to console's trunk, dated ms
+  const push = (id, ms) => dated(ms, () => {
+    ticket(id);
+    const w = path.join(F.base, `push-${id}`);
+    g(['worktree', 'add', '-q', '-b', `ticket/${id}`, w, 'origin/trunk'], F.console);
+    write(path.join(w, `src/${id}.js`), 'pushed\n');
+    g(['add', '-A'], w); g(['commit', '-qm', `${id}: work`], w);
+    g(['push', '-q', 'origin', 'HEAD:trunk'], w);
+    g(['fetch', '-q', 'origin'], F.console);
+    return id;
+  });
+  try {
+    const T = Math.floor(Date.now() / 1000) * 1000;
+    const inHome = merge('home', old, 'side', T);
+    const inLink = merge('companion', F.companion, 'side', T);
+    const tick = push('console-01-a', T);
+    const all = [inHome, inLink, tick].sort();
+    assert.deepEqual(raisedAt(T + 1000), [], 'a second after: nothing');
+    assert.deepEqual(raisedAt(T + 100000), [], '100 seconds after: still nothing');
+    // metrics' first look at the clock (its now) is a second before the merges, every later one a second after
+    assert.deepEqual(raisedWith(preload(`let n = 0; Date.now = () => (n++ ? ${T + 1000} : ${T - 1000});`)), [], 'landed while metrics ran: nothing');
+    assert.deepEqual(raisedAt(T + 120000), all, '2 minutes after, with no act: the merge in home, the one in a linked repo and the ticket');
+    // dated an hour ahead: raised at once
+    const ahead = [merge('home', old, 'ahead', T + 3600000), merge('companion', F.companion, 'ahead', T + 3600000), push('console-02-b', T + 3600000)].sort();
+    assert.deepEqual(raisedAt(T + 1000), ahead, 'a merge dated in the future is raised at once');
+    assert.deepEqual(raisedAt(T + 120000), [...all, ...ahead].sort(), 'and stays, beside the others');
   } finally { F.done(); }
 });

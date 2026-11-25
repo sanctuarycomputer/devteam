@@ -79,7 +79,7 @@ test('capacity: the tick records how many accounts have room and whether that ro
     const left = (lasts) => ({ number: 1, email: 'a@x', active: true, usageStatus: 'ok', usage: { fiveHour: { pct: 31.4, willLastToReset: true }, sevenDay: { pct: 9, projectedExhaustionAt: OUT, willLastToReset: lasts } } });
     F.set({ schemaVersion: 1, accounts: [left(false), full] });
     F.tick();
-    assert.deepEqual(F.state().capacity, { accounts: 2, room: 1, unknown: 0, active_week_pct: 9, active_5h_pct: 31, runs_out_at: OUT, next_reset_at: RESET, gap: true });
+    assert.deepEqual(F.state().capacity, { accounts: 2, room: 1, unknown: 0, active_week_pct: 9, active_5h_pct: 31, runs_out_at: OUT, next_reset_at: RESET, gap: true, list: [{ n: 1, label: 'Account 1', active: true, disabled: false, status: 'ok', week_pct: 9, five_pct: 31.4, models_full: [] }, { n: 2, label: 'Account 2', active: false, disabled: false, status: 'ok', week_pct: 100, week_resets_at: '2026-11-16T21:00:00.000Z', five_pct: 10, models_full: [] }] });
     const gap = findings(F).find((f) => f.kind === 'accounts-capacity-gap');
     assert.ok(gap && gap.severity === 'medium', 'room that runs out before a reset is a finding');
     F.set({ schemaVersion: 1, accounts: [left(true), full] });
@@ -90,7 +90,7 @@ test('capacity: the tick records how many accounts have room and whether that ro
     // an older cswap that projects nothing (no projectedExhaustionAt, no willLastToReset): no end, no gap
     F.set({ schemaVersion: 1, accounts: [row({ fiveHour: { pct: 31 }, sevenDay: { pct: 9 } }, { active: true }), full] });
     F.tick();
-    assert.deepEqual(F.state().capacity, { accounts: 2, room: 1, unknown: 0, active_week_pct: 9, active_5h_pct: 31, runs_out_at: null, next_reset_at: RESET, gap: false });
+    assert.deepEqual(F.state().capacity, { accounts: 2, room: 1, unknown: 0, active_week_pct: 9, active_5h_pct: 31, runs_out_at: null, next_reset_at: RESET, gap: false, list: [{ n: 1, label: 'Account 1', active: true, disabled: false, status: 'ok', week_pct: 9, five_pct: 31, models_full: [] }, { n: 2, label: 'Account 2', active: false, disabled: false, status: 'ok', week_pct: 100, week_resets_at: '2026-11-16T21:00:00.000Z', five_pct: 10, models_full: [] }] });
     assert.ok(!findings(F).some((f) => f.kind === 'accounts-capacity-gap'));
     F.set(FULL);
     F.tick();
@@ -106,7 +106,7 @@ test('capacity: usage that can\'t be read is unknown, never none, and raises not
     // a 429, a timeout, an API key: no account's usage reads, so none is room and none is known full
     F.set({ schemaVersion: 1, accounts: ['unavailable', 'token_expired', 'api_key'].map((usageStatus, i) => row(null, { number: i + 1, email: `${i}@x`, usageStatus, active: i === 0 })) });
     F.tick();
-    assert.deepEqual(F.state().capacity, { accounts: 3, room: 0, unknown: 3, active_week_pct: null, active_5h_pct: null, runs_out_at: null, next_reset_at: null, gap: false });
+    assert.deepEqual(F.state().capacity, { accounts: 3, room: 0, unknown: 3, active_week_pct: null, active_5h_pct: null, runs_out_at: null, next_reset_at: null, gap: false, list: ['unavailable', 'token_expired', 'api_key'].map((status, i) => ({ n: i + 1, label: `Account ${i + 1}`, active: i === 0, disabled: false, status, models_full: [] })) });
     assert.equal(F.state().exhausted, false);
     assert.ok(!findings(F).some((f) => f.kind === 'accounts-capacity-gap' || f.kind === 'accounts-exhausted'), 'not knowing is no alarm');
     // one with room, one full, one unread: each counted as what it is

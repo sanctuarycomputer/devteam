@@ -101,6 +101,9 @@ async function openOn(t, { rec, peeks = clone(PEEK_FX), width = 1440, height = 9
   later(() => p.close());
   await p.send('Page.enable');
   await p.send('Runtime.enable');
+  // the page's CDN stylesheets block its own script until they answer: a slow CDN is not what is tested (kit-855)
+  await p.send('Network.enable');
+  await p.send('Network.setBlockedURLs', { urls: ['https://fonts.googleapis.com/*', 'https://cdn.jsdelivr.net/npm/lucide-static*'] });
   await p.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
   const r = rec === undefined ? undefined : rec === 'fixture' ? fx.rec : rec(fx.rec);
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: initScript(r, peeks, { open: [], answered: [] }) });

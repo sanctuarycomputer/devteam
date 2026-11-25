@@ -72,7 +72,9 @@ async function pagesFixture(t, name, { records = true } = {}) {
   // p.ev while a navigation may be under way: an evaluate that lands as the old document goes (or before
   // the new one has a context) is "not yet", not a failure
   const evNav = (expr) => p.ev(expr).catch((e) => { if (/navigated or closed|Cannot find context|context was destroyed|Execution context/i.test(e.message)) return false; throw e; });
-  const drawn = () => until(() => evNav("location.protocol === 'http:' && !!document.querySelector('main') && !document.querySelector('main.waiting')"), 'the dashboard drawn');
+  // and loaded (kit-784): until the load event, Chrome makes a script's hash change with no user gesture (every
+  // p.ev here) replace the entry rather than add one, so a Back or a close after it would land off the page
+  const drawn = () => until(() => evNav("location.protocol === 'http:' && document.readyState === 'complete' && !!document.querySelector('main') && !document.querySelector('main.waiting')"), 'the dashboard drawn');
   // a fresh visit: a new document, so its first route is a cold one
   const load = async (hash) => {
     await p.send('Page.navigate', { url: 'about:blank' });
