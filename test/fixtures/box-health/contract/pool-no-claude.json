@@ -1,0 +1,15 @@
+{
+  "v": 1,
+  "at": "2026-11-24T18:40:00Z",
+  "hour_end": "2026-11-24T18:40:00Z",
+  "ready": 0,
+  "planners": 0,
+  "goals": [
+    {"id":"g-tools","title":"Tools","priority":1,"usd_hour":0,"new_hour":0}
+  ],
+  "workers": [
+    {"name":"tool-12-imports","title":"Imports in batches","goal":0,"phase":"build","since":"2026-11-24T16:40:00Z","tokens":{"state":"measured","new":900000,"cached":3000000,"usd_hour":0,"new_hour":0,"points":[{"at":"2026-11-24T16:40:00Z","new":75000},{"at":"2026-11-24T16:50:00Z","new":75000},{"at":"2026-11-24T17:00:00Z","new":75000},{"at":"2026-11-24T17:10:00Z","new":75000},{"at":"2026-11-24T17:20:00Z","new":75000},{"at":"2026-11-24T17:30:00Z","new":75000},{"at":"2026-11-24T17:40:00Z","new":75000},{"at":"2026-11-24T17:50:00Z","new":75000},{"at":"2026-11-24T18:00:00Z","new":75000},{"at":"2026-11-24T18:10:00Z","new":75000},{"at":"2026-11-24T18:20:00Z","new":75000},{"at":"2026-11-24T18:30:00Z","new":75000}]}}
+  ],
+  "recent": [],
+  "other": {"usd_hour":0,"new_hour":0}
+}
