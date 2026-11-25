@@ -696,6 +696,92 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
       assert.match(r.err, new RegExp(`${gone.slice(0, 8)} did not arrive`), 'A1');
       assert.ok(!fs.existsSync(wt('ch-42-m')), 'A1: no worktree');
     });
+    await t.test('P2: a push while the start reads origin, its branch then deleted there, isn\'t set back: the commit is kept', tmux, () => {
+      ticket('ch-71-b');
+      const url = git(['config', '--get', 'remote.origin.url'], old);
+      const first = planted(old, git(['rev-parse', 'origin/main'], old), 'first');
+      git(['push', '-q', 'origin', `${first}:refs/heads/ticket/ch-71-b`], old);
+      const newer = planted(old, first, 'newer');
+      const b = before('git-pushes-2', `*" cat-file -e ${first}"*`, (g) => `'${g}' push -q origin ${newer}:refs/heads/ticket/ch-71-b && '${g}' --git-dir='${url}' update-ref -d refs/heads/ticket/ch-71-b`);
+      const r = run(old, ['worker', 'ch-71-b'], b.env);
+      assert.ok(fs.existsSync(b.said), 'P2: it was pushed');
+      assert.notEqual(git(['for-each-ref', '--format=%(refname)', '--contains', newer], old), '', 'P2: a ref still holds the commit');
+      assert.equal(r.status, 0, `P2: started: ${r.err}`);
+    });
+    await t.test('P5: a push of main while the start reads origin isn\'t set back', tmux, () => {
+      ticket('ch-70-a');
+      const main = git(['rev-parse', 'origin/main'], old);
+      git(['push', '-q', 'origin', `${main}:refs/heads/ticket/ch-70-a`], old);
+      const newer = git(['commit-tree', `${main}^{tree}`, '-p', main, '-m', 'main for P5'], old);
+      const b = before('git-pushes-main', `*' fetch '*'ticket/ch-70-a'*`, (g) => `'${g}' push -q origin ${newer}:refs/heads/main`);
+      const r = run(old, ['worker', 'ch-70-a'], b.env);
+      assert.ok(fs.existsSync(b.said), 'P5: it was pushed');
+      git(['merge', '-q', '--ff-only', newer], old);
+      assert.equal(r.status, 0, `P5: started: ${r.err}`);
+      assert.equal(git(['rev-parse', 'refs/remotes/origin/main'], old), newer, 'P5: the tracking ref stays at the push');
+    });
+    await t.test('P3: a tracking ref that keeps moving refuses the start', tmux, () => {
+      ticket('ch-72-c');
+      const main = git(['rev-parse', 'origin/main'], old);
+      git(['push', '-q', 'origin', `${main}:refs/heads/ticket/ch-72-c`], old);
+      const b = before('git-keeps-moving', `*' ls-remote '*'ticket/ch-72-c'*`, (g) => `'${g}' update-ref refs/remotes/origin/ticket/ch-72-c "$('${g}' commit-tree ${main}^{tree} -p ${main} -m "$$")"; false`);
+      const r = run(old, ['worker', 'ch-72-c'], b.env);
+      assert.notEqual(r.status, 0, `P3: refused, not started: ${r.out}`);
+      assert.match(r.err, /origin\/ticket\/ch-72-c here kept moving while it was read/, 'P3');
+    });
+    await t.test('R1: the launch\'s settings read doesn\'t write home\'s main through a symbolic tracking ref', tmux, () => {
+      ticket('ch-84-o');
+      git(['commit', '-q', '--allow-empty', '-m', 'main for R1'], old);
+      git(['push', '-q', 'origin', 'main'], old);
+      git(['branch', 'bystander-8', real], old);
+      git(['symbolic-ref', 'refs/remotes/origin/main', 'refs/heads/bystander-8'], old);
+      const r = run(old, ['worker', 'ch-84-o'], SUP);
+      assert.equal(git(['rev-parse', 'refs/heads/bystander-8'], old), real, 'R1: the branch it names is unmoved');
+      assert.equal(r.status, 0, `R1: started: ${r.err}`);
+      assert.equal(git(['rev-parse', 'refs/remotes/origin/main'], old), git(['rev-parse', 'HEAD'], old), 'R1: the tracking ref is origin\'s');
+    });
+    await t.test('R2: home\'s main that keeps moving here while it is read refuses the start', tmux, () => {
+      ticket('ch-85-p');
+      const main = git(['rev-parse', 'origin/main'], old);
+      const b = before('git-main-moves', `*' ls-remote --symref '*`, (g) => `'${g}' update-ref refs/remotes/origin/main "$('${g}' commit-tree ${main}^{tree} -p ${main} -m "$$")"; false`);
+      const r = run(old, ['worker', 'ch-85-p'], b.env);
+      assert.notEqual(r.status, 0, `R2: refused, not started: ${r.out}`);
+      assert.match(r.err, /could not read main from origin \(origin\/main here kept moving while it was read\)/, 'R2');
+      git(['update-ref', 'refs/remotes/origin/main', main], old);
+    });
+    await t.test('R3: a settings read whose main moved once reads origin again and starts', tmux, () => {
+      ticket('ch-86-q');
+      const main = git(['rev-parse', 'origin/main'], old);
+      const b = before('git-main-moves-once', `*' ls-remote --symref '*`, (g) => `'${g}' update-ref refs/remotes/origin/main "$('${g}' commit-tree ${main}^{tree} -p ${main} -m once)"`);
+      const r = run(old, ['worker', 'ch-86-q'], b.env);
+      assert.ok(fs.existsSync(b.said), 'R3: it moved');
+      assert.equal(r.status, 0, `R3: started: ${r.err}`);
+      assert.equal(git(['rev-parse', 'HEAD'], wt('ch-86-q')), main, 'R3: from origin\'s main');
+    });
+    await t.test('R5: a lock left on home\'s origin/main doesn\'t stop a settings read that finds it right', tmux, () => {
+      ticket('ch-92-w');
+      const lock = path.join(old, '.git/refs/remotes/origin/main.lock');
+      write(lock, '');
+      let r;
+      try { r = run(old, ['worker', 'ch-92-w'], SUP); } finally { fs.rmSync(lock); }
+      assert.doesNotMatch(r.err, /could not read main from origin/, 'R5');
+    });
+    await t.test('R4: a commit origin named for home\'s main that the settings read\'s fetch doesn\'t bring is refused', tmux, () => {
+      ticket('ch-87-r');
+      const main = git(['rev-parse', 'origin/main'], old);
+      const url = git(['config', '--get', 'remote.origin.url'], old);
+      const named = path.join(F.base, 'elsewhere-main');
+      git(['clone', '-q', url, named], old);
+      git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'only on origin'], named);
+      const gone = git(['rev-parse', 'HEAD'], named);
+      git(['push', '-q', 'origin', 'HEAD:main'], named);
+      const b = before('git-origin-main-moves', `*' fetch '*'refs/heads/main'*`, (g) => `'${g}' --git-dir='${url}' update-ref refs/heads/main ${main}`);
+      const r = run(old, ['worker', 'ch-87-r'], b.env);
+      assert.ok(fs.existsSync(b.said), 'R4: origin moved');
+      assert.notEqual(r.status, 0, `R4: refused, not started: ${r.out}`);
+      assert.match(r.err, new RegExp(`${gone.slice(0, 8)} did not arrive`), 'R4');
+      assert.equal(git(['rev-parse', 'refs/remotes/origin/main'], old), main, 'R4: the tracking ref is as it was');
+    });
   } finally { F.done(); }
 });
 

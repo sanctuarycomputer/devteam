@@ -1069,19 +1069,34 @@ function loadSettings({ origin = false, until = null } = {}) {
     };
     // git's own words: its first fatal line (a missing remote's last line is only "and the repository exists.")
     const why = (r) => { const said = String(r.stderr ?? '').split('\n').map((l) => l.trim()).filter(Boolean); return r.status === 124 ? 'it did not answer in time' : (said.find((l) => /^fatal: /.test(l)) ?? said.at(-1) ?? `git exited ${r.status}`).replace(/^fatal: /, '').slice(0, 200); };
-    const ls = toOrigin(['ls-remote', '--symref', 'origin', 'HEAD']);
-    if (ls.status !== 0) no(why(ls));
-    const rows = String(ls.stdout ?? '').split('\n').map((l) => l.split('\t'));
-    const branch = rows.find(([a, b]) => b === 'HEAD' && a.startsWith('ref: refs/heads/'))?.[0].slice('ref: refs/heads/'.length);
-    const sha = rows.find(([a, b]) => b === 'HEAD' && /^[0-9a-f]{40,64}$/.test(a))?.[0];
-    if (!branch || !sha) no('it names no default branch');
-    // always fetched, into the tracking ref by name: a new worktree is based on origin/<main>, so it
-    // is put back where origin has it before anything reads it
-    const f = toOrigin(['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
-    if (f.status !== 0) no(why(f));
     // read here only, never fetched on the side (a partial clone's lazy fetch would run outside the deadline)
     const local = (args) => responderGit(args, mainRoot, { GIT_NO_LAZY_FETCH: '1' });
-    if (local(['cat-file', '-e', `${sha}^{commit}`]).status !== 0) no(`${sha.slice(0, 8)} did not arrive`);
+    let branch;
+    let sha;
+    for (let tries = 1; ; tries += 1) {
+      // the tracking refs before origin is read: which one is main's, origin says
+      const was = new Map(String(local(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/remotes/origin/']).stdout ?? '').split('\n').map((l) => l.split(' ')));
+      const ls = toOrigin(['ls-remote', '--symref', 'origin', 'HEAD']);
+      if (ls.status !== 0) no(why(ls));
+      const rows = String(ls.stdout ?? '').split('\n').map((l) => l.split('\t'));
+      branch = rows.find(([a, b]) => b === 'HEAD' && a.startsWith('ref: refs/heads/'))?.[0].slice('ref: refs/heads/'.length);
+      sha = rows.find(([a, b]) => b === 'HEAD' && /^[0-9a-f]{40,64}$/.test(a))?.[0];
+      if (!branch || !sha) no('it names no default branch');
+      // Always put where origin has it, before anything reads it. Into no ref: a fetch writes through a
+      // symbolic tracking ref. Then by sha, not following one, and only from what it was before origin
+      // was read: a push that moved it meanwhile isn't set back, and origin is read again (kit-856).
+      const f = toOrigin(['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--refmap=', 'origin', `refs/heads/${branch}`]);
+      if (f.status !== 0) no(why(f));
+      if (local(['cat-file', '-e', `${sha}^{commit}`]).status !== 0) no(`${sha.slice(0, 8)} did not arrive`);
+      const tracking = `refs/remotes/origin/${branch}`;
+      const isAt = () => { const now = local(['show-ref', '--verify', '--hash', tracking]); return now.status === 0 ? now.stdout.trim() : '0'.repeat(sha.length); };
+      if (isAt() === sha) break; // already right: a lock left on it stops nothing
+      const old = was.get(tracking) ?? '0'.repeat(sha.length);
+      const set = local(['update-ref', '--no-deref', tracking, sha, old]);
+      if (set.status === 0) break;
+      if (isAt() === old) no(why(set));
+      if (tries === 3) no(`origin/${branch} here kept moving while it was read`);
+    }
     const ref = `origin's ${branch} (${sha.slice(0, 8)})`;
     // before settings.md first lands on main (adoption), the working tree is all there is, as below;
     // only a settings.md git says isn't there, never one git failed to read
@@ -2455,23 +2470,34 @@ function fetchLinkMain(R, refusing = 'refusing to judge against a stale main', {
     if (r.status !== 0) no(r.status === 124 ? 'it did not answer in time' : redactUrl(firstLine(r.stderr).replace(/^fatal: /, '')) || `exit ${r.status}`);
     return String(r.stdout ?? '');
   };
-  const at = {};
-  // ls-remote matches a pattern against the end of a ref's name, so only an exact name counts
-  for (const [sha, ref] of toOrigin(['ls-remote', 'origin', `refs/heads/${rb}`, `refs/heads/${start}`]).split('\n').map((l) => l.split('\t'))) {
-    for (const b of [rb, start]) if (/^[0-9a-f]{40,64}$/.test(sha) && ref === `refs/heads/${b}`) at[b] = sha;
+  // by its exact name: rev-parse would fall back to a branch called refs/remotes/origin/<b>
+  const tracked = (b) => { const r = responderGit(['show-ref', '--verify', '--hash', `refs/remotes/origin/${b}`], R.root); return r.status === 0 ? r.stdout.trim() : null; };
+  for (let tries = 1; ; tries += 1) {
+    // Read before origin is: a session here that pushes meanwhile moves its tracking ref after that,
+    // so setting it from this value refuses, and origin is read again (kit-856).
+    const was = { [rb]: tracked(rb), [start]: tracked(start) };
+    const at = {};
+    // ls-remote matches a pattern against the end of a ref's name, so only an exact name counts
+    for (const [sha, ref] of toOrigin(['ls-remote', 'origin', `refs/heads/${rb}`, `refs/heads/${start}`]).split('\n').map((l) => l.split('\t'))) {
+      for (const b of [rb, start]) if (/^[0-9a-f]{40,64}$/.test(sha) && ref === `refs/heads/${b}`) at[b] = sha;
+    }
+    if (!at[rb]) no(`origin has no ${rb}`);
+    const held = [rb, start].filter((b) => at[b]);
+    // Into no ref: a fetch writes through a symbolic tracking ref, moving the branch it names. The
+    // tracking refs are set below, by sha, without following one.
+    toOrigin(['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--refmap=', 'origin', ...held.map((b) => `refs/heads/${b}`)]);
+    for (const b of held) if (responderGit(['cat-file', '-e', `${at[b]}^{commit}`], R.root, { GIT_NO_LAZY_FETCH: '1' }).status !== 0) no(`${at[b].slice(0, 8)} did not arrive`);
+    const moved = held.find((b) => {
+      const set = responderGit(['update-ref', '--no-deref', `refs/remotes/origin/${b}`, at[b], was[b] ?? '0'.repeat(at[b].length)], R.root);
+      if (set.status !== 0 && tracked(b) === was[b]) no(redactUrl(firstLine(set.stderr).replace(/^fatal: /, '')) || `exit ${set.status}`);
+      return set.status !== 0;
+    });
+    if (!moved) {
+      R.resetCaches();
+      return { main: at[rb], branch: at[start] ?? null };
+    }
+    if (tries === 3) no(`origin/${moved} here kept moving while it was read`);
   }
-  if (!at[rb]) no(`origin has no ${rb}`);
-  const held = [rb, start].filter((b) => at[b]);
-  // Into no ref: a fetch writes through a symbolic tracking ref, moving the branch it names. The
-  // tracking refs are set below, by sha, without following one.
-  toOrigin(['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--refmap=', 'origin', ...held.map((b) => `refs/heads/${b}`)]);
-  for (const b of held) if (responderGit(['cat-file', '-e', `${at[b]}^{commit}`], R.root, { GIT_NO_LAZY_FETCH: '1' }).status !== 0) no(`${at[b].slice(0, 8)} did not arrive`);
-  for (const b of held) {
-    const set = responderGit(['update-ref', '--no-deref', `refs/remotes/origin/${b}`, at[b]], R.root);
-    if (set.status !== 0) no(redactUrl(firstLine(set.stderr).replace(/^fatal: /, '')) || `exit ${set.status}`);
-  }
-  R.resetCaches();
-  return { main: at[rb], branch: at[start] ?? null };
 }
 // In a read-only command, full ref names resolve from one for-each-ref listing (a dashboard
 // refresh asked git about each ticket branch separately: ~90 processes). Anything else, and every
