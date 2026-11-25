@@ -18,7 +18,7 @@ handoverFile();
 const mustRun = !!process.env.CI && Number(process.versions.node.split('.')[0]) >= 22;
 const skip = canDrive ? false : 'needs Chrome and Node 22+';
 // The checks run as four chains at once, one per project (each its own daemon), checks in order within
-// a chain: cA's (C23, C15, C20, W1, C21, RF3, KD2, KD5, KD3, KD4, KD9), cB's (C18, C19, PC1, PC4, PC5, RF4, T4-1, T4-3, KD6, PC3, T4-2),
+// a chain: cA's (C23, C15, C20, W1, C21, RF3, KD2, KD5, KD3, KD4, KD9, KD10), cB's (C18, C19, PC1, PC4, PC5, RF4, T4-1, T4-3, KD6, PC3, T4-2),
 // cC's (C24, T6-3, RF2, RL0, RL1, RL2, KD8, KD8b, RL3) and cD's (C12, C13, C14, KD1, KD7, C16, PC6). onA, onB, onC and onD add a check.
 const cAChecks = [], cBChecks = [], cCChecks = [], cDChecks = [];
 const onA = (name, fn) => cAChecks.push([name, fn]);
@@ -558,6 +558,22 @@ onA('KD9 a clean stop: its reaper stands down, so a file written on the profile 
     await sleep(3000); // a reaper that ran would have deleted it within about 1 s (a node start)
     assert.ok(fs.existsSync(f), "KD9: the old daemon's reaper deleted a file written after a clean stop");
   } finally { fs.rmSync(f, { force: true }); }
+});
+
+// kit-877 (m-20261125-140559755): the four chains, like two projects on one box, pick view ports blind
+// to each other; a start whose bind is taken retries on a random free port, up to four tries in all.
+// The hook fails the first three binds; the start comes up on the fourth.
+onA('KD10 a start whose first three binds are taken still comes up', async () => {
+  const P = cA();
+  const marker = path.join(P.home, 'kd10-bind-fails');
+  fs.rmSync(marker, { force: true });
+  await ok(P, ['stop']);
+  try {
+    await ok(P, ['start'], { DEVTEAM_TEST_BROWSER_BIND_FAIL: marker, DEVTEAM_TEST_BROWSER_BIND_FAIL_N: '3' });
+    assert.equal(fs.readFileSync(marker, 'utf8'), '3', 'KD10: three binds failed first');
+    assert.ok(alive(readState(P).daemon_pid), 'KD10: the daemon is up');
+  } finally { fs.rmSync(marker, { force: true }); }
+  await ok(P, ['stop']);
 });
 
 // --- cB: DEVTEAM_TEST_BROWSER_WATCH_HANDLE=0, so a close is handled only by a verb's pre-verb read or
