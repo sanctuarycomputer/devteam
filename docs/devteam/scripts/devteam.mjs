@@ -7703,12 +7703,13 @@ worldFileFails.actOf = (ref) => {
 // exterior.md.
 
 /* self-plain start */
-// self@2's reader (log.schema.json#self2): test/fixtures/world2/check.mjs's self rules, rule for rule
-// (its reading of lines, fences, code, comments and links; parts; the title; checkSelf; selfHeld, the
-// names rule's words), so the kit
-// gives every case of test/fixtures/world2/cases.json the result it lists. One closure, so none of
-// its names meets another of this file's; it reads nothing but its arguments and path (a test runs
-// this region alone). kit-863 may read exterior.md with it too.
+// self@2's and exterior@2's reader (log.schema.json#self2, #exterior): test/fixtures/world2/check.mjs's
+// rules, rule for rule (its reading of lines, fences, code, comments and links; parts; the title;
+// checkSelf; selfHeld, the names rule's words; and, since kit-863, namesWhole, entries, capitalised,
+// hosts and checkExterior, exterior.md's contract and names rule), so the kit gives every case of
+// test/fixtures/world2/cases.json the result it lists. One closure, so none of its names meets
+// another of this file's; it reads nothing but its arguments, path and URL (a test runs this region
+// alone).
 const selfPlain = (() => {
   // A line ends at LF, CR or CRLF, as markdown reads it.
   const lines = (text) => String(text).replace(/^﻿/, '').split(/\r\n?|\n/);
@@ -8117,7 +8118,248 @@ const selfPlain = (() => {
     return [...out];
   }
 
-  return { version, checkSelf, selfHeld, scan, plain, headings, links, parts };
+  // Whether text names name: as whole words (no letter or digit just before or after), ignoring case
+  // as a regular expression's i and u flags do (each code point by its simple case folding). The text
+  // is indexed once: each of its code points stands for the class of those equal to it ignoring case,
+  // so a name is a plain search and its two ends a look at the code points beside it.
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const LN = /[\p{L}\p{N}]/iu;
+  // The classes of a text's code points: each new code point's class is looked for first among those
+  // of its case bucket (its upper case's lower case, which almost always holds its class), then by one
+  // search of every class's first code point; none, and it starts one.
+  function classes() {
+    const reps = [];
+    let all = '';
+    const at = new Map(); // a class's offset in all to the class
+    const bucket = new Map();
+    const id = new Map();
+    const find = (c, add) => {
+      if (id.has(c)) return id.get(c);
+      const re = new RegExp(esc(c), 'iu');
+      const b = c.toUpperCase().toLowerCase();
+      let k = (bucket.get(b) ?? []).find((x) => re.test(reps[x]));
+      if (k === undefined) { const o = all.search(re); k = o < 0 ? -1 : at.get(o); }
+      if (k < 0 && add) { k = reps.length; reps.push(c); at.set(all.length, k); all += c; }
+      if (k >= 0) { if (!bucket.has(b)) bucket.set(b, []); if (!bucket.get(b).includes(k)) bucket.get(b).push(k); }
+      id.set(c, k);
+      return k;
+    };
+    return { find, count: () => reps.length };
+  }
+  const indexes = [];
+  function indexed(text) {
+    const had = indexes.find((x) => x.text === text);
+    if (had) return had;
+    const cps = Array.from(text);
+    const cl = classes();
+    for (const c of new Set(cps)) cl.find(c, true);
+    if (cl.count() >= 0xd700) return null; // more classes than keys: the caller asks the regular expression
+    const key = (k) => String.fromCharCode(0x100 + k);
+    const x = { text, cps, key, classOf: (c) => cl.find(c, false), keys: cps.map((c) => key(cl.find(c, false))).join('') };
+    indexes.unshift(x);
+    indexes.length = Math.min(indexes.length, 4);
+    return x;
+  }
+  function namesWhole(text, name) {
+    if (name.length > 500) return false;
+    if (!name) return new RegExp('(?<![\\p{L}\\p{N}])(?![\\p{L}\\p{N}])', 'iu').test(text);
+    const x = indexed(String(text));
+    if (!x) return new RegExp(`(?<![\\p{L}\\p{N}])${esc(name)}(?![\\p{L}\\p{N}])`, 'iu').test(text);
+    let want = '';
+    for (const c of name) { const k = x.classOf(c); if (k < 0) return false; want += x.key(k); }
+    const n = want.length;
+    for (let i = x.keys.indexOf(want); i >= 0; i = x.keys.indexOf(want, i + 1)) {
+      if (!(i > 0 && LN.test(x.cps[i - 1])) && !(i + n < x.cps.length && LN.test(x.cps[i + n]))) return true;
+    }
+    return false;
+  }
+
+  // The ### entries: [{ name, body }], body up to the next heading of level 3 or less.
+  function entries(text) {
+    const h = headings(text).filter((x) => x.level <= 3);
+    const all = plain(text).split('\n');
+    return h.flatMap((x, i) => (x.level === 3 ? [{ name: x.text, body: all.slice(x.line, (h[i + 1]?.line ?? all.length + 1) - 1).join('\n') }] : []));
+  }
+  const realDay = (d) => { const t = new Date(`${d}T00:00:00Z`); return !Number.isNaN(t.getTime()) && t.toISOString().slice(0, 10) === d; };
+  // A source is a web address, or a reference link whose definition (anywhere in the file) is one.
+  function entryWarnings({ name, body }, today, refs) {
+    const days = [...body.matchAll(/(?<![\p{L}\p{N}])read\s+(\d{4}-\d{2}-\d{2})(?!\d)/giu)].map((m) => m[1]).filter(realDay);
+    const web = /https?:\/\/[^\s/]/i.test(body) || [...body.matchAll(/\[([^[\]]+)\](?:\[([^[\]]*)\])?/g)].some((m) => refs.has((m[2] || m[1]).toLowerCase()));
+    const w = days.filter((d) => d > today).map((d) => `"${name}": read date ${d} is in the future`);
+    if (!web || !days.length) w.push(`"${name}" has no dated source`);
+    return w;
+  }
+  const webRefs = (text) => new Set([...plain(text).matchAll(/^ {0,3}\[([^[\]\n]+)\]:[ \t]*<?https?:\/\//gim)].map((m) => m[1].toLowerCase()));
+
+  // Every capitalised word of the whole text, no place skipped, each once in order: letters, digits,
+  // ' ’ and -, starting with a letter, a trailing 's dropped, upper-case first, two letters or more.
+  function capitalised(text) {
+    const out = new Set();
+    for (const m of String(text).matchAll(WORD)) {
+      const w = capWord(m[0]);
+      if (w) out.add(w);
+    }
+    return [...out];
+  }
+  // Character references as markdown and HTML read them, once: numeric ones, and the named ones whose
+  // value is one ASCII character. Any other is left as written.
+  const NAMED = { AMP: '&', DiacriticalGrave: '`', GT: '>', Hat: '^', LT: '<', NewLine: '\n', QUOT: '"', Tab: '\t', UnderBar: '_', VerticalLine: '|', amp: '&', apos: "'", ast: '*', bsol: '\\', colon: ':', comma: ',', commat: '@', dollar: '$', equals: '=', excl: '!', grave: '`', gt: '>', lbrace: '{', lbrack: '[', lcub: '{', lowbar: '_', lpar: '(', lsqb: '[', lt: '<', midast: '*', num: '#', percnt: '%', period: '.', plus: '+', quest: '?', quot: '"', rbrace: '}', rbrack: ']', rcub: '}', rpar: ')', rsqb: ']', semi: ';', sol: '/', verbar: '|', vert: '|' };
+  const numeric = (d, x) => { const c = d ? Number(d) : parseInt(x, 16); return String.fromCodePoint(c === 0 || c > 0x10ffff || (c >= 0xd800 && c <= 0xdfff) ? 0xfffd : c); };
+  // As markdown reads text: each backslash escape of ASCII punctuation and each character reference
+  // (with its ;) decoded, once.
+  const decode = (t, squeeze = false) => t.replace(/\\([!-/:-@[-`{-~])|&(?:#(\d{1,7})|#[xX]([0-9a-fA-F]{1,6})|([A-Za-z][A-Za-z0-9]{1,31}));/g, (all, p, d, x, n) => {
+    if (p) return squeeze && (p === '<' || p === '>') ? '' : p;
+    const v = n ? (Object.hasOwn(NAMED, n) ? NAMED[n] : all) : numeric(d, x);
+    return squeeze && /^[\s<>]$/u.test(v) ? '' : v;
+  });
+  // As a browser reads an HTML attribute's value (quoted or not, after = and any white space): its
+  // character references decoded, numeric ones and &amp; &lt; &gt; &quot; with or without the ;, then
+  // its tabs and line breaks taken out, as a URL is read.
+  const LEGACY = { amp: '&', AMP: '&', lt: '<', LT: '<', gt: '>', GT: '>', quot: '"', QUOT: '"' };
+  const attrs = (t, squeeze = false) => t.replace(/(=\s*)("[^"]*"|'[^']*'|[^\s"'=<>`]+)/g, (all, eq, v) => eq + v
+    .replace(/&(?:#(\d{1,7});?|#[xX]([0-9a-fA-F]{1,6});?|([A-Za-z][A-Za-z0-9]{1,31});|(amp|AMP|lt|LT|gt|GT|quot|QUOT)(?![A-Za-z0-9]))/g, (r, d, x, n, l) => (l ? LEGACY[l] : n ? (Object.hasOwn(NAMED, n) ? NAMED[n] : r) : numeric(d, x)))
+    .replace(squeeze ? /[\s<>]/gu : /[\t\r\n]/g, ''));
+  // The text with the white space inside each angle-bracket destination taken out ([x](<…>), [x]: <…>).
+  const angles = (t) => {
+    let out = '';
+    let at = 0;
+    for (let i = t.indexOf(']'); i >= 0; i = t.indexOf(']', i + 1)) {
+      if (i < at || (t[i + 1] !== '(' && t[i + 1] !== ':')) continue;
+      let j = i + 2;
+      while (t[j] === ' ' || t[j] === '\t') j += 1;
+      if (t[j] === '\n') { j += 1; while (t[j] === ' ' || t[j] === '\t' || t[j] === '>') j += 1; } // a quote's > markers too
+      if (t[j] !== '<') continue;
+      let k = j + 1;
+      while (k < t.length && t[k] !== '<' && t[k] !== '>' && t[k] !== '\n') k += 1;
+      if (t[k] !== '>') continue;
+      out += t.slice(at, j + 1) + t.slice(j + 1, k).replace(/\s/gu, '');
+      at = k;
+      i = k;
+    }
+    return out + t.slice(at);
+  };
+  // What follows a host to drop: anything not a letter or digit, from the end back.
+  const tail = (h) => { const c = Array.from(h); while (c.length && !/[\p{L}\p{N}]/u.test(c[c.length - 1])) c.pop(); return c.join(''); };
+  // One address's host from its authority: past the last @ (a user), else up to what ends a sentence
+  // or a link in prose (, ; ' " ` ( ) [ ] |); less a port and what follows the host.
+  const host = (a) => { const at = a.lastIndexOf('@'); const h = at >= 0 ? a.slice(at + 1) : a.replace(/[,;'"`()[\]|].*$/s, ''); return tail(h.replace(/:\d*$/, '')).toLowerCase(); };
+  // With no @, the authority whole as well, up to what a host may not hold ([ ] | ^ % :): a browser keeps
+  // , ; ' " ` ( ) in a host, so prose's ends are read both ways.
+  const whole = (a) => (a.includes('@') ? '' : tail(a.replace(/[[\]|^%:].*$/s, '')).toLowerCase());
+  // Every host in the whole text, lower case, each once: read as markdown decodes the text, then again
+  // with each HTML attribute's value read as a browser does. The authority after http: or https: and
+  // any slashes or backslashes (or ftp:, ws:, wss:, the browser's other schemes that read a host so),
+  // two or more slashes or backslashes not inside a word or path, up to a slash, backslash, ?, #,
+  // white space, < or >; another scheme's // up to a slash, ?, #, white space, < or > (a backslash
+  // is part of its authority); and where it holds ]( (a link's
+  // words ending in an address), each part of it on either side as well. Each address of a mailto:; an
+  // e-mail autolink <local@domain> (CommonMark's local-part characters); an e-mail address's host, as
+  // GitHub links a bare one (a letter, digit, . _ + or - before the @, a dot in the host); and a bare
+  // www. name.
+  const HOST = /<[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@([\p{L}\p{N}.-]+)>|(?:(?:https?|ftp|wss?):[/\\]*|(?<![\p{L}\p{N}/\\._-])[/\\]{2,})([^\s/\\?#<>]+)|mailto:([^\s/\\?#<>"`()[\]|]+)|(?<=[\p{L}\p{N}._+-])@([\p{L}\p{N}_-][\p{L}\p{N}._-]*)|(?<![\p{L}\p{N}/.@-])(www\.[^\s/\\?#<>]+)|(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/([^\s/?#<>]+)/giu;
+  // The third reading: the second, with the white space a URL keeps inside its user taken out, where
+  // markdown or HTML lets it stand inside an address (angle-bracket destinations, attribute values,
+  // references), the < and > a user may hold there too, and every white space but the ASCII ones.
+  // A plain link destination ([x](…), [x]: …, not <…>; after form feeds and vertical tabs, one line break and a quote's > markers
+  // too, as pandoc reads them), up to white space, with
+  // its < and > taken out: a browser encodes them inside a user.
+  const dests = (t) => t.replace(/(\]\(|\]:)([ \t\f\v]*(?:\n[ \t\f\v]*(?:>[ \t\f\v]*)*)?)(\S*)/g, (all, o, sp, v) => (v[0] === '<' ? all : o + sp + v.replace(/\\?[<>]/g, '')));
+  // Each quoted value after an = (and any white space), read on its own as ="…" or ='…', so a stray
+  // quote elsewhere cannot pair with an attribute's own and leave its value unread. Each value ends at
+  // the next quote of its kind, so the values of one kind do not overlap: linear.
+  const values = (t) => {
+    const out = [];
+    for (let i = t.indexOf('='); i >= 0; i = t.indexOf('=', i + 1)) {
+      let j = i + 1;
+      while (j < t.length && (t[j] === ' ' || t[j] === '\t' || t[j] === '\n' || t[j] === '\f' || t[j] === '\r')) j += 1;
+      const q = t[j];
+      if (q !== '"' && q !== "'") continue;
+      const k = t.indexOf(q, j + 1);
+      if (k > 0) out.push(`=${t.slice(j, k + 1)}`);
+    }
+    return out.join(' ');
+  };
+  // Every address as a browser reads it: a scheme (at a word's start, any length), a colon, and what
+  // follows up to white space, < or >, read by node's URL. Its host, percent-decoded (URL decodes a
+  // special scheme's; another's is decoded here); for mailto:, each address of its path and of its
+  // to, cc and bcc fields, decoded, past the last @. This closes the class the rules above spell out
+  // form by form: a host percent-encoded, behind punctuation a host keeps, or after a long scheme.
+  const ADDRESS = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:[^\s<>]*/giu;
+  // Each run of %xx decoded on its own, as a browser or a mail client does; a malformed one kept as written.
+  const pct = (s) => s.replace(/(?:%[0-9a-f]{2})+/gi, (r) => { try { return decodeURIComponent(r); } catch { return r.replace(/%([0-9a-f]{2})/gi, (x, h) => (parseInt(h, 16) < 128 ? String.fromCharCode(parseInt(h, 16)) : x)); } });
+  // An authority read again percent-decoded: whole, past its @, and by node's URL with an https base
+  // (so a scheme-relative //host, /\host or www. host is read as a browser on a web page reads it).
+  function decoded(a) {
+    if (!a.includes('%') && /^[\x20-\x7e]*$/.test(a)) return []; // nothing to decode: the readings above hold it
+    const d = pct(a);
+    const cut = a.replace(/[[\]|^"'`].*$/s, '');
+    const u = URL.canParse(`https://${cut}/`) ? new URL(`https://${cut}/`).hostname : '';
+    return [whole(d), host(d), tail(pct(u)).toLowerCase()];
+  }
+  // A mailto value's addresses: its path and its to, cc and bcc fields, each run of %xx decoded on its
+  // own, split at , and ;, the domain past each address's last @ up to what ends it in prose.
+  function mailHosts(v) {
+    const q = v.indexOf('?');
+    const fields = [q < 0 ? v : v.slice(0, q)];
+    if (q >= 0) for (const p of v.slice(q + 1).split('&')) { const e = p.indexOf('='); if (e > 0 && /^(?:to|cc|bcc)$/i.test(p.slice(0, e))) fields.push(p.slice(e + 1)); }
+    const out = [];
+    for (const f of fields) for (const a of pct(f).split(/[,;]/)) { const at = a.lastIndexOf('@'); if (at >= 0) out.push(a.slice(at + 1).replace(/[\s()[\]|^"'`<>].*$/s, '')); }
+    return out;
+  }
+  const MAILTO = /mailto:([^\s<>]*)/gi;
+  function urlHosts(s) {
+    if (/^mailto:/i.test(s)) return mailHosts(s.slice(7));
+    if (!URL.canParse(s)) return [];
+    const h = new URL(s).hostname;
+    return h ? [pct(h)] : [];
+  }
+  const third = (t) => decode(attrs(angles(dests(t)), true), true).replace(/[^\S\t\n\v\f\r ]/gu, '');
+  function hosts(text) {
+    const out = new Set();
+    const add = (h) => { if (h) out.add(h); };
+    const t = String(text).replace(/\r\n?/g, '\n'); // a line ends at LF, CR or CRLF
+    // A URL keeps white space inside its user (a browser encodes it), so a third reading takes out the
+    // white space inside angle-bracket destinations, attribute values, and what references decode to.
+    const v = values(t);
+    for (const each of new Set([decode(t), decode(attrs(t)), third(t), decode(attrs(v)), decode(attrs(v, true), true)])) { // each distinct reading once
+      for (const m of each.matchAll(HOST)) {
+        if (m[1] !== undefined) add(tail(m[1]).toLowerCase());
+        else if (m[2] !== undefined || m[6] !== undefined) {
+          const a = m[2] ?? m[6];
+          add(host(a)); add(whole(a));
+          for (const h of decoded(a)) add(h);
+          if (a.includes('](')) for (const b of a.split('](')) { add(host(b)); add(whole(b)); for (const h of decoded(b)) add(h); }
+        }
+        else if (m[3] !== undefined) { for (const a of m[3].split(/[,;]/)) if (a.includes('@')) add(host(a)); }
+        else if (m[4] !== undefined) { const h = tail(m[4]).toLowerCase(); if (h.includes('.')) add(h); }
+        else if (m[5] !== undefined) { add(host(m[5])); add(whole(m[5])); for (const h of decoded(m[5])) add(h); }
+      }
+      for (const m of each.matchAll(MAILTO)) for (const h of mailHosts(m[1])) add(tail(h).toLowerCase());
+      for (const u of each.matchAll(ADDRESS)) for (const h of urlHosts(u[0])) add(tail(h).toLowerCase());
+    }
+    return [...out];
+  }
+
+  // exterior.md: { errors, warnings, refused, held, hosts }. On a repo known private nothing is refused
+  // or held; visibility 'public' or 'unknown' keeps the names rule. A ### heading is judged by
+  // allowed.names (origin main's strategy and dependency names); a word or host by allowed.words (the
+  // strategy and the dependency files whole).
+  function checkExterior(text, { today, visibility, allowed }) {
+    const errors = docErrors(text, 'exterior');
+    const all = errors.length ? [] : entries(text);
+    const open = visibility === 'private';
+    const unknown = (list, by) => (open ? [] : list.filter((w) => !namesWhole(by, w)));
+    const refs = webRefs(text);
+    return {
+      errors,
+      warnings: all.flatMap((e) => entryWarnings(e, today, refs)),
+      refused: unknown(headings(text).filter((h) => h.level === 3).map((h) => h.text), allowed.names),
+      held: unknown(capitalised(text), allowed.words),
+      hosts: unknown(hosts(text), allowed.words),
+    };
+  }
+
+  return { version, checkSelf, selfHeld, scan, plain, headings, links, parts, namesWhole, entries, capitalised, hosts, checkExterior };
 })();
 // 1 when a fence's info string is exactly self or exterior (version 1), else 2.
 const selfPlainVersion = selfPlain.version;
