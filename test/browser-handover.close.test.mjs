@@ -875,6 +875,7 @@ onB('T4-3 a close that fails shuts the daemon down, and the offline status says 
   await until(() => !alive(st.daemon_pid), 20000, 'the daemon gone');
   const off = await ok(P, ['status']);
   assert.match(off.out, /^last error: \d{4}-\d\d-\d\dT\S+ browser: couldn't delete \S.* \(EACCES\): Chrome would bring its tabs back$/m, off.out);
+  assert.equal(off.out.split("couldn't delete").length - 1, 1, `kit-877: the shutdown added to a reason that already said the delete failed: ${off.out}`);
   assert.equal(entriesFor(P, q).length, 0, 'a failed close wrote its entry');
   // the next start handles the close, and the old failure is no longer said
   await ok(P, ['start']);
@@ -1165,7 +1166,7 @@ async function unreadableAndUndeletable(P, label, hooks) {
   assert.deepEqual(profilePids(P), [], `${label}: a Chrome left on the profile`);
   return q;
 }
-const READ_THEN_DELETE = /^last error: \S+ browser: couldn't read the log.*couldn't delete \S.* \(EACCES\)/m;
+const READ_THEN_DELETE = /^last error: \S+ browser: couldn't read the log.*couldn't delete \S.* \(EACCES\): Chrome would bring its tabs back$/m;
 const closeAfter = async (P, q) => {
   await ok(P, ['start']);
   await freshViewer(P);

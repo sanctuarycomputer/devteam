@@ -36848,9 +36848,9 @@ function browserReportDelete(reason, msg, opts) {
 }
 // kit-877, the reaper: once Chrome is up the daemon starts sh blocked reading a pipe only the daemon
 // holds; when the daemon ends, however it ends (kill -9 too), the pipe closes and sh runs browser reap,
-// unless the daemon's own shutdown deleted the session files, with no process left on the profile, and said "done" on the pipe first (a clean
-// stop leaves the reaper nothing to do, and a start right after it nothing to race). Detached, so it
-// outlives the daemon's window. DEVTEAM_TEST_BROWSER_REAP=0 (tests) starts none.
+// unless the daemon's own shutdown deleted the session files, with no process left on the profile,
+// and said "done" on the pipe first (a clean stop leaves the reaper nothing to do, and a start right
+// after it nothing to race). Detached, so it outlives the daemon's window. DEVTEAM_TEST_BROWSER_REAP=0 (tests) starts none.
 function browserReaper(ctx) {
   if (browserTestEnv('DEVTEAM_TEST_BROWSER_REAP') === '0') return;
   try {
@@ -36926,7 +36926,7 @@ async function browserReapRun() {
 }
 // The stop path: Browser.close, then the group signalled (SIGTERM, SIGKILL 2 s later) if Chrome
 // hasn't gone in 5 s; the session files deleted (a failure said in last-error by browserReportDelete;
-// once they are gone, the reaper told done); state.json removed when it is this daemon's; the
+// once they are gone and no process is on the profile, within 500 ms, the reaper told done); state.json removed when it is this daemon's; the
 // guard and servers closed; exit. Once a signal came, a dead pty can't end it early.
 function browserShutdown(ctx, why, detail) {
   if (ctx.stopping) return ctx.stopping;
@@ -36941,7 +36941,9 @@ function browserShutdown(ctx, why, detail) {
     await browserEndChrome(ctx.cdp, ctx.chrome?.pid);
     let deleted = false;
     try { browserDeleteSession(ctx.profile); deleted = true; } catch (e) { browserReportDelete(why === 'error' && detail ? String(detail) : null, String(e?.message ?? e)); } // kit-877: said, never swallowed
-    if (deleted && ctx.reaper && browserProcsOn(ctx.profile)?.length === 0) await Promise.race([new Promise((r) => { try { ctx.reaper.stdin.write('done\n', () => r()); } catch { r(); } }), browserSleep(500)]); // kit-877: the reaper stands down
+    let free = false;
+    if (deleted && ctx.reaper) { try { for (const end = Date.now() + 500; !(free = browserProcsOn(ctx.profile)?.length === 0) && Date.now() < end; ) await browserSleep(25); } catch {} }
+    if (free) await Promise.race([new Promise((r) => { try { ctx.reaper.stdin.write('done\n', () => r()); } catch { r(); } }), browserSleep(500)]); // kit-877: the reaper stands down
     if (browserRawState()?.daemon_pid === process.pid) fs.rmSync(browserStateFile(), { force: true });
     for (const s of [ctx.control, ctx.view]) { try { s?.closeAllConnections?.(); s?.close(); } catch {} }
     await Promise.race([ctx.guard?.close(), browserSleep(2000)]).catch(() => {});
