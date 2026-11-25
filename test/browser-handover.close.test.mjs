@@ -806,6 +806,18 @@ onB('T4-2 problem lines never wedge the browser: a handover gone from the log un
 });
 
 // --- cC: DEVTEAM_TEST_BROWSER_IDLE_MS=1500
+// Why a close went unhandled, for a wait that has already failed: the old Chrome still ending, or gone
+// and the fresh one not up yet (slow), or the daemon gone with its reason (failed). Then up to 30 s more
+// (a relaunch's own launch limit), only to say which of the two it came to.
+async function closeState(P, st, qid) {
+  const read = (f) => { try { return fs.readFileSync(f, 'utf8').trim(); } catch { return 'none'; } };
+  const now = () => `old Chrome ${alive(st.chrome_pid) ? 'alive' : 'gone'}, daemon ${alive(st.daemon_pid) ? 'alive' : 'gone'}, load ${read('/proc/loadavg')}`;
+  const first = now(), t0 = Date.now();
+  while (Date.now() - t0 < 30000 && alive(st.daemon_pid) && !entriesFor(P, qid).length) await sleep(100);
+  const ms = Date.now() - t0;
+  const then = entriesFor(P, qid).length ? `slow: handled ${ms} ms later` : alive(st.daemon_pid) ? `still unhandled ${ms} ms later` : `failed: the daemon gone by ${ms} ms later, last-error ${read(path.join(P.run, 'browser', 'last-error'))}`;
+  return `${first}; ${then}`;
+}
 let CC;
 const cC = () => (CC ??= project('cC', { DEVTEAM_TEST_BROWSER_IDLE_MS: '1500' }));
 
@@ -820,7 +832,8 @@ onC('C24 the idle timer never stops the browser while held, and stops it after t
   assert.ok(alive(readState(P)?.chrome_pid ?? st.chrome_pid), 'Chrome stopped while held');
   await withdraw(P, l.id);
   // "after the close": the daemon's close, which ends with its ledger entry and arms the timer again
-  await until(() => entriesFor(P, l.id).length, 20000, 'the close handled');
+  await until(() => entriesFor(P, l.id).length, 20000, 'the close handled')
+    .catch(async (e) => { e.message += ` (${await closeState(P, st, l.id)})`; throw e; });
   await until(() => !alive(st.daemon_pid), 4000, 'the daemon stopped for idleness after the close');
   await until(() => !profilePids(P).length, 5000, 'Chrome gone with the daemon');
 });
