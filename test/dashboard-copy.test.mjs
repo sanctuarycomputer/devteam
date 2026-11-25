@@ -97,6 +97,8 @@ const NOT_EMPTY_STATES = [
   'No readings from … to …', 'No projects running',
   // an artifact's notes (kit-145): a press's answer, where a note is, the composer's placeholder
   'Nothing to hand over', 'Not on this view', 'Not yet? Say what is still wrong', 'Not typed: … has no pane. It reads this when it next checks.',
+  // the hand-over reminder (kit-148): its Not now button, and an open note's card line
+  'Not now', 'Not handed over yet. Hand over sends it to ….',
   // consequences, and where to act instead
   'Nothing is planned or built for it; any planning stops.',
   /^Nothing to click here\. With account rotation set up, the dashboard restarts it once an account has room; otherwise answer it in the terminal\.$/,
