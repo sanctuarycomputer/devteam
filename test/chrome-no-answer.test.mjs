@@ -11,6 +11,16 @@ import { closeTab, oneTab } from './fixtures/artifact-viewer/harness.mjs';
 
 // a call's error and how long it took to come
 const failing = async (call) => { const t = Date.now(); const e = await call.then(() => null, (x) => x); return { e, ms: Date.now() - t }; };
+// What follows "Chrome running; " in a diagnosis, in each form chrome.mjs gives (kit-918): the second-session line and
+// the renderers line (each may say its own look ran out its bound); or the whole look cut at 6 s, after the
+// second-session line or before it; or Chrome's endpoint unreachable, in place of both. ss: the second-session
+// forms this tab may give. Anything else in that place is refused.
+const RENDERERS = String.raw`renderers: (\d+ (\d+% cpu|new)(, \d+ (\d+% cpu|new))*|no process info)`;
+const CUT = 'diagnosis cut at 6 s';
+const ENDPOINT = String.raw`Chrome's endpoint: (no answer in 2 s|could not reach it)`;
+const HELD = String.raw`(its page gives a second session no answer in 2 s|a second session: no answer in 1 s)`;
+const ANY = String.raw`(its page answers a second session in \d+ ms|${HELD})`;
+const looks = (ss) => new RegExp(`; Chrome running; (${ss}; ${RENDERERS}|${ss}; ${CUT}|${CUT}|${ENDPOINT})$`);
 // a tab busy until a set time, whenever its evaluation starts (behind another tab's dialog in the same renderer, or not)
 const busy = (p, until) => failing(p.send('Runtime.evaluate', { expression: `for (;Date.now() < ${until};) {} 1` }));
 
@@ -38,13 +48,11 @@ test('a call with no answer says what Chrome was doing', { skip: canDrive ? fals
         assert.match(rb.e.message, new RegExp(`; an alert dialog \\("held here", at about:blank\\) open on tab ${tab} for `), 'the other tab names the dialog on the held one');
         assert.match(ra.e.message, /; last heard on its socket: [^;]*an alert dialog \d+\.\d s ago/);
         assert.match(ra.e.message, /; Chrome running; /);
-        // On a loaded runner a look can run out its own bound, or the whole look the 6 s cut (kit-918): each
-        // line is then the form that says so, and never a wrong one. The held page never answers the second session.
-        const cut = /; diagnosis cut at 6 s$/;
-        assert.doesNotMatch(ra.e.message, /its page answers a second session/);
-        if (!cut.test(ra.e.message)) assert.match(ra.e.message, /; (its page gives a second session no answer in 2 s|a second session: no answer in 1 s)(; |$)/);
-        if (!cut.test(rb.e.message)) assert.match(rb.e.message, /; renderers: (\d+ (\d+% cpu|new)(, \d+ (\d+% cpu|new))*|no process info)$/);
-        for (const r of [ra, rb]) if (/renderers: no process info|a second session: no answer|Chrome's list of tabs: no answer|diagnosis cut at 6 s/.test(r.e.message)) t.diagnostic(`a look ran out its bound: ${r.e.message.slice(r.e.message.indexOf('; Chrome '))}`);
+        // On a loaded runner a look can run out its own bound, the whole look the 6 s cut, or Chrome's endpoint its 2 s
+        // (kit-918): each line is then the form that says so, and never a wrong one. The held page never answers the second session.
+        assert.match(ra.e.message, looks(HELD));
+        assert.match(rb.e.message, looks(ANY));
+        for (const r of [ra, rb]) if (/renderers: no process info|a second session: no answer|Chrome's list of tabs: no answer|diagnosis cut at 6 s|Chrome's endpoint: /.test(r.e.message)) t.diagnostic(`a look ran out its bound: ${r.e.message.slice(r.e.message.indexOf('; Chrome '))}`);
         // answered by the test, the page goes on: the held call ran once
         await held.send('Page.handleJavaScriptDialog', { accept: true });
         await new Promise((r) => setTimeout(r, Math.max(500, until - Date.now() + 500)));
@@ -159,4 +167,10 @@ test('the harness closes each case\'s tab with closeTab: the last one before the
   assert.equal(src.match(/chrome\.newPage\(\)/g).length, 1, 'the harness opens a tab only in oneTab');
   assert.match(src, /const tabs = oneTab\(chrome\);\n  later\(\(\) => tabs\.done\(\)\);/);
   assert.match(src, /async function visit\([^)]*\) \{\n    const p = await tabs\.next\(\);/);
+});
+test('a diagnosis\'s last looks: each form chrome.mjs gives is taken, anything else in their place refused', () => {
+  const at = (tail) => `Runtime.evaluate: no answer from Chrome in 30 s; tab 0123ABCD at about:blank; last heard on its socket: nothing; Chrome running; ${tail}`;
+  for (const tail of ['its page gives a second session no answer in 2 s; renderers: 12 0% cpu, 34 new', 'a second session: no answer in 1 s; renderers: no process info', 'its page gives a second session no answer in 2 s; diagnosis cut at 6 s', 'diagnosis cut at 6 s', "Chrome's endpoint: no answer in 2 s", "Chrome's endpoint: could not reach it"]) assert.match(at(tail), looks(HELD), tail);
+  assert.match(at('its page answers a second session in 3 ms; renderers: 12 100% cpu'), looks(ANY));
+  for (const tail of ['its page answers a second session in 3 ms; renderers: 12 0% cpu', 'its page gives a second session no answer in 2 s', 'renderers: 12 0% cpu', 'its page gives a second session no answer in 2 s; renderers: garbled', 'garbled; diagnosis cut at 6 s', 'its page gives a second session no answer in 2 s; renderers: 12 0% cpu; diagnosis cut at 6 s', "Chrome's endpoint: something else", "Chrome's endpoint: no answer in 2 s; renderers: 12 0% cpu", 'its page gives a second session no answer in 2 s; renderers: none']) assert.doesNotMatch(at(tail), looks(HELD), tail);
 });
