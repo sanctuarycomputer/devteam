@@ -83,7 +83,11 @@ const POLL_FAST = `(() => { const si = window.setInterval; window.setInterval = 
 //   filter one case remembered never adds th or t to a later case's head (spec-1 F1-7);
 // - history.back, history.go and history.replaceState counted, each replace with whether
 //   leaveArtifact is on its stack (a close by replace, not the router's own stamps);
-// - what the frames' pages say (their { own: 'at' } messages: which page, its hash, where its elements are);
+// - what the frames' pages say (their { own: 'at' } messages: which page, its hash, where its elements are),
+//   each with the dashboard's iframe it came from (window.__ownFrom: the one whose window sent it or holds the
+//   window that did, as a preview's app sits inside its lens), so an aim reads only the stage's (kit-928); a
+//   case may hold words back (window.__ownHold, a test on the word) and let them go, as they came, later
+//   (window.__ownLetGo());
 // - every key message a lens sends (window.__lensKeys: its key, shift and up, as the lens sent them);
 // - every iframe's load, by id (load doesn't bubble, so a capture listener on the document: one on the
 //   element would be lost when the element is replaced).
@@ -96,7 +100,13 @@ const WATCH = `(() => {
   H.go = function (n) { window.__gos.push(n); return go.call(this, n); };
   H.replaceState = function (s, t, u) { window.__replaces.push({ url: u === undefined ? null : String(u), page: s && s.page, leave: /leaveArtifact/.test(String(new Error().stack)) }); return rep.apply(this, arguments); };
   window.__own = [];
-  addEventListener('message', (e) => { if (e.data && e.data.own) window.__own.push(e.data); });
+  window.__ownFrom = new WeakMap();
+  window.__ownHold = null;
+  window.__ownHeld = [];
+  const frameOf = (w) => { for (let i = 0; w && i < 8; i++) { const f = [...document.querySelectorAll('iframe')].find((f) => f.contentWindow === w); if (f) return f; if (w === w.parent) return null; w = w.parent; } return null; };
+  const word = (e) => { window.__own.push(e.data); const f = frameOf(e.source); if (f) window.__ownFrom.set(e.data, f); };
+  window.__ownLetGo = () => { const h = window.__ownHeld; window.__ownHold = null; window.__ownHeld = []; h.forEach(word); return h.length; };
+  addEventListener('message', (e) => { if (!e.data || !e.data.own) return; if (window.__ownHold && window.__ownHold(e.data)) { window.__ownHeld.push(e); return; } word(e); });
   window.__lensKeys = [];
   addEventListener('message', (e) => { const m = e.data; if (m && m.lens === 1 && m.type === 'key') window.__lensKeys.push({ key: m.key, shift: m.shift, ...('up' in m ? { up: m.up } : {}) }); });
   window.__loads = [];
@@ -117,6 +127,26 @@ export const VIEWER_UP = `(!${VIEW}.hidden && document.body.classList.contains('
 export const CLOSED = `(() => { const v = ${VIEW}; return !!v && v.hidden && !document.body.classList.contains('av-open') && !['av-frame', 'pv-frame'].some((id) => document.getElementById(id)?.hasAttribute('src')); })()`;
 // a peek open and at rest (not sliding: a press on its X mid-slide is the slide's, not the X's)
 export const PEEK = "(!document.getElementById('drawer').hidden && document.body.classList.contains('peek-open') && getComputedStyle(document.getElementById('drawer')).transform === 'none')";
+// Where #id is on the page now on the stage, at the stage's frame: read only from the words the stage's own
+// frame said (never a thumbnail's or another frame's) since it last named another page or hash than the
+// one the stage is on now (TS: an artifact's path and hash, a preview's route); null until that page says
+// where #id is (kit-928: run 45684113340 aimed at a Library thumbnail's #to-b). STAGE names that page.
+const STAGE = "(TS.kind === 'preview' ? `${TS.name} ${TS.route}` : `${TS.slug}/${TS.path}${TS.hash}`)";
+export const AIM = (id) => `(() => {
+  const f = tsFrame(), want = TS.kind === 'preview' ? TS.route : TS.path && '/' + TS.path, hash = TS.kind === 'preview' ? null : TS.hash;
+  if (!f || !want) return null;
+  const mine = window.__own.filter((m) => m.own === 'at' && m.rects && window.__ownFrom.get(m) === f);
+  for (let i = mine.length - 1; i >= 0; i--) {
+    const m = mine[i];
+    // a word naming another page or hash ends the run: what came before it is an earlier visit's
+    if (typeof m.page !== 'string' || !m.page.endsWith(want) || (hash !== null && m.hash !== hash)) return null;
+    const e = m.rects[${J(id)}];
+    if (!e || !(e.w > 0)) continue;
+    const r = f.getBoundingClientRect(), x = r.left + f.clientLeft + e.x + e.w / 2, y = r.top + f.clientTop + e.y + e.h / 2, hit = document.elementFromPoint(x, y);
+    return { x, y, hit: hit === f, on: hit ? hit.id || hit.className || hit.tagName : null, page: m.page + m.hash };
+  }
+  return null;
+})()`;
 // True once the stage's frame's box reads the same twice running (soon's polls are 50 ms apart).
 const STEADY = "(() => { const r = tsFrame().getBoundingClientRect(), k = [r.left, r.top, r.width, r.height].join(); const was = window.__steady; window.__steady = k; return was === k; })()";
 export const CARD = "document.getElementById('tl-card')";
@@ -286,9 +316,10 @@ export async function harness(t, fixture) {
     V.frameClick = async (id, next, { hash = null, load = true } = {}) => {
       // the frame's box read the same twice running: the bar above it can still be settling
       await soon(STEADY, "setup: the stage's frame at rest");
-      await soon(`window.__own.some((m) => m.own === 'at' && m.rects && m.rects[${J(id)}] && m.rects[${J(id)}].w > 0)`, `setup: the page on the stage says where #${id} is`);
-      const at = await p.ev(`(() => { const m = window.__own.filter((m) => m.own === 'at' && m.rects && m.rects[${J(id)}] && m.rects[${J(id)}].w > 0).pop(); if (!m) return null; const f = tsFrame(), r = f.getBoundingClientRect(), e = m.rects[${J(id)}]; const x = r.left + f.clientLeft + e.x + e.w / 2, y = r.top + f.clientTop + e.y + e.h / 2, hit = document.elementFromPoint(x, y); return { x, y, hit: hit === f, on: hit ? hit.id || hit.className || hit.tagName : null }; })()`);
-      assert.ok(at, `setup: the page on the stage never said where #${id} is`);
+      // the page now on the stage, by its own frame's word (a moved stage: the new page's, once it says it)
+      if (!(await settle(`${AIM(id)} !== null`, 20000))) assert.fail(`setup: the page on the stage (${await p.ev(STAGE).catch(() => '?')}) never said where #${id} is`);
+      const at = await p.ev(AIM(id));
+      assert.ok(at, `setup: the page on the stage (${await p.ev(STAGE).catch(() => '?')}) no longer says where #${id} is`);
       assert.ok(at.hit, `setup: the point at #${id} is not on the stage's frame (it is on ${at.on})`);
       const n = await V.mark(), loads = await p.ev('window.__loads.length');
       // drawn first and the mouse moved there; a press the frame never acted on (no word from the page it
