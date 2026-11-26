@@ -493,7 +493,9 @@ test('the viewer: pins per page and view, the close after a move inside the fram
     assert.deepEqual(four.readies, [''], "that reload's ready names no hash");
   });
 
-  // C2: a move inside the frame with no load, then each closer: closed, on the head it was opened over
+  // C2: a move inside the frame with no load, then each closer: closed, on the head it was opened over. The pages'
+  // notes aren't handed over, so each closer asks first and the ask's I'll come back closes (kit-937).
+  const ASK = "(() => { const d = document.getElementById('av-ask'); return !!d && !d.hidden && d.getBoundingClientRect().height > 0; })()";
   const MOVES = {
     '#hash link': (V) => V.frameClick('to-tab2', 'pages/index.html', { hash: '#tab2', load: false }),
     pushState: (V) => V.frameClick('push', 'pages/index.html', { hash: '#pushed', load: false }),
@@ -509,6 +511,10 @@ test('the viewer: pins per page and view, the close after a move inside the fram
         const navs = await V.p.ev('AV_NAVS');
         assert.equal(await V.p.ev(VIEWER_UP), true, 'setup: the viewer is still up');
         await V.close(kind);
+        assert.ok(await V.settle(ASK, 3000), `${kind} after the ${move}: #av-ask is shown`);
+        await V.p.ev(FRAMES);
+        const r = await V.p.ev("(() => { const r = document.getElementById('av-ask-later').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()");
+        await V.press(r.x, r.y, 'av-ask-later');
         await V.closedOn('#library', `${kind} after the ${move}`);
         assert.equal(navs, 1, 'the move counted toward AV_NAVS');
       });
