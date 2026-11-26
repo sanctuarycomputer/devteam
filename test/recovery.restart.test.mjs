@@ -193,8 +193,8 @@ test('the restart keeps the permissions the running supervisor had: no flag it w
     const pane = supervisorPane(flagged, MENU, { prefix: 'DEVTEAM_ROLE=supervisor ', shell: true, args: SKIP });
     await until(() => pane.shows().includes('Esc to cancel'), 'the menu');
     flagged.tick(withCswap(flagged));
-    assert.ok(findings(flagged).find((x) => x.kind === 'supervisor-at-limit').suggestion.includes(`supervisor-claude.json' --resume ${SID}${SKIP}`));
-    assert.match(flagged.run(['fleet', 'status', '--no-fetch'], { DEVTEAM_ROLE: '' }).stdout, new RegExp(`recovery .*claude --settings \\S+ --resume ${SID}${SKIP}`));
+    assert.ok(findings(flagged).find((x) => x.kind === 'supervisor-at-limit').suggestion.includes(`claude --resume ${SID}${SKIP}`), 'printed only: no Stop hook file is written, and none was yet');
+    assert.match(flagged.run(['fleet', 'status', '--no-fetch'], { DEVTEAM_ROLE: '' }).stdout, new RegExp(`recovery .*claude --resume ${SID}${SKIP}`));
     assert.match(flagged.tick(withCswap(flagged)), /restarted the supervisor/);
     await until(() => flagged.claudeCalls().length === 1, 'the stand-in claude ran');
     assert.ok(hooked(flagged.claudeCalls()[0]).startsWith(`supervisor|--resume ${SID}${SKIP} `), flagged.claudeCalls()[0]);

@@ -15,16 +15,23 @@ test('a supervisor that can\'t be restarted: the finding and fleet status give t
     F.tick(OFF);
     const f = findings(F).find((x) => x.kind === 'supervisor-at-limit');
     assert.ok(f);
-    // with its Stop hook, as recover's own start has it (supervisor.md §6, Every ask is an Inbox question)
-    assert.ok(f.suggestion.includes(`claude --settings '${path.join(fs.realpathSync(F.root), 'docs/devteam/run/agent/supervisor-claude.json')}' --resume ${SID}`), f.suggestion);
-    assert.match(fs.readFileSync(path.join(F.root, 'docs/devteam/run/agent/supervisor-claude.json'), 'utf8'), /devteam\.mjs' stop-ok --supervisor"/, 'its hook says whose window it is');
+    assert.ok(f.suggestion.includes(`claude --resume ${SID}`), f.suggestion);
+    // a read writes nothing: the line only names the Stop hook's file once a start has written it
+    const hook = path.join(F.root, 'docs/devteam/run/agent/supervisor-claude.json');
+    assert.ok(!fs.existsSync(hook), 'the finding wrote no file');
     assert.doesNotMatch(f.suggestion, /dangerously-skip-permissions/, 'no running process to take it from: left out');
     assert.ok(f.suggestion.includes('DEVTEAM_ROLE=supervisor'), f.suggestion);
     // a dead machine, not at a limit: fleet status still says how to bring the supervisor back
     F.writeTranscript(SID, [{ type: 'user', message: { content: SUP } }, { type: 'assistant', timestamp: new Date().toISOString(), message: { content: [{ type: 'text', text: 'working' }] } }]);
     const shown = F.run(['fleet', 'status', '--no-fetch'], { DEVTEAM_ROLE: '' });
-    assert.match(shown.stdout, new RegExp(`recovery .*claude --settings \\S+supervisor-claude\\.json' --resume ${SID}`), shown.stderr);
+    assert.match(shown.stdout, new RegExp(`recovery .*claude --resume ${SID}`), shown.stderr);
+    assert.ok(json(F.run(['fleet', 'status', '--no-fetch', '--json'], { DEVTEAM_ROLE: '' }).stdout).recovery.endsWith(`claude --resume ${SID}`));
+    assert.ok(!fs.existsSync(hook), 'nor did fleet status');
+    // once a start has written it, the by-hand line carries it too (supervisor.md §6, Every ask is an Inbox question)
+    write(hook, '{}\n');
+    assert.ok(F.run(['fleet', 'status', '--no-fetch'], { DEVTEAM_ROLE: '' }).stdout.includes(`claude --settings '${path.join(fs.realpathSync(F.root), 'docs/devteam/run/agent/supervisor-claude.json')}' --resume ${SID}`));
     assert.ok(json(F.run(['fleet', 'status', '--no-fetch', '--json'], { DEVTEAM_ROLE: '' }).stdout).recovery.endsWith(`supervisor-claude.json' --resume ${SID}`));
+    assert.equal(fs.readFileSync(hook, 'utf8'), '{}\n', 'and leaves it as it was');
     assert.equal(F.run(['supervisor-session'], { DEVTEAM_ROLE: '' }).stdout, `${SID}\n`, 'stdout stays the bare id: the box\'s boot reads it');
   } finally { F.done(); }
 });
@@ -81,6 +88,7 @@ test('recover: a dead machine with no tmux server brings the supervisor back on 
     await until(() => F.claudeCalls().length === 1, 'the stand-in claude ran');
     // with its Stop hook (supervisor.md §6, Every ask is an Inbox question): the policy recover wrote
     assert.match(F.claudeCalls()[0], /^supervisor\|--settings \S+\/run\/agent\/supervisor-claude\.json /, F.claudeCalls()[0]);
+    assert.match(fs.readFileSync(path.join(F.root, 'docs/devteam/run/agent/supervisor-claude.json'), 'utf8'), /devteam\.mjs' stop-ok --supervisor"/, 'its hook says whose window it is');
     assert.ok(F.claudeCalls()[0].replace(/--settings \S+ /, '').startsWith(`supervisor|--resume ${SID} --dangerously-skip-permissions This machine restarted`), F.claudeCalls()[0]);
     assert.match(F.claudeCalls()[0], /Nothing about this restart came from the owner/, 'it carries no owner authority');
     assert.match(F.claudeCalls()[0], /keep the loop, as before the restart: run the tick \(§3\) now, then wait with devteam\.mjs wait and tick again when it returns, until the owner stops you\. A summary to the owner doesn't end it\.$/, 'and it ends by keeping the loop, never at a summary');

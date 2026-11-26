@@ -22522,8 +22522,9 @@ function supervisorRecovery(id) {
   const cmd = supervisorResumeCommand(id) ?? loadSettings().resume_command.replace(/^claude(?=\s|$)/, `claude --resume ${id}`);
   const { target } = resolvePane(supervisorTarget());
   const agent = target ? paneAgentProcess(target) : null;
-  // with its Stop hook, as recover's start has it (supervisor.md §6, Every ask is an Inbox question)
-  return `DEVTEAM_ROLE=supervisor ${withSupervisorPolicy(isSupervisorProcess(agent) && startedSkippingPermissions(agent.args) ? cmd : withoutSkipPermissions(cmd))}`;
+  // with its Stop hook once a start (recover, the restart after a limit) has written it (supervisor.md
+  // §6, Every ask is an Inbox question); printed only, so it writes nothing
+  return `DEVTEAM_ROLE=supervisor ${withSupervisorPolicy(isSupervisorProcess(agent) && startedSkippingPermissions(agent.args) ? cmd : withoutSkipPermissions(cmd), { write: false })}`;
 }
 // A supervisor in tmux stopped at a limit, on its exact conversation: claude --resume <id> from
 // resume_command, in place of the pane's process, after the same refusals as a worker. Claude Code
@@ -39914,14 +39915,18 @@ function claudePolicy(name, s, mb, { stopHook = false } = {}) {
 }
 // The supervisor's: only the Stop hook (stop-ok), which sends an ask of the owner that names no Inbox
 // question back to be asked there. No deny rules: the worker's are not the supervisor's. Its path.
+const supervisorPolicyFile = () => path.join(runDir, 'agent', 'supervisor-claude.json');
 function supervisorPolicy() {
-  const policy = path.join(runDir, 'agent', 'supervisor-claude.json');
+  const policy = supervisorPolicyFile();
   fs.mkdirSync(path.dirname(policy), { recursive: true });
   fs.writeFileSync(policy, `${JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok --supervisor` }] }] } }, null, 2)}\n`);
   return policy;
 }
-// A Claude Code supervisor command with that policy: any other agent command as it is.
-const withSupervisorPolicy = (cmd) => (/^claude(\s|$)/.test(cmd ?? '') && !/\s--settings\s/.test(` ${cmd} `) ? cmd.replace(/^claude/, `claude --settings '${supervisorPolicy()}'`) : cmd);
+// A Claude Code supervisor command with that policy: any other agent command as it is. Written only
+// where a supervisor is started (recover, restartSupervisor); a command that is only printed (the
+// by-hand line, which a read such as fleet status shows) writes nothing, and names the file only once
+// a start has written it.
+const withSupervisorPolicy = (cmd, { write = true } = {}) => (/^claude(\s|$)/.test(cmd ?? '') && !/\s--settings\s/.test(` ${cmd} `) && (write || fs.existsSync(supervisorPolicyFile())) ? cmd.replace(/^claude/, `claude --settings '${write ? supervisorPolicy() : supervisorPolicyFile()}'`) : cmd);
 // The agent's trust in its folder, before it starts (agent_trust_command); a dialog left up is a finding.
 function trustWorktree(wt, s, R) {
   if (s.agent_trust_command && typeof s.agent_trust_command !== 'string') warn('agent_trust_command is not a string (a shell command), so it was not run');
