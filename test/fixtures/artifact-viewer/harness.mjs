@@ -298,6 +298,10 @@ export async function harness(t, fixture) {
     // how many words the frames' pages have said so far
     V.mark = () => p.ev('window.__own.length');
     const said = (from, page, hash = null) => `window.__own.slice(${from}).some((m) => m.own === 'at' && m.page === ${J(page)}${hash === null ? '' : ` && m.hash === ${J(hash)}`})`;
+    // the stage's own frame said, since from, where page's elements are, drawn: none of them 0x0. A page's
+    // word on its load can find its frame not yet drawn and say 0x0, its drawn word two frames later; up
+    // on the first, an aim read at once found nothing, and a word held from then on was the drawn one (kit-948)
+    const drawn = (from, page) => `window.__own.slice(${from}).some((m) => m.own === 'at' && m.page === ${J(page)} && window.__ownFrom.get(m) === tsFrame() && !!m.rects && Object.values(m.rects).every((r) => r.w > 0 && r.h > 0))`;
     // the viewer opened by its head (a new entry, as a link in the dashboard makes), up and its page loaded
     V.open = async (head) => {
       const n = await V.mark();
@@ -305,15 +309,15 @@ export async function harness(t, fixture) {
       await V.up(head, n);
       if (RECTS_DELAY_MS) await p.ev('window.__rectsDelay = true');
     };
-    // up on head's stage: the lens ready (and a preview's app at /), the page's own word heard since from
+    // up on head's stage: the lens ready (and a preview's app at /), the page's own drawn word heard since from
     V.up = async (head, from) => {
       if (head.startsWith('#preview/')) {
         await soon(`${VIEWER_UP} && TS.kind === 'preview' && TS.ready && TS.route === '/'`, `setup: the preview's lens ready at / (the relay in the page's policy?): ${head}`);
-        await soon(said(from, 'app/'), "setup: the app's page loaded in the lens");
+        await soon(drawn(from, 'app/'), "setup: the app's page loaded in the lens and said where its elements are drawn");
       } else {
         const slug = /^#artifact\/main\/(.+)$/.exec(head)[1];
         await soon(`${VIEWER_UP} && TS.kind === 'artifact' && TS.slug === ${J(slug)} && TS.ready`, `setup: the viewer up on ${slug}, its lens ready`);
-        await soon(said(from, `${slug}/index.html`), `setup: ${slug}'s page loaded in the frame`);
+        await soon(drawn(from, `${slug}/index.html`), `setup: ${slug}'s page loaded in the frame and said where its elements are drawn`);
       }
     };
     // A real press at (x, y) on the dashboard's own element what (its id): drawn first and the mouse

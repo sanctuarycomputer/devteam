@@ -12,7 +12,7 @@ import vm from 'node:vm';
 import { execFileSync } from 'node:child_process';
 import { json, line, write } from './lib/kit.mjs';
 import { fixture, SUP } from './lib/next-step-fixture.mjs';
-import { checkExterior as refCheckExterior } from './fixtures/world2/check.mjs';
+import { checkExterior as refCheckExterior, headings as refHeadings } from './fixtures/world2/check.mjs';
 
 const P = 'docs/devteam/project';
 const SELF = `${P}/self.md`;
@@ -38,6 +38,9 @@ const DAY = 86400000;
 const SHIFT = Math.round((Date.parse(`${TODAY}T00:00:00Z`) - Date.parse(`${W2.today}T00:00:00Z`)) / DAY);
 const realDay = (d) => { const t = new Date(`${d}T00:00:00Z`); return !Number.isNaN(t.getTime()) && t.toISOString().slice(0, 10) === d; };
 const shifted = (text) => text.replace(/(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)/g, (d) => (realDay(d) ? new Date(Date.parse(`${d}T00:00:00Z`) + SHIFT * DAY).toISOString().slice(0, 10) : d));
+// The wording a refused heading's line takes: "(a ### heading)" only where text heads an entry with
+// it (a level-3 ATX heading), "(a heading)" for any other form or level (kit-933).
+const formOf = (text, n) => (refHeadings(text).some((h) => h.level === 3 && h.text === n) ? '(a ### heading)' : '(a heading)');
 // what the reference says of a case, as the fixture reads it
 const oracle = (c) => refCheckExterior(shifted(world2(c.file)), { today: TODAY, visibility: c.visibility, allowed });
 
@@ -156,6 +159,28 @@ test('P1t the region reads a hostile or large exterior text in under 2 s each', 
     ['5,000 ### entries, each dated', Array.from({ length: 5000 }, (_, i) => `### ${name(i)}\n\n[p](https://x.example/) (read 2026-11-20)\n`).join('\n')],
     ['a user of 100,000 commas', `[x](https://${'a,'.repeat(100000)}@b.example)`],
     ['www. 2,000 times', 'www.'.repeat(2000)],
+    // kit-933: every heading form, read in linear time
+    ['50,000 setext headings', Array.from({ length: 50000 }, (_, i) => `${name(i)}\n---`).join('\n\n')],
+    ['one paragraph of 50,000 lines over a setext line', `${distinct(50000).replace(/ /g, '\n')}\n===`],
+    ['20,000 <h2 never closed, then 20,000 <h2>', `${'<h2 '.repeat(20000)}${'<h2>Z '.repeat(20000)}`],
+    ['an <h2> holding 100,000 <', `<h2>${'<'.repeat(100000)}Z</h2>`],
+    ['a list marker, 100,000 spaces, then a setext line', `- ${' '.repeat(100000)}x\n---`],
+    ['50,000 quote and item markers before a ###', `${'> - '.repeat(50000)}### Z`],
+    // finals 2 and 2b: a # or ## heading read as shown, its comments, instructions and quoted values whole
+    ['an ## heading of 100,000 unclosed <!--', `## a${'<!--'.repeat(100000)}`],
+    ['an ## heading of 100,000 unclosed <?', `## a${'<?'.repeat(100000)}`],
+    ['an ## heading of 50,000 unclosed quoted values', `## a${'<b title="'.repeat(50000)}`],
+    ['an ## heading of 50,000 quoted >', `## a${'<b title=">'.repeat(50000)}`],
+    // finals 3 and 3b: the joined reading, each span read whole in linear time
+    ['an ## heading of 30,000 quoted values holding a tag', `## a${'<b a="<b a="'.repeat(30000)}`],
+    ['an ## heading of 50,000 unclosed declarations', `## a${'<!x '.repeat(50000)}`],
+    ['an ## heading of 30,000 attribute names holding <', `## a${'<b a<b a '.repeat(30000)}`],
+    ['an ## heading of 50,000 unclosed CDATA', `## a${'<![CDATA['.repeat(50000)}`],
+    // finals 4 and 4b: the cut at each span's first >, and the brackets, in linear time
+    ['an ## heading of 50,000 comments, none ended --!>', `## a${'<!-- -->'.repeat(50000)}`],
+    ['an ## heading of 100,000 < then a letter, no >', `## a${'<x'.repeat(100000)}`],
+    ['an ## heading of 50,000 unclosed comments', `## a${'<!--'.repeat(50000)}`],
+    ['an ## heading of 50,000 ][', `## a${'[a]['.repeat(50000)}`],
   ]) {
     const start = process.hrtime.bigint();
     assert.doesNotThrow(() => P.checkExterior(`# T\n\n${x}\n`, { today: W2.today, visibility: 'public', allowed }), what);
@@ -175,7 +200,7 @@ test('P2 exterior check gives each world2 exterior case the reference\'s result'
       const warns = [...r.out.matchAll(/^warn: exterior\.md: (.*)$/gm)].map((m) => m[1]);
       assert.deepEqual(errs.slice(0, o.errors.length), o.errors, `P2 exterior check's errors on ${c.file}\n${r.out}`);
       assert.equal(errs.length, o.errors.length + o.refused.length, `P2 exterior check's error lines on ${c.file}\n${r.out}`);
-      o.refused.forEach((n, i) => assert.ok(errs[o.errors.length + i].startsWith(`"${n}" (a ### heading)`), `P2 ${c.file} refuses "${n}"\n${r.out}`));
+      o.refused.forEach((n, i) => assert.ok(errs[o.errors.length + i].startsWith(`"${n}" ${formOf(shifted(world2(c.file)), n)} `), `P2 ${c.file} refuses "${n}" as ${formOf(shifted(world2(c.file)), n)}\n${r.out}`));
       assert.deepEqual(warns.slice(0, o.warnings.length), o.warnings, `P2 exterior check's warnings on ${c.file}\n${r.out}`);
       const held = [...o.held.map((w) => `"${w}" (word)`), ...o.hosts.map((h) => `"${h}" (link host)`)];
       assert.deepEqual(warns.slice(o.warnings.length).map((w) => w.replace(/ is in neither.*$/, '')), held, `P2 ${c.file} holds each word and host\n${r.out}`);
@@ -447,3 +472,493 @@ test('H HELP_OBSERVE\'s exterior line says exterior@2 and the document', () => {
   assert.doesNotMatch(help, /exterior@1|signals and scores/, `H no version 1 words: ${help}`);
   assert.match(help, /exterior@2/, `H names exterior@2: ${help}`);
 });
+
+// kit-933: every heading a page shows is judged on a repo not known to be private. Level 3 to 6, in
+// any form, is refused unless named whole; a # or ## heading (the title and sections, in plain words)
+// is refused when it holds a capitalised word, Exterior aside, not named whole; both in origin main's
+// strategy or dependency names. The reference and the region agree on each.
+const formDoc = (x) => `# Exterior\n\n## Rivals\n\n${x}\n`;
+const HEADING_FORMS = [
+  ['an ## heading', '## Zorbly Labs', ['Zorbly Labs']],
+  ['a second # heading', '# Zorbly', ['Zorbly']],
+  ['a #### heading', '#### Zorbly', ['Zorbly']],
+  ['a ###### heading, closing #s', '###### Zorbly ###', ['Zorbly']],
+  ['a setext = heading', 'Zorbly\n======', ['Zorbly']],
+  ['a setext - heading of two lines', 'Zorbly\nLabs\n---', ['Zorbly Labs']],
+  ['an HTML <h2>, with an attribute', '<h2 class="x">Zorbly</h2>', ['Zorbly']],
+  ['an HTML <h3>, a tag inside', '<h3><em>Zorbly</em></h3>', ['Zorbly']],
+  ['an HTML <h6> never closed', '<h6>Zorbly', ['Zorbly']],
+  ['an HTML <H1> in capitals', '<H1>Zorbly</H1>', ['Zorbly']],
+  ['a ### in a list item', '- ### Zorbly', ['Zorbly']],
+  ['an ## in an ordered item', '1. ## Zorbly', ['Zorbly']],
+  ['a ### in a block quote', '> ### Zorbly', ['Zorbly']],
+  ['a #### in a list in a block quote', '> - #### Zorbly', ['Zorbly']],
+  ['a setext heading in a list item', '- Zorbly\n  ---', ['Zorbly']],
+  ['a setext heading in a block quote', '> Zorbly\n> ===', ['Zorbly']],
+  ['a lower-case ####', '#### zorbly co', ['zorbly co']],
+  ['a lower-case ### in a block quote', '> ### zorbly', ['zorbly']],
+  ['a lower-case <h4>', '<h4>zorbly</h4>', ['zorbly']],
+  ['a setext heading of two quoted lines', '> Zorbly\n> Vendors\n> ---', ['Zorbly Vendors']],
+  ['a setext heading of two lines in a list item', '- Zorbly\n  Labs\n  ---', ['Zorbly Labs']],
+  ['an <h2> in a fence', '```\n<h2>Zorbly</h2>\n```', ['Zorbly']],
+  ['an <h2> in a comment', '<!--\n<h2>Zorbly</h2>\n-->', ['Zorbly']],
+  ['an <h2> after a comment on its line', '<!-- x --> <h2>Zorbly</h2>', ['Zorbly']],
+  ['an <h2> in a code span', 'See `<h2>Zorbly</h2>` here.', ['Zorbly']],
+  ['an <h2> between fence lines in a <div>', '<div>\n```\n<h2>Zorbly</h2>\n```\n</div>', ['Zorbly']],
+  ['an <h2> whose backtick pairs with a later tag\'s', '<h2 title="`">Zorbly Labs</h2><span title="`"></span>', ['Zorbly Labs']],
+  ['an <h2>, a blank line, then its text', '<h2>\n\nZorbly', ['Zorbly']],
+  ['an indented <h2> in a <pre> after a blank line', '<pre>\n\n    <h2>Zorbly</h2>\n</pre>', ['Zorbly']],
+  ['an <h2> whose attribute holds a <', '<h2 title="a<b">Zorbly Labs</h2>', ['Zorbly Labs']],
+  ['an <h4> whose attribute is a lone <', '<h4 data-x="<">zorbly</h4>', ['zorbly']],
+  ['an <h2> whose attribute reads like a heading tag', "<h2 title='<h3'>Zorbly</h2>", ['Zorbly']],
+  ['an image in an <h2>', '<h2><img alt="Zorbly" src="z.png"></h2>', ['Zorbly']],
+  // final-1b F1: a footnote definition holds a heading as a list item or a block quote does
+  ['an ## heading in a footnote definition', 'See[^z].\n\n[^z]: ## Zorbly Labs', ['Zorbly Labs']],
+  ['a lower-case #### in a footnote definition', 'See[^z].\n\n[^z]: #### zorbly', ['zorbly']],
+  // final-1 F2: a # or ## heading's words also as a page shows them (references decoded, tags and comments
+  // dropped); its text as written is what is refused. A comment splitting a word was refused before as well.
+  ['an <h2> spelled with a character reference', '<h2>&#90;orbly</h2>', ['&#90;orbly']],
+  ['an ## heading whose word an inline tag splits', '## Z<b>orbly</b>', ['Z<b>orbly</b>']],
+  ['an ## heading whose word a comment splits', '## Zor<!-- -->bly', ['Zor<!-- -->bly']],
+  // final-1 F3: a # or ## heading's link host is judged as its words are
+  ['an ## heading of an autolink', '## <https://zorbly.example>', ['<https://zorbly.example>']],
+  ['an ## heading whose link points at an unnamed host', '## [our partner](https://zorbly.example)', ['our partner']],
+  // final-2 F1-2: a footnote's indented continuation is read, as a list item's is
+  ['a lower-case #### in a footnote\'s continuation', 'See[^z].\n\n[^z]: a\n\n    #### zorbly', ['zorbly']],
+  ['an ## heading in a footnote\'s continuation', 'See[^z].\n\n[^z]: a\n\n    ## Zorbly Labs', ['Zorbly Labs']],
+  // final-2b I1, final-2 F4-2: invisible characters dropped; a quoted value, a comment and <?x?> read whole
+  ['an ## heading split by a quoted > in an attribute', '## Z<b title=">">orbly</b>', ['Z<b title=">">orbly</b>']],
+  ['an ## heading split by a comment holding >', '## Z<!-- a > b -->orbly', ['Z<!-- a > b -->orbly']],
+  ['an ## heading split by a processing instruction', '## Z<?x?>orbly', ['Z<?x?>orbly']],
+  ['an ## heading split by &shy;', '## Z&shy;orbly', ['Z&shy;orbly']],
+  ['an ## heading split by &#173;', '## Z&#173;orbly', ['Z&#173;orbly']],
+  ['an ## heading split by &#8203;', '## Z&#8203;orbly', ['Z&#8203;orbly']],
+  ['an ## heading split by &zwj;', '## Z&zwj;orbly', ['Z&zwj;orbly']],
+  ['an ## heading split by a soft hyphen', '## Z\u00ADorbly', ['Z\u00ADorbly']],
+  ['an ## heading split by a zero-width space', '## Z\u200Borbly', ['Z\u200Borbly']],
+  ['an ## heading split by a zero-width joiner', '## Z\u200Dorbly', ['Z\u200Dorbly']],
+  ['an ## heading split by a word joiner', '## Z\u2060orbly', ['Z\u2060orbly']],
+  // finals 3 and 3b: a # or ## heading's joined reading (markup removed with no separator, typed spaces kept)
+  ['an ## heading split by a literal U+FEFF', '## Z\uFEFForbly', ['Z orbly']],
+  ['a setext heading split by a literal U+FEFF', 'Z\uFEFForbly\n---', ['Z orbly']],
+  ['an ## heading split by a declaration', '## Z<!x y>orbly', ['Z<!x y>orbly']],
+  ['an ## heading split by a lower-case doctype', '## Z<!doctype y>orbly', ['Z<!doctype y>orbly']],
+  ['an ## heading split by an end tag that closes nothing', '## Z</div>orbly', ['Z</div>orbly']],
+  ['an ## heading split by a </section>', '## Z</section>orbly', ['Z</section>orbly']],
+  ['an ## heading split by a <td> outside a table', '## Z<td>orbly', ['Z<td>orbly']],
+  ['an <h2> split by an end tag that closes nothing', '<h2>Z</div>orbly</h2>', ['Z orbly']],
+  ['an ## heading half struck through', '## Z~~orbly~~', ['Z~~orbly~~']],
+  ['an ## heading of a decomposed capital', '## E\u0301mile', ['E\u0301mile']],
+  ['a # heading of a decomposed capital', '# E\u0301mile', ['E\u0301mile']],
+  ['an ## heading with a decomposed capital later', '## our rival E\u0301mile', ['our rival E\u0301mile']],
+  ['an ## heading split by a quoted < in an attribute', '## Z<b title="<">orbly</b>', ['Z<b title="<">orbly</b>']],
+  ['an ## heading split by a single-quoted <', "## Z<b title='<'>orbly</b>", ["Z<b title='<'>orbly</b>"]],
+  ['an <h2> split by a quoted < in an attribute', '<h2>Z<b title="<">orbly</b></h2>', ['Z<b title=" orbly']],
+  // finals 4 and 4b: mixed forms (what only seen dropped, with what only joined did), read joined
+  ['an ## heading split by &shy; and a declaration', '## Z&shy;<!x y>orbly', ['Z&shy;<!x y>orbly']],
+  ['an ## heading split by a CGJ and a U+FEFF', '## Z\u034F\uFEFForbly', ['Z\u034F orbly']],
+  ['an ## heading split by &zwj; and strikethrough', '## Z&zwj;~~orbly~~', ['Z&zwj;~~orbly~~']],
+  ['an ## heading split by a CGJ and a declaration', '## Z\u034F<!x y>orbly', ['Z\u034F<!x y>orbly']],
+  ['an ## heading split by &#x34f; and strikethrough', '## Z&#x34f;~~orbly~~', ['Z&#x34f;~~orbly~~']],
+  ['an ## heading split by a VS16 and an end tag', '## Z\uFE0F</div>orbly', ['Z\uFE0F</div>orbly']],
+  ['an ## heading split by &lrm; and a <td>', '## Z&lrm;<td>orbly', ['Z&lrm;<td>orbly']],
+  ['an ## heading split by a numeric default-ignorable and strikethrough', '## Z&#x2065;~~orbly~~', ['Z&#x2065;~~orbly~~']],
+  // a reference link's brackets, and its label, taken out
+  ['an ## heading a full reference link splits', '## Z[orbly][r]\n\n[r]: https://x.example', ['Z[orbly][r]']],
+  ['an ## heading a collapsed reference link splits', '## Z[orbly][]\n\n[orbly]: https://x.example', ['Z[orbly][]']],
+  ['an ## heading a shortcut reference link splits', '## Z[orbly]\n\n[orbly]: https://x.example', ['Z[orbly]']],
+  ['an ## heading a reference link opens', '## [Z][r]orbly\n\n[r]: https://x.example', ['[Z][r]orbly']],
+  // a combining mark NFKC cannot compose, dropped
+  ['an ## heading of a capital with a combining low line', '## Z\u0332orbly', ['Z\u0332orbly']],
+  ['an ## heading of a capital with an acute no letter takes', '## Q\u0301uux', ['Q\u0301uux']],
+  // each span cut again where a page ends it, at its first >
+  ['an ## heading an instruction splits, ended at its first >', '## Z<?x>orbly ?>', ['Z<?x>orbly ?>']],
+  ['an ## heading a declaration holding < splits', '## Z<!x <y>orbly', ['Z<!x <y>orbly']],
+  ['an ## heading a declaration holding a tag splits', '## Z<!x <b>orbly', ['Z<!x <b>orbly']],
+  ['an <h2> an instruction splits', '<h2>Z<?x>orbly</h2>', ['Z orbly']],
+  ['an <h2> a spaced end tag splits', '<h2>Z</ x>orbly</h2>', ['Z orbly']],
+  ['an <h2> split by <!-->', '<h2>Z<!-->orbly</h2>', ['Z orbly']],
+  ['an <h2> split by <!--->', '<h2>Z<!--->orbly</h2>', ['Z orbly']],
+  ['an <h2> split by a comment ended --!>', '<h2>Z<!-- --!>orbly</h2>', ['Z orbly']],
+  ['an ## heading a comment holding > and an instruction split', '## Z<!-- > --><?x>orbly ?>', ['Z<!-- > --><?x>orbly ?>']],
+  ['an <h2> split by a tag CommonMark does not take', '<h2>Z<b_x>orbly</h2>', ['Z orbly']],
+  ['an <h2> split by a tag with a stray quote', '<h2>Z<b a=x"y>orbly</h2>', ['Z orbly']],
+  // finals 5 and 5b, and the ruling that a # or ## heading, and an HTML one, be plain text
+  // (a-20261126-080419596): no raw HTML, character reference, \p{C} but a tab, mark left after NFC,
+  // default-ignorable character, ~~, [ or ]
+  ['an ## heading split inside a second bracket, by a declaration', '## [a][Z<!x y>orbly]', ['[a][Z<!x y>orbly]']],
+  ['an ## heading split inside a second bracket, by strikethrough', '## [a][Z~~orbly~~]', ['[a][Z~~orbly~~]']],
+  ['an ## heading split inside a second bracket, by a <td>', '## [a][Z<td>orbly]', ['[a][Z<td>orbly]']],
+  ['an ## heading split inside a second bracket, by an end tag', '## [a][Z</div>orbly]', ['[a][Z</div>orbly]']],
+  ['an ## heading split inside a second bracket, by a U+FEFF', '## [a][Z\uFEFForbly]', ['[a][Z orbly]']],
+  ['an ## heading split after a lone ], by a declaration', '## rivals][Z<!x y>orbly]', ['rivals][Z<!x y>orbly]']],
+  ['an <h2> split inside a second bracket', '<h2>[a][Z<!x y>orbly]</h2>', ['[a][Z orbly]']],
+  ['a list item ## split inside a second bracket', '- ## [a][Z~~orbly~~]', ['[a][Z~~orbly~~]']],
+  ['an ## heading split by a quoted > and an instruction', '## Z<b title=">"><?x>orbly ?>', ['Z<b title=">"><?x>orbly ?>']],
+  ['an ## heading split by a single-quoted > and an instruction', '## Z<b title=\'>\'><?x>orbly ?>', ['Z<b title=\'>\'><?x>orbly ?>']],
+  ['an ## heading split by a quoted > and a declaration holding <', '## Z<b title=">"><!x <y>orbly', ['Z<b title=">"><!x <y>orbly']],
+  ['an ## heading split by strikethrough, a quoted > and an instruction', '## Z~~<b title=">">~~<?x>orbly ?>', ['Z~~<b title=">">~~<?x>orbly ?>']],
+  ['an <h2> split by a quoted > and an instruction', '<h2>Z<b title=">"><?x>orbly</h2>', ['Z "> orbly']],
+  ['an <h2> split by a quoted > and <!-->', '<h2>Z<b title=">"><!-->orbly</h2>', ['Z "> orbly']],
+  ['an <h2> split by a quoted > and a comment ended --!>', '<h2>Z<b title=">"><!-- --!>orbly</h2>', ['Z "> orbly']],
+  ['an <h2> split by a quoted > and a tag CommonMark does not take', '<h2>Z<b title=">"><b_x>orbly</h2>', ['Z "> orbly']],
+  ['an ## heading split by an instruction and a quoted >', '## Z<?x><b title=">">orbly ?>', ['Z<?x><b title=">">orbly ?>']],
+  ['a # heading split by an instruction and a quoted >', '# Z<?x><b title=">">orbly ?>', ['Z<?x><b title=">">orbly ?>']],
+  ['a setext heading split by an instruction and a quoted >', 'Z<?x><b title=">">orbly ?>\n---', ['Z<?x><b title=">">orbly ?>']],
+  ['a quoted ## split by an instruction and a quoted >', '> ## Z<?x><b title=">">orbly ?>', ['Z<?x><b title=">">orbly ?>']],
+  ['an <h2> split by an instruction and a quoted >', '<h2>Z<?x><b title=">">orbly</b></h2>', ['Z ">orbly']],
+  ['an ## heading split by a declaration holding < and a quoted >', '## Z<!x <y><b title=">">orbly</b>', ['Z<!x <y><b title=">">orbly</b>']],
+  ['an <h2> split by a declaration holding < and a quoted >', '<h2>Z<!x <y><b title=">">orbly</b></h2>', ['Z<!x ">orbly']],
+  ['an ## heading split by a quoted comment opener', '## Z<b title="<!-- >">orbly</b> -->', ['Z<b title="<!-- >">orbly</b> -->']],
+  ['an <h2> split by <!--> and a quoted >', '<h2>Z<!--><b title=">">orbly</b></h2>', ['Z ">orbly']],
+  ['an <h2> split by a comment ended --!> and a quoted >', '<h2>Z<!-- --!><b title=">">orbly</b></h2>', ['Z ">orbly']],
+  ['an <h2> split by a tag CommonMark does not take and a quoted >', '<h2>Z<b_x><b title=">">orbly</b></h2>', ['Z ">orbly']],
+  ['an <h2> split by a spaced end tag and a quoted >', '<h2>Z</ x><b title=">">orbly</b></h2>', ['Z ">orbly']],
+  ['an <h2> split by an instruction and a single-quoted >', '<h2>Z<?x><b title=\'>\'>orbly</b></h2>', ['Z \'>orbly']],
+  ['an <h2> split by &#173 with no ;', '<h2>Z&#173orbly</h2>', ['Z&#173orbly']],
+  ['an <h2> split by &#xAD with no ;', '<h2>Z&#xADorbly</h2>', ['Z&#xADorbly']],
+  ['an <h2> split by &shy with no ;', '<h2>Z&shyorbly</h2>', ['Z&shyorbly']],
+  ['an <h2> split by &#847 with no ;', '<h2>Z&#847orbly</h2>', ['Z&#847orbly']],
+  ['an <h2> split by &#xFEFF with no ;', '<h2>Z&#xFEFForbly</h2>', ['Z&#xFEFForbly']],
+  ['an <h2> split by a hex reference with leading zeros', '<h2>Z&#x00000000AD;orbly</h2>', ['Z&#x00000000AD;orbly']],
+  ['an <h2> split by a decimal reference with leading zeros', '<h2>Z&#00000000173;orbly</h2>', ['Z&#00000000173;orbly']],
+  ['an ## heading opening with &angst;', '## &angst;rhus', ['&angst;rhus']],
+  ['an ## heading opening with &ohm;', '## &ohm;mega', ['&ohm;mega']],
+  ['an ## heading opening with &real;', '## &real;ivals', ['&real;ivals']],
+  ['an ## heading opening with &image;', '## &image;nc', ['&image;nc']],
+  ['an ## heading of a capital in an enclosing circle', '## Z\u20DDorbly', ['Z\u20DDorbly']],
+  ['an ## heading of a capital in a keycap', '## Z\u20E3orbly', ['Z\u20E3orbly']],
+  ['an ## heading of a capital with a spacing mark', '## Z\u0903orbly', ['Z\u0903orbly']],
+  ['a lower-case ## heading holding a tag', '## our <b>rivals</b>', ['our <b>rivals</b>']],
+  ['a lower-case ## heading holding a character reference', '## rivals &amp; vendors', ['rivals &amp; vendors']],
+  ['a lower-case ## heading holding a private-use character', '## our\uE000rivals', ['our\uE000rivals']],
+  ['a lower-case ## heading holding a combining mark', '## our rivals\u20DD', ['our rivals\u20DD']],
+  ['a lower-case ## heading holding a Hangul filler', '## our\u3164rivals', ['our\u3164rivals']],
+  ['a lower-case ## heading holding strikethrough', '## our ~~old~~ rivals', ['our ~~old~~ rivals']],
+  ['a lower-case ## heading holding a bracket', '## our [rivals]', ['our [rivals]']],
+  ['a lower-case ## heading holding a lone ]', '## our rivals]', ['our rivals]']],
+  ['an <h3> of a named word in a tag', '<h3><b>Vendors</b></h3>', ['Vendors']],
+  ['an <h2> outside code split by a tag', '<h2>Z<b>orbly</b></h2>', ['Z orbly']],
+  ['an <h2> in a fence, split by a tag, by the names rule as before', '```\n<h2>Z<b>orbly</b></h2>\n```', ['Z orbly']],
+  ['an ## heading of named words, one in an inline tag', '## <em>What</em> to watch', ['<em>What</em> to watch']],
+  ['an ## heading of named words a <br> divides', '## What<br>to watch', ['What<br>to watch']],
+  ['an ## heading of named words a <p> divides', '## What<p>to watch</p>', ['What<p>to watch</p>']],
+  // finals 6 and 6b (ruling m-20261126-121428851): an HTML heading tag is code only where a page keeps it
+  // as text, in a fence or indented code outside an HTML block, or wholly inside a comment or a code span
+  // its line doesn't break; and the Minors' rows, each holding one thing
+  ['an <h2> a backtick paragraph wraps', '`x\n<h2>Z<b title=">"><?x>orbly</h2>\n`', ['Z "> orbly']],
+  ['an <h2> of a split label a backtick paragraph wraps', '`x\n<h2>[a][Z<!x y>orbly]</h2>\n`', ['[a][Z orbly]']],
+  ['an <h2> after a comment that opens its line', '<!-- x --><h2>Z<b title=">"><?x>orbly</h2>', ['Z "> orbly']],
+  ['an <h2> after a comment that closes on its line', '<!-- x\n--><h2>[a][Z<!x y>orbly]</h2>', ['[a][Z orbly]']],
+  ['an <h2> that ends a paragraph holding a comment opener', 'a <!--\n<h2>Z<b title=">"><?x>orbly</h2>\n-->', ['Z "> orbly']],
+  ['an <h2> of a quoted > and an instruction after a comment on its line', '<!-- c --><h2>Z<b title=">"><?x>orbly</h2>', ['Z "> orbly']],
+  ['an <h2> of a quoted > and an instruction in a list item after a backtick in the item before', '- a `x\n- <h2>Z<b title=">"><?x>orbly</h2> `', ['Z "> orbly']],
+  ['an <h2> of a quoted > and an instruction after an ## heading holding a backtick', '## a `x\n<h2>Z<b title=">"><?x>orbly</h2> `', ['Z "> orbly']],
+  ['an <h2> of a quoted > and an instruction between fence marks in a <div>', '<div>\n```\n<h2>Z<b title=">"><?x>orbly</h2>\n```\n</div>', ['Z "> orbly']],
+  ['an <h2> of a quoted > and an instruction indented in a <pre> after a blank line', '<pre>\n\n    <h2>Z<b title=">"><?x>orbly</h2>\n</pre>', ['Z "> orbly']],
+  ['an <h2> of a split label after a comment on its line', '<!-- c --><h2>[a][Z<!x y>orbly]</h2>', ['[a][Z orbly]']],
+  ['an <h2> of a split label in a list item after a backtick in the item before', '- a `x\n- <h2>[a][Z<!x y>orbly]</h2> `', ['[a][Z orbly]']],
+  ['an <h2> of a split label after an ## heading holding a backtick', '## a `x\n<h2>[a][Z<!x y>orbly]</h2> `', ['[a][Z orbly]']],
+  ['an <h2> of a split label between fence marks in a <div>', '<div>\n```\n<h2>[a][Z<!x y>orbly]</h2>\n```\n</div>', ['[a][Z orbly]']],
+  ['an <h2> of a split label indented in a <pre> after a blank line', '<pre>\n\n    <h2>[a][Z<!x y>orbly]</h2>\n</pre>', ['[a][Z orbly]']],
+  ['an <h2> of &#173 after a comment on its line', '<!-- c --><h2>Z&#173orbly</h2>', ['Z&#173orbly']],
+  ['an <h2> of &#173 in a list item after a backtick in the item before', '- a `x\n- <h2>Z&#173orbly</h2> `', ['Z&#173orbly']],
+  ['an <h2> of &#173 after an ## heading holding a backtick', '## a `x\n<h2>Z&#173orbly</h2> `', ['Z&#173orbly']],
+  ['an <h2> of &#173 between fence marks in a <div>', '<div>\n```\n<h2>Z&#173orbly</h2>\n```\n</div>', ['Z&#173orbly']],
+  ['an <h2> of &#173 indented in a <pre> after a blank line', '<pre>\n\n    <h2>Z&#173orbly</h2>\n</pre>', ['Z&#173orbly']],
+  ['an <h2> after an empty comment <!-->', '<!--> <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> after an empty comment <!--->', 'a <!---> <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> in a comment holding --!>', 'a <!-- x --!> <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> in backticks in a <div> line', '<div>`<h2>Z<b title=">"><?x>orbly</h2>`</div>', ['Z "> orbly']],
+  ['an <h2> in backticks in an HTML block', '<div>\n`<h2>Z<b title=">"><?x>orbly</h2>`\n</div>', ['Z "> orbly']],
+  ['an <h2> in a span the line before breaks', 'a `b\n`<h2>Z<b title=">"><?x>orbly</h2>`', ['Z "> orbly']],
+  ['an <h2> in a span a table cell splits', '| a | b |\n|---|---|\n| `x | <h2>Z<b title=">"><?x>orbly</h2> ` | c |', ['Z "> orbly']],
+  ['an <h2> after a tag whose value holds a comment opener', 'a <b title="<!--"> <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> after a tag whose value holds a backtick', 'a <b title="`"> <h2>Z<b title=">"><?x>orbly</h2> `', ['Z "> orbly']],
+  ['an <h2> after an escaped comment opener', 'a \\<!-- <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> between fence marks in an HTML block of a custom tag', '<x-note>\n```\n<h2>Z<b title=">"><?x>orbly</h2>\n```\n</x-note>', ['Z "> orbly']],
+  ['an <h2> after an HTML block that a fence mark opened in', '<div>\n```\n\n<h2>Z<b title=">"><?x>orbly</h2>\n```', ['Z "> orbly']],
+  ['an <h2> in a list item after a comment opener in the item before', '- a <!--\n- b <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> after an ## heading holding a comment opener', '## a <!--\nb <h2>Z<b title=">"><?x>orbly</h2> -->', ['a <!--', 'Z "> orbly']],
+  ['a lower-case ## heading holding a closing tag', '## our rivals</b>', ['our rivals</b>']],
+  ['a lower-case ## heading holding a declaration', '## our <!x> rivals', ['our <!x> rivals']],
+  ['a lower-case ## heading holding an instruction', '## our <?x?> rivals', ['our <?x?> rivals']],
+  ['a lower-case ## heading holding a lone [', '## our [rivals', ['our [rivals']],
+  ['a lower-case ## heading holding a comment', '## our <!-- x --> rivals', ['our <!-- x --> rivals']],
+  ['a lower-case <h2> holding markup in backticks', '<h2>our `<b>` rivals</h2>', ['our rivals']],
+  // finals 7 and 7b: a comment from a line before hides a tag only where no line from its opener's on
+  // holds a list, quote or footnote marker or a | and the opener's line is at most three spaces in; and
+  // the Minors' pins (an HTML block after a marker, a comment across table cells)
+  ['an <h2> of a split label in a quote after a paragraph holding a comment opener', 'a <!--\n> b <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of a split label in a nested quote after a quoted comment opener', '> a <!--\n> > b <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of a split label in a quote after a blank quoted line and a comment opener', '> a <!--\n>\n> b <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of a split label in a quote after a quoted ## heading and a comment opener', '> a <!--\n> ## x\n> b <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of a split label in a quote in a list item after a comment opener', '- a <!--\n  > b <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of a quoted > and an instruction in a quote after a paragraph holding a comment opener', 'a <!--\n> b <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a quoted > and an instruction in a nested quote after a quoted comment opener', '> a <!--\n> > b <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a quoted > and an instruction in a quote after a blank quoted line and a comment opener', '> a <!--\n>\n> b <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a quoted > and an instruction in a quote after a quoted ## heading and a comment opener', '> a <!--\n> ## x\n> b <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a quoted > and an instruction in a quote in a list item after a comment opener', '- a <!--\n  > b <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label in a table row after a row holding a comment opener', 'a | b\n--|--\nc | <!-- x\nd <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of a split label in a table row after a comment opener and a piped row', 'a | b\n--|--\nc | <!-- x\n| e | f |\nd <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of a quoted > and an instruction in a table row after a row holding a comment opener', 'a | b\n--|--\nc | <!-- x\nd <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a quoted > and an instruction in a table row after a comment opener and a piped row', 'a | b\n--|--\nc | <!-- x\n| e | f |\nd <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a quoted > and an instruction after a comment opener in a quoted fence', '> ```\n> <!--\n> ```\n\n<h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a quoted > and an instruction in a quote after a comment opener in a quoted fence', '> ```\n> <!--\n> ```\n> <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a quoted > and an instruction in backticks after a comment opener in a quoted fence', '> ```\n> <!--\n> ```\n\n`x\n<h2>Z<b title=">"><?x>orbly</h2> `\n-->', ['Z "> orbly']],
+  ['an <h2> of a quoted > and an instruction on the line that ends a quoted fence holding a comment opener', '> ```\n> <!--\n<h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a quoted > and an instruction in a list item after a comment opener in its indented code', '- a\n\n      <!--\n\n  b <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a quoted > and an instruction in a quote after a comment opener in its indented code', '>     <!--\n> a <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a quoted > and an instruction after a comment opener in a footnote\'s indented code', '[^1]: a\n\n    <!--\n\nb <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label after a comment opener in a quoted fence', '> ```\n> <!--\n> ```\n\n<h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of a split label in a quote after a comment opener in a quoted fence', '> ```\n> <!--\n> ```\n> <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of a split label in backticks after a comment opener in a quoted fence', '> ```\n> <!--\n> ```\n\n`x\n<h2>[a][Z<!x y>orbly]</h2> `\n-->', ['[a][Z orbly]']],
+  ['an <h2> of a split label on the line that ends a quoted fence holding a comment opener', '> ```\n> <!--\n<h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of a split label in a list item after a comment opener in its indented code', '- a\n\n      <!--\n\n  b <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of a split label in a quote after a comment opener in its indented code', '>     <!--\n> a <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of a split label after a comment opener in a footnote\'s indented code', '[^1]: a\n\n    <!--\n\nb <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 after a comment opener in a quoted fence', '> ```\n> <!--\n> ```\n\n<h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of &#173 in a quote after a comment opener in a quoted fence', '> ```\n> <!--\n> ```\n> <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of &#173 in backticks after a comment opener in a quoted fence', '> ```\n> <!--\n> ```\n\n`x\n<h2>Z&#173orbly</h2> `\n-->', ['Z&#173orbly']],
+  ['an <h2> of &#173 on the line that ends a quoted fence holding a comment opener', '> ```\n> <!--\n<h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of &#173 in a list item after a comment opener in its indented code', '- a\n\n      <!--\n\n  b <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of &#173 in a quote after a comment opener in its indented code', '>     <!--\n> a <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of &#173 after a comment opener in a footnote\'s indented code', '[^1]: a\n\n    <!--\n\nb <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> between fence marks in a <div> in a list item', '- <div>\n  ```\n  <h2>Z<b title=">"><?x>orbly</h2>\n  ```', ['Z "> orbly']],
+  ['an <h2> between fence marks in a <div> in an ordered list item', '1. <div>\n   ```\n   <h2>Z<b title=">"><?x>orbly</h2>\n   ```', ['Z "> orbly']],
+  ['an <h2> in a quote after a quoted <div> and a blank quoted line', '> <div>\n>\n> b <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> in a quoted HTML block after a quoted comment opener', '> a <!--\n> <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> in a table cell after a comment opener in the cell before', '| h | i |\n|---|---|\n| a <!-- | <h2>Z<b title=">"><?x>orbly</h2> --> |', ['Z "> orbly']],
+  // final 8: in a list item, a heading, a rule or a fence 4 to 6 spaces in ends the paragraph; a comment
+  // run's line more than three spaces in breaks the run
+  ['an <h2> of a quoted > and an instruction in a list item after a comment opener and a heading 4 spaces in', '- a\n  b <!--\n    # x\n  d <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label in a list item after a comment opener and a heading 4 spaces in', '- a\n  b <!--\n    # x\n  d <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 in a list item after a comment opener and a heading 4 spaces in', '- a\n  b <!--\n    # x\n  d <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of a quoted > and an instruction in a list item after a comment opener and a *** rule 4 spaces in', '- a\n  b <!--\n    ***\n  d <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label in a list item after a comment opener and a *** rule 4 spaces in', '- a\n  b <!--\n    ***\n  d <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 in a list item after a comment opener and a *** rule 4 spaces in', '- a\n  b <!--\n    ***\n  d <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of a quoted > and an instruction in a list item after a comment opener and a ___ rule 4 spaces in', '- a\n  b <!--\n    ___\n  d <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label in a list item after a comment opener and a ___ rule 4 spaces in', '- a\n  b <!--\n    ___\n  d <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 in a list item after a comment opener and a ___ rule 4 spaces in', '- a\n  b <!--\n    ___\n  d <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of a quoted > and an instruction in a list item after a comment opener and a fence 4 spaces in', '- a\n  b <!--\n    ```\n    x\n    ```\n  d <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label in a list item after a comment opener and a fence 4 spaces in', '- a\n  b <!--\n    ```\n    x\n    ```\n  d <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 in a list item after a comment opener and a fence 4 spaces in', '- a\n  b <!--\n    ```\n    x\n    ```\n  d <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of a quoted > and an instruction after a list item holding a comment opener and a heading 4 spaces in', '- a\n  b <!--\n    # x\nd <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label after a list item holding a comment opener and a heading 4 spaces in', '- a\n  b <!--\n    # x\nd <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 after a list item holding a comment opener and a heading 4 spaces in', '- a\n  b <!--\n    # x\nd <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of a quoted > and an instruction in a list item after a comment opener and a heading 5 spaces in', '- a\n  b <!--\n     # x\n  d <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label in a list item after a comment opener and a heading 5 spaces in', '- a\n  b <!--\n     # x\n  d <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 in a list item after a comment opener and a heading 5 spaces in', '- a\n  b <!--\n     # x\n  d <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of a quoted > and an instruction in a list item after a comment opener and a *** rule 5 spaces in', '- a\n  b <!--\n     ***\n  d <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label in a list item after a comment opener and a *** rule 5 spaces in', '- a\n  b <!--\n     ***\n  d <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 in a list item after a comment opener and a *** rule 5 spaces in', '- a\n  b <!--\n     ***\n  d <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of a quoted > and an instruction in a list item after a comment opener and a ___ rule 5 spaces in', '- a\n  b <!--\n     ___\n  d <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label in a list item after a comment opener and a ___ rule 5 spaces in', '- a\n  b <!--\n     ___\n  d <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 in a list item after a comment opener and a ___ rule 5 spaces in', '- a\n  b <!--\n     ___\n  d <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of a quoted > and an instruction in a list item after a comment opener and a fence 5 spaces in', '- a\n  b <!--\n     ```\n     x\n     ```\n  d <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label in a list item after a comment opener and a fence 5 spaces in', '- a\n  b <!--\n     ```\n     x\n     ```\n  d <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 in a list item after a comment opener and a fence 5 spaces in', '- a\n  b <!--\n     ```\n     x\n     ```\n  d <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of a quoted > and an instruction after a list item holding a comment opener and a heading 5 spaces in', '- a\n  b <!--\n     # x\nd <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label after a list item holding a comment opener and a heading 5 spaces in', '- a\n  b <!--\n     # x\nd <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 after a list item holding a comment opener and a heading 5 spaces in', '- a\n  b <!--\n     # x\nd <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of a quoted > and an instruction in a list item after a blank line, a comment opener and a heading 4 spaces in', '- a\n\n  b <!--\n    # x\n  d <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label in a list item after a blank line, a comment opener and a heading 4 spaces in', '- a\n\n  b <!--\n    # x\n  d <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 in a list item after a blank line, a comment opener and a heading 4 spaces in', '- a\n\n  b <!--\n    # x\n  d <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of a quoted > and an instruction in an ordered list item after a comment opener and a heading 5 spaces in', '1. a\n   b <!--\n     # x\n   d <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label in an ordered list item after a comment opener and a heading 5 spaces in', '1. a\n   b <!--\n     # x\n   d <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 in an ordered list item after a comment opener and a heading 5 spaces in', '1. a\n   b <!--\n     # x\n   d <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of a quoted > and an instruction in an ordered list item after a comment opener and a *** rule 5 spaces in', '1. a\n   b <!--\n     ***\n   d <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label in an ordered list item after a comment opener and a *** rule 5 spaces in', '1. a\n   b <!--\n     ***\n   d <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 in an ordered list item after a comment opener and a *** rule 5 spaces in', '1. a\n   b <!--\n     ***\n   d <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of a quoted > and an instruction in an ordered list item after a comment opener and a ___ rule 5 spaces in', '1. a\n   b <!--\n     ___\n   d <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label in an ordered list item after a comment opener and a ___ rule 5 spaces in', '1. a\n   b <!--\n     ___\n   d <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 in an ordered list item after a comment opener and a ___ rule 5 spaces in', '1. a\n   b <!--\n     ___\n   d <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of a quoted > and an instruction in an ordered list item after a comment opener and a fence 5 spaces in', '1. a\n   b <!--\n     ```\n     x\n     ```\n   d <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label in an ordered list item after a comment opener and a fence 5 spaces in', '1. a\n   b <!--\n     ```\n     x\n     ```\n   d <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 in an ordered list item after a comment opener and a fence 5 spaces in', '1. a\n   b <!--\n     ```\n     x\n     ```\n   d <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of a quoted > and an instruction after an ordered list item holding a comment opener and a heading 5 spaces in', '1. a\n   b <!--\n     # x\nd <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label after an ordered list item holding a comment opener and a heading 5 spaces in', '1. a\n   b <!--\n     # x\nd <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 after an ordered list item holding a comment opener and a heading 5 spaces in', '1. a\n   b <!--\n     # x\nd <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of a quoted > and an instruction in an ordered list item after a comment opener and a heading 6 spaces in', '1. a\n   b <!--\n      # x\n   d <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label in an ordered list item after a comment opener and a heading 6 spaces in', '1. a\n   b <!--\n      # x\n   d <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 in an ordered list item after a comment opener and a heading 6 spaces in', '1. a\n   b <!--\n      # x\n   d <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of a quoted > and an instruction in an ordered list item after a comment opener and a *** rule 6 spaces in', '1. a\n   b <!--\n      ***\n   d <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label in an ordered list item after a comment opener and a *** rule 6 spaces in', '1. a\n   b <!--\n      ***\n   d <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 in an ordered list item after a comment opener and a *** rule 6 spaces in', '1. a\n   b <!--\n      ***\n   d <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of a quoted > and an instruction in an ordered list item after a comment opener and a ___ rule 6 spaces in', '1. a\n   b <!--\n      ___\n   d <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label in an ordered list item after a comment opener and a ___ rule 6 spaces in', '1. a\n   b <!--\n      ___\n   d <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 in an ordered list item after a comment opener and a ___ rule 6 spaces in', '1. a\n   b <!--\n      ___\n   d <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of a quoted > and an instruction in an ordered list item after a comment opener and a fence 6 spaces in', '1. a\n   b <!--\n      ```\n      x\n      ```\n   d <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label in an ordered list item after a comment opener and a fence 6 spaces in', '1. a\n   b <!--\n      ```\n      x\n      ```\n   d <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 in an ordered list item after a comment opener and a fence 6 spaces in', '1. a\n   b <!--\n      ```\n      x\n      ```\n   d <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of a quoted > and an instruction after an ordered list item holding a comment opener and a heading 6 spaces in', '1. a\n   b <!--\n      # x\nd <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label after an ordered list item holding a comment opener and a heading 6 spaces in', '1. a\n   b <!--\n      # x\nd <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 after an ordered list item holding a comment opener and a heading 6 spaces in', '1. a\n   b <!--\n      # x\nd <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+  ['an <h2> of a quoted > and an instruction in an ordered list item after a blank line, a comment opener and a heading 5 spaces in', '1. a\n\n   b <!--\n     # x\n   d <h2>Z<b title=">"><?x>orbly</h2> -->', ['Z "> orbly']],
+  ['an <h2> of a split label in an ordered list item after a blank line, a comment opener and a heading 5 spaces in', '1. a\n\n   b <!--\n     # x\n   d <h2>[a][Z<!x y>orbly]</h2> -->', ['[a][Z orbly]']],
+  ['an <h2> of &#173 in an ordered list item after a blank line, a comment opener and a heading 5 spaces in', '1. a\n\n   b <!--\n     # x\n   d <h2>Z&#173orbly</h2> -->', ['Z&#173orbly']],
+];
+const NOT_REFUSED = [
+  ['an ## heading in a fence', '```\n## Zorbly\n```'],
+  ['a setext heading in a ~~~ fence', '~~~\nZorbly\n---\n~~~'],
+  ['an ## heading in indented code', '    ## Zorbly'],
+  ['an ## heading in a comment', '<!--\n## Zorbly\n-->'],
+  ['an ## heading in a code span', 'See `## Zorbly` here.'],
+  ['a # with no space', '#Zorbly is a tag.'],
+  ['a break after a blank line', 'Zorbly is here.\n\n---'],
+  ['a lower-case ## heading', '## zorbly co'],
+  ['an ## heading of named words', '## What to watch'],
+  ['an <h2> of a named word', '<h2>Vendors</h2>'],
+  ['a setext heading of a named word', 'Forces\n==='],
+  ['a named ### in a list item', '- ### Ledgerpad'],
+  ['a named #### in a block quote', '> #### Acme Storage'],
+  ['a dependency name as an <h5>', '<h5>inkwell-sync</h5>'],
+  // what stays plain text: a code span, a tab, a line's end in an HTML heading, a mark NFC composes,
+  // * and _ emphasis; and a heading of level 3 to 6 that is not HTML is judged by its words only
+  ['an ## heading holding a code span of markup', '## the `<div>` and `[x]` tags'],
+  ['an ## heading holding a tab', '## our\trivals'],
+  ['an <h2> of two lines', '<h2>our\nrivals</h2>'],
+  ['an ## heading whose mark NFC composes', '## our cafe\u0301 list'],
+  ['an ## heading with * and _ emphasis', '## our *rivals* and _vendors_'],
+  ['a #### heading of a named link', '#### [Ledgerpad](https://ledgerpad.example)'],
+  ['a named <h3> with markup quoted in a code span', 'See `<h3><b>Ledgerpad</b></h3>` here.'],
+  ['a named <h2> with markup in a fence', '```\n<h2><b>What</b> to watch</h2>\n```'],
+  ['a named <h2> with markup in indented code', '    <h2><b>What</b> to watch</h2>'],
+  ['a named <h2> with markup in a comment', '<!-- <h2><b>What</b> to watch</h2> -->'],
+  ['an ## heading of a command whose options are in code spans', '## box-supervisors `[--all]` `[--dry-run]`'],
+  ['a # heading whose placeholder is in a code span', '# kit-797-reply-parts: thread reply `--part <n>` and --after-parts'],
+  ['an ## heading whose path placeholder is in a code span', '## cmdline.mjs (a scan of every `/proc/<pid>/stat` at two reads at once)'],
+  // finals 6 and 6b: where a page does keep a heading tag as text
+  ['a named <h2> with markup in a comment of three lines', '<!--\n<h2><b>What</b> to watch</h2>\n-->'],
+  ['a named <h2> with markup in a comment inside a paragraph', 'Some <!-- <h2><b>What</b> to watch</h2> --> words.'],
+  ['a named <h2> with markup in a code span in a list item', '- see `<h2><b>What</b> to watch</h2>` here'],
+  ['a named <h2> with markup in a code span in a table row', '| a | `<h2><b>What</b> to watch</h2>` |\n|---|---|'],
+  ['a named <h2> with markup in a fence after a closed <div>', '<div>\n</div>\n\n```\n<h2><b>What</b> to watch</h2>\n```'],
+  // finals 7 and 7b: a comment a page keeps, on its line or across clean lines
+  ['a named <h2> with markup in a comment of three lines in a list item', '- a\n\n  <!--\n  <h2><b>What</b> to watch</h2>\n  -->'],
+  ['a named <h2> with markup in a comment on a quoted line', '> a <!-- <h2><b>What</b> to watch</h2> --> b'],
+  ['a named <h2> with markup in a comment in a table row with no leading pipe', 'a | b\n--|--\nc | <!-- <h2><b>What</b> to watch</h2> -->'],
+  ['a named <h2> with markup in a comment across a paragraph\'s lines', 'Some <!-- x\ny <h2><b>What</b> to watch</h2> --> words.'],
+];
+const formOpts = (visibility, names = allowed.names) => ({ today: W2.today, visibility, allowed: { ...allowed, names } });
+
+test('F1 every heading form is refused on a public or unknown repo, in the reference and the region', () => {
+  const P = plainOf();
+  const wrong = []; // every form that fails, each named, so a red run shows them all
+  for (const [what, x, want] of HEADING_FORMS) {
+    for (const [who, check] of [['reference', refCheckExterior], ['region', P.checkExterior]]) {
+      for (const v of ['public', 'unknown']) { const got = copy(check(formDoc(x), formOpts(v)).refused); if (JSON.stringify(got) !== JSON.stringify(want)) wrong.push(`${who} ${v}: ${what} refused ${JSON.stringify(got)}`); }
+      const got = copy(check(formDoc(x), formOpts('private')).refused);
+      if (got.length) wrong.push(`${who} private: ${what} refused ${JSON.stringify(got)}`);
+    }
+  }
+  assert.deepEqual(wrong, [], `F1 each form refused as listed:\n${wrong.join('\n')}`);
+  const all = formDoc('## Zorbly\n\nBrindle\n---\n\n<h4>Cartwell</h4>\n\n> ### Zorbly');
+  for (const [who, check] of [['reference', refCheckExterior], ['region', P.checkExterior]]) assert.deepEqual(copy(check(all, formOpts('public')).refused), ['Zorbly', 'Brindle', 'Cartwell', 'Zorbly'], `F1 ${who}: in document order, each time`);
+});
+
+test('F2 what a page does not show as a heading, or shows with named words, is not refused', () => {
+  const P = plainOf();
+  for (const [what, x] of NOT_REFUSED) {
+    for (const [who, check] of [['reference', refCheckExterior], ['region', P.checkExterior]]) assert.deepEqual(copy(check(formDoc(x), formOpts('public')).refused), [], `F2 ${who}: ${what} is not refused`);
+  }
+  // the title's own word: Exterior counts as named in a # or ## heading, though nothing names it
+  for (const [who, check] of [['reference', refCheckExterior], ['region', P.checkExterior]]) {
+    assert.deepEqual(copy(check('# Exterior\n\n### inkwell-sync\n', formOpts('public', 'inkwell-sync')).refused), [], `F2 ${who}: the # Exterior title is not refused`);
+    assert.deepEqual(copy(check('# Exterior\n\n### Exterior\n', formOpts('public', 'inkwell-sync')).refused), ['Exterior'], `F2 ${who}: a ### Exterior is judged whole, as before`);
+  }
+});
+
+test('F3 exterior check, chore pr and check-pr refuse a heading of another form, worded as one', withProject('x-forms', {}, async (W, check) => {
+  const FORMS_EXT = `${EXTERIOR}\n## Zorbly Labs\n\n<h3>Brindle</h3>\n`;
+  await check('F3 exterior check: an error per heading, "(a heading)", exit 1; private: none', () => {
+    for (const v of ['public', 'unknown']) {
+      W.setVisibility(v);
+      write(path.join(W.old, EXT), FORMS_EXT);
+      const r = W.run(['exterior', 'check']);
+      assert.equal(r.status, 1, `F3 ${v}: exterior check exits 1\n${r.text}`);
+      for (const n of ['Zorbly Labs', 'Brindle']) assert.match(r.out, new RegExp(`^error: exterior\\.md: "${n}" \\(a heading\\) is not named in origin main's strategy\\.md or its dependency names`, 'm'), `F3 ${v}: "${n}" refused as a heading\n${r.out}`);
+      assert.doesNotMatch(r.out, /\(a ### heading\)/, `F3 ${v}: not worded as a ### heading\n${r.out}`);
+    }
+    W.setVisibility('private');
+    const r = W.run(['exterior', 'check']);
+    assert.equal(r.status, 0, `F3 private: exterior check passes\n${r.text}`);
+    fs.rmSync(path.join(W.old, EXT));
+  });
+  await check('F3 chore pr refuses them with every word named on the chore; nothing pushed', () => {
+    W.setVisibility('public');
+    const p = W.chorePr('forms', (w) => write(path.join(w, EXT), FORMS_EXT), ['--names-checked', 'Zorbly,Labs,Brindle']);
+    assert.notEqual(p.status, 0, `F3 chore pr refuses\n${p.text}`);
+    for (const n of ['Zorbly Labs', 'Brindle']) assert.match(p.text, new RegExp(`"${n}" \\(a heading\\)`), `F3 chore pr names "${n}"\n${p.text}`);
+    assert.ok(!p.pushed(), 'F3 nothing pushed');
+  });
+  await check('F3 check-pr fails each on a public repo', () => {
+    W.setVisibility('public');
+    const sha = W.commitOn('forms2', (x) => write(path.join(x, EXT), FORMS_EXT));
+    const c = W.checkPr('chore-forms2', sha);
+    for (const n of ['Zorbly Labs', 'Brindle']) assert.match(lines(c.out, 'fail').join('\n'), new RegExp(`"${n}" \\(a heading\\)`), `F3 check-pr fails "${n}"\n${c.out}`);
+  });
+}));
+
+test('F4 exterior-drift reads every heading form as the draft does', withProject('x-drift-forms', { exterior: `${world2('exterior.md')}\n<h2>Zorbly</h2>\n\n> #### Brindle\n` }, async (W, check) => {
+  await check('F4 last known public: one exterior-drift per heading another form names, keyed by it', () => {
+    W.record('public');
+    const keys = W.findings(['exterior-drift']).map((f) => f.key).sort();
+    assert.deepEqual(keys, ['brindle', 'zorbly'], 'F4 an <h2> and a #### in a block quote drift');
+  });
+}));
+
+test('F5 headBlobs reads the working tree only; the region returns only what is read', () => {
+  const at = SRC.indexOf('function headBlobs(');
+  assert.ok(at > 0, 'F5 headBlobs is defined');
+  const body = SRC.slice(at, SRC.indexOf('\n}\n', at));
+  assert.match(body, /^function headBlobs\(\) \{/, `F5 headBlobs takes nothing\n${body.split('\n')[0]}`);
+  assert.doesNotMatch(body, /\bref\b|\broot\b|rev-parse/, `F5 no ref branch and no root\n${body}`);
+  const comment = SRC.slice(0, at).split('\n').reverse().slice(1).filter((_, i, a) => a.slice(0, i + 1).every((l) => l.startsWith('//'))).reverse().join('\n');
+  assert.match(comment, /working tree/, `F5 its comment says it reads the working tree\n${comment}`);
+  assert.doesNotMatch(comment, /\bref\b/, `F5 its comment no longer speaks of a ref\n${comment}`);
+  const keys = Object.keys(plainOf());
+  for (const k of ['entries', 'capitalised', 'hosts']) assert.ok(!keys.includes(k), `F5 the region no longer returns ${k}: ${keys}`);
+  for (const k of ['checkExterior', 'headings', 'namesWhole']) assert.ok(keys.includes(k), `F5 the region still returns ${k}`);
+});
+
+test('F6 the contract and the help say every heading form', () => {
+  const S = JSON.parse(fs.readFileSync(new URL('../docs/devteam/schema/log.schema.json', import.meta.url), 'utf8'));
+  const d = S.$defs.exterior2.description;
+  assert.doesNotMatch(d, /each ### heading must be named whole/, 'F6 the schema no longer limits the rule to ###');
+  assert.doesNotMatch(d, /Headings in code or a comment are not read\./, 'F6 the schema no longer says no heading in code or a comment is read');
+  assert.ok(d.includes('underlined with = or -'), 'F6 the schema says what a setext heading is, in plain words');
+  for (const w of ['or a footnote', 'but Exterior, or a link host', 'as the page shows them']) assert.ok(d.includes(w), `F6 the schema says "${w}"`);
+  for (const w of ['every heading', 'setext', '<h1>', 'list item or block quote', 'wherever it stands', 'level 3 to 6', 'capitalised word but Exterior']) assert.ok(d.includes(w), `F6 the schema says "${w}"`);
+  const help = SRC.slice(SRC.indexOf('const HELP_OBSERVE')).split('\n').find((l) => l.includes('exterior show'));
+  assert.doesNotMatch(help, /a ### heading not named whole/, `F6 the help no longer limits the rule to ###: ${help}`);
+  assert.match(help, /a heading of any form/, `F6 the help says any form: ${help}`);
+  assert.match(help, /but Exterior, or a link host, not named whole/, `F6 the help says a # or ## heading's link host is judged: ${help}`);
+  assert.ok(d.includes('a top-level heading must be plain text'), 'F6 the schema says a top-level heading must be plain text');
+  for (const w of ['raw HTML', 'a character reference', '~~', 'a [ or ]', 'code span']) assert.ok(d.includes(w), `F6 the schema says "${w}"`);
+  assert.match(help, /a top-level heading must be plain text/, `F6 the help says a top-level heading must be plain text: ${help}`);
+});
+
+test('F7 a refused # or ## heading says to name it in the strategy or reword it, once', withProject('x-forms-once', {}, async (W, check) => {
+  await check('F7 exterior check: one error per refused heading, with its fix', () => {
+    W.setVisibility('public');
+    write(path.join(W.old, EXT), `${EXTERIOR}\n## Zorbly Labs\n\nSome words.\n\n## Zorbly Labs\n`);
+    const r = W.run(['exterior', 'check']);
+    assert.equal(r.status, 1, `F7 exterior check exits 1\n${r.text}`);
+    const got = r.out.split('\n').filter((l) => l.includes('"Zorbly Labs" (a heading)'));
+    assert.equal(got.length, 1, `F7 one line for the heading written twice\n${r.out}`);
+    assert.match(got[0], /name it in the strategy first, or reword it/, `F7 the line says to name it in the strategy or reword it\n${got[0]}`);
+    fs.rmSync(path.join(W.old, EXT));
+  });
+  await check('F7 exterior check: a heading that is not plain text says so, once', () => {
+    W.setVisibility('public');
+    write(path.join(W.old, EXT), `${EXTERIOR}\n## our ~~old~~ rivals\n\nSome words.\n\n## our ~~old~~ rivals\n`);
+    const r = W.run(['exterior', 'check']);
+    assert.equal(r.status, 1, `F7 exterior check exits 1\n${r.text}`);
+    const got = r.out.split('\n').filter((l) => l.includes('"our ~~old~~ rivals" (a heading)'));
+    assert.equal(got.length, 1, `F7 one line for the heading written twice\n${r.out}`);
+    assert.match(got[0], /a top-level heading must be plain text; put options, placeholders and markup in backticks/, `F7 the line says a top-level heading must be plain text, and how to fix it\n${got[0]}`);
+    assert.doesNotMatch(got[0], /name it in the strategy first/, `F7 not the names rule's fix\n${got[0]}`);
+    fs.rmSync(path.join(W.old, EXT));
+  });
+}));
