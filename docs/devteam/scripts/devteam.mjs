@@ -29460,11 +29460,19 @@ function pageVersion(page) {
 // <seg> first), to a GET, as before (a HEAD there is the dashboard's 404). Every other method, and
 // every other path, is DASH_NEXT; in the tree it may answer GET and HEAD, and nothing else.
 function servePageAsset(req, res, server) {
-  if (req.method !== 'GET') return DASH_NEXT;
-  const m = server === 'dashboard' ? /^\/review\/[^/]+\/(devteam-ui\.(?:css|js))$/.exec(new URL(req.url, 'http://x').pathname) : null;
+  if (req.method !== 'GET' || server !== 'dashboard') return DASH_NEXT;
+  let p;
+  try { p = new URL(req.url, 'http://x').pathname; } catch { return DASH_NEXT; }
+  const m = /^\/review\/[^/]+\/(devteam-ui\.(?:css|js))$/.exec(p);
   if (!m) return DASH_NEXT;
+  // read before any header, so a file that is gone is a 500 (as servePage's), never a throw after a 200
+  let body;
+  try { body = fs.readFileSync(path.join(kitDir, 'dashboard', m[1])); } catch {
+    res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+    return res.end('this file could not be read\n');
+  }
   res.writeHead(200, { 'content-type': m[1].endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
-  return res.end(fs.readFileSync(path.join(kitDir, 'dashboard', m[1])));
+  return res.end(body);
 }
 // A static export served from folder at base, by alpha-build@1's rules and
 // test/fixtures/alpha-serving.json. A caller's mistake throws before any request is read: a base
@@ -30281,6 +30289,17 @@ async function dashRoutesOwner(D, req, res, q) {
 }
 const DASHBOARD_ROUTES = [dashRoutesUpload, dashRoutesPage, dashRoutesViewer, dashRoutesThreads, dashRoutesReads, dashRoutesFiles, dashRoutesArtifacts, dashRoutesReviewPage, dashRoutesApp, dashRoutesOwner];
 /* dashboardRoutes end */
+// A request whose handling threw, one no guard foresaw: logged with its method and path (the query
+// cut, at most 200 characters) and the error, then a 500 when no header is out yet. Once headers are
+// out, a response still open is destroyed, so a cut body looks cut; one already ended is left as it is.
+function dashRequestFailed(log, req, res, e) {
+  log(`request failed: ${req.method} ${String(req.url).split('?')[0].slice(0, 200)}: ${e?.stack ?? e}`);
+  if (!res.headersSent) {
+    res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+    return res.end('this request failed');
+  }
+  if (!res.writableEnded) res.destroy();
+}
 async function cmdDashboard() {
   // the kit as this process loaded it, printed first, before any wait (kit-288): a sync landing
   // while it starts is then a change it sees
@@ -30833,27 +30852,37 @@ async function cmdDashboard() {
   const logWatch = presenceChanged(liveLogDir(), () => { dataEpoch += 1; presence.changed(); });
   every(logWatch.tick, 1000);
   const D = dashContext({ log, page, pageCsp, run, describing, versioning, remote, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, ACTION_JSON, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, sessionPrompts, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
+  // A throw out of any route is that request's failure (dashRequestFailed), never the dashboard's
+  // stop: a rejection out of this async handler would reach processLog, which exits.
   const server = http.createServer(async (req, res) => {
-    if (draining) res.setHeader('connection', 'close');
-    // Node's five minutes for a body, for all but an upload (UPLOAD_REQUEST_MS, and its stall timer)
-    const bodyTimer = setTimeout(() => { if (!req.complete) req.destroy(); }, bodyMs);
-    bodyTimer.unref();
-    req.once('close', () => clearTimeout(bodyTimer));
-    // Every route answers only on the dashboard's own address: a page elsewhere that points its own
-    // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
-    const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
-    // the terminal's routes read these two refusals as JSON, with their why (terminal@1 §2)
-    const isTerm = req.url.startsWith('/api/term/');
-    const termNo = (why) => { log(`refused ${req.url.split('?')[0]}: ${why}`); termDrain(req); return send(res, 403, 'application/json', JSON.stringify(req.method === 'POST' ? { error: 'the terminal answers only on this page', why } : { why })); };
-    if (!okHost) return isTerm ? termNo('host') : send(res, 403, 'text/plain; charset=utf-8', 'the dashboard answers only on its own address');
-    // a request a preview's relay forwarded (it sends localhost as Host and Origin, which the owner checks accept): never the owner's
-    if (req.headers[RELAY_MARK] !== undefined) return isTerm ? termNo('relay') : send(res, 403, 'text/plain; charset=utf-8', 'not through a preview relay');
-    // /presence is a socket: a plain request gets its guard's status (presence@1 §2)
-    if (req.url === '/presence' || req.url.startsWith('/presence?')) return presence.refuse(req, res);
-    // the terminal: right after the global guards, before any other route
-    if (isTerm) return await term.handle(req, res, new URL(req.url, 'http://x'));
-    const q = { okHost, bodyTimer, get u() { return this._u ??= new URL(req.url, 'http://x'); } };
-    for (const route of DASHBOARD_ROUTES) if (await route(D, req, res, q) !== DASH_NEXT) return;
+    try {
+      if (draining) res.setHeader('connection', 'close');
+      // Node's five minutes for a body, for all but an upload (UPLOAD_REQUEST_MS, and its stall timer)
+      const bodyTimer = setTimeout(() => { if (!req.complete) req.destroy(); }, bodyMs);
+      bodyTimer.unref();
+      req.once('close', () => clearTimeout(bodyTimer));
+      // Every route answers only on the dashboard's own address: a page elsewhere that points its own
+      // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
+      const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
+      // the terminal's routes read these two refusals as JSON, with their why (terminal@1 §2)
+      const isTerm = req.url.startsWith('/api/term/');
+      const termNo = (why) => { log(`refused ${req.url.split('?')[0]}: ${why}`); termDrain(req); return send(res, 403, 'application/json', JSON.stringify(req.method === 'POST' ? { error: 'the terminal answers only on this page', why } : { why })); };
+      if (!okHost) return isTerm ? termNo('host') : send(res, 403, 'text/plain; charset=utf-8', 'the dashboard answers only on its own address');
+      // a request a preview's relay forwarded (it sends localhost as Host and Origin, which the owner checks accept): never the owner's
+      if (req.headers[RELAY_MARK] !== undefined) return isTerm ? termNo('relay') : send(res, 403, 'text/plain; charset=utf-8', 'not through a preview relay');
+      // /presence is a socket: a plain request gets its guard's status (presence@1 §2)
+      if (req.url === '/presence' || req.url.startsWith('/presence?')) return presence.refuse(req, res);
+      // the request's one parse, which every route reads (q.u): a target that is no URL here is a 400,
+      // never a throw out of this handler, which would stop the dashboard
+      let u;
+      try { u = new URL(req.url, 'http://x'); } catch { return send(res, 400, 'text/plain; charset=utf-8', 'bad request'); }
+      // the terminal: right after the global guards, before any other route
+      if (isTerm) return await term.handle(req, res, u);
+      const q = { okHost, bodyTimer, u };
+      for (const route of DASHBOARD_ROUTES) if (await route(D, req, res, q) !== DASH_NEXT) return;
+    } catch (e) {
+      dashRequestFailed(log, req, res, e);
+    }
   });
   // Two dashboards starting at once can pick the same free port: the one that loses picks again.
   const tried = [];
