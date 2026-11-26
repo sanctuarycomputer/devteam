@@ -106,13 +106,17 @@ test('a call with no answer says what Chrome was doing', { skip: canDrive ? fals
     t.test('a tab still saving is closed once the save ends, with no dialog', async () => {
       const chrome = await openChrome();
       try {
-        const p = await chrome.newPage();
-        await p.send('Page.enable');
-        // the dashboard's guard (index.html's SAVING and beforeunload), the save ending 1.5 s on
-        await p.send('Runtime.evaluate', { expression: "var SAVING = 1; addEventListener('beforeunload', (e) => { if (SAVING) { e.preventDefault(); e.returnValue = ''; } }); setTimeout(() => { SAVING = 0; }, 1500); 1", userGesture: true });
-        const r = await failing(closeTab(p));
-        assert.equal(r.e, null, 'the close succeeds');
-        assert.ok(r.ms >= 1400 && r.ms < 10000, `took ${r.ms} ms`);
+        for (const late of [0, 150, 300]) {
+          const p = await chrome.newPage();
+          await p.send('Page.enable');
+          // the dashboard's guard (index.html's SAVING and beforeunload), the save ending 1.5 s on; the floor counts from began, the page's own clock
+          const began = (await p.send('Runtime.evaluate', { expression: "var SAVING = 1; addEventListener('beforeunload', (e) => { if (SAVING) { e.preventDefault(); e.returnValue = ''; } }); var began = Date.now(); setTimeout(() => { SAVING = 0; }, 1500); began", userGesture: true, returnByValue: true })).result.value;
+          if (late) await new Promise((r) => setTimeout(r, late));
+          const r = await failing(closeTab(p));
+          assert.equal(r.e, null, `the close succeeds (${late} ms late)`);
+          const since = Date.now() - began;
+          assert.ok(since >= 1400 && r.ms < 10000, `closed ${since} ms after the save began (the close ${late} ms late); the close took ${r.ms} ms`);
+        }
       } finally { await chrome.close(); }
     }),
     t.test('a tab saving past the bound fails its close, saying so, and opens no dialog', async () => {
