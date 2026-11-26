@@ -11417,8 +11417,16 @@ function threadViews(objects) {
   }
   // source: where a note to check shows now (noteSource), read from git and the worktrees
   let holds = null;
+  const standing = new Map();
+  // gone: no worktree of that name at all (ENOENT), never one the kit merely can't read now
+  const missing = (name) => { try { fs.lstatSync(path.join(mainRoot, '.worktrees', name)); return false; } catch (e) { return e?.code === 'ENOENT'; } };
+  const gone = (name) => { if (!standing.has(name)) standing.set(name, !draftWorktree(name) && missing(name)); return standing.get(name); };
   return [...objects.values()].filter((o) => o.type === 'thread').map((t) => {
-    const v = threadView(t, (turns.get(t.id) ?? []).sort(byTime), (asked.get(t.id) ?? []).sort(byTime), (marks.get(t.id) ?? []).sort(byTime));
+    let v = threadView(t, (turns.get(t.id) ?? []).sort(byTime), (asked.get(t.id) ?? []).sort(byTime), (marks.get(t.id) ?? []).sort(byTime));
+    if (v.status === 'open' && v.subject?.kind === 'artifact' && v.handed && !v.check && v.handed.to !== 'supervisor' && gone(v.handed.to)) {
+      // waiting as for a note handed to the supervisor: its reply or the responder's, not the gone session's own words
+      v = { ...v, with: 'supervisor', waiting: v.turns.some((u) => u.by !== 'owner' && u.writer !== v.handed.to && u.at > v.handed.at) ? 'session' : 'supervisor' };
+    }
     return noteToCheck(v) ? { ...v, source: noteSource(v, (holds ??= shotHoldsOnce())) } : v;
   });
 }
@@ -14641,9 +14649,10 @@ function artifactNotesCmd(slug, at) {
 /* artifactNotes end */
 /* artifactHandoff start */
 // artifact handoff <slug> [--at <where>] [--json]: the owner hands the open notes there to the session
-// drawing that copy: a line on each note, then one message, which names ids and counts and never
-// anything a page wrote. A recipient with no pane keeps it in its messages, and the supervisor is
-// nudged with the same line.
+// drawing that copy, and with them any note that came back from a session whose worktree is gone (its
+// view's with isn't handed.to): a line on each note, then one message, which names ids and counts and
+// never anything a page wrote. A recipient with no pane keeps it in its messages, and the supervisor is
+// nudged with the same line; nobody (in --json too) says when the supervisor has no pane either.
 function artifactHandoffCmd(slug, at) {
   const { by } = ownerWriter('the owner hands notes over: they press Hand over on the dashboard, or run artifact handoff in their own terminal');
   const to = artifactRecipient(at);
@@ -14651,21 +14660,24 @@ function artifactHandoffCmd(slug, at) {
   fs.mkdirSync(runDir, { recursive: true });
   const notes = withLock(runPath('artifact-handoff'), () => {
     logCache = null;
-    const open = artifactNoteSet(slug, at).filter((v) => noteState(v) === 'open');
+    const open = artifactNoteSet(slug, at).filter((v) => noteState(v) === 'open' || (!v.check && v.handed && v.with !== v.handed.to));
     for (const v of open) appendLog({ type: 'thread', op: 'set', id: v.id, handed: { to, at: nowIso() } }, by);
     return open;
   });
   const count = notes.length;
-  if (!count) return flags.json ? json({ to, typed: false, count }) : out(`no open notes on artifact ${slug} at ${at}: nothing handed over`);
+  if (!count) return flags.json ? json({ to, typed: false, count, nobody: false }) : out(`no open notes on artifact ${slug} at ${at}: nothing handed over`);
   const report = {};
   sendLine({ to, kind: 'info', from: by, text: `${plural(count, 'note')} on artifact ${slug} ${count === 1 ? 'is' : 'are'} yours: \`devteam.mjs artifact notes ${slug} --at ${at}\`. Mark each with \`devteam.mjs artifact addressed <thread> --note "what changed"\`.` }, report);
+  // nobody's pane took it: the session's isn't there, and the supervisor's isn't either
+  const nobody = to !== 'supervisor' && !report.typed && !!resolvePane(supervisorTarget()).problem;
   if (to !== 'supervisor' && !report.typed) nudgeSupervisor(report.line);
-  if (flags.json) return json({ to, typed: !!report.typed, count });
+  if (flags.json) return json({ to, typed: !!report.typed, count, nobody });
   out(`handed ${plural(count, 'note')} on artifact ${slug} to ${to}`);
   out(report.typed === true ? `typed into ${to}'s pane`
     : report.typed ? `held for ${to}'s pane: ${heldWords(report.typed, to === 'supervisor' ? "the supervisor's" : `${to}'s`)}`
       : to === 'supervisor' ? 'not typed: the supervisor has no pane; it stays in its messages and unread'
-        : `not typed: ${to} has no pane; it stays in ${to}'s messages, and the supervisor is nudged with the same line`);
+        : nobody ? `not typed: neither ${to} nor the supervisor has a pane; it stays in ${to}'s messages and the supervisor's unread, and nobody works it until one of them is back`
+          : `not typed: ${to} has no pane; it stays in ${to}'s messages, and the supervisor is nudged with the same line`);
 }
 /* artifactHandoff end */
 /* artifactAddressed start */
