@@ -95,8 +95,11 @@ test('shell.md says @3 and defines what the design lists', () => {
   assert.match(SHELL_MD, /^Contract `dashboard-shell@3`\./m, 'shell.md is headed dashboard-shell@3');
   assert.match(SHELL_MD, /^- \*\*@2\*\* \(`kit-267`\): /m, 'a @2 line in its History');
   assert.match(SHELL_MD, /^- \*\*@3\*\* \(`kit-611`\): /m, 'a @3 line in its History');
-  // @3 (kit-611): the tab bar's panels and sub size, the terminal th values, a file peek's view, tab choices as history, §10 amended
-  for (const n of ['aria-controls', 'aria-labelledby', 'role=tabpanel', "size: 'sub'", 'tabPanel', 'tabSelected', 'th=supervisor', 'th=shell', 'view=raw', "Every tab set's choice is a state key", 'it is a history entry', 'while a peek is open replaces the entry', 'history.state = { hub: 1, key }', 'only selects the tab', 'no `openAt`', "After a reload the marker isn't enough", '**`hub-route` still replaces**', "{ devteam: 'hub-visible', visible }"]) assert.ok(SHELL_MD.includes(n), `shell.md @3 says ${n}`);
+  // @3 (kit-611): the tab bar's panels and sub size, the terminal th values, a file peek's view, tab choices as history, §10 amended.
+  // Read with the History section cut off, so a rule deleted from its section goes red even though the @3 line names it
+  const body = SHELL_MD.split(/^## History$/m)[0];
+  assert.ok(body.length < SHELL_MD.length, 'shell.md has a History section');
+  for (const n of ['aria-controls', 'aria-labelledby', 'role=tabpanel', "size: 'sub'", 'tabPanel', 'tabSelected', 'th=supervisor', 'th=shell', 'view=raw', "Every tab set's choice is a state key", 'it is a history entry', 'while a peek is open replaces the entry', 'history.state = { hub: 1, key }', 'only selects the tab', 'no `openAt`', "After a reload the marker isn't enough", '**`hub-route` still replaces**', "{ devteam: 'hub-visible', visible }", '**A file peek\'s view** is in its query', '`inbox`, `open`, `resolved`, `supervisor`, `shell`']) assert.ok(body.includes(n), `shell.md @3 says ${n} outside its History`);
   assert.match(SHELL_MD, /^## 10\. The hub frame$/m, 'a §10');
   // §6, §7, §8 and §10 name what the design's 'Contract dashboard-shell@2' section says
   for (const n of ['`p=q/<id>`', '`i`', '`u`', 'SHELL_ROUTES.peeks', 'peekHead', 'legacy: true', '`tree/<id>`', '`wt/<worktree>`', '`path`', '`route`', '`talk/<t-id>?u=<u-id>`', 'th=inbox&i=', 'URLSearchParams', 'artifactPathOk', 'reads its page from the head', '`hub-route`', '`hub-base`', '2,048', '`null`', 'postHead()', '`box: 2`', '#<key>/<head>', '`#overview?ot=<id>`', 'test/fixtures/hub-frame-fake.html', 'test/fixtures/dashboard-frame-fake.html', 'An empty value is a value']) assert.ok(SHELL_MD.includes(n), `shell.md says ${n}`);
