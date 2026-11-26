@@ -7221,7 +7221,7 @@ function openArtifact(raw) {
 // with a session, or open; a resolved thread is no note.
 function tNoteState(t) {
   // a reply of the owner's on its way has reopened a note to check, as the server will say
-  return t.status !== 'open' ? 'resolved' : t.check && !t.turns?.some((u) => u.pending && u.by === 'owner') ? 'check' : t.handed ? 'with' : 'open';
+  return t.status !== 'open' ? 'resolved' : t.check && !t.turns?.some((u) => u.pending && u.by === 'owner') ? 'check' : t.handed && t.with === t.handed.to ? 'with' : 'open';
 }
 // The shown version's open notes, as their pins are numbered: those placed on it; on main also a published
 // tree's, and a worktree's the Library lists no more; and on any version the notes to check whose change is
@@ -7271,11 +7271,16 @@ avNotes.draw = () => {
 // opts ({slug, at, done}: the reminder's press, kit-148): that version's, its reply or {error} handed to done,
 // neither AV nor the bar touched. Any hand-over that succeeds ends that artifact's reminder hold.
 async function avHandOver(opts) {
+  // where a hand-over no pane took waits: one line for every press that says so (the bar's, kit-148's reminder's)
+  const typedLine = (out) => (!(out?.count > 0) || out.typed !== false ? ''
+    : out.nobody === true ? `Not typed: neither ${out.to} nor the supervisor has a pane. It waits in their messages until one of them is back.`
+      : out.to === 'supervisor' ? 'Not typed: the supervisor has no pane. It waits in its messages until it reads them.'
+        : `Not typed: ${out.to} has no pane. It waits in its messages until ${out.to} or the supervisor reads it.`);
   if (opts) {
     const { slug, at, done } = opts;
     return press('avn', {
       build: () => ({ action: 'artifact-handoff', body: { slug, at } }),
-      onOk: (out) => { AV_REMIND.held.delete(slug); done(out); tlRefresh(); },
+      onOk: (out) => { AV_REMIND.held.delete(slug); done(out, typedLine(out)); tlRefresh(); },
       onError: (error) => done({ error }),
     });
   }
@@ -7292,7 +7297,7 @@ async function avHandOver(opts) {
       onOk: (out) => {
         AV_REMIND.held.delete(av.slug);
         if (out.count > 0) say(`With ${out.to}`, ids); else say('Nothing to hand over', []);
-        if (out.count > 0 && out.typed === false && AV === av) avNotes.say(`Not typed: ${out.to} has no pane. It reads this when it next checks.`, 10000);
+        if (AV === av && typedLine(out)) avNotes.say(typedLine(out), 10000);
         tlRefresh();
       },
       // a refusal too is said only of the version it was pressed on
@@ -7775,11 +7780,13 @@ document.addEventListener('click', (e) => {
   if (AV_REMIND.busy) return;
   AV_REMIND.busy = true;
   $('e-avr').textContent = '';
-  avHandOver({ slug: t.slug, at: t.at, done: (out) => {
+  avHandOver({ slug: t.slug, at: t.at, done: (out, line = '') => {
     if (AV_REMIND.taken !== t) return;
     if (out?.error) { $('e-avr').textContent = `Not saved: ${out.error}`; return; }
     const c = avRemindCard();
     c.querySelector('.tx').textContent = out?.count > 0 ? `With ${out.to}` : 'Nothing to hand over';
+    // where it waits when no pane took it: the bar's line (avHandOver), under the buttons' place
+    $('e-avr').textContent = line;
     c.querySelector('.av-remind-do').hidden = true;
     clearTimeout(AV_REMIND.timer);
     AV_REMIND.timer = setTimeout(avRemindHide, AV_REMIND_MS);

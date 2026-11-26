@@ -11417,8 +11417,16 @@ function threadViews(objects) {
   }
   // source: where a note to check shows now (noteSource), read from git and the worktrees
   let holds = null;
+  const standing = new Map();
+  // gone: no worktree of that name at all (ENOENT), never one the kit merely can't read now
+  const missing = (name) => { try { fs.lstatSync(path.join(mainRoot, '.worktrees', name)); return false; } catch (e) { return e?.code === 'ENOENT'; } };
+  const gone = (name) => { if (!standing.has(name)) standing.set(name, !draftWorktree(name) && missing(name)); return standing.get(name); };
   return [...objects.values()].filter((o) => o.type === 'thread').map((t) => {
-    const v = threadView(t, (turns.get(t.id) ?? []).sort(byTime), (asked.get(t.id) ?? []).sort(byTime), (marks.get(t.id) ?? []).sort(byTime));
+    let v = threadView(t, (turns.get(t.id) ?? []).sort(byTime), (asked.get(t.id) ?? []).sort(byTime), (marks.get(t.id) ?? []).sort(byTime));
+    if (v.status === 'open' && v.subject?.kind === 'artifact' && v.handed && !v.check && v.handed.to !== 'supervisor' && gone(v.handed.to)) {
+      // waiting as for a note handed to the supervisor: its reply or the responder's, not the gone session's own words
+      v = { ...v, with: 'supervisor', waiting: v.turns.some((u) => u.by !== 'owner' && u.writer !== v.handed.to && u.at > v.handed.at) ? 'session' : 'supervisor' };
+    }
     return noteToCheck(v) ? { ...v, source: noteSource(v, (holds ??= shotHoldsOnce())) } : v;
   });
 }
@@ -14641,9 +14649,10 @@ function artifactNotesCmd(slug, at) {
 /* artifactNotes end */
 /* artifactHandoff start */
 // artifact handoff <slug> [--at <where>] [--json]: the owner hands the open notes there to the session
-// drawing that copy: a line on each note, then one message, which names ids and counts and never
-// anything a page wrote. A recipient with no pane keeps it in its messages, and the supervisor is
-// nudged with the same line.
+// drawing that copy, and with them any note that came back from a session whose worktree is gone (its
+// view's with isn't handed.to): a line on each note, then one message, which names ids and counts and
+// never anything a page wrote. A recipient with no pane keeps it in its messages, and the supervisor is
+// nudged with the same line; nobody (in --json too) says when the supervisor has no pane either.
 function artifactHandoffCmd(slug, at) {
   const { by } = ownerWriter('the owner hands notes over: they press Hand over on the dashboard, or run artifact handoff in their own terminal');
   const to = artifactRecipient(at);
@@ -14651,21 +14660,24 @@ function artifactHandoffCmd(slug, at) {
   fs.mkdirSync(runDir, { recursive: true });
   const notes = withLock(runPath('artifact-handoff'), () => {
     logCache = null;
-    const open = artifactNoteSet(slug, at).filter((v) => noteState(v) === 'open');
+    const open = artifactNoteSet(slug, at).filter((v) => noteState(v) === 'open' || (!v.check && v.handed && v.with !== v.handed.to));
     for (const v of open) appendLog({ type: 'thread', op: 'set', id: v.id, handed: { to, at: nowIso() } }, by);
     return open;
   });
   const count = notes.length;
-  if (!count) return flags.json ? json({ to, typed: false, count }) : out(`no open notes on artifact ${slug} at ${at}: nothing handed over`);
+  if (!count) return flags.json ? json({ to, typed: false, count, nobody: false }) : out(`no open notes on artifact ${slug} at ${at}: nothing handed over`);
   const report = {};
   sendLine({ to, kind: 'info', from: by, text: `${plural(count, 'note')} on artifact ${slug} ${count === 1 ? 'is' : 'are'} yours: \`devteam.mjs artifact notes ${slug} --at ${at}\`. Mark each with \`devteam.mjs artifact addressed <thread> --note "what changed"\`.` }, report);
+  // nobody's pane took it: the session's isn't there, and the supervisor's isn't either
+  const nobody = to !== 'supervisor' && !report.typed && !!resolvePane(supervisorTarget()).problem;
   if (to !== 'supervisor' && !report.typed) nudgeSupervisor(report.line);
-  if (flags.json) return json({ to, typed: !!report.typed, count });
+  if (flags.json) return json({ to, typed: !!report.typed, count, nobody });
   out(`handed ${plural(count, 'note')} on artifact ${slug} to ${to}`);
   out(report.typed === true ? `typed into ${to}'s pane`
     : report.typed ? `held for ${to}'s pane: ${heldWords(report.typed, to === 'supervisor' ? "the supervisor's" : `${to}'s`)}`
       : to === 'supervisor' ? 'not typed: the supervisor has no pane; it stays in its messages and unread'
-        : `not typed: ${to} has no pane; it stays in ${to}'s messages, and the supervisor is nudged with the same line`);
+        : nobody ? `not typed: neither ${to} nor the supervisor has a pane; it stays in ${to}'s messages and the supervisor's unread, and nobody works it until one of them is back`
+          : `not typed: ${to} has no pane; it stays in ${to}'s messages, and the supervisor is nudged with the same line`);
 }
 /* artifactHandoff end */
 /* artifactAddressed start */
@@ -25270,6 +25282,33 @@ const boxHealthParts = () => [
 // What a section needs before it is in the answer at all, and stands in for while a part's own fields
 // are checked alone.
 const BOX_HEALTH_BASE = { headroom: {}, pool: { projects: [], allocated: [], recent: [] }, claude: { accounts: [] }, box: {} };
+// The hub's one budget of file reads (kit-919), the sampler's and every part's. Node runs each async
+// file call on one of its file threads (libuv's pool, UV_THREADPOOL_SIZE read once as C's atoi reads
+// it: 4 when unset, 1 for 0 or no number, 1024 at most and for a negative one), and a read that hangs
+// (a dead volume, a process whose memory is locked) holds its thread until it returns. Box health has
+// one fewer than the threads at once, so one is always left for the rest of the hub, and never two
+// reads of one file. boxHealthIo(file, fn) gives null, calling nothing, when that file is out or the
+// budget is (boxHealthIoFull() tells which); otherwise fn's promise, the one its caller awaits, with
+// the file out until it settles, however long, whatever run asked or whether that run has stopped:
+// the budget is this process's, not a sampler's, so a start after a stop still counts what the old
+// run left out. fn makes its file calls one after another, so it holds one thread at a time. A refusal
+// is null itself, never a promise of null, so it is never taken for a missing file: each reader keeps
+// its last value on it (a volume, a gap), and one that finds the budget full says BOX_HEALTH_FULL.
+const BOX_HEALTH_THREADS = (() => {
+  const v = process.env.UV_THREADPOOL_SIZE;
+  if (v === undefined) return 4;
+  const n = Number(/^\s*([+-]?\d+)/.exec(v)?.[1] ?? 0);
+  return n === 0 ? 1 : n < 0 || n > 1024 ? 1024 : n;
+})();
+const BOX_HEALTH_IO = BOX_HEALTH_THREADS - 1;
+const boxHealthIoOut = new Set();
+const boxHealthIoFull = () => boxHealthIoOut.size >= BOX_HEALTH_IO;
+function boxHealthIo(file, fn) {
+  if (boxHealthIoOut.has(file) || boxHealthIoFull()) return null;
+  boxHealthIoOut.add(file);
+  return (async () => fn())().finally(() => boxHealthIoOut.delete(file));
+}
+const BOX_HEALTH_FULL = "the hub's box-health file reads are all in use: a read that can't start keeps its last value";
 // the engine's own then, and the call that applies it, taken once as the region loads: it attaches to a
 // native promise whatever that promise's own then is, and nothing patched later changes it
 const boxHealthThen = Promise.prototype.then, boxHealthApply = Reflect.apply;
@@ -25416,25 +25455,53 @@ function boxHealth(log, scan, { kit = null, parts = boxHealthParts(), real = () 
   };
   const ctx = ctxFor('sampler');
   const running = parts.map(([name, part]) => ({ name, part, ctx: ctxFor(name), up: false }));
+  // The roots as memoryRoots names them, but each root's settings read one at a time through the
+  // budget (kit-919): one that can't start, or hasn't answered in 2 s of real(), keeps that root's last.
+  const settingsOf = new Map();
   const readRoots = async () => {
     let list = [];
     try { list = await scan(); } catch { list = []; }
-    ({ roots, ceiling } = await memoryRoots(list));
+    let registry = [];
+    try { registry = machineRepos(); } catch { registry = []; }
+    const scanned = (Array.isArray(list) ? list : []).filter((s) => memoryIsMap(s) && typeof s.root === 'string').map((s) => ({ root: s.root, name: typeof s.name === 'string' ? s.name : '' }));
+    const all = [...new Set([...registry, ...scanned.map((s) => s.root)].filter((r) => typeof r === 'string').map((r) => r.replace(/\/+$/, '')))].filter((r) => r.startsWith('/'));
+    const late = Symbol('late');
+    for (const r of all) {
+      if (stopped) return;
+      const p = boxHealthIo(path.join(r, 'docs', 'devteam', 'project', 'settings.md'), () => memorySettings(r));
+      if (p === null) { if (boxHealthIoFull()) ctx.say(BOX_HEALTH_FULL); continue; }
+      let end = () => {};
+      const got = await Promise.race([p, new Promise((res) => { end = ctx.timeout(BOX_HEALTH_STATFS_MS, () => res(late)); })]);
+      end();
+      if (got !== late) settingsOf.set(r, got);
+    }
+    for (const r of [...settingsOf.keys()]) if (!all.includes(r)) settingsOf.delete(r);
+    ({ roots, ceiling } = memoryNameRoots(registry, scanned, (r) => settingsOf.get(r) ?? null));
   };
   // [device, its entry], one a distinct volume. At most two reads are ever out, so a volume that hangs
-  // can't hold the threads every file read shares, and no root of it is asked while one is.
+  // can't hold the threads every file read shares, and no root of it is asked while one is. Each is a
+  // read of the budget: one that can't start counts as not answered (a gap, its volume not forgotten);
+  // with the budget full the tick asks no more, and a root whose own read is out is passed over.
   const readDisks = async () => {
     const found = new Map();
     const queue = roots.map((r) => r.root), waiting = [];
-    let over = false;
+    let over = false, skipped = false;
     const one = async (root) => {
       asking.add(root);
       try {
-        const { dev } = await fs.promises.stat(root);
-        deviceOf.set(root, dev);
-        if ([...asking].some((r) => r !== root && deviceOf.get(r) === dev)) { waiting.push(root); return; }
-        const s = await fs.promises.statfs(root);
-        if (!found.has(dev)) found.set(dev, s);
+        const p = boxHealthIo(root, async () => {
+          const { dev } = await fs.promises.stat(root);
+          deviceOf.set(root, dev);
+          if ([...asking].some((r) => r !== root && deviceOf.get(r) === dev)) { waiting.push(root); return; }
+          const s = await fs.promises.statfs(root);
+          if (!found.has(dev)) found.set(dev, s);
+        });
+        if (p === null) {
+          skipped = true;
+          if (boxHealthIoFull()) { over = true; ctx.say(BOX_HEALTH_FULL); }
+          return;
+        }
+        await p;
       } catch {} finally { asking.delete(root); }
     };
     const worker = async () => {
@@ -25454,7 +25521,7 @@ function boxHealth(log, scan, { kit = null, parts = boxHealthParts(), real = () 
     end();
     if (asking.size) ctx.say('a volume did not answer within 2 s');
     // every root answered or is gone: a volume with none left is forgotten
-    if (!asking.size && !queue.length) volumes = volumes.filter((dev) => found.has(dev));
+    if (!asking.size && !queue.length && !skipped) volumes = volumes.filter((dev) => found.has(dev));
     const got = new Map(found);
     for (const dev of got.keys()) if (!volumes.includes(dev)) volumes.push(dev);
     return volumes.flatMap((dev) => {
@@ -25622,6 +25689,10 @@ function boxHealth(log, scan, { kit = null, parts = boxHealthParts(), real = () 
 //             dropped. At most two processes' reads are ever out, across walks, and never two for
 //             one process, so a read that hangs (a process whose memory is locked) holds at most
 //             one of the threads every file read shares, and only while it hangs (final-1 F1).
+//             Each process's two reads are one read of the hub's budget (boxHealthIo, kit-919): one
+//             that can't start leaves its last info as it was, and with the budget full the walk
+//             starts no more. The run/ files and the sensors listing are too: one that can't
+//             start ends that pids read, keeping the last pids, and the next walk asks again.
 //             What is left of the 2 s ends the reading, not the walk: a process not read yet
 //             counts as unknown (outside, never a stray) until its read settles. Only the kind, whether it starts a test run, whether it is devteam's or tmux,
 //             and its cwd are kept, and only in this region. One whose cmdline can't be read is
@@ -25727,19 +25798,27 @@ const boxHealthProcesses = (() => {
     } catch { return null; } finally { await fh?.close().catch(() => {}); }
   };
   // the pids the known roots' run/ folders record
+  // Each read is one of the hub's budget (kit-919): one that can't start ends this read, so the last
+  // pids are kept and the next walk asks again.
   const readPids = async (ctx, r, roots) => {
     const pids = new Set();
     const add = (v) => { if (Number.isSafeInteger(v) && v > 1) pids.add(v); };
-    const json = async (f) => { try { const o = JSON.parse(await readSmall(f) ?? 'null'); return memoryIsMap(o) ? o : null; } catch { return null; } };
-    for (const { root } of roots) {
-      const dir = path.join(root, 'docs', 'devteam', 'run');
-      const b = await json(path.join(dir, 'browser', 'state.json'));
-      add(b?.daemon_pid); add(b?.chrome_pid);
-      add((await json(path.join(dir, 'supervisor-up.json')))?.pid);
-      let sensors = [];
-      try { sensors = await fs.promises.readdir(path.join(dir, 'sensors')); } catch { sensors = []; }
-      for (const s of sensors) { const t = (await readSmall(path.join(dir, 'sensors', s, 'stream.pid')))?.trim(); if (/^\d+$/.test(t ?? '')) add(Number(t)); }
-    }
+    const refused = Symbol('refused');
+    const io = (key, fn) => { const p = boxHealthIo(key, fn); if (p !== null) return p; if (boxHealthIoFull()) ctx.say(BOX_HEALTH_FULL); throw refused; };
+    const small = (f) => io(f, () => readSmall(f));
+    const json = async (f) => { const t = await small(f); try { const o = JSON.parse(t ?? 'null'); return memoryIsMap(o) ? o : null; } catch { return null; } };
+    try {
+      for (const { root } of roots) {
+        const dir = path.join(root, 'docs', 'devteam', 'run');
+        const b = await json(path.join(dir, 'browser', 'state.json'));
+        add(b?.daemon_pid); add(b?.chrome_pid);
+        add((await json(path.join(dir, 'supervisor-up.json')))?.pid);
+        let sensors = [];
+        const listed = path.join(dir, 'sensors');
+        try { sensors = await io(listed, () => fs.promises.readdir(listed)); } catch (e) { if (e === refused) throw e; sensors = []; }
+        for (const s of sensors) { const t = (await small(path.join(dir, 'sensors', s, 'stream.pid')))?.trim(); if (/^\d+$/.test(t ?? '')) add(Number(t)); }
+      }
+    } catch (e) { if (e === refused) return; throw e; }
     if (run === r) { r.pids = pids; r.pidsOf = roots; }
   };
   // readPids, one at a time, waited for at most 2 s; a late one sets the pids when it ends
@@ -25752,11 +25831,16 @@ const boxHealthProcesses = (() => {
     if (was) ctx.say("a root's run/ files did not answer within 2 s: the last pids are kept");
   };
   // a process's info: { cwd, kind, test, own }; one whose cmdline can't be read is known as nothing
+  // undefined: a read of the hub's budget (kit-919) that can't start, so the last info stands
   const readInfo = async (ctx, pid) => {
-    const dir = path.join(ctx.proc, String(pid));
-    const text = await readSmall(path.join(dir, 'cmdline'));
+    const dir = path.join(ctx.proc, String(pid)), cmdline = path.join(dir, 'cmdline');
+    const p = boxHealthIo(cmdline, async () => {
+      const text = await readSmall(cmdline);
+      return text === null ? { text } : { text, cwd: await fs.promises.readlink(path.join(dir, 'cwd')).catch(() => null) };
+    });
+    if (p === null) { if (boxHealthIoFull()) ctx.say(BOX_HEALTH_FULL); return undefined; }
+    const { text, cwd } = await p;
     if (text === null) return { cwd: null, kind: null, test: false, own: false, none: true };
-    const cwd = await fs.promises.readlink(path.join(dir, 'cwd')).catch(() => null);
     return { cwd, ...procClassify(memoryWords(text)) };
   };
   const walk = async (ctx, r) => {
@@ -25792,6 +25876,8 @@ const boxHealthProcesses = (() => {
           r.out.add(k);
           try {
             const info = await readInfo(ctx, pid);
+            // the budget full: this walk reads no more; one whose file is out is passed over
+            if (info === undefined) { if (boxHealthIoFull()) over = true; continue; }
             if (run === r) r.info.set(k, { at: ctx.real(), ...info });
           } finally { r.out.delete(k); }
         }
@@ -25951,7 +26037,8 @@ const boxHealthProcesses = (() => {
 // A killed du stuck in the kernel stays alive until it closes: while one is, its worktree gets no
 // second du (its row stays), and while two are, no du starts at all (every row stays). The
 // .worktrees/ folders are listed one at a time inside the one look, so a volume that hangs holds at
-// most one of the threads every file read shares, and no look starts until it answers.
+// most one of the threads every file read shares, and no look starts until it answers. Each listing
+// is a read of the hub's budget (boxHealthIo, kit-919): one that can't start keeps that root's rows.
 //
 // part(ctx, parts) gives undefined until a read has ended, then (a new object after each read):
 //   worktrees   [{ root, worktree, disk, disk_at }], in the order the roots and their folders were
@@ -25993,12 +26080,29 @@ const boxHealthDisk = (() => {
     const found = [], order = [];
     for (const { root } of ctx.roots()) {
       let list = [];
-      try { list = await fs.promises.readdir(path.join(root, '.worktrees'), { withFileTypes: true }); } catch (e) {
+      const dir = path.join(root, '.worktrees');
+      // a read of the hub's budget (kit-919): one that can't start keeps the root's rows, as an unreadable one does.
+      // The names, then each one's lstat one after another, so the read holds one file thread at a time:
+      // withFileTypes, on a volume that leaves entry types unknown, starts every entry's lstat at once
+      // (final-1 F1). An entry gone before its lstat is left out.
+      const p = boxHealthIo(dir, async () => {
+        const dirs = [];
+        for (const name of await fs.promises.readdir(dir)) {
+          try { if ((await fs.promises.lstat(path.join(dir, name))).isDirectory()) dirs.push(name); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
+        }
+        return dirs;
+      });
+      if (p === null) {
+        if (boxHealthIoFull()) ctx.say(BOX_HEALTH_FULL);
+        for (const k of r.order) if (k.startsWith(`${root}\0`)) order.push(k);
+        continue;
+      }
+      try { list = await p; } catch (e) {
         // missing: no worktrees; unreadable (EACCES, EIO): its rows stay as they are, none read again
         if (e?.code !== 'ENOENT') for (const k of r.order) if (k.startsWith(`${root}\0`)) order.push(k);
         continue;
       }
-      for (const d of list) if (d.isDirectory()) { found.push({ root, worktree: d.name }); order.push(keyOf({ root, worktree: d.name })); }
+      for (const name of list) { found.push({ root, worktree: name }); order.push(keyOf({ root, worktree: name })); }
     }
     if (ctx.stopped() || run !== r) return;
     r.order = order;
@@ -26151,7 +26255,8 @@ const boxHealthState = (() => {
 // with 2 s of real(): one that hasn't answered keeps that root's last read (its at still ages it), and
 // isn't asked again until it settles. At most two reads are out at once, across every project: while
 // two are, a root whose read can't start keeps its last read too, so hung files never hold more than
-// two of the hub's file threads.
+// two of the hub's file threads. Each is a read of the hub's budget (boxHealthIo, kit-919) as well: one
+// the budget can't start is late at once, the same way.
 //
 // A project's dashboard, from the hub's scan (which can't tell a refused port from a slow one):
 //   up     a hello names the root: its port and its fleet's mode are the hello's
@@ -26217,8 +26322,11 @@ const boxHealthPool = (() => {
   const LATE = Symbol('late');
   const settled = (ctx, r, file, max) => {
     if (r.out.has(file) || r.out.size >= POOL_READS) { ctx.say("two file reads are out: a project whose read can't start keeps its last read"); return Promise.resolve(LATE); }
+    // and a read of the hub's budget (kit-919): one that can't start is late too
+    const read = boxHealthIo(file, () => readCapped(file, max));
+    if (read === null) { if (boxHealthIoFull()) ctx.say(BOX_HEALTH_FULL); return Promise.resolve(LATE); }
     r.out.add(file);
-    const p = readCapped(file, max).finally(() => r.out.delete(file));
+    const p = read.finally(() => r.out.delete(file));
     let end = () => {};
     const late = new Promise((res) => { end = ctx.timeout(POOL_FILE_MS, () => res(LATE)); });
     return Promise.race([p, late]).finally(() => end());
@@ -26429,8 +26537,8 @@ const boxHealthPool = (() => {
 // Every 15 s of now() it reads again once a minute of now() has passed since the last read (the first
 // read follows the sampler's first read of the roots). A read: for each known root, one at a time,
 // <root>/docs/devteam/run/accounts.json (at most 256 KB + 1), raced with 2 s of real(). At most two
-// reads are out at once, never two of one file: a read that can't start, or hasn't answered in 2 s,
-// keeps that file's last read. The record used is the freshest (by its at) whose capacity.list is a
+// reads are out at once, never two of one file: a read that can't start (here, or in the hub's budget,
+// boxHealthIo: kit-919), or hasn't answered in 2 s, keeps that file's last read. The record used is the freshest (by its at) whose capacity.list is a
 // list, among those within 5 minutes of real() (one older, or ahead: a wrong clock, is dropped); with none, claude is absent (no cswap,
 // an older kit's record, or a stopped tick). Each read that finds one adds a reading to the ring.
 //
@@ -26650,8 +26758,11 @@ const boxHealthClaude = (() => {
   // raced with 2 s of real(); at most two out, never two of one file: one that can't start is late
   const settled = (ctx, r, file) => {
     if (r.out.has(file) || r.out.size >= CLAUDE_READS) { ctx.say("two file reads are out: a project whose accounts.json read can't start keeps its last read"); return Promise.resolve(LATE); }
+    // and a read of the hub's budget (kit-919): one that can't start is late too
+    const read = boxHealthIo(file, () => readCapped(file, CLAUDE_MAX_BYTES));
+    if (read === null) { if (boxHealthIoFull()) ctx.say(BOX_HEALTH_FULL); return Promise.resolve(LATE); }
     r.out.add(file);
-    const p = readCapped(file, CLAUDE_MAX_BYTES).finally(() => r.out.delete(file));
+    const p = read.finally(() => r.out.delete(file));
     let end = () => {};
     const late = new Promise((res) => { end = ctx.timeout(CLAUDE_FILE_MS, () => res(LATE)); });
     return Promise.race([p, late]).finally(() => end());
