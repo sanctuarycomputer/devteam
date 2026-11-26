@@ -14921,7 +14921,59 @@ function draftArtifacts(landed = landedArtifacts()) {
   save(treeFile, nextTrees, trees);
   return [...res, ...remote];
 }
-const allArtifacts = () => { const l = landedArtifacts(); return [...l, ...draftArtifacts(l)]; };
+// A landed entry whose log object says archived carries archived {at, by, goal} (kit-934): read from
+// the log on every call, never kept in the landed cache or in artifact.json. A draft never carries it.
+const allArtifacts = () => {
+  const l = landedArtifacts();
+  const rec = archiveRecords();
+  return [...l.map((a) => { const r = rec.get(a.slug); return r?.archived ? { ...a, archived: { at: r.at, by: r.by, goal: r.goal } } : a; }), ...draftArtifacts(l)];
+};
+// ----- archiving: a met goal's Library items leave the Library, and nothing is deleted (kit-934) -----
+// Each slug's artifact object (log type artifact, id artifact:<slug>), folded like any object: the
+// newest set of a field wins, unless a higher-ranked writer (the owner) set it. Only the owner and the
+// supervisor write the type (the schema's authority table, checked on every read). Per slug: whether it
+// is archived, who last set archived and when (its last applied update carrying it, else its creation),
+// and the goal it was archived for (or null).
+function archiveRecords() {
+  const m = new Map();
+  for (const o of logObjects('artifact')) {
+    if (typeof o.id !== 'string' || !o.id.startsWith('artifact:')) continue;
+    const u = [...(o.updates ?? [])].reverse().find((x) => 'archived' in x);
+    m.set(o.id.slice('artifact:'.length), { archived: o.archived === true, at: u?.at ?? o.created_at, by: u?.by ?? o.created_by, goal: o.goal ?? null });
+  }
+  return m;
+}
+// The landed artifacts kit-935 archives when goal g is met: landed by `at` (an ISO time; null
+// is now), every scope in their for a goal:, feature: or ticket: scope resolving to met goals, at
+// least one of them g. A feature resolves to the goals it serves when every one is met; a ticket
+// through its feature. An all, project, component: or link: scope, an unknown id, a running goal, a
+// draft and an empty for are never archivable. The one rule kit-935 and kit-936 read.
+function archivableArtifacts(goalId, at = null) {
+  const goals = new Map(logObjects('goal').map((g) => [g.id, g]));
+  const met = (id) => goals.get(id)?.status === 'met';
+  if (!met(goalId)) return [];
+  const served = (fid) => { const gs = features().get(fid)?.goals ?? []; return gs.length && gs.every(met) ? gs : null; };
+  const resolve = (s) => {
+    const i = String(s).indexOf(':');
+    const kind = i < 0 ? s : s.slice(0, i), id = i < 0 ? '' : s.slice(i + 1);
+    if (kind === 'goal') return met(id) ? [id] : null;
+    if (kind === 'feature') return served(id);
+    if (kind === 'ticket') { const t = tickets().get(id); return t ? served(t.feature) : null; }
+    return null;
+  };
+  let landed = landedArtifacts();
+  if (at) {
+    // main as it stood at `at`: its last first-parent commit by then, and the folders it held
+    const ref = mainRef();
+    const c = ref ? git(['rev-list', '-1', '--first-parent', `--before=${at}`, ref], mainRoot) : null;
+    const then = new Set(c ? (git(['ls-tree', '--name-only', `${c}:${ARTIFACTS_REL}`], mainRoot) ?? '').split('\n').filter(Boolean) : []);
+    landed = landed.filter((a) => then.has(a.slug));
+  }
+  return landed.filter((a) => {
+    const rs = (a.for ?? []).map(resolve);
+    return rs.length > 0 && rs.every(Boolean) && rs.flat().includes(goalId);
+  }).sort((a, b) => a.slug.localeCompare(b.slug));
+}
 // ----- publishing: the owner makes a landed artifact readable by anyone, from the cloud box -----
 // The gateway does the publishing (its confirm page, its own copy of the bytes); the kit says what
 // main has, and records the owner's word as an owner act (the public-artifacts design).
@@ -15218,14 +15270,57 @@ function cmdArtifact() {
     return sub === 'handoff' ? artifactHandoffCmd(slug, at) : artifactNotesCmd(slug, at);
   }
   if (sub === 'addressed') return artifactAddressedCmd(args[0]);
-  die('usage: artifact new <slug> --title t --summary s [--for json] [--kind mock|diagram|docs] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact versions <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner | artifact handoff <slug> [--at <where>] [--json] | artifact notes <slug> [--at <where>] [--json] | artifact addressed <t-id> --note "<what changed>" [--sha <commit>] [--draft <worktree>]');
+  // artifact archivable <goal> [--at <time>] [--json]: what kit-935 archives when that goal is met
+  // (archivableArtifacts), landed by --at; it writes nothing
+  if (sub === 'archivable') {
+    const gid = args[0] ?? die('usage: artifact archivable <goal-id> [--at <time>] [--json]');
+    if (logGet(gid)?.type !== 'goal') die(`no goal ${gid}`);
+    let at = null;
+    if (flags.at !== undefined) {
+      const ms = Date.parse(flagStr('at') ?? '');
+      if (!/^\d{4}-\d{2}-\d{2}T/.test(flagStr('at') ?? '') || Number.isNaN(ms)) die('--at is a time: 2026-11-26T09:00:00Z');
+      at = new Date(ms).toISOString();
+    }
+    const list = archivableArtifacts(gid, at);
+    if (flags.json) return json(list);
+    if (!list.length) return out(`nothing archivable for ${gid}${at ? ` as of ${at}` : ''}`);
+    for (const a of list) out(`${a.slug} ${a.error ? `(broken: ${a.error})` : quoteData(a.title)} for ${a.for.join(', ')}`);
+    return;
+  }
+  // artifact archive|restore <slug> [--reason "<why>"] [--owner]: set or clear the artifact's archived
+  // attribute (kit-934), the supervisor's or, with --owner, the owner's. One line in the log; its files
+  // never move. Once the owner has set it, only the owner changes it.
+  if (sub === 'archive' || sub === 'restore') {
+    const slugName = args[0];
+    if (!LINK_ID.test(slugName ?? '')) die(`usage: artifact ${sub} <slug> [--reason "<why>"] [--owner]`);
+    const by = flags.owner ? ownerWriter().by : (supervisorOnly(`artifact ${sub}`), 'supervisor');
+    const reason = flags.reason === undefined ? null : (flagStr('reason') ?? '').replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim() || null;
+    if (reason && Buffer.byteLength(reason) > 500) die(`--reason is at most 500 bytes; this one is ${Buffer.byteLength(reason)}`);
+    const landed = landedArtifacts();
+    if (!landed.some((a) => a.slug === slugName)) die(draftArtifacts(landed).some((a) => a.slug === slugName) ? `${slugName} is a draft; only a landed artifact is archived` : `${slugName}: no artifact by that name on main`);
+    const want = sub === 'archive';
+    const id = `artifact:${slugName}`;
+    // two writers at once write one line: the check and the line under one lock
+    fs.mkdirSync(runDir, { recursive: true });
+    const why = withLock(runPath('artifact-archive'), () => {
+      logCache = null;
+      const cur = archiveRecords().get(slugName);
+      if ((cur?.archived === true) === want) return want ? `${slugName} is already archived` : `${slugName} is not archived; there is nothing to restore`;
+      if (cur && by !== 'owner' && cur.by === 'owner') return `${slugName}: the owner ${cur.archived ? 'archived' : 'restored'} it (${cur.at}), so only the owner changes it now`;
+      appendLog({ type: 'artifact', ...(cur ? { op: 'set' } : {}), id, archived: want, goal: null, reason }, by);
+      return null;
+    });
+    if (why) die(why);
+    return out(want ? `archived ${slugName}: it leaves the Library; its files stay` : `restored ${slugName}: it is back in the Library`);
+  }
+  die('usage: artifact new <slug> --title t --summary s [--for json] [--kind mock|diagram|docs] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact versions <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner | artifact handoff <slug> [--at <where>] [--json] | artifact notes <slug> [--at <where>] [--json] | artifact addressed <t-id> --note "<what changed>" [--sha <commit>] [--draft <worktree>] | artifact archivable <goal-id> [--at <time>] [--json] | artifact archive|restore <slug> [--reason "<why>"] [--owner]');
 }
 function cmdArtifacts() {
   gitReadCache = new Map();
   const all = allArtifacts();
   if (flags.json) return json(all);
   if (!all.length) return out('no artifacts');
-  for (const a of all) out(`${a.slug} [${a.at === 'main' ? 'landed' : `draft in ${a.at}`}] ${a.error ? `(broken: ${a.error})` : quoteData(a.title)}${a.for.length ? ` for ${a.for.join(', ')}` : ''}`);
+  for (const a of all) out(`${a.slug} [${a.at === 'main' ? 'landed' : `draft in ${a.at}`}] ${a.archived ? '[archived] ' : ''}${a.error ? `(broken: ${a.error})` : quoteData(a.title)}${a.for.length ? ` for ${a.for.join(', ')}` : ''}`);
 }
 // The starter page: the dashboard's light and dark tokens copied inline, since an artifact can't
 // load the dashboard's files.
@@ -33660,8 +33755,11 @@ function cmdRecurring() {
 //   its lock or an .npmrc above that folder (a workspace root above .kit would otherwise install its own
 //   lock, bytes the pin never named), so a workspace root or an .npmrc above changes nothing and is not
 //   refused (C4 runs real npm to show it). Each runs with npm_config_userconfig and npm_config_globalconfig naming
-//   two different empty files (regular files; npm refuses one file for both), with no other npm_config_* or
-//   NPM_CONFIG_* variable in its environment, and in a folder the step made that holds no .npmrc: ci and
+//   two different empty files (regular files; npm refuses one file for both), with no other variable whose
+//   name starts with npm_config_ in any letter case in its environment: those two names are lower-case,
+//   and NPM_CONFIG_USERCONFIG or any other spelling is another variable to drop (npm reads the prefix in
+//   any letter case: npm_config_*, NPM_CONFIG_* and a mixed spelling such as Npm_Config_* alike, a scoped
+//   npm_config_@scope:registry included), and in a folder the step made that holds no .npmrc: ci and
 //   audit in .kit/<version>-<hash>/, view in its own folder made outside the checkout (mkdtemp under
 //   os.tmpdir()) holding only a package.json the step writes ({}). An npm
 //   older than 9.5 can't verify attestations: a finding before layout 2, a refusal from it. A registry
@@ -41290,6 +41388,8 @@ const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   artifact notes <slug> [--at main|<worktree>|tree:<id>] [--json]   the notes on that copy not yet resolved: each one's state, the spot as data, the owner's words
   artifact addressed <t-id> --note "<what changed>" [--sha <commit>] [--draft <worktree>]   (the session a note was handed to, or the supervisor) mark it, with the kit's picture of the spot: look at it
   artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner   the owner's record that a landed artifact went public or came down (the gateway's confirm page runs these; by hand they record intent only)
+  artifact archivable <goal-id> [--at <time>] [--json]   the landed artifacts kit-935 archives when that goal is met (landed by --at); writes nothing
+  artifact archive|restore <slug> [--reason "<why>"] [--owner]   archive a landed artifact (out of the Library, nothing deleted) or bring it back: the supervisor's, or the owner's with --owner
   artifacts [--json]              landed artifacts, and drafts in session worktrees
   preview <port> [--label "<one line>"]   register a server you are running; prints the link for this machine (a name derived from project, session and label)
   preview --run "<command>" [--port <p>] [--label …]   the kit runs it in a tmux window beside yours; PORT is set, {port} in the command is filled in, a free port in 4400-4499 is picked without --port

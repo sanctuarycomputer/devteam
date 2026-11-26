@@ -398,6 +398,15 @@ test('C13 each failure, driven once', async () => {
         assert.equal(raw.status, 1, 'C13 hostile-env: npm refuses a call that passed the config on');
         assert.match(raw.stderr, /npm config from the environment reached npm/, 'C13 hostile-env: and says so');
         assert.match(raw.stderr, /npm_config_@sanctuarycomputer:registry/, 'C13 hostile-env: naming the scoped registry too');
+        // npm reads the npm_config_ prefix in any letter case, so the hostile env holds a mixed-case name
+        const MIXED = 'Npm_Config_@sanctuarycomputer:registry';
+        assert.equal(e[MIXED], 'http://127.0.0.1:9/', 'C13 hostile-env: env() carries a mixed-case npm_config_ name');
+        // a kit that strips only the two spellings npm_config_* and NPM_CONFIG_*
+        const two = Object.fromEntries(Object.entries(e).filter(([k]) => !k.startsWith('npm_config_') && !k.startsWith('NPM_CONFIG_')));
+        const vd2 = viewDir('hostile-view-two-spellings');
+        const half = spawnSync('npm', ['view', `${NAME}@0.101.0`, '--json', `--registry=${reg.url}`, '--ignore-scripts', `--prefix=${vd2}`, '--workspaces=false'], { cwd: vd2, env: { ...two, npm_config_userconfig: npmEnv(reg).npm_config_userconfig, npm_config_globalconfig: npmEnv(reg).npm_config_globalconfig }, encoding: 'utf8', timeout: 60000 });
+        assert.equal(half.status, 1, 'C13 hostile-env: a kit that strips only npm_config_* and NPM_CONFIG_* is refused');
+        assert.match(half.stderr, /npm config from the environment reached npm: Npm_Config_@sanctuarycomputer:registry/, 'C13 hostile-env: naming the mixed-case name it left');
         assert.equal(npm(reg, ['view', `${NAME}@0.101.0`, '--json', ...FLAGS(reg)]).status, 0, 'C13 hostile-env: the same call with the config dropped passes');
       }
       seen.push(f);
@@ -438,6 +447,7 @@ test('C14 the fake npm refuses a call that breaks the calling rules', async () =
     refused([...view, `--registry=${reg.url}`], {}, /--ignore-scripts/, 'no --ignore-scripts');
     refused([...view, ...FLAGS(reg)], { env: npmEnv(reg, { npm_config_cache: '/tmp/x' }) }, /npm config from the environment reached npm: npm_config_cache/, 'any other npm_config_ variable');
     refused([...view, ...FLAGS(reg)], { env: npmEnv(reg, { NPM_CONFIG_REGISTRY: 'http://127.0.0.1:9/' }) }, /npm config from the environment reached npm: NPM_CONFIG_REGISTRY/, 'an upper-case NPM_CONFIG_ variable');
+    refused([...view, ...FLAGS(reg)], { env: npmEnv(reg, { Npm_Config_Registry: 'http://127.0.0.1:9/' }) }, /npm config from the environment reached npm: Npm_Config_Registry/, 'a mixed-case Npm_Config_ variable');
     refused([...view, ...FLAGS(reg)], { env: npmEnv(reg, { 'npm_config_@sanctuarycomputer:registry': 'http://127.0.0.1:9/' }) }, /npm config from the environment reached npm: npm_config_@sanctuarycomputer:registry/, 'a scoped registry variable, a name no shell keeps');
     const env = npmEnv(reg);
     refused([...view, ...FLAGS(reg)], { env: { ...env, npm_config_globalconfig: env.npm_config_userconfig } }, /double-loading config/, 'one file for both configs');
@@ -688,7 +698,9 @@ test('C16 the comment above packagePinPair states kit-install@1, and the alpha-b
     ['its name', /kit-install@1/],
     ['the settings', /package_name[\s\S]*alpha[\s\S]*settingsAt\(main\)|package_name[\s\S]*alpha[\s\S]*main's committed settings/],
     ['the pair and its expected version', /docs\/devteam\/package\.json[\s\S]*package-lock\.json[\s\S]*upstream_base/],
-    ['the forced registry and the scrubbed config', /--registry=[\s\S]*--ignore-scripts[\s\S]*npm_config_userconfig and npm_config_globalconfig naming two different empty files[\s\S]*no other npm_config_\* or NPM_CONFIG_\*/],
+    ['the forced registry and the scrubbed config', /--registry=[\s\S]*--ignore-scripts[\s\S]*npm_config_userconfig and npm_config_globalconfig naming two different empty files[\s\S]*no other variable whose name starts with npm_config_ in any letter case/],
+    ['the two config names are lower-case', /those two names are lower-case, and NPM_CONFIG_USERCONFIG or any other spelling is another variable to drop/],
+    ['npm reads the prefix in any case', /npm reads the prefix in any letter case: npm_config_\*, NPM_CONFIG_\* and a mixed spelling such as Npm_Config_\* alike/],
     ['the test registry, loopback only', /DEVTEAM_NPM_REGISTRY[\s\S]*exactly http:\/\/127\.0\.0\.1:<port>\/[\s\S]*any other value \(localhost, \[::1\], https, a path\)[\s\S]*exit 1 naming the variable[\s\S]*never used or passed over for the public one/],
     ['npm 9.5', /older than 9\.5[\s\S]*a finding before layout 2, a refusal from it/],
     ['npm\'s answers', /npm E404 for the version is unpublished: a finding before layout 2, a refusal from it\. EINTEGRITY is\s+a refusal/],
