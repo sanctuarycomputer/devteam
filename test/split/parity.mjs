@@ -70,10 +70,11 @@ export function parseTap(text) {
   const rows = new Map();
   let file = null, stack = [], inSummary = false;
   for (const line of text.split('\n')) {
+    // runPart joins run.mjs outputs (rest 1/5: alone, then the shard): a file header ends a summary
+    const h = FILE_HEAD.exec(line);
+    if (h) { inSummary = false; file = h[1]; files.add(file); stack = []; continue; }
     if (/^summary: \d+ files?, concurrency \d+$/.test(line)) { inSummary = true; file = null; continue; }
     if (inSummary) { const m = ROW.exec(line); if (m) { rows.set(m[1], m[3]); files.add(m[1]); } continue; }
-    const h = FILE_HEAD.exec(line);
-    if (h) { file = h[1]; files.add(file); stack = []; continue; }
     if (!file) continue;
     const s = SUBTEST.exec(line);
     if (s) { const d = s[1].length / 4; stack.length = d; stack[d] = unescape(s[2]); continue; }
@@ -93,9 +94,12 @@ export function parseTap(text) {
 }
 
 // ---- the comparison: failing tests ----
-const keyOf = (t) => `${t.file}\u0000${t.name}`;
+// a file may repeat a test name: each occurrence is its own key (name, then its index among its twins)
+const keyOf = (t) => `${t.file}\u0000${t.name}\u0000${t.nth ?? 0}`;
+const numbered = (tests) => { const seen = new Map(); return tests.map((t) => { const k = `${t.file}\u0000${t.name}`; const nth = seen.get(k) ?? 0; seen.set(k, nth + 1); return { ...t, nth }; }); };
 // partial (a part is missing): a file the tree side never ran isn't counted; the report names the part
-export function compare(source, tree, { partial = false } = {}) {
+export function compare(source0, tree0, { partial = false } = {}) {
+  const source = { files: source0.files, tests: numbered(source0.tests) }, tree = { files: tree0.files, tests: numbered(tree0.tests) };
   const failing = [];
   const treeFiles = new Set(tree.files);
   const srcFail = new Set(source.tests.filter((t) => t.status === 'fail').map(keyOf));
@@ -514,13 +518,12 @@ export function snapshot(dir, label, origin = null) {
     if (r.status !== 0) throw new Error(`git ${a[0]} in ${dir} failed: ${tail(r.stderr, 5)}`);
   }
 }
-export async function build({ sha, repo, splitDir, work, startupRuns, files }) {
+export async function build({ sha, repo, splitDir, work, startupRuns, files, split = path.join(here, 'split.mjs') }) {
   const tree = path.join(work, 'tree'), source = path.join(work, 'source'), home = path.join(work, 'home');
   const o = run('git', ['-C', repo, 'remote', 'get-url', 'origin']);
   const origin = o.status === 0 ? o.stdout.trim() || null : null;
   fs.mkdirSync(work, { recursive: true });
   fs.mkdirSync(home, { recursive: true });
-  const split = path.join(here, 'split.mjs');
   const sa = ['--at', sha, '--repo', repo, ...(splitDir ? ['--split-dir', splitDir] : [])];
   const s = spawnSync(process.execPath, [split, ...sa, '--out', tree, '--json'], { encoding: 'utf8', env: gitEnv(), maxBuffer: 1 << 28 });
   let js = null; try { js = JSON.parse(s.stdout); } catch {}
