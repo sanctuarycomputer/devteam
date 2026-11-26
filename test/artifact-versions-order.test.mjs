@@ -183,6 +183,18 @@ test('the Library lists no copy of main\'s landed or an earlier version as a dra
   assert.deepEqual(lib.map((a) => a.at).sort(), ['kit-103-real', 'main'], 'O9: the Library row opens main; no Draft row for a stale copy');
 });
 
+// git on PATH writing each call's arguments to a file: run(args) runs devteam.mjs through it and
+// gives its output and the git calls it made
+function gitSpy(F) {
+  const bin = path.join(path.dirname(F.old), 'order-bin');
+  const calls = path.join(path.dirname(F.old), 'order-git-calls.txt');
+  const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  write(path.join(bin, 'git'), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexec '${real}' "$@"\n`);
+  fs.chmodSync(path.join(bin, 'git'), 0o755);
+  const env = { PATH: `${bin}${path.delimiter}${process.env.PATH}` };
+  return (args) => { fs.writeFileSync(calls, ''); const out = F.owner(args, env); return { out, calls: fs.readFileSync(calls, 'utf8').split('\n').filter(Boolean) }; };
+}
+
 test('the drop is kept in run/cache: a second dashboard-data read runs no git log or ls-tree -r for it', (t) => {
   const F = threadsFixture('order-o10');
   cleanup(t)(() => F.done());
@@ -192,14 +204,7 @@ test('the drop is kept in run/cache: a second dashboard-data read runs no git lo
   plainCopy(F, 'kit-102-real', 'order-mock', page('real'));
   remoteBranch(F, 'ticket/far-02', v1.commit, '2026-03-01T00:00:00Z', '2026-05-01T00:00:00Z');
   draftAt(F, 'kit-103-checkout', 'order-mock', page('checkout'), '2026-03-05T00:00:00Z');
-  // git on PATH writes each call's arguments to a file
-  const bin = path.join(path.dirname(F.old), 'order-bin');
-  const calls = path.join(path.dirname(F.old), 'order-git-calls.txt');
-  const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
-  write(path.join(bin, 'git'), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexec '${real}' "$@"\n`);
-  fs.chmodSync(path.join(bin, 'git'), 0o755);
-  const env = { PATH: `${bin}${path.delimiter}${process.env.PATH}` };
-  const run = (args) => { fs.writeFileSync(calls, ''); const out = F.owner(args, env); return { out, calls: fs.readFileSync(calls, 'utf8').split('\n').filter(Boolean) }; };
+  const run = gitSpy(F);
   const first = run(['dashboard-data']);
   assert.ok(first.calls.length > 0, 'the wrapper saw git');
   assert.equal(typeof treeFps(F)[v2.tree], 'string', 'O10: main\'s tree fingerprint kept by tree id after a Library read');
@@ -207,8 +212,16 @@ test('the drop is kept in run/cache: a second dashboard-data read runs no git lo
   const forDrop = second.calls.filter((c) => (/^log\b/.test(c) && c.includes(ARTIFACTS_REL)) || /^ls-tree\b.*\s-[a-z]*r[a-z]*(\s|$)/.test(c));
   assert.deepEqual(forDrop, [], 'O11: nothing changed, no git log or ls-tree -r for the drop');
   assert.deepEqual(JSON.parse(second.out).library.artifacts.filter((a) => a.slug === 'order-mock').map((a) => a.at).sort(), ['kit-102-real', 'kit-103-checkout', 'main'], 'O11: the same drop, from the cache');
-  // a draft's folder-change time is kept by its head (the branch tip, the checkout's HEAD): a second
-  // versions read of each runs no git log limited to one commit
+});
+
+test('a draft\'s last-change time is kept by its head: a second versions read runs no one-commit git log', (t) => {
+  const F = threadsFixture('order-o12');
+  cleanup(t)(() => F.done());
+  const v1 = landAt(F, 'order-mock', page(1), '2026-01-01T00:00:00Z');
+  remoteBranch(F, 'ticket/far-02', v1.commit, '2026-03-01T00:00:00Z', '2026-05-01T00:00:00Z');
+  draftAt(F, 'kit-103-checkout', 'order-mock', page('checkout'), '2026-03-05T00:00:00Z');
+  const run = gitSpy(F);
+  // the branch tip's, and the clean checkout's HEAD's
   const one = (c) => /^log\b/.test(c) && /(^|\s)(-1|-n\s?1|--max-count[=\s]1)(\s|$)/.test(c);
   for (const slug of ['far-mock', 'order-mock']) {
     const firstRead = run(['artifact', 'versions', slug, '--json']);
@@ -216,6 +229,41 @@ test('the drop is kept in run/cache: a second dashboard-data read runs no git lo
     const again = run(['artifact', 'versions', slug, '--json']);
     assert.deepEqual(again.calls.filter(one), [], `O12: ${slug}: no one-commit git log on a second versions read with nothing changed`);
   }
+});
+
+test('the cap keeps landed: A, 200 other pages, then A again', (t) => {
+  const F = threadsFixture('order-cap');
+  cleanup(t)(() => F.done());
+  const dir = path.join(F.old, ARTIFACTS_REL, 'cap-mock');
+  const at = (i) => new Date(Date.UTC(2026, 0, 1) + i * 3600 * 1000).toISOString();
+  // one push at the end: 202 commits, each an hour after the last
+  const commit = (n, i) => { fs.rmSync(dir, { recursive: true, force: true }); putIn(dir, page(n)); gitAt(F.old, at(i), ['add', '-A', dir]); gitAt(F.old, at(i), ['commit', '-qm', `cap-mock ${n}`]); };
+  commit('A', 0);
+  for (let i = 1; i <= 200; i++) commit(`x${i}`, i);
+  commit('A', 201);
+  gitAt(F.old, null, ['push', '-q', 'origin', 'main']);
+  const r = JSON.parse(F.owner(['artifact', 'versions', 'cap-mock', '--json']));
+  assert.equal(r.versions.length, 200);
+  assert.equal(r.truncated, true);
+  assert.deepEqual([r.versions.at(-1).kind, Date.parse(r.versions.at(-1).time)], ['landed', Date.parse(at(0))], 'landed, dated by its first commit, kept at the end');
+  assert.ok(nonIncreasing(r.versions), 'newest first');
+  assert.equal(r.versions[0].time.slice(0, 13), at(200).slice(0, 13), 'the newest other page first');
+});
+
+test('a draft whose checkout ignores its folder is dated by its files\' time', (t) => {
+  const F = threadsFixture('order-ignored');
+  cleanup(t)(() => F.done());
+  landAt(F, 'order-mock', page(1), '2026-01-01T00:00:00Z');
+  const root = path.join(F.old, '.worktrees', 'demo-07-ignored');
+  write(path.join(root, 'other.txt'), 'not the artifact');
+  gitAt(root, null, ['init', '-q']);
+  gitAt(root, '2026-04-01T00:00:00Z', ['add', 'other.txt']);
+  gitAt(root, '2026-04-01T00:00:00Z', ['commit', '-qm', 'unrelated']);
+  write(path.join(root, '.git/info/exclude'), 'docs/\n');
+  putIn(wtDir(F, 'demo-07-ignored', 'order-mock'), page('ignored'));
+  touchAll(wtDir(F, 'demo-07-ignored', 'order-mock'), new Date('2026-06-01T00:00:00Z'));
+  const d = versions(F, 'order-mock').find((v) => v.kind === 'draft');
+  assert.equal(d?.time, ISO('2026-06-01T00:00:00Z'), 'a clean status and no commit for the folder: its files\' newest time');
 });
 
 test('the viewer\'s version list: each entry\'s date, drafts included', { ...CHROME, timeout: 300000 }, async (t) => {
