@@ -392,6 +392,13 @@
   .mem-holds tr.sub td:first-child { padding-left: 14px; color: var(--fg-2); }
   @media (max-width: 560px) { .mem-bar { flex: 1 1 100%; width: auto; } .mem-spark { max-width: none; } .mem-open { margin-left: 0; } }
   /* box-memory-css end */
+  /* hub-tabbar-css start */
+  /* the hub's tabs are the shell's tab bar (dashboard-shell@3): its look over the old .tab box, whose
+     rules stay for the dot, the counts and a gone tab */
+  #tabs.tabbar { border-bottom: 0; }
+  #tabs.tabbar .tab { border: 0; border-radius: 0; background: none; height: 34px; padding: 0 10px; font: 500 13px/18px var(--sans); }
+  #tabs.tabbar .tab:hover, #tabs.tabbar .tab[aria-selected="true"] { background: none; }
+  /* hub-tabbar-css end */
   /* threads with the operator: the dashboard's thread layer (index.html, .tl-*), over the Overview */
   #ov-body { min-width: 0; }
   #tl { position: fixed; left: 0; top: 0; width: 0; height: 0; }
@@ -920,6 +927,9 @@ function showOnly(key) {
     o.tab.tabIndex = r === key ? 0 : -1;
     if (o.frame) o.frame.hidden = r !== key;
   }
+  // the one tab panel, labelled by the selected tab (none under Settings)
+  const on = key === TERM ? term?.tab : key === OVERVIEW ? ovTab : items.get(key)?.tab;
+  if (on?.id) framesEl.setAttribute('aria-labelledby', on.id); else framesEl.removeAttribute('aria-labelledby');
 }
 function selectOverview() {
   selected = OVERVIEW;
@@ -1357,6 +1367,55 @@ window.addEventListener('hashchange', () => {
   else hubWrite(it);
 });
 /* hubFrameRoute end */
+/* hubTabs start */
+// The hub's tabs are dashboard-shell@3's tab bar: each is a tab tabBar draws, taken in as nav#tabs's
+// own child (nav#tabs keeps its role and label, so there is no tablist inside a tablist), and their one
+// tab panel is main#frames. A tab's id in the bar is terminal, overview or p-<its root's 6 hex>: a
+// project's key may hold characters an id can't, and tabBar gives such a tab no id.
+const HUB_PANEL = 'frames';
+const hubTabId = (root) => (root === TERM ? 'terminal' : root === OVERVIEW ? 'overview' : `p-${hex6.get(root)}`);
+const hubRootOf = (id) => (id === 'terminal' ? (term ? TERM : null) : id === 'overview' ? OVERVIEW : [...items.keys()].find((r) => hubTabId(r) === id) ?? null);
+// one tab, as tabBar draws it, with the hub's .tab for its dot, its counts and a gone tab's look
+function hubTab(id, label, disabled = false) {
+  const t = document.createElement('template');
+  t.innerHTML = tabBar({ tabs: [{ id, label, disabled }], panel: HUB_PANEL });
+  const b = t.content.querySelector('[role="tab"]');
+  b.classList.add('tab');
+  b.setAttribute('aria-selected', 'false');
+  b.tabIndex = -1;
+  return b;
+}
+tabsEl.classList.add('tabbar');
+framesEl.setAttribute('role', 'tabpanel');
+bindTabBar(tabsEl, { onSelect: (id) => { const r = hubRootOf(id); if (r !== null) hubChoose(r); } });
+// Arrows, Home and End move from the tab with focus, skipping a disabled one, in the capture phase:
+// the page's older arrow listener on the nav never hears them (it moves from the selection).
+tabsEl.addEventListener('keydown', (e) => {
+  const b = e.target.closest?.('[role="tab"]');
+  if (!b || !tabsEl.contains(b)) return;
+  const all = [...tabsEl.querySelectorAll('[role="tab"]')];
+  const to = tabStep(all.map((x) => ({ id: x.dataset.tab, disabled: x.getAttribute('aria-disabled') === 'true' })), b.dataset.tab, e.key);
+  if (to === null) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const r = hubRootOf(to);
+  if (r !== null) hubChoose(r);
+  all.find((x) => x.dataset.tab === to)?.focus();
+}, true);
+/* hubTabs end */
+/* hubHistory start */
+// dashboard-shell@3 §10: a tab the owner chooses is a history entry, marked { hub: 1, key }; Back or
+// Forward onto a marked entry only selects its tab. Everything else the hub writes (the first entry,
+// a hub-route, a hash typed by hand, the step itself) replaces the entry and keeps it marked. A choice
+// is what runs inside a click on the hub's page, or the tab bar's keys (hubChoose).
+let hubChoosing = false;
+window.addEventListener('click', () => { hubChoosing = true; setTimeout(() => { hubChoosing = false; }); }, true);
+function hubChoose(root) {
+  if (root === selected) return;
+  hubChoosing = true;
+  try { select(root); } finally { hubChoosing = false; }
+}
+/* hubHistory end */
 // a card's ⋯: its root and port, and two ways to open its dashboard
 let menuPop = null;
 // closed, the keyboard goes back to the ⋯ it came from (Escape), found by its data-k after a redraw
@@ -3188,10 +3247,7 @@ async function draw() {
     await hexOf(x.root);
     let it = items.get(x.root);
     if (!it) {
-      const tab = document.createElement('button');
-      tab.className = 'tab';
-      tab.setAttribute('role', 'tab');
-      tab.onclick = () => select(x.root);
+      const tab = hubTab(hubTabId(x.root), x.name);
       tabsEl.append(tab);
       it = { x, tab, frame: null, goneAt: null };
       items.set(x.root, it);
@@ -3335,6 +3391,8 @@ function viewOnly() {
 }
 /* viewOnly end */
 async function findBox() {
+  // the Overview's tab, made before this runs: taken in as tabBar's
+  if (ovTab && !ovTab.dataset.tab) { const b = hubTab('overview', 'Overview'); b.title = ovTab.title; ovTab.replaceWith(b); ovTab = b; }
   try {
     const r = await fetch('box.json', { cache: 'no-store' });
     const b = r.ok ? await r.json() : null;
@@ -3354,10 +3412,7 @@ async function findBox() {
     // the signed-in person's level (kit-250): View has no terminal and changes nothing
     box.level = b.level === 'full' || b.level === 'view' ? b.level : null;
     if (box.role && box.role !== 'member' && typeof b.people === 'string') { try { const u = new URL(b.people, location.href); if (u.origin === location.origin) box.people = u.href; } catch {} }
-    const tab = document.createElement('button');
-    tab.className = 'tab';
-    tab.setAttribute('role', 'tab');
-    tab.textContent = 'Terminal';
+    const tab = hubTab('terminal', 'Terminal', box.level === 'view');
     tabsEl.prepend(tab);
     if (box.level === 'view') {
       // there but disabled: term stays null, so #terminal and a remembered Terminal tab fall back as a laptop's do
@@ -3369,7 +3424,6 @@ async function findBox() {
       tab.onclick = () => oaToast('View only: no terminal');
     } else {
       tab.title = 'The box\'s tmux sessions: supervisors, workers, logins';
-      tab.onclick = selectTerminal;
       term = { tab, frame: null };
     }
     viewOnly();
