@@ -8839,9 +8839,9 @@ function cmdSelf() {
 // project/exterior.md, what the project relates to: since kit-863 a plain document
 // (log.schema.json#exterior2), judged by the self-plain region's checkExterior, which follows
 // test/fixtures/world2/check.mjs rule for rule: one # title, ### entries, a dated source for each, and
-// on a repo not known to be private the names rule (a ### heading named whole in origin main's
-// strategy or dependency names, else refused; every capitalised word and every link host held until
-// named on the chore). A draft must be one. Version 1 (log.schema.json#exterior@1, one fenced
+// on a repo not known to be private the names rule (every heading, in any form: one of level 3 to 6
+// named whole in origin main's strategy or dependency names, a # or ## one each capitalised word in
+// it, else refused; every capitalised word and every link host held until named on the chore). A draft must be one. Version 1 (log.schema.json#exterior@1, one fenced
 // `exterior` block) still validates on main, by kit-135's rules below, and raises one exterior-drift.
 const EXTERIOR_REL = () => `${projectRel}/exterior.md`;
 const EXTERIOR_NOT_DRAFTED = 'exterior.md is not drafted yet: the supervisor drafts it from the strategy and self.md (supervisor.md, Monitoring)';
@@ -8942,7 +8942,7 @@ function dependencyNames(ref = mainRef()) {
   return { text: names.join('\n'), warnings };
 }
 // What the names rule allows at ref (origin main; the branch's own files never count): names, which
-// a ### heading must be named in whole (main's strategy.md and its dependency names), and words, which
+// judge every heading (main's strategy.md and its dependency names), and words, which
 // hold every other capitalised word and every link host (main's strategy.md and its dependency files'
 // whole text, namesAllowedText); warnings, the dependency files'.
 function exteriorAllowed(ref = mainRef()) {
@@ -8955,7 +8955,11 @@ function exteriorAllowed(ref = mainRef()) {
 function exteriorDraft(text, allowed) {
   return selfPlain.checkExterior(text, { today: exteriorToday(), visibility: 'public', allowed });
 }
-const exteriorRefusedLine = (name) => `"${name}" (a ### heading) is not named whole in origin main's strategy.md or its dependency names: on a repo not known to be private an entry is headed only by a name they give; head it as a group or a topic, or have the strategy name it first`;
+// A refused heading's line: a level-3 ATX heading of text's (an entry) as kit-863 words it; any other
+// form or level as a heading.
+const exteriorRefusedLine = (name, text) => (selfPlain.headings(text).some((h) => h.level === 3 && h.text === name)
+  ? `"${name}" (a ### heading) is not named whole in origin main's strategy.md or its dependency names: on a repo not known to be private an entry is headed only by a name they give; head it as a group or a topic, or have the strategy name it first`
+  : `"${name}" (a heading) is not named in origin main's strategy.md or its dependency names: on a repo not known to be private a heading of level 3 to 6 is only a name they give whole, and a # or ## heading holds no capitalised word they don't name; head it in plain words, or have the strategy name it first`);
 const exteriorWordLine = (w) => `"${w.word}" (${w.where}) is in neither origin main's strategy.md nor its dependency files: on a repo not known to be private, the draft is public once its branch is pushed; reword it, or check it and name it on the chore (chore pr --names-checked)`;
 // The draft's history (every version is pushed): the contract and dated sources on head ({ text }, or
 // null when there is no exterior.md at the head), then the names rule on each version ([{ commit,
@@ -8972,7 +8976,7 @@ function exteriorVersionsScan(head, versions, allowed) {
   const seen = new Set();
   for (const { commit, text } of versions) {
     const d = judge(text);
-    for (const name of d.refused) if (!seen.has(`n:${name}`)) { seen.add(`n:${name}`); named.push({ name, line: exteriorRefusedLine(name), commit }); }
+    for (const name of d.refused) if (!seen.has(`n:${name}`)) { seen.add(`n:${name}`); named.push({ name, line: exteriorRefusedLine(name, text), commit }); }
     for (const [list, where] of [[d.held, 'word'], [d.hosts, 'link host']]) for (const word of list) if (!seen.has(`w:${word}`)) { seen.add(`w:${word}`); words.push({ word, where, commit }); }
   }
   warns.push(...allowed.warnings);
@@ -9101,7 +9105,7 @@ function exteriorBase(main, blob) {
 // metrics' exterior findings, read from main with no network call (none with no main), each keyed so
 // observeFindings keeps one observation per name or blob pair. A version 1 exterior.md: one
 // exterior-drift (key exterior@1) asking for the plain version, and no other. A plain one:
-// exterior-drift once per ### heading main's strategy.md and dependency names no longer name, only
+// exterior-drift once per heading the names rule refuses against main's strategy.md and dependency names, only
 // where the repo was last known public (a machine with no record says nothing); exterior-stale while
 // main's strategy.md or self.md blob isn't the one at its base (exteriorBase; unknown raises none);
 // both low. exterior-missing while main has self.md, a written strategy linking it, and no
@@ -9126,10 +9130,10 @@ function exteriorFindings(add) {
   if (lastRepoVisibility() === 'public') {
     const allowed = exteriorAllowed(main);
     const seen = new Set();
-    for (const h of selfPlain.headings(m.text)) {
-      if (h.level !== 3 || seen.has(h.text.toLowerCase()) || selfPlain.namesWhole(allowed.names, h.text)) continue;
-      seen.add(h.text.toLowerCase());
-      add('low', 'exterior-drift', 'exterior', `exterior.md's entry "${h.text}" is named in neither main's strategy.md nor its dependency names`, 'draft a new version of exterior.md that heads it as a group or a topic, or have the strategy name it; run exterior check before chore pr', { key: h.text.toLowerCase() });
+    for (const name of exteriorDraft(m.text, allowed).refused) {
+      if (seen.has(name.toLowerCase())) continue;
+      seen.add(name.toLowerCase());
+      add('low', 'exterior-drift', 'exterior', `exterior.md's heading "${name}" is named in neither main's strategy.md nor its dependency names`, 'draft a new version of exterior.md that heads it in plain words, as a group or a topic, or have the strategy name it; run exterior check before chore pr', { key: name.toLowerCase() });
     }
   }
   const base = exteriorBase(main, m.blob);
@@ -9153,7 +9157,7 @@ function exteriorCheckLines() {
     const v = repoVisibility();
     if (v !== 'private') {
       const tail = v === 'unknown' ? " (the repo's visibility is unknown, which counts as not private)" : '';
-      errors.push(...d.refused.map((n) => `${exteriorRefusedLine(n)}${tail}`));
+      errors.push(...d.refused.map((n) => `${exteriorRefusedLine(n, text)}${tail}`));
       warnings.push(...[...d.held.map((word) => ({ word, where: 'word' })), ...d.hosts.map((word) => ({ word, where: 'link host' }))].map(exteriorWordLine));
     }
   }

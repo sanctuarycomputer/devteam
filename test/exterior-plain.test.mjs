@@ -12,7 +12,7 @@ import vm from 'node:vm';
 import { execFileSync } from 'node:child_process';
 import { json, line, write } from './lib/kit.mjs';
 import { fixture, SUP } from './lib/next-step-fixture.mjs';
-import { checkExterior as refCheckExterior } from './fixtures/world2/check.mjs';
+import { checkExterior as refCheckExterior, headings as refHeadings } from './fixtures/world2/check.mjs';
 
 const P = 'docs/devteam/project';
 const SELF = `${P}/self.md`;
@@ -38,6 +38,9 @@ const DAY = 86400000;
 const SHIFT = Math.round((Date.parse(`${TODAY}T00:00:00Z`) - Date.parse(`${W2.today}T00:00:00Z`)) / DAY);
 const realDay = (d) => { const t = new Date(`${d}T00:00:00Z`); return !Number.isNaN(t.getTime()) && t.toISOString().slice(0, 10) === d; };
 const shifted = (text) => text.replace(/(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)/g, (d) => (realDay(d) ? new Date(Date.parse(`${d}T00:00:00Z`) + SHIFT * DAY).toISOString().slice(0, 10) : d));
+// The wording a refused heading's line takes: "(a ### heading)" only where text heads an entry with
+// it (a level-3 ATX heading), "(a heading)" for any other form or level (kit-933).
+const formOf = (text, n) => (refHeadings(text).some((h) => h.level === 3 && h.text === n) ? '(a ### heading)' : '(a heading)');
 // what the reference says of a case, as the fixture reads it
 const oracle = (c) => refCheckExterior(shifted(world2(c.file)), { today: TODAY, visibility: c.visibility, allowed });
 
@@ -182,7 +185,7 @@ test('P2 exterior check gives each world2 exterior case the reference\'s result'
       const warns = [...r.out.matchAll(/^warn: exterior\.md: (.*)$/gm)].map((m) => m[1]);
       assert.deepEqual(errs.slice(0, o.errors.length), o.errors, `P2 exterior check's errors on ${c.file}\n${r.out}`);
       assert.equal(errs.length, o.errors.length + o.refused.length, `P2 exterior check's error lines on ${c.file}\n${r.out}`);
-      o.refused.forEach((n, i) => assert.ok(errs[o.errors.length + i].startsWith(`"${n}" (a ### heading)`), `P2 ${c.file} refuses "${n}"\n${r.out}`));
+      o.refused.forEach((n, i) => assert.ok(errs[o.errors.length + i].startsWith(`"${n}" ${formOf(shifted(world2(c.file)), n)} `), `P2 ${c.file} refuses "${n}" as ${formOf(shifted(world2(c.file)), n)}\n${r.out}`));
       assert.deepEqual(warns.slice(0, o.warnings.length), o.warnings, `P2 exterior check's warnings on ${c.file}\n${r.out}`);
       const held = [...o.held.map((w) => `"${w}" (word)`), ...o.hosts.map((h) => `"${h}" (link host)`)];
       assert.deepEqual(warns.slice(o.warnings.length).map((w) => w.replace(/ is in neither.*$/, '')), held, `P2 ${c.file} holds each word and host\n${r.out}`);
@@ -539,4 +542,43 @@ test('F2 what a page does not show as a heading, or shows with named words, is n
     assert.deepEqual(copy(check('# Exterior\n\n### Exterior\n', formOpts('public', 'inkwell-sync')).refused), ['Exterior'], `F2 ${who}: a ### Exterior is judged whole, as before`);
   }
 });
+
+test('F3 exterior check, chore pr and check-pr refuse a heading of another form, worded as one', withProject('x-forms', {}, async (W, check) => {
+  const FORMS_EXT = `${EXTERIOR}\n## Zorbly Labs\n\n<h3>Brindle</h3>\n`;
+  await check('F3 exterior check: an error per heading, "(a heading)", exit 1; private: none', () => {
+    for (const v of ['public', 'unknown']) {
+      W.setVisibility(v);
+      write(path.join(W.old, EXT), FORMS_EXT);
+      const r = W.run(['exterior', 'check']);
+      assert.equal(r.status, 1, `F3 ${v}: exterior check exits 1\n${r.text}`);
+      for (const n of ['Zorbly Labs', 'Brindle']) assert.match(r.out, new RegExp(`^error: exterior\\.md: "${n}" \\(a heading\\) is not named in origin main's strategy\\.md or its dependency names`, 'm'), `F3 ${v}: "${n}" refused as a heading\n${r.out}`);
+      assert.doesNotMatch(r.out, /\(a ### heading\)/, `F3 ${v}: not worded as a ### heading\n${r.out}`);
+    }
+    W.setVisibility('private');
+    const r = W.run(['exterior', 'check']);
+    assert.equal(r.status, 0, `F3 private: exterior check passes\n${r.text}`);
+    fs.rmSync(path.join(W.old, EXT));
+  });
+  await check('F3 chore pr refuses them with every word named on the chore; nothing pushed', () => {
+    W.setVisibility('public');
+    const p = W.chorePr('forms', (w) => write(path.join(w, EXT), FORMS_EXT), ['--names-checked', 'Zorbly,Labs,Brindle']);
+    assert.notEqual(p.status, 0, `F3 chore pr refuses\n${p.text}`);
+    for (const n of ['Zorbly Labs', 'Brindle']) assert.match(p.text, new RegExp(`"${n}" \\(a heading\\)`), `F3 chore pr names "${n}"\n${p.text}`);
+    assert.ok(!p.pushed(), 'F3 nothing pushed');
+  });
+  await check('F3 check-pr fails each on a public repo', () => {
+    W.setVisibility('public');
+    const sha = W.commitOn('forms2', (x) => write(path.join(x, EXT), FORMS_EXT));
+    const c = W.checkPr('chore-forms2', sha);
+    for (const n of ['Zorbly Labs', 'Brindle']) assert.match(lines(c.out, 'fail').join('\n'), new RegExp(`"${n}" \\(a heading\\)`), `F3 check-pr fails "${n}"\n${c.out}`);
+  });
+}));
+
+test('F4 exterior-drift reads every heading form as the draft does', withProject('x-drift-forms', { exterior: `${world2('exterior.md')}\n<h2>Zorbly</h2>\n\n> #### Brindle\n` }, async (W, check) => {
+  await check('F4 last known public: one exterior-drift per heading another form names, keyed by it', () => {
+    W.record('public');
+    const keys = W.findings(['exterior-drift']).map((f) => f.key).sort();
+    assert.deepEqual(keys, ['brindle', 'zorbly'], 'F4 an <h2> and a #### in a block quote drift');
+  });
+}));
 
