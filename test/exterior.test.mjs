@@ -675,20 +675,95 @@ test('A14 A15 exterior-stale and exterior-missing', withProject('exterior-stale'
   });
 }));
 
+// supervisor.md's Monitoring and Outside senses (kit-865): the world-model paragraphs and the section
+const SUPMD = fs.readFileSync(new URL('../docs/devteam/process/supervisor.md', import.meta.url), 'utf8');
+const MON = /\n### Monitoring\n([\s\S]*?)(?=\n#{2,3} )/.exec(SUPMD)?.[1] ?? '';
+const OUTSIDE = /\n## Outside senses\n([\s\S]*?)(?=\n## )/.exec(SUPMD)?.[1] ?? '';
+const monPara = (head) => new RegExp(`\\*\\*${re(head)}\\*\\*\\n([\\s\\S]*?)(?=\\n\\n|$)`).exec(MON)?.[1] ?? '';
+const bullet = (text, head) => text.split('\n').find((l) => l.startsWith(`- **${head}`)) ?? '';
+
 test('A17 Monitoring documents drafting exterior.md', () => {
-  const sup = fs.readFileSync(new URL('../docs/devteam/process/supervisor.md', import.meta.url), 'utf8');
-  const mon = /\n### Monitoring\n([\s\S]*?)(?=\n#{2,3} )/.exec(sup)?.[1] ?? '';
-  const para = /\*\*Drafting exterior\.md\.\*\*\n([\s\S]*?)(?=\n\n|$)/.exec(mon)?.[1] ?? '';
+  const para = monPara('Drafting exterior.md.');
   assert.ok(para, 'A17 Monitoring has a paragraph headed Drafting exterior.md');
   for (const want of [
-    /after .*self\.md.* is on main/, /serves, depends on, builds on it, alternative, collaborates, governs it, affects/, /business roles.*only examples/i,
-    /never a private person/, /what matters/, /signals that would show it, in words/, /1 to 4/, /strategy quote/, /names rule/,
+    /after .*self\.md.* is on main/, /from dated research/, /serves, depends on, builds on it, alternative, collaborates, governs it, affects/, /business roles.*only examples/i,
+    /never a private person/, /what matters/, /signals that would show it, in words/, /Order is importance/, /names rule/,
     /exterior-drift/, /exterior-stale.*re-read `?self\.md`? first/, /exterior-missing/,
   ]) assert.match(para, want, `A17 the paragraph says ${want}`);
   assert.match(para, /`exterior-missing` \([^)]*high until the owner has[^)]*medium while its question is open\)/, 'K9 the exterior-missing line says its severity (kit-814)');
   const c = para.indexOf('exterior check');
   assert.ok(c >= 0 && c < para.indexOf('chore pr'), 'A17 exterior check comes before chore pr');
 });
+
+test('kit-865 Monitoring and Outside senses: how the Self and the Exterior are kept right', async (t) => {
+  const draft = monPara('Drafting exterior.md.'), keep = monPara('Keeping the Self and the Exterior right.');
+  const has = (id, text, wants) => t.test(id, () => { for (const w of wants) assert.match(text, w, `${id} says ${w}`); });
+  // DW1: Keeping it right
+  await has('KR1 who researches, and the second reader on each page', bullet(draft, 'Who researches'), [/researcher[^.]*strong model/, /second reader, not the researcher, opens each page the draft relies on/, /search result or a summary is not used/]);
+  await t.test('KR2 one weekly recurring chore over both documents, with its entry to ask for', () => {
+    const line = bullet(keep, 'One weekly pass');
+    assert.match(line, /one `recurring-edit`[^.]*a chore of yours over both, weekly/, 'KR2 one recurring-edit for one chore over both, weekly');
+    const change = /--change '(\{[^']*\})'/.exec(line)?.[1];
+    assert.ok(change, `KR2 the line gives the --change to ask\n${line}`);
+    const job = JSON.parse(change).recurring?.['world-pass'];
+    assert.deepEqual([job?.kind, job?.by, job?.every, job?.on, job?.grace_days], ['chore', 'supervisor', '1w', 'mon', 1], 'KR2 a chore of yours, every week on Mondays, a day of grace');
+    assert.match(line, /Self first, then the Exterior/, 'KR2 the Self first');
+  });
+  await has('KR3 what a pass re-reads', bullet(keep, 'What a pass re-reads'), [/Every page the Exterior cites under what to watch, its rivals and its vendors/, /at least once in four passes/, /what merged since the approved `self\.md`'s commit/]);
+  await has('KR4 dated notes', bullet(keep, 'Dated notes'), [/page's own date if it has one, and the day it was read/, /not bumped for their own sake/]);
+  await has('KR5 a fast sense, exterior-stale or the owner\'s word starts a pass sooner, as an ordinary chore', bullet(keep, 'Sooner'), [/fast sense/, /`exterior-stale`/, /a move the owner mentions/, /starts a pass at once, as an ordinary chore/, /moves no slot/, /unless a pass's note already says why nothing had to change/, /nothing to land ends with `chore drop <slug>/]);
+  await has('KR6 where notes and ideas are kept, on a private and a public repo; public notes in the main checkout\'s run/', keep, [/known to be private, notes go under `project\/senses\/`/, /On any other they go to the main checkout's `run\/`, untracked, never the chore worktree's/, /notes stay in `run\/`, you show the owner what to take through a preview of that file/, /you stop \(`preview stop <name>`\) once the owner has read it/]);
+  await has('KR7 how a finding is taken up or passed', bullet(keep, 'A finding becomes an idea'), [/take each finding up \(a lesson, a ticket inside a running goal, a new goal drafted\) or pass on it with one line of why/, /No finding starts work by itself/]);
+  await has('KR8 which pages a pass may read, and the recurring-edit question says so', bullet(keep, 'What a pass may read'), [/question says that the job reads the public pages the approved Exterior cites/, /read every week only once an approved Exterior cites it/, /signed out/, /the recurring-edit yes stands in for the page-list question/]);
+  // DW2: what starts a new Self
+  await has('KR9 what starts a new Self, and its source', bullet(keep, 'What starts a new Self'), [/`self-drift`/, /an approved strategy change/, /in the weekly pass, a reading of what merged since the approved `self\.md`'s commit/, /source is the commit or PR/]);
+  // DW3: proposing a change
+  const prop = bullet(keep, 'Proposing a change');
+  await has('KR10 only when something changed, one question per document from the draft\'s own chore', prop, [/Only when something changed/, /chore of its own \(`chore start self`, `chore start exterior`\)/, /one question per document[^.]*never one per passage/]);
+  await has('KR11 a line per changed passage on the card', prop, [/one short line per changed passage, most important first: what changes, why, and the source/, /when even those lines would make the card long, it says how many more the change note holds/]);
+  await has('KR12 a linked change note on the draft\'s branch, each passage whole', prop, [/change note is a markdown file[^.]*on the draft's own branch/, /the card links it: each passage whole, with the old words, the new words, why, and the source with the day it was read/]);
+  await has('KR13 at most one open per document, withdrawn and asked again', bullet(keep, 'One open per document'), [/At most one open question per document/, /withdraw it[^.]*and ask once with everything/]);
+  await has('KR14 what follows an alteration or a No; a refused passage', bullet(keep, 'The owner\'s answer'), [/An alteration: amend the draft[^.]*ask about the new text/, /A No: drop the draft's chore[^.]*main's version stands/, /refused is proposed again only when its source changed/]);
+  await has('KR15 exterior-stale with nothing to change stays raised, its reason in the note', bullet(keep, 'One open per document'), [/leave `exterior-stale` raised until the next version, and say in the pass's note why nothing had to change/]);
+  // DW4: the document's order, and nothing of the block
+  await has('KR16 senses are asked in the document\'s order', OUTSIDE, [/Ask in the document's own order/, /the earliest in `exterior\.md`'s order first/]);
+  for (const [id, where, text] of [['KR17a', 'Drafting exterior.md', draft], ['KR17b', 'Keeping the Self and the Exterior right', keep], ['KR17c', 'Outside senses', OUTSIDE]]) {
+    await t.test(`${id} ${where} holds no line on weights, scores, blobs or strategy quotes`, () => {
+      assert.ok(text, `${id} ${where} is there`);
+      const bad = text.split('\n').filter((l) => /\bweigh|\bweights?\b|\bscores?\b|blob|strategy quote/i.test(l));
+      assert.deepEqual(bad, [], `${id} ${where} holds no line on weights, scores, blobs or strategy quotes`);
+    });
+  }
+  // DW5: names in public
+  const names = bullet(draft, 'Names in public, by the owner\'s word');
+  await has('KR18 a name in public: asked once, quoting none; the owner\'s own words, then a strategy-change', names, [/ask once which other companies or products it may name/, /quotes no name and recommends none/, /answer itself is in the public log/, /in their own words\. Then propose a `strategy-change` holding just those names/]);
+  await has('KR19 what a name in public never covers', bullet(draft, 'What a name in public covers'), [/Never a private person, anything known only privately, or the project's weak points, plans and ideas/]);
+  await has('KR23 a heading is refused unless its words are named: levels 3 to 6 whole, # and ## by every capitalised word, in any form; --names-checked never clears one (d-20261126-020531504)', bullet(draft, 'The names rule'), [/a heading of level 3 to 6 must be named whole, and in a `#` or `##` heading every capitalised word but Exterior must be named/, /in any form \(`#` marks, an underline or an HTML heading, in a list item or a quote too\)/, /`--names-checked` never clears a heading: only rewording, or the strategy naming it through the owner's names question, clears it/, /`--names-checked` is only for a word the rule allows: never for an organisation or work main's strategy or dependency files don't name/]);
+  await has('KR23b a top-level heading must be plain text, or it is refused, in exterior check\'s own words (kit-933, a-20261126-080419596)', bullet(draft, 'The names rule'), [/A `#` or `##` heading, or an HTML `<h1>` to `<h6>` one, is refused too when it is not plain text/, /"a top-level heading must be plain text; put options, placeholders and markup in backticks"/]);
+  await t.test('KR23c the words the names rule quotes are the ones exterior check prints', () => {
+    const quoted = bullet(draft, 'The names rule').match(/"(a top-level heading must be plain text[^"]*)"/);
+    assert.ok(quoted, 'KR23c the names rule quotes exterior check\'s plain-text refusal');
+    assert.ok(fs.readFileSync(new URL('../docs/devteam/scripts/devteam.mjs', import.meta.url), 'utf8').includes(quoted[1]), `KR23c devteam.mjs prints "${quoted[1]}"`);
+  });
+  await has('KR20 how a name is taken back', bullet(draft, 'Taking a name back'), [/stop using it at once and propose the strategy without it in any line/, /a heading naming it is refused and any other use is held: never clear it with `--names-checked`/, /raises `exterior-drift`/]);
+  // the private and the public side of a finding, and what a public repo keeps out of everything tracked, logged or pushed
+  await has('KR21 on a private repo a finding is an observation naming its source', bullet(keep, 'A finding becomes an idea'), [/On a repo known to be private, each finding is an observation naming its source/, /On any other, none is/]);
+  await has('KR22 a public repo keeps names and weak points out of everything tracked, logged or pushed', bullet(keep, 'What a public repo keeps out'), [/nothing you track, log or push names what the names rule doesn't allow or states a weak point of the project: no/, /no observation, goal, lesson, ticket or message, no question's card line, no change note's why, no `recurring done` or `chore drop` reason/, /names only in `self\.md` and `exterior\.md`[^.]*your care/]);
+
+});
+
+// the weekly job's entry, as Keeping the Self and the Exterior right gives it, is one validate accepts
+test('kit-865 KR2b the world-pass entry passes validate', withProject('exterior-world-pass', {}, async (W, check) => {
+  await check('KR2b recurring.json holding just the entry: validate says nothing of it', () => {
+    const line = bullet(monPara('Keeping the Self and the Exterior right.'), 'One weekly pass');
+    const change = /--change '(\{[^']*\})'/.exec(line)?.[1];
+    assert.ok(change, `KR2b the line gives the --change to ask\n${line}`);
+    W.writeTree(`${P}/recurring.json`, `${JSON.stringify(JSON.parse(change).recurring, null, 2)}\n`);
+    const v = W.run(['validate']);
+    assert.doesNotMatch(v.out, /recurring/i, `KR2b validate finds nothing wrong with the entry\n${v.out}`);
+    assert.equal(v.status, 0, `KR2b validate passes\n${v.text}`);
+  });
+}));
 
 // final-1 F1: a name in a fenced block is read; F2: a version added then deleted is still read
 const SECRET = `${PLAIN_EXT}\n\`\`\`text\nZentrix Labs is our secret client.\n\`\`\`\n`;

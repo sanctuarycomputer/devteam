@@ -1,0 +1,10 @@
+{
+  "source": "docs/devteam/scripts/devteam.mjs",
+  "dir": "docs/devteam/scripts/lib",
+  "entry": "docs/devteam/scripts/cli.mjs",
+  "cap": 2000,
+  "modules": [
+    { "name": "one", "from": { "line": 1 } },
+    { "name": "two", "from": { "banner": "2. two" } }
+  ]
+}

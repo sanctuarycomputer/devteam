@@ -574,7 +574,7 @@ test('help and supervisor.md say it (DW1, DW4, DW7)', async (t) => {
     ['what it is', /what (the project|it) is/],
     ['what it makes or does', /what it makes or does/],
     ['what it controls', /what it controls/],
-    ['its parts with their paths', /parts with (their|the) paths/],
+    ['its parts, each linked to its folder or file (self@2)', /its parts, each part an inline link to its folder or file/],
     ['what it controls and what it touches but does not', /touches but does(n't| not)/],
     ['never a private person', /never a private person/],
     ['ask self-change', /self-change/],
@@ -582,6 +582,11 @@ test('help and supervisor.md say it (DW1, DW4, DW7)', async (t) => {
     ['--names-checked', /--names-checked/],
     ['self-drift, self-unlinked and self-missing', /self-drift[\s\S]*self-unlinked[\s\S]*self-missing|self-missing[\s\S]*self-unlinked[\s\S]*self-drift/],
   ]) await t.test(`C26 supervisor.md Monitoring documents ${what}`, () => assert.match(mon, pattern, `C26 ${what}`));
+  await t.test('C26 Drafting the Self holds no line on weights, scores, blobs or strategy quotes (kit-865)', () => {
+    const para = /\*\*Drafting the Self\.\*\*\n([\s\S]*?)(?=\n\n|$)/.exec(mon)?.[1] ?? '';
+    assert.ok(para, 'C26 Monitoring has a paragraph headed Drafting the Self');
+    assert.deepEqual(para.split('\n').filter((l) => /\bweigh|\bweights?\b|\bscores?\b|blob|strategy quote/i.test(l)), [], 'C26 Drafting the Self holds no line on weights, scores, blobs or strategy quotes');
+  });
   // kit-814
   const start = /\n## 1\. Starting up\n([\s\S]*?)\n## /.exec(sup)?.[1] ?? '';
   const asking = /\n## 6\. Questions to the owner\n([\s\S]*?)\n## /.exec(sup)?.[1] ?? '';
