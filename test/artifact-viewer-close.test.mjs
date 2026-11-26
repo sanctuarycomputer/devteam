@@ -93,7 +93,7 @@ test('the viewer closes, whatever the page inside it did: DW3 a and b, history a
     ['#library', { th: 'open', t: T }, LIB_T, 'the panel opened on T'],
     [LIB_T, { th: null, t: null }, '#library', 'the panel closed'],
   ]) {
-    await sub(`DW3 b: opened from ${from === '#library' ? '#library' : 'the panel open on T'}, ${what} while the viewer is up, then a link: X closes on ${to}`, async () => {
+    await sub(`DW3 b: opened from ${from === '#library' ? '#library' : 'the panel open on T'}, ${what} while the viewer is up, then a link: X closes on ${to === '#library' ? '#library' : 'the panel open on T'}`, async () => {
       const V = await visit(from);
       if (from === LIB_T) await V.soon(IN_PANEL(T), 'setup: T open in the panel');
       await V.open(AV_A);
