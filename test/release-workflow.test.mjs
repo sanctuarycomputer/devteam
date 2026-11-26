@@ -19,6 +19,78 @@ let n = 0;
 const scratch = (name) => { const d = path.join(tmp, `${++n}-${name}`); fs.mkdirSync(d, { recursive: true }); return d; };
 const read = (f) => fs.readFileSync(f, 'utf8');
 
+// ---- a YAML reader for the subset release.yml is written in ------------------------------------
+// Block maps and lists, a list item that is a map, `|` block text, plain and quoted scalars, [] / {} and
+// full-line comments. Anything else (anchors, aliases, folded text, flow maps with content, tabs, a
+// comment after a value) throws, so the file can't drift into syntax this reads wrongly.
+function yaml(text) {
+  const lines = text.split('\n');
+  if (lines.some((l) => /^\s*\t/.test(l))) throw new Error('yaml: a tab in the indentation');
+  const indentOf = (l) => l.length - l.trimStart().length;
+  const skip = (i) => { while (i < lines.length && (/^\s*$/.test(lines[i]) || /^\s*#/.test(lines[i]))) i++; return i; };
+  const scalar = (s) => {
+    s = s.trim();
+    if (s === '{}') return {};
+    if (s === '[]') return [];
+    if (/^'.*'$/.test(s)) return s.slice(1, -1).replaceAll("''", "'");
+    if (/^".*"$/.test(s)) return JSON.parse(s);
+    if (/^\[.*\]$/.test(s)) return s.slice(1, -1).split(',').map((x) => scalar(x));
+    if (/^[&*!>]|^\{| #/.test(s)) throw new Error(`yaml: unsupported scalar ${s}`);
+    return s;
+  };
+  // the value after "key:" (rest), with the block below it when rest is empty or |
+  const value = (rest, i, indent) => {
+    if (rest === '|' || rest === '|-') {
+      const body = [];
+      let j = i + 1;
+      while (j < lines.length && (/^\s*$/.test(lines[j]) || indentOf(lines[j]) > indent)) body.push(lines[j++]);
+      while (body.length && /^\s*$/.test(body[body.length - 1])) body.pop();
+      const cut = Math.min(...body.filter((l) => l.trim()).map(indentOf));
+      return [body.map((l) => l.slice(cut)).join('\n') + (rest === '|' ? '\n' : ''), j];
+    }
+    if (rest !== '') return [scalar(rest), i + 1];
+    const j = skip(i + 1);
+    if (j >= lines.length || indentOf(lines[j]) <= indent) return [null, j];
+    return block(j, indentOf(lines[j]));
+  };
+  const block = (i, indent) => {
+    i = skip(i);
+    if (lines[i].trimStart().startsWith('- ')) {
+      const list = [];
+      while (i < lines.length && indentOf(lines[i]) === indent && lines[i].trimStart().startsWith('- ')) {
+        const item = lines[i].slice(indent + 2);
+        if (/^[\w.-]+:( |$)/.test(item)) {
+          lines[i] = `${' '.repeat(indent + 2)}${item}`;
+          const [v, j] = block(i, indent + 2);
+          list.push(v);
+          i = skip(j);
+        } else { list.push(scalar(item)); i = skip(i + 1); }
+      }
+      return [list, i];
+    }
+    const map = {};
+    while (i < lines.length && indentOf(lines[i]) === indent && !lines[i].trimStart().startsWith('- ')) {
+      const m = /^([\w.-]+):(?: (.*))?$/.exec(lines[i].trim());
+      if (!m) throw new Error(`yaml: can't read line ${i + 1}: ${lines[i]}`);
+      if (m[1] in map) throw new Error(`yaml: ${m[1]} twice`);
+      const [v, j] = value((m[2] ?? '').trim(), i, indent);
+      map[m[1]] = v;
+      i = skip(j);
+    }
+    if (i < lines.length && indentOf(lines[i]) > indent) throw new Error(`yaml: line ${i + 1} is indented under nothing`);
+    return [map, i];
+  };
+  const [doc, end] = block(0, 0);
+  if (skip(end) < lines.length) throw new Error(`yaml: unread from line ${end + 1}`);
+  return doc;
+}
+
+const WF = path.join(REPO, '.github', 'workflows', 'release.yml');
+const wfText = () => read(WF);
+const wf = () => yaml(wfText());
+const runs = (job) => job.steps.map((s) => s.run ?? '').join('\n');
+const uses = (job) => job.steps.map((s) => s.uses).filter(Boolean);
+
 // ---- R1: the root package.json -------------------------------------------------------------------
 test('R1 package.json names @sanctuarycomputer/devteam, no dependencies, no bin, files docs/devteam/ less project/ and run/, layout 1', () => {
   const p = JSON.parse(read(path.join(REPO, 'package.json')));
@@ -30,6 +102,78 @@ test('R1 package.json names @sanctuarycomputer/devteam, no dependencies, no bin,
   assert.deepEqual(p.files, ['docs/devteam/', '!docs/devteam/project/', '!docs/devteam/run/'], 'R1 files: docs/devteam/ less project/ and run/');
   assert.deepEqual(p.devteam, { layout: 1 }, 'R1 "devteam": { "layout": 1 }');
   assert.equal(p.repository?.url, 'git+https://github.com/sanctuarycomputer/devteam.git', 'R1 the repository the trusted publisher and provenance name');
+});
+
+// ---- R2 to R6: release.yml -----------------------------------------------------------------------
+test('R2 release.yml runs on release: published, only a full release in sanctuarycomputer/devteam, and on pull_request for its own paths', () => {
+  const w = wf();
+  assert.deepEqual(w.on.release, { types: ['published'] }, 'R2 release: published');
+  assert.deepEqual(w.on.pull_request, { paths: ['.github/workflows/release.yml', 'package.json', 'apps/**', 'test/release/**'] }, 'R2 pull_request paths');
+  assert.deepEqual(Object.keys(w.on).sort(), ['pull_request', 'release'], 'R2 no other trigger');
+  assert.deepEqual(w.permissions, {}, 'R2 no permission by default');
+  assert.equal(w.jobs.publish.if, "github.event_name == 'release' && github.repository == 'sanctuarycomputer/devteam' && !github.event.release.prerelease", 'R2 publish: a full release, here only');
+  assert.equal(w.jobs.build.if, "github.event_name == 'pull_request' || (github.repository == 'sanctuarycomputer/devteam' && !github.event.release.prerelease)", 'R2 build: a PR, or a full release here');
+});
+
+test('R3 on a pull_request the publish job is skipped and check runs the same package check', () => {
+  const w = wf();
+  assert.deepEqual(Object.keys(w.jobs).sort(), ['build', 'check', 'publish'], 'R3 three jobs');
+  assert.match(w.jobs.publish.if, /^github\.event_name == 'release' && /, 'R3 publish runs only on a release');
+  assert.equal(w.jobs.check.if, "github.event_name == 'pull_request'", 'R3 check runs only on a PR');
+  assert.equal(w.jobs.check.needs, 'build', 'R3 check needs build');
+  assert.deepEqual(w.jobs.check.permissions, { contents: 'read' }, 'R3 check: contents: read only');
+  assert.equal(w.jobs.check.environment, undefined, 'R3 check: no environment');
+  assert.match(runs(w.jobs.check), /^node test\/release\/package-check\.mjs --tag v0\.0\.0 --tree HEAD --alpha "\$RUNNER_TEMP\/alpha" --out "\$RUNNER_TEMP\/pack" --min-npm 11\.5\.1$/m, 'R3 check runs package-check');
+  assert.match(runs(w.jobs.check), /cat "\$RUNNER_TEMP\/pack\/files\.txt"; echo '```'; \} >> "\$GITHUB_STEP_SUMMARY"/, 'R3 the packed file list in the summary');
+});
+
+test('R4 build: contents: read only, no secrets, builds each apps/<app>/ with npm ci --ignore-scripts and npm run build at /next, uploads only out/', () => {
+  const w = wf();
+  const b = w.jobs.build;
+  assert.deepEqual(b.permissions, { contents: 'read' }, 'R4 contents: read only');
+  assert.equal(b.environment, undefined, 'R4 no environment');
+  const text = JSON.stringify(b);
+  assert.doesNotMatch(text, /\bsecrets\b|id-token|NODE_AUTH_TOKEN|NPM_TOKEN/, 'R4 no secret and no token');
+  const r = runs(b);
+  assert.match(r, /for pj in apps\/\*\/package\.json; do/, 'R4 each apps/<app>/ present');
+  assert.match(r, /\(cd "apps\/\$app" && npm ci --ignore-scripts && DEVTEAM_BASE_PATH=\/next npm run build\)/, 'R4 npm ci --ignore-scripts, then npm run build at /next');
+  assert.match(r, /cp -R "apps\/\$app\/out" "\$RUNNER_TEMP\/alpha\/\$app"/, 'R4 only out/ is staged');
+  const up = b.steps.filter((s) => s.uses?.startsWith('actions/upload-artifact@'));
+  assert.equal(up.length, 1, 'R4 one upload');
+  assert.deepEqual(up[0].with, { name: 'alpha', path: '${{ runner.temp }}/alpha/', 'if-no-files-found': 'ignore', 'retention-days': '1' }, 'R4 it uploads only the staged out/ folders');
+  assert.equal(b.steps.find((s) => s.uses?.startsWith('actions/checkout@'))?.with?.['persist-credentials'], 'false', 'R4 no token left in the checkout');
+});
+
+test('R5 publish: id-token: write in npm-publish, no npm ci and no build, package-check before npm publish', () => {
+  const w = wf();
+  const p = w.jobs.publish;
+  assert.deepEqual(p.permissions, { contents: 'read', 'id-token': 'write' }, 'R5 id-token: write');
+  assert.equal(p.environment, 'npm-publish', 'R5 the npm-publish environment');
+  assert.equal(p.needs, 'build', 'R5 after build');
+  assert.deepEqual(Object.keys(p).sort(), ['environment', 'if', 'needs', 'permissions', 'runs-on', 'steps', 'timeout-minutes'], 'R5 nothing else in the job (no container, services or env)');
+  assert.deepEqual(uses(p).map((u) => u.split('@')[0]), ['actions/checkout', 'actions/setup-node', 'actions/download-artifact'], 'R5 no other action');
+  const r = runs(p);
+  assert.doesNotMatch(r, /npm (ci|install|i|run|exec|rebuild)\b|npx |DEVTEAM_BASE_PATH/, 'R5 no npm ci and no build');
+  const lines = r.split('\n');
+  const at = (re) => lines.findIndex((l) => re.test(l));
+  const checkAt = at(/^node test\/release\/package-check\.mjs --tag "\$TAG" --alpha "\$RUNNER_TEMP\/alpha" --out "\$RUNNER_TEMP\/pack" --min-npm 11\.5\.1$/);
+  const pubAt = at(/^npm publish "\$RUNNER_TEMP\/pack\/package\.tgz" --access public --provenance --ignore-scripts$/);
+  assert.ok(checkAt >= 0, 'R5 it runs package-check');
+  assert.ok(pubAt > checkAt, 'R5 it publishes the checked tarball, after the check');
+  assert.equal(p.steps.find((s) => s.name === 'Check the package')?.env?.TAG, '${{ github.event.release.tag_name }}', 'R5 the version comes from the tag');
+  assert.equal(p.steps.find((s) => s.uses?.startsWith('actions/checkout@'))?.with?.['fetch-depth'], '0', 'R5 the tag is fetched');
+  const dl = p.steps.find((s) => s.uses?.startsWith('actions/download-artifact@'));
+  assert.deepEqual(dl.with, { pattern: 'alpha', 'merge-multiple': 'true', path: '${{ runner.temp }}/alpha' }, 'R5 it downloads only the alpha');
+});
+
+test('R6 the newest Node 24 everywhere, no cache; no npm token or secret read anywhere in the file', () => {
+  const w = wf();
+  for (const [name, job] of Object.entries(w.jobs)) {
+    const sn = job.steps.filter((s) => s.uses?.startsWith('actions/setup-node@'));
+    assert.equal(sn.length, 1, `R6 ${name}: one setup-node`);
+    assert.deepEqual(sn[0].with, { 'node-version': '24', 'check-latest': 'true', 'package-manager-cache': 'false' }, `R6 ${name}: the newest Node 24, no cache, and no registry-url (which writes an .npmrc that reads a token)`);
+  }
+  assert.doesNotMatch(wfText().replace(/^\s*#.*$/gm, ''), /\bsecrets\b|NODE_AUTH_TOKEN|NPM_TOKEN|_authToken|registry-url/, 'R6 no token, no secret');
 });
 
 // ---- R7 to R12: package-check against fixtures ---------------------------------------------------
