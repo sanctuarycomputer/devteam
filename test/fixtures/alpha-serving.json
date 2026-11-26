@@ -1,0 +1,210 @@
+{
+  "v": 1,
+  "base": "/next",
+  "outside": {
+    "at": "../outside.txt",
+    "text": "outside the served folder\n"
+  },
+  "cases": [
+    {
+      "name": "the root route",
+      "path": "/next/",
+      "status": 200,
+      "type": "text/html; charset=utf-8",
+      "file": "index.html"
+    },
+    {
+      "name": "bare /next",
+      "path": "/next",
+      "status": 301,
+      "type": null,
+      "location": "/next/"
+    },
+    {
+      "name": "a route's index.html",
+      "path": "/next/threads/one/",
+      "status": 200,
+      "type": "text/html; charset=utf-8",
+      "file": "threads/one/index.html"
+    },
+    {
+      "name": "a route without its trailing slash",
+      "path": "/next/threads/one",
+      "status": 301,
+      "type": null,
+      "location": "/next/threads/one/"
+    },
+    {
+      "name": "an index.html by name",
+      "path": "/next/threads/one/index.html",
+      "status": 200,
+      "type": "text/html; charset=utf-8",
+      "file": "threads/one/index.html"
+    },
+    {
+      "name": "a ?_rsc= query on a payload",
+      "path": "/next/threads/one/index.txt?_rsc=3k1x9",
+      "status": 200,
+      "type": "text/plain; charset=utf-8",
+      "file": "threads/one/index.txt"
+    },
+    {
+      "name": "a ?_rsc= query on a route",
+      "path": "/next/?_rsc=a1b2c",
+      "status": 200,
+      "type": "text/html; charset=utf-8",
+      "file": "index.html"
+    },
+    {
+      "name": ".txt",
+      "path": "/next/index.txt",
+      "status": 200,
+      "type": "text/plain; charset=utf-8",
+      "file": "index.txt"
+    },
+    {
+      "name": ".js",
+      "path": "/next/_next/static/chunks/app.js",
+      "status": 200,
+      "type": "text/javascript; charset=utf-8",
+      "file": "_next/static/chunks/app.js"
+    },
+    {
+      "name": ".css",
+      "path": "/next/_next/static/css/app.css",
+      "status": 200,
+      "type": "text/css; charset=utf-8",
+      "file": "_next/static/css/app.css"
+    },
+    {
+      "name": ".json",
+      "path": "/next/manifest.json",
+      "status": 200,
+      "type": "application/json",
+      "file": "manifest.json"
+    },
+    {
+      "name": ".svg",
+      "path": "/next/logo.svg",
+      "status": 200,
+      "type": "image/svg+xml",
+      "file": "logo.svg"
+    },
+    {
+      "name": ".png",
+      "path": "/next/icon.png",
+      "status": 200,
+      "type": "image/png",
+      "file": "icon.png"
+    },
+    {
+      "name": ".ico",
+      "path": "/next/favicon.ico",
+      "status": 200,
+      "type": "image/x-icon",
+      "file": "favicon.ico"
+    },
+    {
+      "name": ".webp",
+      "path": "/next/pic.webp",
+      "status": 200,
+      "type": "image/webp",
+      "file": "pic.webp"
+    },
+    {
+      "name": ".woff2",
+      "path": "/next/_next/static/media/font.woff2",
+      "status": 200,
+      "type": "font/woff2",
+      "file": "_next/static/media/font.woff2"
+    },
+    {
+      "name": "an unknown extension (the file exists)",
+      "path": "/next/_next/static/chunks/app.js.map",
+      "status": 404,
+      "type": "text/plain; charset=utf-8",
+      "file": null
+    },
+    {
+      "name": "a file that is not there",
+      "path": "/next/nothing-here.js",
+      "status": 404,
+      "type": "text/plain; charset=utf-8",
+      "file": null
+    },
+    {
+      "name": "..",
+      "path": "/next/../outside.txt",
+      "status": 404,
+      "type": "text/plain; charset=utf-8",
+      "file": null
+    },
+    {
+      "name": ".. inside a route",
+      "path": "/next/threads/../../outside.txt",
+      "status": 404,
+      "type": "text/plain; charset=utf-8",
+      "file": null
+    },
+    {
+      "name": "%2e%2e",
+      "path": "/next/%2e%2e/outside.txt",
+      "status": 404,
+      "type": "text/plain; charset=utf-8",
+      "file": null
+    },
+    {
+      "name": "%2E%2E",
+      "path": "/next/%2E%2E/outside.txt",
+      "status": 404,
+      "type": "text/plain; charset=utf-8",
+      "file": null
+    },
+    {
+      "name": "a double-encoded ..",
+      "path": "/next/%252e%252e/outside.txt",
+      "status": 404,
+      "type": "text/plain; charset=utf-8",
+      "file": null
+    },
+    {
+      "name": "an encoded slash",
+      "path": "/next/threads%2fone/index.html",
+      "status": 404,
+      "type": "text/plain; charset=utf-8",
+      "file": null
+    },
+    {
+      "name": "an encoded backslash",
+      "path": "/next/threads%5cone%5cindex.html",
+      "status": 404,
+      "type": "text/plain; charset=utf-8",
+      "file": null
+    },
+    {
+      "name": "a NUL",
+      "path": "/next/index.html%00.txt",
+      "status": 404,
+      "type": "text/plain; charset=utf-8",
+      "file": null
+    },
+    {
+      "name": "a request path over 2048 bytes",
+      "path": "/next/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.js",
+      "status": 404,
+      "type": "text/plain; charset=utf-8",
+      "file": null
+    },
+    {
+      "name": "a symlink out of the folder",
+      "path": "/next/leak.txt",
+      "status": 404,
+      "type": "text/plain; charset=utf-8",
+      "file": null,
+      "symlink": {
+        "at": "leak.txt",
+        "to": "../outside.txt"
+      }
+    }
+  ]
+}
