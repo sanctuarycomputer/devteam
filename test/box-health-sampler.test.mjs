@@ -913,7 +913,25 @@ function loadAll({ env = {}, roots = [] } = {}) {
   const logs = [], clock = { t: T0 }, timers = { live: new Set(), list: [] };
   const fifos = new Set(), opens = { now: 0, most: 0, twice: 0 }, dirs = [], files = [], per = new Map();
   const stats = { now: 0, most: 0, stuck: new Set(), noDtype: false, waits: [], go: () => stats.waits.splice(0).forEach((r) => r()) };
+  // every fs.promises call and call on a handle it opened, but a FIFO's open, is counted while out
+  // (busy), so stick can wait for the calls that answer before it fires any 2 s limit
+  const busy = { now: 0 };
+  const track = (p) => { busy.now++; const done = () => { busy.now--; }; p.then(done, done); return p; };
+  const handle = (fh) => new Proxy(fh, { get: (o, k) => {
+    const v = o[k];
+    return typeof v === 'function' ? (...a) => { const r = v.apply(o, a); return typeof r?.then === 'function' ? track(r) : r; } : v;
+  } });
   const promises = new Proxy(fs.promises, { get: (o, k) => {
+    const f = own(o, k);
+    if (typeof f !== 'function') return f;
+    return (...a) => {
+      if (k === 'open' && fifos.has(String(a[0]))) return f(...a);
+      const r = f(...a);
+      if (typeof r?.then !== 'function') return r;
+      return k === 'open' ? track(r).then(handle) : track(r);
+    };
+  } });
+  const own = (o, k) => {
     if (k === 'open') return (p, ...a) => {
       files.push(String(p));
       if (!fifos.has(String(p))) return o.open(p, ...a);
@@ -938,7 +956,7 @@ function loadAll({ env = {}, roots = [] } = {}) {
       return names.map((name, i) => ({ name, isDirectory: () => got[i].isDirectory(), isFile: () => got[i].isFile() }));
     };
     return o[k];
-  } });
+  };
   const ffs = new Proxy(fs, { get: (o, k) => (k === 'promises' ? promises : o[k]) });
   const fos = { cpus: () => [], loadavg: () => [0, 0, 0], totalmem: () => 16e9, freemem: () => 4e9, homedir: () => NOWHERE };
   const set = (kind) => (fn, ms) => { const h = { kind, ms, fn, unref() {} }; timers.live.add(h); timers.list.push(h); return h; };
@@ -954,7 +972,7 @@ function loadAll({ env = {}, roots = [] } = {}) {
   const code = `'use strict';\n${helpers}\n${memory}\n${regions.map((n) => regionOf(n, src)).join('\n')}\n${['state', 'park', 'room'].map((n) => stub(n)).join('\n')}\nreturn { boxHealth, boxHealthDisk, boxHealthProcesses, boxHealthIo: typeof boxHealthIo === 'function' ? boxHealthIo : undefined };`;
   const got = new Function(...Object.keys(names), code)(...Object.values(names));
   const make = () => got.boxHealth((m) => logs.push(m), async () => [], { real: () => clock.t });
-  return { ...got, health: make(), make, clock, logs, timers, fifos, opens, dirs, files, stats };
+  return { ...got, health: make(), make, clock, logs, timers, fifos, opens, dirs, files, stats, busy };
 }
 const iso = (ms) => new Date(ms).toISOString();
 // a FIFO at f, its name added to fifos
@@ -991,14 +1009,25 @@ const partTimers = (s, from = 0) => {
   const [processes, disk, pool, claude] = s.timers.list.slice(from).filter((h) => h.kind === 'every');
   return { processes, disk, pool, claude };
 };
-// fires the given intervals, then every 2 s limit that is set, a minute of the clock apart (as the
-// parts' own intervals would ask again), until n FIFO opens are out (or 60 rounds); then lets the reads
-// that answer at once end
+// until every file call that answers has (none out across a few turns, or 2 s of real time): a busy
+// machine may take longer than any count of turns. With FIFO opens on all of Node's own file threads
+// (as with no budget) none can answer, so it doesn't wait.
+const NODE_THREADS = Number(process.env.UV_THREADPOOL_SIZE) || 4;
+async function settle(s) {
+  const until = Date.now() + 2000;
+  while (Date.now() < until && s.opens.now < NODE_THREADS) {
+    if (s.busy.now === 0) { await turns(); if (s.busy.now === 0) return; } else await sleep(5);
+  }
+}
+// fires the given intervals, then (once the file calls that answer have) every 2 s limit that is set,
+// a minute of the clock apart (as the parts' own intervals would ask again), until n FIFO opens are
+// out (or 60 rounds); then lets the reads that answer at once end
 async function stick(s, fns, n) {
   for (let i = 0; i < 60 && s.opens.now < n; i++) {
     if (i > 0) s.clock.t += MIN;
     for (const h of fns) h.fn();
     await turns();
+    await settle(s);
     for (const h of [...s.timers.live]) if (h.kind === 'once' && h.ms === 2000) { s.timers.live.delete(h); h.fn(); }
   }
   await turns(40);
@@ -1091,6 +1120,7 @@ async function heldBudget(t) {
   // record it keeps is still fresh (5 minutes)
   const read1 = s2.clock.t;
   await stick(s2, [p.processes, p.pool], 3);
+  assert.equal(s2.opens.now, 3, 'the budget is held: two pool.json and a cmdline out');
   s2.clock.t = read1 + MIN;
   fs.writeFileSync(accounts, record(20));
   await Promise.race([p.claude.fn(), sleep(1000)]);
