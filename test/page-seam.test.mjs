@@ -153,13 +153,19 @@ test('S6 serveAppFiles beyond the table: each segment decoded once, a .. that st
   assert.equal(ix.status, 404, "S6 a folder's index.html that leads out of the folder is a 404");
   assert.ok(!ix.body.toString().includes('outside the served folder'), 'S6 and nothing of the file it leads to');
   // not a regular file: a FIFO with a known type would block the read (task-1 F2)
-  // a writer at its other end for 5 s, so a server that read it would get 'x' and answer, not hang
+  // a writer at its other end, so a server that read it would get 'x' and answer, not hang. It opens
+  // without O_CREAT (never a regular file in its place), and is let go and awaited here, before any
+  // teardown: a reader opened and closed ends its open (timeout ends it in 10 s at worst)
   if (spawnSync('mkfifo', [path.join(root, 'pipe.txt')]).status === 0) {
     const fifo = path.join(root, 'pipe.txt');
-    spawn('timeout', ['5', 'sh', '-c', 'printf x > "$1"', 'sh', fifo], { stdio: 'ignore' });
-    // its writer, still opening the FIFO, is let go at once: a reader opened and closed (timeout ends it in 5 s at worst)
-    t.after(() => { try { fs.closeSync(fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK)); } catch {} });
-    assert.equal((await ask(port, '/next/pipe.txt')).status, 404, 'S6 a FIFO is a 404');
+    const writer = spawn('timeout', ['10', process.execPath, '-e', "const fs = require('fs'); try { const fd = fs.openSync(process.argv[1], fs.constants.O_WRONLY); fs.writeSync(fd, 'x'); fs.closeSync(fd); } catch {}", fifo], { stdio: 'ignore' });
+    const ended = new Promise((done) => writer.on('exit', done));
+    try {
+      assert.equal((await ask(port, '/next/pipe.txt')).status, 404, 'S6 a FIFO is a 404');
+    } finally {
+      try { fs.closeSync(fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK)); } catch {}
+      await ended;
+    }
   }
   // a file asked for as a folder (task-1 F3)
   for (const p of ['/next/index.txt/', '/next/threads/one/index.html/']) assert.equal((await ask(port, p)).status, 404, `S6 ${p}: a file with a trailing slash is a 404`);
