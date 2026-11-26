@@ -191,6 +191,14 @@ test('S8 servePage answers 500 for a page it cannot read; serveAppFiles refuses 
   fs.writeFileSync(path.join(AB0, 'index.html'), '<!doctype html><title>x</title>');
   const thrower = await listen(t, (req, res) => { try { serveAppFiles(AB0, '/next', req, res, () => { throw new Error('no'); }); } catch { res.writeHead(598); res.end(); } });
   assert.equal((await ask(thrower, '/next/')).status, 500, 'S8 a policyFor that throws is a 500, never a throw out of serveAppFiles');
+  // servePageAsset: only the dashboard's own two helpers; every other path or server is not its (task-2 F1)
+  const { servePageAsset } = seam(K);
+  for (const f of ['devteam-ui.js', 'devteam-ui.css']) fs.writeFileSync(path.join(K, 'dashboard', f), '/* helper */');
+  const sink = { writeHead() {}, end() {} };
+  assert.notEqual(servePageAsset({ method: 'GET', url: '/review/preview/devteam-ui.js' }, sink, 'dashboard'), NEXT, "S8 servePageAsset answers the dashboard's own helper");
+  for (const [server, p] of [['hub', '/review/preview/devteam-ui.js'], ['browser', '/review/preview/devteam-ui.css'], ['dashboard', '/review/preview/devteam-ui.js/x'], ['dashboard', '/review/preview/devteam-ui.jsx']]) {
+    assert.equal(servePageAsset({ method: 'GET', url: p }, sink, server), NEXT, `S8 servePageAsset ${server} ${p} is not its (DASH_NEXT)`);
+  }
   for (const base of ['/next/', 'next', '/', '/a//b', undefined, null, 1]) assert.throws(() => serveAppFiles('/x', base, { method: 'GET', url: '/' }, {}, POLICY), /serveAppFiles: base/, `S8 base ${JSON.stringify(base)} throws`);
   for (const folder of ['', undefined, null]) assert.throws(() => serveAppFiles(folder, '/next', { method: 'GET', url: '/next/' }, {}, POLICY), /serveAppFiles: no folder/, `S8 folder ${JSON.stringify(folder)} throws`);
   const none = await listen(t, (req, res) => { if (serveAppFiles(path.join(K, 'gone'), '/next', req, res, POLICY) === NEXT) { res.writeHead(599); res.end(); } });
