@@ -4,8 +4,8 @@
 //               { changed: [{ file?, decl?, item?, site? }], refused: [{ site, why }] }: the sites it
 //               changed (a declaration named here is one --verify accepts as changed, and so is an item
 //               that is no declaration, named with its module: item '(head)', the lines before a
-//               module's first declaration, or 'marker <name>', a marker line and the statements after
-//               it) and those it refused.
+//               module's first declaration, or 'marker <name> start|end', a marker line and the statements
+//               after it) and those it refused.
 //   overrides/  <any>.mjs: line 1 is `// override <name> sha256:<64 hex>[ in <source>]`, the hash of the
 //               declaration it was written against; the rest replaces that declaration's whole item.
 //   files/      files at their tree paths, written over whatever the tree has there.
@@ -135,7 +135,7 @@ function parse(text) {
 // A declaration in a module's text, by one of its names: { names, key, text, from, to }, or null.
 export function findDecl(text, name) { return parse(text).decls.find((d) => d.names.includes(name)) ?? null; }
 export const findDecls = (text, name) => parse(text).decls.filter((d) => d.names.includes(name));
-// An item that is no declaration, by its key: '(head)' or 'marker <name>'.
+// An item that is no declaration, by its key: '(head)' or 'marker <name> start|end'.
 export const ITEM_KEY = /^(?:\(head\)|marker [A-Za-z0-9_$.-]+ (?:start|end))$/;
 export const findItems = (text, key) => parse(text).all.filter((x) => x.kind !== 'decl' && x.key === key);
 // What --verify accepts by one name: a declaration's, or an item's key.
@@ -369,8 +369,8 @@ export function applyPatches(out, folders, report, env) {
   }
 }
 
-// For --verify: a tree's modules with every declaration the overlay accepted put back as the source
-// has it (or taken out, when the source has none), after checking each is exactly what the overlay
+// For --verify: a tree's modules with every declaration and item the overlay accepted put back as the
+// source has it (or taken out, when the source has none), after checking each is exactly what the overlay
 // makes. { modules, problems }. The regions are made again, so verify judges only the declarations;
 // the tree's own regions are checked by regionProblems.
 export function restore(srcItems, modules, accepted, overlaid, builtins) {
