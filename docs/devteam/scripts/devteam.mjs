@@ -14649,9 +14649,10 @@ function artifactNotesCmd(slug, at) {
 /* artifactNotes end */
 /* artifactHandoff start */
 // artifact handoff <slug> [--at <where>] [--json]: the owner hands the open notes there to the session
-// drawing that copy: a line on each note, then one message, which names ids and counts and never
-// anything a page wrote. A recipient with no pane keeps it in its messages, and the supervisor is
-// nudged with the same line.
+// drawing that copy, and with them any note that came back from a session whose worktree is gone (its
+// view's with isn't handed.to): a line on each note, then one message, which names ids and counts and
+// never anything a page wrote. A recipient with no pane keeps it in its messages, and the supervisor is
+// nudged with the same line; nobody (in --json too) says when the supervisor has no pane either.
 function artifactHandoffCmd(slug, at) {
   const { by } = ownerWriter('the owner hands notes over: they press Hand over on the dashboard, or run artifact handoff in their own terminal');
   const to = artifactRecipient(at);
