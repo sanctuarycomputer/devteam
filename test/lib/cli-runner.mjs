@@ -30,7 +30,20 @@ for (const k of Object.keys(process.env)) delete process.env[k];
 Object.assign(process.env, r.env);
 process.argv = [process.execPath, r.script, ...r.args];
 // written whole, then renamed: the test process reads the code the moment the file appears
-process.on('exit', (code) => { fs.writeFileSync(path.join(slot, 'exit.tmp'), String(code)); fs.renameSync(path.join(slot, 'exit.tmp'), path.join(slot, 'exit')); });
+const done = (code) => { fs.writeFileSync(path.join(slot, 'exit.tmp'), String(code)); fs.renameSync(path.join(slot, 'exit.tmp'), path.join(slot, 'exit')); };
+// and written last (kit-950): the script's own exit listeners (the kit writes run/cache as it ends)
+// run before it, or the test would read what they write before they write it. Each exit listener
+// the script adds, however it adds it, moves this one back behind it.
+const on = process.on;
+for (const m of ['on', 'addListener', 'once', 'prependListener', 'prependOnceListener']) {
+  const add = process[m];
+  process[m] = function (event, fn) {
+    const r = add.call(this, event, fn);
+    if (event === 'exit' && fn !== done) { process.removeListener('exit', done); on.call(process, 'exit', done); }
+    return r;
+  };
+}
+process.on('exit', done);
 // V8's code cache for the script (Node 22.1+): the same code, compiled once rather than on every call
 module.enableCompileCache?.(path.join(shared, 'devteam-kit-compile-cache'));
 await import(pathToFileURL(r.script).href);
