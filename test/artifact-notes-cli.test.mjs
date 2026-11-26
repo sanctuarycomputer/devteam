@@ -144,7 +144,7 @@ test('C1c with no open notes it writes nothing and says so', fresh(() => {
   const id = note('plan-pricing'); handed(id, 'plan-pricing');
   const was = bytes();
   assert.equal(ok(cli(handoff('--at', 'plan-pricing'))), 'no open notes on artifact pricing at plan-pricing: nothing handed over');
-  assert.deepEqual(JSON.parse(ok(cli(handoff('--at', 'plan-pricing', '--json')))), { to: 'plan-pricing', typed: false, count: 0 });
+  assert.deepEqual(JSON.parse(ok(cli(handoff('--at', 'plan-pricing', '--json')))), { to: 'plan-pricing', typed: false, count: 0, nobody: false });
   assert.equal(bytes(), was);
 }));
 
@@ -188,7 +188,7 @@ test('C1d a line held for the session is said so, counts as typed, and nudges no
     note('plan-pricing');
     assert.match(ok(cli(handoff('--at', 'plan-pricing'), P)), /^handed 1 note on artifact pricing to plan-pricing\nheld for plan-pricing's pane: recorded and held: /);
     note('plan-pricing');
-    assert.deepEqual(JSON.parse(ok(cli(handoff('--at', 'plan-pricing', '--json'), P))), { to: 'plan-pricing', typed: true, count: 1 });
+    assert.deepEqual(JSON.parse(ok(cli(handoff('--at', 'plan-pricing', '--json'), P))), { to: 'plan-pricing', typed: true, count: 1, nobody: false });
     await new Promise((r) => setTimeout(r, 500));
     assert.deepEqual([w.typed(), pane.typed()], ['', '']);
     assert.ok(fs.readdirSync(path.join(F.old, 'docs/devteam/run/held')).length, 'held where fresh clears it');
@@ -226,7 +226,7 @@ test('C2a who a place hands to', fresh(() => {
 test('C2b main takes published trees and gone worktrees, not a standing one', fresh(() => {
   const mine = [note('main'), note(`tree:${'b'.repeat(40)}`), note('plan-gone')];
   const not = note('plan-pricing');
-  assert.deepEqual(JSON.parse(ok(cli(handoff('--at', 'main', '--json')))), { to: 'supervisor', typed: false, count: 3 });
+  assert.deepEqual(JSON.parse(ok(cli(handoff('--at', 'main', '--json')))), { to: 'supervisor', typed: false, count: 3, nobody: false });
   for (const id of mine) assert.equal(show(id).handed.to, 'supervisor', id);
   assert.equal(show(not).handed, null);
 }));
@@ -424,6 +424,91 @@ test("C10a C10b list --with: the notes a session has, and no others", fresh(() =
   for (const s of ['artifact handoff <slug>', 'artifact notes <slug>', 'artifact addressed <t-id>']) assert.ok(cli(['help']).out.includes(s), s);
 }));
 
+// ---- kit-860: a handed-over note whose session's worktree is gone comes back to the supervisor
+const gonePlace = (name) => { const root = worktree(name, `plan/${name.slice(5)}`, 'GONE COPY'); return () => F.g(['worktree', 'remove', '--force', root], F.old); };
+test('G1a a hand-over whose worktree went after the press is with the supervisor, and not with the session', fresh(() => {
+  const remove = gonePlace('plan-went');
+  try {
+    const id = note('plan-went');
+    assert.equal(JSON.parse(ok(cli(handoff('--at', 'plan-went', '--json')))).to, 'plan-went', 'setup: handed to the standing worktree');
+    remove();
+    const tk = note('x-02-gone'); handed(tk, 'x-02-gone', 20 * MIN);
+    assert.deepEqual(ok(cli(['thread', 'list', '--with', 'supervisor'])).split('\n').map((l) => l.split(' ')[0]), [tk, id]);
+    assert.equal(ok(cli(['thread', 'list', '--with', 'plan-went'])), 'no notes are with plan-went');
+    const v = show(id);
+    assert.deepEqual([v.handed.to, v.with, v.waiting], ['plan-went', 'supervisor', 'supervisor']);
+    assert.ok(JSON.parse(ok(cli(['thread', 'list', '--waiting', '--json']))).some((x) => x.id === id), 'the supervisor owes it, as a note handed to it');
+    // a worktree made again under that name takes its note back: nothing was written
+    fs.mkdirSync(path.join(F.old, '.worktrees', 'plan-went'));
+    assert.deepEqual([show(id).with, show(id).waiting], ['plan-went', 'session']);
+    fs.rmdirSync(path.join(F.old, '.worktrees', 'plan-went'));
+  } finally {
+    // whatever a failure left: the folder made again, the worktree's record, its branch
+    fs.rmSync(path.join(F.old, '.worktrees', 'plan-went'), { recursive: true, force: true });
+    F.g(['worktree', 'prune'], F.old);
+    try { F.g(['branch', '-D', 'plan/went'], F.old); } catch {}
+  }
+}));
+
+test('G1c a note that came back waits on the supervisor: thread-waiting times it, and the gone session\'s own turn doesn\'t end that', fresh(() => {
+  const id = note('plan-gone', { ago: 40 * MIN }); handed(id, 'plan-gone', 30 * MIN);
+  F.hand('plan-gone', { type: 'turn', thread: id, text: 'Looking.' }, 25 * MIN);
+  assert.deepEqual([show(id).with, show(id).waiting], ['supervisor', 'supervisor']);
+  const found = JSON.parse(ok(cli(['metrics', '--json'], F.SUP))).findings.filter((f) => f.subject === id).map((f) => f.kind);
+  assert.ok(found.includes('thread-waiting'), `thread-waiting names it: ${found}`);
+  // the supervisor's reply after the hand-over ends its wait, as for a note handed to it
+  F.hand('supervisor', { type: 'turn', thread: id, text: 'On it.' }, 20 * MIN);
+  assert.deepEqual([show(id).with, show(id).waiting], ['supervisor', 'session'], "the supervisor's reply: the owner's move");
+}));
+
+test('G1b a second Hand over sends it again, to the supervisor; a third sends nothing', fresh(() => {
+  const id = note('plan-gone'); handed(id, 'plan-gone');
+  const was = ownerMessages().length;
+  assert.deepEqual(JSON.parse(ok(cli(handoff('--json')))), { to: 'supervisor', typed: false, count: 1, nobody: false });
+  assert.deepEqual([show(id).handed.to, show(id).with], ['supervisor', 'supervisor']);
+  const sent = ownerMessages();
+  assert.equal(sent.length, was + 1);
+  assert.equal(sent.pop().to, 'supervisor');
+  assert.deepEqual(JSON.parse(ok(cli(handoff('--json')))), { to: 'supervisor', typed: false, count: 0, nobody: false });
+  // at the gone place itself, too
+  const two = note('plan-gone'); handed(two, 'plan-gone');
+  assert.deepEqual(JSON.parse(ok(cli(handoff('--at', 'plan-gone', '--json')))), { to: 'supervisor', typed: false, count: 1, nobody: false });
+  assert.equal(show(two).handed.to, 'supervisor');
+}));
+
+test("G3 a live session's note is never moved: a standing worktree with no pane, a mark, a resolve", fresh(() => {
+  const live = note('plan-pricing'); handed(live, 'plan-pricing');
+  const tk = note('x-01-y'); handed(tk, 'x-01-y');
+  const marked = note('plan-gone'); handed(marked, 'plan-gone'); mark(marked, 'plan-gone');
+  const done = note('plan-gone'); handed(done, 'plan-gone'); F.hand('owner', { id: done, type: 'thread', op: 'set', status: 'resolved', outcome: null }, MIN);
+  // a worktree folder the kit won't use (a link to somewhere else) is there, not gone: only a missing one is
+  const link = path.join(F.old, '.worktrees', 'plan-elsewhere');
+  fs.symlinkSync(fs.mkdtempSync(path.join(F.base, 'elsewhere-')), link);
+  try {
+    const odd = note('plan-elsewhere'); handed(odd, 'plan-elsewhere');
+    assert.deepEqual([show(live).with, show(live).waiting, show(tk).with], ['plan-pricing', 'session', 'x-01-y']);
+    assert.deepEqual([show(marked).check, show(marked).with ?? null, show(done).status], ['addressed', null, 'resolved']);
+    assert.equal(ok(cli(['thread', 'list', '--with', 'supervisor'])), 'no notes are with supervisor');
+    for (const at of ['plan-pricing', 'x-01-y', 'main', 'plan-gone']) assert.equal(JSON.parse(ok(cli(handoff('--at', at, '--json')))).count, 0, at);
+    assert.deepEqual([show(live).handed.to, show(tk).handed.to], ['plan-pricing', 'x-01-y']);
+    assert.deepEqual([show(odd).with, show(odd).waiting], ['plan-elsewhere', 'session']);
+    // a worktree the kit can't look up (lstat fails with no ENOENT; here ENAMETOOLONG) is not gone either (final-1 F2)
+    const long = `plan-${'x'.repeat(300)}`;
+    const far = note('plan-pricing'); handed(far, long);
+    assert.deepEqual([show(far).handed.to, show(far).with, show(far).waiting], [long, long, 'session'], 'an lstat error other than ENOENT');
+  } finally { fs.rmSync(link, { force: true }); }
+}));
+
+test("G2c the press's reply says when nobody's pane took it", fresh(() => {
+  note('plan-pricing');
+  assert.deepEqual(JSON.parse(ok(cli(handoff('--at', 'plan-pricing', '--json')))), { to: 'plan-pricing', typed: false, count: 1, nobody: true });
+}));
+
+test("G2a a hand-over nobody's pane took is said so to the owner", fresh(() => {
+  note('plan-pricing');
+  assert.equal(ok(cli(handoff('--at', 'plan-pricing'))), "handed 1 note on artifact pricing to plan-pricing\nnot typed: neither plan-pricing nor the supervisor has a pane; it stays in plan-pricing's messages and the supervisor's unread, and nobody works it until one of them is back");
+}));
+
 // ---- Task 7: the dashboard
 const dashboard = async (supervisor, fn) => {
   const { dash, port } = await dashboardOnFreePort(F.old, F.env({ ...SHOT, DEVTEAM_SUPERVISOR: supervisor }));
@@ -446,15 +531,15 @@ test('C3b C3c the page hands over, and reads where it went; a second press hands
     await dashboard(pane.target, async ({ post }) => {
       const id = note('plan-pricing');
       const body = { slug: 'pricing', at: 'plan-pricing' };
-      assert.deepEqual(await post('artifact-handoff', body), { status: 200, said: { to: 'plan-pricing', typed: true, count: 1 } });
+      assert.deepEqual(await post('artifact-handoff', body), { status: 200, said: { to: 'plan-pricing', typed: true, count: 1, nobody: false } });
       assert.equal(lines().find((l) => l.id === id && l.handed).by, 'owner');
       const [sent] = ownerMessages();
       await until(() => w.typed().includes(`[devteam info ${sent.id} from owner] ${sent.text}`), 'its own line in the session');
-      assert.deepEqual(await post('artifact-handoff', body), { status: 200, said: { to: 'plan-pricing', typed: false, count: 0 } });
+      assert.deepEqual(await post('artifact-handoff', body), { status: 200, said: { to: 'plan-pricing', typed: false, count: 0, nobody: false } });
       assert.equal(ownerMessages().length, 1, 'a second press sends nothing');
       w.close();
       note('plan-pricing'); note('plan-pricing');
-      assert.deepEqual(await post('artifact-handoff', body), { status: 200, said: { to: 'plan-pricing', typed: false, count: 2 } });
+      assert.deepEqual(await post('artifact-handoff', body), { status: 200, said: { to: 'plan-pricing', typed: false, count: 2, nobody: false } });
       const m = ownerMessages().find((x) => x.text.startsWith('2 notes'));
       const typed = await until(() => pane.typed().includes(m.id) && pane.typed(), "the same line in the supervisor's pane");
       assert.ok(typed.includes(`[devteam info ${m.id} from owner] ${m.text}`), typed);
@@ -619,4 +704,15 @@ test('C8 C9 C10b the docs say whose a note is, how it is worked, and what a mark
   has(section(sup, '## 11. Recovery'), 'thread list --with supervisor');
   has(section(doc('worker.md'), '## 7. Talking to the supervisor'), 'artifact notes', 'artifact addressed', 'what changed', 'picture', 'withdrawn', 'thread list --with <');
   has(section(doc('planning.md'), '## 2. The design'), '### Artifact notes', 'artifact notes', 'thread list --with plan-<feature>');
+});
+
+test("G2b supervisor.md: a hand-over read in unread is worked as one typed, and nothing says to ack a note nobody will work", () => {
+  const notesDoc = section(doc('supervisor.md'), '### Artifact notes');
+  has(notesDoc, 'A hand-over typed to you or read in `unread` that names another session\'s place', "nobody's pane took", 'Hand over again', 'resume that session or mark the notes yourself, then ack', '`{to, typed, count, nobody}`');
+  assert.ok(!notesDoc.includes("Ack the hand-over's own owner lines too."), 'no bare ack of a hand-over');
+  has(notesDoc, '`with` is `supervisor`');
+  // a returned note's wait: the gone session's own turn doesn't end it (final-1 F3)
+  has(notesDoc, "a turn by the gone session itself doesn't end it");
+  // how the supervisor tells a hand-over a pane took from one nobody's pane took (final-1b F2)
+  has(notesDoc, "at once when that session's window is up");
 });
