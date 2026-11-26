@@ -5,10 +5,11 @@
 // the contract's calling rules, so a consumer's test sees the rule kept, not only the answer. Two kinds of
 // refusal, told apart by their text:
 //   `fake npm: … (kit-install@1)`  a contract rule (exactly one --registry= naming this registry, the
-//                                  DEVTEAM_NPM_REGISTRY env() sets; --ignore-scripts; each command's exact
+//                                  DEVTEAM_NPM_REGISTRY env() sets; --ignore-scripts; --prefix=<the folder
+//                                  it runs in> and --workspaces=false, once each; each command's exact
 //                                  arguments and nothing else; no npm_config_* or NPM_CONFIG_* but two
-//                                  different empty regular config files; no .npmrc where it runs); real npm
-//                                  takes these
+//                                  different empty regular config files; no .npmrc where it runs; view in
+//                                  an empty folder); real npm takes these
 //   `npm error code …`             what real npm does (10.x): a pair out of sync (package.json's version not
 //                                  the lock entry's, an entry missing, an entry with dependencies), a tarball
 //                                  whose sha512 isn't the lock's integrity, one file for both configs, a 404,
@@ -39,7 +40,8 @@
 //   server-error    every request is a 503 (an outage: unreachable to the kit, never a refusal)
 //   attestation-gone
 //                   manifests advertise attestations but the bundle is a 404 (real npm's audit fails E404)
-//   redirect        the bundle is a 302 to another host (http://127.0.0.2:9/); the kit must not follow it
+//   redirect        the bundle is a 302 to the same bundle at another path the fake serves (/-/moved/…):
+//                   a kit that follows it gets a 200 and passes every guard, so its test goes red
 //
 // The registry is the fixture's four packages (registry/devteam-<version>.tgz; each manifest is the
 // tarball's package.json with dist and _id) and their provenance (registry/provenance.json, commits
@@ -157,11 +159,14 @@ function serve(stateFile) {
     if (state.fail === 'server-error') return send(503, 'application/json', '{"error":"Service Unavailable"}\n');
     let p;
     try { p = decodeURIComponent(new URL(req.url, 'http://x').pathname); } catch { return notFound(); }
+    // where the redirect failure points: the same answer, served live
+    const moved = p.startsWith('/-/moved/');
+    if (moved) p = p.slice('/-/moved'.length);
     const at = /^\/-\/npm\/v1\/attestations\/(.+)@(\d+\.\d+\.\d+)$/.exec(p);
     if (at) {
       const pk = at[1] === NAME && pkgs.get(at[2]);
       if (!pk || state.fail === 'no-attestation' || state.fail === 'attestation-gone') return notFound();
-      if (state.fail === 'redirect') { res.writeHead(302, { location: `http://127.0.0.2:9${req.url}` }); return res.end(); }
+      if (state.fail === 'redirect' && !moved) { res.writeHead(302, { location: `http://${req.headers.host}/-/moved${req.url}` }); return res.end(); }
       return send(200, 'application/json', JSON.stringify(attestations(pk, state.fail)));
     }
     if (p === `/${NAME}`) {
@@ -287,17 +292,26 @@ async function fakeNpm(stateFile, args) {
     const reg = args.filter((a) => a.startsWith('--registry=')).map((a) => a.slice(11));
     if (reg.length !== 1 || reg[0] !== state.url) return rule(`every call passes exactly one --registry=, the registry DEVTEAM_NPM_REGISTRY names (got ${reg.length ? reg.join(' ') : 'none'})`);
     if (!args.includes('--ignore-scripts')) return rule('every call passes --ignore-scripts');
-    // each command's exact arguments: the two flags once, its own, and nothing that undoes them
+    // npm's prefix is the folder it runs in, so it never walks up to a package.json, its workspaces, its
+    // lock or an .npmrc above it (real npm 10.7 and 10.9: with these it reads none of them)
+    const prefixes = args.filter((a) => a.startsWith('--prefix='));
+    const here = (q) => { try { return fs.realpathSync(q) === fs.realpathSync('.'); } catch { return false; } };
+    const ws = args.filter((a) => a.startsWith('--workspaces='));
+    if (prefixes.length !== 1 || !here(prefixes[0].slice(9)) || ws.length !== 1 || ws[0] !== '--workspaces=false') {
+      return rule(`every call passes --prefix=<the folder it runs in> and --workspaces=false, once each (got ${[...prefixes, ...ws].join(' ') || 'neither'})`);
+    }
+    // each command's exact arguments: the flags once, its own, and nothing that undoes them
     const known = { view: ['--json'], ci: ['--dry-run'], audit: [] };
     const plain = args.filter((a) => !a.startsWith('-'));
     if (known[plain[0]]) {
-      const extra = args.filter((a) => a.startsWith('-') && !a.startsWith('--registry=') && a !== '--ignore-scripts' && !known[plain[0]].includes(a));
+      const extra = args.filter((a) => a.startsWith('-') && !a.startsWith('--registry=') && a !== '--ignore-scripts' && a !== prefixes[0] && a !== '--workspaces=false' && !known[plain[0]].includes(a));
       const once = args.filter((a) => a === '--ignore-scripts').length === 1 && known[plain[0]].every((f) => args.filter((a) => a === f).length <= 1);
       const shape = plain[0] === 'view' ? plain.length >= 2 && plain.length <= 3 && (plain.length === 2 || /^[A-Za-z_][\w.]*$/.test(plain[2]))
         : plain[0] === 'ci' ? plain.length === 1 : plain.length === 2 && plain[1] === 'signatures';
-      if (extra.length || !once || !shape) return rule(`every call is exactly view <name>@<version> [<field>] [--json], ci [--dry-run] or audit signatures, with --registry=<the registry> and --ignore-scripts and nothing else (got ${args.join(' ')})`);
+      if (extra.length || !once || !shape) return rule(`every call is exactly view <name>@<version> [<field>] [--json], ci [--dry-run] or audit signatures, with --registry=<the registry>, --ignore-scripts, --prefix=<the folder it runs in> and --workspaces=false and nothing else (got ${args.join(' ')})`);
     }
     if (fs.existsSync('.npmrc')) return rule('npm runs in a folder with no .npmrc');
+    if (plain[0] === 'view' && fs.readdirSync('.').length) return rule('view runs in its own empty folder');
     const stray = Object.keys(npmEnv).filter((k) => !['npm_config_userconfig', 'npm_config_globalconfig'].includes(k));
     if (stray.length) return rule(`npm config from the environment reached npm: ${stray.sort().join(', ')}`);
     const u = npmEnv.npm_config_userconfig, g = npmEnv.npm_config_globalconfig;

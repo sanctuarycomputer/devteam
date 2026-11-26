@@ -116,7 +116,7 @@ test('C4 real npm ci --ignore-scripts --dry-run accepts the pair offline', { ski
   const u = path.join(tmp, `${n}-user-npmrc`), g = path.join(tmp, `${n}-global-npmrc`);
   fs.writeFileSync(u, ''); fs.writeFileSync(g, '');
   const env = { PATH: process.env.PATH, HOME: d, npm_config_userconfig: u, npm_config_globalconfig: g, npm_config_cache: path.join(d, '.cache') };
-  const r = spawnSync('npm', ['ci', '--ignore-scripts', '--dry-run', '--offline', `--registry=${PUBLIC}`], { cwd: d, env, encoding: 'utf8', timeout: 120000 });
+  const r = spawnSync('npm', ['ci', '--ignore-scripts', '--dry-run', '--offline', `--registry=${PUBLIC}`, `--prefix=${d}`, '--workspaces=false'], { cwd: d, env, encoding: 'utf8', timeout: 120000 });
   assert.equal(r.status, 0, `C4 npm ci accepts the pair: ${r.stdout}\n${r.stderr}`);
   assert.match(r.stdout, /added 1 package/, 'C4 one package');
 });
@@ -221,8 +221,10 @@ const npmEnv = (reg, extra = {}) => {
   const base = Object.fromEntries(Object.entries(reg.env()).filter(([k]) => !/^npm_config_/i.test(k)));
   return { ...base, npm_config_userconfig: u, npm_config_globalconfig: g, ...extra };
 };
-const FLAGS = (reg) => [`--registry=${reg.url}`, '--ignore-scripts'];
-const npm = (reg, args, { cwd = reg.dir, env = npmEnv(reg) } = {}) => spawnSync('npm', args, { cwd, env, encoding: 'utf8', timeout: 60000 });
+// HERE stands for --prefix=<the folder the call runs in>; npm() fills it in
+const HERE = '--prefix=<here>';
+const FLAGS = (reg) => [`--registry=${reg.url}`, '--ignore-scripts', HERE, '--workspaces=false'];
+const npm = (reg, args, { cwd = scratch('npm-here'), env = npmEnv(reg) } = {}) => spawnSync('npm', args.map((a) => (a === HERE ? `--prefix=${cwd}` : a)), { cwd, env, encoding: 'utf8', timeout: 60000 });
 const pinDir = (version = '0.101.0', layout = 1) => {
   const d = scratch(`pin-${version}`);
   const integrity = `sha512-${sha512(TARBALLS[version]).toString('base64')}`;
@@ -347,14 +349,22 @@ test('C13 each failure, driven once', async () => {
         assert.equal(au.status, 1, 'C13 attestation-gone: audit signatures fails, as real npm does');
         assert.match(au.stderr, /npm error code E404/, 'C13 attestation-gone: E404');
       } else if (f === 'redirect') {
-        const r = await fetch(`${reg.url}-/npm/v1/attestations/${NAME.replace('/', '%2f')}@0.101.0`, { redirect: 'manual' });
+        const at = `${reg.url}-/npm/v1/attestations/${NAME.replace('/', '%2f')}@0.101.0`;
+        const r = await fetch(at, { redirect: 'manual' });
         assert.equal(r.status, 302, 'C13 redirect: the bundle is a 302');
-        assert.equal(new URL(r.headers.get('location')).host, '127.0.0.2:9', 'C13 redirect: to another host');
+        const to = new URL(r.headers.get('location'));
+        assert.ok(to.origin === new URL(reg.url).origin && to.pathname !== new URL(at).pathname, `C13 redirect: to another path the fake serves (${to})`);
+        const followed = await fetch(at);
+        assert.equal(followed.status, 200, 'C13 redirect: a fetch that follows it gets the bundle, so a kit that follows goes red');
+        const fb = await followed.json();
+        const fa = fb.attestations.find((x) => x.predicateType === 'https://slsa.dev/provenance/v1');
+        assert.deepEqual(readFacts(JSON.parse(Buffer.from(fa.bundle.dsseEnvelope.payload, 'base64'))), want, 'C13 redirect: the same bundle, every guard passing');
         assert.equal((await fetch(`${reg.url}${NAME.replace('/', '%2f')}/0.101.0`)).status, 200, 'C13 redirect: the bundle only');
       } else if (f === 'hostile-env') {
         const e = reg.env();
         assert.ok(Object.keys(e).some((k) => /^npm_config_registry$/i.test(k)) && Object.keys(e).some((k) => /^NPM_CONFIG_/.test(k)), 'C13 hostile-env: env() carries npm config pointing elsewhere');
-        const raw = spawnSync('npm', ['view', `${NAME}@0.101.0`, '--json', ...FLAGS(reg)], { cwd: reg.dir, env: { ...e, ...npmEnv(reg) }, encoding: 'utf8', timeout: 60000 });
+        const vd = scratch('hostile-view');
+        const raw = spawnSync('npm', ['view', `${NAME}@0.101.0`, '--json', `--registry=${reg.url}`, '--ignore-scripts', `--prefix=${vd}`, '--workspaces=false'], { cwd: vd, env: { ...e, ...npmEnv(reg) }, encoding: 'utf8', timeout: 60000 });
         assert.equal(raw.status, 1, 'C13 hostile-env: npm refuses a call that passed the config on');
         assert.match(raw.stderr, /npm config from the environment reached npm/, 'C13 hostile-env: and says so');
         assert.equal(npm(reg, ['view', `${NAME}@0.101.0`, '--json', ...FLAGS(reg)]).status, 0, 'C13 hostile-env: the same call with the config dropped passes');
@@ -418,6 +428,19 @@ test('C14 the fake npm refuses a call that breaks the calling rules', async () =
     refused([...view, ...FLAGS(reg)], { env: { ...env, npm_config_userconfig: '/dev/null' } }, /is an empty file/, 'a config that is not a regular file');
     const bare = Object.fromEntries(Object.entries(env).filter(([k]) => !/^npm_config_/i.test(k)));
     refused([...view, ...FLAGS(reg)], { env: bare }, /npm_config_userconfig and npm_config_globalconfig both name an empty file/, 'no config files');
+    const flagsRule = /every call passes --prefix=<the folder it runs in> and --workspaces=false, once each/;
+    const reg1 = [`--registry=${reg.url}`, '--ignore-scripts'];
+    refused([...view, ...reg1, '--workspaces=false'], {}, flagsRule, 'no --prefix');
+    refused([...view, ...reg1, `--prefix=${scratch('another')}`, '--workspaces=false'], {}, flagsRule, '--prefix naming another folder');
+    refused([...view, ...reg1, HERE], {}, flagsRule, 'no --workspaces=false');
+    refused([...view, ...FLAGS(reg), HERE], {}, flagsRule, '--prefix twice');
+    refused([...view, ...FLAGS(reg), '--workspaces=false'], {}, flagsRule, '--workspaces=false twice');
+    refused([...view, ...reg1, HERE, '--workspaces=true'], {}, flagsRule, '--workspaces=true in its place');
+    refused([...view, ...FLAGS(reg), '--workspaces'], {}, exact, '--workspaces after it');
+    refused(['ci', ...FLAGS(reg), '--workspace=x'], {}, exact, 'ci naming a workspace');
+    const busy = scratch('view-not-empty');
+    fs.writeFileSync(path.join(busy, 'package.json'), '{}\n');
+    refused([...view, ...FLAGS(reg)], { cwd: busy }, /view runs in its own empty folder/, 'view in a folder that is not empty');
     const rc = scratch('with-npmrc');
     fs.writeFileSync(path.join(rc, '.npmrc'), 'strict-ssl=false\n');
     refused([...view, ...FLAGS(reg)], { cwd: rc }, /runs in a folder with no \.npmrc/, 'a .npmrc where npm runs');
@@ -431,7 +454,7 @@ test('C14 the fake npm refuses a call that breaks the calling rules', async () =
     npmSays(edited((l) => { l.packages[`node_modules/${NAME}`].version = '0.100.0'; }), ['ci', '--dry-run', ...FLAGS(reg)], /npm error code ENOTCACHED/, 'a pair out of sync');
     npmSays(edited((l) => { l.packages[`node_modules/${NAME}`].dependencies = { x: '1.0.0' }; }), ['ci', '--dry-run', ...FLAGS(reg)], /npm error code ENOTCACHED/, 'an entry with dependencies');
     npmSays(edited((l) => { l.packages[`node_modules/${NAME}`].resolved = 'http://127.0.0.1:9/x.tgz'; }), ['ci', '--dry-run', ...FLAGS(reg)], /resolved is on the public registry/, 'a resolved off the public registry');
-    npmSays(reg.dir, ['view', `${NAME}@9.9.9`, '--json', ...FLAGS(reg)], /npm error code E404/, 'an unpublished version');
+    npmSays(scratch('view-404'), ['view', `${NAME}@9.9.9`, '--json', ...FLAGS(reg)], /npm error code E404/, 'an unpublished version');
     const dry = pinDir();
     assert.equal(npm(reg, ['ci', '--dry-run', ...FLAGS(reg)], { cwd: dry }).status, 0, 'C14 ci --dry-run passes');
     assert.ok(!fs.existsSync(path.join(dry, 'node_modules')), 'C14 ci --dry-run installs nothing');
@@ -621,7 +644,10 @@ test('C16 the comment above packagePinPair states kit-install@1, and the alpha-b
     ['the port, the slash, nothing after', /\(port 1 to 65535, no leading zero, the final slash, nothing after it\)/],
     ['no redirect', /never follow a redirect \(redirect: 'manual'\): a 3xx is unreachable/],
     ['the exact calls', /exactly npm view <name>@<version> \[<field>\] \[--json\], npm ci \[--dry-run\] and npm audit signatures[\s\S]*no other argument in any form \(no second or scoped registry/],
-    ['the folders npm runs in', /in a folder the step made that holds no \.npmrc: ci and audit in \.kit\/<version>-<hash>\/, view in its own empty folder/],
+    ['nothing above npm\'s folder', /--registry=<the registry>, --ignore-scripts, --prefix=<the folder it runs in> and --workspaces=false, each once[\s\S]*npm never walks up to a package\.json, its workspaces, its lock or an \.npmrc above that folder/],
+    ['the folders npm runs in', /in a folder the step made that holds no \.npmrc: ci and audit in \.kit\/<version>-<hash>\/, view in its own empty folder made outside the checkout \(mkdtemp under os\.tmpdir\(\)\)/],
+    ['merge compares .kit as git compares .git', /each of a path's first three components is compared as git compares \.git on any file system: case-insensitively, after Unicode NFC normalisation, with the code points HFS\+ ignores removed[\s\S]*a trailing run of dots and spaces dropped[\s\S]*NTFS 8\.3 short name[\s\S]*\.KIT\/, Docs\/DevTeam\/\.kit\/, \.kit\.\/ and KIT~1\/ are \.kit/],
+    ['the ignore line does not fold case', /The ignore line does not fold case[\s\S]*merge's refusal is what stops \.KIT/],
     ['audit reports the attestation', /npm audit signatures must then pass on the installed tree and report the package's attestation verified/],
     ['the bundle fetched once in 15 s', /is fetched once \(15 s, at most 1 MiB\)/],
     ['the install lock', /Folders are made under withLock\(\.kit\/\.lock\)/],

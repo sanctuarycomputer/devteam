@@ -33297,12 +33297,16 @@ function cmdRecurring() {
 //   upstream_base at its head without the v; a pin naming another version is refused, and so is a PR
 //   that deletes the pair (the fix: restore main's pair, or package pin <tag>).
 // - npm. The calls are exactly npm view <name>@<version> [<field>] [--json], npm ci [--dry-run] and npm
-//   audit signatures, each with --registry=<the registry> and --ignore-scripts and no other argument in any
-//   form (no second or scoped registry, no --reg or --registry <url>, no ignore-scripts negation, no
-//   --userconfig or --globalconfig). Each runs with npm_config_userconfig and npm_config_globalconfig naming
+//   audit signatures, each with --registry=<the registry>, --ignore-scripts, --prefix=<the folder it runs
+//   in> and --workspaces=false, each once, and no other argument in any form (no second or scoped registry,
+//   no --reg or --registry <url>, no ignore-scripts negation, no other prefix or workspace flag, no
+//   --userconfig or --globalconfig). With the last two npm never walks up to a package.json, its workspaces,
+//   its lock or an .npmrc above that folder (a workspace root above .kit would otherwise install its own
+//   lock, bytes the pin never named). Each runs with npm_config_userconfig and npm_config_globalconfig naming
 //   two different empty files (regular files; npm refuses one file for both), with no other npm_config_* or
 //   NPM_CONFIG_* variable in its environment, and in a folder the step made that holds no .npmrc: ci and
-//   audit in .kit/<version>-<hash>/, view in its own empty folder. An npm
+//   audit in .kit/<version>-<hash>/, view in its own empty folder made outside the checkout (mkdtemp under
+//   os.tmpdir()). An npm
 //   older than 9.5 can't verify attestations: a finding before layout 2, a refusal from it. A registry
 //   that can't be reached is not a refusal: a fetch or npm call that gets no answer in time, a network
 //   error, or any status but 200 and 404 (a 5xx, a 429), and an npm call that fails with a network code
@@ -33344,8 +33348,14 @@ function cmdRecurring() {
 //   is no current: never followed, read as nothing installed.
 // - Never committed. docs/devteam/.kit must be a real folder (lstat); a symlink or anything else there is
 //   read as nothing installed. Its ignore line is .kit, with no slash, so a symlink of that name is ignored
-//   too, and merge refuses a PR that adds or changes docs/devteam/.kit itself or any path under it: an
-//   install is only ever made on the machine, by the step.
+//   too, and merge refuses a PR that adds or changes docs/devteam/.kit itself or any path under it, where
+//   each of a path's first three components is compared as git compares .git on any file system:
+//   case-insensitively, after Unicode NFC normalisation, with the code points HFS+ ignores removed (U+200C
+//   to U+200F, U+202A to U+202E, U+206A to U+206F, U+FEFF), with a trailing run of dots and spaces dropped,
+//   and a component that is the name's NTFS 8.3 short name (DEVTEA~<digit>, KIT~<digit>) matching too; so
+//   .KIT/, Docs/DevTeam/.kit/, .kit./ and KIT~1/ are .kit. An install is only ever made on the machine, by
+//   the step. The ignore line does not fold case on a case-sensitive file system; merge's refusal is what
+//   stops .KIT.
 // - verified.json: { v: 1, name, version, layout, integrity, integrity_ok, provenance_ok, provenance:
 //   { repo (owner/name), workflow, ref, commit }, at (UTC, toISOString) }, in that order, at most 4 KiB.
 //   The install step writes it last, by an atomic rename, only once both checks pass, so it never writes
