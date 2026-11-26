@@ -267,6 +267,71 @@ test('N the names hold reads a heading, a list item, a table row, a link\'s word
     }
   });
 }));
+
+// kit-926: main holds docs/devteam/out, a symlink to a folder outside the repo, docs/devteam/alias,
+// one to the app's folder in it, and docs/devteam/vendor, a repo of its own. git's tree holds each
+// symlink as a file, never a folder to look through, and the repo as a gitlink at most.
+const LINKS = '[a](../out/), [b](../out/secretdir/), [c](../alias/), [d](../alias/guide.md), [e](../../../.git/config), [f](../../../.git/), [g](../App/), [h](../gone/), [i](../app/#top), [j](../Kestrelbox/), [k](../../../../old/), [l](notes.md), [m](../services/sync/), [n](../vendor/), [o](../vendor/x)';
+const NOTHING = ['part link ../out/secretdir/ points to nothing', 'part link ../alias/guide.md points to nothing', 'part link ../../../.git/config points to nothing', 'part link ../../../.git/ points to nothing', 'part link ../App/ points to nothing', 'part link ../gone/ points to nothing', 'part link ../Kestrelbox/ points to nothing', 'part link ../../../../old/ leaves the repo', 'part link ../vendor/ points to nothing', 'part link ../vendor/x points to nothing'];
+test('L self check looks for a part where the gates do: never through a symlink, never into .git or a nested repo (kit-926)', withProject('links', {}, async (W, check) => {
+  write(path.join(W.base, 'outside/secretdir/x'), 'x\n');
+  fs.symlinkSync(path.join(W.base, 'outside'), path.join(W.old, 'docs/devteam/out'));
+  fs.symlinkSync('app', path.join(W.old, 'docs/devteam/alias'));
+  const vendor = path.join(W.old, 'docs/devteam/vendor');
+  write(path.join(vendor, 'x'), 'x\n');
+  W.g(['init', '-q'], vendor);
+  W.g(['add', 'x'], vendor);
+  W.g(['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'vendor'], vendor);
+  W.onMain({}, 'symlinks and a nested repo');
+  const draft = (links) => SELF_MD.replace('It controls its code', `Its other parts: ${links}.\n\nIt controls its code`);
+  const selfCheck = (links) => {
+    write(path.join(W.old, SELF), draft(links));
+    const r = W.run(['self', 'check']);
+    W.g(['checkout', '--', SELF], W.old);
+    return { ...r, errors: [...r.out.matchAll(/^error: self\.md: (.*)$/gm)].map((m) => m[1]) };
+  };
+  await check('L1 self check refuses a part link through a symlinked folder outside the repo', () => {
+    const r = selfCheck('[the vault](../out/secretdir/)');
+    assert.equal(r.status, 1, `L1 refused\n${r.text}`);
+    assert.deepEqual(r.errors, ['part link ../out/secretdir/ points to nothing'], `L1 why\n${r.out}`);
+  });
+  await check('L1b self check refuses a part link through a symlinked folder inside the repo', () => {
+    const r = selfCheck('[the guide](../alias/guide.md)');
+    assert.equal(r.status, 1, `L1b refused\n${r.text}`);
+    assert.deepEqual(r.errors, ['part link ../alias/guide.md points to nothing'], `L1b why\n${r.out}`);
+  });
+  await check('L1c self check refuses a part link into a nested repo, and the nested repo itself', () => {
+    const r = selfCheck('[the vendor file](../vendor/x) and [the vendor](../vendor/)');
+    assert.equal(r.status, 1, `L1c refused\n${r.text}`);
+    assert.deepEqual(r.errors, ['part link ../vendor/x points to nothing', 'part link ../vendor/ points to nothing'], `L1c why\n${r.out}`);
+  });
+  await check('L2 self check refuses a part link into .git/', () => {
+    const r = selfCheck('[the config](../../../.git/config)');
+    assert.equal(r.status, 1, `L2 refused\n${r.text}`);
+    assert.deepEqual(r.errors, ['part link ../../../.git/config points to nothing'], `L2 why\n${r.out}`);
+  });
+  await check('L2b self check refuses a part link to .git itself', () => {
+    const r = selfCheck('[the repo](../../../.git/)');
+    assert.equal(r.status, 1, `L2b refused\n${r.text}`);
+    assert.deepEqual(r.errors, ['part link ../../../.git/ points to nothing'], `L2b why\n${r.out}`);
+  });
+  await check('L3 self check passes a part link to a symlink itself, as git\'s tree holds it', () => {
+    const r = selfCheck('[the vault](../out/) and [the alias](../alias/)');
+    assert.equal(r.status, 0, `L3 passes\n${r.text}`);
+  });
+  await check('L4 self check, chore pr and check-pr refuse the same links, every link of these tests', () => {
+    const own = selfCheck(LINKS).errors;
+    const chore = W.chorePr('links', (w) => write(path.join(w, SELF), draft(LINKS)));
+    const sha = W.branchOf('chore-agree', (w) => write(path.join(w, SELF), draft(LINKS)));
+    const pr = W.checkPr('chore-agree', sha);
+    assert.notEqual(chore.status, 0, `L4 chore pr refuses\n${chore.text}`);
+    assert.notEqual(pr.status, 0, `L4 check-pr refuses\n${pr.text}`);
+    const gate = (re, text) => [...text.matchAll(re)].map((m) => m[1]);
+    assert.deepEqual(gate(/^(?:devteam: )?chore pr: self\.md: (.*)$/gm, chore.text), NOTHING, `L4 chore pr\n${chore.text}`);
+    assert.deepEqual(gate(/self\.md breaks self@2 at [0-9a-f]+: (.*)$/gm, pr.text), NOTHING, `L4 check-pr\n${pr.text}`);
+    assert.deepEqual(own, NOTHING, 'L4 self check refuses what the gates refuse');
+  });
+}));
 test('X1 a project outside its repo: its own folder stands in for the repo', async (t) => {
   const F = fixture('x-outside');
   try {
@@ -287,6 +352,16 @@ test('X1 a project outside its repo: its own folder stands in for the repo', asy
       const c = run(['self', 'check']);
       assert.equal(c.status, 1, `X1 refused\n${c.text}`);
       assert.match(c.out, /error: self\.md: part link \.\.\/old\/ leaves the repo/, `X1 leaves the repo\n${c.out}`);
+    });
+    await t.test('X1c self check refuses a part link through a symlinked folder in the project folder, and passes one to the symlink itself (kit-926)', () => {
+      write(path.join(F.base, 'elsewhere/x'), 'x\n');
+      fs.symlinkSync(path.join(F.base, 'elsewhere'), path.join(out, 'linked'));
+      write(path.join(out, 'self.md'), doc.replace('](app/)', '](linked/x)'));
+      const c = run(['self', 'check']);
+      assert.equal(c.status, 1, `X1c refused\n${c.text}`);
+      assert.match(c.out, /error: self\.md: part link linked\/x points to nothing/, `X1c why\n${c.out}`);
+      write(path.join(out, 'self.md'), doc.replace('](app/)', '](linked/)'));
+      assert.equal(run(['self', 'check']).status, 0, 'X1c the symlink itself passes');
     });
   } finally { F.done(); }
 });

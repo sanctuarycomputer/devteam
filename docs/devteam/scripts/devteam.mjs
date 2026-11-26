@@ -8841,15 +8841,24 @@ function partPath(p) {
   return String(p).split('/').filter((s) => s !== '' && s !== '.').join('/');
 }
 // Whether a normalised path is on disk under the repo root (the project folder, for a project outside
-// its repo: selfRoot), each segment matched by its exact case (as git reads it), so App/ is missing
-// beside app/ on a disk that folds case too.
+// its repo: selfRoot) where git's tree could hold it, as hasAt reads a commit (kit-926): each segment
+// matched by its exact case (as git reads it), so App/ is missing beside app/ on a disk that folds case
+// too; never through a symlink (a symlink is a file to git: one may be the last segment, never a
+// folder on the way); never into .git, in any case (git keeps no .git in a tree); and never at or
+// into a folder holding its own .git (a nested repo or a submodule, which the tree holds as a gitlink
+// at most). A file not committed yet is still found: self check reads a draft before its commit.
 function hasOnDisk(n) {
   let dir = projectInRepo ? projectRoot : projectDir;
-  for (const seg of n === '' ? [] : n.split('/')) {
+  const segs = n === '' ? [] : n.split('/');
+  for (const [i, seg] of segs.entries()) {
+    if (seg.toLowerCase() === '.git') return false;
     let names;
     try { names = fs.readdirSync(dir); } catch { return false; }
     if (!names.includes(seg)) return false;
     dir = path.join(dir, seg);
+    const st = fs.lstatSync(dir, { throwIfNoEntry: false });
+    if (!st || (st.isSymbolicLink() && i < segs.length - 1)) return false;
+    if (st.isDirectory() && fs.existsSync(path.join(dir, '.git'))) return false;
   }
   return true;
 }
