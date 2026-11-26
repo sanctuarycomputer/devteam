@@ -6,6 +6,8 @@
 // inside a try (the one parse at the top answers 400).
 // R4 a route that throws on what a request carries (today: /api/file with a NUL in its path, which
 // execFile refuses) is answered 400 or 500, never a stop, and logged with its path only; it serves on.
+// R5 dashRequestFailed, the handler's catch, on its own: a 500 before any header, a destroy once
+// headers are out and the response is open, nothing once it has ended; the logged path cut at 200.
 // Ports: +50 the dashboard's hub (the dashboard itself is pinned on a free port outside the block)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -53,12 +55,16 @@ const BAD = ['//', '///', '//:', '//a:99999', '//a:x', '//[', '//[::1', '//a%zz'
 async function dashboard(t, { drop = [] } = {}) {
   // one hook, in this order: the dashboard stopped (its group gone), then its fixture removed, so
   // nothing it started is still writing into a folder being removed
+  // (both folders go even when the stop fails)
   const base = scratch('dash');
+  const home = scratch('home');
   let dash = null;
-  t.after(async () => { await dash?.stop(); fs.rmSync(base, { recursive: true, force: true }); });
+  t.after(async () => {
+    try { await dash?.stop(); } finally { for (const d of [base, home]) fs.rmSync(d, { recursive: true, force: true }); }
+  });
   const root = bareProject(base, 'guard');
   for (const f of drop) fs.rmSync(path.join(root, 'docs', 'devteam', 'dashboard', f));
-  const env = { ...process.env, HOME: scratch('home'), DEVTEAM_HUB_PORT: String(HUB), DEVTEAM_DATA_WAIT_MS: '0' };
+  const env = { ...process.env, HOME: home, DEVTEAM_HUB_PORT: String(HUB), DEVTEAM_DATA_WAIT_MS: '0' };
   for (const k of Object.keys(env)) if (k.startsWith('DEVTEAM_') && !['DEVTEAM_HUB_PORT', 'DEVTEAM_DATA_WAIT_MS', 'DEVTEAM_PORT_BASE', 'DEVTEAM_TEST_SHARED_TMP'].includes(k)) delete env[k];
   let port;
   ({ dash, port } = await dashboardOnFreePort(root, env));
@@ -145,6 +151,10 @@ test('R4 a route that throws on a request is answered (400 or 500) and the dashb
   for (const target of ['/api/file?path=%00', '/api/file?path=a%00b&ref=HEAD']) {
     const r = await raw(port, target);
     assert.ok([400, 500].includes(r.status), `R4 GET ${target} is answered 400 or 500 (got ${r.status}; ${dash.out().split('\n').filter((l) => /crash/.test(l)).slice(-1)[0] ?? ''})`);
+    if (r.status === 500) {
+      assert.match(r.head, /\r\ncontent-type: text\/plain; charset=utf-8\r\n/, `R4 GET ${target}: the 500 is plain text`);
+      assert.match(r.body, /this request failed/, `R4 GET ${target}: the 500 says so`);
+    }
     await alive(port, `R4 after GET ${target}`);
   }
   assert.equal(dash.p.exitCode, null, 'R4 the dashboard process is still running');
@@ -154,4 +164,41 @@ test('R4 a route that throws on a request is answered (400 or 500) and the dashb
   const lines = logText.split('\n').filter((l) => / request failed: /.test(l));
   assert.equal(lines.length, 2, `R4 the log has a request failed line for each (${lines.length})`);
   for (const l of lines) assert.match(l, / request failed: GET \/api\/file: /, `R4 the line names the method and path, no query: ${l.slice(0, 160)}`);
+});
+
+// the handler's catch on its own, under node:vm, with a response stub that records what it was asked
+test('R5 dashRequestFailed: a 500 before headers, a destroy after them while open, nothing once ended; the path cut', () => {
+  const i = src.indexOf('\nfunction dashRequestFailed(');
+  assert.ok(i >= 0, 'devteam.mjs declares dashRequestFailed');
+  const code = src.slice(i + 1, src.indexOf('\n}\n', i + 1) + 3);
+  const dashRequestFailed = vm.runInContext(`${code}\n;dashRequestFailed`, vm.createContext({}));
+  const stub = (headersSent, writableEnded) => {
+    const o = { headersSent, writableEnded, code: null, headers: null, body: null, destroyed: false, writeHead(c, h) { o.code = c; o.headers = h; }, end(b) { o.body = b; }, destroy() { o.destroyed = true; } };
+    return o;
+  };
+  const err = new Error('boom');
+  const run = (url, res) => { const lines = []; dashRequestFailed((m) => lines.push(m), { method: 'GET', url }, res, err); return lines; };
+  // before any header: the 500, as the handler's other plain answers
+  const a = stub(false, false);
+  const la = run('/api/file?path=x', a);
+  assert.equal(a.code, 500, 'R5 before any header: a 500');
+  assert.deepEqual({ ...a.headers }, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' }, "R5 the 500's headers");
+  assert.equal(a.body, 'this request failed', "R5 the 500's body");
+  assert.equal(a.destroyed, false, 'R5 before any header: no destroy');
+  assert.deepEqual(la.map((l) => l.split('\n')[0]), ['request failed: GET /api/file: Error: boom'], 'R5 one log line: method, path without its query, the error');
+  // headers out, response open: destroyed, nothing written
+  const b = stub(true, false);
+  run('/x', b);
+  assert.equal(b.destroyed, true, 'R5 headers out and the response open: destroyed, so a cut body looks cut');
+  assert.equal(b.code, null, 'R5 headers out: no second writeHead');
+  assert.equal(b.body, null, 'R5 headers out: no body written');
+  // the response already ended: left as it is
+  const c = stub(true, true);
+  run('/x', c);
+  assert.equal(c.destroyed, false, 'R5 a response already ended is not destroyed');
+  assert.equal(c.code, null, 'R5 a response already ended gets no writeHead');
+  // a long path is cut at 200 characters, the query never logged
+  const long = `/${'a'.repeat(300)}`;
+  const ld = run(`${long}?q=secret`, stub(false, false));
+  assert.equal(ld[0].split('\n')[0], `request failed: GET ${long.slice(0, 200)}: Error: boom`, 'R5 the logged path is cut at 200 characters, without its query');
 });
