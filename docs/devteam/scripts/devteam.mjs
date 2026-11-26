@@ -29187,6 +29187,109 @@ function artifactRemoteRefs({ root, main, onMoved = () => {}, env = process.env 
     stop() { clearTimeout(timer); timer = null; if (child) try { process.kill(-child.pid, 'SIGTERM'); } catch {} },
   };
 }
+// page-seam@1 (kit-983): every page the CLI's servers send goes through servePage, pageVersion and
+// servePageAsset, and serveAppFiles is the one static server by alpha-build@1's rules. At main they
+// send today's pages (dashboard/index.html, hub.html, browser.html) exactly as before; the generated
+// tree overrides only these declarations to serve the apps (designs/kit-package-apps.md).
+// servePage sends one of today's pages: 'dashboard', 'hub' or 'browser', read from the kit's
+// dashboard folder on each request, as text/html with the caller's headers and policy, and no body
+// to a HEAD. A page it can't read is a 500. D.keep, when the caller gives one, holds the page's bytes
+// for the server's life (the browser view, whose page must match the daemon that serves it): called
+// with no res, at the server's creation, it only reads the page into D.keep, and throws when it
+// can't, so that server fails at start.
+function servePage(D, req, res, page, policy, headers = {}) {
+  const file = { dashboard: 'index.html', hub: 'hub.html', browser: 'browser.html' }[page];
+  if (!file) throw new Error(`servePage: no page ${page}`);
+  if (!res) { D.keep[page] = fs.readFileSync(path.join(kitDir, 'dashboard', file)); return; }
+  // 'in', not a read: the dashboard's D (dashContext) throws on a name it was not given
+  const keep = D && 'keep' in D ? D.keep : null;
+  let body = keep?.[page];
+  if (!body) {
+    try { body = fs.readFileSync(path.join(kitDir, 'dashboard', file)); } catch {
+      res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+      return res.end('this page could not be read\n');
+    }
+    if (keep) keep[page] = body;
+  }
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': body.length, ...headers, 'content-security-policy': policy });
+  return res.end(req.method === 'HEAD' ? undefined : body);
+}
+// The x-devteam-page value of a page: the first 16 hex of the sha256 of its file, or '' when it
+// can't be read. An open tab compares it with the one it first saw, and offers a reload.
+function pageVersion(page) {
+  const file = { dashboard: 'index.html', hub: 'hub.html', browser: 'browser.html' }[page];
+  if (!file) return '';
+  try { return sha256(fs.readFileSync(path.join(kitDir, 'dashboard', file))).slice(0, 16); } catch { return ''; }
+}
+// A page's own file, for a request no route of server ('dashboard', 'hub' or 'browser') took, or
+// DASH_NEXT, "not mine": the caller's own answer (its 404) follows. At main only the dashboard has
+// any: the review pages' helpers, /review/<seg>/devteam-ui.css and .js (dashRoutesReviewPage checks
+// <seg> first), to a GET, as before (a HEAD there is the dashboard's 404). Every other method, and
+// every other path, is DASH_NEXT; in the tree it may answer GET and HEAD, and nothing else.
+function servePageAsset(req, res, server) {
+  if (req.method !== 'GET') return DASH_NEXT;
+  const m = server === 'dashboard' ? /^\/review\/[^/]+\/(devteam-ui\.(?:css|js))$/.exec(new URL(req.url, 'http://x').pathname) : null;
+  if (!m) return DASH_NEXT;
+  res.writeHead(200, { 'content-type': m[1].endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+  return res.end(fs.readFileSync(path.join(kitDir, 'dashboard', m[1])));
+}
+// A static export served from folder at base ('/next', or '' for the root), by alpha-build@1's
+// rules and test/fixtures/alpha-serving.json. DASH_NEXT for a method but GET and HEAD, or a path
+// outside base; inside it, it always answers. The query is ignored. A path over 2048 bytes, a
+// segment that does not decode (each decoded once), an empty segment but the last, '.', '..', or a
+// decoded '/', '\' or NUL is a 404, as is anything whose real path (symlinks followed) is outside
+// the folder, is not a file, or has a type not in the known list. A folder without its slash is a
+// 301 to it with one; a folder is its index.html. An .html page carries the policy
+// policyFor(<route>) gives, <route> as csp-hashes.json keys it ('/', '/threads/one/'); one it gives
+// no string for is a 500. The 404 is text/plain, 'not found'. A base that is not '' or '/<name>'
+// without a trailing slash, or a folder that is not a string, throws (a caller's mistake, before
+// any request is read); a folder that isn't there serves nothing (404).
+function serveAppFiles(folder, base, req, res, policyFor) {
+  if (typeof base !== 'string' || (base !== '' && !/^\/[^/?#]+(?:\/[^/?#]+)*$/.test(base))) throw new Error(`serveAppFiles: base ${JSON.stringify(base)} is not '' or /<name>`);
+  if (typeof folder !== 'string' || !folder) throw new Error('serveAppFiles: no folder');
+  const KNOWN = { html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', txt: 'text/plain; charset=utf-8', json: 'application/json', svg: 'image/svg+xml', png: 'image/png', ico: 'image/x-icon', webp: 'image/webp', woff2: 'font/woff2' };
+  if (req.method !== 'GET' && req.method !== 'HEAD') return DASH_NEXT;
+  const raw = String(req.url);
+  const p = raw.split('?')[0];
+  if (p !== base && !p.startsWith(`${base}/`)) return DASH_NEXT;
+  const answer = (code, headers, body) => { res.writeHead(code, { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...headers }); return res.end(req.method === 'HEAD' ? undefined : body); };
+  const none = () => answer(404, { 'content-type': 'text/plain; charset=utf-8' }, 'not found\n');
+  if (Buffer.byteLength(raw) > 2048) return none();
+  if (p === base) return answer(301, { location: `${base}/` });
+  const segs = p.slice(base.length + 1).split('/');
+  const parts = [];
+  for (const [i, s] of segs.entries()) {
+    let d;
+    try { d = decodeURIComponent(s); } catch { return none(); }
+    if (d === '') { if (i === segs.length - 1) continue; return none(); }
+    if (d === '.' || d === '..' || /[/\\\0]/.test(d)) return none();
+    parts.push(d);
+  }
+  let top, real, st;
+  try { top = fs.realpathSync(folder); real = fs.realpathSync(path.join(top, ...parts)); st = fs.statSync(real); } catch { return none(); }
+  const inside = (f) => f === top || f.startsWith(top + path.sep);
+  if (!inside(real)) return none();
+  if (st.isDirectory()) {
+    if (!p.endsWith('/')) return answer(301, { location: `${p}/` });
+    try { real = fs.realpathSync(path.join(real, 'index.html')); st = fs.statSync(real); } catch { return none(); }
+    if (!inside(real)) return none();
+  }
+  if (!st.isFile()) return none();
+  const ext = path.extname(real).slice(1).toLowerCase();
+  const type = Object.hasOwn(KNOWN, ext) ? KNOWN[ext] : null;
+  if (!type) return none();
+  let body;
+  try { body = fs.readFileSync(real); } catch { return none(); }
+  const headers = { 'content-type': type, 'content-length': body.length };
+  if (ext === 'html') {
+    const rel = path.relative(top, path.dirname(real)).split(path.sep).join('/');
+    const route = rel ? `/${rel}/` : '/';
+    const policy = policyFor(route);
+    if (typeof policy !== 'string' || !policy) return answer(500, { 'content-type': 'text/plain; charset=utf-8' }, 'no policy for this page\n');
+    headers['content-security-policy'] = policy;
+  }
+  return answer(200, headers, body);
+}
 /* cmdDashboard start */
 /* dashboardRoutes start */
 // What a route group returns when none of its routes matched the request.
