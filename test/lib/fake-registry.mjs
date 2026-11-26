@@ -206,15 +206,23 @@ export async function startFakeRegistry({ fail = null, commits = {} } = {}) {
   const save = () => fs.writeFileSync(stateFile, JSON.stringify(state));
   save();
   const child = fork(SELF, ['serve', stateFile], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
-  const first = await new Promise((resolve, reject) => {
-    child.once('message', resolve);
-    child.once('exit', (code) => reject(new Error(`fake registry: the server exited (${code}) before it was ready`)));
-  });
-  if (!first.ready) { child.kill(); throw new Error(`fake registry: ${first.error}`); }
+  let first;
+  try {
+    first = await new Promise((resolve, reject) => {
+      child.once('message', resolve);
+      child.once('exit', (code) => reject(new Error(`fake registry: the server exited (${code}) before it was ready`)));
+    });
+    if (!first.ready) throw new Error(`fake registry: ${first.error}`);
+  } catch (e) {
+    child.kill();
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw e;
+  }
   child.removeAllListeners('exit');
   state.url = `http://127.0.0.1:${first.port}/`;
   save();
   let ids = 0;
+  let closing = null;
   const tell = () => new Promise((resolve, reject) => {
     const id = ++ids;
     const on = (m) => { if (m.id !== id) return; child.off('message', on); if (m.ok) resolve(); else reject(new Error(`fake registry: ${m.error}`)); };
@@ -246,13 +254,17 @@ export async function startFakeRegistry({ fail = null, commits = {} } = {}) {
       if (!fs.existsSync(callsFile)) return [];
       return fs.readFileSync(callsFile, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
     },
-    async close() {
-      if (child.exitCode === null && child.signalCode === null) {
-        const gone = new Promise((resolve) => child.once('exit', resolve));
-        child.disconnect();
-        await gone;
-      }
-      fs.rmSync(dir, { recursive: true, force: true });
+    // stops the registry and removes its folder; every call, overlapping or later, gets the same promise
+    close() {
+      closing ??= (async () => {
+        if (child.exitCode === null && child.signalCode === null) {
+          const gone = new Promise((resolve) => child.once('exit', resolve));
+          if (child.connected) child.disconnect(); else child.kill();
+          await gone;
+        }
+        fs.rmSync(dir, { recursive: true, force: true });
+      })();
+      return closing;
     },
   };
 }
@@ -278,6 +290,10 @@ async function fakeNpm(stateFile, args) {
     if (path.resolve(u) === path.resolve(g)) return err('ECONFIG', `double-loading config "${g}" as "global", previously loaded as "user"`);
     for (const f of [u, g]) { let size; try { size = fs.statSync(f).size; } catch { size = -1; } if (size !== 0) return rule(`${f} is an empty file`); }
     const words = args.filter((a) => !a.startsWith('-'));
+    // an answer that isn't 200: a 5xx or a 429 is npm's E<status> (an outage), anything else its E404
+    const notOk = (r, what) => (r.status >= 500 || r.status === 429
+      ? err(`E${r.status}`, `${r.status} ${r.status === 429 ? 'Too Many Requests' : 'Service Unavailable'} - GET ${what}`)
+      : err('E404', `404 Not Found - GET ${what}`));
     const get = async (rel) => {
       try { const r = await fetch(new URL(rel, state.url), { signal: AbortSignal.timeout(10000) }); return { status: r.status, body: Buffer.from(await r.arrayBuffer()) }; } catch (e) { return { down: e?.cause?.code ?? 'ECONNRESET' }; }
     };
@@ -286,7 +302,7 @@ async function fakeNpm(stateFile, args) {
       if (!m) return err('EUSAGE', 'view takes <name>@<version> here');
       const r = await get(`${m[1].replace('/', '%2f')}/${m[2]}`);
       if (r.down) return err(r.down, `request to ${state.url} failed, reason: ${r.down}`);
-      if (r.status >= 500) return err(`E${r.status}`, `${r.status} Service Unavailable - GET ${state.url}${m[1]}`);
+      if (r.status >= 500 || r.status === 429) return notOk(r, `${state.url}${m[1]}`);
       if (r.status !== 200) return err('E404', `404 Not Found - GET ${state.url}${m[1]} - '${m[1]}@${m[2]}' is not in this registry.`);
       let v = JSON.parse(r.body);
       for (const field of words.slice(2)) for (const k of field.split('.')) v = v?.[k];
@@ -311,7 +327,7 @@ async function fakeNpm(stateFile, args) {
         if (!String(e.resolved).startsWith(PUBLIC)) return rule(`${k}'s resolved is on the public registry`);
         const r = await get(String(e.resolved).slice(PUBLIC.length));
         if (r.down) return err(r.down, `request to ${state.url} failed, reason: ${r.down}`);
-        if (r.status !== 200) return err('E404', `404 Not Found - GET ${e.resolved}`);
+        if (r.status !== 200) return notOk(r, e.resolved);
         const got = `sha512-${sha512(r.body).toString('base64')}`;
         if (e.integrity && got !== e.integrity) return err('EINTEGRITY', `sha512 integrity checksum failed when using sha512: wanted ${e.integrity} but got ${got}.`);
         if (args.includes('--dry-run')) continue;
@@ -338,14 +354,14 @@ async function fakeNpm(stateFile, args) {
         if (state.fail === 'old-npm') continue;
         const m = await get(`${k.slice(13).replace('/', '%2f')}/${e.version}`);
         if (m.down) return err(m.down, `request to ${state.url} failed, reason: ${m.down}`);
-        if (m.status !== 200) return err('E404', `404 Not Found - GET ${state.url}${k.slice(13)}`);
+        if (m.status !== 200) return notOk(m, `${state.url}${k.slice(13)}`);
         const advertised = JSON.parse(m.body).dist?.attestations;
         if (!advertised) continue;
         // as pacote: the advertised path, on the registry npm was given
         const at = new URL(advertised.url).pathname.slice(1);
         const r = await get(at);
         if (r.down) return err(r.down, `request to ${state.url} failed, reason: ${r.down}`);
-        if (r.status !== 200) return err('E404', `404 Not Found - GET ${state.url}${at}`);
+        if (r.status !== 200) return notOk(r, `${state.url}${at}`);
         // the signature is the fake's to trust; the subject must be the package npm installed
         const want = Buffer.from(String(e.integrity).replace(/^sha512-/, ''), 'base64').toString('hex');
         const bundle = JSON.parse(r.body);

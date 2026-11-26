@@ -329,6 +329,12 @@ test('C13 each failure, driven once', async () => {
         const v = npm(reg, ['view', `${NAME}@0.101.0`, '--json', ...FLAGS(reg)]);
         assert.equal(v.status, 1, 'C13 server-error: npm view fails');
         assert.match(v.stderr, /npm error code E503/, 'C13 server-error: with E503');
+        const cid = npm(reg, ['ci', '--dry-run', ...FLAGS(reg)], { cwd: d });
+        assert.equal(cid.status, 1, 'C13 server-error: npm ci fails');
+        assert.match(cid.stderr, /npm error code E503/, 'C13 server-error: npm ci with E503, never E404 (unpublished)');
+        const au = npm(reg, ['audit', 'signatures', ...FLAGS(reg)], { cwd: (await installed(reg)) });
+        assert.equal(au.status, 1, 'C13 server-error: audit signatures fails');
+        assert.match(au.stderr, /npm error code E503/, 'C13 server-error: audit with E503, never E404 (attestation gone)');
       } else if (f === 'attestation-gone') {
         const mf = await (await fetch(`${reg.url}${NAME.replace('/', '%2f')}/0.101.0`)).json();
         assert.ok(mf.dist.attestations, 'C13 attestation-gone: the manifest advertises attestations');
@@ -349,7 +355,8 @@ test('C13 each failure, driven once', async () => {
     await reg.fail(null);
     assert.equal(npm(reg, ['view', `${NAME}@0.101.0`, '--json', ...FLAGS(reg)]).status, 0, 'C13 no failure again: answered');
     assert.equal(npm(reg, ['ci', ...FLAGS(reg)], { cwd: d }).status, 0, 'C13 no failure again: installed');
-  } finally { await reg.close(); }
+  } finally { await Promise.all([reg.close(), reg.close()]); }
+  assert.ok(!fs.existsSync(reg.dir), 'C13 close(), even twice at once, removes the fake\'s folder');
   assert.deepEqual(seen, FAILURES, 'C13 every failure was driven');
 });
 // a pin installed while no failure is set, for audit signatures to read
@@ -378,6 +385,7 @@ test('C14 the fake npm refuses a call that breaks the calling rules', async () =
     refused([...view, `--registry=${reg.url}`, `--registry=${reg.url}`, '--ignore-scripts'], {}, /exactly one --registry=/, 'two --registry=');
     refused([...view, `--registry=${reg.url}`], {}, /--ignore-scripts/, 'no --ignore-scripts');
     refused([...view, ...FLAGS(reg)], { env: npmEnv(reg, { npm_config_cache: '/tmp/x' }) }, /npm config from the environment reached npm: npm_config_cache/, 'any other npm_config_ variable');
+    refused([...view, ...FLAGS(reg)], { env: npmEnv(reg, { NPM_CONFIG_REGISTRY: 'http://127.0.0.1:9/' }) }, /npm config from the environment reached npm: NPM_CONFIG_REGISTRY/, 'an upper-case NPM_CONFIG_ variable');
     const env = npmEnv(reg);
     refused([...view, ...FLAGS(reg)], { env: { ...env, npm_config_globalconfig: env.npm_config_userconfig } }, /double-loading config/, 'one file for both configs');
     const full = path.join(reg.dir, 'full-npmrc');
@@ -562,6 +570,7 @@ test('C16 the comment above packagePinPair states kit-install@1, and the alpha-b
     ['the forced registry and the scrubbed config', /--registry=[\s\S]*--ignore-scripts[\s\S]*npm_config_userconfig and npm_config_globalconfig naming two different empty files[\s\S]*no other npm_config_\* or NPM_CONFIG_\*/],
     ['the test registry, loopback only', /DEVTEAM_NPM_REGISTRY[\s\S]*exactly http:\/\/127\.0\.0\.1:<port>\/[\s\S]*any other value \(localhost, \[::1\], https, a path\)[\s\S]*exit 1 naming the variable[\s\S]*never used or passed over for the public one/],
     ['npm 9.5', /older than 9\.5[\s\S]*a finding before layout 2, a refusal from it/],
+    ['npm\'s answers', /npm E404 for the version is unpublished: a finding before layout 2, a refusal from it\. EINTEGRITY is\s+a refusal/],
     ['an outage is unreachable, never a refusal', /any status but 200 and 404 \(a 5xx, a 429\)[\s\S]*E5xx\/E429, are unreachable, never a refusal\. Unreachable is a finding\s+before layout 2; from it the step stops, changes nothing[\s\S]*nothing records the version as refused\), and the next run tries again/],
     ['never committed', /merge refuses a PR that adds or changes any path\s+under it/],
     ['layout read from the manifest', /layout is the manifest's devteam\.layout[\s\S]*never guessed/],

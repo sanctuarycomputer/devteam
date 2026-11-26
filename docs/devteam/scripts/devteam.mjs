@@ -33304,7 +33304,8 @@ function cmdRecurring() {
 //   error, or any status but 200 and 404 (a 5xx, a 429), and an npm call that fails with a network code
 //   (ECONN*, ETIMEDOUT, EAI_AGAIN) or E5xx/E429, are unreachable, never a refusal. Unreachable is a finding
 //   before layout 2; from it the step stops, changes nothing (current, verified.json and the pair stay as
-//   they were, and nothing records the version as refused), and the next run tries again.
+//   they were, and nothing records the version as refused), and the next run tries again. An npm E404 for
+//   the version is unpublished: a finding before layout 2, a refusal from it. EINTEGRITY is a refusal.
 // - The registry is https://registry.npmjs.org/. DEVTEAM_NPM_REGISTRY, for tests, replaces it only when it
 //   is exactly http://127.0.0.1:<port>/ (port 1 to 65535, no leading zero, the final slash, nothing after
 //   it); any other value (localhost, [::1], https, a path) stops the command with exit 1 naming the
