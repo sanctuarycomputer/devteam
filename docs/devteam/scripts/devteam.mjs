@@ -37375,6 +37375,7 @@ async function browserRetryPort(name, lost) {
   const left = pool.filter((p) => !lost.has(p) && !held.has(p) && previewPortOk(p) === true);
   for (let i = left.length - 1; i > 0; i--) { const j = crypto.randomInt(i + 1); [left[i], left[j]] = [left[j], left[i]]; }
   for (const p of left) if (await portFree(p)) return p;
+  removePreview(name); // kit-917: the last try's record goes with it, never left naming a lost port
   die(`browser: no free view port left in ${PREVIEW_PICK[0]}-${PREVIEW_PICK.at(-1)} to retry on: this start lost ${[...lost].join(', ')} to other servers' binds; try again once one is free`);
 }
 // A live daemon, or one started: in the browser preview's window, under the start lock, the memory
@@ -38524,7 +38525,9 @@ const browserPgidOf = (pid) => {
 };
 // browser reap (internal): the dead daemon's Chrome given 3 s to end, then killed (its group, and each
 // process on the profile in that group); the session files deleted once no process holds the profile,
-// or the failure said in last-error. It stands down, on any pass, when the profile is gone, a live
+// or the failure said in last-error; once no session file is left, a last-error line that says they
+// stay is made true (kit-917): a shutdown's reason, or a failed delete's own words, kept and ended with
+// "the session files were deleted after the daemon ended"; a report of its own about them removed. It stands down, on any pass, when the profile is gone, a live
 // daemon runs (state.json's daemon_pid, a browser serve), or a start holds the start lock. It makes no
 // folder. DEVTEAM_TEST_BROWSER_REAP_DONE=<file> (tests): "done <exit code>" appended as it ends.
 async function browserReap() {
@@ -38546,8 +38549,20 @@ async function browserReapRun() {
     const p = /^([1-9]\d*)-/.exec(t ?? '')?.[1];
     return !!p && browserAlive(Number(p));
   };
+  // a file that can't even be looked at (EACCES, EIO) counts as left, so its failed delete is still said
+  const left = () => browserSessionFiles(profile).some((f) => { try { return !!fs.lstatSync(f, { throwIfNoEntry: false }); } catch { return true; } });
+  const gone = () => {
+    if (standDown()) return 0;
+    const text = browserReadLastError()?.replace(/^\S+ /, '') ?? '';
+    const i = text.indexOf('; the session files stay: '), done = '; the session files were deleted after the daemon ended';
+    const keep = i > 0 ? text.slice(0, i) : text.startsWith("browser: couldn't delete ") ? text : null; // a reason, or a failed delete's own words
+    if (keep !== null) browserLastError(`${keep.slice(0, 300 - done.length)}${done}`, { make: false });
+    else if (text.includes('session files stay')) { try { fs.rmSync(browserErrorFile(), { force: true }); } catch {} } // the reaper's own report
+    return 0;
+  };
   const report = (msg) => {
     if (standDown()) return 0;
+    if (!left()) return gone(); // kit-917: nothing stays, so nothing says it does
     if (!fs.existsSync(BROWSER_DIR())) return 1;
     browserReportDelete(browserReadLastError()?.replace(/^\S+ /, '') ?? null, msg, { make: false });
     return 1;
@@ -38567,7 +38582,7 @@ async function browserReapRun() {
     const procs = browserProcsOn(profile);
     if (procs === null) return report("browser: couldn't list this machine's processes after the daemon ended, so the session files stay");
     if (!procs.length) {
-      try { browserDeleteSession(profile); return 0; } catch (e) { return report(String(e?.message ?? e)); }
+      try { browserDeleteSession(profile); return gone(); } catch (e) { return report(String(e?.message ?? e)); }
     }
     if (Date.now() > end) return report(`browser: the daemon ended and a process (pid ${procs[0]}) still had the profile 5 s later; its session files stay until browser stop or the next start`);
   }
