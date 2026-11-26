@@ -197,6 +197,15 @@ test('F8: a declaration whose names the scanner can not read whole stops the spl
     assert.ok(h.stderr.includes(`binds names the split can't read whole (read: ${read}): ${line}`), h.stderr);
     assert.equal(fs.existsSync(H.out), false);
   }
+  // so is a top-level declaration not at column 0, indented or after a comment: it starts no item.
+  // A line starting with a comment belongs to the declaration below it, as fileParts has it.
+  for (const [i, [line, item]] of [['  let q = 2;', 'p): let p = 1;'], ['/* c */ let q = 2;', 'counter): let counter = 0;'], ['/* c */ function q() {}', 'counter): let counter = 0;']].entries()) {
+    const H = fixtureRepo(`offcol${i}`, FIXTURE.replace('let counter = 0;', `let p = 1;\n${line}\nlet counter = 0;`));
+    const h = split(...H.opts, '--out', H.out);
+    assert.equal(h.status, 1, `${line}: ${h.stderr}`);
+    assert.ok(h.stderr.includes(`binds names the split can't read whole (read: ${item}`), `${line}: ${h.stderr}`);
+    assert.equal(fs.existsSync(H.out), false);
+  }
 });
 
 test('F9: verify names a declaration fileParts reads and the scanner does not', () => {

@@ -197,7 +197,9 @@ export function items(src) {
   }
   // a declaration after another statement on the same line (let p = 1; let q = 2;) starts no item,
   // so its names would be read by no one: its item is unread, and the caller refuses it
-  for (const it of out) for (let i = it.from; i <= it.to; i++) if (secondDecl(codeLines[i - 1], info[i - 1])) it.unread = true;
+  // and so does a top-level declaration not at column 0 (indented, or after a comment on its line)
+  const offColumn = (i) => !info[i - 1]?.inside && info[i - 1]?.depth === 0 && NEXT_DECL.test(codeLines[i - 1]);
+  for (const it of out) for (let i = it.from; i <= it.to; i++) if (secondDecl(codeLines[i - 1], info[i - 1]) || (i !== it.line && offColumn(i))) it.unread = true;
   for (const s of statements) s.item = out.findLast((x) => x.from <= s.line) ?? null;
   return { items: out, statements, lines, code, codeLines, info };
 }
