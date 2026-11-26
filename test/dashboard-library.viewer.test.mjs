@@ -255,7 +255,8 @@ test('the version pill: the versions, an earlier one read-only, Escape closes on
   await soon(`${LIST_OPEN} && ${OPTS}.length === 4`, 'the versions listed');
   const opts = await p.ev(OPTS);
   assert.deepEqual(opts.map((o) => o.at), [VERS_WT, 'main', mid.at, oldest.at], 'drafts, landed, earlier');
-  assert.equal(opts[0].text, `Draft · live in ${VERS_WT}`);
+  const day = await p.ev(`new Date(${JSON.stringify(made.versions[0].time)}).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })`);
+  assert.equal(opts[0].text, `Draft · live in ${VERS_WT} · ${day}`);
   assert.match(opts[1].text, /^Landed on main · \S/);
   assert.ok(opts[3].text.endsWith(` · ${oldest.commit.slice(0, 7)}`), `an earlier one by its date and short commit: ${opts[3].text}`);
   // the oldest: read-only
