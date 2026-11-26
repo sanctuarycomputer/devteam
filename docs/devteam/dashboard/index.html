@@ -123,6 +123,7 @@ try {
   :where(.shell) .tabbar .n:not(:where(.no-shell, .no-shell *)) { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
   :where(.shell) .tabbar .n.blue:not(:where(.no-shell, .no-shell *)) { color: var(--blue-fg); font-weight: 500; }
   :where(.shell) .tabbar .spacer:not(:where(.no-shell, .no-shell *)) { flex: 1; }
+  :where(.shell) .tabbar.sub [role="tab"]:not(:where(.no-shell, .no-shell *)) { height: 30px; font-size: 12px; padding: 0 8px; }
   /* the record table: sortable monospace headers, every row opens its record, "None" when empty */
   :where(.shell) .db-t:not(:where(.no-shell, .no-shell *)) { width: 100%; border-collapse: collapse; }
   :where(.shell) .db-t th:not(:where(.no-shell, .no-shell *)), :where(.shell) .db-t td:not(:where(.no-shell, .no-shell *)) { text-align: left; border-bottom: 1px solid var(--line); }
@@ -959,10 +960,12 @@ try {
 
 /* css-library end */
 /* css-viewer start */
+  /* a note's running text measures 5 of 12 columns of the page (kit-145) */
+  :root { --av-measure: calc((var(--page-max, 1200px) - 2 * var(--page-pad, 32px) - 11 * var(--gap, 16px)) / 2 + 5 * var(--gap, 16px)); }
   /* the artifact viewer: a page the fleet drew, a modal over the scrim from under the page bar (--bar-h, so the Inbox button above it stays
      clear) to 16px from the window's sides and bottom; its right edge is --av-right, which the open Inbox panel moves left of itself (8px all
      round under 600px, below) */
-  #artifact-view:not([hidden]) { position: fixed; inset: var(--bar-h, 49px) var(--av-right, 16px) 16px 16px; z-index: 22; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,.35); overflow: hidden; }
+  #artifact-view:not([hidden]) { container: av / inline-size; position: fixed; inset: var(--bar-h, 49px) var(--av-right, 16px) 16px 16px; z-index: 22; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,.35); overflow: hidden; }
   /* a viewer opened over a review stays above it: the review sits above the panel (z 25, kit-100) */
   .app:has(main.reviewing) ~ #artifact-view:not([hidden]) { z-index: 26; }
 /* css-viewer-bar start */
@@ -972,7 +975,7 @@ try {
   .av-bar > i { font-size: 15px; color: var(--muted); flex: none; }
   .av-head { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; font-size: 12px; white-space: nowrap; }
   .av-head b { font-size: 13.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; }
-  .av-head .badge { margin: 0; flex: none; }
+  .av-head .badge { margin: 0; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .av-head > #av-project, .av-head > #av-hint, .av-head > #av-note { min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
   .av-bar button, .av-bar a.av-btn { flex: none; margin: 0; display: inline-flex; align-items: center; gap: 6px; }
   /* the version pill: a badge that is a button, its label #av-where; plain (no chevron, not pressable) on a preview */
@@ -1008,12 +1011,41 @@ try {
   /* the artifact changed since the frame loaded it (kit-206): an outline at the pill's border width, over its border; a
      keyboard's focus ring still shows over it */
   #av-reload.stale:not(:focus-visible) { outline: 1px solid var(--amber); outline-offset: -1px; }
+  /* the notes (kit-145): the stepper, Hand over and who has them, pills as the rest */
+  /* what they say gives way (With, a refusal: whole in its title), and the head keeps room for the pill beside them */
+  #av-notes:not([hidden]) { display: inline-flex; align-items: center; gap: 8px; flex: 0 1 auto; min-width: 0; }
+  #av-step, #av-handover { flex: none; }
+  .av-bar:has(#av-notes:not([hidden])) .av-ver-wrap { min-width: 34px; }
+  .av-bar:has(#av-notes:not([hidden])) .av-head { min-width: 110px; }
+  #av-step { display: inline-flex; align-items: center; gap: 4px; height: 20px; }
+  #av-stepn { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #av-filter { height: 20px; width: auto; margin: 0; padding: 0 4px; border: 1px solid var(--line-2); border-radius: 999px; background: var(--surface); color: var(--fg); font-size: 11px; line-height: 18px; }
+  .av-bar span.av-pill:not([hidden]) { display: block; box-sizing: border-box; flex: 0 1 auto; min-width: 0; max-width: 200px; border: 1px solid var(--line-2); color: var(--fg-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #e-avn:empty { display: none; }
+  #e-avn { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+  /* too narrow for all of it on one line: the notes on a row of their own under the rest (kit-145) */
+  @container av (max-width: 1100px) {
+    .av-bar:has(#av-notes:not([hidden])) { flex-wrap: wrap; height: auto; min-height: var(--head-h); }
+    .av-bar:has(#av-notes:not([hidden])) .av-head { min-width: 0; min-height: calc(var(--head-h) - 1px); }
+    #av-notes:not([hidden]) { order: 1; display: flex; flex: 1 0 100%; max-width: 100%; box-sizing: border-box; flex-wrap: wrap; padding-bottom: 8px; row-gap: 6px; }
+    .av-bar span.av-pill:not([hidden]), #e-avn { max-width: 100%; }
+  }
+  @container av (max-width: 400px) { .av-bar .av-pub-wrap > .av-pill { display: block; max-width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } }
   @media (max-width: 600px) { .av-bar .av-label { display: none; } .av-bar .av-pill { padding: 0 6px; } }
 /* css-viewer-bar end */
   #av-frame, #pv-frame { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; background: #fff; display: block; }
   #av-frame[hidden], #pv-frame[hidden] { display: none; }
   @media (max-width: 600px) { #artifact-view:not([hidden]) { inset: 8px; } }
   #av-stage { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
+  /* a note's picture, full size over the stage (kit-145) */
+  #av-shot { position: absolute; inset: 0; z-index: 4; display: flex; align-items: center; justify-content: center; padding: 16px; background: color-mix(in srgb, var(--bg) 70%, transparent); }
+  /* the card gives way to the picture, so its Close is never under it */
+  body:has(#artifact-view:not([hidden]) #av-shot) #tl-card { visibility: hidden; }
+  .av-shot-in { display: flex; flex-direction: column; max-width: 100%; max-height: 100%; min-height: 0; padding: 8px; gap: 8px; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.18); }
+  .av-shot-bar { display: flex; align-items: center; gap: 6px; flex: none; }
+  .av-shot-bar button { margin: 0; }
+  .av-shot-bar [aria-pressed="true"] { background: var(--hover); font-weight: 600; }
+  .av-shot-in img { min-height: 0; max-width: 100%; object-fit: contain; }
   /* over the frame, under the layer's cursor and chip: Shift raises it, so a click is the layer's */
   .av-over { position: absolute; inset: 0; z-index: 2; touch-action: none; }
   .av-pins { position: absolute; inset: 0; z-index: 1; overflow: hidden; pointer-events: none; }
@@ -1022,6 +1054,15 @@ try {
      else of the dashboard shows */
   .viewer .app, .viewer .scrim, .viewer #av-close, .viewer #av-tab { display: none !important; }
   .viewer #artifact-view:not([hidden]) { inset: var(--bar-h) 0 0; border: 0; border-radius: 0; box-shadow: none; }
+  /* the reminder on close (kit-148): a card at the bottom centre over the page, under the scrim (20), a peek (21) and
+     the Threads panel (22); beside the open panel above 900px, under it at 900px and below, where it is the whole window */
+  #av-remind:not([hidden]) { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 19; width: min(440px, calc(100vw - 32px)); box-sizing: border-box; display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.18); font-size: 13px; }
+  #av-remind .tx { margin: 0; }
+  .av-remind-do:not([hidden]) { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+  .av-remind-do button { margin: 0; }
+  #e-avr:empty { display: none; }
+  body.view-only #av-remind-hand { opacity: .45; cursor: not-allowed; }
+  @media (min-width: 901px) { body.threads-open #av-remind { left: calc((100% - var(--threads-w)) / 2); } }
 /* css-viewer end */
 /* css-threads start */
   /* threads: the layer over the page (Shift and point at anything), outside <main> */
@@ -1045,17 +1086,24 @@ try {
   .tl-ctx summary { display: flex; gap: 6px; align-items: center; cursor: pointer; list-style: none; }
   .tl-ctx summary b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
   .tl-ctx .kv code { overflow-wrap: anywhere; }
-  .tl-turns { overflow-y: auto; flex: 1; min-height: 60px; display: flex; flex-direction: column; gap: 8px; padding: 4px 0; }
-  .tl-turn .tl-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .tl-turns { overflow-y: auto; flex: 1 100000 auto; min-height: 60px; display: flex; flex-direction: column; gap: 8px; padding: 4px 0; }
+  .tl-turn .tl-text { max-width: var(--av-measure); white-space: pre-wrap; overflow-wrap: anywhere; }
   .tl-turn.owner { align-self: flex-end; max-width: 88%; background: color-mix(in srgb, var(--blue) 10%, var(--surface)); border-radius: 8px; padding: 6px 8px; }
   .tl-refs { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 2px; font-size: 12px; }
   .tl-compose textarea { margin-top: 6px; }
   .tl-compose .row-inline { align-items: center; }
   @media (max-width: 640px) { .tl-card:not(.sheet) { width: calc(100vw - 32px); } }
+  /* a short window (kit-882): the floating card's floors give way, the box to one line, the note's words to two */
+  @media (max-height: 480px) {
+    .tl-card:not(.in-panel) #tl-c-text { min-height: 34px; height: 34px; }
+    .tl-card:not(.in-panel) .tl-words { min-height: 40px; }
+  }
   /* under the scrim (20) and what opens over it (the drawer, a review, an artifact), over the page's own (at most 6) */
   .tl-pins { position: absolute; left: 0; top: 0; width: 0; height: 0; }
   .tl-pin { position: absolute; z-index: 10; width: 22px; height: 22px; padding: 0; margin: 0; border-radius: 50%; border: 2px solid #fff; background: var(--blue); color: #fff; font: 600 11px/18px var(--sans); text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
   .tl-pin.on { outline: 2px solid var(--blue); outline-offset: 2px; }
+  .tl-pin.handed { background: transparent; border: 2px solid var(--blue); color: var(--blue); }
+  .tl-pin.check::after { content: '\2713'; position: absolute; right: -7px; bottom: -6px; width: 13px; height: 13px; border-radius: 50%; background: var(--green); color: #fff; font: 700 9px/13px var(--sans); }
   .tl-pin sup { font-size: 9px; margin-left: 1px; }
   /* the in-panel thread (kit-89 spec §2.4): the one card, moved into #th-card-slot, static, the slot's width,
      no frame of its own and no height of its own (the slot scrolls); its title and × are the pane's row and the
@@ -1141,6 +1189,34 @@ try {
   .viewer #tt-peek { display: inline-flex; top: calc(var(--bar-h) / 2); right: var(--header-pad); transform: translateY(-50%); z-index: 24; }
   .viewer .shell:not(.threads-open) #tt-peek { visibility: visible; opacity: 1; pointer-events: auto; transition: opacity var(--dur) var(--ease), visibility 0s; }
   .viewer .threads { z-index: 23; }
+  /* a note on an artifact (kit-145): what there is to check, a mark withdrawn, where a step landed */
+  /* on a capped card what can be long scrolls, down to a floor, and what is pressed never does: the note's words (with what
+     is said above and below them) over their row of presses, an open context, the terminal's ask. Each is the card's own
+     flex item, so none can fall under what it holds; the turns give way first */
+  #tl-c-note:has(.tl-addr), #tl-c-note:has(.tl-addr) > div:last-child, .tl-addr { display: contents; }
+  #tl-c-note:not(:has(.tl-addr)) { display: flex; flex-direction: column; flex: 0 1 auto; }
+  #tl-c-note:not(:has(.tl-addr)):has(> div:first-child:not(:empty)) { min-height: 36px; }
+  #tl-c-note > div:first-child:not(:empty) { flex: 0 1 auto; min-height: 36px; overflow-y: auto; }
+  .tl-words, .tl-addr > .row-inline { border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--surface)); font-size: 12px; }
+  .tl-words { flex: 0 1 auto; min-height: 61px; margin-top: 6px; padding: 6px 8px 0; border-bottom: 0; border-radius: 6px 6px 0 0; overflow-y: auto; }
+  .tl-addr > .row-inline { flex: none; margin: 0 0 6px; padding: 8px 8px 6px; border-top: 0; border-radius: 0 0 6px 6px; }
+  #tl-c-ask:not(:empty), #tl-c-ctx:has(details[open]) { flex: 0 1 auto; min-height: 44px; overflow-y: auto; }
+  #tl-c-ctx:not(:has(details[open])), .tl-compose, .tl-head { flex: none; }
+  .tl-card:has(.tl-addr) .tl-turns, .tl-card:has(#tl-c-ask:not(:empty)) .tl-turns { min-height: 0; padding: 0; }
+  .tl-addr .by { color: var(--muted); }
+  .tl-addr [data-tl-accept].waiting { opacity: .55; }
+  #av-held { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 70; max-width: min(90vw, 480px); padding: 8px 14px; border-radius: 8px; background: var(--fg); color: var(--bg); font-size: 13px; pointer-events: none; }
+  #av-held[hidden] { display: none; }
+  .tl-addr .tx, .tl-wd .tx { max-width: var(--av-measure); overflow-wrap: anywhere; }
+  .tl-nview { max-width: var(--av-measure); }
+  button.tl-shot { display: block; width: auto; height: auto; margin: 6px 0 2px; padding: 0; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .tl-shot img { display: block; width: 160px; height: auto; max-height: 120px; object-fit: contain; }
+  .tl-shot-cap { font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
+  .th-check { display: flex; align-items: center; gap: 6px; padding: 0 6px 8px 26px; }
+  .th-check .badge, .th-check button { margin: 0; flex: none; }
+  .th-check button.th-shot { width: auto; height: auto; padding: 0; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  .th-shot img { display: block; width: 48px; height: auto; max-height: 36px; object-fit: cover; }
+  .tl-wd, .tl-nview { margin: 6px 0; font-size: 12px; color: var(--muted); }
   .tl-ready { margin: 6px 0; padding: 6px 8px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--surface)); font-size: 12px; }
   .tl-ready input { width: 100%; padding: 4px 8px; margin-top: 4px; }
   /* what the supervisor's terminal asks: its words as the terminal has them, one button an option */
@@ -1244,6 +1320,13 @@ try {
   .card.goal.blk-full, .ov-goal.blk-full { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
   .card.goal.blk-partial, .ov-goal.blk-partial { border-color: color-mix(in srgb, var(--amber) 55%, var(--line)); }
 /* css-overview end */
+/* css-view-only start */
+  /* View only (kit-250): what the gateway refuses a view-only person looks it, and says why when pressed */
+  body.view-only :is([data-answer], [data-cant], [data-reply], [data-dontuse], [data-post-secrets], [data-overrule-send], [data-correct-send], [data-rv-answer], [data-decline], [data-rv-decline], [data-know], [data-oa-know], [data-oa-goal], [data-hold-id], [data-met-id], [data-goal-move], [data-preview-start], [data-preview-stop], [data-forget], [data-limit-save], [data-limit-none], [data-limit-step], .fleet-switch [data-fleet], [data-checknow], [data-tl-send], [data-tl-accept], [data-tl-notyet], [data-tl-resolve-go], [data-tl-reopen], [data-goal-grip], [data-ask-option], [data-ask-esc], #av-handover, a[href*="/public/"], .dropbox[data-drop] textarea, .dropbox[data-drop] input, #tl-c-text) { opacity: .45; cursor: not-allowed; }
+  .av-head #view-only { margin-left: 6px; }
+  #view-only { color: var(--amber-fg); background: color-mix(in srgb, var(--amber) 16%, transparent); }
+  #view-only-toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 60; max-width: min(90vw, 480px); padding: 8px 14px; border-radius: 8px; background: var(--fg); color: var(--bg); font-size: 13px; box-shadow: 0 4px 16px rgb(0 0 0 / .18); }
+/* css-view-only end */
 </style>
 </head>
 <body class="shell">
@@ -1410,6 +1493,7 @@ try {
   <div class="av-bar">
     <i class="av-kind icon-layout-dashboard" aria-hidden="true"></i>
     <div class="av-head"><b id="av-title"></b><span class="badge" id="av-kind">Mock</span><span class="av-ver-wrap"><button type="button" class="badge ver-pill" id="av-ver" aria-haspopup="listbox" aria-expanded="false" title="Its versions"><span id="av-where"></span><i class="icon-chevron-down" aria-hidden="true"></i></button><div id="av-vers" class="av-pop" role="listbox" aria-label="Versions" hidden></div></span><span id="av-project" class="muted"></span><span id="av-note" class="badge high" hidden></span><span id="av-hint" class="muted" hidden>Click the page, then hold Shift to point at something</span></div>
+    <span id="av-notes" hidden><span id="av-step"><button type="button" class="ghost av-pill" id="av-prev" title="Previous note" aria-label="Previous note">‹</button><span id="av-stepn"></span><button type="button" class="ghost av-pill" id="av-next" title="Next note" aria-label="Next note">›</button><select id="av-filter" aria-label="Which notes"><option value="check">To check</option><option value="open">Open</option><option value="all">All</option></select></span><button type="button" class="av-pill" id="av-handover" hidden></button><span class="av-pill" id="av-with" hidden></span><span class="err" id="e-avn"></span></span>
     <button class="ghost av-pill" id="av-reload" title="Load the page again" aria-label="Reload"><i class="icon-rotate-cw" aria-hidden="true"></i><span class="av-label">Reload</span></button>
     <span class="av-pub-wrap"></span>
     <span id="av-run"></span><span class="err av-run-err"></span>
@@ -1463,13 +1547,30 @@ const escHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;
 const shellText = (html) => String(html ?? '').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').trim();
 
 // ---- the tab bar: counts, a disabled state, roving tabindex, arrows that skip disabled tabs ----
-function tabBar({ tabs = [], selected = null } = {}) {
-  const sel = tabs.some((t) => t.id === selected && !t.disabled) ? selected : (tabs.find((t) => !t.disabled) || {}).id;
-  return `<div class="tabbar" role="tablist">${tabs.map((t) => {
+const TAB_PANEL = /^[a-z][a-z0-9-]*$/;
+const TAB_ID = /^[A-Za-z0-9_-]+$/;
+const goodPanel = (p) => typeof p === 'string' && TAB_PANEL.test(p);
+const goodTabId = (id) => TAB_ID.test(String(id ?? ''));
+// the tab a bar selects: selected if it is enabled, else the first enabled tab (undefined: none)
+function tabSelected(tabs, selected) {
+  return tabs.some((t) => t.id === selected && !t.disabled) ? selected : (tabs.find((t) => !t.disabled) || {}).id;
+}
+function tabBar({ tabs = [], selected = null, panel = null, size = null } = {}) {
+  const sel = tabSelected(tabs, selected);
+  return `<div class="tabbar${size === 'sub' ? ' sub' : ''}" role="tablist">${tabs.map((t) => {
     const on = t.id === sel;
+    const ctl = goodPanel(panel) && goodTabId(t.id) ? ` id="tab-${panel}-${t.id}" aria-controls="${panel}"` : '';
     const n = t.count === undefined || t.count === null || t.count === '' ? '' : ` <span class="n${t.waiting ? ' blue' : ''}">${escHtml(t.count)}</span>`;
-    return `<button type="button" role="tab" data-tab="${escHtml(t.id)}" aria-selected="${on}" tabindex="${on ? 0 : -1}"${t.disabled ? ' aria-disabled="true"' : ''}>${escHtml(t.label)}${n}</button>`;
+    return `<button type="button" role="tab" data-tab="${escHtml(t.id)}"${ctl} aria-selected="${on}" tabindex="${on ? 0 : -1}"${t.disabled ? ' aria-disabled="true"' : ''}>${escHtml(t.label)}${n}</button>`;
   }).join('')}</div>`;
+}
+// the panel a tab bar controls, labelled by the tab the bar selects; a bad panel gives html unwrapped
+function tabPanel({ panel, tabs = [], selected = null } = {}, html) {
+  const body = html ?? '';
+  if (!goodPanel(panel)) return body;
+  const sel = tabSelected(tabs, selected);
+  const lab = sel !== undefined && goodTabId(sel) ? ` aria-labelledby="tab-${panel}-${sel}"` : '';
+  return `<div role="tabpanel" id="${panel}"${lab}>${body}</div>`;
 }
 // the tab an arrow, Home or End moves to from fromId, wrapping and skipping disabled tabs (null: not a move)
 function tabStep(tabs, fromId, key) {
@@ -1656,10 +1757,48 @@ const threadsTabs = (() => {
   };
 })();
 
-// ---- the URL: page heads (#<page>[?state]) and today's link heads ----
-const STATE_KEYS = { '*': ['th', 't'], board: ['goal', 'feat', 'repo', 'att'], progress: ['goal', 'narrow', 'show'], library: ['kind', 'goal'], goals: ['gt'], sensors: ['st'], loop: ['lt', 'kind', 'orient'] };
+// ---- the URL (dashboard-shell@2): page heads (#<page>[?state], p the open peek or viewer) and link heads ----
+const STATE_KEYS = { '*': ['th', 't', 'i', 'u', 'p'], board: ['goal', 'feat', 'repo', 'att'], progress: ['goal', 'narrow', 'show'], library: ['kind', 'goal'], goals: ['gt'], sensors: ['st'], loop: ['lt', 'kind', 'orient'] };
 const stateKeys = (page) => [...(STATE_KEYS[page] || []), ...STATE_KEYS['*']];
-// routes (the page's own table, outside this block): { pages, links: { kind: home }, files: [[RegExp, home]], redirects: { head: head } }
+// A peek's or a viewer's head without '#' (a p value, or a legacy head's), as the canonical head of that view, or
+// null when it names none: its kind one of routes.peeks; a file by its query (path required); an artifact's
+// version main, wt/<worktree> or tree/<40 or 64 hex> (anything else is main), its slug an artifact slug, its page
+// kept only when the server can serve it (index.html is the default); a preview's route kept unless '/'. A query
+// is read with URLSearchParams and written with it again, so a page or a route holding & = # round-trips.
+function peekHead(v, routes) {
+  const h = String(v ?? '');
+  const q = h.indexOf('?');
+  const path = q < 0 ? h : h.slice(0, q);
+  const query = new URLSearchParams(q < 0 ? '' : h.slice(q + 1));
+  const peeks = routes.peeks || [];
+  if (path === 'file') {
+    if (!peeks.includes('file') || !query.get('path')) return null;
+    const view = query.get('view');
+    query.delete('view');
+    if (view === 'raw' || view === 'rendered') query.append('view', view);
+    return `file?${query}`;
+  }
+  const s = path.indexOf('/');
+  const kind = s < 0 ? path : path.slice(0, s), rest = s < 0 ? '' : path.slice(s + 1);
+  if (!rest || !peeks.includes(kind) || kind === 'file') return null;
+  if (kind === 'artifact') {
+    const segs = rest.split('/'), slug = segs.pop();
+    if (!/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(slug)) return null;
+    let at = 'main';
+    if (segs.length === 2 && segs[0] === 'wt' && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(segs[1])) at = `wt/${segs[1]}`;
+    if (segs.length === 2 && segs[0] === 'tree' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(segs[1])) at = `tree/${segs[1]}`;
+    const page = query.get('path');
+    const keep = page !== null && page !== 'index.html' && /^[A-Za-z0-9._/-]+$/.test(page) && page.split('/').every((x) => x && !x.startsWith('.'));
+    return `artifact/${at}/${slug}${keep ? `?${new URLSearchParams({ path: page })}` : ''}`;
+  }
+  if (kind === 'preview') {
+    if (rest.includes('/')) return null;
+    const route = query.get('route');
+    return `preview/${rest}${route && route !== '/' ? `?${new URLSearchParams({ route })}` : ''}`;
+  }
+  return h;
+}
+// routes (the page's own table, outside this block): { pages, peeks, links: { kind: home }, files: [[RegExp, home]], redirects: { head: head } }
 function parseHead(hash, routes) {
   let h = String(hash ?? '').replace(/^#/, '');
   let redirected = false;
@@ -1675,12 +1814,17 @@ function parseHead(hash, routes) {
       const hit = (routes.files || []).find(([re]) => re.test(path));
       home = hit ? hit[1] : 'library';
     }
+    // a peek's or a viewer's link head is legacy: its home page with it as p (none when it names no view)
+    if ((routes.peeks || []).includes(kind)) { const p = peekHead(h, routes); return { page: home, state: p ? { p } : {}, legacy: true }; }
     return { link: h, kind, home };
   }
   const page = (routes.pages || []).includes(first) ? first : 'overview';
   const got = new URLSearchParams(q < 0 ? '' : h.slice(q + 1));
   const state = {};
   for (const k of stateKeys(page)) if (got.has(k)) state[k] = got.get(k);
+  // i is a card in the Inbox tab: only with th=inbox; p only a view routes.peeks names, as its canonical head
+  if (state.i !== undefined && state.th !== 'inbox') delete state.i;
+  if (state.p !== undefined) { const p = peekHead(state.p, routes); if (p) state.p = p; else delete state.p; }
   return redirected ? { page, state, redirected } : { page, state };
 }
 function headFor(p) {
@@ -1690,13 +1834,17 @@ function headFor(p) {
   const s = qs.toString();
   return `#${p.page}${s ? `?${s}` : ''}`;
 }
-// history.state for an entry: { page, depth, openedHere }. entry = { hash, state }, here = what was on
-// screen (its stamp), cold = the visit's first route
+// history.state for an entry: { page, depth, openedHere }, page the entry's head without p. entry = { hash, state },
+// here = what was on screen (its stamp), cold = the visit's first route
 function stampFor(entry, here, cold, routes) {
   if (entry.state && typeof entry.state.page === 'string') return entry.state;
   const p = parseHead(entry.hash, routes);
-  if (p.link === undefined) return { page: headFor(p), depth: 0, openedHere: !cold };
-  if (cold || !here) return { page: headFor(parseHead(p.home, routes)), depth: 1, openedHere: false };
+  const link = p.link !== undefined || !!p.legacy;
+  if (!link && p.state.p === undefined) return { page: headFor(p), depth: 0, openedHere: !cold };
+  // a p head names its page; a link or a legacy head is over its kind's home on a cold load, else over what is on screen
+  const page = link ? null : headFor({ page: p.page, state: { ...p.state, p: undefined } });
+  if (cold || !here) return { page: page ?? headFor(parseHead(p.link !== undefined ? p.home : p.page, routes)), depth: 1, openedHere: false };
+  if (page !== null && page !== here.page) return { page, depth: 1, openedHere: false };
   // from a peek: every entry down to the page was pushed in this visit only if the peek below's were
   if (here.depth > 0) return { page: here.page, depth: here.depth + 1, openedHere: !!here.openedHere };
   return { page: here.page, depth: 1, openedHere: true };
@@ -1705,7 +1853,7 @@ function stampFor(entry, here, cold, routes) {
 const withPage = (state, page) => ({ ...state, page });
 // closing a peek: back to the page under it, by history when this visit pushed the entries, else in place
 const closeTarget = (state) => (state && state.openedHere && state.depth > 0 ? { go: -state.depth } : { replace: (state && state.page) || '#overview' });
-// remembered filters: a page's own keys, applied only to a fresh entry whose head carries none of them
+// remembered filters: a page's own keys, applied only to a fresh entry whose head carries none of them and no p
 const REMEMBERED = { board: ['goal', 'feat', 'repo', 'att'], progress: ['goal'], library: ['goal', 'kind'] };
 // stored as one flat object ({ goal, feat, repo, att, kind }), so the goal is shared by the pages that remember it
 const FILTERS_KEY = 'devteam.board.filters';
@@ -1713,7 +1861,8 @@ function storedFilters() { try { return JSON.parse(localStorage.getItem(FILTERS_
 function rememberedFilters(page, keys, fresh, stored = storedFilters()) {
   const own = REMEMBERED[page] || [];
   if (!fresh || !own.length || !stored || typeof stored !== 'object') return null;
-  if ((keys || []).some((k) => own.includes(k))) return null;
+  // a head that names one of the page's filters (an empty value too) or a peek says what it shows
+  if ((keys || []).some((k) => own.includes(k) || k === 'p')) return null;
   const out = {};
   for (const k of own) if (typeof stored[k] === 'string' && stored[k]) out[k] = stored[k];
   return Object.keys(out).length ? out : null;
@@ -1736,6 +1885,8 @@ function saveFilters(page, state) {
 const SHELL_ROUTES_PAGES = ['overview', 'goals', 'progress', 'board', 'library', 'trust', 'efficiency', 'awareness', 'governance', 'sensors', 'jobs', 'retros', 'loop', 'settings'];
 const SHELL_ROUTES = {
   pages: SHELL_ROUTES_PAGES,
+  // dashboard-shell@2: what p may open, each a peek kind (TYPE_META's) or one of the two viewers
+  peeks: ['ticket', 'goal', 'feature', 'story', 'release', 'wave', 'milestone', 'act', 'decision', 'retro', 'lesson', 'problem', 'thread', 'planner', 'q', 'file', 'sensor', 'observation', 'signal', 'learning', 'lib', 'class', 'recurring', 'builtin', 'artifact', 'preview'],
   links: {
     ticket: 'board', feature: 'board', story: 'board', release: 'board', wave: 'board', milestone: 'board', planner: 'board', thread: 'board',
     goal: 'goals', q: 'overview', talk: 'overview',
@@ -2387,7 +2538,7 @@ let SENSOR_TAB = 'production';
 bindTabBar($('monitoring'), { onSelect: (id) => {
   if (!['production', 'fleet'].includes(id)) return;
   const cur = parseHead(location.hash, SHELL_ROUTES);
-  const state = cur.link === undefined && cur.page === 'sensors' ? { ...cur.state } : {};
+  const state = cur.link === undefined && !cur.legacy && cur.page === 'sensors' ? { ...cur.state } : {};
   if (id === 'fleet') state.st = 'fleet'; else delete state.st;
   SENSOR_TAB = id;
   if (DATA) renderMonitoring(DATA);
@@ -2785,7 +2936,7 @@ function narrowViews(p, goal) {
 // The page head in force: the hash's, or under a link (a peek) the head in its stamp.
 function pageHeadNow() {
   const h = parseHead(location.hash, SHELL_ROUTES);
-  return h.link === undefined ? h : parseHead(typeof history.state?.page === 'string' ? history.state.page : '#overview', SHELL_ROUTES);
+  return h.link === undefined && !h.legacy ? h : parseHead(typeof history.state?.page === 'string' ? history.state.page : '#overview', SHELL_ROUTES);
 }
 // A page's filters as the head in force has them (none when another page shows), with a goal naming no goal
 // a filter can pick, a Narrow outside the goal's views and a Show that isn't one dropped: the controls then show
@@ -2878,7 +3029,7 @@ function drawFilterPage(page) {
 // stamp's page head with it, so a peek opened over it closes back to the filtered head.
 function filterHead(fresh) {
   let p = parseHead(location.hash, SHELL_ROUTES);
-  if (p.link !== undefined || p.redirected || !FILTER_PAGES.includes(p.page)) return;
+  if (p.link !== undefined || p.legacy || p.redirected || !FILTER_PAGES.includes(p.page)) return;
   const r = fresh ? rememberedFilters(p.page, Object.keys(p.state), true) : null;
   if (r) p = { page: p.page, state: { ...p.state, ...r } };
   const head = headFor(p);
@@ -3449,7 +3600,8 @@ function qblock(text, links) {
 const qplain = (text, links) => String(text ?? '').replace(new RegExp(NAME_REF.source, 'g'), (all, n) => (links || []).find((x) => x.name === n)?.title ?? all);
 // In a peek (inPeek) it is read-only: no anchor, and no Overrule, which stays on the Inbox's card (kit-88 spec §2.3).
 function answeredCard(q, { inPeek = false } = {}) {
-  const how = q.status === 'defaulted' ? 'went with the default; you didn’t answer in time' : q.status === 'withdrawn' ? 'withdrawn by the supervisor' : `answered ${CHANNEL_WORDS[q.channel] || ''}`;
+  // who answered, when one of the box's people did (kit-252): how is escaped where it is drawn
+  const how = q.status === 'defaulted' ? 'went with the default; you didn’t answer in time' : q.status === 'withdrawn' ? 'withdrawn by the supervisor' : `${q.answered_person ? `${q.answered_person.name} answered` : 'answered'} ${CHANNEL_WORDS[q.channel] || ''}`;
   return `<div class="card small"${inPeek ? '' : ` id="a-${esc(q.id)}"`}${subj('question', q.id, qplain(q.question, q.links))}>
     <div>${qlink(q.id, q.question)}</div>
     ${q.answer && !isFilled(q.answer, q.files) ? `<div><b>${esc(q.answer)}</b></div>` : ''}
@@ -4670,7 +4822,7 @@ window.addEventListener('keydown', (e) => {
 bindTabBar($('goals'), { onSelect: (id) => {
   if (!GOALS_TABS.includes(id)) return;
   const cur = parseHead(location.hash, SHELL_ROUTES);
-  const state = cur.link === undefined && cur.page === 'goals' ? { ...cur.state } : {};
+  const state = cur.link === undefined && !cur.legacy && cur.page === 'goals' ? { ...cur.state } : {};
   if (id === 'active') delete state.gt; else state.gt = id;
   GOALS_TAB = id;
   renderGoals();
@@ -6571,39 +6723,6 @@ function refetchFile(url) {
   FILE_FLIGHT.set(url, pr);
   return pr;
 }
-// The Self's or the Exterior's block as lists (kit-137), from its dashboard shape (log.schema.json $defs.self.dashboard,
-// $defs.exterior.dashboard): HTML in which every value from the block is escaped. null is not drafted yet. The
-// Exterior's entities by relation, in the schema's order (other by its word), each in the data's order with its
-// signals by score, highest first.
-function worldBlocks(kind, block) {
-  if (block === null) return `<p>The ${kind === 'self' ? 'Self is not drafted yet: main has no self.md' : 'Exterior is not drafted yet: main has no exterior.md'} that passes its check.</p>`;
-  const list = (xs) => (Array.isArray(xs) ? xs : []);
-  const ul = (items) => `<ul>${items.length ? items.join('') : '<li>None</li>'}</ul>`;
-  const sec = (h, body) => `<h3>${esc(h)}</h3>${body}`;
-  const b = block && typeof block === 'object' ? block : {};
-  if (kind === 'self') {
-    return sec('What it is', `<p>${esc(b.what)}</p>`) + sec('What it makes', `<p>${esc(b.makes)}</p>`)
-      + sec('Its parts', ul(list(b.parts).map((x) => `<li>${esc(x?.name)}: ${esc(x?.what)}${list(x?.code).map((c) => ` <code>${esc(c)}</code>`).join('')}</li>`)))
-      + sec('What it controls', ul(list(b.controls).map((x) => `<li>${esc(x)}</li>`)))
-      + sec('What it touches but does not control', ul(list(b.not).map((x) => `<li>${esc(x)}</li>`)));
-  }
-  const ents = list(b.entities).filter((e) => e && typeof e === 'object');
-  if (!ents.length) return '<p>None</p>';
-  const REL = [['serves', 'It serves'], ['depends_on', 'It depends on'], ['builds_on_it', 'Builds on it'], ['alternative', 'Its alternatives'], ['collaborates', 'It works with'], ['governs', 'Governs it'], ['affects', 'It affects']];
-  const KIND = { organisation: 'an organisation', group: 'a group', work: 'a work' };
-  const score = (s) => (Number.isFinite(s?.score) ? s.score : 0);
-  const entity = (e) => {
-    const sigs = list(e.signals).filter((s) => s && typeof s === 'object').sort((x, y) => score(y) - score(x));
-    return `<li><b>${esc(e.name)}</b>, ${esc(Object.hasOwn(KIND, e.kind) ? KIND[e.kind] : e.kind)}: ${esc(e.matters)}<ul>${sigs.length ? sigs.map((s) => `<li>${esc(s.what)}</li>`).join('') : '<li>None</li>'}</ul></li>`;
-  };
-  const known = new Set(REL.map(([r]) => r));
-  const groups = REL.map(([r, h]) => [h, ents.filter((e) => e.relation === r)]);
-  // other, and a relation this page doesn't know, by its word in first-seen order
-  const words = [];
-  for (const e of ents) if (!known.has(e.relation)) { const w = typeof e.relation_word === 'string' && e.relation_word ? e.relation_word : ''; if (!words.includes(w)) words.push(w); }
-  for (const w of words) groups.push([w ? `Other: ${w}` : 'Other', ents.filter((e) => !known.has(e.relation) && ((typeof e.relation_word === 'string' && e.relation_word) || '') === w)]);
-  return groups.filter(([, es]) => es.length).map(([h, es]) => sec(h, `<ul>${es.map(entity).join('')}</ul>`)).join('');
-}
 function openFile(params) {
   const path = params.get('path'), title = params.get('title') || path, ref = params.get('ref'), repo = params.get('repo');
   drawerFor('file', path, params);
@@ -6615,29 +6734,61 @@ function openFile(params) {
   const tail = historySection(p, path);
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) return showDrawer(`${head}<div class="viewer"><img src="${esc(url)}" alt="${esc(title)}"></div>${tail}`);
   if (['html', 'pdf'].includes(ext)) return showDrawer(`${head}<div class="viewer"><iframe sandbox src="${esc(url)}" title="${esc(title)}"></iframe></div><p class="meta"><a href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open in a new tab</a></p>${tail}`);
-  // The project's self.md or exterior.md read at main (kit-137): its fenced block is drawn as lists from DATA's
-  // dashboard block (self@1, exterior@1), main's like DATA; null there is not drafted yet, and a key DATA lacks
-  // (a server that doesn't carry it) leaves the file as any Markdown file. The project's: the path the page
-  // assumes for the strategy until a governance listing is read, then one that listing shows in its Project section.
+  // The project's self.md or exterior.md read at main (kit-137, kit-866): a plain document (self@2, exterior@2),
+  // rendered as any Markdown file whatever dashboard-data carries, and one main lacks is not drafted yet. The
+  // project's: the path the page assumes for the strategy until a governance listing is read, then one that
+  // listing shows in its Project section.
   const wk = ref || repo || ext !== 'md' ? undefined : ['self', 'exterior'].find((k) => (GOV.files
     ? GOV.files.some((f) => f?.group === 'project' && f.path === path) && (path === `${k}.md` || path.endsWith(`/${k}.md`))
     : path === `docs/devteam/project/${k}.md`));
-  const wb = wk && DATA && Object.hasOwn(DATA, wk) ? worldBlocks(wk, DATA[wk]) : null;
   const txt = FILES.get(url);
   if (txt === undefined) { refetchFile(url); return showDrawer(`${head}<p class="loading">Loading…</p>${tail}`); }
-  if (typeof txt !== 'string') return showDrawer(`${head}${wb !== null && DATA[wk] === null ? `<div class="viewer"><div class="md">${wb}</div></div>` : `<p class="err">${esc(txt.error)}</p>`}${tail}`);
+  if (typeof txt !== 'string') {
+    // The server answers `not found:` both for a file main lacks and for one over its read cap (kit-909). For the
+    // project's Self or Exterior, main's listing of the file's folder (git show of a tree lists its names) tells
+    // them apart: a file it names is there but too big, one it doesn't (or no folder) is not drafted yet. A
+    // folder read that fails otherwise leaves the file's own error.
+    let line = null;
+    if (wk && /^not found: /.test(String(txt.error))) {
+      const name = wk === 'self' ? 'Self' : 'Exterior', dir = path.split('/').slice(0, -1).join('/');
+      line = `The ${name} is not drafted yet: main has no ${wk}.md.`;
+      const durl = dir && `/api/file?${new URLSearchParams({ path: dir })}`;
+      const ls = durl ? FILES.get(durl) : '';
+      if (ls === undefined) { refetchFile(durl); return showDrawer(`${head}<p class="loading">Loading…</p>${tail}`); }
+      if (typeof ls === 'string' && ls.split('\n').includes(`${wk}.md`)) line = `The ${name} is too big to show here: main's ${wk}.md is larger than the dashboard reads.`;
+      else if (typeof ls !== 'string' && !/^not found: /.test(String(ls.error))) line = null;
+    }
+    return showDrawer(`${head}${line ? `<div class="viewer"><div class="md"><p>${esc(line)}</p></div></div>` : `<p class="err">${esc(txt.error)}</p>`}${tail}`);
+  }
   const where = `<code>${esc(path)}</code>${ref ? ` at <code>${esc(ref)}</code>` : ''}`;
   // Markdown renders (sanitized: agents write these files) with a toggle back to the raw text.
   const isMd = ['md', 'markdown'].includes(ext) && window.marked && window.DOMPurify;
   const mode = (() => { try { return localStorage.getItem('devteam.mdview') || 'rendered'; } catch { return 'rendered'; } })();
   let rendered = isMd ? DOMPurify.sanitize(marked.parse(txt, { gfm: true }), { FORBID_TAGS: ['style', 'form', 'input'], FORBID_ATTR: ['style'] }) : '';
-  if (isMd && wb !== null) {
-    // the lists in the block's place (after the sanitizer: they are built from escaped strings only), else after the prose
-    const doc = document.createElement('template'), lists = document.createElement('template');
+  if (isMd && wk) {
+    // After the sanitizer. A version 1 file's fenced self or exterior block is left out (Raw shows the file as it
+    // is). A link with no scheme has no page here: one to a Markdown file in the same folder (a reference, as
+    // strategy.md) opens that file's peek at main, and any other (a part's folder or file, an anchor) shows as its words.
+    const doc = document.createElement('template');
     doc.innerHTML = rendered;
-    lists.innerHTML = wb;
-    const pre = doc.content.querySelector(`pre > code.language-${wk}`)?.parentElement;
-    if (pre) pre.replaceWith(lists.content); else doc.content.append(lists.content);
+    for (const c of doc.content.querySelectorAll('pre > code.language-self, pre > code.language-exterior')) c.parentElement.remove();
+    const dir = path.split('/').slice(0, -1);
+    for (const a of doc.content.querySelectorAll('a')) {
+      const h = a.getAttribute('href') ?? '';
+      if (/^[a-z][a-z0-9+.-]*:/i.test(h)) continue;
+      // resolved from the file's folder as self@2 resolves a part (its anchor and query dropped, % decoded);
+      // a reference is an .md whose folder is the file's own
+      let to = null;
+      try {
+        const segs = [...dir];
+        for (const s of decodeURIComponent(h.replace(/[#?].*$/, '')).split('/')) {
+          if (s === '..') { if (!segs.length) throw new Error('outside the repo'); segs.pop(); } else if (s && s !== '.') segs.push(s);
+        }
+        if (!h.startsWith('/') && /\.md$/i.test(segs.at(-1) ?? '') && segs.slice(0, -1).join('/') === dir.join('/')) to = segs.join('/');
+      } catch {}
+      if (to) a.setAttribute('href', `#file?${new URLSearchParams({ path: to })}`);
+      else a.replaceWith(...a.childNodes);
+    }
     rendered = doc.innerHTML;
   }
   if (isMd) AFTER.push(() => renderMermaid($('drawer-body').querySelector('.md')));
@@ -6754,6 +6905,8 @@ function tsSet(kind, info = {}) {
 // picked: a version picked from the bar's list ({ at, label, earlier }), which keeps the versions this open has read.
 // anchor: '#…' to frame the page at (a viewer tab's own hash, kit-106), kept by a live reload.
 function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp = null, picked = null, anchor = '' } = {}) {
+  // a viewer opening ends the reminder of the last close (kit-148)
+  avRemindHide();
   const src = artSrc(slug, at) + anchor;
   const keep = picked && AV?.slug === slug ? AV : null;
   AV = { at, slug, picked, vers: keep?.vers ?? null, known: keep?.known ?? null };
@@ -6786,6 +6939,9 @@ function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp =
   if ($('av-frame').getAttribute('src') !== src) { const f = avFreshFrame('av-frame'); f.dataset.opened = src; f.src = src; }
   $('artifact-view').hidden = false;
   avHint();
+  tShot.close(false);
+  tShot.missing.clear();
+  avNotes.draw();
 }
 // The reload button says when main's artifact on the stage changed since its frame loaded it (the
 // latest fingerprint seen is another), until a press loads it. A draft reloads by itself
@@ -6929,10 +7085,15 @@ function tsBar() {
 // its address to keep), and says it is doing so ('reload'); the stage here says to reload rather than
 // reloading the whole dashboard.
 function showPreview(name, info) {
+  // a viewer opening ends the reminder of the last close (kit-148)
+  avRemindHide();
   const seen = `devteam.preview.reloaded.${name}`;
   if (info?.opened && VIEWER) { try { if (!sessionStorage.getItem(seen)) { sessionStorage.setItem(seen, '1'); location.reload(); return 'reload'; } } catch {} }
   else { try { sessionStorage.removeItem(seen); } catch {} }
   AV = { preview: name };
+  // an artifact's notes are none of a preview's
+  $('av-notes').hidden = true;
+  tShot.close(false);
   // a dropped image the stage showed gone, the bar's controls back (kit-171); Reload as every preview has it
   avUploadOff();
   $('av-reload').hidden = false;
@@ -6997,8 +7158,9 @@ function openArtifact(raw) {
   const m = /^artifact\/(main|wt\/([^/]+))\/([^/]+)$/.exec(raw);
   let at = null, slug = null;
   if (m) try { at = m[1] === 'main' ? 'main' : decodeURIComponent(m[2]); slug = decodeURIComponent(m[3]); } catch {}
-  const note = AV_NOTE;
+  const note = AV_NOTE, show = SHOW_NOTE;
   AV_NOTE = null;
+  SHOW_NOTE = null;
   if (!at || !/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(slug ?? '')) return void (location.hash = '#library');
   if (!AV) { AV_FROM = ROUTED; avFocus = document.activeElement; }
   const arts = DATA?.library?.artifacts ?? [];
@@ -7007,7 +7169,12 @@ function openArtifact(raw) {
   // stage, as one gone while it was shown is listed nowhere either
   const fresh = TS.kind !== 'artifact' || TS.slug !== slug || TS.at !== at;
   const fp = arts.find((x) => x.slug === slug && x.at === at)?.fp ?? (fresh && at !== 'main' && !String(at).startsWith('tree:') ? mainFp : null);
-  showArtifact(slug, at, { note, fp, mainFp });
+  // Show me (kit-145): the first load is the note's own page and view; another version shown in an open viewer is
+  // a move of the viewer's, counted for the close, which still lands where the viewer was opened over
+  const shown = show && show.head === artHref(slug, at) && TL.threads.find((x) => x.id === show.id), spot = shown && avStep.where(shown);
+  if (shown && AV) AV_NAVS++;
+  showArtifact(slug, at, { note, fp, mainFp, anchor: spot ? spot.file + (spot.vh ?? '') : '' });
+  if (shown) avStep.to(shown, { gone: show.gone, opening: true });
   $('scrim').hidden = false;
   document.body.classList.add('overlay-open');
   // opened over the open panel, it is on top of it at 900px and below (final-1 F1)
@@ -7017,8 +7184,580 @@ function openArtifact(raw) {
   document.body.style.overflow = 'hidden';
   $('av-close').focus();
 }
+// ---- notes on an artifact, in its viewer (kit-145): the version's notes, Hand over, the stepper ----
+// One note's state, from what the threads read says of it (kit-143's fields) and nothing else: to check,
+// with a session, or open; a resolved thread is no note.
+function tNoteState(t) {
+  // a reply of the owner's on its way has reopened a note to check, as the server will say
+  return t.status !== 'open' ? 'resolved' : t.check && !t.turns?.some((u) => u.pending && u.by === 'owner') ? 'check' : t.handed ? 'with' : 'open';
+}
+// The shown version's open notes, as their pins are numbered: those placed on it; on main also a published
+// tree's, and a worktree's the Library lists no more; and on any version the notes to check whose change is
+// there (Show me opens it). Fields of kit-143's rows only: nothing here is worked out from the log.
+function avNotes() {
+  if (!AV || AV.preview || TS.kind !== 'artifact') return [];
+  const listed = DATA?.library?.artifacts ?? null;
+  const here = (s, t) => (tNoteState(t) === 'check' && t.source?.slug === AV.slug && t.source.at === AV.at)
+    || (s.slug === AV.slug && (s.at === AV.at || (AV.at === 'main' && (String(s.at).startsWith('tree:') || (!!listed && !String(s.at).startsWith('origin:') && !listed.some((a) => a.slug === s.slug && a.at === s.at))))));
+  const at = new Map(tPins(TL.threads).flatMap((g) => g.ids).map((id, i) => [id, i]));
+  return TL.threads.filter((t) => t.subject?.kind === 'artifact' && tNoteState(t) !== 'resolved' && here(t.subject, t))
+    .sort((a, b) => (at.get(a.id) ?? Infinity) - (at.get(b.id) ?? Infinity));
+}
+// what the bar says of Hand over: cut where there is no room, whole in its title
+// (for: how long, when it isn't until the next)
+avNotes.say = (words, ms) => {
+  clearTimeout(avNotes.said);
+  $('e-avn').textContent = words;
+  $('e-avn').title = words;
+  if (ms) { const t = setTimeout(() => { if (avNotes.said === t) avNotes.say(''); }, ms); avNotes.said = t; } else avNotes.said = null;
+};
+// The bar's group drawn from them: the stepper, Hand over (N open notes; none, no button) and who has the rest.
+// A hand-over just answered is believed until a read shows it (or 10 s have gone): the notes it took are with
+// that session. What was said of a version goes when another is shown.
+avNotes.draw = () => {
+  const notes = avNotes();
+  // what a step said of its card, and the picture go with the card, the version, the viewer
+  if (avStep.off && (avStep.off.av !== AV || TL.open !== avStep.off.id)) avStep.off = null;
+  if (!AV || AV.preview || TS.kind !== 'artifact') tShot.close(false);
+  if (avNotes.av !== AV) { avNotes.av = AV; avNotes.say(''); }
+  const said = AV?.handed;
+  if (said && (Date.now() > said.until || notes.some((t) => said.ids.includes(t.id) && tNoteState(t) !== 'open'))) AV.handed = null;
+  const given = AV?.handed?.ids ?? [];
+  const open = notes.filter((t) => tNoteState(t) === 'open' && !given.includes(t.id));
+  const withs = notes.find((t) => tNoteState(t) === 'with');
+  const words = AV?.handed?.words ?? (withs ? `With ${withs.with ?? withs.handed?.to}` : '');
+  $('av-notes').hidden = !notes.length;
+  $('av-handover').hidden = !open.length;
+  const label = `Hand over (${open.length})`;
+  if ($('av-handover').textContent !== label) $('av-handover').textContent = label;
+  $('av-with').hidden = !words;
+  if ($('av-with').textContent !== words) { $('av-with').textContent = words; $('av-with').title = words; }
+  avStep.draw(notes);
+};
+// Hand over: the version's open notes to the session the server picks (kit-144). One request at a time (press
+// would queue a second behind the first), and its answer written only while that version is still shown.
+// opts ({slug, at, done}: the reminder's press, kit-148): that version's, its reply or {error} handed to done,
+// neither AV nor the bar touched. Any hand-over that succeeds ends that artifact's reminder hold.
+async function avHandOver(opts) {
+  if (opts) {
+    const { slug, at, done } = opts;
+    return press('avn', {
+      build: () => ({ action: 'artifact-handoff', body: { slug, at } }),
+      onOk: (out) => { AV_REMIND.held.delete(slug); done(out); tlRefresh(); },
+      onError: (error) => done({ error }),
+    });
+  }
+  const av = AV;
+  if (!av || av.preview || av.notesBusy) return;
+  const ids = avNotes().filter((t) => tNoteState(t) === 'open').map((t) => t.id);
+  if (!ids.length) return;
+  av.notesBusy = true;
+  const say = (words, gone) => { if (AV === av) { av.handed = { words, ids: gone, until: Date.now() + 10000 }; avNotes.draw(); setTimeout(avNotes.draw, 10050); } };
+  try {
+    await press('avn', {
+      build: () => ({ action: 'artifact-handoff', body: { slug: av.slug, at: av.at } }),
+      apply: () => { avNotes.say(''); av.handed = null; },
+      onOk: (out) => {
+        AV_REMIND.held.delete(av.slug);
+        if (out.count > 0) say(`With ${out.to}`, ids); else say('Nothing to hand over', []);
+        if (out.count > 0 && out.typed === false && AV === av) avNotes.say(`Not typed: ${out.to} has no pane. It reads this when it next checks.`, 10000);
+        tlRefresh();
+      },
+      // a refusal too is said only of the version it was pressed on
+      onError: (error) => { if (AV === av) avNotes.say(`Not saved: ${error}`); },
+    });
+  } finally { av.notesBusy = false; }
+}
+/* avStep start */
+// The stepper: one note back (-1) or on (1) in the filter's list, from the note a step is on its way to, else
+// the open card's, else from the list's end. want: the step (or Show me) under way: its note, whether it came from
+// a version gone (the card says main is shown), what was open when it began (the owner moving on drops it), and
+// sent: where the frame was last sent, until its lens says it is there.
+function avStep(by) {
+  // under the picture nothing steps
+  if (document.getElementById('av-shot')) return;
+  const list = avStep.list();
+  if (!list.length) return;
+  // (a step under way counts until the owner opens something else)
+  const i = list.findIndex((t) => t.id === (avStep.want && TL.open === avStep.want.open ? avStep.want.id : TL.open));
+  avStep.to(i < 0 ? (by > 0 ? list[0] : list[list.length - 1]) : list[(i + by + list.length) % list.length]);
+}
+// To check, Open or All: as kept in this browser (on this page, where storage refuses), else To check once any note is.
+avStep.filter = (notes = avNotes()) => {
+  const kept = avStep.chosen ?? lsGet('devteam.notes.filter');
+  return ['check', 'open', 'all'].includes(kept) ? kept : notes.some((t) => tNoteState(t) === 'check') ? 'check' : 'open';
+};
+avStep.list = (notes = avNotes()) => {
+  const f = avStep.filter(notes);
+  return notes.filter((t) => f === 'all' || (tNoteState(t) === 'check') === (f === 'check'));
+};
+avStep.draw = (notes) => {
+  const list = avStep.list(notes), i = list.findIndex((t) => t.id === TL.open), words = `${i < 0 ? '–' : i + 1} / ${list.length}`;
+  if ($('av-stepn').textContent !== words) $('av-stepn').textContent = words;
+  const f = avStep.filter(notes);
+  if ($('av-filter').value !== f && document.activeElement !== $('av-filter')) $('av-filter').value = f;
+  for (const id of ['av-prev', 'av-next']) $(id).disabled = !list.length;
+};
+// Where a note is: its file, and the view it was placed on. A spot with no element keeps its view in its path;
+// an element's note, in the frame the owner saw; one with no frame says nothing of it (null: left as it is).
+avStep.where = (t) => {
+  const p = t.subject.path || 'index.html', i = p.indexOf('#'), seen = typeof t.frame?.hash === 'string' ? t.frame.hash : null;
+  // a spot's path with no view is its page's plain view when the frame it was made in had none, else it says nothing
+  const spot = i >= 0 && p.length > i + 1 ? p.slice(i) : seen === '' ? '' : null;
+  return { file: (i < 0 ? p : p.slice(0, i)) || 'index.html', vh: t.subject.anchor?.selector ? seen : spot };
+};
+avStep.to = (t, { gone = false, opening = false } = {}) => {
+  avStep.off = null;
+  // a move whose page never said it came is no one's any more
+  if (avStep.sent && TS.ready && Date.now() >= avStep.sent.until) avStep.sent = null;
+  const want = avStep.want = { id: t.id, gone, av: AV, open: TL.open, draft: TL.draft };
+  // Show me's open is already loading the note's page; what the route opens as it ends is its own, not the owner's
+  if (opening) { avStep.sent = { av: AV, ...avStep.where(t), load: true, until: Date.now() + 3000 }; setTimeout(() => { want.open = TL.open; want.draft = TL.draft; }, 0); }
+  // a page whose lens never says it is there (an older one, one that changes its own hash, a slow one): the card all the same
+  clearTimeout(avStep.timer);
+  avStep.timer = setTimeout(() => { if (avStep.want === want) avStep.land('late'); }, 3000);
+  avStep.land();
+};
+// The step under way carried on, as often as the lens says something (from 'ready' or 'nav'): the frame sent where
+// the note is, once (only if it isn't there and isn't on its way there: another file loads, another view of this
+// one goes without a load, a page with a view goes back to its plain file by loading it), then, once it is there,
+// scrolled to and its card opened. Late (3 s), the card opens anyway: the step is over, and a page still on its
+// way is scrolled when it comes, if that card is still the open one.
+avStep.land = (from = '') => {
+  const is = (d) => TS.ready && TS.path === d.file && (d.vh === null || TS.hash === d.vh);
+  const scroll = (t) => { const { selector, tag, text, rect } = t.subject.anchor ?? {}; if (selector) tsPost({ type: 'scroll-to', anchor: { selector, tag, text, rect } }); };
+  // where the frame was sent, until its lens says so (a page loaded for it has come, whatever view it then shows);
+  // what the page being left says is none of it
+  let sent = avStep.sent, came = null;
+  if (sent && sent.av !== AV) sent = null;
+  else if (sent && ((from === 'nav' && is(sent)) || (from === 'ready' && TS.path === sent.file && (sent.load || is(sent))))) { came = sent; sent = null; }
+  avStep.sent = sent;
+  const then = came?.scroll && TL.open === came.scroll && TL.threads.find((x) => x.id === came.scroll);
+  if (then) scroll(then);
+  const want = avStep.want;
+  if (!want) return;
+  const t = TL.threads.find((x) => x.id === want.id), on = document.activeElement;
+  // the owner has moved on since: another card, a new note, pin mode, words in the card, the picture
+  const left = TL.open !== want.open || TL.draft !== want.draft || TL.pin || document.getElementById('av-shot') || (on?.closest?.('#tl-card') && typingIn(on));
+  if (!t || want.av !== AV || TS.kind !== 'artifact' || left) { avStep.want = null; return; }
+  const to = avStep.where(t), late = from === 'late';
+  const same = (d) => !!d && d.file === to.file && (to.vh === null || d.vh === to.vh);
+  const there = same(came) || (!sent && is(to));
+  if (!there && !same(sent) && (TS.ready || late)) {
+    const go = TS.ready && TS.path === to.file && !!to.vh && !sent?.load, f = tsFrame(), page = artSrc(AV.slug, AV.at) + to.file, src = page + (to.vh ?? '');
+    avStep.sent = { av: AV, ...to, load: !go, until: Date.now() + 3000 };
+    if (go) tsPost({ type: 'go', hash: to.vh });
+    // (a page not ready yet that is this file already is left to come, whatever its view)
+    else if (TS.ready || (f.getAttribute('src') ?? '').split('#')[0].replace(/\/$/, '/index.html') !== page) {
+      // opened: without the view, so a live reload puts back the view the lens names (kit-142)
+      f.dataset.opened = page;
+      f.src = src;
+    }
+  }
+  if (!there && !late) return;
+  avStep.want = null;
+  if (there) scroll(t); else if (avStep.sent) avStep.sent.scroll = t.id;
+  // by a step: placed at the stage's top right when the note has no pin there, and (gone) what version this is
+  avStep.off = { id: t.id, gone: want.gone, av: AV };
+  // opened under the owner's hand, so Resolve waits its second again
+  avStep.forget();
+  tlOpen(t.id, false);
+};
+// A step asked by the page's lens: at most one a frame, however many it says
+avStep.soon = (by) => { avStep.due ??= requestAnimationFrame(() => { avStep.due = null; avStep(by); }); };
+// A note a step opened whose element the lens says isn't showing on this view.
+avStep.unseen = (t) => {
+  if (!t || avStep.off?.id !== t.id || !tsOn() || !TS.ready) return false;
+  if (!tFrameOn(t.subject, TS)) return true;
+  return !!t.subject.anchor?.selector && TS.rects.get(TS.keyOf.get(tKey(t.subject)))?.rect === null;
+};
+// Hand over's press and the stepper's
+document.addEventListener('click', (e) => { if (e.target.closest?.('#av-handover')) avHandOver(); });
+document.addEventListener('click', (e) => { const b = e.target.closest?.('#av-prev, #av-next'); if (b) avStep(b.id === 'av-prev' ? -1 : 1); });
+$('av-filter').addEventListener('change', () => { const f = $('av-filter').value; avStep.chosen = lsSet('devteam.notes.filter', f) ? null : f; avNotes.draw(); });
+// ArrowLeft and ArrowRight on the dashboard's own window, with the viewer up and nothing that takes them focused.
+window.addEventListener('keydown', (e) => {
+  if ((e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.repeat || e.defaultPrevented) return;
+  if (!AV || AV.preview || $('artifact-view').hidden) return;
+  const on = document.activeElement;
+  if (on && on !== document.body && (typingIn(on) || on.tagName === 'SELECT' || !on.closest('#artifact-view'))) return;
+  e.preventDefault();
+  avStep(e.key === 'ArrowLeft' ? -1 : 1);
+});
+// --- what a framed page can't do (kit-145): make a press of the owner's count that they didn't aim ---------------
+// A page can open, move, redraw, uncover or close things, through its lens or not. So a pointer press on a control
+// that records the owner's decision (what VIEW_WRITES names, in the card or the viewer's bar) counts only if that
+// control has sat in the same box, uncovered, for ASK_ARM_MS when the pointer goes down, and still does at the click,
+// whatever moved it. Keys count at once: a page can't press one here.
+// seen: each control by its deed, with its box and since when; last: the last sample; down: the deed pressed, settled.
+avStep.press = { seen: new Map(), last: 0, on: false, down: null, closed: -Infinity, closedHidden: false, placed: null };
+avStep.up = () => !$('artifact-view').hidden;
+// The reminder's Hand over (kit-148): it comes up as the viewer closes, which a page can bring about, so it is a
+// decision held like the rest, while its card shows, stage or none. (Its Not now commits nothing: free.)
+avStep.REMIND = '#av-remind:not([hidden]) #av-remind-hand';
+avStep.reminds = () => !!document.querySelector(avStep.REMIND);
+// The decisions: not a field, a link, or Send of plain words (Send on a resolved thread reopens it)
+avStep.decides = (el) => {
+  const c = el?.closest?.(VIEW_WRITES) || el?.closest?.(avStep.REMIND);
+  if (!c || c.matches('textarea, input, a') || c.closest('.dropbox')) return null;
+  if (c.matches('[data-tl-send]') && TL.threads.find((t) => t.id === TL.open)?.status !== 'resolved') return null;
+  return c;
+};
+// In scope: with a stage up, the card's and the bar's; with none, a to-check block's Resolve (no page to move the rest);
+// either way, the reminder's Hand over while it shows
+avStep.held = (el) => {
+  const c = avStep.decides(el);
+  if (!c) return null;
+  if (c.matches('[data-tl-accept]') && c.closest('.tl-addr')) return c;
+  if (c.matches(avStep.REMIND)) return c;
+  return avStep.up() && c.closest('#tl-card, .av-bar') ? c : null;
+};
+// The deed a control is, whatever its node: what it carries, the thread, the mark, the question, the ask, the stage
+avStep.deed = (c) => {
+  const t = TL.threads.find((x) => x.id === TL.open), q = c.closest('[data-qcard]')?.dataset.qcard;
+  return JSON.stringify([c.id, c.tagName, c.textContent.trim(), { ...c.dataset }, TL.open, t?.status, c.closest('.tl-addr')?.dataset.for ?? t?.ready?.at,
+    q, q && seenHash(q), c.matches('[data-ask-option], [data-ask-esc]') ? ASK.q?.digest : null, TS.kind, TS.slug, TS.at, TS.name]);
+};
+// Whether the middle of the part of it its scrollers show is its own
+avStep.bare = (c, r) => {
+  let { left, top, right, bottom } = r;
+  for (let p = c.parentElement; p && p !== document.documentElement; p = p.parentElement) {
+    const o = getComputedStyle(p);
+    if (o.overflowX === 'visible' && o.overflowY === 'visible') continue;
+    const b = p.getBoundingClientRect();
+    left = Math.max(left, b.left); top = Math.max(top, b.top); right = Math.min(right, b.right); bottom = Math.min(bottom, b.bottom);
+  }
+  // (the layout's window: innerWidth is the zoomed part of it on a phone)
+  const { clientWidth: w, clientHeight: h } = document.documentElement;
+  left = Math.max(left, 0); top = Math.max(top, 0); right = Math.min(right, w); bottom = Math.min(bottom, h);
+  return right > left && bottom > top && c.contains(document.elementFromPoint((left + right) / 2, (top + bottom) / 2));
+};
+avStep.sample = () => {
+  const P = avStep.press, now = performance.now(), was = P.seen, next = new Map(), count = new Map();
+  // frames that stopped: what stood before them says nothing of now
+  if (now - P.last > 250) was.clear();
+  P.last = now;
+  const roots = `${avStep.up() ? '#tl-card, .av-bar' : '#tl-card .tl-addr'}, #av-remind:not([hidden])`;
+  for (const root of document.querySelectorAll(roots)) for (const el of root.querySelectorAll(`${VIEW_WRITES}, #av-remind-hand`)) {
+    if (avStep.held(el) !== el) continue;
+    const key = avStep.deed(el), n = count.get(key) ?? 0, k = `${n} ${key}`;
+    count.set(key, n + 1);
+    const r = el.getBoundingClientRect(), bare = r.width > 0 && avStep.bare(el, r), p = was.get(k);
+    // against the box it settled in, so it can't creep
+    const same = p && bare && p.bare && ['left', 'top', 'width', 'height'].every((x) => Math.abs(p.box[x] - r[x]) <= 0.5);
+    const rec = { el, bare, box: same ? p.box : { left: r.left, top: r.top, width: r.width, height: r.height }, since: same ? p.since : now };
+    next.set(k, rec);
+    if (el.matches('[data-tl-accept]') && el.closest('.tl-addr')) {
+      const wait = !avStep.settled(rec);
+      el.classList.toggle('waiting', wait);
+      const title = wait ? 'Read it first' : '';
+      if (el.title !== title) el.title = title;
+    }
+  }
+  P.seen = next;
+  if (document.getElementById('tl-card')?.hidden) P.placed = null;
+};
+avStep.settled = (rec) => !!rec && rec.bare && performance.now() - rec.since >= ASK_ARM_MS;
+// The deed (and its order) of a control that has settled, else null
+avStep.ready = (c) => { avStep.sample(); for (const [k, rec] of avStep.press.seen) if (rec.el === c) return avStep.settled(rec) ? k : null; return null; };
+// Resolve's second begun again
+avStep.forget = () => { for (const [k, rec] of avStep.press.seen) if (rec.el.matches('[data-tl-accept]')) avStep.press.seen.delete(k); };
+avStep.watch = () => {
+  const P = avStep.press;
+  avStep.clear();
+  if (P.on) return;
+  P.on = true;
+  const tick = () => {
+    avStep.clear();
+    const card = document.getElementById('tl-card');
+    if (!avStep.up() && !(card && !card.hidden && card.querySelector('.tl-addr')) && !avStep.reminds()) { P.on = false; P.seen.clear(); return; }
+    avStep.sample();
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+};
+// The card left where it is under the owner's pointer or focus, so a page that never rests can't keep it moving
+avStep.stays = (t, card) => {
+  const P = avStep.press, key = `${t?.id ?? ''} ${document.documentElement.clientWidth} ${document.documentElement.clientHeight}`, was = P.placed;
+  P.placed = key;
+  if (!t || !avStep.up() || was !== key || !(card.matches(':hover') || card.contains(document.activeElement))) return false;
+  const r = card.getBoundingClientRect();
+  const { clientWidth: w, clientHeight: h } = document.documentElement;
+  return r.left >= 0 && r.top >= 0 && r.right <= w && r.bottom <= h;
+};
+// kit-916: while the reminder card shows, each frame of the guard's watch sets the held words and View only's
+// just above it; with no card, '' hands them back to their own CSS.
+avStep.clear = () => {
+  const r = document.querySelector('#av-remind:not([hidden])')?.getBoundingClientRect();
+  const at = r && r.height > 0 ? `${Math.round(document.documentElement.clientHeight - r.top + 8)}px` : '';
+  for (const id of ['av-held', 'view-only-toast']) { const e = document.getElementById(id); if (e && e.style.bottom !== at) e.style.bottom = at; }
+};
+avStep.say = () => {
+  let e = document.getElementById('av-held');
+  if (!e) { e = document.createElement('div'); e.id = 'av-held'; e.setAttribute('role', 'status'); document.body.append(e); }
+  // (empty first, so it is announced each time)
+  e.textContent = '';
+  requestAnimationFrame(() => { e.textContent = 'That moved just now. Press again in a second.'; });
+  e.hidden = false;
+  avStep.clear();
+  clearTimeout(e._hide);
+  e._hide = setTimeout(() => { e.hidden = true; }, 4000);
+};
+avStep.stop = (e) => { e.preventDefault(); e.stopImmediatePropagation(); avStep.say(); };
+// just after the viewer closed (a page can say Escape), nothing it bared is taken, by pointer or key
+avStep.bared = () => performance.now() - avStep.press.closed < ASK_ARM_MS;
+new MutationObserver(() => {
+  const P = avStep.press;
+  P.seen.clear();
+  if (avStep.up()) avStep.watch();
+  else { P.closed = performance.now(); P.closedHidden = document.hidden; }
+}).observe($('artifact-view'), { attributes: true, attributeFilter: ['hidden'] });
+document.addEventListener('visibilitychange', () => {
+  const P = avStep.press;
+  P.seen.clear();
+  if (!document.hidden && P.closedHidden) { P.closed = performance.now(); P.closedHidden = false; }
+});
+// (a person who may only look gets viewStop's own words)
+avStep.looks = () => document.body.classList.contains('view-only');
+window.addEventListener('pointerdown', (e) => {
+  const P = avStep.press;
+  P.down = null;
+  if (avStep.looks()) return;
+  if (avStep.bared() && e.target.closest?.('[data-goal-grip]')) return avStep.stop(e);
+  const c = avStep.held(e.target);
+  if (c) P.down = avStep.ready(c);
+}, true);
+window.addEventListener('pointercancel', () => { avStep.press.down = null; }, true);
+window.addEventListener('click', (e) => {
+  if (avStep.looks()) return;
+  if (avStep.bared() && avStep.decides(e.target)) return avStep.stop(e);
+  // no pointer: a key's, a script's or assistive tech's
+  if (e.detail === 0) return;
+  const c = avStep.held(e.target);
+  if (!c) return;
+  const P = avStep.press, down = P.down;
+  P.down = null;
+  if (down === null || avStep.ready(c) !== down) avStep.stop(e);
+}, true);
+window.addEventListener('keydown', (e) => {
+  if (avStep.looks() || !avStep.bared()) return;
+  const grip = /^Arrow(Up|Down)$/.test(e.key) && e.target.closest?.('[data-goal-grip]');
+  const reopen = e.key === 'Enter' && e.shiftKey && e.target.id === 'tl-c-text' && TL.threads.find((t) => t.id === TL.open)?.status === 'resolved';
+  if (grip || reopen) avStep.stop(e);
+}, true);
+/* avStep end */
+// The note Show me is opening ({ id, gone }), for the one open that follows: no head carries it, so a reload or
+// Back opens the artifact on its first page.
+let SHOW_NOTE = null;
+/* avShowMe start */
+// Show me: a note to check on the copy its change is in (its source, the server's word), on its own page with its
+// card open; main, saying so, when that copy is gone. The version shown already: a step.
+function avShowMe(id) {
+  const t = TL.threads.find((x) => x.id === id);
+  const go = t && avShowMe.to(t);
+  if (!go) return;
+  const { gone, at, slug } = go;
+  if (AV && !AV.preview && AV.slug === slug && AV.at === at && !$('artifact-view').hidden) return void avStep.to(t, { gone });
+  // a viewer tab shows one version at an address of its own
+  if (VIEWER) return void location.assign(artViewer(slug, at));
+  const head = artHref(slug, at);
+  SHOW_NOTE = { id, gone, head };
+  // the head may stand already (another version picked in the bar): no hashchange comes then
+  if (location.hash === head) route(); else location.hash = head;
+}
+// Where a note's Show me goes ({ slug, at, gone }), or null for a source that is no version's name (no button then).
+avShowMe.to = (t) => {
+  const gone = !t.source, at = t.source?.at ?? 'main', slug = t.source?.slug ?? t.subject?.slug;
+  return t.subject?.kind === 'artifact' && (at === 'main' || /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(at)) && /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(slug ?? '') ? { gone, at, slug } : null;
+};
+document.addEventListener('click', (e) => { const b = e.target.closest?.('[data-tl-show]'); if (b) avShowMe(b.dataset.tlShow); });
+/* avShowMe end */
+/* tShot start */
+// A to-check note's picture (kit-147): its thumbnail with what it is of, or why there is none. small: a panel
+// row's, the thumbnail alone. Its address is made only of a thread's id and a stamp as the kit writes them; one the
+// server hasn't (tShot.missing) is said, never a broken image.
+function tShot(t, small = false) {
+  const shot = t.shot;
+  if (!shot) return small ? '' : `<div class="tl-shot-cap">${t.noshot === 'no-change' ? 'Nothing to picture: proposed with no change' : 'No picture (marked before pictures)'}</div>`;
+  const src = tShot.src(t);
+  const got = src && !tShot.gone(src);
+  if (small) return got ? `<button type="button" class="ghost th-shot" data-shot-of="${esc(t.id)}" aria-label="Open the picture"><img src="${src}" width="48" alt=""></button>` : '';
+  const anchor = { gone: 'The noted element is gone; this is where it was.', hidden: 'The noted element is on the page but hidden on this view; this is where it was.', changed: 'Its text has changed since the note.' };
+  const sha = /^[0-9a-f]{7,64}$/.test(shot.sha ?? '') ? ` · ${shot.sha.slice(0, 7)}` : '';
+  const cap = `${shot.src === 'main' ? 'From main' : `From ${esc(shot.src)}'s draft`}${sha}${shot.dirty ? ' + uncommitted changes' : ''}${Number.isFinite(shot.w) ? ` · ${shot.w}px wide` : ''}`;
+  const said = Object.hasOwn(anchor, shot.anchor) ? `<div class="tl-shot-cap">${anchor[shot.anchor]}</div>` : '';
+  if (!got) return '<div class="tl-shot-cap">Picture not on this machine</div><div class="tl-shot-cap">The mark stands; Show me still opens the spot.</div>';
+  return `<button type="button" class="ghost tl-shot" data-shot-of="${esc(t.id)}" aria-label="Open the picture"><img src="${src}" width="160" alt="The noted spot"></button><div class="tl-shot-cap">${cap}</div>${said}`;
+}
+// The ones the server hadn't, with when each was last asked for: 30 s on, a draw asks once more, out of sight (an image
+// put in the card to find out would move Resolve)
+tShot.missing = new Map();
+tShot.gone = (src) => {
+  const at = tShot.missing.get(src);
+  if (at === undefined) return false;
+  if (Date.now() - at >= 30000) {
+    tShot.missing.set(src, Date.now());
+    const img = new Image();
+    img.onload = () => { tShot.missing.delete(src); tlDraw(); };
+    img.src = src;
+  }
+  return true;
+};
+tShot.src = (t, tone = 'light') => (/^t-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(t.id) && /^\d{8}-\d{9}$/.test(t.shot?.stamp ?? '') ? `/api/shot/${t.id}/${t.shot.stamp}-${tone}.png` : null);
+// The picture full size, over the stage: X, Escape and a click outside it close it and nothing else. With no
+// viewer up there is no stage to show it on: Show me first.
+tShot.open = (id) => {
+  const t = TL.threads.find((x) => x.id === id);
+  if (!t || !tShot.src(t)) return;
+  if ($('artifact-view').hidden) return void avShowMe(id);
+  tShot.close(false);
+  const el = document.createElement('div');
+  el.id = 'av-shot';
+  el.setAttribute('role', 'dialog');
+  el.setAttribute('aria-label', 'The picture');
+  el.setAttribute('aria-modal', 'true');
+  const tones = t.shot.dark ? '<button type="button" class="ghost av-pill" data-shot="light" aria-pressed="true">Light</button><button type="button" class="ghost av-pill" data-shot="dark" aria-pressed="false">Dark</button>' : '';
+  el.innerHTML = `<div class="av-shot-in"><div class="av-shot-bar">${tones}<span class="grow"></span><button type="button" class="ghost icon-btn" data-shot-close aria-label="Close the picture"><i class="icon-x" aria-hidden="true"></i></button></div><img src="${tShot.src(t)}" alt="The noted spot"><div class="tl-shot-cap" hidden>Picture not on this machine</div></div>`;
+  el.querySelector('img').addEventListener('error', (e) => { e.target.hidden = true; el.querySelector('.tl-shot-cap').hidden = false; });
+  el.addEventListener('click', (e) => {
+    const tone = e.target.closest('[data-shot]')?.dataset.shot;
+    if (!tone) return;
+    el.querySelector('.tl-shot-cap').hidden = true;
+    el.querySelector('img').hidden = false;
+    el.querySelector('img').src = tShot.src(t, tone);
+    for (const b of el.querySelectorAll('[data-shot]')) b.setAttribute('aria-pressed', String(b.dataset.shot === tone));
+  });
+  $('av-stage').append(el);
+  tShot.of = id;
+  el.querySelector('[data-shot-close]').focus();
+};
+tShot.close = (focus = true) => {
+  const el = document.getElementById('av-shot');
+  if (!el) return false;
+  el.remove();
+  // left behind by a viewer closed under it, it took nobody's key
+  if ($('artifact-view').hidden) return false;
+  if (focus) (document.querySelector(`#tl-card .tl-shot[data-shot-of="${tShot.of}"]`) ?? document.querySelector(`.th-shot[data-shot-of="${tShot.of}"]`))?.focus();
+  return true;
+};
+// Tab goes round in the picture's own buttons
+tShot.tab = (e) => {
+  const el = document.getElementById('av-shot');
+  if (!el || $('artifact-view').hidden) return;
+  const all = [...el.querySelectorAll('button')], i = all.indexOf(document.activeElement);
+  e.preventDefault();
+  all[i < 0 ? (e.shiftKey ? all.length - 1 : 0) : (i + (e.shiftKey ? -1 : 1) + all.length) % all.length].focus();
+};
+// before every other listener of these (the card's and the viewer's Escape): the picture alone closes
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && tShot.close()) { e.preventDefault(); e.stopImmediatePropagation(); } else if (e.key === 'Tab') tShot.tab(e); }, true);
+document.addEventListener('click', (e) => {
+  if (document.getElementById('av-shot') && (e.target.closest('[data-shot-close]') || !e.target.closest('.av-shot-in'))) { tShot.close(); if (e.target.id === 'av-shot' || e.target.closest('[data-shot-close]')) return; }
+  const pic = e.target.closest?.('.tl-shot, .th-shot');
+  if (pic) tShot.open(pic.dataset.shotOf);
+});
+document.addEventListener('error', (e) => {
+  if (e.target?.tagName !== 'IMG' || !e.target.closest('.tl-shot, .th-shot')) return;
+  tShot.missing.set(e.target.getAttribute('src'), Date.now());
+  tlDraw();
+}, true);
+/* tShot end */
+/* avRemind start */
+// The reminder when the viewer closes on a version with notes nobody handed over (kit-148): a card at the bottom of
+// the window, Not now and Hand over. Not now holds the artifact for this page load only (nothing stored): held maps
+// a slug to the ids of the notes open at each Not now, and the subject keys of those still saving (pending-…),
+// added to, never replaced. Any hand-over that succeeds, the bar's or the card's, ends the slug's hold (avHandOver).
+// taken: what the close the card shows took; busy: the card's press on its way; timer: its result's.
+const AV_REMIND = { held: new Map(), busy: false, timer: 0, taken: null };
+const AV_REMIND_MS = 4000;
+// Who Hand over sends a version's notes to, by kit-144's rule as the page sees it: a planner's draft, or a ticket's
+// in the graph, that the Library lists (its worktree is there), else the supervisor. The press's reply names the real one.
+function avRecipient(at) {
+  const listed = (DATA?.library?.artifacts ?? []).some((x) => x.at === at);
+  return (/^plan-[a-z0-9-]+$/.test(at) || ticketMap().has(at)) && listed ? at : 'supervisor';
+}
+// What a close takes of the artifact it lets go of, while AV and the lens are still its own: the bar's Hand over (N),
+// the version's open notes less those the bar believes just handed; their ids, and the subject keys of those still
+// saving; its title and who would get them. Nothing of a preview, a dropped image or a viewer tab. The title is the
+// Library's for the version, else for another of the artifact's (a draft the Library lists no more), else the bar's.
+function avRemindTake() {
+  if (!AV?.slug || AV.preview || AV.upload || VIEWER) return null;
+  const given = AV.handed?.ids ?? [];
+  const open = avNotes().filter((t) => tNoteState(t) === 'open' && !given.includes(t.id));
+  const saving = (t) => String(t.id).startsWith('pending-');
+  const lib = DATA?.library?.artifacts ?? [];
+  const title = (lib.find((x) => x.slug === AV.slug && x.at === AV.at) ?? lib.find((x) => x.slug === AV.slug && x.title))?.title || $('av-title').textContent;
+  return { slug: AV.slug, at: AV.at, title, n: open.length, ids: open.filter((t) => !saving(t)).map((t) => t.id), keys: open.filter(saving).map((t) => tKey(t.subject)), to: avRecipient(AV.at) };
+}
+// The card, made on first use; never focused by the page
+function avRemindCard() {
+  let c = document.getElementById('av-remind');
+  if (c) return c;
+  c = document.createElement('div');
+  c.id = 'av-remind';
+  c.hidden = true;
+  c.setAttribute('role', 'status');
+  c.setAttribute('aria-live', 'polite');
+  c.innerHTML = '<p class="tx"></p><div class="av-remind-do"><button type="button" class="ghost" id="av-remind-later">Not now</button><button type="button" id="av-remind-hand"></button></div><span class="err" id="e-avr"></span>';
+  document.body.append(c);
+  return c;
+}
+// Shown after a close when it took open notes and one of them is not held (its id, nor its subject key). Its words
+// are set as text: the title is a session's.
+function avRemindShow(taken) {
+  if (!taken || !(taken.n > 0)) return;
+  const held = AV_REMIND.held.get(taken.slug);
+  const keyOf = (id) => { const t = TL.threads.find((x) => x.id === id); return t ? tKey(t.subject) : null; };
+  if (held && taken.ids.every((id) => held.ids.has(id) || held.keys.has(keyOf(id))) && taken.keys.every((k) => held.keys.has(k))) return;
+  clearTimeout(AV_REMIND.timer);
+  AV_REMIND.taken = taken;
+  const c = avRemindCard(), one = taken.n === 1, sup = taken.to === 'supervisor';
+  c.querySelector('.tx').textContent = `${one ? '1 note' : `${taken.n} notes`} on ${taken.title} ${one ? 'isn\'t' : 'aren\'t'} handed over. ${sup ? 'The supervisor' : `${taken.to}, the session drawing it,`} won't start on ${one ? 'it' : 'them'} until you do.`;
+  $('av-remind-hand').textContent = `Hand over to ${sup ? 'the supervisor' : taken.to}`;
+  c.querySelector('.av-remind-do').hidden = false;
+  $('e-avr').textContent = '';
+  c.hidden = false;
+  // its Hand over under kit-145's press guard while it shows (avStep.REMIND): the guard's frames run until it hides
+  avStep.watch();
+}
+function avRemindHide() {
+  clearTimeout(AV_REMIND.timer);
+  AV_REMIND.taken = null;
+  const c = document.getElementById('av-remind');
+  if (c) c.hidden = true;
+}
+// Not now: the notes it named held. Hand over: one press at a time; its result in place of the words, the buttons
+// gone, then the card goes after AV_REMIND_MS; a refusal under the buttons, which stay.
+document.addEventListener('click', (e) => {
+  const b = e.target.closest?.('#av-remind-later, #av-remind-hand'), t = AV_REMIND.taken;
+  if (!b || !t) return;
+  if (b.id === 'av-remind-later') {
+    const h = AV_REMIND.held.get(t.slug) ?? { ids: new Set(), keys: new Set() };
+    for (const id of t.ids) h.ids.add(id);
+    for (const k of t.keys) h.keys.add(k);
+    AV_REMIND.held.set(t.slug, h);
+    avRemindHide();
+    return;
+  }
+  // a person who may only look: View only's words, as the bar's Hand over gets them (it is not in VIEW_WRITES)
+  if (document.body.classList.contains('view-only')) return void viewToast();
+  if (AV_REMIND.busy) return;
+  AV_REMIND.busy = true;
+  $('e-avr').textContent = '';
+  avHandOver({ slug: t.slug, at: t.at, done: (out) => {
+    if (AV_REMIND.taken !== t) return;
+    if (out?.error) { $('e-avr').textContent = `Not saved: ${out.error}`; return; }
+    const c = avRemindCard();
+    c.querySelector('.tx').textContent = out?.count > 0 ? `With ${out.to}` : 'Nothing to hand over';
+    c.querySelector('.av-remind-do').hidden = true;
+    clearTimeout(AV_REMIND.timer);
+    AV_REMIND.timer = setTimeout(avRemindHide, AV_REMIND_MS);
+  } }).finally(() => { AV_REMIND.busy = false; });
+});
+/* avRemind end */
 function closeArtifact() {
   if (!AV) return false;
+  // what the reminder needs of the artifact let go of (kit-148), while it is still the one shown
+  const taken = avRemindTake();
   AV = null;
   tsSet(null);
   tsPins();
@@ -7033,6 +7772,8 @@ function closeArtifact() {
   document.body.classList.remove('av-open');
   if (!peekIsOpen() && !RV) { $('scrim').hidden = true; document.body.style.overflow = ''; }
   avFocus?.focus?.();
+  // the reminder after the focus is back where the close put it: it takes none
+  avRemindShow(taken);
   return true;
 }
 // After a frame move, where the close lands, in place of the viewer's entry: over a page, that page as it was
@@ -7041,12 +7782,12 @@ function closeArtifact() {
 // cold stampFor (a ticket peek would go over #board, without th).
 function avReturn() {
   const now = history.state?.page || '#library', r = parseHead(AV_RET || '#library', SHELL_ROUTES);
-  if (r.link !== undefined) return { head: AV_RET, stamp: { page: now, depth: 1, openedHere: false } };
+  if (r.link !== undefined || r.legacy) return { head: AV_RET, stamp: { page: now, depth: 1, openedHere: false } };
   const c = parseHead(now, SHELL_ROUTES), s = { ...r.state };
   delete s.th;
   delete s.t;
-  if (c.link === undefined && c.state.th !== undefined) s.th = c.state.th;
-  if (c.link === undefined && c.state.t !== undefined) s.t = c.state.t;
+  if (c.link === undefined && !c.legacy && c.state.th !== undefined) s.th = c.state.th;
+  if (c.link === undefined && !c.legacy && c.state.t !== undefined) s.t = c.state.t;
   const head = headFor({ page: r.page, state: s });
   return { head, stamp: { page: head, depth: 0, openedHere: false } };
 }
@@ -7169,7 +7910,7 @@ function routeHead({ fresh = false, carry = null } = {}) {
   // leaving a talk/ entry (a route to any other head) closes the card it opened
   if (TL.route && raw !== `talk/${encodeURIComponent(TL.route)}` && raw !== `talk/${TL.route}`) tlLeave();
   // a link opens over the page in its stamp: the one it was clicked on, or on a cold load its kind's home
-  if (p.link !== undefined) showHead(parseHead(HERE.page, SHELL_ROUTES));
+  if (p.link !== undefined || p.legacy) showHead(parseHead(HERE.page, SHELL_ROUTES));
   // before anything that hides the drawer, the scrim or a review: the viewer opens over them
   // (a viewer opening takes the head it is over, and counts the frame's moves from none)
   if (raw.startsWith('preview/')) { if (!AV) { AV_RET = ROUTED ? LAST_HEAD : null; AV_NAVS = 0; AV_FRAME_ESC = false; } openPreview(raw.slice(8)); ROUTED = true; return; }
@@ -7197,7 +7938,7 @@ function routeHead({ fresh = false, carry = null } = {}) {
   if (h.startsWith('file?')) return void openFile(new URLSearchParams(location.hash.slice(6)));
   hideDrawer();
   // a page head: its page; an unknown or empty head, or a redirect, is replaced in place (#overview, #monitoring → #sensors)
-  if (p.link !== undefined) return;
+  if (p.link !== undefined || p.legacy) return;
   if (p.redirected || raw.split('?')[0] !== p.page) history.replaceState(history.state, '', headFor(p));
   showHead(p);
 }
@@ -8308,7 +9049,7 @@ function openLib(id) {
 const avDay = (t) => { const d = new Date(t); return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); };
 // a version's words, as the pill and the list say them
 function avVersionLabel(v) {
-  if (v.kind === 'draft') return `Draft · live in ${v.worktree ?? v.at}`;
+  if (v.kind === 'draft') return `Draft · live in ${v.worktree ?? v.at}${v.time ? ` · ${avDay(v.time)}` : ''}`;
   if (v.kind === 'landed') return `Landed on main${v.time ? ` · ${avDay(v.time)}` : ''}`;
   return [avDay(v.time), String(v.commit ?? '').slice(0, 7)].filter(Boolean).join(' · ');
 }
@@ -8610,6 +9351,74 @@ function renderOverview() {
   ovSet($('ov-secs'), ovSec('Status', status) + ovSec('Numbers', numbers) + ovSec('Autonomy', autonomy) + ovSec('Goals', goals) + ovSec('Needs you', needs) + ovSec('Commit history', ovMosaic(HELLO?.pulse?.activity)));
 }
 
+/* viewOnly start */
+// View only (kit-250): served to a view-only person (the box's gateway says so in /api/data's viewer, or
+// /api/hello's level for the viewer tab, which reads no /api/data), the page says "View only" beside the kit badge and greys the writes,
+// and a press on one shows why instead of sending it. The gateway refuses those writes anyway; this is
+// so nobody presses and waits. Navigation is left alone: tabs, filters, links, Back, peeks, copy.
+const VIEW_WRITES = "[data-answer], [data-cant], [data-reply], [data-dontuse], [data-post-secrets], [data-overrule-send], [data-correct-send], [data-rv-answer], [data-decline], [data-rv-decline], [data-know], [data-oa-know], [data-oa-goal], [data-hold-id], [data-met-id], [data-goal-move], [data-preview-start], [data-preview-stop], [data-forget], [data-limit-save], [data-limit-none], [data-limit-step], .fleet-switch [data-fleet], [data-checknow], [data-tl-send], [data-tl-accept], [data-tl-notyet], [data-tl-resolve-go], [data-tl-reopen], [data-goal-grip], [data-ask-option], [data-ask-esc], #av-handover, a[href*=\"/public/\"], .dropbox[data-drop] textarea, .dropbox[data-drop] input, #tl-c-text";
+const VIEW_TOAST = 'View only: you can look, but not change anything';
+let viewToastAt = 0;
+function viewToast() {
+  if (Date.now() - viewToastAt < 2000) return;
+  viewToastAt = Date.now();
+  let t = document.getElementById('view-only-toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'view-only-toast';
+    t.setAttribute('role', 'status');
+    document.body.append(t);
+  }
+  t.textContent = VIEW_TOAST;
+  t.hidden = false;
+  avStep.clear();
+  clearTimeout(t._hide);
+  t._hide = setTimeout(() => { t.hidden = true; }, 2500);
+}
+function viewStop(e) {
+  if (!document.body.classList.contains('view-only')) return;
+  const el = e.target instanceof Element ? e.target : null;
+  if (!el) return;
+  const write = el.closest(VIEW_WRITES);
+  let stop = false;
+  if (e.type === 'click') stop = Boolean(write);
+  else if (e.type === 'submit') stop = Boolean(e.submitter?.closest(VIEW_WRITES) || el.querySelector(VIEW_WRITES));
+  else if (e.type === 'drop') stop = Boolean(write || el.closest('.dropbox[data-drop]'));
+  else if (e.type === 'pointerdown') stop = Boolean(el.closest('[data-goal-grip]'));
+  else if (e.type === 'keydown') {
+    if (e.isComposing || e.keyCode === 229) return;
+    const typing = write && write.matches('textarea, input:not([type=checkbox], [type=radio], [type=button], [type=submit])');
+    stop = Boolean(write) && (e.key === 'Enter' || (e.key === ' ' && !typing)) || ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && Boolean(el.closest('[data-goal-grip]')));
+  }
+  if (!stop) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  if (e.type === 'drop') el.closest('.dropbox')?.classList.remove('drop-over');
+  viewToast();
+}
+let viewListening = false;
+function viewOnly(level) {
+  const view = level === 'view';
+  document.body.classList.toggle('view-only', view);
+  let b = document.getElementById('view-only');
+  if (view && !b) {
+    b = document.createElement('span');
+    b.className = 'badge';
+    b.id = 'view-only';
+    b.textContent = 'View only';
+    b.title = 'View only: you can look at everything on this box. Buttons that would change something are greyed out.';
+    // the viewer tab hides .app (and #kit with it): there it goes in the viewer's bar, after the kind
+    const at = document.getElementById(VIEWER ? 'av-kind' : 'kit');
+    if (at) at.after(b); else document.body.prepend(b);
+  }
+  if (b) b.hidden = !view;
+  if (view && !viewListening) {
+    viewListening = true;
+    for (const type of ['click', 'submit', 'drop', 'pointerdown', 'keydown']) window.addEventListener(type, viewStop, true);
+  }
+}
+if (VIEWER) fetch('/api/hello', { cache: 'no-store' }).then((r) => r.json()).then((j) => viewOnly(j.level ?? null)).catch(() => {});
+/* viewOnly end */
 function render(d) {
   DATA = d;
   const focus = focusMark();
@@ -8707,6 +9516,7 @@ function render(d) {
   for (const [sel, v] of kept) { const el = pageField(sel); if (el) el.value = v; }
   for (const sel of keptChecks) { const el = [...document.querySelectorAll(sel)].find((c) => !layerField(c) && !c.closest('#drawer')); if (el) el.checked = true; }
   restoreSecretDrafts();
+  viewOnly(d.viewer?.level ?? null);
   focusBack(focus);
 }
 
@@ -8896,19 +9706,49 @@ function tCardState(t, now, typed, pane, sup = typeof TL !== 'undefined' ? TL.su
   const wAt = Date.parse(w?.at ?? '');
   const has = !!w && (w.stage === 'picked-up' || w.stage === 'responding') && o >= 0 && !!turns[o].id && w.turn === turns[o].id
     && turns.slice(o + 1).every((x) => x.by !== 'owner' && Date.parse(x.at) < wAt);
+  // an artifact note (kit-148): by kit-145's state; the page's other threads are as ever (two tests load threads-core alone)
+  const art = t.subject?.kind === 'artifact' && typeof tNoteState === 'function' && typeof avRecipient === 'function';
+  const ns = art ? tNoteState(t) : null;
+  if (art && !last.pending && !has) {
+    if (ns === 'check') return null;
+    if (ns === 'with') {
+      const to = t.with ?? t.handed?.to;
+      const from = Date.parse(t.handed?.at ?? '');
+      // the supervisor's own turn after the hand-over (writer, else any non-owner turn: the view names them all supervisor)
+      const replied = turns.some((x) => x.by !== 'owner' && Date.parse(x.at) > from && (x.writer ? x.writer === 'supervisor' : true));
+      if (to === 'supervisor' && !replied && now - from > T_WAIT_MS) return "The supervisor hasn't replied yet.";
+      return `With ${to}.`;
+    }
+  }
   if (last.by !== 'owner' && !has) return null;
   if (last.pending) return 'Sending…';
   if (has) {
     // plain words for who: ticket ids have no fixed shape, so any other name is a session on it
     const b = w.by;
     const plan = typeof b === 'string' ? /^plan-(.+)$/.exec(b) : null;
-    const who = typeof b !== 'string' || !b ? 'A session' : b === 'supervisor' ? 'The supervisor' : b === 'responder' ? 'The responder' : plan ? `The planner for ${plan[1]}` : `The session on ${b}`;
-    return w.stage === 'responding' ? `${who} is responding…` : `${who} picked it up.`;
+    const named = typeof b === 'string' && b && !plan && typeof who === 'function' ? who(b) : '';
+    const who2 = typeof b !== 'string' || !b ? 'A session' : b === 'supervisor' ? 'The supervisor' : b === 'responder' ? 'The responder' : plan ? `The planner for ${plan[1]}` : named && named !== b ? `${named.charAt(0).toUpperCase()}${named.slice(1)}` : `The session on ${b}`;
+    return w.stage === 'responding' ? `${who2} is responding…` : `${who2} picked it up.`;
   }
+  // an open note whose newest words are the owner's and nobody's yet (kit-144): they wait for Hand over
+  if (art && ns === 'open' && last.by === 'owner' && (last.routed_to ?? 'supervisor') === 'supervisor') return `Not handed over yet. Hand over sends it to ${avRecipient(t.subject.at).replace(/^supervisor$/, 'the supervisor')}.`;
   // a turn routed to the responder (kit-104): the landed turn's route says so (a turn in the log is
   // the server's record's to say), else the page's own send; the responder's hold or failed typing
   // stays late until a reply. Never "Not delivered" nor the supervisor's hold for it.
   const landed = /^u-/.test(last.id ?? '');
+  // a turn routed to a session (kit-109): the landed turn's route names it, else the page's own send
+  // ({ session, who }, from the send's words); the card names that session, never the supervisor, and
+  // never says "Not delivered" for it (its turn is never in the undelivered list)
+  const sName = (x) => { const n = typeof who === 'function' ? who(x) : ''; return n && n !== x ? n : /^plan-/.test(x) ? `the planner for ${x.slice(5)}` : `the agent on ${x}`; };
+  const mine = typed && typeof typed === 'object' && typeof typed.session === 'string' && typeof typed.who === 'string' ? typed : null;
+  const sess = landed ? (last.routed_to === 'session' && typeof last.routed_session === 'string' ? { who: sName(last.routed_session), state: mine?.session ?? null } : null) : mine ? { who: mine.who, state: mine.session } : null;
+  if (sess) {
+    const s = sess.who;
+    if (now - Date.parse(last.at) > T_WAIT_MS) return `${s.charAt(0).toUpperCase()}${s.slice(1)} hasn't replied yet; the supervisor has been told.`;
+    if (sess.state === 'held') return `Held: ${s}'s terminal is asking something, and these words must not answer it. They reach it once it is answered.`;
+    if (sess.state === 'missed') return `Still with ${s}: its terminal didn't take it, and the supervisor is told if there's no reply in 5 minutes.`;
+    return sess.state === 'typed' ? `Sent to ${s}.` : `Sent to ${s}; it replies here.`;
+  }
   const r = landed ? (last.routed_to === 'responder' ? (typed === 'responder-late' ? 'responder-late' : last.delivered === 'queued' ? 'queued' : 'responder') : null)
     : typed === 'responder' || typed === 'queued' || typed === 'responder-late' ? typed : null;
   if (r) {
@@ -8969,7 +9809,7 @@ function tPins(threads) {
 // owner is starting likewise. Neither counts as seen or unread: a pending turn's clock is the page's.
 // files: those sent with it (kit-171), as threadView gives a turn's.
 const tPendingTurn = (text, at, files) => ({ id: null, by: 'owner', at, text, refs: [], question: null, pending: true, files: files ?? [] });
-const tPendingThread = (id, title, subject, turn) => ({ id, title, subject: subject || null, status: 'open', outcome: null, ready: null, turns: [turn], questions: [], waiting: 'supervisor', created_at: turn.at, resolved_at: null, activity_at: turn.at, first_reply_ms: null, pending: true });
+const tPendingThread = (id, title, subject, turn) => ({ id, title, subject: subject || null, status: 'open', outcome: null, ready: null, turns: [turn], questions: [], waiting: subject?.kind === 'artifact' ? 'owner' : 'supervisor', created_at: turn.at, resolved_at: null, activity_at: turn.at, first_reply_ms: null, pending: true, ...(subject?.kind === 'artifact' ? { check: null, handed: null } : {}) });
 // The threads as the owner's presses will leave them: each pending send's turn on its thread (or
 // its new thread), and a thread resolved or reopened, until the server's threads show it.
 function tOverlay(raw, pend) {
@@ -8978,8 +9818,10 @@ function tOverlay(raw, pend) {
     const id = tPendId(p);
     const t = threads.find((x) => x.id === id);
     // whatever the owner says, resolves or reopens clears a standing proposal, as threadView has it
-    if (p.status) { if (t) Object.assign(t, { status: p.status, ready: null }); continue; }
-    if (t) { if (t.turns.filter((u) => u.by === 'owner' && u.text === p.turn.text).length <= p.had) { t.turns.push(p.turn); t.ready = null; t.waiting = 'supervisor'; } }
+    // a note on an artifact is the owner's move again, nothing handed or to check standing (kit-148)
+    const note = (x) => { x.ready = null; x.check = null; x.handed = null; delete x.with; x.waiting = 'owner'; };
+    if (p.status) { if (t) { Object.assign(t, { status: p.status, ready: null }); if (t.subject?.kind === 'artifact') note(t); } continue; }
+    if (t) { if (t.turns.filter((u) => u.by === 'owner' && u.text === p.turn.text).length <= p.had) { t.turns.push(p.turn); t.ready = null; if (t.subject?.kind === 'artifact') note(t); else t.waiting = 'supervisor'; } }
     else if (p.fresh) threads.push(tPendingThread(id, p.fresh.title, p.fresh.subject, p.turn));
   }
   return threads;
@@ -9016,7 +9858,7 @@ function tLensMessage(e, frameWin, minted) {
   // where watched anchors are now: null is "not found there"; a rect that is no box says nothing
   if (m.type === 'rects') return { type: 'rects', rects: (Array.isArray(m.rects) ? m.rects.slice(0, 200) : []).filter((r) => r && typeof r.key === 'string').flatMap((r) => { const rect = r.rect === null ? null : tBox(r.rect, ['x', 'y', 'w', 'h']); return r.rect === null || rect ? [{ key: r.key, rect, changed: r.changed === true }] : []; }) };
   // a keyup's key message is marked up (kit-141 design-change 1); the field is left out for a keydown's
-  if (m.type === 'key') return { type: 'key', key: m.key === 'Escape' ? 'Escape' : 'Shift', shift: m.shift === true, ...(m.up === true ? { up: true } : {}) };
+  if (m.type === 'key') return { type: 'key', key: m.key === 'Escape' || m.key === 'ArrowLeft' || m.key === 'ArrowRight' ? m.key : 'Shift', shift: m.shift === true, ...(m.up === true ? { up: true } : {}) };
   // ready's hash only when the lens sent one (a page with none says what it said before kit-142)
   if (m.type === 'ready') return { type: 'ready', path: str(m.path, T_CAPS.path + 400), route: str(m.route, T_CAPS.route), title: typeof m.title === 'string' ? tLine(tUncap(m.title), 80) : '', viewport: tBox(m.viewport, ['w', 'h']), ...(typeof m.hash === 'string' ? { hash: hash(m.hash) } : {}) };
   // a move inside the page (a #hash, pushState): where it is now
@@ -9284,7 +10126,7 @@ function tlInboxHome(t) {
   const s = t?.subject;
   if (VIEWER || !s) return false;
   if (s.kind === 'item') return inInbox(tlHome(s));
-  if (s.kind === 'page') { const p = parseHead(String(s.view ?? ''), SHELL_ROUTES); return p.link === undefined && p.state?.th === 'inbox'; }
+  if (s.kind === 'page') { const p = parseHead(String(s.view ?? ''), SHELL_ROUTES); return p.link === undefined && !p.legacy && p.state?.th === 'inbox'; }
   return false;
 }
 // A Settings row's element, as Settings draws it (null when it isn't drawn).
@@ -9373,9 +10215,9 @@ function subjectHead(s) {
   }
   if (s?.kind === 'page') {
     const p = parseHead(String(s.view ?? ''), SHELL_ROUTES);
-    if (p.link === undefined) return headFor(p);
+    if (p.link === undefined && !p.legacy) return headFor(p);
     // a view with a path the table doesn't redirect (#loop/<other>): its page, if it is one
-    return headFor(parseHead(SHELL_ROUTES.pages.includes(p.kind) ? p.kind : p.home, SHELL_ROUTES));
+    return headFor(parseHead(p.legacy ? p.page : SHELL_ROUTES.pages.includes(p.kind) ? p.kind : p.home, SHELL_ROUTES));
   }
   return '#overview';
 }
@@ -9477,7 +10319,10 @@ function tsPins() {
   // none until this page's lens is ready: a point is only where the last page's pin was
   const pins = !tsOn() || !TS.ready ? [] : tPins(TL.threads).filter((g) => tFrameOn(g.subject, TS)).map((g) => {
     const r = tsRect(g.subject);
-    return r && { id: g.ids[g.ids.length - 1], cls: `tl-pin${g.ids.includes(TL.open) ? ' on' : ''}`, left: `${Math.round(r.fx - 11)}px`, top: `${Math.round(r.fy - 11)}px`, label: `Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`, html: `${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}` };
+    // a note with a session has a ring, one to check a check; a pin of several says the one that waits on the owner
+    const states = TL.threads.filter((t) => g.ids.includes(t.id)).map(tNoteState);
+    const note = g.subject.kind !== 'artifact' ? '' : states.includes('check') ? ' check' : states.includes('with') ? ' handed' : '';
+    return r && { id: g.ids[g.ids.length - 1], cls: `tl-pin${g.ids.includes(TL.open) ? ' on' : ''}${note}`, left: `${Math.round(r.fx - 11)}px`, top: `${Math.round(r.fy - 11)}px`, label: `Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`, html: `${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}` };
   }).filter(Boolean);
   // a stage pin pressed or focused is kept through a redraw as a page pin is (tlHeld): the press is
   // recorded for it too (the layer's pointerdown), though it sits on the stage, outside #tl
@@ -9536,7 +10381,10 @@ function tlTurnBody(u, t) {
 // Each turn's files as chips under its words; files sent alone (kit-171 §4) show their chips, not the words the
 // kit recorded for them, pending or posted.
 function tlTurns(t) {
-  return t.turns.map((u) => `<div class="tl-turn ${u.by}"><div class="meta">${u.by === 'owner' ? 'You' : 'The supervisor'} · ${esc(when(u.at))}</div>${tlTurnBody(isFilled(u.text, u.files) ? { ...u, text: '' } : u, t)}${chipsHtml(u.files ?? [])}${u.refs.length ? `<div class="tl-refs">${u.refs.map(tlRef).join('')}</div>` : ''}</div>`).join('');
+  // an owner turn a person on the box gave names them (kit-252); older lines, a laptop and a pending turn say You
+  // a ticket's or planner's turn names its session (kit-109): who()'s words, capitalised
+  const label = (w) => { const n = who(w); return esc(`${n.charAt(0).toUpperCase()}${n.slice(1)}`); };
+  return t.turns.map((u) => `<div class="tl-turn ${u.by}"><div class="meta">${u.by === 'owner' ? (u.person ? esc(u.person.name) : 'You') : typeof u.writer === 'string' && (ticketMap().has(u.writer) || /^plan-[a-z0-9]/.test(u.writer)) ? label(u.writer) : 'The supervisor'} · ${esc(when(u.at))}</div>${tlTurnBody(isFilled(u.text, u.files) ? { ...u, text: '' } : u, t)}${chipsHtml(u.files ?? [])}${u.refs.length ? `<div class="tl-refs">${u.refs.map(tlRef).join('')}</div>` : ''}</div>`).join('');
 }
 // The card's body, redrawn only when what it shows changed and never under the owner's hands (a
 // focused control in its turns, a question card mid-answer), so a pick or a note survives a poll.
@@ -9548,7 +10396,7 @@ function tlCardBody(t) {
   const acts = t ? (t.status === 'resolved' ? '<button type="button" class="ghost" data-tl-reopen>Reopen</button>' : '<button type="button" class="ghost" data-tl-resolve>Resolve</button>') : '';
   if (acts !== TL.acts) { TL.acts = acts; tlEl('tl-c-acts').innerHTML = acts; }
   // the banner or the resolve form, redrawn only when it changes, so a half-typed outcome stays
-  const rk = !t ? '' : TL.resolving ? `form:${t.id}:${t.questions.filter((q) => q.status === 'open').length}` : t.ready ? `ready:${t.id}:${t.ready.at}:${t.questions.filter((q) => q.status === 'open').length}` : '';
+  const rk = !t ? '' : TL.resolving ? `form:${t.id}:${t.questions.filter((q) => q.status === 'open').length}` : t.ready && !(t.check && s?.kind === 'artifact') ? `ready:${t.id}:${t.ready.at}:${t.questions.filter((q) => q.status === 'open').length}` : '';
   if (rk !== TL.readyKey) {
     // a question answered meanwhile changes the warning, never the words being typed or the caret
     const was = tlEl('tl-outcome'), kept = was?.value ?? '', focused = document.activeElement === was, caret = was?.selectionStart ?? 0;
@@ -9556,6 +10404,36 @@ function tlCardBody(t) {
     tlEl('tl-c-ready').innerHTML = !rk ? '' : TL.resolving ? tlResolveForm(t) : tlReady(t);
     const now = tlEl('tl-outcome');
     if (now && kept) { now.value = kept; if (focused) { now.focus(); now.setSelectionRange(caret, caret); } }
+  }
+  // a note on an artifact (kit-145): what there is to check (a session's mark or the supervisor's proposal, as
+  // text), a mark withdrawn, and where the step that opened it landed; redrawn only when it changes. Resolve
+  // sends the mark's time as drawn (TL.drawnAt); a pointer's press counts once it has sat still for a second
+  // (avStep.press): one that swaps in under the pointer isn't accepted by a click meant for the last one.
+  let box0 = document.getElementById('tl-c-note');
+  if (!box0) {
+    box0 = document.createElement('div');
+    box0.id = 'tl-c-note';
+    box0.innerHTML = '<div></div><div></div>';
+    tlEl('tl-c-ready').after(box0);
+  }
+  const check = s?.kind === 'artifact' && !!t && tNoteState(t) === 'check' && !TL.resolving && (t.check === 'addressed' ? t.addressed : t.check === 'ready' ? t.ready : null);
+  const off = avStep.off && avStep.off.id === t?.id && avStep.off.av === AV ? avStep.off : null;
+  const sha = check && t.check === 'addressed' && /^[0-9a-f]{7,64}$/.test(check.sha ?? '') ? ` · ${check.sha.slice(0, 7)}` : '';
+  // each part redrawn on its own, so where a step landed (the page's word) never takes a press from Resolve
+  const draw = (el, html) => { if (el && el.said !== html) { el.said = html; el.innerHTML = html; } };
+  const above = [
+    off?.gone && AV?.at === 'main' && '<div class="tl-nview">Showing main: the version with the change is gone.</div>',
+    t && avStep.unseen(t) && '<div class="tl-nview">Not on this view</div>',
+    t?.unready && s?.kind === 'artifact' && t.status === 'open' && `<div class="tl-wd"><div class="tx">The supervisor withdrew a mark: ${esc(t.unready.reason)}</div></div>`,
+  ].filter(Boolean).join('');
+  draw(box0.children[0], check ? '' : above);
+  // (named by note and mark: another's block is always a new one, never this one under the pointer)
+  draw(box0.children[1], !check ? '' : `<div class="tl-addr" data-for="${esc(`${t.id} ${check.at}`)}"><div class="tl-words"><div class="tl-said"></div><div class="by">${t.check === 'addressed' ? `Addressed by ${esc(check.by)}${sha}` : 'Proposed by the supervisor'}</div><div class="tx">${esc(t.check === 'addressed' ? check.note : check.outcome)}</div>${tlOpenWarn(t)}<div class="tl-pic"></div></div><div class="row-inline">${avShowMe.to(t) ? `<button type="button" class="ghost" data-tl-show="${esc(t.id)}">Show me</button>` : ''}<button type="button" data-tl-accept class="waiting" title="Read it first">Resolve</button></div></div>`);
+  if (check) {
+    draw(box0.querySelector('.tl-said'), above);
+    draw(box0.querySelector('.tl-pic'), tShot(t));
+    (TL.drawnAt ??= {})[t.id] = check.at;
+    avStep.watch();
   }
   // seen only when the owner can see it: a reply landing in a hidden tab still gets its dot
   if (t && document.visibilityState === 'visible') tlSeen(t);
@@ -9572,10 +10450,11 @@ function tlCardBody(t) {
     if (was) tlEl('tl-c-ctx').querySelector('details').open = true;
     turns.innerHTML = t ? tlTurns(t) : '';
     const box = tlEl('tl-c-text');
-    if (box) box.placeholder = t?.turns?.length ? 'Reply' : 'Message';
+    if (box) box.placeholder = check ? 'Not yet? Say what is still wrong' : t?.turns?.length ? 'Reply' : 'Message';
     turns.scrollTop = turns.scrollHeight;
   }
-  const line = !t ? '' : t.status === 'resolved' ? `Resolved${t.outcome ? `: ${t.outcome}` : ''}. Writing reopens it.` : tCardState(t, Date.now(), TL.typed[t.id] === 'held' && !askShown() ? true : TL.typed[t.id], TL.pane) ?? '';
+  const said = !t ? '' : t.status === 'resolved' ? `Resolved${t.outcome ? `: ${t.outcome}` : ''}. Writing reopens it.` : tCardState(t, Date.now(), TL.typed[t.id] === 'held' && !askShown() ? true : TL.typed[t.id], TL.pane) ?? '';
+  const line = said;
   // a live region: written only when the words change, so a poll with the same stage announces nothing
   const state = tlEl('tl-c-state');
   if (state.textContent !== line) state.textContent = line;
@@ -9592,6 +10471,45 @@ function tlPlaceCard(t) {
   const card = tlEl('tl-card');
   // Not under a press: a card that grows near the bottom moves up, and the release would land elsewhere. The next draw places it.
   if (TL.pressed && card.contains(TL.pressed)) return;
+  // nor under the owner's pointer or focus while a page is up (kit-145): it would never rest on a page that moves
+  if (avStep.stays(t, card)) return;
+  // in the window (kit-882): hung from its top, the card is capped by the room down to the window's bottom (8px in);
+  // where its floors need more than that, it rises as far as they need (an 8px margin at the top), and a card standing on
+  // the bottom (the dock, the sheet) grows up as far. A window with the stylesheet's cap of room changes nothing.
+  card.style.maxHeight = '';
+  const fit = () => {
+    const sheet = card.classList.contains('sheet'), dock = card.classList.contains('in-dock'), hung = !sheet && !dock;
+    const low = innerHeight - (sheet ? 0 : dock ? 16 : 8), top = card.getBoundingClientRect().top;
+    if (hung && low - top < parseFloat(getComputedStyle(card).maxHeight)) card.style.maxHeight = `${Math.max(0, low - top)}px`;
+    // past its bottom: the composer's end (the last of it), under the card's own padding and border
+    const box = card.getBoundingClientRect(), cs = getComputedStyle(card), end = card.querySelector(':scope > .tl-compose');
+    const over = end ? end.getBoundingClientRect().bottom + parseFloat(cs.paddingBottom) + parseFloat(cs.borderBottomWidth) - box.bottom : 0;
+    if (!(over > 0.5)) return;
+    const need = Math.min(box.height + over, low - 8);
+    if (hung && box.top + need > low) card.style.top = `${parseFloat(card.style.top) - (box.top + need - low)}px`;
+    card.style.maxHeight = `${Math.ceil(need)}px`;
+  };
+  // what grows once the card is placed (the terminal's ask, drawn after it; a picture loading; a turn) fits it again
+  // where it stands, on the next frame, under the pointer or focus too: a framed page can't make the card grow, and a
+  // control that moved waits out its second before a press counts (kit-145). Its flex items are watched, from each place.
+  TL.fitting ??= typeof ResizeObserver === 'function' ? new ResizeObserver(() => requestAnimationFrame(() => {
+    if (!card.hidden && !card.classList.contains('in-panel') && !(TL.pressed && card.contains(TL.pressed))) fit();
+  })) : null;
+  const watch = () => {
+    if (!TL.fitting) return;
+    TL.fitting.disconnect();
+    for (const e of [card, ...card.querySelectorAll(':scope > *, #tl-c-note > div, .tl-words, .tl-addr > .row-inline')]) TL.fitting.observe(e);
+  };
+  // a note a step opened whose element isn't showing on this view (kit-145): the stage's top right corner
+  if (innerWidth >= 640 && avStep.unseen(t)) {
+    const st = $('av-stage').getBoundingClientRect();
+    card.classList.remove('sheet', 'in-dock', 'in-threads');
+    card.style.left = `${st.right - 8 - (card.offsetWidth || 360) + scrollX}px`;
+    card.style.top = `${st.top + 8 + scrollY}px`;
+    fit();
+    watch();
+    return;
+  }
   // in the panel it is the slot's: nothing to place
   if (card.classList.contains('in-panel')) { card.classList.remove('sheet', 'in-dock', 'in-threads'); card.style.left = ''; card.style.top = ''; return; }
   // a thread whose home is the Inbox tab (kit-100 spec §2.6): fixed, in the window's coordinates, shown over the
@@ -9619,6 +10537,8 @@ function tlPlaceCard(t) {
   card.classList.toggle('in-dock', !p.sheet && !!p.dock);
   card.style.left = p.sheet || p.dock ? '' : `${p.left + (fixed ? 0 : scrollX)}px`;
   card.style.top = p.sheet || p.dock ? '' : `${p.top + (fixed ? 0 : scrollY)}px`;
+  fit();
+  watch();
 }
 // The pins and a floating card placed again where their subjects now are, nothing redrawn: on a scroll of #th-body,
 // the panel's slide ending and a change of tab (kit-100 spec §2.6); a resize redraws the lot.
@@ -9689,7 +10609,7 @@ function tlCard() {
   // one card poll at a time: reads slower than 2 s don't pile up
   if (t && !TL.polling) TL.polling = setInterval(() => { if (document.visibilityState !== 'visible' || !TL.open || TL.polled) return; TL.polled = true; tlRefresh().finally(() => { TL.polled = false; }); }, 2000);
 }
-function tlDraw() { tlMarkRow(); tlCard(); thDraw(); tlPins(); askDraw(); }
+function tlDraw() { tlMarkRow(); tlCard(); thDraw(); tlPins(); avNotes.draw(); askDraw(); }
 // The open thread's Settings row is marked (.tl-marked) while its card is open: Settings draws the mark.
 function tlMarkRow() {
   const t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
@@ -9886,6 +10806,10 @@ function tlSend() {
   const sent = files.length ? { files } : {};
   const p = { thread: t ? t.id : `pending-${++tlFresh}`, real: named ? t.id : null, turn: tPendingTurn(words, new Date().toISOString(), files), had: t ? tHad(t, words) : 0, fresh: t ? null : { title: draft?.title || tLine(text || files[0].name, T_TITLE_MAX), subject: draft?.subject || null }, confirmed: false };
   if (t && !named) p.firstOf = TL.pend.find((x) => x.fresh && tPendId(x) === t.id);
+  // a new note on the artifact shown goes with the frame it was made in (kit-145), within the server's bounds (kit-147)
+  const on = p.fresh?.subject, f = on?.kind === 'artifact' && TS.kind === 'artifact' && TS.slug === on.slug && TS.at === on.at && TS.path === (on.path || 'index.html').split('#')[0] ? tsFrame() : null;
+  const within = (n, lo, hi) => Math.min(hi, Math.max(lo, Math.round(n)));
+  const frame = f ? { frame: { w: within(f.clientWidth, 320, 3840), h: within(f.clientHeight, 240, 2160), hash: TS.hash ?? '' } } : {};
   let taken = null;
   press(`tl:${p.thread}`, {
     build: () => {
@@ -9893,7 +10817,7 @@ function tlSend() {
       // the first words were refused, so there is no thread to say this into
       if (!id && p.firstOf) throw new Error("the thread wasn't started (its first words weren't saved), so this wasn't sent either");
       if (id) { p.real = id; return { action: resolved ? 'thread-reopen' : 'thread-say', body: { id, text, ...sent } }; }
-      return { action: 'thread-new', body: { title: p.fresh.title, subject: p.fresh.subject || undefined, text, ...sent } };
+      return { action: 'thread-new', body: { title: p.fresh.title, subject: p.fresh.subject || undefined, text, ...frame, ...sent } };
     },
     apply: () => {
       TL.pend.push(p);
@@ -9933,7 +10857,8 @@ function tlSend() {
       if (!p.real) p.real = String(out.out || '').split('\n')[0].trim();
       // files dropped while the thread was being started go on with it, under its id (the box's key too)
       if (p.real && p.real !== p.thread) moveAttach(`tl:${p.thread}`, `tl:${p.real}`);
-      TL.typed[p.real] = /(^|\n)(recorded and held: the responder's|not delivered to the responder)/.test(out.out || '') ? 'responder-late' : /(^|\n)sent to the responder/.test(out.out || '') ? 'responder' : /(^|\n)the responder is busy/.test(out.out || '') ? 'queued' : /(^|\n)recorded and held/.test(out.out || '') ? 'held' : /supervisor's pane/.test(out.out || '');
+      // a session's (kit-109) first: sent to, held, or not typed, naming it; one expression, as kit-104's reads it
+      TL.typed[p.real] = ((said, m) => ((m = /(^|\n)sent to ((?:the agent on|the planner for) [^\n]+)/.exec(said)) ? { session: 'typed', who: m[2] } : (m = /(^|\n)recorded and held: [^\n]*?((?:the agent on|the planner for) [^\n]*?)'s terminal/.exec(said)) ? { session: 'held', who: m[2] } : (m = /(^|\n)not delivered: ((?:the agent on|the planner for) [^\n]*?)'s terminal didn't take it/.exec(said)) ? { session: 'missed', who: m[2] } : null))(String(out.out || '')) ?? (/(^|\n)(recorded and held: the responder's|not delivered to the responder)/.test(out.out || '') ? 'responder-late' : /(^|\n)sent to the responder/.test(out.out || '') ? 'responder' : /(^|\n)the responder is busy/.test(out.out || '') ? 'queued' : /(^|\n)recorded and held/.test(out.out || '') ? 'held' : /supervisor's pane/.test(out.out || ''));
       if (TL.open === p.thread && p.real !== p.thread) {
         TL.open = p.real;
         // the card is this thread's under its id now, as it is: words typed since Send (kept under the pending
@@ -9974,7 +10899,9 @@ document.addEventListener('click', (e) => {
   if (e.target.closest('[data-tl-resolve]')) { TL.resolving = true; return void tlDraw(); }
   if (e.target.closest('[data-tl-resolve-cancel]')) { TL.resolving = false; return void tlDraw(); }
   if (t && e.target.closest('[data-tl-resolve-go]')) return void tlAct('thread-resolve', { id: t.id, outcome: tlEl('tl-outcome')?.value.trim() || undefined });
-  if (t && e.target.closest('[data-tl-accept]')) return void tlAct('thread-accept', { id: t.id, at: t.ready?.at });
+  const accept = t && e.target.closest('[data-tl-accept]');
+  if (accept && accept.closest('.tl-addr')) return void tlAct(t.check === 'addressed' ? 'thread-accept-addressed' : 'thread-accept', { id: t.id, at: TL.drawnAt[t.id] });
+  if (accept) return void tlAct('thread-accept', { id: t.id, at: t.ready?.at });
   if (t && e.target.closest('[data-tl-notyet]')) return void tlAct('thread-say', { id: t.id, text: 'Not yet' });
   if (t && e.target.closest('[data-tl-reopen]')) return void tlAct('thread-reopen', { id: t.id });
   const pin = e.target.closest('[data-tl-pin]');
@@ -10070,9 +10997,9 @@ const TH_TITLES = { supervisor: "The supervisor's terminal: the follow-on goal",
 // An open thread's one state, by kit-84's rule (the hub's threads: { you, waiting, ready }), so the button
 // here and the hub's tab agree: ready to accept, else your move (the supervisor spoke last, or no turns),
 // else waiting on the supervisor. The owner's pending presses are laid over TL.threads, so a send moves it.
-const tState = (t) => (t.ready ? 'ready' : t.waiting === 'owner' ? 'you' : 'wait');
+const tState = (t) => (t.ready || tNoteState(t) === 'check' ? 'ready' : t.waiting === 'owner' ? 'you' : t.waiting === 'session' ? 'with' : 'wait');
 function tCounts(threads) {
-  const c = { open: 0, you: 0, ready: 0, wait: 0 };
+  const c = { open: 0, you: 0, ready: 0, wait: 0, with: 0 };
   for (const t of threads) if (t.status === 'open') { c.open++; c[tState(t)]++; }
   return c;
 }
@@ -10080,10 +11007,10 @@ function tCounts(threads) {
 function tButton(c) {
   if (c.ready) { const w = `${c.ready} ready to accept${c.you ? `, ${c.you} your move` : ''}`; return { cls: 'ok', n: c.ready + c.you, title: w, label: w }; }
   if (c.you) { const w = `${c.you} your move`; return { cls: 'you', n: c.you, title: w, label: w }; }
-  if (c.open) { const w = `${c.open} waiting on the supervisor`; return { cls: 'wait', n: c.open, title: w, label: w }; }
+  if (c.wait) { const w = `${c.wait} waiting on the supervisor`; return { cls: 'wait', n: c.wait, title: w, label: w }; }
   return { cls: null, n: 0, title: '', label: '' };
 }
-const TH_MARK = { ready: ['ok', 'Ready to accept'], you: ['you', 'Your move'], wait: ['wait', 'Waiting on the supervisor'] };
+const TH_MARK = { ready: ['ok', 'Ready to accept'], you: ['you', 'Your move'], wait: ['wait', 'Waiting on the supervisor'], with: ['with', 'With a session'] };
 // The time since a thread's last activity, short.
 function thAgo(iso) {
   const m = Math.floor((Date.now() - Date.parse(iso)) / 60000);
@@ -10096,14 +11023,19 @@ const thGone = (t) => (t.subject?.kind === 'item' && !tlHome(t.subject)) || tlRo
 // subject is drawn), the time since, and its title. No line under it (spec §2.3).
 function thRow(t, nums) {
   const st = t.status === 'open' ? tState(t) : null;
-  const [cls, words] = st ? TH_MARK[st] : [];
+  const [cls, mw] = st ? TH_MARK[st] : [];
+  const note = t.subject?.kind === 'artifact' && typeof tNoteState === 'function' ? tNoteState(t) : null;
+  const wth = t.with ?? t.handed?.to;
+  const words = st === 'with' && wth ? `With ${wth}` : mw;
   const mark = !st ? '' : st === 'ready' ? `<i class="th-st ok icon-check" role="img" aria-label="${words}" title="${words}"></i>` : `<span class="th-st ${cls}" role="img" aria-label="${words}" title="${words}"></span>`;
   const gone = thGone(t);
   const n = st && !gone ? nums.get(t.id) : null;
   // a thread the supervisor started (kit-108) says so first
-  const where = [t.started_by === 'supervisor' ? 'From the supervisor' : '', t.subject ? `${tWhere(t.subject)}${gone ? ' · subject gone' : ''}` : ''].filter(Boolean).join(' · ');
+  const where = [t.started_by === 'supervisor' ? 'From the supervisor' : '', t.subject ? `${tWhere(t.subject)}${gone ? ' · subject gone' : ''}` : '', note === 'open' ? 'Open · not handed over yet' : note === 'with' && wth ? `With ${wth}` : ''].filter(Boolean).join(' · ');
   const on = TL.open === t.id;
-  return `<li><button type="button" class="th-row${st ? ` st-${st}` : ''}${on ? ' on' : ''}" data-tl-open="${esc(t.id)}"${on ? ' aria-current="true"' : ''}>${mark}<span class="th-s">${n ? `<span class="pinchip">${n}</span>` : ''}<span class="th-where">${esc(where)}</span></span><span class="th-tm">${esc(thAgo(t.activity_at))}</span><span class="th-w">${esc(t.title)}</span></button></li>`;
+  // a note on an artifact to check (kit-145): what it waits for, its picture and Show me, beside the row's button
+  const toCheck = t.subject?.kind === 'artifact' && tNoteState(t) === 'check' ? `<div class="th-check"><span class="badge">to check</span><span class="grow"></span>${tShot(t, true)}${avShowMe.to(t) ? `<button type="button" class="ghost" data-tl-show="${esc(t.id)}">Show me</button>` : ''}</div>` : '';
+  return `<li><button type="button" class="th-row${st ? ` st-${st}` : ''}${on ? ' on' : ''}" data-tl-open="${esc(t.id)}"${on ? ' aria-current="true"' : ''}>${mark}<span class="th-s">${n ? `<span class="pinchip">${n}</span>` : ''}<span class="th-where">${esc(where)}</span></span><span class="th-tm">${esc(thAgo(t.activity_at))}</span><span class="th-w">${esc(t.title)}</span></button>${toCheck}</li>`;
 }
 // The Threads pane: what the terminal asks (#ask-threads, askDraw's), Open / Resolved, then the list: every
 // open thread, newest activity first, or the last 50 resolved, newest first.
@@ -10186,7 +11118,7 @@ bindTabBar($('th-tabs'), { onSelect: (id) => { thSync(); if (id !== (TH.th === '
 // talk/) the page head under it, history.state.page.
 function thHead() {
   const p = parseHead(location.hash, SHELL_ROUTES);
-  if (p.link === undefined) return headFor(p);
+  if (p.link === undefined && !p.legacy) return headFor(p);
   return typeof history.state?.page === 'string' ? history.state.page : '#overview';
 }
 // TH as the page head in force has it. A head thGo writes (a card's ×: a new entry) is in force at once, but routed
@@ -10225,7 +11157,8 @@ function thGo({ th = null, t, focus = false } = {}) {
   if (t) state.t = t;
   const next = headFor({ page: p.page, state });
   if (next === head) return void thRoute();
-  if (parseHead(location.hash, SHELL_ROUTES).link !== undefined) {
+  const at = parseHead(location.hash, SHELL_ROUTES);
+  if (at.link !== undefined || at.legacy) {
     // under a talk/ head a change of t replaces the talk/ entry with the page head (stamped): one card, one thread
     if (location.hash.startsWith('#talk/') && (t || null) !== (p.state.t || null)) return void goHead(next, { replace: true });
     history.replaceState(withPage(history.state, next), '', location.href);
@@ -10254,7 +11187,8 @@ const thReady = () => TL.have > 0 && !!DATA;
 // The page head in force changed in place, stamped: the entry's own head (hash and stamp), or under a link head
 // the page under it (withPage), the link left as it is.
 function thReplace(next) {
-  if (parseHead(location.hash, SHELL_ROUTES).link === undefined) history.replaceState(withPage(history.state, next), '', next);
+  const at = parseHead(location.hash, SHELL_ROUTES);
+  if (at.link === undefined && !at.legacy) history.replaceState(withPage(history.state, next), '', next);
   else history.replaceState(withPage(history.state, next), '');
   HERE = history.state;
 }
@@ -10267,7 +11201,7 @@ function thUnknown(t) {
 function thDecide() {
   const head = thHead();
   const p = parseHead(head, SHELL_ROUTES);
-  if (p.link !== undefined) return;
+  if (p.link !== undefined || p.legacy) return;
   const s = { ...p.state };
   // bad values (the block's parseHead keeps any): th open or resolved, t a thread id
   if (s.th !== undefined && !TH_LISTS.includes(s.th)) delete s.th;
@@ -10306,7 +11240,7 @@ function thRemember() {
   if (VIEWER) return;
   const head = thHead();
   const p = parseHead(head, SHELL_ROUTES);
-  if (p.link !== undefined || p.state.th !== undefined || p.state.t !== undefined) return;
+  if (p.link !== undefined || p.legacy || p.state.th !== undefined || p.state.t !== undefined) return;
   const v = thStored();
   if (v) thReplace(headFor({ page: p.page, state: { ...p.state, ...v } }));
 }
@@ -10315,7 +11249,7 @@ function thRemember() {
 // A page head without its t.
 function thWithout(head) {
   const p = parseHead(head, SHELL_ROUTES);
-  if (p.link !== undefined || p.state.t === undefined) return head;
+  if (p.link !== undefined || p.legacy || p.state.t === undefined) return head;
   const s = { ...p.state };
   delete s.t;
   return headFor({ page: p.page, state: s });
@@ -10329,7 +11263,7 @@ function thFreshness() {
 function thCarry(page) {
   const head = thHead();
   const p = parseHead(head, SHELL_ROUTES), c = parseHead(page, SHELL_ROUTES);
-  if (p.link !== undefined || c.link !== undefined || p.page !== c.page) return;
+  if (p.link !== undefined || p.legacy || c.link !== undefined || c.legacy || p.page !== c.page) return;
   const s = { ...p.state };
   delete s.th;
   delete s.t;
@@ -10505,7 +11439,7 @@ function tlAct(action, body) {
   const err = tlEl('e-tl');
   const t = TL.threads.find((x) => x.id === body.id);
   // Not yet is a turn like any other; resolve, accept and reopen change the thread's status
-  const status = { 'thread-resolve': 'resolved', 'thread-accept': 'resolved', 'thread-reopen': 'open' }[action] ?? null;
+  const status = { 'thread-resolve': 'resolved', 'thread-accept': 'resolved', 'thread-accept-addressed': 'resolved', 'thread-reopen': 'open' }[action] ?? null;
   const p = status ? { thread: body.id, real: body.id, status, confirmed: false } : { thread: body.id, real: body.id, turn: tPendingTurn(body.text, new Date().toISOString()), had: t ? tHad(t, body.text) : 0, confirmed: false };
   const wasOpen = TL.open;
   // a thread still being started has no name to act on yet
@@ -10529,6 +11463,8 @@ function tlAct(action, body) {
     },
     undo: () => { TL.pend = TL.pend.filter((x) => x !== p); if (status === 'resolved') TL.open = wasOpen; tlRelay(); tlDraw(); },
     onOk: () => { p.confirmed = true; tlRefresh(); },
+    // refused (the note changed): read again, so the card shows the note as it is now; the words stay
+    restore: () => { if (action.startsWith('thread-accept')) tlRefresh(); },
     errId: 'tl',
   });
 }
@@ -10673,7 +11609,7 @@ window.addEventListener('message', (e) => {
   // and once it has, what it watches for the pins is asked of it afresh. Once a load (the frame's
   // load lets it go): a page that says ready again and again would otherwise have every one redraw
   // and ask its lens to watch again, and a loop of them would hold the owner's tab.
-  if (m.type === 'ready') { if (TS.ready) return; TS.ready = true; if (TS.kind === 'artifact') { TS.path = tArtPath(m.path, TS.slug); TS.hash = m.hash ?? ''; } TS.watch = ''; tsDrawSoon(); return; }
+  if (m.type === 'ready') { if (TS.ready) return; TS.ready = true; if (TS.kind === 'artifact') { TS.path = tArtPath(m.path, TS.slug); TS.hash = m.hash ?? ''; } TS.watch = ''; tsDrawSoon(); avStep.land('ready'); return; }
   // a move inside an artifact's page (a #hash, pushState) after its ready (one before it, a redirect
   // while it loads, is dropped: ready gives the page): another view, so another set of pins, asked of
   // the lens afresh. Taken only when it changes something, drawn once a frame, so a page saying moves
@@ -10684,6 +11620,7 @@ window.addEventListener('message', (e) => {
     const path = tArtPath(m.path, TS.slug);
     if (path === TS.path && m.hash === TS.hash) return;
     AV_NAVS++; TS.path = path; TS.hash = m.hash; TS.rects.clear(); TS.watch = ''; tsDrawSoon();
+    avStep.land('nav');
     return;
   }
   // where each watched anchor is now, for only the anchors asked about (a Set: no key a page makes
@@ -10707,11 +11644,17 @@ window.addEventListener('message', (e) => {
     if (document.activeElement !== tsFrame()) return;
     if (m.key === 'Escape') {
       if (m.up) return;
+      // the picture over the stage first, and only it (kit-145)
+      if (tShot.close()) return;
       if (TL.pin) tlPinMode(false);
       else if (TS.raised || tlShowing()) {}
       else if (AV_FRAME_ESC) {}
       else if (tlFloating()) tlClose();
       else { AV_FRAME_ESC = true; leaveArtifact(); }
+    } else if (m.key === 'ArrowLeft' || m.key === 'ArrowRight') {
+      // the stepper's keys, told by the lens with nothing of the page focused (kit-145); a page that fakes
+      // one can only step its own viewer's card
+      if (!m.up && TS.kind === 'artifact') avStep.soon(m.key === 'ArrowLeft' ? -1 : 1);
     } else if (m.shift) tsRaise(true);
     return;
   }

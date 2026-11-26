@@ -83,7 +83,11 @@ const POLL_FAST = `(() => { const si = window.setInterval; window.setInterval = 
 //   filter one case remembered never adds th or t to a later case's head (spec-1 F1-7);
 // - history.back, history.go and history.replaceState counted, each replace with whether
 //   leaveArtifact is on its stack (a close by replace, not the router's own stamps);
-// - what the frames' pages say (their { own: 'at' } messages: which page, its hash, where its elements are);
+// - what the frames' pages say (their { own: 'at' } messages: which page, its hash, where its elements are),
+//   each with the dashboard's iframe it came from (window.__ownFrom: the one whose window sent it or holds the
+//   window that did, as a preview's app sits inside its lens), so an aim reads only the stage's (kit-928); a
+//   case may hold words back (window.__ownHold, a test on the word) and let them go, as they came, later
+//   (window.__ownLetGo());
 // - every key message a lens sends (window.__lensKeys: its key, shift and up, as the lens sent them);
 // - every iframe's load, by id (load doesn't bubble, so a capture listener on the document: one on the
 //   element would be lost when the element is replaced).
@@ -96,7 +100,13 @@ const WATCH = `(() => {
   H.go = function (n) { window.__gos.push(n); return go.call(this, n); };
   H.replaceState = function (s, t, u) { window.__replaces.push({ url: u === undefined ? null : String(u), page: s && s.page, leave: /leaveArtifact/.test(String(new Error().stack)) }); return rep.apply(this, arguments); };
   window.__own = [];
-  addEventListener('message', (e) => { if (e.data && e.data.own) window.__own.push(e.data); });
+  window.__ownFrom = new WeakMap();
+  window.__ownHold = null;
+  window.__ownHeld = [];
+  const frameOf = (w) => { for (let i = 0; w && i < 8; i++) { const f = [...document.querySelectorAll('iframe')].find((f) => f.contentWindow === w); if (f) return f; if (w === w.parent) return null; w = w.parent; } return null; };
+  const word = (e) => { window.__own.push(e.data); const f = frameOf(e.source); if (f) window.__ownFrom.set(e.data, f); };
+  window.__ownLetGo = () => { const h = window.__ownHeld; window.__ownHold = null; window.__ownHeld = []; h.forEach(word); return h.length; };
+  addEventListener('message', (e) => { if (!e.data || !e.data.own) return; if (window.__ownHold && window.__ownHold(e.data)) { window.__ownHeld.push(e); return; } word(e); });
   window.__lensKeys = [];
   addEventListener('message', (e) => { const m = e.data; if (m && m.lens === 1 && m.type === 'key') window.__lensKeys.push({ key: m.key, shift: m.shift, ...('up' in m ? { up: m.up } : {}) }); });
   window.__loads = [];
@@ -117,6 +127,26 @@ export const VIEWER_UP = `(!${VIEW}.hidden && document.body.classList.contains('
 export const CLOSED = `(() => { const v = ${VIEW}; return !!v && v.hidden && !document.body.classList.contains('av-open') && !['av-frame', 'pv-frame'].some((id) => document.getElementById(id)?.hasAttribute('src')); })()`;
 // a peek open and at rest (not sliding: a press on its X mid-slide is the slide's, not the X's)
 export const PEEK = "(!document.getElementById('drawer').hidden && document.body.classList.contains('peek-open') && getComputedStyle(document.getElementById('drawer')).transform === 'none')";
+// Where #id is on the page now on the stage, at the stage's frame: read only from the words the stage's own
+// frame said (never a thumbnail's or another frame's) since it last named another page or hash than the
+// one the stage is on now (TS: an artifact's path and hash, a preview's route); null until that page says
+// where #id is (kit-928: run 45684113340 aimed at a Library thumbnail's #to-b). STAGE names that page.
+const STAGE = "(TS.kind === 'preview' ? `${TS.name} ${TS.route}` : `${TS.slug}/${TS.path}${TS.hash}`)";
+export const AIM = (id) => `(() => {
+  const f = tsFrame(), want = TS.kind === 'preview' ? TS.route : TS.path && '/' + TS.path, hash = TS.kind === 'preview' ? null : TS.hash;
+  if (!f || !want) return null;
+  const mine = window.__own.filter((m) => m.own === 'at' && m.rects && window.__ownFrom.get(m) === f);
+  for (let i = mine.length - 1; i >= 0; i--) {
+    const m = mine[i];
+    // a word naming another page or hash ends the run: what came before it is an earlier visit's
+    if (typeof m.page !== 'string' || !m.page.endsWith(want) || (hash !== null && m.hash !== hash)) return null;
+    const e = m.rects[${J(id)}];
+    if (!e || !(e.w > 0)) continue;
+    const r = f.getBoundingClientRect(), x = r.left + f.clientLeft + e.x + e.w / 2, y = r.top + f.clientTop + e.y + e.h / 2, hit = document.elementFromPoint(x, y);
+    return { x, y, hit: hit === f, on: hit ? hit.id || hit.className || hit.tagName : null, page: m.page + m.hash };
+  }
+  return null;
+})()`;
 // True once the stage's frame's box reads the same twice running (soon's polls are 50 ms apart).
 const STEADY = "(() => { const r = tsFrame().getBoundingClientRect(), k = [r.left, r.top, r.width, r.height].join(); const was = window.__steady; window.__steady = k; return was === k; })()";
 export const CARD = "document.getElementById('tl-card')";
@@ -131,6 +161,43 @@ const STATE = `(() => { const v = ${VIEW}; return {
   length: history.length, state: history.state, backs: window.__backs, gos: window.__gos,
   leaveReplaces: (window.__replaces || []).filter((r) => r.leave).length,
   slug: typeof TS === 'object' ? TS.slug : null, kind: typeof TS === 'object' ? TS.kind : null } })()`;
+
+// A case's tab closed, and seen gone (kit-918). Page.close runs the page's beforeunload, and the
+// dashboard's asks while a press is saving (SAVING > 0): a dialog nobody answers holds the tab, and the
+// renderer it shares with the next one. So the close first waits, up to saving ms, until nothing is
+// saving. Page.close answers at once, even when that dialog then opens, so the tab is gone only once its
+// socket closes: it is called until then. Still answering after gone ms, it never went; a call with no
+// answer (a dialog holds it) fails the caller with what chrome.mjs says Chrome was doing.
+export async function closeTab(p, { saving = 10000, gone = 5000 } = {}) {
+  const closed = (e) => /: Chrome's page connection closed /.test(e.message);
+  const fail = (e, after = '') => { throw new Error(`closing the tab: ${after}${e.message}`, { cause: e }); };
+  const pause = () => new Promise((r) => setTimeout(r, 50));
+  try {
+    const end = Date.now() + saving;
+    for (;;) {
+      // a page that can't say (not the dashboard, or its evaluation threw) has nothing saving; one that gives no answer fails here
+      const n = await p.ev("typeof SAVING === 'number' ? SAVING : 0").catch((e) => (/: no answer from Chrome /.test(e.message) ? fail(e) : 0));
+      if (!n) break;
+      if (Date.now() > end) assert.fail(`closing the tab: the page still saving (SAVING ${n}) after ${saving / 1000} s; closing it would open its beforeunload dialog`);
+      await pause();
+    }
+    if (await p.send('Page.close').then(() => false, (e) => closed(e) || fail(e))) return;
+    const by = Date.now() + gone;
+    for (;;) {
+      if (await p.send('Runtime.evaluate', { expression: '1' }).then(() => false, (e) => closed(e) || fail(e, 'still open after Page.close; '))) return;
+      if (Date.now() > by) assert.fail(`closing the tab: still open ${gone / 1000} s after Page.close`);
+      await pause();
+    }
+  } finally { p.close(); }
+}
+
+// One tab at a time on chrome: next() closes the last one (closeTab) and opens a new one; done()
+// closes the last. The last is let go before its close, so a close that fails isn't tried again.
+export function oneTab(chrome) {
+  let tab = null;
+  const done = async () => { if (!tab) return; const last = tab; tab = null; await closeTab(last); };
+  return { done, next: async () => { await done(); tab = await chrome.newPage(); return tab; } };
+}
 
 // The fixture's artifacts on main, as the supervisor lands one, with an HTML file of the project's
 // (docs/drawer-page.html, for the file drawer's frame; T4's).
@@ -186,13 +253,11 @@ export async function harness(t, fixture) {
   const LIB_T = `#library?th=open&t=${T}`, PROG_T = `#progress?th=open&t=${T}`;
 
   // A tab of its own for a case (the last one's closed), at 1280x800, on the dashboard at hash.
-  let tab = null;
-  later(async () => { if (tab) { await tab.send('Page.close').catch(() => {}); tab.close(); } });
+  const tabs = oneTab(chrome);
+  later(() => tabs.done());
   // (a viewer tab, opts.path 'view/artifact/viewer-a', is ready when the page says it is the viewer and has read its threads)
   async function visit(hash, { path = '', width = 1280, height = 800 } = {}) {
-    if (tab) { await tab.send('Page.close').catch(() => {}); tab.close(); tab = null; }
-    const p = await chrome.newPage();
-    tab = p;
+    const p = await tabs.next();
     // the tab in front: a hidden one draws nothing, and the mouse is hit-tested against what it drew
     await p.send('Page.bringToFront');
     await p.send('Page.enable');
@@ -251,9 +316,10 @@ export async function harness(t, fixture) {
     V.frameClick = async (id, next, { hash = null, load = true } = {}) => {
       // the frame's box read the same twice running: the bar above it can still be settling
       await soon(STEADY, "setup: the stage's frame at rest");
-      await soon(`window.__own.some((m) => m.own === 'at' && m.rects && m.rects[${J(id)}] && m.rects[${J(id)}].w > 0)`, `setup: the page on the stage says where #${id} is`);
-      const at = await p.ev(`(() => { const m = window.__own.filter((m) => m.own === 'at' && m.rects && m.rects[${J(id)}] && m.rects[${J(id)}].w > 0).pop(); if (!m) return null; const f = tsFrame(), r = f.getBoundingClientRect(), e = m.rects[${J(id)}]; const x = r.left + f.clientLeft + e.x + e.w / 2, y = r.top + f.clientTop + e.y + e.h / 2, hit = document.elementFromPoint(x, y); return { x, y, hit: hit === f, on: hit ? hit.id || hit.className || hit.tagName : null }; })()`);
-      assert.ok(at, `setup: the page on the stage never said where #${id} is`);
+      // the page now on the stage, by its own frame's word (a moved stage: the new page's, once it says it)
+      if (!(await settle(`${AIM(id)} !== null`, 20000))) assert.fail(`setup: the page on the stage (${await p.ev(STAGE).catch(() => '?')}) never said where #${id} is`);
+      const at = await p.ev(AIM(id));
+      assert.ok(at, `setup: the page on the stage (${await p.ev(STAGE).catch(() => '?')}) no longer says where #${id} is`);
       assert.ok(at.hit, `setup: the point at #${id} is not on the stage's frame (it is on ${at.on})`);
       const n = await V.mark(), loads = await p.ev('window.__loads.length');
       // drawn first and the mouse moved there; a press the frame never acted on (no word from the page it

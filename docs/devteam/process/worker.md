@@ -77,7 +77,7 @@ Phases: `spec`, `plan`, `contract`, `build`, `verify`, `final-review`, `awaiting
 
 ## 6. Gates and observations
 
-Run every gate through the recorder, so slow and flaky tests show up: `devteam.mjs gate test --junit reports/junit.xml -- pnpm test`. It passes the command's exit status through.
+Run every gate through the recorder, so slow and flaky tests show up: `devteam.mjs gate test --junit reports/junit.xml -- pnpm test`. It passes the command's exit status through. When a gate waits on CI, give it a slow poll: `gh run watch <id> --exit-status --interval 60`. gh's default asks every 3 seconds, about 60 calls a minute, so one or two watchers use up the 5,000 calls an hour that every session on the machine's login shares.
 
 Record what is worth knowing beyond your ticket as an observation: a slow or flaky test, a confusing contract, a tool that kept failing, something that went well and should be repeated.
 
@@ -105,6 +105,20 @@ The supervisor turns recurring observations into lessons, and accepted lessons r
 4. Read the answer. `devteam.mjs review result <qid> --json` (exit 1 unless every hash verifies; `--tsv` for rows). A draft (`review draft <qid>`) is partial progress, never an answer. A page sent back comes with the owner's reason; redraw it and ask again.
 5. Apply exactly it. Apply the rows as the owner decided them, no more and no fewer, write what you applied as `[{ "id", "values", "evidence" }]`, and `devteam.mjs review verify <qid> --applied <file>` must exit 0.
 6. Commit it. `devteam.mjs review result <qid> --commit` copies the owner's result into your ticket folder (`questions/<qid>/result.json`) after both hashes verify, and prints the `git add`. Commit it with the work that applied it. `check-pr` refuses a result whose bytes are not the owner's, and any change to a page, data or schema a question pinned, so never edit any of them by hand.
+
+### Threads bound to you
+
+A thread about your ticket (its subject is `ticket:<your id>`, or a preview you offered) is bound to you. While you are at work, the owner's turns there are typed into your pane as `[devteam thread <t-id> from owner on …]`, and reach no one else. A thread about an artifact drawn in your worktree is bound to you only for replying and handing over: its owner turns are never typed into your pane, and go where the owner hands them.
+
+- Reply first, with `devteam.mjs thread reply <t-id> "…"`, to the turns routed to you; the reply prints the turns it answers (`answering <u-id>: "…"`), so read each one (`thread show <t-id>`). Add `--pending` when work follows, and follow it up with `--re <that reply's u-id>`.
+- Write in plain words, as to a person: no commands, flags or ids except as `--refs <type>:<id>` (`--refs ticket:<id>`, `--refs act:a-…`).
+- Stay within your ticket. The owner's words there are their request about your work; they bind beyond it only through the supervisor, which records them (`thread ask --turn`).
+- Hand over anything else (a question for the owner, a decision, a merge, a change to your ticket) with `devteam.mjs send supervisor "…" --kind handoff --thread <t-id>`, then reply "Passed to the supervisor: …". The handoff stays open until the supervisor answers it in the thread; say more there with `thread reply`, or send another handoff, never `--re` it.
+- Once the supervisor has answered in the thread, reply again only to say something new, with `--anyway`.
+- A turn routed to you with no reply for 5 minutes, or a `--pending` reply with nothing after it for 10, raises `session-overdue`, and your threads go to the responder or the supervisor until each is answered.
+- You reply only in threads bound to you: anywhere else `thread reply` refuses ("this thread isn't about your work"), so send the supervisor what you have instead.
+
+**Artifact notes handed to you.** The owner hands notes on an artifact you draw to you as an `info` message from the owner. Read them with the `artifact notes` command it names, which also prints the files the owner dropped (each kept 7 days; a file gone by then is asked for again through the supervisor), change the draft, commit, and mark each note with `devteam.mjs artifact addressed <t-id> --note "<what changed>"`. A mark says what changed for that note ("the Start trial button is primary"), never "done" or "see the artifact". Look at the picture it prints before going on; if it doesn't show the change, fix the page and mark the note again. A mark the supervisor has withdrawn arrives as a message: fix the change and mark the note again. `thread list --with <your id>` lists the notes you still have.
 
 ## 8. Finishing
 

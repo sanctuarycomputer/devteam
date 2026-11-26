@@ -67,7 +67,7 @@ test('artifact-notes-contract: the schema, the fake, and what log-check refuses'
       }
       assert.ok(ms.properties.kind.enum.includes('addressed'), 'message.kind takes addressed');
       assert.match(ms.properties.kind.description, /artifact-notes-1[^.]*addressed[^.]*no reply/, 'the kind says an addressed message awaits no reply');
-      assert.deepEqual(SCHEMA['x-authority'].set.thread, { owner: ['status', 'outcome', 'handed'], supervisor: ['ready', 'shot', 'noshot', 'unready'] });
+      assert.deepEqual(SCHEMA['x-authority'].set.thread, { owner: ['status', 'outcome', 'handed', 'person'], supervisor: ['ready', 'shot', 'noshot', 'unready'] });
       assert.deepEqual(th.properties.shot, ms.properties.shot, 'the two copies of shot are the same');
       for (const k of ['handed', 'shot', 'noshot', 'unready']) assert.ok(th['x-set-only'].includes(k), `thread.${k} is set-only`);
       assert.ok(!th['x-set-only'].includes('frame'), 'frame is on the new line');
@@ -174,7 +174,7 @@ test('artifact-notes-contract A4: /api/threads carries the note fields, with no 
       const e = expected(f);
       const v = threads.find((x) => x.id === e.thread);
       assert.ok(v, `${f}: /api/threads lists ${e.thread}`);
-      noteFieldsEqual(v, { ...(e.api ?? e.view), addressed: null }, `${f} (api)`);
+      noteFieldsEqual(v, e.view, `${f} (api)`);
       assert.equal(v.source, null, `${f}: source`);
     }
   } finally { if (dash) await dash.stop(); F.done(); }
@@ -252,7 +252,7 @@ test('artifact-notes-contract A5: supervisor.md states the contract, and every e
   const end = heads[k + 2]?.at ?? doc.length;
   assert.equal(heads[k + 2]?.level, 2, 'and is the last part of its section');
   const sec = doc.slice(heads[k + 1].at, end);
-  for (const s of ['- `handed` `{to, at}`', '- `addressed` `{by, at, note, sha, draft}`', '- `check`:', '- `shot`:', '`noshot` is `\'no-change\'`', '- `unready` `{at, reason}`', '- `frame` `{w, h, hash}`', '- `source`:', "'owner'", "'supervisor'", "'session'", '`with` names `handed.to`', 'last word', '/shot/<t-id>/<stamp>-<light|dark>.png', 'is a 404', 'frame {w, h, hash}', 'thread-new', 'artifact-handoff {slug, at}', '{to, typed, count}', 'thread-accept-addressed {id, at}', 'The note changed; read it again', 'artifact notes <slug> --json'])
+  for (const s of ['- `handed` `{to, at}`', '- `addressed` `{by, at, note, sha, draft}`', '- `check`:', '- `shot`:', '`noshot` is `\'no-change\'`', '- `unready` `{at, reason}`', '- `frame` `{w, h, hash}`', '- `source`:', "'owner'", "'supervisor'", "'session'", '`with` names `handed.to`', 'last word', '/api/shot/<t-id>/<stamp>-<light|dark>.png', 'is a 404', 'frame {w, h, hash}', 'thread-new', 'artifact-handoff {slug, at}', '{to, typed, count}', 'thread-accept-addressed {id, at}', 'The note changed; read it again', 'artifact notes <slug> --json'])
     assert.ok(sec.includes(s), `the section names ${s}`);
   assert.match(sec, /^resolved; to check; with <session>; open$/m, 'the state order, as one line');
   assert.match(sec, /kit-144[^.]*kit-147[^.]*release|release[^.]*kit-144[^.]*kit-147/, 'the release rule');

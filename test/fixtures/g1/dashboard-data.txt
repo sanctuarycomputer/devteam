@@ -90,6 +90,8 @@ exit 0
     "merge-word": "Merging a ticket",
     "approve-feature-plan": "Approving a feature's plan",
     "merge-chore": "Merging a chore",
+    "chore-start": "Starting a chore",
+    "chore-drop": "Dropping a chore",
     "worker-slots": "Starting and stopping workers",
     "replan-within-feature": "Replanning the tickets of a feature",
     "add-ticket": "Adding a ticket",
@@ -201,6 +203,7 @@ exit 0
       "matched": null,
       "hash": "<sha>",
       "rewritten": false,
+      "answered_person": null,
       "labels": [
         "yes",
         "no"
@@ -2157,6 +2160,17 @@ exit 0
       "group": "Agents and sessions",
       "name": "Thread responder",
       "description": "a quick session that answers your thread messages at once; off sends them all to the supervisor",
+      "shown": "value",
+      "value": true,
+      "set": false,
+      "default": true,
+      "owner_only": null
+    },
+    {
+      "key": "session_threads",
+      "group": "Agents and sessions",
+      "name": "Threads to sessions",
+      "description": "a thread about a live worker's or planner's work goes straight to it; off sends those to the responder",
       "shown": "value",
       "value": true,
       "set": false,

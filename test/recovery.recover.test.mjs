@@ -16,6 +16,9 @@ test('a supervisor that can\'t be restarted: the finding and fleet status give t
     const f = findings(F).find((x) => x.kind === 'supervisor-at-limit');
     assert.ok(f);
     assert.ok(f.suggestion.includes(`claude --resume ${SID}`), f.suggestion);
+    // a read writes nothing: the line only names the Stop hook's file once a start has written it
+    const hook = path.join(F.root, 'docs/devteam/run/agent/supervisor-claude.json');
+    assert.ok(!fs.existsSync(hook), 'the finding wrote no file');
     assert.doesNotMatch(f.suggestion, /dangerously-skip-permissions/, 'no running process to take it from: left out');
     assert.ok(f.suggestion.includes('DEVTEAM_ROLE=supervisor'), f.suggestion);
     // a dead machine, not at a limit: fleet status still says how to bring the supervisor back
@@ -23,7 +26,28 @@ test('a supervisor that can\'t be restarted: the finding and fleet status give t
     const shown = F.run(['fleet', 'status', '--no-fetch'], { DEVTEAM_ROLE: '' });
     assert.match(shown.stdout, new RegExp(`recovery .*claude --resume ${SID}`), shown.stderr);
     assert.ok(json(F.run(['fleet', 'status', '--no-fetch', '--json'], { DEVTEAM_ROLE: '' }).stdout).recovery.endsWith(`claude --resume ${SID}`));
+    assert.ok(!fs.existsSync(hook), 'nor did fleet status');
+    // once a start has written it, the by-hand line carries it too (supervisor.md §6, Every ask is an Inbox question)
+    write(hook, '{}\n');
+    assert.ok(F.run(['fleet', 'status', '--no-fetch'], { DEVTEAM_ROLE: '' }).stdout.includes(`claude --settings '${path.join(fs.realpathSync(F.root), 'docs/devteam/run/agent/supervisor-claude.json')}' --resume ${SID}`));
+    assert.ok(json(F.run(['fleet', 'status', '--no-fetch', '--json'], { DEVTEAM_ROLE: '' }).stdout).recovery.endsWith(`supervisor-claude.json' --resume ${SID}`));
+    assert.equal(fs.readFileSync(hook, 'utf8'), '{}\n', 'and leaves it as it was');
     assert.equal(F.run(['supervisor-session'], { DEVTEAM_ROLE: '' }).stdout, `${SID}\n`, 'stdout stays the bare id: the box\'s boot reads it');
+  } finally { F.done(); }
+});
+
+// The Stop hook's file is written before recover claims the start: a write that fails leaves no claim
+// behind, so the next recover doesn't answer "brought back moments ago" for a start that never was.
+test('recover: a failed write of the Stop hook claims no start', () => {
+  const F = fixture('rechook', { resume: CLAUDE_RESUME });
+  try {
+    F.writeTranscript(SID, [{ type: 'user', message: { content: SUP } }, { type: 'assistant', timestamp: new Date().toISOString(), message: { content: [{ type: 'text', text: 'working' }] } }]);
+    write(path.join(F.root, 'docs/devteam/run/agent'), 'a file where its folder goes\n');
+    const r = F.run(['recover', '--force'], { DEVTEAM_ROLE: '', DEVTEAM_CSWAP: 'off', DEVTEAM_MACHINE_EPOCH: 'boot2' });
+    assert.notEqual(r.status, 0, 'the write failed');
+    const up = path.join(F.root, 'docs/devteam/run/supervisor-up.json');
+    assert.ok(!fs.existsSync(up) || !json(fs.readFileSync(up, 'utf8')).starting, `no start claimed: ${fs.existsSync(up) ? fs.readFileSync(up, 'utf8') : ''}`);
+    assert.deepEqual(F.claudeCalls(), [], 'nothing started');
   } finally { F.done(); }
 });
 
@@ -62,7 +86,10 @@ test('recover: a dead machine with no tmux server brings the supervisor back on 
     assert.match(noted[0], /^%\d+$/);
     assert.equal(noted[1], noted[0], 'recorded for the supervisor, marked as made for it');
     await until(() => F.claudeCalls().length === 1, 'the stand-in claude ran');
-    assert.ok(F.claudeCalls()[0].startsWith(`supervisor|--resume ${SID} --dangerously-skip-permissions This machine restarted`), F.claudeCalls()[0]);
+    // with its Stop hook (supervisor.md §6, Every ask is an Inbox question): the policy recover wrote
+    assert.match(F.claudeCalls()[0], /^supervisor\|--settings \S+\/run\/agent\/supervisor-claude\.json /, F.claudeCalls()[0]);
+    assert.match(fs.readFileSync(path.join(F.root, 'docs/devteam/run/agent/supervisor-claude.json'), 'utf8'), /devteam\.mjs' stop-ok --supervisor"/, 'its hook says whose window it is');
+    assert.ok(F.claudeCalls()[0].replace(/--settings \S+ /, '').startsWith(`supervisor|--resume ${SID} --dangerously-skip-permissions This machine restarted`), F.claudeCalls()[0]);
     assert.match(F.claudeCalls()[0], /Nothing about this restart came from the owner/, 'it carries no owner authority');
     assert.match(F.claudeCalls()[0], /keep the loop, as before the restart: run the tick \(§3\) now, then wait with devteam\.mjs wait and tick again when it returns, until the owner stops you\. A summary to the owner doesn't end it\.$/, 'and it ends by keeping the loop, never at a summary');
     const again = recover(F, [], server.env);
@@ -182,7 +209,7 @@ test('recover --here: a supervisor from a plain terminal comes back in this one'
     const did = spawnSync(process.execPath, [path.join(F.root, 'docs/devteam/scripts/devteam.mjs'), 'recover', '--here'], { cwd: F.root, encoding: 'utf8', env: { ...F.env(asOwner), SHELL: '/bin/sh', PATH: `${bin}${path.delimiter}${process.env.PATH}` } });
     assert.equal(did.status, 0, did.stderr);
     assert.match(did.stdout, /in this terminal/);
-    assert.match(fs.readFileSync(calls, 'utf8'), new RegExp(`^--resume ${SID} This machine restarted`), 'no permissions flag: it had none');
+    assert.match(fs.readFileSync(calls, 'utf8'), new RegExp(`^--settings \\S+supervisor-claude\\.json --resume ${SID} This machine restarted`), 'no permissions flag: it had none');
   } finally { F.done(); }
 });
 
@@ -279,8 +306,11 @@ test('recover: two at once on one repo start one supervisor', { skip: !hasTmux }
     F.killSession();
     const dt = path.join(F.root, 'docs/devteam/scripts/devteam.mjs');
     const once = () => new Promise((resolve) => execFile(process.execPath, [dt, 'recover'], { cwd: F.root, env: F.env({ ...asOwner, ...server.env }), encoding: 'utf8' }, (err, stdout, stderr) => resolve({ status: err?.code ?? 0, stdout, stderr })));
+    // fetch first, so with origin/main already current neither recover sets the ref and the start claim
+    // alone is under test; two recovers meeting a moved origin's ref lock is kit-910's test below
+    execFileSync('git', ['fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main'], { cwd: F.root });
     const both = await Promise.all([once(), once()]);
-    assert.deepEqual(both.map((r) => r.status), [0, 0], both.map((r) => r.stderr).join());
+    assert.deepEqual(both.map((r) => r.status), [0, 0], both.map((r) => `${r.stdout}${r.stderr}`.trim()).join(' | '));
     assert.equal(both.filter((r) => /^resumed session/.test(r.stdout)).length, 1, both.map((r) => r.stdout).join());
     assert.equal(both.filter((r) => /^already running/.test(r.stdout)).length, 1, both.map((r) => r.stdout).join());
     await until(() => F.claudeCalls().length === 1, 'the stand-in claude ran');
@@ -289,6 +319,121 @@ test('recover: two at once on one repo start one supervisor', { skip: !hasTmux }
     const windows = spawnSync('tmux', ['list-windows', '-a', '-F', '#W'], { env: { ...process.env, TMUX_TMPDIR: server.dir }, encoding: 'utf8' }).stdout.trim().split('\n');
     assert.deepEqual(windows, ['supervisor']);
   } finally { server.done(); F.done(); }
+});
+
+// kit-910: once origin's main has moved since this checkout last read it, each recover's origin read
+// sets origin/main here, and git holds that ref's lock while one does: the other read finds it held.
+// origin read once, then a commit on main (the fixture's origin is the repo itself): origin moved
+const moveOrigin = (F) => {
+  execFileSync('git', ['fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main'], { cwd: F.root });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'origin moved'], { cwd: F.root });
+  return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: F.root, encoding: 'utf8' }).trim();
+};
+const trackingAt = (F) => execFileSync('git', ['rev-parse', 'refs/remotes/origin/main'], { cwd: F.root, encoding: 'utf8' }).trim();
+// git's own trace (GIT_TRACE2_EVENT): how many update-refs ran and exited non-zero
+const updatesRefused = (trace) => {
+  const events = (fs.existsSync(trace) ? fs.readFileSync(trace, 'utf8') : '').split('\n').flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } });
+  const updates = new Set(events.filter((e) => e.event === 'start' && e.argv?.includes('update-ref')).map((e) => e.sid));
+  return events.filter((e) => e.event === 'exit' && updates.has(e.sid) && e.code !== 0).length;
+};
+
+test('recover: two at once after origin moved both finish, though origin/main\'s lock is held as they set it (kit-910)', { skip: !hasTmux }, async () => {
+  const F = fixture('reclockrace', { resume: CLAUDE_RESUME });
+  const server = privateServer();
+  const lock = path.join(F.root, '.git/refs/remotes/origin/main.lock');
+  try {
+    sessionTranscript(F);
+    await seenUp(F);
+    F.killSession();
+    const main = moveOrigin(F);
+    const traces = [path.join(F.base, 'git-trace-a.json'), path.join(F.base, 'git-trace-b.json')];
+    const dt = path.join(F.root, 'docs/devteam/scripts/devteam.mjs');
+    let ended = 0;
+    const once = (trace) => new Promise((resolve) => execFile(process.execPath, [dt, 'recover'], { cwd: F.root, env: F.env({ ...asOwner, ...server.env, GIT_TRACE2_EVENT: trace }), encoding: 'utf8' }, (err, stdout, stderr) => { ended += 1; resolve({ status: err?.code ?? 0, stdout, stderr }); }));
+    // The race made certain: the lock is held (as the other recover's update holds it) until git has
+    // refused it to a read's update (each recover has its own trace), then until it has refused the other
+    // too or 1 s has passed (well inside the 5 s a read waits on it, on any runner), or until a recover has
+    // ended; git gives up on a held ref lock after 100 ms (core.filesRefLockTimeout), less than a loaded
+    // box's other recover can hold it
+    write(lock, '');
+    const running = Promise.all(traces.map(once));
+    await until(() => ended > 0 || traces.some((t) => updatesRefused(t) >= 1), 'git refused the held lock to a read, or a recover ended');
+    const firstRefused = Date.now();
+    await until(() => ended > 0 || traces.every((t) => updatesRefused(t) >= 1) || Date.now() - firstRefused >= 1000, 'the other read refused too, or 1 s passed');
+    fs.rmSync(lock, { force: true });
+    const both = await running;
+    const said = both.map((r) => `${r.stdout}${r.stderr}`.trim()).join(' | ');
+    assert.deepEqual(both.map((r) => r.status), [0, 0], said);
+    assert.doesNotMatch(said, /could not read main from origin/, 'neither says origin did not answer');
+    assert.equal(both.filter((r) => /^resumed session/.test(r.stdout)).length, 1, said);
+    assert.equal(both.filter((r) => /^already running/.test(r.stdout)).length, 1, said);
+    assert.equal(trackingAt(F), main, 'origin/main here is origin\'s');
+    await until(() => F.claudeCalls().length === 1, 'the stand-in claude ran');
+  } finally { fs.rmSync(lock, { force: true }); server.done(); F.done(); }
+});
+
+test('recover: origin that can\'t be reached is still said as one, and nothing starts (kit-910)', { skip: !hasTmux }, async () => {
+  const F = fixture('recnoorigin', { resume: CLAUDE_RESUME });
+  const server = privateServer();
+  try {
+    sessionTranscript(F);
+    await seenUp(F);
+    F.killSession();
+    moveOrigin(F);
+    execFileSync('git', ['remote', 'set-url', 'origin', path.join(F.base, 'no-such-origin')], { cwd: F.root });
+    const r = recover(F, [], server.env);
+    assert.equal(r.status, 1, `${r.stdout}${r.stderr}`);
+    // git's own words on what it couldn't reach, as before kit-910
+    assert.match(r.stderr, /could not read main from origin \('[^']*no-such-origin' does not appear to be a git repository\), so the owner's settings can't be confirmed and nothing was started/);
+    assert.equal(F.claudeCalls().length, 0, 'nothing started');
+  } finally { server.done(); F.done(); }
+});
+
+test('recover: a lock no one lets go on a moved origin/main still refuses, with git\'s words, inside the deadline (kit-910)', { skip: !hasTmux }, async () => {
+  const F = fixture('recstalelock', { resume: CLAUDE_RESUME });
+  const server = privateServer();
+  const lock = path.join(F.root, '.git/refs/remotes/origin/main.lock');
+  try {
+    sessionTranscript(F);
+    await seenUp(F);
+    F.killSession();
+    moveOrigin(F);
+    const was = trackingAt(F);
+    write(lock, '');
+    const t0 = Date.now();
+    const r = recover(F, [], server.env);
+    const took = Date.now() - t0;
+    assert.equal(r.status, 1, `${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /could not read main from origin \([^)]*(lock|Another git process)[^)]*\)/, 'git\'s own words on the lock');
+    // the wait on a lock ends after 5 s, far inside the 30 s read (the rest is the read and the start)
+    assert.ok(took < 20000, `gave up on the lock after about 5 s, not after ${took} ms`);
+    assert.equal(trackingAt(F), was, 'origin/main here is as it was');
+    assert.equal(F.claudeCalls().length, 0, 'nothing started');
+    // a short deadline (a relaunch's, a restart's budget) ends the wait before it, still in git's words
+    const short = recover(F, [], { ...server.env, DEVTEAM_LAUNCH_ORIGIN_MS: '5000' });
+    assert.equal(short.status, 1, `${short.stdout}${short.stderr}`);
+    assert.match(short.stderr, /could not read main from origin \([^)]*(lock|Another git process)[^)]*\)/, 'git\'s own words on the lock, before a short deadline');
+  } finally { fs.rmSync(lock, { force: true }); server.done(); F.done(); }
+});
+
+// root writes where the mode says it can't, so there it is no other failure
+test('recover: an origin/main here that git can\'t set for another reason refuses at once, tried once (kit-910)', { skip: !hasTmux || process.getuid?.() === 0 }, async () => {
+  const F = fixture('recrefdenied', { resume: CLAUDE_RESUME });
+  const server = privateServer();
+  const refs = path.join(F.root, '.git/refs/remotes/origin');
+  try {
+    sessionTranscript(F);
+    await seenUp(F);
+    F.killSession();
+    moveOrigin(F);
+    const trace = path.join(F.base, 'git-trace.json');
+    fs.chmodSync(refs, 0o555);
+    const r = recover(F, [], { ...server.env, GIT_TRACE2_EVENT: trace });
+    assert.equal(r.status, 1, `${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /could not read main from origin \(update_ref failed for ref 'refs\/remotes\/origin\/main': cannot lock ref/, r.stderr);
+    assert.equal(updatesRefused(trace), 1, 'git was asked once: only a held lock is waited on');
+    assert.equal(F.claudeCalls().length, 0, 'nothing started');
+  } finally { if (fs.existsSync(refs)) fs.chmodSync(refs, 0o755); server.done(); F.done(); }
 });
 
 test('recover: the start is claimed before a window opens, and taken back if nothing started', { skip: !hasTmux }, async () => {

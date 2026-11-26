@@ -331,6 +331,13 @@ export function ownerSettingSignature(privateKeyPem, port, body, ts = Date.now()
   const msg = Buffer.from(`devteam-owner-setting-v1\n${port}\n${ts}\n${nonce}\n${crypto.createHash('sha256').update(body).digest('hex')}`);
   return { 'x-devteam-gateway-ts': String(ts), 'x-devteam-gateway-nonce': nonce, 'x-devteam-gateway-sig': b64u(crypto.sign(null, msg, crypto.createPrivateKey(privateKeyPem))) };
 }
+// The same for the owner's terminal posts on an instance's dashboard (terminal@1 §3): keys under
+// devteam-term-keys-v1 and the shell's open under devteam-term-open-v1, each naming its which, so a
+// signature for one route, or one which, is never good for another, nor for a pane answer or a setting.
+export function termSignature(privateKeyPem, domain, port, which, body, ts = Date.now(), nonce = b64u(crypto.randomBytes(24))) {
+  const msg = Buffer.from(`${domain}\n${port}\n${which}\n${ts}\n${nonce}\n${crypto.createHash('sha256').update(body).digest('hex')}`);
+  return { 'x-devteam-gateway-ts': String(ts), 'x-devteam-gateway-nonce': nonce, 'x-devteam-gateway-sig': b64u(crypto.sign(null, msg, crypto.createPrivateKey(privateKeyPem))) };
+}
 const claimLive = (s) => Boolean(s.claimHash) && (s.claimExpires ?? 0) > Date.now();
 const claimUrl = (pub, token) => `${pub}/auth/claim#${token}`;
 function newClaim(store) {
@@ -1006,7 +1013,10 @@ export function safeUploadName(raw) {
   const ext = dot >= 0 && plain.length - dot <= 17 ? plain.slice(dot).toLowerCase().replace(/[^.a-z0-9]/g, '') : '';
   // the extension first: a name that's all replaced characters still comes out an image
   const stem = (ext ? plain.slice(0, dot) : plain).replace(/^[._-]+/, '').slice(0, UPLOAD_NAME).replace(/[.-]+$/, '');
-  return `${stem || 'file'}${ext.length > 1 ? ext : ''}`;
+  const name = `${stem || 'file'}${ext.length > 1 ? ext : ''}`;
+  // again until it settles, so a stored name is always the rule's own (x.Z._ gives x.Z, which gives x.z);
+  // each further pass only shortens or lower-cases it
+  return name === raw ? name : safeUploadName(name);
 }
 // These run in the terminal's page too (TERM_DROP has their source), and are tested here.
 // A stored path never needs the quotes; they're for whatever else this is ever handed.
@@ -1031,11 +1041,11 @@ function uploadType(name) {
   const ext = path.extname(name);
   return Object.hasOwn(UPLOAD_IMAGES, ext) ? { type: UPLOAD_IMAGES[ext], attachment: false } : { type: 'application/octet-stream', attachment: true };
 }
-// What the owner is told after a drop. The paths stay on screen: a paste can still go astray.
-export function dropNote(paths) {
+// What the owner is told after a drop, or ("Pasted") a paste. The paths stay on screen: a paste can still go astray.
+export function dropNote(paths, verb = 'Sent') {
   const images = paths.filter(isDropImage).length;
   const how = images === paths.length ? 'images arrive as attachments' : images ? 'images arrive as attachments, PDFs and other files as a path' : 'PDFs and other files arrive as a path';
-  return `Sent to the focused pane. In Claude Code, ${how}.\n${paths.join('\n')}`;
+  return `${verb} to the focused pane. In Claude Code, ${how}.\n${paths.join('\n')}`;
 }
 
 // --- the server ---------------------------------------------------------------------------------
@@ -1089,7 +1099,10 @@ export function createGateway(opts = {}) {
   const COOKIE = 'devteam_session';
   const dir = opts.dir ?? gatewayDir();
   const ttydPort = Number(opts.ttydPort ?? env.DEVTEAM_TTYD_PORT ?? 7681);
-  const store = stateStore(dir);
+  const stored = stateStore(dir);
+  // every write is followed by a look at the open presence and canvas sockets (endPresence), in the same turn
+  let afterSave = () => {};
+  const store = { load: stored.load, save: (s) => { stored.save(s); afterSave(); } };
   const firstFile = (...c) => c.find((f) => f && fs.existsSync(f));
   const hubPage = fs.readFileSync(firstFile(opts.hubPage, env.DEVTEAM_HUB_PAGE, path.join(here, 'hub.html'), path.join(here, '..', 'docs', 'devteam', 'dashboard', 'hub.html')));
   const ttydPage = () => fs.readFileSync(opts.ttydPage ?? env.DEVTEAM_TTYD_PAGE ?? path.join(here, 'ttyd.html'));
@@ -1136,6 +1149,8 @@ export function createGateway(opts = {}) {
   const isOwner = (person) => person?.role === 'owner';
   // 'owner', 'admin' or 'member': any other role in a row reads as a member's, the least it can be
   const roleOf = (person) => (isOwner(person) ? 'owner' : person?.role === 'admin' ? 'admin' : 'member');
+  // 'full' or 'view' (kit-250): only a row that says view is View; the stand-in and any other value are Full
+  const levelOf = (person) => (person?.level === 'view' ? 'view' : 'full');
   // A claimed file with no owner row (one restored from before people, read while running): its
   // top-level sessions are still the owner's, until the next start's upgrade writes the row.
   const STAND_IN = { id: null, role: 'owner', level: 'full', name: 'Owner' };
@@ -1231,7 +1246,9 @@ export function createGateway(opts = {}) {
   // anyone else's in their row. Devices aren't what `rev` counts, so neither bumps it.
   const subsOf = (s, person) => (isOwner(person) ? s.pushSubs ?? [] : (s.people ?? []).find((p) => p.id === person.id)?.pushSubs ?? []);
   const withSubs = (s, person, subs) => (isOwner(person) ? { ...s, pushSubs: subs } : { ...s, people: (s.people ?? []).map((p) => (p.id === person.id ? { ...p, pushSubs: subs } : p)) });
-  const everySub = (s) => [...(s.pushSubs ?? []), ...(s.people ?? []).flatMap((p) => p.pushSubs ?? [])];
+  // Whom news goes to: the owner's devices and every Full person's. A View person gets none (kit-801),
+  // even if their row holds a device (a hand-edited state); removing a dead one still reads every list.
+  const everySub = (s) => [...(s.pushSubs ?? []), ...(s.people ?? []).flatMap((p) => (levelOf(p) === 'view' ? [] : p.pushSubs ?? []))];
   // Every list, everyone's, keeping only what `keep` passes.
   const keepSubs = (s, keep) => ({ ...s, pushSubs: (s.pushSubs ?? []).filter(keep), ...(s.people ? { people: s.people.map((p) => ({ ...p, pushSubs: (p.pushSubs ?? []).filter(keep) })) } : {}) });
   // "Yours" before "last", so nobody learns anything of anyone else's. On success: whoever held it
@@ -1270,6 +1287,31 @@ export function createGateway(opts = {}) {
   // a method's { key, data, label, added_at, last_used }, both ways.
   const topToMethod = (p) => ({ key: p.id, data: { userId: p.userId, jwk: p.jwk, alg: p.alg, signCount: p.signCount, rp: p.rp }, label: p.name, added_at: p.createdAt, last_used: p.usedAt ?? null });
   const methodToTop = (m) => ({ id: m.key, userId: m.data.userId, jwk: m.data.jwk, alg: m.data.alg, signCount: m.data.signCount, name: m.label, rp: m.data.rp, createdAt: m.added_at });
+  // Hand the box from `from` (the owner's row) to `to` (joined, no link out, a passkey): the next
+  // state, which the caller saves in one write (kit-253 spec §2). The top-level fields, all an older
+  // gateway reads, become `to`'s alone; `from`'s passkeys, sessions and devices move into their row,
+  // each moved session naming the new id of the passkey it named, the id of another method still in
+  // their row, or none. The stamp follows.
+  const transferTo = (s, from, to) => {
+    const pk = (to.methods ?? []).filter((m) => m.type === 'passkey');
+    const keyOf = new Map(pk.map((m) => [m.id, m.key]));
+    const idOf = new Map(s.passkeys.map((p) => [p.id, newId('m-')]));
+    const moved = s.passkeys.map((p) => ({ id: idOf.get(p.id), type: 'passkey', ...topToMethod(p) }));
+    const theirs = (s.peopleSessions ?? []).filter((x) => x.person === to.id);
+    return stamped({
+      ...s,
+      passkeys: pk.map((m) => ({ ...methodToTop(m), ...(m.last_used ? { usedAt: m.last_used } : {}) })),
+      sessions: theirs.map(({ person, ...x }) => ({ ...x, method: keyOf.get(x.method) ?? x.method ?? null })),
+      pushSubs: to.pushSubs ?? [],
+      people: s.people.map((p) => {
+        if (p.id === to.id) return { ...p, role: 'owner', level: 'full', methods: (p.methods ?? []).filter((m) => m.type !== 'passkey'), pushSubs: [], rev: p.rev + 1 };
+        if (p.id === from.id) return { ...p, role: 'admin', level: 'full', methods: [...(p.methods ?? []), ...moved], pushSubs: (s.pushSubs ?? []).slice(-PUSH_DEVICES), rev: p.rev + 1 };
+        return p;
+      }),
+      peopleSessions: [...(s.peopleSessions ?? []).filter((x) => x.person !== to.id), ...s.sessions.map((x) => ({ ...x, person: from.id, method: idOf.get(x.method) ?? ((from.methods ?? []).some((m) => m.id === x.method) ? x.method : null) }))],
+      invites: (s.invites ?? []).filter((x) => x.person !== from.id && x.person !== to.id),
+    });
+  };
   // Who holds (type, key) on the box: the owner's top-level passkeys, else anyone's row.
   const holderOf = (s, type, key) => {
     const pk = type === 'passkey' ? s.passkeys.find((p) => p.id === key) : null;
@@ -1453,9 +1495,7 @@ export function createGateway(opts = {}) {
     const got = await peopleBody(req, res, who.session);
     if (!got) return;
     const { s, body } = got;
-    if (body.level !== undefined && body.level !== 'full') {
-      return body.level === 'view' ? refuse(res, 400, 'view-not-yet', 'View arrives in a later release; invite at Full for now.') : refuse(res, 400, 'bad-request', 'a level is full');
-    }
+    if (body.level !== undefined && body.level !== 'full' && body.level !== 'view') return refuse(res, 400, 'bad-request', 'a level is full or view');
     // a file from before people gets its owner row here, stamped as start stamps it: a people list
     // with no stamp reads, at the next start, as an older gateway's change and is reset
     const base = s.people ? s : stamped(withOwner(s));
@@ -1465,7 +1505,7 @@ export function createGateway(opts = {}) {
     const open = liveInvites(base);
     if (open.length >= MAX_INVITES || base.people.length >= MAX_PEOPLE) return refuse(res, 409, 'too-many', `A box holds ${MAX_PEOPLE} people and ${MAX_INVITES} open invites; remove one first.`);
     const iso = new Date().toISOString();
-    const row = { id: newId('p-'), name, role: 'member', level: 'full', methods: [], pushSubs: [], added_at: iso, last_seen: null, notices: [], rev: 1 };
+    const row = { id: newId('p-'), name, role: 'member', level: body.level === 'view' ? 'view' : 'full', methods: [], pushSubs: [], added_at: iso, last_seen: null, notices: [], rev: 1 };
     const { link, invite } = newInvite(row.id);
     store.save({ ...base, people: [...base.people, row], invites: [...open, invite] });
     log(`invited "${name}"`);
@@ -1491,11 +1531,17 @@ export function createGateway(opts = {}) {
   };
 
   // --- People: the list, and the changes kit-249 owns (rename, revoke, remove) ---------------------
-  // Who sees People: the owner (the stand-in included) and admins. Admins act on nothing yet; kit-253
-  // gives them rename and remove (a-20261123-051441425-supervisor).
+  // Who sees People: the owner (the stand-in included) and admins. Admins rename, remove and raise
+  // joined members and admins, and leave (kit-253, a-20261123-051441425-supervisor).
   const seesPeople = (person) => roleOf(person) !== 'member';
   const FRESH_AGAIN = "Confirm it's you: sign in again, then make the change again";
   const joined = (s, row) => ownMethods(s, row).length > 0;
+  // Any invite naming the row, expired or not, is a link out until it is revoked (kit-253 R3).
+  const linkOut = (s, id) => (s.invites ?? []).some((x) => x.person === id);
+  const hasPasskey = (s, row) => ownMethods(s, row).some((m) => m.type === 'passkey');
+  const isAdmin = (person) => roleOf(person) === 'admin';
+  // A move to Full is offered only to a View member (an admin is always Full); kit-250 adds View.
+  const movable = (row) => roleOf(row) === 'member';
   // The newest invite naming the row: a first invite for someone who never joined, else a new link.
   const linkOf = (s, row) => {
     const mine = (s.invites ?? []).filter((x) => x.person === row.id);
@@ -1503,16 +1549,26 @@ export function createGateway(opts = {}) {
     const newest = mine.reduce((a, b) => (b.expires > a.expires ? b : a));
     return { kind: joined(s, row) ? 'new-link' : 'invite', expires: newest.expires, expired: newest.expires <= Date.now() };
   };
-  // What this viewer may post for this row, in menu order; the routes refuse the rest. One live link
-  // per person: with one out, Revoke comes first and no second link is offered (relink still takes
-  // one, replacing it). Someone who never joined and whose link is gone (swept as expired by an
+  // What this viewer may post for this row, in menu order; the routes refuse the rest. One link per
+  // person: with one out (expired too, until it is revoked: kit-253 R3), Revoke comes first and no
+  // second link is offered (relink still takes one, replacing it). Someone who never joined and whose link is gone (swept as expired by an
   // invite or relink's save) can only be removed.
+  // Make admin and Make owner only where they land: joined, no link out, and for Make owner a passkey,
+  // never from the stand-in (it restarts first). The list never offers what mayPeople refuses.
   const peopleActions = (s, viewer, row) => {
-    if (!isOwner(viewer)) return [];
-    if (isOwner(row)) return ['rename'];
-    const link = linkOf(s, row);
-    if (!joined(s, row)) return link ? ['revoke'] : ['remove'];
-    return link && !link.expired ? ['revoke', 'rename', 'remove'] : ['rename', 'relink', 'remove'];
+    const offered = (() => {
+      if (isOwner(viewer)) {
+        if (isOwner(row)) return ['rename'];
+        const link = linkOf(s, row);
+        if (!joined(s, row)) return link ? ['revoke'] : ['remove'];
+        const lv = movable(row) ? ['level'] : [];
+        if (link) return ['revoke', 'rename', ...lv, 'remove'];
+        return ['rename', ...lv, 'role', ...(hasPasskey(s, row) && viewer.id !== null ? ['transfer'] : []), 'relink', 'remove'];
+      }
+      if (!isAdmin(viewer) || isOwner(row) || !joined(s, row)) return [];
+      return ['rename', ...(movable(row) ? ['level'] : []), 'remove'];
+    })();
+    return offered.filter((a) => !mayPeople(viewer, row, a, s));
   };
   const peopleList = (s, viewer) => {
     const rows = s.people ?? [];
@@ -1526,11 +1582,28 @@ export function createGateway(opts = {}) {
       })),
     };
   };
-  // Why this viewer may not do this to this row, or null: the rules peopleActions draws from.
-  const mayNot = (viewer, row, action) => {
-    if (!isOwner(viewer)) return 'Only the box\'s owner can do this, for now.';
-    if (isOwner(row) && action === 'remove') return 'Nobody can remove the box\'s owner.';
-    if (isOwner(row) && action === 'revoke') return 'The box\'s owner has no link to revoke.';
+  // Step 9: why this viewer may not do this to this row (403 not-allowed, its sentence), or null. The
+  // rules peopleActions draws from (kit-253 spec §1). `self`: the row is the viewer's own.
+  const mayPeople = (viewer, row, action, s) => {
+    const no = (error) => ({ status: 403, code: 'not-allowed', error });
+    const self = viewer.id !== null && row.id === viewer.id;
+    if (isOwner(viewer)) {
+      if (action === 'remove' && isOwner(row)) return no('Nobody can remove the box\'s owner.');
+      if (action === 'revoke' && isOwner(row)) return no('The box\'s owner has no link to revoke.');
+      if (action === 'level' && roleOf(row) !== 'member') return no(isAdmin(row) ? 'An admin is always Full; take Admin away first' : 'The box\'s owner is always Full');
+      if (action === 'level' && !joined(s, row)) return no('They haven\'t joined yet: their level is their invite\'s');
+      if (action === 'role' && (self || isOwner(row))) return no('The owner stops being the owner only by handing the box over');
+      if (action === 'transfer' && (self || isOwner(row))) return no('You already own this box');
+      return null;
+    }
+    if (!isAdmin(viewer)) return no('Only the owner and admins can change People.');
+    if (isOwner(row)) return no('Nobody but the owner changes the owner\'s row');
+    if (action === 'role') return no('Only the owner makes admins');
+    if (action === 'transfer') return no('Only the owner hands the box over');
+    if (action !== 'rename' && action !== 'remove' && action !== 'level') return no('Only the owner sends or revokes links');
+    if (action === 'level' && isAdmin(row)) return no(self ? 'An admin is always Full' : 'An admin is always Full; take Admin away first');
+    // R1: an invite not used yet is the owner's to change
+    if (!self && !joined(s, row)) return no('They haven\'t joined yet: only the owner changes an invite');
     return null;
   };
   // The guards, in the spec's order: role and fresh (before the body), the body, still held and still
@@ -1547,8 +1620,8 @@ export function createGateway(opts = {}) {
     if (!fresh(held.session)) return refuse(res, 403, 'fresh-sign-in', FRESH_AGAIN), null;
     const row = typeof body.id === 'string' ? (s.people ?? []).find((x) => x.id === body.id) : null;
     if (!row || body.rev !== row.rev) return refuse(res, 409, 'stale', STALE), null;
-    const no = mayNot(held.person, row, action);
-    if (no) return refuse(res, 403, 'not-allowed', no), null;
+    const no = mayPeople(held.person, row, action, s);
+    if (no) return refuse(res, no.status, no.code, no.error), null;
     return { s, person: held.person, row, body };
   };
   const renameRoute = async (req, res, who) => {
@@ -1575,17 +1648,66 @@ export function createGateway(opts = {}) {
   };
   // One write ends everything the row held (its methods and devices go with it), every session and
   // invite naming them; then the terminal and preview sockets they hold close. The owner's row is
-  // never removed (mayNot).
+  // never removed (mayPeople). Removing your own row is Leave: the answer clears your cookie too.
   const removeRoute = async (req, res, who) => {
     const g = await peopleGuard(req, res, who, 'remove');
     if (!g) return;
-    const { s, row } = g;
+    const { s, person, row } = g;
     store.save({ ...s, people: s.people.filter((x) => x.id !== row.id), peopleSessions: (s.peopleSessions ?? []).filter((x) => x.person !== row.id), invites: (s.invites ?? []).filter((x) => x.person !== row.id) });
     dropPerson(row.id);
-    log('a person was removed: their sessions, invites and open sockets ended');
+    const left = person.id !== null && person.id === row.id;
+    log(left ? 'a person left the box: their sessions, invites and open sockets ended' : 'a person was removed: their sessions, invites and open sockets ended');
+    return json(res, 200, { ok: true }, left ? { 'set-cookie': cookie('', 0) } : undefined);
+  };
+  // A move between Full and View (kit-250). Already there: its rev, nothing written (R4). A move to
+  // View drops their push subscriptions in the same write, then closes their terminal and preview
+  // sockets; their sessions go on, at View from their next request.
+  const levelRoute = async (req, res, who) => {
+    const g = await peopleGuard(req, res, who, 'level');
+    if (!g) return;
+    const { s, row, body } = g;
+    if (body.level !== 'full' && body.level !== 'view') return refuse(res, 400, 'bad-request', 'a level is full or view');
+    if (levelOf(row) === body.level) return json(res, 200, { ok: true, rev: row.rev });
+    const rev = row.rev + 1;
+    const next = body.level === 'view' ? { level: 'view', pushSubs: [], rev } : { level: 'full', rev };
+    store.save({ ...s, people: s.people.map((x) => (x.id === row.id ? { ...x, ...next } : x)) });
+    if (body.level === 'view') dropPerson(row.id);
+    log(body.level === 'view' ? 'a person was made view only: their terminal and preview sockets closed' : 'a person was made full');
+    return json(res, 200, { ok: true, rev });
+  };
+  // Make admin (joined, no link out; a View member becomes Full too) or Take Admin away (they stay
+  // Full). Their sessions go on; their next People request is judged by the new role.
+  const roleRoute = async (req, res, who) => {
+    const g = await peopleGuard(req, res, who, 'role');
+    if (!g) return;
+    const { s, row, body } = g;
+    if (body.role !== 'admin' && body.role !== 'member') return refuse(res, 400, 'bad-request', 'a role is admin or member');
+    if (body.role === 'admin') {
+      if (!joined(s, row)) return refuse(res, 409, 'not-joined', 'They haven\'t joined yet');
+      if (linkOut(s, row.id)) return refuse(res, 409, 'link-outstanding', 'Revoke their link first');
+    }
+    if (roleOf(row) === body.role) return json(res, 200, { ok: true, rev: row.rev });
+    const rev = row.rev + 1;
+    const next = body.role === 'admin' ? { role: 'admin', level: 'full', rev } : { role: 'member', rev };
+    store.save({ ...s, people: s.people.map((x) => (x.id === row.id ? { ...x, ...next } : x)) });
+    log(body.role === 'admin' ? 'a person was made admin' : 'a person is no longer an admin');
+    return json(res, 200, { ok: true, rev });
+  };
+  // Make owner: the owner (never the stand-in: its row is written at the next start) hands the box to
+  // a joined person with no link out who holds a passkey, and stays on as a Full admin. One write.
+  const transferRoute = async (req, res, who) => {
+    const g = await peopleGuard(req, res, who, 'transfer');
+    if (!g) return;
+    const { s, person, row } = g;
+    if (person.id === null) return refuse(res, 409, 'restart-first', 'Restart the box first, then try again');
+    if (!joined(s, row)) return refuse(res, 409, 'not-joined', 'They haven\'t joined yet');
+    if (linkOut(s, row.id)) return refuse(res, 409, 'link-outstanding', 'Revoke their link first');
+    if (!hasPasskey(s, row)) return refuse(res, 409, 'no-passkey', 'They need a passkey first: the box\'s owner always has one');
+    store.save(transferTo(s, person, row));
+    log('the box was handed to another person; the old owner is an admin');
     return json(res, 200, { ok: true });
   };
-  const PEOPLE_POSTS = { rename: renameRoute, revoke: revokeRoute, remove: removeRoute };
+  const PEOPLE_POSTS = { rename: renameRoute, revoke: revokeRoute, remove: removeRoute, level: levelRoute, role: roleRoute, transfer: transferRoute };
 
   // Start, guards in the spec's order. `who`: the request's session (sessionOf), for an add.
   const startFlow = async (req, type, purpose, body, who) => {
@@ -1741,14 +1863,33 @@ export function createGateway(opts = {}) {
 
   // --- requests that look local to the kit, and its headers mapped back to the public names ---
   const HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'referer', 'forwarded', 'x-real-ip', 'true-client-ip', 'cf-connecting-ip']);
+  // Who a request is and what it may see are the gateway's to say (kit-252): the browser's copies of
+  // x-devteam-person and x-devteam-level never pass, on any route.
   const upstreamHeaders = (req, port, publicOrigin, { loopbackHost = '127.0.0.1' } = {}) => {
     const h = {};
-    for (const [k, v] of Object.entries(req.headers)) if (!HOP.has(k) && !k.startsWith('x-forwarded-') && !k.startsWith('fly-') && !k.startsWith('rndr-') && !k.startsWith('render-')) h[k] = v;
+    // a name with a space before its colon is no header of ours, and older Nodes let one in
+    for (const [k, v] of Object.entries(req.headers)) if (k === k.trim() && !HOP.has(k) && !k.startsWith('x-forwarded-') && !k.startsWith('fly-') && !k.startsWith('rndr-') && !k.startsWith('render-') && k !== 'x-devteam-person' && k !== 'x-devteam-level') h[k] = v;
     h.host = `${loopbackHost}:${port}`;
     if (req.headers.origin === publicOrigin) h.origin = `http://${loopbackHost}:${port}`;
     const rest = String(req.headers.cookie ?? '').split(';').map((p) => p.trim()).filter((p) => p && p.split('=')[0] !== COOKIE).join('; ');
     if (rest) h.cookie = rest; else delete h.cookie;
     return h;
+  };
+  // The person a session is, as x-devteam-person (presence@1 §4) for a dashboard or the hub to put on
+  // the owner's lines it writes for them (kit-252): null for the owner's stand-in (a state from before
+  // people: no person, the owner as ever), false for a row whose id or name the header can't carry
+  // (only a hand-edited state makes one), never a throw. A lone surrogate is U+FFFD (encodeURIComponent
+  // throws on one), and the name is cut, by whole characters, to 80 bytes of JSON without its quotes.
+  // Attribution, not authority: it is not signed, and the kit gives it no say in who may do what.
+  const PERSON_ID = /^[A-Za-z0-9._:@/-]{1,64}$/;
+  const personHeader = (person) => {
+    if (!person || person.id === null) return null;
+    if (typeof person.id !== 'string' || !PERSON_ID.test(person.id) || typeof person.name !== 'string') return false;
+    const whole = person.name.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD');
+    let name = '';
+    let n = 0;
+    for (const ch of whole) { const b = Buffer.byteLength(JSON.stringify(ch)) - 2; if (n + b > 80) break; name += ch; n += b; }
+    return name ? `${person.id};name=${encodeURIComponent(name)}` : false;
   };
   const LOOP = /http:\/\/(?:127\.0\.0\.1|localhost):(\d+)/g;
   // A block port to its project's host, as the list last said; a port no one name holds stays as sent.
@@ -1783,8 +1924,10 @@ export function createGateway(opts = {}) {
     return { ...out, ...hsts };
   };
   // viewer: null, or for the viewer's page whether the wrapper's grant holds (viewerAncestors)
-  const proxy = (req, res, { port, path: p, publicOrigin, cap, extra = null, viewer = null }) => {
-    const up = http.request({ host: '127.0.0.1', port, method: req.method, path: p, headers: upstreamHeaders(req, port, publicOrigin) }, (ur) => {
+  // person: the session's x-devteam-person (personHeader), on a dashboard's request alone
+  // level: the session's, sent beside the person (kit-250), never the browser's
+  const proxy = (req, res, { port, path: p, publicOrigin, cap, extra = null, viewer = null, person = null, level = 'full' }) => {
+    const up = http.request({ host: '127.0.0.1', port, method: req.method, path: p, headers: { ...upstreamHeaders(req, port, publicOrigin), ...(person ? { 'x-devteam-person': person, 'x-devteam-level': level } : {}) } }, (ur) => {
       // Never kept: a page an agent served once on this name must not come back from the browser's
       // cache after a real dashboard has taken its port.
       const head = downstreamHeaders(ur.headers, cap, publicOrigin);
@@ -1807,22 +1950,46 @@ export function createGateway(opts = {}) {
   // The body is read whole (it is small) so its hash is what is signed; whatever signature headers
   // the browser sent are replaced.
   const SIGNED_POSTS = { '/api/pane-answer': paneSignature, '/api/owner-setting': ownerSettingSignature };
-  const signedPost = (req, res, port, publicOrigin, route, signer) => {
+  const signedPost = (req, res, port, publicOrigin, route, signer, person = null, level = 'full', { cap = 20000, cut = Infinity, leave = false, over = (extra) => send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }), extra) } = {}) => {
     const chunks = [];
     let size = 0;
-    req.on('data', (c) => { size += c.length; if (size <= 20000) chunks.push(c); else chunks.length = 0; });
+    let answered = false;
+    req.on('data', (c) => {
+      if (answered) return;
+      size += c.length;
+      if (size <= cap) chunks.push(c); else chunks.length = 0;
+      if (size > cut) { answered = true; over({ connection: 'close' }); }
+    });
     req.on('error', () => res.destroy());
     req.on('end', () => {
-      if (size > 20000) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
+      if (answered) return;
+      if (size > cap) return over();
       const data = Buffer.concat(chunks);
-      const up = http.request({ host: '127.0.0.1', port, method: 'POST', path: route, headers: { ...upstreamHeaders(req, port, publicOrigin), 'content-length': data.length, ...signer(threadKey(store).privateKey, port, data) } }, (ur) => {
+      const up = http.request({ host: '127.0.0.1', port, method: 'POST', path: route, headers: { ...upstreamHeaders(req, port, publicOrigin), ...(person ? { 'x-devteam-person': person, 'x-devteam-level': level } : {}), 'content-length': data.length, ...signer(threadKey(store).privateKey, port, data) } }, (ur) => {
         res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, undefined, publicOrigin), 'cache-control': 'no-store' });
         pipeline(ur, res, () => {});
       });
+      // a terminal post: a browser that goes away stops the kit's work for it, as proxy does
+      if (leave) res.on('close', () => { if (!res.writableFinished) up.destroy(); });
       up.on('error', () => { if (res.headersSent) return res.destroy(); send(res, 502, 'text/plain; charset=utf-8', `Nothing answers on instance ${port}.`); });
       up.end(data);
     });
   };
+  // The terminal's two posts (terminal@1 §3): keys, for the supervisor or the shell, and the shell's
+  // open, each signed under its own domain with the path's own which. Matched on the path as the
+  // dashboard routes it (url.pathname: dot segments resolved, %2e among them, nothing else decoded), so what is signed is
+  // what it routes; any other POST under /api/term/ goes on unsigned and the dashboard refuses it,
+  // and its reads (token, screen, history) go on unsigned as any GET does.
+  // Their bodies are capped at 100 KB, as the dashboard caps them: over it is a 413, with nothing
+  // forwarded, and a body more than four times over is cut off once the 413 is sent. A View session
+  // never gets here: viewRefusal's rule 0 answers it first.
+  const TERM_CAP = 102400;
+  const termPost = (p) => {
+    const m = /^\/api\/term\/(supervisor|shell)\/keys$/.exec(p);
+    if (m) return (key, port, body) => termSignature(key, 'devteam-term-keys-v1', port, m[1], body);
+    return p === '/api/term/shell/open' ? (key, port, body) => termSignature(key, 'devteam-term-open-v1', port, 'shell', body) : null;
+  };
+  const termCap = (res) => ({ cap: TERM_CAP, cut: 4 * TERM_CAP, leave: true, over: (extra) => send(res, 413, 'application/json', JSON.stringify({ error: 'that is too large to send' }), extra) });
   // Where a preview's server is listening: a dev server bound to localhost may sit on either family.
   const previewHost = (port) => new Promise((resolve) => {
     const next = (hosts) => {
@@ -1970,12 +2137,12 @@ export function createGateway(opts = {}) {
   // hub's own Unix user and can send the hub any header, so on a box the hub takes a press only
   // with this signature, checked against the public half the boot gave root (gateway.mjs thread-key).
   const HUB_POSTS = ['thread-new', 'thread-say', 'thread-close', 'thread-reopen', 'start'];
-  const hubAsk = (method, p, body = null) => new Promise((settle) => {
+  const hubAsk = (method, p, body = null, person = null) => new Promise((settle) => {
     let deadline = null;
     const resolve = (v) => { clearTimeout(deadline); settle(v); };
     const none = () => resolve(null);
     const data = body === null ? null : Buffer.from(JSON.stringify(body));
-    const up = http.request({ host: '127.0.0.1', port: HUB_PORT, path: p, method, timeout: 150000, headers: { host: `127.0.0.1:${HUB_PORT}`, 'sec-fetch-site': 'same-origin', ...(data ? { origin: `http://127.0.0.1:${HUB_PORT}`, 'content-type': 'application/json', 'content-length': data.length, ...hubSignature(threadKey(store).privateKey, p, data) } : {}) } }, (ur) => {
+    const up = http.request({ host: '127.0.0.1', port: HUB_PORT, path: p, method, timeout: 150000, headers: { host: `127.0.0.1:${HUB_PORT}`, 'sec-fetch-site': 'same-origin', ...(person ? { 'x-devteam-person': person } : {}), ...(data ? { origin: `http://127.0.0.1:${HUB_PORT}`, 'content-type': 'application/json', 'content-length': data.length, ...hubSignature(threadKey(store).privateKey, p, data) } : {}) } }, (ur) => {
       const chunks = [];
       let size = 0;
       ur.on('data', (c) => { size += c.length; if (size > 4 * 1024 * 1024) { none(); up.destroy(); } else chunks.push(c); });
@@ -1993,10 +2160,10 @@ export function createGateway(opts = {}) {
   // what the press asked, 403 for a press the hub wouldn't take: its signature, its key, a
   // replay). Only the status and the one line of error go back from a refusal. Anything else (no
   // hub, a hub on a kit from before these threads, something else on the port) is a 502.
-  const operatorThreads = async (req, res, action) => {
+  const operatorThreads = async (req, res, action, person = null) => {
     let body = null;
     if (action) { body = await readJson(req, 20000); if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'missing or invalid fields' }); body = redactClaimLinks(body); }
-    const r = await hubAsk(action ? 'POST' : 'GET', action ? `/operator/${action}` : '/operator/threads', body);
+    const r = await hubAsk(action ? 'POST' : 'GET', action ? `/operator/${action}` : '/operator/threads', body, person);
     const answered = r && r.json && typeof r.json === 'object' && !Array.isArray(r.json);
     if (answered && r.status === 200) return json(res, 200, r.json);
     if (answered && [400, 403].includes(r.status) && typeof r.json.error === 'string') return json(res, r.status, { error: r.json.error.slice(0, 600) });
@@ -2156,6 +2323,44 @@ export function createGateway(opts = {}) {
   };
 
   const navigating = (req) => req.method === 'GET' && (req.headers['sec-fetch-mode'] === 'navigate' || (!req.headers['sec-fetch-mode'] && String(req.headers.accept ?? '').includes('text/html')));
+  // View only (kit-250): a View session reads and changes nothing. One check, run once the name is
+  // resolved and before any route or body; the sockets refuse View on their own (upgrade). null, or
+  // the 403's type and body. project: the name is a dashboard's (not a preview's); p: the pathname.
+  const VIEW_ANY = 'View only: you can look at everything here, but not change anything.';
+  const VIEW_TERM = 'View only: there is no terminal for view-only people.';
+  // Is this a dashboard's terminal route, as terminal@1 §3 reads a path (parsed as a URL,
+  // percent-decoded, dot segments resolved, repeated slashes folded)? Readings differ on where a
+  // decoded / or . counts, so every plausible one is taken and any that lands under /api/term/ is
+  // refused: refusing a View session too much costs nothing, too little reaches the terminal.
+  const dots = (d) => {
+    const out = [];
+    const segs = d.replace(/\/+/g, '/').split('/').slice(1);
+    segs.forEach((seg, i) => {
+      if (seg === '..') out.pop();
+      else if (seg !== '.') out.push(seg);
+      if ((seg === '.' || seg === '..') && i === segs.length - 1) out.push('');
+    });
+    return `/${out.join('/')}`;
+  };
+  const decoded = (x) => { try { return decodeURIComponent(x); } catch { return x; } };
+  const isTermRoute = (raw) => {
+    let parsed = raw;
+    try { parsed = new URL(raw.replace(/^\/+/, '/'), 'http://x').pathname; } catch {}
+    // the raw path resolved first (as the dashboard parses it), then decoded; decoded first; neither
+    return [dots(decoded(parsed)), dots(decoded(raw)), dots(raw), dots(parsed)].some((p) => p.startsWith('/api/term/'));
+  };
+  const VIEW_EXEMPT = (p, method) => (method === 'POST' && p === '/auth/logout') || p.startsWith('/auth/method/') || p === '/auth/passkeys' || p.startsWith('/auth/passkeys/');
+  const viewRefusal = (req, person, { isBox, isTerm, project, p }) => {
+    if (person?.level !== 'view') return null;
+    // 0: a dashboard's terminal routes answer as the dashboard's own View deny does (terminal@1 §4)
+    if (project && isTermRoute(req.url.split('?')[0])) return { type: 'json', body: '{"why":"view"}' };
+    const no = (sentence) => (navigating(req) ? { type: 'text', body: sentence } : { type: 'json', body: JSON.stringify({ error: sentence, code: 'view-only' }) });
+    if (isTerm) return no(VIEW_TERM);
+    if (isBox && (p === '/public' || p.startsWith('/public/'))) return no(VIEW_ANY);
+    if (req.method === 'GET' || req.method === 'HEAD') return null;
+    if (isBox && VIEW_EXEMPT(p, req.method)) return null;
+    return no(VIEW_ANY);
+  };
   // The cookie is SameSite=None, so a page elsewhere (another site, or another name of the box)
   // could make the browser send it with an <img> or <script>, or navigate a frame to the API. Such
   // a request is refused, but for a link to a page and for what a sandboxed review page loads (its
@@ -2419,8 +2624,26 @@ export function createGateway(opts = {}) {
       return blob ? new File([blob], file.name.replace(/\\.[^.]*$/, '') + '.jpg', { type: 'image/jpeg' }) : file;
     } catch { return file; }
   };
+  // A paste's image: the kinds Claude Code attaches go as they are, any other is redrawn as a PNG here.
+  const ASIS = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
+  const toPng = async (file) => {
+    if (Object.hasOwn(ASIS, file.type)) return file;
+    let blob = null;
+    try {
+      const bitmap = await createImageBitmap(file);
+      const canvas = document.createElement('canvas');
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      canvas.getContext('2d').drawImage(bitmap, 0, 0);
+      bitmap.close();
+      blob = await new Promise((r) => canvas.toBlob(r, 'image/png'));
+    } catch {}
+    if (!blob) throw Object.assign(new Error("That image can't be read here. Save it and drop the file."), { whole: true });
+    return new File([blob], file.name.replace(/\\.[^.]*$/, '') + '.png', { type: 'image/png' });
+  };
   // Stored but not yet pasted. Tried again until the terminal is back, and on screen until then.
   let waiting = [];
+  let verb = 'Sent';
   let trouble = [];
   let active = 0;
   window.devteamDropBusy = () => active > 0 || waiting.length > 0;
@@ -2435,14 +2658,14 @@ export function createGateway(opts = {}) {
     window.term.paste(dropPaste(paths));
     if (dropSpace(paths)) window.term.input(' ');
     window.term.focus();
-    say(trouble.concat(dropNote(paths)).join('\\n'), trouble.length > 0);
+    say(trouble.concat(dropNote(paths, verb)).join('\\n'), trouble.length > 0);
     trouble = [];
     return true;
   };
   setInterval(flush, 500);
-  const take = async (picks) => {
+  const take = async (picks, skipped) => {
     const paths = [];
-    const failed = [];
+    const failed = skipped ? [skipped] : [];
     for (const [i, p] of picks.entries()) {
       const name = p.file ? p.file.name : 'that item';
       try {
@@ -2450,10 +2673,12 @@ export function createGateway(opts = {}) {
         if (p.file.size > MAX) throw new Error('is over the ' + Math.floor(MAX / 1048576) + ' MB limit');
         const label = (picks.length > 1 ? (i + 1) + '/' + picks.length + ' ' : '') + name;
         say(label + ' 0%');
-        paths.push(await send(await toJpeg(p.file), label));
-      } catch (e) { failed.push(name + ': ' + e.message); }
+        paths.push(await send(await (p.pasted ? toPng : toJpeg)(p.file), label));
+      } catch (e) { failed.push(e.whole ? e.message : name + ': ' + e.message); }
     }
     trouble = failed;
+    // a drop and a paste waiting together are told as a drop
+    if (paths.length) verb = picks[0].pasted && (!waiting.length || verb === 'Pasted') ? 'Pasted' : 'Sent';
     waiting.push(...paths);
     if (flush()) return;
     if (waiting.length) say(trouble.concat('terminal not connected: stored at ' + dropPaste(waiting) + '\\nIt pastes when the terminal reconnects.').join('\\n'), true);
@@ -2462,6 +2687,10 @@ export function createGateway(opts = {}) {
   const hasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files');
   let hide = 0;
   let queue = Promise.resolve();
+  const enqueue = (picks, skipped) => {
+    active++;
+    queue = queue.then(() => take(picks, skipped)).catch((err) => say(String(err && err.message || err), true)).finally(() => { active--; });
+  };
   addEventListener('dragover', (e) => {
     if (!hasFiles(e)) return;
     e.preventDefault();
@@ -2478,8 +2707,49 @@ export function createGateway(opts = {}) {
     veil.style.display = 'none';
     // only while the event lasts: the list is empty afterwards
     const picks = Array.from(e.dataTransfer.items).filter((i) => i.kind === 'file').map((i) => { const entry = i.webkitGetAsEntry && i.webkitGetAsEntry(); return { file: i.getAsFile(), dir: Boolean(entry && entry.isDirectory) }; });
-    active++;
-    queue = queue.then(() => take(picks)).catch((err) => say(String(err && err.message || err), true)).finally(() => { active--; });
+    enqueue(picks);
+  }, true);
+  // --- a pasted image: only in the owner's own paste, and never in place of text ---
+  const IMAGES_ONLY = 'Only images paste here. Drop other files instead.';
+  // The text of a paste that only names its files: a copied image's address, or a copied file's name.
+  // Browsers wrap a copied image's HTML differently, so it is judged by what is left in its body.
+  const onlyNames = (text, html, files) => {
+    const line = text.replace(/[\\r\\n]+$/, '');
+    if (!line) return true;
+    // every line break there is, not only the ones a browser writes
+    if (/[\\r\\n\\v\\f\\x85\\u2028\\u2029]/.test(line)) return false;
+    if (html) {
+      const body = new DOMParser().parseFromString(html, 'text/html').body;
+      const els = Array.from(body.querySelectorAll('*')).filter((e) => e.tagName !== 'META');
+      if (els.length !== 1 || els[0].tagName !== 'IMG' || body.textContent.trim()) return false;
+    }
+    return /^(https?|file|data):\\S+$/i.test(line) || /\\.(png|jpe?g|gif|webp|heic|tiff?|bmp)$/i.test(line) || files.some((f) => f.name && line.endsWith(f.name));
+  };
+  const pastedName = (file, at) => {
+    if (file.name && !/^image\\.[a-z0-9]+$/i.test(file.name)) return file;
+    const two = (n) => String(n).padStart(2, '0');
+    const stamp = at.getFullYear() + two(at.getMonth() + 1) + two(at.getDate()) + '-' + two(at.getHours()) + two(at.getMinutes()) + two(at.getSeconds());
+    return new File([file], 'pasted-' + stamp + '.' + (Object.hasOwn(ASIS, file.type) ? ASIS[file.type] : 'png'), { type: file.type });
+  };
+  addEventListener('paste', (e) => {
+    const data = e.clipboardData;
+    const files = data ? Array.from(data.files) : [];
+    if (!files.length || !onlyNames(data.getData('text/plain'), data.getData('text/html'), files)) return;
+    // before xterm.js, which would type the clipboard's text
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    const images = files.filter((f) => /^image\\//i.test(f.type));
+    if (!images.length) return void enqueue([], IMAGES_ONLY);
+    const at = new Date();
+    enqueue(images.map((f) => ({ file: pastedName(f, at), dir: false, pasted: true })), images.length < files.length ? IMAGES_ONLY : '');
+  }, true);
+  // Off a Mac, xterm.js types Ctrl+V as ^V and prevents the browser's paste. These keys never reach it,
+  // and the browser pastes. keyCode follows the keyboard's layout, as the browser's own shortcut does.
+  // On a Mac, Cmd+V pastes and Ctrl+V stays ^V.
+  const mac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
+  addEventListener('keydown', (e) => {
+    if (mac || e.altKey || e.metaKey) return;
+    if (e.ctrlKey ? e.keyCode === 86 : e.shiftKey && e.keyCode === 45) e.stopPropagation();
   }, true);
 })();</script>`);
   const TERM_CSP = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; font-src data:; img-src data:; connect-src 'self' ${TERM.replace(/^http/, 'ws')}; frame-ancestors ${PUB}; base-uri 'none'; form-action 'none'`;
@@ -2992,6 +3262,9 @@ export function createGateway(opts = {}) {
         return send(res, claimed ? 401 : 403, 'text/plain; charset=utf-8', claimed ? 'sign in with your passkey' : 'this box is unclaimed');
       }
       const { session, person } = who;
+      // who this session is, for the kit (kit-252): read here, once, before anything is forwarded
+      const personH = personHeader(person);
+      if (personH === false) return send(res, 500, 'text/plain; charset=utf-8', "this person's record can't be read");
       // Only now, with the session, does the name mean anything: a miss asks the hub once, shared.
       let port = null;
       let pv = null;
@@ -3007,6 +3280,8 @@ export function createGateway(opts = {}) {
         port = found.port ?? null;
         pv = found.preview ?? null;
       }
+      const viewNo = viewRefusal(req, person, { isBox, isTerm, project: Boolean(port && !pv), p });
+      if (viewNo) return send(res, 403, viewNo.type === 'text' ? 'text/plain; charset=utf-8' : 'application/json', viewNo.body);
       if (pv && !isOwner(person) && ownerOnlyPreview(pv)) return send(res, 403, 'text/plain; charset=utf-8', 'Only the box\'s owner can open the supervisor\'s browser.');
       // A preview's lens: the gateway's own page, after the session check, never the app's (spec §7).
       // Static, so it asks the hub nothing; any other method or path there is the app's, as before.
@@ -3022,10 +3297,12 @@ export function createGateway(opts = {}) {
         if (['GET', 'HEAD'].includes(req.method) && rawPath.startsWith('/upload/')) return await serveUpload(req, res, rawPath);
         const prefix = req.method === 'GET' && ['iframe', 'document'].includes(req.headers['sec-fetch-dest']) && ['same-origin', 'none'].includes(req.headers['sec-fetch-site']) ? ARTIFACT.exec(rawPath)?.[0] : null;
         if (prefix) return redirect(res, `${capFor(port, prefix, session)}${req.url}`);
-        if (req.method === 'POST' && Object.hasOwn(SIGNED_POSTS, rawPath)) return signedPost(req, res, port, own, rawPath, SIGNED_POSTS[rawPath]);
+        if (req.method === 'POST' && Object.hasOwn(SIGNED_POSTS, rawPath)) return signedPost(req, res, port, own, rawPath, SIGNED_POSTS[rawPath], personH, levelOf(person));
+        const termSigner = req.method === 'POST' ? termPost(p) : null;
+        if (termSigner) return signedPost(req, res, port, own, p, termSigner, personH, levelOf(person), termCap(res));
         // the viewer, by its path as the kit resolves it: the box may frame it only under the wrapper's grant
         const viewer = VIEWER.test(p) || VIEWER.test(rawPath) ? { granted: wrapGranted(label, rawPath, url) } : null;
-        return proxy(req, res, { port, path: req.url, publicOrigin: own, viewer, extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
+        return proxy(req, res, { port, path: req.url, publicOrigin: own, viewer, person: personH, level: levelOf(person), extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
       }
       // The terminal: the gateway's copy of ttyd's page. Only its socket reaches ttyd (see upgrade).
       if (isTerm) {
@@ -3101,11 +3378,18 @@ export function createGateway(opts = {}) {
       // set (a laptop, an older image). Versions only. An additive change keeps box: 2.
       // role is the signed-in person's ('owner', 'admin' or 'member'); people, where the People list
       // is, for the owner and admins only, so the hub draws People for them alone.
-      if (req.method === 'GET' && p === '/box.json') return json(res, 200, { box: 2, terminal: `${TERM}/`, project: `${pubUrl.protocol}//{project}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, previews: `${PUB}/dev/`, push: vapid().publicKey, image: BOX_IMAGE, role: roleOf(person), ...(roleOf(person) === 'member' ? {} : { people: `${PUB}/auth/people/list` }) });
+      if (['GET', 'HEAD'].includes(req.method) && p === '/box.json') return json(res, 200, { box: 2, terminal: `${TERM}/`, project: `${pubUrl.protocol}//{project}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, previews: `${PUB}/dev/`, push: vapid().publicKey, image: BOX_IMAGE, role: roleOf(person), level: levelOf(person), ...(roleOf(person) === 'member' ? {} : { people: `${PUB}/auth/people/list` }) });
       if (req.method === 'GET' && p === '/instances.json') return instances(req, res);
       if (req.method === 'GET' && p === '/memory.json') return memory(req, res, url.searchParams);
-      if (req.method === 'GET' && p === '/operator/threads') return operatorThreads(req, res, null);
-      if (req.method === 'POST' && p.startsWith('/operator/') && HUB_POSTS.includes(p.slice(10))) return operatorThreads(req, res, p.slice(10));
+      if (req.method === 'GET' && p === '/operator/threads') return operatorThreads(req, res, null, personH);
+      if (req.method === 'POST' && p.startsWith('/operator/') && HUB_POSTS.includes(p.slice(10))) return operatorThreads(req, res, p.slice(10), personH);
+      // a file for a thread with the operator: dropped as on an instance's name (the session and the Origin
+      // rule above), and served back to the hub's own page alone, which its browser says it is
+      if (req.method === 'POST' && rawPath === '/upload') { clearTimeout(bodyTimer); return await receiveUpload(req, res, url.searchParams.get('name')); }
+      if (['GET', 'HEAD'].includes(req.method) && rawPath.startsWith('/upload/')) {
+        if (req.headers['sec-fetch-site'] !== 'same-origin') return send(res, 403, 'text/plain; charset=utf-8', 'dropped files only to the hub\'s own page');
+        return await serveUpload(req, res, rawPath);
+      }
       if (req.method === 'POST' && p === '/push/subscribe') {
         const sub = pushSubscription(await readJson(req));
         if (!sub) return json(res, 400, { error: 'that is not a push subscription this box can send to' });
@@ -3114,6 +3398,8 @@ export function createGateway(opts = {}) {
         const now = store.load();
         const held = stillHeld(now, session);
         if (!held) return json(res, 401, { error: 'your session ended; sign in again' });
+        // moved to View while its body was read (the View rule ran at Full): no device, as the guard answers
+        if (levelOf(held.person) === 'view') return json(res, 403, { error: VIEW_ANY, code: 'view-only' });
         const freed = keepSubs(now, (x) => x.endpoint !== sub.endpoint);
         store.save(withSubs(freed, held.person, [...subsOf(freed, held.person), sub].slice(-PUSH_DEVICES)));
         return json(res, 200, { ok: true });
@@ -3295,10 +3581,47 @@ export function createGateway(opts = {}) {
   // passes, before anything is awaited, so a removal at any point after closes it.
   const heldSockets = new Map();
   const holdSocket = (socket, person) => {
-    heldSockets.set(socket, person?.id ?? null);
+    heldSockets.set(socket, { person: person?.id ?? null });
     socket.once('close', () => heldSockets.delete(socket));
   };
-  const dropPerson = (id) => { for (const [sock, holder] of heldSockets) if (holder === id) sock.destroy(); };
+  const dropPerson = (id) => { for (const [sock, holder] of heldSockets) if (holder.person === id) sock.destroy(); };
+  // A /presence or /canvas socket (presence@1 §2, canvas@1 §3) lives no longer than its session, at the level it opened with.
+  // Looked at after every write (sign-out, removal, a level or role change), at the session's own end,
+  // and each second while any is open, for a write by another process (devteam-reclaim). A state that
+  // can't be read ends them all: the page tries again.
+  const PRESENCE_POLL_MS = 1000;
+  let presencePoll = null;
+  const presenceOpen = () => [...heldSockets].filter(([, h]) => h.session);
+  const endPresence = () => {
+    const open = presenceOpen();
+    if (!open.length) { clearInterval(presencePoll); presencePoll = null; return; }
+    let s = null;
+    try { s = store.load(); } catch {}
+    for (const [sock, h] of open) {
+      let now = null;
+      try { now = s ? stillHeld(s, h.session) : null; } catch {}
+      if (!now || (now.person.id ?? null) !== h.person || levelOf(now.person) !== h.level) sock.destroy();
+    }
+  };
+  afterSave = endPresence;
+  const holdPresence = (socket, { session, person }) => {
+    holdSocket(socket, person);
+    heldSockets.set(socket, { person: person?.id ?? null, session, level: levelOf(person) });
+    // The session's end, by the wall clock its liveness is read by (liveSession). A timer runs on the
+    // monotonic clock and can fire a little before the wall clock gets there, while the session still
+    // reads live: it is then set again for what is left, so an early timer never leaves the close to
+    // the next poll (kit-927).
+    let end = null;
+    const atEnd = () => {
+      const left = session.expires - Date.now();
+      if (left > 0) { end = setTimeout(atEnd, Math.min(left + 1, 2 ** 31 - 1)); end.unref(); return; }
+      endPresence();
+    };
+    end = setTimeout(atEnd, Math.min(Math.max(session.expires - Date.now(), 0) + 1, 2 ** 31 - 1));
+    end.unref();
+    socket.once('close', () => clearTimeout(end));
+    if (!presencePoll) { presencePoll = setInterval(endPresence, PRESENCE_POLL_MS); presencePoll.unref(); }
+  };
   // The supervisor's browser view (the preview the hub labels so): whoever opens it drives the
   // owner's signed-in browser, so it is the owner's alone, under any name its port is listed by.
   const ownerOnlyPreview = (name) => {
@@ -3306,16 +3629,81 @@ export function createGateway(opts = {}) {
     if (!link || link.ambiguous) return false;
     return browserPorts.has(link.port);
   };
+  // A refusal, and the socket gone a second later even if the browser keeps its half open or sends on.
+  const endUpgrade = (socket, code, msg) => {
+    socket.on('error', () => {});
+    socket.end(`HTTP/1.1 ${code} ${msg}\r\nconnection: close\r\ncontent-length: 0\r\n\r\n`);
+    socket.resume();
+    const t = setTimeout(() => socket.destroy(), 1000);
+    t.unref();
+    socket.once('close', () => clearTimeout(t));
+  };
+  // An upgrade, forwarded on a raw socket. extra: headers the gateway sets over the browser's.
+  // answerMs: how long the upstream has to answer (0: no limit). only101: any other answer is told by
+  // its status alone and both sides end, and nothing of the browser's goes on before a 101: a server
+  // with no such socket (an older kit) would read what came next as requests the gateway never saw.
+  const relayUpgrade = (req, socket, head, { port, host, own, loopbackHost, extra = null, answerMs = 0, only101 = false }) => {
+    // each side's pipe listens to both: more than Node's 10 without any leak
+    socket.setMaxListeners(20);
+    const up = net.connect(port, host);
+    const late = answerMs ? setTimeout(() => socket.destroy(), answerMs) : null;
+    late?.unref();
+    socket.once('close', () => clearTimeout(late));
+    up.on('error', () => socket.destroy());
+    socket.on('error', () => up.destroy());
+    socket.on('close', () => up.destroy());
+    up.once('close', () => socket.destroy());
+    up.on('connect', () => {
+      if (socket.destroyed) return up.destroy();
+      const h = { ...upstreamHeaders(req, port, own, { loopbackHost }), ...extra };
+      h.connection = 'Upgrade';
+      h.upgrade = req.headers.upgrade;
+      const lines = [`GET ${req.url} HTTP/1.1`, ...Object.entries(h).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`)];
+      up.write(`${lines.join('\r\n')}\r\n\r\n`);
+      if (head?.length && !only101) up.write(head);
+      // The handshake's answer gets the rules any response does (cookies above all): held until its
+      // headers are whole, then relayed, so a Set-Cookie on a 101 can't shadow anything either.
+      let held = Buffer.alloc(0);
+      const onHead = (chunk) => {
+        held = Buffer.concat([held, chunk]);
+        const text = held.toString('latin1');
+        const end = /\r?\n\r?\n/.exec(text);
+        if (!end) { if (held.length > 64 * 1024) { up.destroy(); socket.destroy(); } return; }
+        up.off('data', onHead);
+        clearTimeout(late);
+        const status = /^HTTP\/1\.[01] (\d{3})(?: |\r|\n|$)/.exec(text)?.[1];
+        if (only101 && status !== '101') {
+          up.removeAllListeners('close');
+          up.destroy();
+          return endUpgrade(socket, status && status >= '400' ? status : '502', 'Refused');
+        }
+        const filtered = previewHandshake(text.slice(0, end.index), own, port);
+        if (!filtered) { up.destroy(); socket.destroy(); return; }
+        socket.write(Buffer.from(`${filtered}\r\n\r\n`, 'latin1'));
+        if (only101 && head?.length) up.write(head);
+        const rest = held.subarray(end.index + end[0].length);
+        if (rest.length) socket.write(rest);
+        pipeline(up, socket, () => {});
+        pipeline(socket, up, () => {});
+      };
+      up.on('data', onHead);
+      return undefined;
+    });
+    return undefined;
+  };
   const previewUpgrade = async (req, socket, head, name, refuse) => {
     const own = previewOrigin(name);
     if (req.headers.origin !== own) return refuse(403, 'Forbidden');
     let who = null;
     try { who = store.load().passkeys.length ? sessionOf(req) : null; } catch { return refuse(503, 'Service Unavailable'); }
     if (!who) return refuse(401, 'Unauthorized');
+    if (who.person?.level === 'view') return refuse(403, 'Forbidden');
     if (!isOwner(who.person) && ownerOnlyPreview(name)) return refuse(403, 'Forbidden');
     holdSocket(socket, who.person);
-    if (!req.url.startsWith('/') || req.url.startsWith('//')) return refuse(400, 'Bad Request');
     const link = previews.get(name);
+    // a project's name that has the form of a preview's: no socket of its but /presence and /canvas
+    if (!link && projects.has(name)) return refuse(421, 'Misdirected Request');
+    if (!req.url.startsWith('/') || req.url.startsWith('//')) return refuse(400, 'Bad Request');
     if (!link || link.ambiguous) return refuse(503, 'Service Unavailable');
     const open = previewSockets.get(name) ?? new Set();
     if (open.size >= PREVIEW_SOCKETS) return refuse(429, 'Too Many Requests');
@@ -3327,44 +3715,41 @@ export function createGateway(opts = {}) {
     open.add(socket);
     const drop = () => { open.delete(socket); if (!open.size && previewSockets.get(name) === open) previewSockets.delete(name); };
     socket.once('close', drop);
-    const up = net.connect(link.port, host);
-    up.on('error', () => socket.destroy());
-    socket.on('error', () => up.destroy());
-    socket.on('close', () => up.destroy());
-    up.once('close', () => socket.destroy());
-    up.on('connect', () => {
-      if (socket.destroyed) return up.destroy();
-      const h = upstreamHeaders(req, link.port, own, { loopbackHost: 'localhost' });
-      h.connection = 'Upgrade';
-      h.upgrade = req.headers.upgrade;
-      const lines = [`GET ${req.url} HTTP/1.1`, ...Object.entries(h).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`)];
-      up.write(`${lines.join('\r\n')}\r\n\r\n`);
-      if (head?.length) up.write(head);
-      // The handshake's answer gets the rules any response does (cookies above all): held until its
-      // headers are whole, then relayed, so a Set-Cookie on a 101 can't shadow anything either.
-      let held = Buffer.alloc(0);
-      const onHead = (chunk) => {
-        held = Buffer.concat([held, chunk]);
-        const text = held.toString('latin1');
-        const end = /\r?\n\r?\n/.exec(text);
-        if (!end) { if (held.length > 64 * 1024) { up.destroy(); socket.destroy(); } return; }
-        up.off('data', onHead);
-        const filtered = previewHandshake(text.slice(0, end.index), own, link.port);
-        if (!filtered) { up.destroy(); socket.destroy(); return; }
-        socket.write(Buffer.from(`${filtered}\r\n\r\n`, 'latin1'));
-        const rest = held.subarray(end.index + end[0].length);
-        if (rest.length) socket.write(rest);
-        pipeline(up, socket, () => {});
-        pipeline(socket, up, () => {});
-      };
-      up.on('data', onHead);
-      return undefined;
-    });
-    return undefined;
+    return relayUpgrade(req, socket, head, { port: link.port, host, own, loopbackHost: 'localhost' });
   };
-  // The terminal's WebSocket, on the terminal's name, its Origin, a session; and any preview's.
+  // A page's presence socket (presence@1 §2), on a project's name or the box's own, or its canvas
+  // socket (canvas@1 §3, the same handshake), on a project's name alone: that name's Origin
+  // (an artifact frame's is null), a session, at any level, and the person and level the gateway says.
+  // Project and preview names share a form, so the list decides, once there is a session.
+  const PRESENCE_ANSWER_MS = opts.presenceAnswerMs ?? 10000; // only a test shortens it
+  const presenceUpgrade = async (req, socket, head, label, refuse) => {
+    const own = label ? projectOrigin(label) : PUB;
+    if (req.headers.origin !== own) return refuse(403, 'Forbidden');
+    let who = null;
+    try { who = store.load().passkeys.length ? sessionOf(req) : null; } catch { return refuse(503, 'Service Unavailable'); }
+    if (!who) return refuse(401, 'Unauthorized');
+    const person = personHeader(who.person);
+    if (person === false) return refuse(500, 'Internal Server Error');
+    holdPresence(socket, who);
+    socket.on('error', () => socket.destroy());
+    let port = HUB_PORT;
+    if (label) {
+      let found = resolveLabel(label);
+      if (!found) { await refreshWithin(1000); found = resolveLabel(label); }
+      if (socket.destroyed) return undefined;
+      if (!found?.port) return previewOf(req.headers.host) && !found?.shared ? previewUpgrade(req, socket, head, label, refuse) : refuse(421, 'Misdirected Request');
+      port = found.port;
+    }
+    return relayUpgrade(req, socket, head, { port, host: '127.0.0.1', own, loopbackHost: '127.0.0.1', extra: person ? { 'x-devteam-person': person, 'x-devteam-level': levelOf(who.person) } : null, answerMs: PRESENCE_ANSWER_MS, only101: true });
+  };
+  // The terminal's WebSocket, on the terminal's name, its Origin, a session; any preview's; presence; and a canvas.
   server.on('upgrade', (req, socket, head) => {
-    const refuse = (code, msg) => { socket.end(`HTTP/1.1 ${code} ${msg}\r\nconnection: close\r\ncontent-length: 0\r\n\r\n`); };
+    const refuse = (code, msg) => endUpgrade(socket, code, msg);
+    const label = labelOf(req.headers.host);
+    // the path exactly as sent, less a query, as the relay reads it: only /presence is /presence, and
+    // only /canvas is /canvas (canvas@1 §3), which a project's dashboard serves and the hub doesn't
+    const route = req.method === 'GET' ? req.url.split('?')[0] : null;
+    if ((route === '/presence' && (label || req.headers.host === pubUrl.host)) || (route === '/canvas' && label)) return presenceUpgrade(req, socket, head, label, refuse).catch(() => socket.destroy());
     const pv = previewOf(req.headers.host);
     if (pv) return previewUpgrade(req, socket, head, pv, refuse).catch(() => socket.destroy());
     if (req.headers.host !== termHost) return refuse(421, 'Misdirected Request');
@@ -3372,6 +3757,7 @@ export function createGateway(opts = {}) {
     let who = null;
     try { who = store.load().passkeys.length ? sessionOf(req) : null; } catch { return refuse(503, 'Service Unavailable'); }
     if (!who) return refuse(401, 'Unauthorized');
+    if (who.person?.level === 'view') return refuse(403, 'Forbidden');
     holdSocket(socket, who.person);
     let p;
     try { p = new URL(req.url, PUB); } catch { return refuse(400, 'Bad Request'); }
@@ -3504,7 +3890,7 @@ if (!token) location.replace('/auth/login');
 else post('/auth/claim/invite', { token }).then((i) => {
   again = i.again === true;
   if (again) { el('h').textContent = 'Add a sign-in method to your account'; el('who').textContent = 'This link adds a sign-in method (a passkey) to ' + i.name + '\\'s account on ' + host + '. Your other sign-in methods keep working.'; el('how').textContent = ''; el('go').textContent = 'Create passkey'; }
-  else el('who').textContent = 'You\\'re invited to ' + host + ', ' + i.name + ', as ' + (i.level === 'full' ? 'Full: you can do everything on the box except manage people.' : String(i.level) + '.');
+  else el('who').textContent = 'You\\'re invited to ' + host + ', ' + i.name + ', as ' + (i.level === 'view' ? 'view only: you can see everything here (the hub, dashboards, artifacts, boards and goals) and change only your own sign-in methods. One exception: opening a running preview can set off what that app does when a page opens.' : 'Full: you can do everything on the box except manage people.');
 }, (e) => (/expired or was used/.test(e.message) ? dead() : err(e.message + ' Reload to try again.')));
 el('go').onclick = run(async () => {
   try { await create('/auth/method/passkey/start', '/auth/method/passkey/finish', { purpose: 'invite', token, name: el('name').value }); }

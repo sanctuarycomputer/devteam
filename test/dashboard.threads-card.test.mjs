@@ -216,7 +216,7 @@ test("threads on the dashboard page: Shift and point, the card, the pins and the
   });
 
   await t.test("the supervisor's reply shows in the open card within two polls", async (st) => {
-    F.sup(['thread', 'reply', T, 'That drops the measure to EU orders; want me to propose the change?']);
+    F.sup(['thread', 'reply', T, 'That drops the measure to EU orders; want me to propose the change?', '--no-ask', 'a test of the page, not of asks']);
     const t0 = Date.now();
     await soon(`document.querySelector('#tl-c-turns .tl-turn.supervisor')?.textContent.includes('drops the measure')`, 'the reply');
     // the card polls every 2 s: two polls, and one more and a margin for a loaded machine

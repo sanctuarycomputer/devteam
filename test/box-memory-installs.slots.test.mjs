@@ -157,18 +157,24 @@ test('4h: a slot held past 15 minutes is taken over, warned and logged', () => {
 });
 
 test('4h\': a runner whose slot was taken over leaves the taker\'s slot alone', async () => {
-  // A sleeps 3 s, B (the taker) 5 s, C 1 s
-  const S = slotFleet('installs-4h2', (F) => `n=$(basename "$PWD"); echo "start ${clock}" >> ${F.base}/4h-$n.txt; case $n in chore-a) sleep 3;; chore-b) sleep 5;; *) sleep 1;; esac; echo "end ${clock}" >> ${F.base}/4h-$n.txt`);
+  // A runs until the takeover is seen (4h-go), B (the taker) 5 s, C 1 s
+  const S = slotFleet('installs-4h2', (F) => `n=$(basename "$PWD"); echo "start ${clock}" >> ${F.base}/4h-$n.txt; case $n in chore-a) while [ ! -e ${F.base}/4h-go ]; do sleep 0.1; done;; chore-b) sleep 5;; *) sleep 1;; esac; echo "end ${clock}" >> ${F.base}/4h-$n.txt`);
+  const runs = [];
   const times = (s) => Object.fromEntries(fs.readFileSync(path.join(S.F.base, `4h-chore-${s}.txt`), 'utf8').trim().split('\n').map((l) => l.split(' ')).map(([k, v]) => [k, Number(v)]));
   try {
     const env = () => ({ DEVTEAM_SETUP_SLOTS: '1', ...deadlineIn(20000) });
     const runA = S.startAsync('a', env());
+    runs.push(runA);
     await until(() => fs.existsSync(path.join(S.F.base, '4h-chore-a.txt')), 10000, 'setup A to start');
+    // A's runner writes its holder once more, with the setup's pgid, after the setup starts: ours comes after it
+    await until(() => readHolder(S.slots, 0)?.pgid, 10000, "A's holder to name its setup's group");
     const idA = readHolder(S.slots, 0)?.id;
     assert.ok(idA, 'A holds slot 0');
     rewriteHolder(S.slots, 0, (h) => ({ ...h, at: new Date(Date.now() - 16 * 60000).toISOString() }));
     const runB = S.startAsync('b', env());
+    runs.push(runB);
     const idB = await until(() => { const id = readHolder(S.slots, 0)?.id; return id && id !== idA && id; }, 10000, 'B to take over slot 0');
+    fs.writeFileSync(path.join(S.F.base, '4h-go'), '');
     const a = await runA;
     assert.equal(a.status, 0, a.stderr);
     assert.equal(readHolder(S.slots, 0)?.id, idB, 'A\'s release left B\'s slot alone');
@@ -178,7 +184,12 @@ test('4h\': a runner whose slot was taken over leaves the taker\'s slot alone', 
     assert.equal(c.status, 0, c.stderr);
     assert.match(b.stderr, /took over setup slot 0/);
     assert.ok(times('c').start >= times('b').end, `C started at ${times('c').start}, before B ended at ${times('b').end}`);
-  } catch (e) { S.failed = e; throw e; } finally { S.finish(); }
+  } catch (e) { S.failed = e; throw e; } finally {
+    // A's setup ends, and every run is over, before the fixture's base goes
+    fs.writeFileSync(path.join(S.F.base, '4h-go'), '');
+    await Promise.all(runs);
+    S.finish();
+  }
 });
 
 test('4i: DEVTEAM_SETUP_SLOTS outside 1-8 warns naming the value and gives two slots', async () => {

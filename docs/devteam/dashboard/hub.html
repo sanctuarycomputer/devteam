@@ -107,6 +107,7 @@
   :where(.shell) .tabbar .n:not(:where(.no-shell, .no-shell *)) { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
   :where(.shell) .tabbar .n.blue:not(:where(.no-shell, .no-shell *)) { color: var(--blue-fg); font-weight: 500; }
   :where(.shell) .tabbar .spacer:not(:where(.no-shell, .no-shell *)) { flex: 1; }
+  :where(.shell) .tabbar.sub [role="tab"]:not(:where(.no-shell, .no-shell *)) { height: 30px; font-size: 12px; padding: 0 8px; }
   /* the record table: sortable monospace headers, every row opens its record, "None" when empty */
   :where(.shell) .db-t:not(:where(.no-shell, .no-shell *)) { width: 100%; border-collapse: collapse; }
   :where(.shell) .db-t th:not(:where(.no-shell, .no-shell *)), :where(.shell) .db-t td:not(:where(.no-shell, .no-shell *)) { text-align: left; border-bottom: 1px solid var(--line); }
@@ -462,6 +463,14 @@
   .tl-n { flex: none; width: 20px; height: 20px; border-radius: 50%; background: var(--blue); color: #fff; font-size: 11px; line-height: 20px; text-align: center; }
   .tl-closed summary { cursor: pointer; font-size: 12px; color: var(--fg-2); padding: 6px; }
   @media (pointer: coarse) { #tl .btn { height: 36px; padding: 0 14px; } #tl .btn.x { width: 36px; padding: 0; } #tl .tl-pill { height: 40px; } }
+/* css-view-only start */
+  /* View only (kit-250): the hub's writes greyed, the disabled Terminal tab, the badge and the line */
+  body.view-only :is(.fleet-switch [data-fleet], [data-tl-send], #tl-c-text, [data-tl-start], [data-tl-end], [data-tl-reopen], #view-notify) { opacity: .45; cursor: not-allowed; }
+  #tabs [role=tab][aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
+  #view-only { align-self: center; margin-bottom: 4px; flex: none; font-size: 11px; font-weight: 600; line-height: 18px; padding: 0 7px; border-radius: 999px; white-space: nowrap; color: var(--amber-fg, #a35200); background: color-mix(in srgb, var(--amber, #f5a623) 16%, transparent); }
+  .view-line { font-size: 12.5px; color: var(--fg-2, inherit); margin: 4px 0 12px; }
+  #view-line { margin: 6px 16px; }
+/* css-view-only end */
 </style>
 </head>
 <body class="shell">
@@ -496,13 +505,30 @@ const escHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;
 const shellText = (html) => String(html ?? '').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').trim();
 
 // ---- the tab bar: counts, a disabled state, roving tabindex, arrows that skip disabled tabs ----
-function tabBar({ tabs = [], selected = null } = {}) {
-  const sel = tabs.some((t) => t.id === selected && !t.disabled) ? selected : (tabs.find((t) => !t.disabled) || {}).id;
-  return `<div class="tabbar" role="tablist">${tabs.map((t) => {
+const TAB_PANEL = /^[a-z][a-z0-9-]*$/;
+const TAB_ID = /^[A-Za-z0-9_-]+$/;
+const goodPanel = (p) => typeof p === 'string' && TAB_PANEL.test(p);
+const goodTabId = (id) => TAB_ID.test(String(id ?? ''));
+// the tab a bar selects: selected if it is enabled, else the first enabled tab (undefined: none)
+function tabSelected(tabs, selected) {
+  return tabs.some((t) => t.id === selected && !t.disabled) ? selected : (tabs.find((t) => !t.disabled) || {}).id;
+}
+function tabBar({ tabs = [], selected = null, panel = null, size = null } = {}) {
+  const sel = tabSelected(tabs, selected);
+  return `<div class="tabbar${size === 'sub' ? ' sub' : ''}" role="tablist">${tabs.map((t) => {
     const on = t.id === sel;
+    const ctl = goodPanel(panel) && goodTabId(t.id) ? ` id="tab-${panel}-${t.id}" aria-controls="${panel}"` : '';
     const n = t.count === undefined || t.count === null || t.count === '' ? '' : ` <span class="n${t.waiting ? ' blue' : ''}">${escHtml(t.count)}</span>`;
-    return `<button type="button" role="tab" data-tab="${escHtml(t.id)}" aria-selected="${on}" tabindex="${on ? 0 : -1}"${t.disabled ? ' aria-disabled="true"' : ''}>${escHtml(t.label)}${n}</button>`;
+    return `<button type="button" role="tab" data-tab="${escHtml(t.id)}"${ctl} aria-selected="${on}" tabindex="${on ? 0 : -1}"${t.disabled ? ' aria-disabled="true"' : ''}>${escHtml(t.label)}${n}</button>`;
   }).join('')}</div>`;
+}
+// the panel a tab bar controls, labelled by the tab the bar selects; a bad panel gives html unwrapped
+function tabPanel({ panel, tabs = [], selected = null } = {}, html) {
+  const body = html ?? '';
+  if (!goodPanel(panel)) return body;
+  const sel = tabSelected(tabs, selected);
+  const lab = sel !== undefined && goodTabId(sel) ? ` aria-labelledby="tab-${panel}-${sel}"` : '';
+  return `<div role="tabpanel" id="${panel}"${lab}>${body}</div>`;
 }
 // the tab an arrow, Home or End moves to from fromId, wrapping and skipping disabled tabs (null: not a move)
 function tabStep(tabs, fromId, key) {
@@ -689,10 +715,48 @@ const threadsTabs = (() => {
   };
 })();
 
-// ---- the URL: page heads (#<page>[?state]) and today's link heads ----
-const STATE_KEYS = { '*': ['th', 't'], board: ['goal', 'feat', 'repo', 'att'], progress: ['goal', 'narrow', 'show'], library: ['kind', 'goal'], goals: ['gt'], sensors: ['st'], loop: ['lt', 'kind', 'orient'] };
+// ---- the URL (dashboard-shell@2): page heads (#<page>[?state], p the open peek or viewer) and link heads ----
+const STATE_KEYS = { '*': ['th', 't', 'i', 'u', 'p'], board: ['goal', 'feat', 'repo', 'att'], progress: ['goal', 'narrow', 'show'], library: ['kind', 'goal'], goals: ['gt'], sensors: ['st'], loop: ['lt', 'kind', 'orient'] };
 const stateKeys = (page) => [...(STATE_KEYS[page] || []), ...STATE_KEYS['*']];
-// routes (the page's own table, outside this block): { pages, links: { kind: home }, files: [[RegExp, home]], redirects: { head: head } }
+// A peek's or a viewer's head without '#' (a p value, or a legacy head's), as the canonical head of that view, or
+// null when it names none: its kind one of routes.peeks; a file by its query (path required); an artifact's
+// version main, wt/<worktree> or tree/<40 or 64 hex> (anything else is main), its slug an artifact slug, its page
+// kept only when the server can serve it (index.html is the default); a preview's route kept unless '/'. A query
+// is read with URLSearchParams and written with it again, so a page or a route holding & = # round-trips.
+function peekHead(v, routes) {
+  const h = String(v ?? '');
+  const q = h.indexOf('?');
+  const path = q < 0 ? h : h.slice(0, q);
+  const query = new URLSearchParams(q < 0 ? '' : h.slice(q + 1));
+  const peeks = routes.peeks || [];
+  if (path === 'file') {
+    if (!peeks.includes('file') || !query.get('path')) return null;
+    const view = query.get('view');
+    query.delete('view');
+    if (view === 'raw' || view === 'rendered') query.append('view', view);
+    return `file?${query}`;
+  }
+  const s = path.indexOf('/');
+  const kind = s < 0 ? path : path.slice(0, s), rest = s < 0 ? '' : path.slice(s + 1);
+  if (!rest || !peeks.includes(kind) || kind === 'file') return null;
+  if (kind === 'artifact') {
+    const segs = rest.split('/'), slug = segs.pop();
+    if (!/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(slug)) return null;
+    let at = 'main';
+    if (segs.length === 2 && segs[0] === 'wt' && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(segs[1])) at = `wt/${segs[1]}`;
+    if (segs.length === 2 && segs[0] === 'tree' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(segs[1])) at = `tree/${segs[1]}`;
+    const page = query.get('path');
+    const keep = page !== null && page !== 'index.html' && /^[A-Za-z0-9._/-]+$/.test(page) && page.split('/').every((x) => x && !x.startsWith('.'));
+    return `artifact/${at}/${slug}${keep ? `?${new URLSearchParams({ path: page })}` : ''}`;
+  }
+  if (kind === 'preview') {
+    if (rest.includes('/')) return null;
+    const route = query.get('route');
+    return `preview/${rest}${route && route !== '/' ? `?${new URLSearchParams({ route })}` : ''}`;
+  }
+  return h;
+}
+// routes (the page's own table, outside this block): { pages, peeks, links: { kind: home }, files: [[RegExp, home]], redirects: { head: head } }
 function parseHead(hash, routes) {
   let h = String(hash ?? '').replace(/^#/, '');
   let redirected = false;
@@ -708,12 +772,17 @@ function parseHead(hash, routes) {
       const hit = (routes.files || []).find(([re]) => re.test(path));
       home = hit ? hit[1] : 'library';
     }
+    // a peek's or a viewer's link head is legacy: its home page with it as p (none when it names no view)
+    if ((routes.peeks || []).includes(kind)) { const p = peekHead(h, routes); return { page: home, state: p ? { p } : {}, legacy: true }; }
     return { link: h, kind, home };
   }
   const page = (routes.pages || []).includes(first) ? first : 'overview';
   const got = new URLSearchParams(q < 0 ? '' : h.slice(q + 1));
   const state = {};
   for (const k of stateKeys(page)) if (got.has(k)) state[k] = got.get(k);
+  // i is a card in the Inbox tab: only with th=inbox; p only a view routes.peeks names, as its canonical head
+  if (state.i !== undefined && state.th !== 'inbox') delete state.i;
+  if (state.p !== undefined) { const p = peekHead(state.p, routes); if (p) state.p = p; else delete state.p; }
   return redirected ? { page, state, redirected } : { page, state };
 }
 function headFor(p) {
@@ -723,13 +792,17 @@ function headFor(p) {
   const s = qs.toString();
   return `#${p.page}${s ? `?${s}` : ''}`;
 }
-// history.state for an entry: { page, depth, openedHere }. entry = { hash, state }, here = what was on
-// screen (its stamp), cold = the visit's first route
+// history.state for an entry: { page, depth, openedHere }, page the entry's head without p. entry = { hash, state },
+// here = what was on screen (its stamp), cold = the visit's first route
 function stampFor(entry, here, cold, routes) {
   if (entry.state && typeof entry.state.page === 'string') return entry.state;
   const p = parseHead(entry.hash, routes);
-  if (p.link === undefined) return { page: headFor(p), depth: 0, openedHere: !cold };
-  if (cold || !here) return { page: headFor(parseHead(p.home, routes)), depth: 1, openedHere: false };
+  const link = p.link !== undefined || !!p.legacy;
+  if (!link && p.state.p === undefined) return { page: headFor(p), depth: 0, openedHere: !cold };
+  // a p head names its page; a link or a legacy head is over its kind's home on a cold load, else over what is on screen
+  const page = link ? null : headFor({ page: p.page, state: { ...p.state, p: undefined } });
+  if (cold || !here) return { page: page ?? headFor(parseHead(p.link !== undefined ? p.home : p.page, routes)), depth: 1, openedHere: false };
+  if (page !== null && page !== here.page) return { page, depth: 1, openedHere: false };
   // from a peek: every entry down to the page was pushed in this visit only if the peek below's were
   if (here.depth > 0) return { page: here.page, depth: here.depth + 1, openedHere: !!here.openedHere };
   return { page: here.page, depth: 1, openedHere: true };
@@ -738,7 +811,7 @@ function stampFor(entry, here, cold, routes) {
 const withPage = (state, page) => ({ ...state, page });
 // closing a peek: back to the page under it, by history when this visit pushed the entries, else in place
 const closeTarget = (state) => (state && state.openedHere && state.depth > 0 ? { go: -state.depth } : { replace: (state && state.page) || '#overview' });
-// remembered filters: a page's own keys, applied only to a fresh entry whose head carries none of them
+// remembered filters: a page's own keys, applied only to a fresh entry whose head carries none of them and no p
 const REMEMBERED = { board: ['goal', 'feat', 'repo', 'att'], progress: ['goal'], library: ['goal', 'kind'] };
 // stored as one flat object ({ goal, feat, repo, att, kind }), so the goal is shared by the pages that remember it
 const FILTERS_KEY = 'devteam.board.filters';
@@ -746,7 +819,8 @@ function storedFilters() { try { return JSON.parse(localStorage.getItem(FILTERS_
 function rememberedFilters(page, keys, fresh, stored = storedFilters()) {
   const own = REMEMBERED[page] || [];
   if (!fresh || !own.length || !stored || typeof stored !== 'object') return null;
-  if ((keys || []).some((k) => own.includes(k))) return null;
+  // a head that names one of the page's filters (an empty value too) or a peek says what it shows
+  if ((keys || []).some((k) => own.includes(k) || k === 'p')) return null;
   const out = {};
   for (const k of own) if (typeof stored[k] === 'string' && stored[k]) out[k] = stored[k];
   return Object.keys(out).length ? out : null;
@@ -793,7 +867,7 @@ function keyOf(it) {
 // behind a devteam gateway (cloud/gateway.mjs), box.json says where instead (its own subdomain, so
 // still an origin of its own: the port's on box: 1, the project's name's on box: 2), and adds the
 // box's terminal as the first tab.
-let box = null; // { v, terminal, instance (v 1) or project (v 2), push, image, previews, passkeys } when the gateway answers box.json
+let box = null; // { v, terminal, instance (v 1) or project (v 2), push, image, previews, passkeys, role, people, level ('full' | 'view' | null) } when the gateway answers box.json
 let hubSeen = null; // the last list instances.json gave, or null when it gave none (the box line)
 // A project's address, or null when it has none: on box: 2 a name that can't be a host, or that two
 // listed projects share, gets none (the gateway serves no dashboard there). urlOf.why says which.
@@ -1713,6 +1787,7 @@ function paintSettings() {
   const had = page.contains(document.activeElement) ? document.activeElement : null;
   const head = el('div', 'ov-head');
   head.append(el('h2', '', 'Settings'));
+  const view = box?.level === 'view';
   const sec = (name, rows) => { const d = el('div', 'sec'); const r = el('div', 'rows'); for (const x of rows) r.append(...x); d.append(el('div', 'lbl', name), r); return d; };
   const text = (t, cls = '') => el('span', cls, t);
   const link = (href, words) => { const a = document.createElement('a'); a.href = href; a.textContent = words; a.dataset.k = `settings:${words}`; return a; };
@@ -1739,8 +1814,21 @@ function paintSettings() {
     groups.push(...oaGroups());
   } else if (box?.passkeys) groups.push(sec('Signing in', [setRow('Passkeys', 'passkeys', link(box.passkeys, 'Manage'), 'the keys that may open this hub and its dashboards; add one per device, remove a lost one', true)]));
   // Notifications: the control itself (one node, kept: notifyControl writes into it), then a test once they're on
-  const notes = [setRow('New Inbox items', 'on this device', $('notify'), 'a notification on this device when any project asks you something', true)];
-  if (notifyOn()) {
+  // View: a disabled Off in place of the control (kept off the page, in #hub-later), and no Test row
+  let notifyNode = $('notify');
+  if (view) {
+    $('hub-later').append(notifyNode);
+    notifyNode = el('button', 'ghost mini', 'Off');
+    notifyNode.type = 'button';
+    notifyNode.id = 'view-notify';
+    notifyNode.setAttribute('aria-disabled', 'true');
+    notifyNode.title = 'View only: notifications are for Full people';
+    notifyNode.dataset.k = 'settings:notify-off';
+    notifyNode.onclick = () => oaToast('View only: notifications are for Full people');
+  }
+  // View can't change it, so it isn't marked yours (the mock's own())
+  const notes = [setRow('New Inbox items', 'on this device', notifyNode, 'a notification on this device when any project asks you something', !view)];
+  if (notifyOn() && !view) {
     // one button, kept: its answer ("Test sent") and its focus outlive the 10 s repaint
     if (!testBtn) {
       const b = testBtn = el('button', '', 'Send a test');
@@ -1773,7 +1861,7 @@ function paintSettings() {
   }
   // whatever had the keyboard keeps it: the same element when it is kept (the Notify control, the
   // Test button), else the new one with its data-k
-  page.replaceChildren(head, ...(oa && OA.askFresh ? [oaFreshNote()] : []), ...groups);
+  page.replaceChildren(head, ...(view ? [el('div', 'view-line', 'View only: you can change your own sign-in methods here; the rest is read-only.')] : []), ...(oa && OA.askFresh ? [oaFreshNote()] : []), ...groups);
   if (had && had !== document.activeElement) (had.isConnected ? had : had.dataset.k ? page.querySelector(`[data-k="${CSS.escape(had.dataset.k)}"]`) : null)?.focus({ preventScroll: true });
 }
 // ----- Your sign-in and People (kit-249): the gateway's /auth routes, on a box whose /box.json
@@ -1841,9 +1929,18 @@ async function oaFetch() {
     OA.notices = Array.isArray(m.notices) ? m.notices : [];
     OA.freshUntil = Date.now() + (Number(m.fresh_ms) > 0 ? Number(m.fresh_ms) : 0);
   }
-  // a failed fetch keeps the last good list: People, and any card open in it, stay
-  if (box?.people) { const l = await oaGet(box.people); if (l && l.viewer && Array.isArray(l.people)) OA.list = l; }
+  // a failed fetch keeps the last good list: People, and any card open in it, stay; a 403 means this
+  // viewer no longer sees People (their Admin was taken away), so the hub reads its role again
+  let lost = false;
+  if (box?.people) {
+    let r = null;
+    try { r = await fetch(box.people, { cache: 'no-store' }); } catch {}
+    const l = r?.ok ? await r.json().catch(() => null) : null;
+    if (l && l.viewer && Array.isArray(l.people)) OA.list = l;
+    else if (r?.status === 403) lost = (await r.json().catch(() => null))?.code === 'not-allowed';
+  }
   OA.at = Date.now();
+  if (lost) return refreshRole();
   const signIn = JSON.stringify([OA.methods, OA.notices]) !== was.signIn;
   const list = JSON.stringify(OA.list) !== was.list;
   const missing = Boolean(OA.list) && !SEC.people?.isConnected;
@@ -1851,6 +1948,22 @@ async function oaFetch() {
   if (OA.list && (list || !SEC.people)) oaDrawPeople();
   // Settings itself is painted again only when People should show and isn't there
   if (missing) paintSettings();
+}
+// The hub's own role, read again from /box.json: after this viewer handed the box over, or when the
+// list refuses them (their Admin taken away in another tab). Only box.role and box.people change;
+// People goes when they no longer see it, and Settings is painted again.
+async function refreshRole() {
+  const b = await oaGet('box.json');
+  if (!b || !box) return;
+  box.role = OA_ROLES.includes(b.role) ? b.role : null;
+  // a level that changed while the hub was open (moved to View or back): the Terminal tab, the frames
+  // and every control follow from the level at load, so the hub loads again
+  const level = b.level === 'full' || b.level === 'view' ? b.level : null;
+  if (level !== box.level) return void location.reload();
+  box.people = null;
+  if (box.role && box.role !== 'member' && typeof b.people === 'string') { try { const u = new URL(b.people, location.href); if (u.origin === location.origin) box.people = u.href; } catch {} }
+  if (!box.people) { oaCloseMenu(); OA.list = null; OA.open = null; OA.openNode = null; OA.panel = null; OA.panelNode = null; OA.link = null; SEC.people = null; }
+  oaRedraw();
 }
 // Each section's own redraw, unless something in it is open; then Settings is painted again.
 function oaRedraw() {
@@ -1960,6 +2073,13 @@ async function oaAddPasskey() {
 // and the one-time link card. The open box, card and link are nodes kept in OA (`openNode`,
 // `panelNode`) so a redraw re-inserts them, typed text and all; the link lives only in its card.
 const OA_WORDS = { rename: 'Rename', relink: 'Send a new link', revoke: 'Revoke the link', remove: 'Remove' };
+// A menu item's label, by the row: Make full on a View member and Make view only on a Full one,
+// Make admin or Take Admin away by their role, Make owner, and Leave this box on your own row.
+const oaWord = (x, a) => (a === 'level' ? (x.level === 'view' ? 'Make full' : 'Make view only')
+  : a === 'role' ? (x.role === 'admin' ? 'Take Admin away' : 'Make admin')
+  : a === 'transfer' ? 'Make owner'
+  : a === 'remove' && x.you ? 'Leave this box'
+  : OA_WORDS[a] ?? null);
 const OA_INTRO = {
   owner: 'Everyone here sees everything on this box. Full people can also change anything but People. Admins move members between Full and View only, and rename or remove people; only you invite, make admins or hand the box over. For someone who must not see the rest, set up a box of their own.',
   admin: "You're an admin: you can move members between Full and View only, and rename or remove members and other admins. Only the owner invites, makes admins or hands the box over, and nobody changes the owner's row.",
@@ -1980,7 +2100,8 @@ function oaMeta(x) {
     if (!x.link || x.link.expired) return `${level} · invite link expired`;
     return `${level} · invite link not used yet · expires in ${plural(Math.max(1, Math.round((x.link.expires - Date.now()) / 3600e3)), 'hour')}`;
   }
-  const newLink = x.link?.kind === 'new-link' && !x.link.expired ? ' · a new link not used yet' : '';
+  // an expired new link stays on the row until it is revoked (kit-253 R3): Make admin and Make owner wait for that
+  const newLink = x.link?.kind === 'new-link' ? (x.link.expired ? ' · a new link expired' : ' · a new link not used yet') : '';
   // your own row: you are signed in, reading it (a claim sets no last_seen), as the mock draws it
   return `${plural(x.methods, 'sign-in method')} · ${x.you ? 'signed in now' : x.last_seen ? `signed in ${agoText(x.last_seen)}` : 'never signed in'}${newLink}`;
 }
@@ -2001,8 +2122,8 @@ function oaOpenMenu(btn, x) {
   const m = el('div', 'menu-pop oa-menu');
   m.dataset.person = x.id;
   m.setAttribute('role', 'menu');
-  for (const a of x.actions.filter((a) => OA_WORDS[a])) {
-    const b = el('button', a === 'remove' || a === 'revoke' ? 'red' : '', OA_WORDS[a]);
+  for (const a of x.actions.filter((a) => oaWord(x, a))) {
+    const b = el('button', a === 'remove' || a === 'revoke' ? 'red' : '', oaWord(x, a));
     b.type = 'button';
     b.setAttribute('role', 'menuitem');
     b.onclick = () => { oaCloseMenu(); OA.open = { id: x.id, kind: a }; OA.openNode = null; OA.panel = null; OA.panelNode = null; oaDrawPeople(); SEC.people.querySelector('#oa-rename input, #oa-confirm button')?.focus({ preventScroll: true }); };
@@ -2042,7 +2163,7 @@ function oaPersonRow(x) {
   nm.append(' ', oaBadge(x));
   who.append(nm, el('span', 'pmeta', oaMeta(x)));
   r.append(el('span', 'av', oaInitials(x.name)), who);
-  if (x.actions.some((a) => OA_WORDS[a])) {
+  if (x.actions.some((a) => oaWord(x, a))) {
     const b = el('button', 'menu-btn');
     b.type = 'button';
     b.dataset.k = `settings:menu:${x.id}`;
@@ -2061,7 +2182,7 @@ function oaRefused(r, err, names) {
   if (err && names?.[code]) { err.textContent = names[code]; return; }
   if (code === 'fresh-sign-in') return oaNeedFresh();
   oaToast(r.json?.error || "That didn't work; try again");
-  if (code === 'stale' || code === 'not-allowed' || r.status === 401) { OA.open = null; OA.openNode = null; oaDrawPeople(); oaLoad(); }
+  if (['stale', 'not-allowed', 'not-joined', 'link-outstanding', 'no-passkey', 'restart-first'].includes(code) || r.status === 401) { OA.open = null; OA.openNode = null; oaDrawPeople(); oaLoad(); }
 }
 const OA_NAME_WORDS = { 'bad-name': 'A name is needed.', 'name-taken': 'Someone here already has that name.' };
 // One request at a time from a box or card: its buttons are disabled until the answer is in.
@@ -2104,25 +2225,40 @@ function oaCancel() { OA.open = null; OA.openNode = null; OA.panel = null; OA.pa
 function oaConfirmBox(x, kind) {
   const f = oaFirst(x.name);
   const relinked = x.link?.kind === 'new-link';
+  const leave = kind === 'remove' && x.you;
+  const unmake = kind === 'role' && x.role === 'admin';
   const words = {
+    level: x.level === 'view' ? `Make ${f} full? They can then change anything except People, and open the terminal, which reaches every repo and the box's GitHub and AI logins.` : `Make ${f} view only? Their terminal and anything else open that changes things closes now. What they already did with the terminal stays, such as a program left running.`,
+    role: unmake ? `Take Admin away from ${f}? They stay Full, and can no longer manage people.` : `Make ${f} an admin? They can then move members between Full and View only, and rename or remove members and other admins. They can't invite, make admins, or touch your row.${x.level === 'view' ? ' They become Full too.' : ''}`,
+    transfer: `Make ${f} the owner of this box? ${f} can then invite, make admins and hand it over again. You become an admin. Only ${f} can undo this.`,
     relink: `Make a new link for ${f}? Opening it adds a sign-in method (a passkey) to their account; their others keep working. Use it when they lost theirs. They are told one was added.`,
-    remove: `Remove ${f}? They are signed out everywhere now, and their sign-in methods stop working. What they did with the terminal stays, such as a program left running or a login copied; if that matters, change the box's logins.`,
+    remove: leave ? 'Leave this box? You are signed out everywhere now, and your sign-in methods stop working. Only the owner can invite you back.' : `Remove ${f}? They are signed out everywhere now, and their sign-in methods stop working. What they did with the terminal stays, such as a program left running or a login copied; if that matters, change the box's logins.`,
     revoke: relinked ? `Revoke ${f}'s new link? It stops working now; their sign-in methods keep working.` : `Revoke ${f}'s invite link? It stops working now.`,
   }[kind];
-  const yes = { relink: 'Make the link', remove: 'Remove', revoke: 'Revoke' }[kind];
+  const yes = { level: x.level === 'view' ? 'Make full' : 'Make view only', role: unmake ? 'Take Admin away' : 'Make admin', transfer: `Make ${f} the owner`, relink: 'Make the link', remove: leave ? 'Leave' : 'Remove', revoke: 'Revoke' }[kind];
+  const extra = { level: { level: x.level === 'view' ? 'full' : 'view' }, role: { role: unmake ? 'member' : 'admin' } }[kind] ?? {};
   const d = el('div', 'oa-confirm');
   d.id = 'oa-confirm';
   const go = () => oaSending(d, async () => {
-    const r = await oaPost(oaPeoplePath(kind), { id: x.id, rev: x.rev });
+    const r = await oaPost(oaPeoplePath(kind), { id: x.id, rev: x.rev, ...extra });
     if (r.status !== 200) return oaRefused(r);
+    // Leave: this session is gone (its cookie cleared), so nothing here is repainted against it
+    if (leave) return location.replace('/auth/login');
     OA.open = null; OA.openNode = null;
     if (kind === 'relink') return oaShowLink(`Send this link to ${f} yourself`, `It works once, for 24 hours. Opening it adds a passkey to ${f}'s account.`, r.json.link);
     oaDrawPeople();
-    oaToast(kind === 'remove' ? `${f} was removed and signed out` : relinked ? `${f}'s new link no longer works` : `${f}'s invite link no longer works`);
+    oaToast({
+      level: x.level === 'view' ? `${f} is now full` : `${f} is now view only`,
+      role: unmake ? `${f} is no longer an admin` : `${f} is now an admin`,
+      transfer: `${f} is now the owner. You are an admin`,
+      remove: `${f} was removed and signed out`,
+    }[kind] ?? (relinked ? `${f}'s new link no longer works` : `${f}'s invite link no longer works`));
+    // after a hand-over this viewer is an admin: the hub reads its role again, then the list
+    if (kind === 'transfer') await refreshRole();
     oaLoad();
   });
   const acts = el('div', 'acts');
-  acts.append(oaButton(yes, kind === 'relink' ? 'mini' : 'mini danger', `confirm-${kind}`, go), oaButton('Cancel', 'ghost mini', 'confirm-cancel', oaCancel));
+  acts.append(oaButton(yes, kind === 'remove' || kind === 'revoke' ? 'mini danger' : 'mini', `confirm-${kind}`, go), oaButton('Cancel', 'ghost mini', 'confirm-cancel', oaCancel));
   d.append(el('p', '', words), acts);
   return d;
 }
@@ -2144,23 +2280,30 @@ function oaInviteCard() {
   inp.dataset.k = 'settings:invite-name';
   inp.setAttribute('aria-label', 'Their name');
   const pick = el('fieldset', 'lvl-pick');
-  const opt = el('label', 'lvl-opt');
-  const radio = el('input');
-  radio.type = 'radio';
-  radio.name = 'oa-level';
-  radio.value = 'full';
-  radio.checked = true;
-  const words = el('span');
-  words.append(el('b', '', 'Full'), el('span', '', "Everything you can do here except People: answer questions, steer supervisors, open the terminal. The terminal reaches every repo and the box's GitHub and AI logins."));
-  opt.append(radio, words);
-  pick.append(el('legend', '', 'Level'), opt);
+  const card = (value, name, text) => {
+    const opt = el('label', 'lvl-opt');
+    const radio = el('input');
+    radio.type = 'radio';
+    radio.name = 'oa-level';
+    radio.value = value;
+    radio.checked = value === 'full';
+    radio.dataset.k = `settings:invite-${value}`;
+    const words = el('span');
+    words.append(el('b', '', name), el('span', '', text));
+    opt.append(radio, words);
+    return opt;
+  };
+  pick.append(el('legend', '', 'Level'),
+    card('full', 'Full', "Everything you can do here except People: answer questions, steer supervisors, open the terminal. The terminal reaches every repo and the box's GitHub and AI logins."),
+    card('view', 'View only', 'Sees everything here: the hub, dashboards, artifacts, boards, goals and what agents print. Changes nothing and has no terminal. One exception: opening a running preview can set off what that app does when a page opens.'));
   const err = el('div', 'oa-err');
   err.setAttribute('role', 'alert');
   const make = () => oaSending(d, async () => {
     err.textContent = '';
-    const r = await oaPost(oaPeoplePath('invite'), { name: inp.value, level: 'full' });
+    const level = pick.querySelector('input[name="oa-level"]:checked')?.value === 'view' ? 'view' : 'full';
+    const r = await oaPost(oaPeoplePath('invite'), { name: inp.value, level });
     if (r.status !== 200) return oaRefused(r, err, { 'bad-name': 'Give them a name, so you can tell people apart here.', 'name-taken': 'Someone here already has that name.' });
-    oaShowLink(`Send this link to ${oaFirst(inp.value)} yourself`, 'It works once, for 24 hours. Whoever opens it first makes a passkey and joins as full.', r.json.link);
+    oaShowLink(`Send this link to ${oaFirst(inp.value)} yourself`, `It works once, for 24 hours. Whoever opens it first makes a passkey and joins as ${level === 'view' ? 'view only' : 'full'}.`, r.json.link);
   });
   inp.onkeydown = (e) => { if (e.key === 'Enter') make(); };
   const acts = el('div', 'acts');
@@ -2240,7 +2383,8 @@ const typingIn = (e) => !!e && (e.tagName === 'TEXTAREA' || e.tagName === 'INPUT
 function tThread(x) {
   if (!x || typeof x !== 'object' || typeof x.id !== 'string' || typeof x.created_at !== 'string' || !Array.isArray(x.turns)) return null;
   const s = x.subject && typeof x.subject === 'object' && x.subject.kind === 'overview' && x.subject.anchor && OP_PARTS.includes(x.subject.anchor.selector) ? { root: typeof x.subject.root === 'string' ? x.subject.root : null, name: typeof x.subject.name === 'string' ? x.subject.name : null, selector: x.subject.anchor.selector, label: typeof x.subject.anchor.label === 'string' ? x.subject.anchor.label : '' } : null;
-  const turns = x.turns.filter((u) => u && typeof u.at === 'string' && typeof u.text === 'string').map((u) => ({ id: String(u.id ?? ''), by: u.by === 'owner' ? 'owner' : 'operator', at: u.at, text: u.text, ...(typeof u.signed === 'boolean' ? { signed: u.signed, unsigned: !u.signed } : {}) }));
+  // person (kit-252): which of the box's people said an owner turn, as the server kept it
+  const turns = x.turns.filter((u) => u && typeof u.at === 'string' && typeof u.text === 'string').map((u) => ({ id: String(u.id ?? ''), by: u.by === 'owner' ? 'owner' : 'operator', at: u.at, text: u.text, ...(typeof u.signed === 'boolean' ? { signed: u.signed, unsigned: !u.signed } : {}), ...(u.by === 'owner' && u.person && typeof u.person.id === 'string' && u.person.id && typeof u.person.name === 'string' && u.person.name ? { person: { id: u.person.id, name: u.person.name } } : {}) }));
   // signed: on a box, whether the box's gateway signed it (the thread's title and subject, each owner turn)
   return { id: x.id, title: String(x.title ?? ''), subject: s, status: x.status === 'closed' ? 'closed' : 'open', turns, ...(typeof x.signed === 'boolean' ? { signed: x.signed, unsigned: !x.signed } : {}), created_at: x.created_at, closed_at: typeof x.closed_at === 'string' ? x.closed_at : null, activity_at: typeof x.activity_at === 'string' ? x.activity_at : x.created_at };
 }
@@ -2511,10 +2655,10 @@ function tlCardBody(t) {
   const ctxSig = s ? `${tKey(s)}|${title}|${!!tlTarget(s)}` : '';
   if (ctxEl.dataset.is !== ctxSig) { const was = ctxEl.querySelector('details')?.open; ctxEl.dataset.is = ctxSig; ctxEl.replaceChildren(...(s ? [tlCtx(s, title)] : [])); if (was) ctxEl.querySelector('details').open = true; }
   const turns = $('tl-c-turns');
-  const sig = t ? JSON.stringify([!!TL.op?.box, t.turns.map((u) => [u.by, u.at, u.text, !!u.pending, !!u.unsigned])]) : '';
+  const sig = t ? JSON.stringify([!!TL.op?.box, t.turns.map((u) => [u.by, u.at, u.text, !!u.pending, !!u.unsigned, u.person?.name ?? null])]) : '';
   if (sig !== TL.turnsSig) {
     TL.turnsSig = sig;
-    turns.replaceChildren(...(t ? t.turns : []).map((u) => { const d = el('div', `tl-turn ${u.by}`); d.append(el('div', 'meta', `${u.by === 'owner' ? (u.unsigned ? 'Not sent from this page: written on the box as yours' : 'You') : TL.op?.box ? 'The operator (not verified)' : 'The operator'} · ${when(u.at)}`), el('div', 'tl-text', u.text)); return d; }));
+    turns.replaceChildren(...(t ? t.turns : []).map((u) => { const d = el('div', `tl-turn ${u.by}`); d.append(el('div', 'meta', `${u.by === 'owner' ? (u.unsigned ? 'Not sent from this page: written on the box as yours' : u.person ? u.person.name : 'You') : TL.op?.box ? 'The operator (not verified)' : 'The operator'} · ${when(u.at)}`), el('div', 'tl-text', u.text)); return d; }));
     turns.scrollTop = turns.scrollHeight;
   }
   // On a box only your own turns are proved (the gateway signs them): a reply, and a thread or turn
@@ -2994,6 +3138,7 @@ async function draw() {
   for (const root of [...items.keys()].sort(byRoot)) tabsEl.append(items.get(root).tab);
   if (ovTab) tabsEl.prepend(ovTab);
   if (term) tabsEl.prepend(term.tab);
+  else if (viewTermTab) tabsEl.prepend(viewTermTab);
   for (const it of items.values()) paintTab(it);
   paintOvTab();
   empty.hidden = items.size > 0 || Boolean(term) || selected === OVERVIEW || selected === SETTINGS;
@@ -3047,6 +3192,53 @@ tabsEl.addEventListener('keydown', (e) => {
   window.addEventListener('drop', (e) => { e.preventDefault(); say(); });
 }
 // The hub on a laptop has no box.json (404); a devteam gateway answers it.
+/* viewOnly start */
+// View only (kit-250), from /box.json's level: <body> gets view-only, a "View only" badge ends the tab
+// bar, after the tabs (the hub shows no person's name), the mock's line sits under it on every tab, and a capturing
+// listener stops a press on the hub's writes with the toast (oaToast's node). The gateway refuses those
+// writes anyway; this is so nobody presses and waits. Anything else is left alone.
+const HUB_WRITES = ".fleet-switch [data-fleet], [data-tl-send], #tl-c-text, [data-tl-start], [data-tl-end], [data-tl-reopen], #view-notify";
+let viewToastAt = 0;
+function viewStop(e) {
+  if (!document.body.classList.contains('view-only')) return;
+  const el = e.target instanceof Element ? e.target : null;
+  const write = el?.closest(HUB_WRITES);
+  if (!write || write.id === 'view-notify') return;
+  if (e.type === 'keydown') {
+    const typing = write.matches('textarea, input');
+    if (!(e.key === 'Enter' || (e.key === ' ' && !typing))) return;
+  }
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  if (Date.now() - viewToastAt < 2000) return;
+  viewToastAt = Date.now();
+  oaToast('View only: you can look, but not change anything');
+}
+let viewListening = false;
+// the Terminal tab at View: there, disabled, and kept first by draw() as term's is (term stays null)
+let viewTermTab = null;
+function viewOnly() {
+  const view = box?.level === 'view';
+  document.body.classList.toggle('view-only', view);
+  let badge = $('view-only'), line = $('view-line');
+  if (view && !badge) {
+    badge = el('span', '', 'View only');
+    badge.id = 'view-only';
+    badge.title = 'View only: you can look at everything on this box. Buttons that would change something are greyed out.';
+    line = el('div', 'view-line', 'View only: you can look at everything on this box. Buttons that would change something are greyed out.');
+    line.id = 'view-line';
+    // the badge ends the header's bar, after the tabs' strip (which scrolls); the line sits under the header
+    tabsEl.after(badge);
+    tabsEl.parentElement.after(line);
+  }
+  if (badge) badge.hidden = !view;
+  if (line) line.hidden = !view;
+  if (view && !viewListening) {
+    viewListening = true;
+    for (const type of ['click', 'submit', 'keydown']) window.addEventListener(type, viewStop, true);
+  }
+}
+/* viewOnly end */
 async function findBox() {
   try {
     const r = await fetch('box.json', { cache: 'no-store' });
@@ -3064,15 +3256,28 @@ async function findBox() {
     if (typeof b.passkeys === 'string' && secure(b.passkeys)) box.passkeys = b.passkeys;
     // who is signed in, and where People are: the page may fetch only its own origin (connect-src)
     if (OA_ROLES.includes(b.role)) box.role = b.role;
+    // the signed-in person's level (kit-250): View has no terminal and changes nothing
+    box.level = b.level === 'full' || b.level === 'view' ? b.level : null;
     if (box.role && box.role !== 'member' && typeof b.people === 'string') { try { const u = new URL(b.people, location.href); if (u.origin === location.origin) box.people = u.href; } catch {} }
     const tab = document.createElement('button');
     tab.className = 'tab';
     tab.setAttribute('role', 'tab');
     tab.textContent = 'Terminal';
-    tab.title = 'The box\'s tmux sessions: supervisors, workers, logins';
-    tab.onclick = selectTerminal;
     tabsEl.prepend(tab);
-    term = { tab, frame: null };
+    if (box.level === 'view') {
+      // there but disabled: term stays null, so #terminal and a remembered Terminal tab fall back as a laptop's do
+      tab.setAttribute('aria-disabled', 'true');
+      tab.setAttribute('aria-selected', 'false');
+      tab.tabIndex = -1;
+      viewTermTab = tab;
+      tab.title = 'View only: no terminal';
+      tab.onclick = () => oaToast('View only: no terminal');
+    } else {
+      tab.title = 'The box\'s tmux sessions: supervisors, workers, logins';
+      tab.onclick = selectTerminal;
+      term = { tab, frame: null };
+    }
+    viewOnly();
   } catch {}
 }
 // The Overview's tab: after the box's Terminal, before the projects.

@@ -799,7 +799,7 @@
             "type": "string"
           },
           "kind": {
-            "description": "What sort of message: a question for a review or go-ahead, a merge request, blocked, a design change, a ruling, a relayed answer, info, or (responder-1) a handoff: the responder passing the supervisor what an owner's thread turn needs that it can't do. artifact-notes-1: or addressed, a session's mark that it addressed an artifact note handed to it, to the owner with the note's thread, which like info awaits no reply.",
+            "description": "What sort of message: a question for a review or go-ahead, a merge request, blocked, a design change, a ruling, a relayed answer, info, or (responder-1) a handoff: the responder passing the supervisor what an owner's thread turn needs that it can't do (responder-2: or the worker or planner the thread is bound to; only the supervisor's reply or its turn in the thread closes one). artifact-notes-1: or addressed, a session's mark that it addressed an artifact note handed to it, to the owner with the note's thread, which like info awaits no reply.",
             "enum": [
               "design-change",
               "merge-request",
@@ -851,7 +851,7 @@
             "x-tip": "Where the change can be seen."
           },
           "shot": {
-            "description": "artifact-notes-1. The kit's picture of the marked spot (on the supervisor's ready, or on the marking session's addressed message), as the kit took it: stamp (the time form of a log id, and the file name's <stamp> in /shot/<t-id>/<stamp>-<light|dark>.png), its size in pixels (w, h), what it was taken from (src: main, a tree:<id> or a worktree name) at which commit (sha) and whether that tree had changes not committed (dirty), how the mark's element was found (anchor), whether a dark picture was taken too (dark, exactly when sum.dark is given), and each picture's sha256 (sum.light, sum.dark).",
+            "description": "artifact-notes-1. The kit's picture of the marked spot (on the supervisor's ready, or on the marking session's addressed message), as the kit took it: stamp (the time form of a log id, and the file name's <stamp> in /api/shot/<t-id>/<stamp>-<light|dark>.png), its size in pixels (w, h), what it was taken from (src: main, a tree:<id> or a worktree name) at which commit (sha) and whether that tree had changes not committed (dirty), how the mark's element was found (anchor), whether a dark picture was taken too (dark, exactly when sum.dark is given), and each picture's sha256 (sum.light, sum.dark).",
             "type": "object",
             "properties": {
               "stamp": { "description": "When it was taken, as a log id's time (yyyymmdd-hhmmssmmm).", "type": "string", "pattern": "^\\d{8}-\\d{9}$" },
@@ -1302,6 +1302,17 @@
         "description": "The supervisor asking the owner. why_asked says the class, its rung and ceiling, and the reasons. The owner's answer (a set) may carry an autonomy direction and a standing rule; an answer equal to the recommendation counts as agreement. stake, urgency, settles and settles_if are the supervisor's rating: it may set them again while the question is open, and they are left out of the hash the owner's answer records, so a new rating never reopens an answered question.",
         "type": "object",
         "properties": {
+          "person": {
+            "description": "Who gave it, when several people share a box (kit-252): the person's id and name as the box's gateway knows them, from x-devteam-person (presence@1 §4). Only the owner's lines carry it. Attribution, not authority (design P6): it never changes who may write what, and a line without it is the owner's as before. The name's real limit is presence@1 §4's: at most 80 bytes of its JSON encoding without the quotes; maxLength is only an outer bound.",
+            "x-tip": "Who gave it, when several people share the box.",
+            "type": "object",
+            "required": ["id", "name"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "pattern": "^[A-Za-z0-9._:@/-]{1,64}$" },
+              "name": { "type": "string", "minLength": 1, "maxLength": 80 }
+            }
+          },
           "kind": {
             "description": "What sort of question: a decision, a one-way door, a clarification, a proposal, more trust, defining or approving a goal, something only you can do, or a review.",
             "enum": [
@@ -2196,6 +2207,17 @@
         "description": "Something the supervisor did (incl. approve-spec, approve-plan, merge-word, and worker-slots, whose planner acts carry the feature's id_block). An act that carries decision did what that decision line decided, and the decision answers for it: the owner corrects the decision, not the act. An act without decision is its own decision (mechanical acts, and every act written before decisions existed). The owner, or the supervisor at a retro, sets corrected; the supervisor then sets repaired. The owner writes acts of four classes only. goal-order (devteam.mjs goal order, from the owner's terminal or the dashboard) is the record of the owner putting the goals in order; its refs are the goals whose priority it set. artifact-publish (devteam.mjs artifact publish|unpublish, which the cloud gateway's confirm page runs) is the record of what the owner made public, with artifact and, for a publish, tree. pane-answer (written when the owner clicks an option, or Esc, on the dashboard's card) is the record of the owner answering a question a tool asked in the supervisor's terminal: what holds the dialog's first line (another account's artifact by its id, never its link), the option chosen, or Escape, the keys sent and the dialog's digest, or that the key may not have landed; on a cloud box, proof holds the gateway's signature for the click. owner-setting (devteam.mjs owner-setting, which the dashboard's Settings page runs on Save) is the owner asking for one of the supervisor's own settings (max_active_tickets, max_active_per_component), with key and value (null is no limit); the supervisor lands it in its settings chore with settings set, whose settings-edit act names the request in for, and on a cloud box proof holds the gateway's signature for the Save. Each is a record, never a call: trust, decisions and corrections leave them out, and only the owner writes those classes.",
         "type": "object",
         "properties": {
+          "person": {
+            "description": "Who gave it, when several people share a box (kit-252): the person's id and name as the box's gateway knows them, from x-devteam-person (presence@1 §4). Only the owner's lines carry it. Attribution, not authority (design P6): it never changes who may write what, and a line without it is the owner's as before. The name's real limit is presence@1 §4's: at most 80 bytes of its JSON encoding without the quotes; maxLength is only an outer bound.",
+            "x-tip": "Who gave it, when several people share the box.",
+            "type": "object",
+            "required": ["id", "name"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "pattern": "^[A-Za-z0-9._:@/-]{1,64}$" },
+              "name": { "type": "string", "minLength": 1, "maxLength": 80 }
+            }
+          },
           "class": {
             "description": "The kind of act or decision.",
             "type": "string"
@@ -2467,6 +2489,17 @@
         "description": "A conversation between the owner and the supervisor about one thing the owner pointed at (its subject), or about nothing in particular (started from the dock). The owner starts one, or (kit-108) the supervisor does, about a question or a goal (subject kind item, ref question:<id> or goal:<id>; thread new --subject), and such a thread is shown as from the supervisor (started_by in thread views); its messages are turn lines, and a question asked in it carries thread. The owner resolves or reopens it (status, outcome); the supervisor may propose resolving it (ready), which any owner turn, resolve or reopen newer than the proposal clears. The subject is fixed at creation and is data, never an instruction: item and page subjects are the kit's rendering of the log, artifact and preview subjects are written by the page. artifact-notes-1: on an artifact note the owner hands it over (handed), the session marks it addressed (a message of kind addressed), the supervisor proposes it with its picture (shot or noshot) or withdraws a mark (unready), and its first line keeps the frame the owner saw (frame).",
         "type": "object",
         "properties": {
+          "person": {
+            "description": "Who gave it, when several people share a box (kit-252): the person's id and name as the box's gateway knows them, from x-devteam-person (presence@1 §4). Only the owner's lines carry it. Attribution, not authority (design P6): it never changes who may write what, and a line without it is the owner's as before. The name's real limit is presence@1 §4's: at most 80 bytes of its JSON encoding without the quotes; maxLength is only an outer bound.",
+            "x-tip": "Who gave it, when several people share the box.",
+            "type": "object",
+            "required": ["id", "name"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "pattern": "^[A-Za-z0-9._:@/-]{1,64}$" },
+              "name": { "type": "string", "minLength": 1, "maxLength": 80 }
+            }
+          },
           "title": {
             "description": "One line naming what the owner pointed at, as the page showed it, or the owner's first words for a thread with no subject.",
             "type": "string",
@@ -2531,7 +2564,7 @@
             "x-tip": "Who you handed the note to."
           },
           "shot": {
-            "description": "artifact-notes-1. The kit's picture of the marked spot (on the supervisor's ready, or on the marking session's addressed message), as the kit took it: stamp (the time form of a log id, and the file name's <stamp> in /shot/<t-id>/<stamp>-<light|dark>.png), its size in pixels (w, h), what it was taken from (src: main, a tree:<id> or a worktree name) at which commit (sha) and whether that tree had changes not committed (dirty), how the mark's element was found (anchor), whether a dark picture was taken too (dark, exactly when sum.dark is given), and each picture's sha256 (sum.light, sum.dark).",
+            "description": "artifact-notes-1. The kit's picture of the marked spot (on the supervisor's ready, or on the marking session's addressed message), as the kit took it: stamp (the time form of a log id, and the file name's <stamp> in /api/shot/<t-id>/<stamp>-<light|dark>.png), its size in pixels (w, h), what it was taken from (src: main, a tree:<id> or a worktree name) at which commit (sha) and whether that tree had changes not committed (dirty), how the mark's element was found (anchor), whether a dark picture was taken too (dark, exactly when sum.dark is given), and each picture's sha256 (sum.light, sum.dark).",
             "type": "object",
             "properties": {
               "stamp": { "description": "When it was taken, as a log id's time (yyyymmdd-hhmmssmmm).", "type": "string", "pattern": "^\\d{8}-\\d{9}$" },
@@ -2591,9 +2624,20 @@
         "x-set-only": ["status", "outcome", "ready", "handed", "shot", "noshot", "unready"]
       },
       "turn": {
-        "description": "One message in a thread: the owner's words to the supervisor, which carry the weight of the owner's words in its session and are already verbatim here, or a reply by the supervisor or (responder-1) the responder, which answers the owner's turns quickly and hands the rest to the supervisor; a responder turn never asks a question and is never the owner's words. Never changed. A turn on a thread that doesn't exist or is resolved is refused by thread say (the owner's) and thread reply (the supervisor's).",
+        "description": "One message in a thread: the owner's words to the supervisor, which carry the weight of the owner's words in its session and are already verbatim here, or a reply by the supervisor or (responder-1) the responder, which answers the owner's turns quickly and hands the rest to the supervisor; a responder turn never asks a question and is never the owner's words; or (responder-2) a reply by the worker or planner a thread is bound to (its ticket, its plan, a preview it offered, an artifact drawn in its worktree), which never asks a question, is never the owner's words, and answers only the owner's turns routed to it. Never changed. A turn on a thread that doesn't exist or is resolved is refused by thread say (the owner's) and thread reply (the supervisor's).",
         "type": "object",
         "properties": {
+          "person": {
+            "description": "Who gave it, when several people share a box (kit-252): the person's id and name as the box's gateway knows them, from x-devteam-person (presence@1 §4). Only the owner's lines carry it. Attribution, not authority (design P6): it never changes who may write what, and a line without it is the owner's as before. The name's real limit is presence@1 §4's: at most 80 bytes of its JSON encoding without the quotes; maxLength is only an outer bound.",
+            "x-tip": "Who gave it, when several people share the box.",
+            "type": "object",
+            "required": ["id", "name"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "pattern": "^[A-Za-z0-9._:@/-]{1,64}$" },
+              "name": { "type": "string", "minLength": 1, "maxLength": 80 }
+            }
+          },
           "thread": {
             "description": "The thread it belongs to.",
             "type": "string",
@@ -2621,9 +2665,16 @@
             "x-tip": "The question it asks you."
           },
           "routed_to": {
-            "description": "responder-1. On the owner's turn only: who owes the reply, decided once when the turn was written and never recomputed: the supervisor, or the responder.",
-            "enum": ["supervisor", "responder"],
+            "description": "responder-1. On the owner's turn only: who owes the reply, decided once when the turn was written and never recomputed: the supervisor, or the responder; or (responder-2) session: the live worker or planner whose work the thread is about, named in routed_session.",
+            "enum": ["supervisor", "responder", "session"],
             "x-tip": "Who it went to."
+          },
+          "routed_session": {
+            "description": "responder-2. On the owner's turn routed_to session only, and required there: the ticket (its id) or planner (plan-<feature>) it was typed to, which owes the reply with the supervisor. Never on a session's own turn: its writer already names it.",
+            "type": "string",
+            "maxLength": 120,
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+            "x-tip": "The session it went to."
           },
           "delivered": {
             "description": "responder-1. On the owner's turn routed to the responder only: typed into the responder's pane, or queued in the log while it was busy.",
@@ -2647,6 +2698,13 @@
             "minLength": 1,
             "maxLength": 300,
             "x-tip": "Why it is about something else."
+          },
+          "no_ask": {
+            "description": "On a reply by the supervisor or the responder, or the supervisor's first turn in its own thread (never the owner's): why words that read as an ask of the owner ask nothing that needs an answer, as given with --no-ask (supervisor.md §6, Every ask is an Inbox question); one line, at most 300 bytes.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300,
+            "x-tip": "Why it asks you nothing."
           },
           "files": {
             "type": "array",
@@ -2683,6 +2741,17 @@
         },
         "additionalProperties": false,
         "x-required-new": ["thread", "text"]
+      }
+    },
+    "person": {
+      "description": "Who gave it, when several people share a box (kit-252): the person's id and name as the box's gateway knows them, from x-devteam-person (presence@1 §4). Only the owner's lines carry it. Attribution, not authority (design P6): it never changes who may write what, and a line without it is the owner's as before. The name's real limit is presence@1 §4's: at most 80 bytes of its JSON encoding without the quotes; maxLength is only an outer bound.",
+      "x-tip": "Who gave it, when several people share the box.",
+      "type": "object",
+      "required": ["id", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9._:@/-]{1,64}$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 }
       }
     },
     "self": {
@@ -3080,6 +3149,12 @@
         "required": ["entities"],
         "additionalProperties": false
       }
+    },
+    "self2": {
+      "description": "self@2: project/self.md, what the project is, as a plain markdown document and nothing else (there is no object to give a schema to: the kit reads what it needs from the text). It opens with one # title, and says in prose what the project is, what it makes, its parts, what it controls and what it touches but does not. A fenced block whose info string is exactly self or exterior makes it version 1 ($defs.self), which a new draft may not be. A part is an inline link outside code and comments, not an image, its target relative: no scheme, no leading /, not only an #anchor. The target's anchor and query are dropped, its % escapes decoded, and it resolves from the file's folder; it must stay inside the repo and exist, by exact case. A link to an .md in self.md's own folder is a reference, not a part; reference-style and angle-bracket links are prose. At least one part is required. The exact grammar is the reference checker's, test/fixtures/world2/check.mjs, and test/fixtures/world2/cases.json lists each case with its result. A later version is a kit change, not a mark in the document."
+    },
+    "exterior2": {
+      "description": "exterior@2: project/exterior.md, what the project relates to, as a plain markdown document and nothing else (no block, weight, id or strategy quote). It opens with one # title; ## sections group by relation, in plain words; a ### entry is one subject, an organisation, work, law, standard or topic, never a person. Order is importance: the first section and the first entry matter most. A fenced block whose info string is exactly self or exterior makes it version 1 ($defs.exterior), which a new draft may not be. Headings in code or a comment are not read. A claim carries its source as a link and the day it was read, (read YYYY-MM-DD) or a sentence holding read YYYY-MM-DD: an entry with no web address or no read date, or with a date after today, is a warning at the draft, never a refusal. On a repo known to be private it names freely. On any other (unknown counts as public) each ### heading must be named whole, ignoring case, in origin main's strategy or dependency names, else it is refused; every capitalised word of the whole text, no place skipped, and every link host that the strategy and the dependency files' whole text don't name whole is held until named on the chore. The exact grammar is the reference checker's, test/fixtures/world2/check.mjs, and test/fixtures/world2/cases.json lists each case with its result. A later version is a kit change, not a mark in the document."
     }
   },
   "x-id": {
@@ -3145,13 +3220,15 @@
         "ticket",
         "observation",
         "message",
-        "phase"
+        "phase",
+        "turn"
       ],
       "ticket": [
         "phase",
         "gate",
         "observation",
-        "message"
+        "message",
+        "turn"
       ],
       "responder": [
         "turn",
@@ -3312,14 +3389,16 @@
           "said_at",
           "answer_seen",
           "choice",
-          "reading_void"
+          "reading_void",
+          "person"
         ]
       },
       "thread": {
         "owner": [
           "status",
           "outcome",
-          "handed"
+          "handed",
+          "person"
         ],
         "supervisor": [
           "ready",
@@ -3383,7 +3462,8 @@
           "repaired"
         ],
         "owner": [
-          "corrected"
+          "corrected",
+          "person"
         ]
       }
     }

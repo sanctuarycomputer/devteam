@@ -30,6 +30,40 @@
     "qid": null
   },
   {
+    "t": "dialog",
+    "id": "d-0123456789abcdef",
+    "kind": "confirm",
+    "url": "https://shop.example/pay",
+    "text": "Pay now?"
+  },
+  {
+    "t": "dialog",
+    "id": "d-3123456789abcdef",
+    "kind": "confirm",
+    "url": "https://shop.example/pay",
+    "text": "Sure?",
+    "frame": true
+  },
+  {
+    "t": "dialog_end",
+    "id": "d-0123456789abcdef"
+  },
+  {
+    "t": "dialog",
+    "id": "d-1123456789abcdef",
+    "kind": "prompt",
+    "url": "https://shop.example/pay",
+    "text": "Your name?",
+    "default": "Sam"
+  },
+  {
+    "t": "dialog",
+    "id": "d-2123456789abcdef",
+    "kind": "beforeunload",
+    "url": "https://shop.example/pay",
+    "text": ""
+  },
+  {
     "t": "bye",
     "why": "The supervisor has the browser again."
   }

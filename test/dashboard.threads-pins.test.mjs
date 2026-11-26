@@ -83,7 +83,7 @@ test("threads on the dashboard page: Shift and point, the card, the pins and the
   // the subject and title its Shift+click gives, as :3344 asserts) and subtest 9's reply (:3373)
   T = F.owner(['thread', 'new', 'Narrow this to the EU launch', '--title', 'Launch checkout', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}`, quote: 'Launch checkout' })]).split('\n')[0];
   { const th = threads().find((x) => x.id === T); assert.deepEqual([th.subject.kind, th.subject.ref, th.title], ['item', `goal:${F.goal}`, 'Launch checkout']); }
-  F.sup(['thread', 'reply', T, 'That drops the measure to EU orders; want me to propose the change?']);
+  F.sup(['thread', 'reply', T, 'That drops the measure to EU orders; want me to propose the change?', '--no-ask', 'a test of the page, not of asks']);
   // its card open from the link, as subtests 7-10 leave it (:3443-3444)
   await p.ev(`location.hash = '#talk/${T}'`);
   await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the card from the link');
@@ -227,9 +227,11 @@ test("threads on the dashboard page: Shift and point, the card, the pins and the
   });
 
   await t.test('a press on a pin across a read that adds a pin still opens its card', async () => {
+    // the page places its pins when the slide's transitionend runs (a task after the frame that ends it, late on a loaded runner); a listener added after the page's own says that has run. The panel-closed term keeps a late end of subtest 7's opening slide from counting.
+    await p.ev(`window.__slid = false; document.querySelector('.main').addEventListener('transitionend', (e) => { if (e.target === e.currentTarget && e.propertyName === 'margin-right' && !document.body.classList.contains('threads-open')) window.__slid = true; }); void 0`);
     await click('#th-close');
     // closed, and the page back at rest (its margin slides over --dur), so the pin stays where it is found
-    await soon(`!document.body.classList.contains('threads-open') && getComputedStyle(document.querySelector('.main')).marginRight === '0px'`, 'the panel closed, the page at rest');
+    await soon(`!document.body.classList.contains('threads-open') && getComputedStyle(document.querySelector('.main')).marginRight === '0px' && window.__slid`, 'the panel closed, the page at rest, its pins placed');
     // still from finding the pin to pressing it; the reads then land under the press
     const at = await still(async () => {
       const xy = await p.at('.tl-pin');

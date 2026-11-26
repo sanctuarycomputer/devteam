@@ -477,6 +477,27 @@ test('A6: the test exception: loopback ports the test lists, never an owner cont
   } finally { await site.close(); }
 });
 
+// kit-811: in the browser's daemon PORT is its view port, not the gateway's.
+test('A6 with PORT the view port: the gateway\'s name and its default port are still refused', async () => {
+  const VIEW = 4400;
+  const g = await startGuard({ stub: true, env: { ...stubEnv({ loopbackOk: [8080, VIEW] }), DEVTEAM_PUBLIC_URL: 'https://box.example.test', PORT: String(VIEW), DEVTEAM_BROWSER_SERVE: '1', DEVTEAM_TEST: '1', DEVTEAM_TEST_BROWSER_ALLOW: `80,443,8080,${VIEW}` } });
+  try {
+    for (const host of ['box.example.test', 'x.box.example.test']) {
+      for (const r of [await get(g.port, `http://${host}/`), await connect(g.port, `${host}:443`)]) {
+        assert.equal(r.status, 403, `${host}: ${r.head}`);
+        assert.equal(refusal(r).rule, 'gateway', host);
+      }
+    }
+    for (const p of [8080, VIEW]) {
+      for (const r of [await get(g.port, `http://127.0.0.1:${p}/`), await connect(g.port, `127.0.0.1:${p}`)]) {
+        assert.equal(r.status, 403, `port ${p}: ${r.head}`);
+        refusal(r);
+      }
+    }
+    assert.deepEqual(dials(g), [], 'nothing is dialled');
+  } finally { await g.stop(); }
+});
+
 test('A9: other answers, headers that stop at the guard, and a guard that stays up', async () => {
   const site = await startSites();
   let seen = null;

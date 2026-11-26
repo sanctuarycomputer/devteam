@@ -43,6 +43,8 @@ const REQUESTS = (F) => ({
   // the result as TSV only once the owner answered: this question has none yet, so `review result` says so
   'dash /api/review': [[200, `/api/review?id=${F.review}`], [404, `/api/review?id=${F.review}&format=tsv`]],
   'dash /public-manifest/*': [[200, `/public-manifest/${F.slug}`]],
+  // a note's picture (kit-147): there is none here, so a 404, and another site's page is refused
+  'dash re:^\\/api\\/shot\\/(t-\\d{8}-\\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*)\\/(\\d{8}-\\d{9}-(?:light|dark)\\.png)$': [[404, '/api/shot/t-20260101-000000000-owner/20260101-000000000-light.png'], [403, '/api/shot/t-20260101-000000000-owner/20260101-000000000-light.png', { 'sec-fetch-site': 'cross-site' }]],
   'dash /artifact/*': [[200, `/artifact/main/${F.slug}/`], [301, `/artifact/main/${F.slug}`], [200, `/artifact/wt/${F.wt}/${F.slug}/`], [404, `/artifact/origin/ticket%2Fnone/${F.slug}/`]],
   'dash re:^\\/review\\/([^/]+)\\/([^/]*)$': [[200, `/review/${F.review}/`, FRAME], [200, `/review/preview/?path=docs/devteam/project/artifacts/${F.slug}/index.html&ref=main`, FRAME], [200, '/review/preview/devteam-ui.css']],
   // a socket: a plain request gets its guard's status
@@ -54,8 +56,13 @@ const REQUESTS = (F) => ({
   'hub /presence?*': [[400, '/presence?x=1']],
   'hub /': [[200, '/']],
   'hub /instances.json': [[200, '/instances.json']],
+  // an operator thread's file: the laptop hub's own folder (on a box the gateway serves them)
+  'hub /upload/*': [[{ laptop: 200, box: 404 }, `/upload/${F.upload}`], [404, `/upload/2020-01-01-${'0'.repeat(24)}/none.txt`]],
   'hub /memory.json': [[200, '/memory.json']],
   'hub /memory.json?*': [[200, '/memory.json?since=8d'], [200, `/memory.json?after=${new Date(Date.now() - 3600000).toISOString().replace(/\.\d{3}Z$/, 'Z')}`]],
+  // the machine's live health (kit-836): off on a fixture port with no switch, so the route is the hub's 404
+  'hub /box-health.json': [[404, '/box-health.json']],
+  'hub /box-health.json?*': [[404, `/box-health.json?after=${new Date(Date.now() - 3600000).toISOString().replace(/\.\d{3}Z$/, 'Z')}`]],
   // the thread written into this run's store, folded and answered (on a box, the boxed fold)
   'hub /operator/threads': [[200, '/operator/threads', SAME, new RegExp(OPERATOR_THREAD)]],
 });
@@ -66,7 +73,7 @@ const REQUESTS = (F) => ({
 const LAPTOP_PARTS = [
   ['dash /upload/*', 'dash /api/hello', 'dash /', 'dash /index.html', 'dash /api/data*', 'dash re:^\\/view\\/artifact\\/([^/]+)$', 'dash re:^\\/view\\/preview\\/([^/]+)$', 'dash /api/artifact-fp', 'dash /api/view', 'dash /api/artifact-versions', 'dash /api/artifact-remote', 'dash /api/threads'],
   ['dash /api/fleet', 'dash /api/record', 'dash /api/peek', 'dash /api/sensor', 'dash /api/schema', 'dash /api/timeline', 'dash /api/governance', 'dash /api/file', 'dash /api/review', 'dash /public-manifest/*'],
-  ['dash /artifact/*', 'dash re:^\\/review\\/([^/]+)\\/([^/]*)$', 'dash /presence', 'dash /presence?*', 'term /api/term/token', 'term re:^\\/api\\/term\\/(supervisor|shell)\\/(screen|history|keys)$', 'hub /presence', 'hub /presence?*', 'hub /', 'hub /instances.json', 'hub /memory.json', 'hub /memory.json?*', 'hub /operator/threads'],
+  ['dash re:^\\/api\\/shot\\/(t-\\d{8}-\\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*)\\/(\\d{8}-\\d{9}-(?:light|dark)\\.png)$', 'dash /artifact/*', 'dash re:^\\/review\\/([^/]+)\\/([^/]*)$', 'dash /presence', 'dash /presence?*', 'term /api/term/token', 'term re:^\\/api\\/term\\/(supervisor|shell)\\/(screen|history|keys)$', 'hub /presence', 'hub /presence?*', 'hub /', 'hub /instances.json', 'hub /upload/*', 'hub /memory.json', 'hub /memory.json?*', 'hub /box-health.json', 'hub /box-health.json?*', 'hub /operator/threads'],
 ];
 const PARTS = { laptop: LAPTOP_PARTS, box: [LAPTOP_PARTS.flat()] };
 
@@ -243,6 +250,7 @@ function getSafeFixture() {
   const real = fs.realpathSync(F.old);
   F.upload = `2026-11-20-${'a'.repeat(24)}/note.txt`;
   write(path.join(F.home, '.devteam', 'uploads', `${path.basename(real).replace(/[^A-Za-z0-9-]+/g, '-').slice(0, 40)}-${crypto.createHash('sha256').update(real).digest('hex').slice(0, 8)}`, F.upload), 'a dropped note\n');
+  write(path.join(F.home, '.devteam', 'uploads', `hub-${PORTS}`, F.upload), 'a note for the operator\n');
   F.preload = path.join(F.base, 'a13-preload.mjs');
   fs.writeFileSync(F.preload, PRELOAD);
   F.cmds = path.join(F.base, 'a13-commands.jsonl');
@@ -266,15 +274,20 @@ const request = (method, port, p, headers = {}, out = {}) => new Promise((resolv
   r.setTimeout(120000, () => r.destroy(new Error(`${method} ${p}: no answer in 2 min`)));
   r.end();
 });
-const readCmds = (F) => (fs.existsSync(F.cmds) ? fs.readFileSync(F.cmds, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
+// The recorded commands. A command appends its line while this reads, so only whole lines count: what
+// follows the last newline is still being written (settled waits for its end). A whole line that isn't
+// JSON still throws.
+const cmdsText = (F) => (fs.existsSync(F.cmds) ? fs.readFileSync(F.cmds, 'utf8') : '');
+const readCmds = (F, text = cmdsText(F)) => text.slice(0, text.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map((l) => JSON.parse(l));
 // the instance at rest: nothing of its process groups running but their leaders, and no command
 // recorded, for 300 ms
 const settled = async (F, leaders) => {
   let last = -1, same = 0;
   await until(() => {
     const kids = leaders.flatMap((pid) => spawnSync('pgrep', ['-g', String(pid)], { encoding: 'utf8' }).stdout.split('\n').filter(Boolean).filter((p) => !leaders.includes(Number(p))));
-    const n = readCmds(F).length;
-    same = n === last && !kids.length ? same + 1 : 0;
+    const text = cmdsText(F);
+    const n = readCmds(F, text).length;
+    same = n === last && !kids.length && (!text || text.endsWith('\n')) ? same + 1 : 0;
     last = n;
     return same >= 3;
   }, 'the instance at rest');
