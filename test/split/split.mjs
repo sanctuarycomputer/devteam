@@ -95,19 +95,28 @@ if (flag('verify')) {
     const problems = mine.length ? [...back.problems, ...regionProblems(mine, b.builtins), ...cap, ...verify(src, M, back.modules).filter((p) => !p.startsWith('over the cap:'))] : [`no modules under ${M.dir}`];
     const kit = kitParts(src) ?? kitParts(show('docs/devteam/scripts/devteam.mjs') ?? '');
     let pc = null;
+    let inTemplates = [];
     if (!kit) problems.push(`independent count: no fileParts at ${sha}`);
     else {
-      for (const x of partsNames(kit, src, M.source)) problems.push(`fileParts reads a declaration the scanner doesn't: ${x}`);
+      // the declarations whose templates hold browser code at column 0 (a list of names; none by default)
+      const tpl = M.templates ?? [];
+      const tplOk = Array.isArray(tpl) && tpl.every((x) => typeof x === 'string');
+      if (!tplOk) problems.push('manifest: templates must be a list of declaration names');
+      const pn = partsNames(kit, src, M.source, tplOk ? tpl : []);
+      for (const x of pn.refused) problems.push(`fileParts reads a declaration the scanner doesn't: ${x}`);
+      for (const x of pn.unknown) problems.push(`manifest: templates names ${x}, which is not a top-level declaration`);
+      inTemplates = pn.accepted;
       pc = partsCount(kit, src, M.source, back.modules);
       if (!pc.equal) problems.push(`independent count: fileParts finds ${pc.source} declaration leaves in the source and ${pc.tree} in the tree; only in the source: ${pc.onlySource.slice(0, 5).join(' | ')}; only in the tree: ${pc.onlyTree.slice(0, 5).join(' | ')}`);
     }
     if (problems.length) bad = true;
-    report.push({ manifest: name, source: M.source, modules: mine.length, accepted: [...accepted].sort(), problems, parts: pc && { equal: pc.equal, source: pc.source, tree: pc.tree } });
+    report.push({ manifest: name, source: M.source, modules: mine.length, accepted: [...accepted].sort(), inTemplates, problems, parts: pc && { equal: pc.equal, source: pc.source, tree: pc.tree } });
   }
   if (flag('json')) say(JSON.stringify({ sha, tree: path.resolve(tree), clean: !bad, report }, null, 2));
   else for (const x of report) {
     say(`${x.source} at ${sha.slice(0, 8)}: ${x.modules} modules, ${x.problems.length ? `${x.problems.length} problems` : 'clean'}${x.parts ? `; independent count ${x.parts.equal ? 'equal' : 'differs'} (${x.parts.source} declaration leaves in the source, ${x.parts.tree} in the tree)` : ''}`);
     if (x.accepted.length) say(`  accepted as changed by the overlay: ${x.accepted.join(', ')}`);
+    if (x.inTemplates.length) say(`  read by fileParts as declarations, inside a template the manifest names: ${x.inTemplates.join(', ')}`);
     for (const p of x.problems) say(`  ${p}`);
   }
   process.exit(bad ? 1 : 0);

@@ -421,7 +421,7 @@ test('H3: at HEAD, the default entry imports every module in manifest order, the
 test('H4: at HEAD, verify is clean and the independent count is equal', { skip: STALE }, () => {
   const v = split(...H, '--verify', '--at', sha, '--tree', tree, '--json');
   assert.equal(v.status, 0, v.stdout);
-  const j = JSON.parse(v.stdout).report[0];
+  const j = JSON.parse(v.stdout).report.find((x) => x.source === M.source);
   assert.deepEqual(j.problems, []);
   assert.ok(j.parts.equal && j.parts.source > 2000 && j.parts.source === j.parts.tree, JSON.stringify(j.parts));
 });
