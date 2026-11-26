@@ -2536,6 +2536,28 @@ exit 0
       "owner_only": null
     },
     {
+      "key": "package_name",
+      "group": "Upstream and releases",
+      "name": "Kit package",
+      "description": "the npm package devteam releases are published as and installed from",
+      "shown": "value",
+      "value": "@sanctuarycomputer/devteam",
+      "set": false,
+      "default": "@sanctuarycomputer/devteam",
+      "owner_only": "governance-edit"
+    },
+    {
+      "key": "alpha",
+      "group": "Upstream and releases",
+      "name": "Live alpha",
+      "description": "whether the new apps are served at /next/ beside the stable pages",
+      "shown": "value",
+      "value": true,
+      "set": false,
+      "default": true,
+      "owner_only": "governance-edit"
+    },
+    {
       "key": "release",
       "group": "Upstream and releases",
       "name": "How a release reaches production",
