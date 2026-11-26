@@ -19,6 +19,8 @@ const SCHEMA = JSON.parse(fs.readFileSync(path.join(testDir, '..', 'docs', 'devt
 const FOLDERS = fs.readdirSync(FAKE, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort();
 const expected = (f) => JSON.parse(fs.readFileSync(path.join(FAKE, f, 'expected.json'), 'utf8'));
 const C1 = 'c01-handed';
+// the session the fixtures hand notes to is live: its worktree stands (a gone one's notes are the supervisor's, kit-860)
+const live = (F) => { for (const n of ['plan-pricing', 'kit-9-x']) fs.mkdirSync(path.join(F.old, '.worktrees', n), { recursive: true }); return F; };
 
 // every file under a dir, by its path inside it, with its bytes
 const filesOf = (root) => {
@@ -141,7 +143,7 @@ const noteFieldsEqual = (got, want, what) => {
 };
 
 test('artifact-notes-contract A2: each fixture\'s view, by thread show and thread list --waiting', () => {
-  const F = threadsFixture('artifact-notes-view');
+  const F = live(threadsFixture('artifact-notes-view'));
   try {
     for (const f of FOLDERS) {
       const snap = F.snapLog();
@@ -159,7 +161,7 @@ test('artifact-notes-contract A2: each fixture\'s view, by thread show and threa
 });
 
 test('artifact-notes-contract A4: /api/threads carries the note fields, with no change to the dashboard server', async () => {
-  const F = threadsFixture('artifact-notes-api');
+  const F = live(threadsFixture('artifact-notes-api'));
   let dash = null;
   try {
     const folders = ['c11-ready-with-shot', 'c13-unready-after-addressed', 'c16-frame', 'c17-ready-noshot', 'c18-handed-to-supervisor', 'c02-handed-then-addressed', 'c33-noshot-then-mark', 'r8-bad-draft-and-unready'];
@@ -181,7 +183,7 @@ test('artifact-notes-contract A4: /api/threads carries the note fields, with no 
 });
 
 test('artifact-notes-contract A3: the readers of waiting (thread show and list, hello\'s counts, thread-waiting, thread-undelivered)', async (t) => {
-  const F = threadsFixture('artifact-notes-readers');
+  const F = live(threadsFixture('artifact-notes-readers'));
   const MIN = 60000;
   const run = path.join(F.old, 'docs/devteam/run');
   const undelivered = path.join(run, 'undelivered-turns.json');
@@ -252,7 +254,7 @@ test('artifact-notes-contract A5: supervisor.md states the contract, and every e
   const end = heads[k + 2]?.at ?? doc.length;
   assert.equal(heads[k + 2]?.level, 2, 'and is the last part of its section');
   const sec = doc.slice(heads[k + 1].at, end);
-  for (const s of ['- `handed` `{to, at}`', '- `addressed` `{by, at, note, sha, draft}`', '- `check`:', '- `shot`:', '`noshot` is `\'no-change\'`', '- `unready` `{at, reason}`', '- `frame` `{w, h, hash}`', '- `source`:', "'owner'", "'supervisor'", "'session'", '`with` names `handed.to`', 'last word', '/api/shot/<t-id>/<stamp>-<light|dark>.png', 'is a 404', 'frame {w, h, hash}', 'thread-new', 'artifact-handoff {slug, at}', '{to, typed, count}', 'thread-accept-addressed {id, at}', 'The note changed; read it again', 'artifact notes <slug> --json'])
+  for (const s of ['- `handed` `{to, at}`', '- `addressed` `{by, at, note, sha, draft}`', '- `check`:', '- `shot`:', '`noshot` is `\'no-change\'`', '- `unready` `{at, reason}`', '- `frame` `{w, h, hash}`', '- `source`:', "'owner'", "'supervisor'", "'session'", '`with` names `handed.to`', 'last word', '/api/shot/<t-id>/<stamp>-<light|dark>.png', 'is a 404', 'frame {w, h, hash}', 'thread-new', 'artifact-handoff {slug, at}', '{to, typed, count, nobody}', 'thread-accept-addressed {id, at}', 'The note changed; read it again', 'artifact notes <slug> --json'])
     assert.ok(sec.includes(s), `the section names ${s}`);
   assert.match(sec, /^resolved; to check; with <session>; open$/m, 'the state order, as one line');
   assert.match(sec, /kit-144[^.]*kit-147[^.]*release|release[^.]*kit-144[^.]*kit-147/, 'the release rule');
