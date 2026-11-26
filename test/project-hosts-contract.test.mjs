@@ -159,6 +159,9 @@ test("the gateway's Publish refuses a page named next, and one named after any r
   }
   assert.equal(G.addressProblem({ slug: 'launch-notes', project: 'alpha' }), null, 'a page of any other name has an address');
   assert.equal(G.addressProblem({ slug: 'nextpage', project: 'alpha' }), null, 'only the whole segment is reserved');
+  // the slug is said first, then the project, as before the check moved
+  assert.match(G.addressProblem({ slug: 'next', project: 'my.app' }) ?? '', /^next is a path of the dashboard/, 'both wrong: the slug first');
+  assert.equal(G.addressProblem({ slug: 'notes', project: 'my.app' }), "my.app can't be a host name, so a page of it would have no address: rename the project (settings.md's project)");
   // Publish uses this check: the gateway defines it once; publishProblem (POST, before and inside the queue) and the Publish page call it
   const gw = read('cloud', 'gateway.mjs');
   assert.equal(gw.match(/\baddressProblem\s*=/g)?.length ?? 0, 1, 'the gateway defines addressProblem once, the export');
