@@ -215,6 +215,10 @@ test('F8: a declaration whose names the scanner can not read whole stops the spl
     ['indented, first line after the shebang', FIXTURE.replace(/^(#!.*\n)/, '$1  let q = 2;\n')],
     ['indented, first line', `  let q = 2;\n${FIXTURE.replace(/^#!.*\n/, '')}`],
     ['after a comment, first line', `/* c */ let q = 2;\n${FIXTURE.replace(/^#!.*\n/, '')}`],
+    ['string continued with a backslash', after("let p = 'a\\\nb'; let q = 2;")],
+    ['double-quoted string continued with a backslash', after('let p = "a\\\nb"; let q = 2;')],
+    ['export default function after a ;', after('let p = 1; export default function q() {}')],
+    ['export default class after a ;', after('let p = 1; export default class q {}')],
   ].entries()) {
     const H = fixtureRepo(`midline${i}`, source);
     const h = split(...H.opts, '--out', H.out);

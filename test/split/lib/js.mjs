@@ -13,7 +13,7 @@ export function scan(src) {
   const sp = (a, b) => { for (let k = a; k < b && k < n; k++) if (o[k] !== '\n') o[k] = ' '; };
   const lines = [{ depth: 0, inside: false }];
   const lineAt = []; // offset of each newline handled as code
-  const resumes = []; // [offset, depth] where code resumes after a comment or template text over a newline
+  const resumes = []; // [offset, depth] where code resumes after a comment, string or template over a newline
   const template = (start) => {
     for (let k = start; k < n;) {
       if (src[k] === '\\') { k += 2; continue; }
@@ -42,6 +42,7 @@ export function scan(src) {
     if (c === "'" || c === '"') {
       let k = i + 1;
       while (k < n && src[k] !== c && src[k] !== '\n') k += src[k] === '\\' ? 2 : 1;
+      if (src.slice(i, k).includes('\n')) resumes.push([k + 1, depth + other]); // continued with a backslash
       sp(i + 1, k);
       i = k + 1; last = 'x'; word = '';
       continue;
@@ -151,7 +152,7 @@ export function bindingNames(code) {
 
 // Whether a line's blanked code, from depth d, comes back to depth 0 (after a ; or a closing
 // bracket) and then begins another declaration on the same line.
-const NEXT_DECL = /^\s*(?:export\s+)?(?:async\s+function|function|class|const|let|var)(?=[\s{[*(])/;
+const NEXT_DECL = /^\s*(?:export\s+(?:default\s+)?)?(?:async\s+function|function|class|const|let|var)(?=[\s{[*(])/;
 function secondDecl(c, d) {
   for (let k = 0; k < c.length; k++) {
     const ch = c[k];
