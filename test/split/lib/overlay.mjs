@@ -1,8 +1,11 @@
 // The overlay (cutover-tree@1): what the split tool applies to a split, from every folder under
 // <split dir>/overlay/, in name order. A folder may hold:
 //   rules.mjs   export const rules = [{ name, apply(t) }] and checks = [{ name, run(t) }]. Each returns
-//               { changed: [{ file?, decl?, site? }], refused: [{ site, why }] }: the sites it changed
-//               (a declaration named here is one --verify accepts as changed) and those it refused.
+//               { changed: [{ file?, decl?, item?, site? }], refused: [{ site, why }] }: the sites it
+//               changed (a declaration named here is one --verify accepts as changed, and so is an item
+//               that is no declaration, named with its module: item '(head)', the lines before a
+//               module's first declaration, or 'marker <name>', a marker line and the statements after
+//               it) and those it refused.
 //   overrides/  <any>.mjs: line 1 is `// override <name> sha256:<64 hex>[ in <source>]`, the hash of the
 //               declaration it was written against; the rest replaces that declaration's whole item.
 //   files/      files at their tree paths, written over whatever the tree has there.
@@ -132,6 +135,11 @@ function parse(text) {
 // A declaration in a module's text, by one of its names: { names, key, text, from, to }, or null.
 export function findDecl(text, name) { return parse(text).decls.find((d) => d.names.includes(name)) ?? null; }
 export const findDecls = (text, name) => parse(text).decls.filter((d) => d.names.includes(name));
+// An item that is no declaration, by its key: '(head)' or 'marker <name>'.
+export const ITEM_KEY = /^(?:\(head\)|marker [A-Za-z0-9_$.-]+ (?:start|end))$/;
+export const findItems = (text, key) => parse(text).all.filter((x) => x.kind !== 'decl' && x.key === key);
+// What --verify accepts by one name: a declaration's, or an item's key.
+const findAccepted = (text, name) => (ITEM_KEY.test(name) ? findItems(text, name) : findDecls(text, name));
 // The module with lines from..to replaced by a declaration text, export put on each of its
 // declarations' own lines.
 export function spliceDecl(text, from, to, bare) {
@@ -239,6 +247,16 @@ async function attempt({ folders, builds, show, paths, sha, excluded }) {
     const sites = [];
     for (const s of res.changed ?? []) {
       if (!s || typeof s !== 'object' || (!s.decl && !s.file)) { staleOf(area, kind, r.name, `a changed site names neither a file nor a declaration: ${JSON.stringify(s)}`); continue; }
+      if (s.item !== undefined) {
+        // an item that is no declaration: named with its module, there exactly once
+        if (s.decl || typeof s.item !== 'string' || !ITEM_KEY.test(s.item)) { staleOf(area, kind, r.name, `a changed item must be '(head)' or 'marker <name> start|end', alone: ${JSON.stringify(s)}`); continue; }
+        if (!s.file || !modules.has(s.file)) { staleOf(area, kind, r.name, `names ${s.item} as changed, but ${s.file ?? '(no file)'} is not a module the split makes`); continue; }
+        const n = findItems(read(staged, s.file), s.item).length;
+        if (n !== 1) { staleOf(area, kind, r.name, `names ${s.item} in ${s.file} as changed, but the tool can't place it: it is there ${n} times`); continue; }
+        if (kind === 'rule') accepted.get(modules.get(s.file)).add(s.item);
+        sites.push([s.file, s.item, s.site ?? ''].filter(Boolean).join(' '));
+        continue;
+      }
       if (s.decl) {
         const hits = locate(staged, s.decl, null).filter((h) => !s.file || h.file === s.file);
         if (hits.length !== 1) { staleOf(area, kind, r.name, `names ${s.decl}${s.file ? ` in ${s.file}` : ''} as changed, but the tool can't place it: ${hits.length ? `it is in ${hits.map((h) => h.file).join(' and ')}` : 'it is in no module'}`); continue; }
@@ -358,7 +376,9 @@ export function applyPatches(out, folders, report, env) {
 export function restore(srcItems, modules, accepted, overlaid, builtins) {
   const problems = [];
   const srcDecl = (name) => {
-    const it = srcItems.items.find((x) => x.kind === 'decl' && x.names.includes(name));
+    const it = ITEM_KEY.test(name)
+      ? srcItems.items.find((x) => x.kind !== 'decl' && (x.kind === 'head' ? '(head)' : `marker ${x.names[0]}`) === name)
+      : srcItems.items.find((x) => x.kind === 'decl' && x.names.includes(name));
     if (!it) return null;
     const ls = srcItems.lines.slice(it.from - 1, it.to);
     ls[it.line - it.from] = ls[it.line - it.from].replace(/^export\s+/, '');
@@ -369,12 +389,12 @@ export function restore(srcItems, modules, accepted, overlaid, builtins) {
   const where = (pairs) => pairs.filter(([, n]) => n).sort(([a], [b]) => (a < b ? -1 : 1)).map(([f, n]) => `${f}${n > 1 ? ` (${n} times)` : ''}`).join(', ') || 'no module';
   for (const name of accepted) {
     // where the overlay puts it, and how often, must be where the tree has it
-    const want = new Map([...overlaid].map(([f, t]) => [f, findDecls(t, name)]));
-    const have = where(out.map((m) => [m.file, findDecls(m.text, name).length]));
+    const want = new Map([...overlaid].map(([f, t]) => [f, findAccepted(t, name)]));
+    const have = where(out.map((m) => [m.file, findAccepted(m.text, name).length]));
     const should = where([...want].map(([f, ds]) => [f, ds.length]));
     if (have !== should) problems.push(`placed: ${name} is in ${have} in the tree, and the overlay puts it in ${should}`);
     for (const m of out) {
-      const ds = findDecls(m.text, name);
+      const ds = findAccepted(m.text, name);
       const w = want.get(m.file) ?? [];
       ds.forEach((d, i) => { if (w[i] && d.text !== w[i].text) problems.push(`changed: ${name} in ${m.file} differs from what the overlay makes of it`); });
       const orig = srcDecl(name) ?? '';
