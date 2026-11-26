@@ -814,12 +814,110 @@ function settingsAt(ref, { orNull = false } = {}) {
 // Whole keys as before, then the links registry entry by entry: an owner's class needs an
 // owner answer, a registry-edit the supervisor's act (merge checks both).
 function ownerSettingsChanged(base, head) {
-  const a = settingsAt(base), b = settingsAt(head);
+  let a = settingsAt(base), b = settingsAt(head);
   if (!a || !b) return null;
+  // Each side is what that side's kit runs (kit-978): settings.md over the defaults of the kit's
+  // scripts at that commit. Where a commit changes a kit script (a kit sync), an owner key
+  // settings.md leaves unset changes when its default does, and is the owner's to answer as an edit
+  // is; so is a key the head's kit makes the owner's. SETTINGS_DEFAULTS and OWNER_SETTINGS are read
+  // from whichever script under <kit>/scripts/ declares them (`const`, or `export const` in a module),
+  // as data, never run (read, below); a kit where either doesn't read so needs the owner's
+  // governance-edit answer. A commit that changes no kit script compares as it always has, and so
+  // does one where either side has no kit scripts at all.
+  let owner = OWNER_SETTINGS;
+  let drifted = () => null;
+  const unread = [];
+  const scripts = kitRel.startsWith('..') ? null : `${kitRel ? `${kitRel}/` : ''}scripts`;
+  // every path here is from the repo's top, wherever merge runs from (:(top), --full-tree, --full-name)
+  const mjs = `:(top)${scripts}/*.mjs`;
+  const touched = scripts && !!git(['diff', '--name-only', base, head, '--', mjs]);
+  const hasKit = (ref) => !!git(['ls-tree', '-r', '--full-tree', '--name-only', ref, '--', `${scripts}/`]);
+  if (touched && hasKit(base) && hasKit(head)) {
+    // a block that isn't an object (null, a list) sets nothing, as settingsAt reads it
+    const raw = (ref) => { const t = settingsBlockAt(ref); const j = t === null ? null : JSON.parse(t); return j && typeof j === 'object' && !Array.isArray(j) ? j : {}; };
+    const ra = raw(base), rb = raw(head);
+    const want = (ref, name, side) => { const r = read(ref, name); if (r?.v && typeof r.v === 'object' && !Array.isArray(r.v)) return r.v; unread.push({ key: `${name} in ${scripts}/ does not read at the ${side} as literal data, so the owner's defaults can't be compared`, cls: 'governance-edit' }); return null; };
+    const da = want(base, 'SETTINGS_DEFAULTS', 'base'), db = want(head, 'SETTINGS_DEFAULTS', 'head'), ob = want(head, 'OWNER_SETTINGS', 'head');
+    // unreadable: settings.md's own changes are still compared, over the running kit's defaults
+    if (!unread.length) {
+      owner = { ...ob, ...OWNER_SETTINGS };
+      a = { ...da, ...ra };
+      b = { ...db, ...rb };
+      const shown = (v) => { if (v === undefined) return 'none'; const s = canonical(v); return s.length > 120 ? `${s.slice(0, 119)}…` : s; };
+      drifted = (k) => (!Object.hasOwn(ra, k) && !Object.hasOwn(rb, k) && canonical(da[k]) !== canonical(db[k]) ? `${k}'s default changes from ${shown(da[k])} to ${shown(db[k])}, and settings.md leaves it unset` : null);
+    }
+  }
   // gates run in their order, one after another in one checkout, so their order is the owner's too:
   // compared as written (key order included), not canonically
   const differs = (k) => (k === 'gates' ? JSON.stringify(a[k]) !== JSON.stringify(b[k]) : canonical(a[k]) !== canonical(b[k]));
-  return [...Object.entries(OWNER_SETTINGS).filter(([k]) => differs(k)).map(([key, cls]) => ({ key, cls })), ...linkOwnerChanges(a.links, b.links)];
+  return [...unread, ...Object.entries(owner).filter(([k]) => differs(k)).map(([key, cls]) => ({ key: drifted(key) ?? key, cls })), ...linkOwnerChanges(a.links, b.links)];
+  // `const <name> = <value>` (or `export const`) at the start of a line, in exactly one .mjs
+  // under <kit>/scripts/ at ref, once, read as data: strings ('…' or "…", simple escapes), numbers,
+  // true, false, null, arrays and objects (comments and trailing commas allowed), and a bare name of
+  // another such const, one level deep. { v } or null: anything else (a call, an operator, a spread,
+  // a template string), a second declaration, or any line of a script, outside a // or * comment
+  // line, that writes into it (`<name>.x =`, `[k] ??=` and the other assignments, `++`, `delete`,
+  // Object.assign(<name>, …)) is unreadable. What this can't see is a default applied in code
+  // (`s.x ?? 'y'`) rather than in the const, or a write through another name for it.
+  function read(ref, name, depth = 0) {
+    const decl = `^(export )?const ${name} = `;
+    const files = (git(['grep', '-l', '--full-name', '-E', decl, ref, '--', mjs]) ?? '').split('\n').filter(Boolean);
+    if (files.length !== 1) return null;
+    const N = `(^|[^A-Za-z0-9_$.])${name}`, member = '(\\.[A-Za-z_$][A-Za-z0-9_$]*|\\[[^]]*\\])';
+    const writes = [
+      `${N}${member}[[:space:]]*(([-+*/%&|^]|\\*\\*|<<|>>>?|&&|\\|\\||\\?\\?)?=([^=]|$)|\\+\\+|--)`,
+      `(\\+\\+|--|delete[[:space:]]+)${name}${member}`,
+      `Object\\.(assign|defineProperty|defineProperties|setPrototypeOf)\\([[:space:]]*${name}([^A-Za-z0-9_$]|$)`,
+    ].join('|');
+    const hits = (git(['grep', '-h', '-E', writes, ref, '--', mjs]) ?? '').split('\n').filter((l) => l && !/^\s*(\/\/|\/?\*)/.test(l));
+    if (hits.length) return null;
+    const src = git(['show', files[0]]);
+    const at = [...(src ?? '').matchAll(new RegExp(decl, 'gm'))];
+    if (at.length !== 1) return null;
+    let i = at[0].index + at[0][0].length;
+    const fail = () => { throw new Error('unreadable'); };
+    const ws = () => { for (;;) { if (/\s/.test(src[i] ?? '')) i++; else if (src.startsWith('//', i)) { const e = src.indexOf('\n', i); i = e < 0 ? src.length : e; } else if (src.startsWith('/*', i)) { const e = src.indexOf('*/', i + 2); if (e < 0) fail(); i = e + 2; } else return; } };
+    const ESC = { n: '\n', t: '\t', r: '\r', '\\': '\\', "'": "'", '"': '"', '/': '/' };
+    const str = () => { const q = src[i++]; let s = ''; for (;;) { const c = src[i++]; if (c === undefined || c === '\n') fail(); if (c === q) return s; if (c !== '\\') { s += c; continue; } const e = src[i++]; if (e === 'u' && /^[0-9a-fA-F]{4}$/.test(src.slice(i, i + 4))) { s += String.fromCharCode(parseInt(src.slice(i, i + 4), 16)); i += 4; } else if (Object.hasOwn(ESC, e)) s += ESC[e]; else fail(); } };
+    const word = () => { const m = /^[A-Za-z_$][\w$]*/.exec(src.slice(i, i + 200)); if (!m) fail(); i += m[0].length; return m[0]; };
+    const value = () => {
+      ws();
+      const c = src[i];
+      if (c === '{' || c === '[') {
+        i++;
+        const obj = c === '{', out = obj ? {} : [];
+        for (;;) {
+          ws();
+          if (src[i] === (obj ? '}' : ']')) { i++; return out; }
+          if (obj) {
+            const k = src[i] === "'" || src[i] === '"' ? str() : word();
+            ws();
+            if (src[i++] !== ':') fail();
+            // defined, not assigned: a key "__proto__" is a key like any other
+            Object.defineProperty(out, k, { value: value(), enumerable: true, writable: true, configurable: true });
+          } else out.push(value());
+          ws();
+          if (src[i] === ',') i++;
+          else if (src[i] !== (obj ? '}' : ']')) fail();
+        }
+      }
+      if (c === "'" || c === '"') return str();
+      const n = /^-?(?:\d+(?:\.\d+)?)(?:[eE][+-]?\d+)?(?![\w$.])/.exec(src.slice(i, i + 40));
+      if (n) { i += n[0].length; return Number(n[0]); }
+      const w = word();
+      if (w === 'true' || w === 'false') return w === 'true';
+      if (w === 'null') return null;
+      const r = depth < 1 ? read(ref, w, depth + 1) : null;
+      if (!r) fail();
+      return r.v;
+    };
+    try {
+      const v = value();
+      ws();
+      if (src[i] !== ';' && src[i] !== undefined) fail();
+      return { v };
+    } catch { return null; }
+  }
 }
 // Adding a gate is the supervisor's call when it only adds (constitution.md §4: development-only
 // tools are the supervisor's): a new check makes merges stricter, never looser. A gate's command runs
