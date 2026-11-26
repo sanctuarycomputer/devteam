@@ -542,6 +542,9 @@ test('pins on an artifact: where its lens says, following its scroll, the card b
     const T = threads().find((x) => x.subject?.kind === 'artifact' && x.subject.slug === 'pin-mock' && x.subject.anchor).id;
     await p.ev('tlClose()');
     await p.key('Escape'); // the stage: back to the Library
+    // its notes aren't handed over, so the stage asks first (kit-937); I'll come back closes it
+    await soon(`(() => { const d = document.getElementById('av-ask'); return !!d && !d.hidden && !document.getElementById('artifact-view').hidden; })()`, 'the ask, the stage still up');
+    await p.click('#av-ask-later');
     await soon(`document.getElementById('artifact-view').hidden && !document.querySelector('#av-pins .tl-pin')`, 'closed, no pins');
     await p.ev(`location.hash = '#talk/${T}'`);
     await soon(`!document.getElementById('artifact-view').hidden && !!document.querySelector('#av-pins .tl-pin')`, 'the stage, its pin');
