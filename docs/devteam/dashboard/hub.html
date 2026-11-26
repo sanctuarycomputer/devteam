@@ -900,7 +900,8 @@ let ovTab = null;
 const SETTINGS = '\u0000settings';
 const setEl = $('settings-view');
 const byRoot = (a, b) => String(a).localeCompare(String(b));
-const wanted = () => { try { return decodeURIComponent(location.hash.slice(1)); } catch { return ''; } };
+// the key the address names: a project's, or overview, settings or terminal (hubHead reads the rest)
+const wanted = () => hubHead().key;
 
 // Whatever is selected, only its own view shows: the Overview, the terminal or one dashboard.
 function showOnly(key) {
@@ -922,7 +923,7 @@ function showOnly(key) {
 }
 function selectOverview() {
   selected = OVERVIEW;
-  history.replaceState(null, '', '#overview');
+  history.replaceState(null, '', tlHash());
   showOnly(OVERVIEW);
   paintOverview();
   tlRefresh();
@@ -956,9 +957,11 @@ function select(root) {
   const it = items.get(root);
   if (!it) return;
   selected = root;
-  history.replaceState(null, '', `#${encodeURIComponent(keyOf(it))}`);
+  // the address the view its kept frame shows: the head its frame last said (§10)
+  hubWrite(it);
   frameFor(it);
   showOnly(root);
+  hubBase(it);
 }
 // A project's dashboard in its frame, made once and kept; hidden until its tab is chosen. The
 // Overview's fleet controls use it too: the dashboard does the owner action, on its own origin.
@@ -1010,8 +1013,10 @@ function frameFor(it) {
     // a frame that loaded was let in: its origin may make the hub reload again, once, if refused later.
     // A refused frame fires load too (its error page), after the violation: this page's seen says so.
     const f = it.frame;
+    // on every load, not once: the dashboard reloads itself, and a sign-in inside the frame is a navigation
+    f.addEventListener('load', () => hubBase(it));
     f.addEventListener('load', () => { let origin; try { origin = new URL(f.src).origin; } catch { return; } setTimeout(() => { if (!frameRefused.seen.has(origin)) frameRefused.drop(origin); }, 300); });
-    it.frame.src = urlOf(it.x);
+    it.frame.src = `${urlOf(it.x)}${hubKept(it)}`;
     framesEl.append(it.frame);
   }
   return it.frame;
@@ -1261,10 +1266,97 @@ function countsEl(x, stat = false) {
 function openAt(root, hash) {
   const it = items.get(root);
   if (!it) return;
+  // kept as its head, so the hub's address names it at once (its hub-route then agrees)
+  it.head = hash;
+  const had = it.frame;
   const f = frameFor(it);
-  if (f instanceof HTMLIFrameElement) f.src = `${urlOf(it.x)}${hash}`;
+  // a frame made just now is already at that head; one that was there is pointed at it in place, pushing
+  // no history entry of its own, so Back and Forward step through the hub's own addresses
+  if (had && f instanceof HTMLIFrameElement) {
+    const to = `${urlOf(it.x)}${hash}`;
+    try { f.contentWindow.location.replace(to); } catch { f.src = to; }
+  }
   select(root);
 }
+/* hubFrameRoute start */
+// The hub's half of dashboard-shell@2 §10 (test/contracts/shell.md). The hub's heads are
+// #<key>[/<dashboard head>], #overview[?ot=<operator thread id>], #settings and #terminal. The key is
+// written URI-encoded, so the first literal '/' ends it; it is decoded only after that split, and the
+// dashboard's head after it is kept exactly as written.
+function hubHead(hash = location.hash) {
+  const raw = String(hash).replace(/^#/, '');
+  const cut = raw.indexOf('/');
+  const first = cut < 0 ? raw : raw.slice(0, cut);
+  const q = first.indexOf('?');
+  let key = '';
+  try { key = decodeURIComponent(q < 0 ? first : first.slice(0, q)); } catch {}
+  const rest = cut < 0 ? '' : raw.slice(cut + 1);
+  let ot = null;
+  if (key === 'overview' && cut < 0 && q >= 0) ot = new URLSearchParams(first.slice(q + 1)).get('ot') || null;
+  return { key, head: rest ? `#${rest}` : null, ot };
+}
+// The project a key names: its own key, or else the one listed project of that name (its twin, which
+// made both keys hex-suffixed, has gone). The hub's own views are never a project's name here.
+function hubFind(key) {
+  const all = [...items.values()].sort((a, b) => byRoot(a.x.root, b.x.root));
+  const own = all.find((o) => keyOf(o) === key);
+  if (own || !key || HUB_VIEWS.includes(key)) return own ?? null;
+  const named = all.filter((o) => !o.goneAt && o.x.name === key);
+  return named.length === 1 ? named[0] : null;
+}
+// a project's kept head: the last its frame said (null when over 2,048 characters), or where the hub pointed it
+const hubKept = (it) => (typeof it.head === 'string' && it.head.length > 1 ? it.head : '');
+// the selected project's address: its key and its kept head, in place (the frame's own hash change made the entry)
+function hubWrite(it) {
+  const key = encodeURIComponent(keyOf(it));
+  const head = hubKept(it);
+  history.replaceState(null, '', head ? `#${key}/${head.slice(1)}` : `#${key}`);
+}
+// The address Copy link copies for that project, sent to its frame's origin alone: on a box: 2 box its
+// own host, else the hub's own address for it.
+function hubBase(it) {
+  const f = it.frame;
+  const url = urlOf(it.x);
+  if (!(f instanceof HTMLIFrameElement) || !url) return;
+  const base = box?.v === 2 ? `${url}#` : `${location.origin}${location.pathname}#${encodeURIComponent(keyOf(it))}/`;
+  try { f.contentWindow?.postMessage({ devteam: 'hub-base', base }, new URL(url).origin); } catch {}
+}
+// the Overview's address: the operator thread open on it, if one with a name is
+const tlHash = () => (TL.open && !String(TL.open).startsWith('pending-') ? `#overview?ot=${encodeURIComponent(TL.open)}` : '#overview');
+// A dashboard's head, from its own frame window on its own origin only, and only a head: a string
+// starting with '#' of at most 2,048 characters (the dashboard sends null for a longer one), or null.
+// Kept per project; the address follows only the selected one's.
+window.addEventListener('message', (ev) => {
+  const m = ev.data;
+  if (!m || typeof m !== 'object' || m.devteam !== 'hub-route') return;
+  if (!(m.head === null || (typeof m.head === 'string' && m.head.startsWith('#') && m.head.length <= 2048))) return;
+  const it = [...items.values()].find((o) => o.frame instanceof HTMLIFrameElement && o.frame.contentWindow === ev.source);
+  if (!it || !ev.source) return;
+  let origin = null;
+  try { origin = new URL(urlOf(it.x)).origin; } catch {}
+  if (!origin || ev.origin !== origin) return;
+  it.head = m.head;
+  if (selected === it.x.root) hubWrite(it);
+  hubBase(it);
+});
+// An address the hub didn't write (a link, a push, one typed): a project at a head opens it there;
+// an operator thread opens its card. Registered before the plain tab switch below, which then has
+// nothing left to do for these.
+window.addEventListener('hashchange', () => {
+  const { key, head, ot } = hubHead();
+  if (key === 'overview') {
+    if (selected !== OVERVIEW) selectOverview();
+    // then the address settles on the thread actually open (an ot naming no listed thread opens nothing)
+    if (ot) tlOpen(ot).finally(() => { if (selected === OVERVIEW) history.replaceState(null, '', tlHash()); });
+    return;
+  }
+  const it = hubFind(key);
+  if (!it) return;
+  if (head) return void openAt(it.x.root, head);
+  if (it.x.root !== selected) select(it.x.root);
+  else hubWrite(it);
+});
+/* hubFrameRoute end */
 // a card's ⋯: its root and port, and two ways to open its dashboard
 let menuPop = null;
 // closed, the keyboard goes back to the ⋯ it came from (Escape), found by its data-k after a redraw
@@ -2725,7 +2817,7 @@ function tlRelay() {
   TL.pend = TL.pend.filter((p) => !(p.confirmed && tLanded(TL.raw, p)));
   TL.threads = tOverlay(TL.raw, TL.pend);
 }
-function tlClose() { TL.open = null; TL.draft = null; tlDraw(); }
+function tlClose() { TL.open = null; TL.draft = null; if (selected === OVERVIEW) history.replaceState(null, '', tlHash()); tlDraw(); }
 async function tlOpen(id, go = true) {
   if (!TL.threads.some((x) => x.id === id)) await tlRefresh();
   const t = TL.threads.find((x) => x.id === id);
@@ -2733,6 +2825,7 @@ async function tlOpen(id, go = true) {
   TL.draft = null;
   TL.open = id;
   TL.openAt = -1;
+  if (selected === OVERVIEW) history.replaceState(null, '', tlHash());
   // from the dock, what it is about is brought into view first
   if (go) tlTarget(t.subject)?.scrollIntoView({ block: 'nearest' });
   tlDraw();
@@ -3128,7 +3221,8 @@ async function draw() {
     if (!it.frame) continue;
     const url = urlOf(it.x);
     if (url === it.addr) continue;
-    if (url && it.addr && it.frame instanceof HTMLIFrameElement) { it.frame.src = url; it.addr = url; continue; }
+    // at its kept head, so the view on screen survives the move
+    if (url && it.addr && it.frame instanceof HTMLIFrameElement) { it.frame.src = `${url}${hubKept(it)}`; it.addr = url; continue; }
     it.frame.remove();
     it.frame = null;
     it.loaded = null;
@@ -3144,14 +3238,15 @@ async function draw() {
   empty.hidden = items.size > 0 || Boolean(term) || selected === OVERVIEW || selected === SETTINGS;
   if (!items.size) empty.textContent = 'No projects running';
   if (!selected || (selected !== TERM && selected !== OVERVIEW && selected !== SETTINGS && !items.has(selected))) {
-    const want = wanted();
-    const ordered = [...items.values()].sort((a, b) => byRoot(a.x.root, b.x.root));
-    // the address picks a tab; with none, the Overview (the terminal when the address says so)
-    const pick = ordered.find((it) => keyOf(it) === want);
-    if (pick) select(pick.x.root);
+    const { key: want, head, ot } = hubHead();
+    // the address picks a tab, at the head it names; with none, the Overview (the terminal when the
+    // address says so), at the operator thread it names
+    const pick = hubFind(want);
+    if (pick && head) openAt(pick.x.root, head);
+    else if (pick) select(pick.x.root);
     else if (term && want === 'terminal') selectTerminal();
     else if (want === 'settings') selectSettings();
-    else selectOverview();
+    else { selectOverview(); if (want === 'overview' && ot) tlOpen(ot); }
   }
   paintOverview();
   paintSettings();
