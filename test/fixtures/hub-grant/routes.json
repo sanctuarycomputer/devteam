@@ -1,0 +1,272 @@
+{
+  "cases": [
+    {
+      "name": "GET /box.json on box",
+      "method": "GET",
+      "host": "box",
+      "path": "/box.json",
+      "expect": {
+        "scope": "hub:read",
+        "audience": "root"
+      }
+    },
+    {
+      "name": "GET /instances.json on box",
+      "method": "GET",
+      "host": "box",
+      "path": "/instances.json",
+      "expect": {
+        "scope": "hub:read",
+        "audience": "root"
+      }
+    },
+    {
+      "name": "GET /memory.json on box",
+      "method": "GET",
+      "host": "box",
+      "path": "/memory.json",
+      "expect": {
+        "scope": "hub:read",
+        "audience": "root"
+      }
+    },
+    {
+      "name": "GET /api/data on project",
+      "method": "GET",
+      "host": "project",
+      "path": "/api/data",
+      "expect": {
+        "scope": "hub:read",
+        "audience": "root"
+      }
+    },
+    {
+      "name": "a query is not part of the path",
+      "method": "GET",
+      "host": "project",
+      "path": "/api/data?since=1",
+      "expect": {
+        "scope": "hub:read",
+        "audience": "root"
+      }
+    },
+    {
+      "name": "GET /api/threads on project",
+      "method": "GET",
+      "host": "project",
+      "path": "/api/threads",
+      "expect": {
+        "scope": "hub:read",
+        "audience": "root"
+      }
+    },
+    {
+      "name": "POST /api/thread-new on project",
+      "method": "POST",
+      "host": "project",
+      "path": "/api/thread-new",
+      "expect": {
+        "scope": "threads:write",
+        "audience": "root"
+      }
+    },
+    {
+      "name": "POST /api/thread-say on project",
+      "method": "POST",
+      "host": "project",
+      "path": "/api/thread-say",
+      "expect": {
+        "scope": "threads:write",
+        "audience": "root"
+      }
+    },
+    {
+      "name": "POST /upload on project",
+      "method": "POST",
+      "host": "project",
+      "path": "/upload",
+      "expect": {
+        "scope": "threads:write",
+        "audience": "root"
+      }
+    },
+    {
+      "name": "POST /mcp on box",
+      "method": "POST",
+      "host": "box",
+      "path": "/mcp",
+      "expect": {
+        "scope": "mcp",
+        "audience": "mcp"
+      }
+    },
+    {
+      "name": "the hub's operator post",
+      "method": "POST",
+      "host": "box",
+      "path": "/operator/thread-say",
+      "expect": null
+    },
+    {
+      "name": "POST /operator/thread-new on box",
+      "method": "POST",
+      "host": "box",
+      "path": "/operator/thread-new",
+      "expect": null
+    },
+    {
+      "name": "GET /operator/threads on box",
+      "method": "GET",
+      "host": "box",
+      "path": "/operator/threads",
+      "expect": null
+    },
+    {
+      "name": "the operator threads' upload",
+      "method": "POST",
+      "host": "box",
+      "path": "/upload",
+      "expect": null
+    },
+    {
+      "name": "POST /api/pane-answer on project",
+      "method": "POST",
+      "host": "project",
+      "path": "/api/pane-answer",
+      "expect": null
+    },
+    {
+      "name": "POST /api/owner-setting on project",
+      "method": "POST",
+      "host": "project",
+      "path": "/api/owner-setting",
+      "expect": null
+    },
+    {
+      "name": "POST /api/term/shell/open on project",
+      "method": "POST",
+      "host": "project",
+      "path": "/api/term/shell/open",
+      "expect": null
+    },
+    {
+      "name": "POST /api/term/supervisor/keys on project",
+      "method": "POST",
+      "host": "project",
+      "path": "/api/term/supervisor/keys",
+      "expect": null
+    },
+    {
+      "name": "GET /api/term/token on project",
+      "method": "GET",
+      "host": "project",
+      "path": "/api/term/token",
+      "expect": null
+    },
+    {
+      "name": "POST /api/answer on project",
+      "method": "POST",
+      "host": "project",
+      "path": "/api/answer",
+      "expect": null
+    },
+    {
+      "name": "POST /api/goal-decide on project",
+      "method": "POST",
+      "host": "project",
+      "path": "/api/goal-decide",
+      "expect": null
+    },
+    {
+      "name": "POST /api/thread-resolve on project",
+      "method": "POST",
+      "host": "project",
+      "path": "/api/thread-resolve",
+      "expect": null
+    },
+    {
+      "name": "a trailing slash",
+      "method": "POST",
+      "host": "project",
+      "path": "/api/thread-say/",
+      "expect": null
+    },
+    {
+      "name": "the wrong method",
+      "method": "GET",
+      "host": "project",
+      "path": "/api/thread-say",
+      "expect": null
+    },
+    {
+      "name": "HEAD /box.json on box",
+      "method": "HEAD",
+      "host": "box",
+      "path": "/box.json",
+      "expect": null
+    },
+    {
+      "name": "GET /api/file on project",
+      "method": "GET",
+      "host": "project",
+      "path": "/api/file",
+      "expect": null
+    },
+    {
+      "name": "/api/data on the box name",
+      "method": "GET",
+      "host": "box",
+      "path": "/api/data",
+      "expect": null
+    },
+    {
+      "name": "/mcp on a project name",
+      "method": "POST",
+      "host": "project",
+      "path": "/mcp",
+      "expect": null
+    },
+    {
+      "name": "GET /mcp",
+      "method": "GET",
+      "host": "box",
+      "path": "/mcp",
+      "expect": null
+    },
+    {
+      "name": "the terminal's host",
+      "method": "GET",
+      "host": "term",
+      "path": "/box.json",
+      "expect": null
+    },
+    {
+      "name": "a preview",
+      "method": "GET",
+      "host": "preview",
+      "path": "/api/data",
+      "expect": null
+    },
+    {
+      "name": "POST /push/subscribe on box",
+      "method": "POST",
+      "host": "box",
+      "path": "/push/subscribe",
+      "expect": null
+    },
+    {
+      "name": "POST /auth/people/invite on box",
+      "method": "POST",
+      "host": "box",
+      "path": "/auth/people/invite",
+      "expect": null
+    },
+    {
+      "name": "POST /api/thread-say/../answer on project",
+      "method": "POST",
+      "host": "project",
+      "path": "/api/thread-say/../answer",
+      "expect": "refused"
+    }
+  ]
+}

@@ -1,0 +1,130 @@
+{
+  "cases": [
+    {
+      "name": "good",
+      "label": "Alex's MacBook",
+      "ok": true
+    },
+    {
+      "name": "41 bytes",
+      "label": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ok": false
+    },
+    {
+      "name": "a newline",
+      "label": "Alex\nlaptop",
+      "ok": false
+    },
+    {
+      "name": "U+202E, a bidi override",
+      "label": "Alex‮laptop",
+      "ok": false
+    },
+    {
+      "name": "40 bytes whose percent-encoding is longer than 40",
+      "label": "éééééééééééééééééééé",
+      "ok": true
+    },
+    {
+      "name": "a ]",
+      "label": "laptop]",
+      "ok": false
+    },
+    {
+      "name": "a [",
+      "label": "[laptop",
+      "ok": false
+    },
+    {
+      "name": "a ;",
+      "label": "lap;top",
+      "ok": false
+    },
+    {
+      "name": "a %",
+      "label": "100% laptop",
+      "ok": false
+    },
+    {
+      "name": "a tab",
+      "label": "lap\ttop",
+      "ok": false
+    },
+    {
+      "name": "U+2028, a line separator",
+      "label": "lap top",
+      "ok": false
+    },
+    {
+      "name": "U+200B, a format character",
+      "label": "lap​top",
+      "ok": false
+    },
+    {
+      "name": "empty",
+      "label": "",
+      "ok": false
+    },
+    {
+      "name": "exactly 40 bytes",
+      "label": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ok": true
+    },
+    {
+      "name": "only a space",
+      "label": " ",
+      "ok": false
+    },
+    {
+      "name": "a leading space",
+      "label": " laptop",
+      "ok": false
+    },
+    {
+      "name": "a trailing no-break space",
+      "label": "laptop ",
+      "ok": false
+    },
+    {
+      "name": "a space inside",
+      "label": "my laptop",
+      "ok": true
+    },
+    {
+      "name": "missing, for a metadata-document client",
+      "label": null,
+      "client_name": "Example App",
+      "expect": "Example App"
+    },
+    {
+      "name": "missing, client_name of only control and bidi characters",
+      "label": null,
+      "client_name": "\u0007\u001b‮ ",
+      "expect": "an app"
+    },
+    {
+      "name": "missing, the 40th byte inside a multi-byte character",
+      "label": null,
+      "client_name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaé and more",
+      "expect": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "name": "missing, client_name with forbidden characters removed",
+      "label": null,
+      "client_name": " [Example]; 100% App\n",
+      "expect": "Example 100 App"
+    },
+    {
+      "name": "missing, no client_name",
+      "label": null,
+      "client_name": null,
+      "expect": "an app"
+    },
+    {
+      "name": "missing, client_name of only spaces",
+      "label": null,
+      "client_name": "   ",
+      "expect": "an app"
+    }
+  ]
+}

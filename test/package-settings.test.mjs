@@ -120,7 +120,8 @@ test('the Settings page: each named in plain words, owner-only, and only a value
       const e = entry(all(), 'alpha');
       assert.deepEqual([e.value, e.withheld], [null, true], `alpha ${JSON.stringify(bad)} is withheld`);
     }
-    for (const bad of ['devteam', '@Sanctuary/devteam', '@sanctuarycomputer/', '@/devteam', '@a/b/c', '@a/.b', '@a/_b', '@a /b', '@a/~b', '@a/b~', '@~a/b', "@a/b'c", '@a/b!', '@a/b(c)', '@a/b*', `@a/${'b'.repeat(212)}`, 7, null]) {
+    // 'x@a/b' pins the ^ anchor, '@a/B' lower case after the / (kit-977)
+    for (const bad of ['devteam', 'x@a/b', '@Sanctuary/devteam', '@a/B', '@sanctuarycomputer/', '@/devteam', '@a/b/c', '@a/.b', '@a/_b', '@a /b', '@a/~b', '@a/b~', '@~a/b', "@a/b'c", '@a/b!', '@a/b(c)', '@a/b*', `@a/${'b'.repeat(212)}`, 7, null]) {
       onMain(F, (j) => { j.package_name = bad; });
       const e = entry(all(), 'package_name');
       assert.deepEqual([e.value, e.withheld], [null, true], `package_name ${JSON.stringify(bad)} is withheld`);
