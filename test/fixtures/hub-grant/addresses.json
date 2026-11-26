@@ -137,6 +137,14 @@
       "ok": false
     },
     {
+      "ip": "3fff::1",
+      "ok": false
+    },
+    {
+      "ip": "3fff:fff:ffff::1",
+      "ok": false
+    },
+    {
       "ip": "2002:7f00:1::1",
       "ok": false
     },

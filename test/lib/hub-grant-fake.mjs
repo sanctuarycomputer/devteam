@@ -182,7 +182,7 @@ function v6big(ip) {
   const parts = rest === undefined ? a : [...a, ...Array(8 - a.length - b.length).fill('0'), ...b];
   return parts.reduce((x, h) => (x << 16n) + BigInt(parseInt(h, 16)), 0n);
 }
-const V6_REFUSED = [['::', 128], ['::1', 128], ['::ffff:0:0', 96], ['64:ff9b::', 96], ['100::', 64], ['2001::', 23], ['2001:db8::', 32], ['2002::', 16], ['fc00::', 7], ['fe80::', 10], ['fec0::', 10], ['ff00::', 8]];
+const V6_REFUSED = [['::', 128], ['::1', 128], ['::ffff:0:0', 96], ['64:ff9b::', 96], ['100::', 64], ['2001::', 23], ['2001:db8::', 32], ['3fff::', 20], ['2002::', 16], ['fc00::', 7], ['fe80::', 10], ['fec0::', 10], ['ff00::', 8]];
 const inV6 = (n, [base, bits]) => (n >> BigInt(128 - bits)) === (v6big(base) >> BigInt(128 - bits));
 export function addressAllowed(ip) {
   const kind = net.isIP(String(ip));

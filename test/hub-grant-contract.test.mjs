@@ -78,7 +78,7 @@ test('C5: the role and level checked at each use', () => {
 });
 
 test('C6: the client-metadata fetch rules', () => {
-  states(6, ['it happens only for a request with a live session', 'TLS is verified for the URL\'s host name', 'at most 4 fetches at once', 'with or without a port', 'public unicast', 'with no second lookup', 'no redirects: a `3xx` is a failure', '5 seconds for the whole fetch', 'at most 5 KB (5120 bytes)', '`client_id` equal to the URL exactly', '"couldn\'t read this app\'s details"', '`::ffff:0:0/96` (IPv4-mapped']);
+  states(6, ['it happens only for a request with a live session', 'TLS is verified for the URL\'s host name', 'at most 4 fetches at once', 'with or without a port', 'public unicast', 'with no second lookup', '`3fff::/20`', 'no redirects: a `3xx` is a failure', '5 seconds for the whole fetch', 'at most 5 KB (5120 bytes)', '`client_id` equal to the URL exactly', '"couldn\'t read this app\'s details"', '`::ffff:0:0/96` (IPv4-mapped']);
   assert.ok(section(6).includes(NO_DETAILS), 'the fake\'s fixed reason is the document\'s');
 });
 
