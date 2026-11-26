@@ -3529,6 +3529,395 @@
           }
         }
       ]
+    },
+    {
+      "name": "the owner removed and re-added: their old grant stays ended",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "set": {
+              "scope": "hub:read mcp owner:act"
+            }
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r1",
+            "access_token": "m1"
+          }
+        },
+        {
+          "mcp": {
+            "token": "$m1",
+            "body": {
+              "jsonrpc": "2.0",
+              "id": 1,
+              "method": "ping"
+            }
+          },
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "people": [
+            {
+              "id": "p-sam",
+              "name": "Sam Lee",
+              "role": "member",
+              "level": "full"
+            },
+            {
+              "id": "p-vee",
+              "name": "Vee Park",
+              "role": "member",
+              "level": "view"
+            }
+          ]
+        },
+        {
+          "people": [
+            {
+              "id": "p-owner",
+              "name": "Alex Rivera",
+              "role": "owner",
+              "level": "full"
+            },
+            {
+              "id": "p-sam",
+              "name": "Sam Lee",
+              "role": "member",
+              "level": "full"
+            },
+            {
+              "id": "p-vee",
+              "name": "Vee Park",
+              "role": "member",
+              "level": "view"
+            }
+          ]
+        },
+        {
+          "mcp": {
+            "token": "$m1",
+            "body": {
+              "jsonrpc": "2.0",
+              "id": 2,
+              "method": "ping"
+            }
+          },
+          "expect": {
+            "status": 401
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        },
+        {
+          "list": "p-owner",
+          "expect": {
+            "ended": [
+              "person removed"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "a code whose person was removed and re-added stays refused",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "people": [
+            {
+              "id": "p-sam",
+              "name": "Sam Lee",
+              "role": "member",
+              "level": "full"
+            },
+            {
+              "id": "p-vee",
+              "name": "Vee Park",
+              "role": "member",
+              "level": "view"
+            }
+          ]
+        },
+        {
+          "people": [
+            {
+              "id": "p-owner",
+              "name": "Alex Rivera",
+              "role": "owner",
+              "level": "full"
+            },
+            {
+              "id": "p-sam",
+              "name": "Sam Lee",
+              "role": "member",
+              "level": "full"
+            },
+            {
+              "id": "p-vee",
+              "name": "Vee Park",
+              "role": "member",
+              "level": "view"
+            }
+          ]
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        },
+        {
+          "grants": {
+            "count": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "a code still trades when the people change around its person",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "people": [
+            {
+              "id": "p-owner",
+              "name": "Alex Rivera",
+              "role": "owner",
+              "level": "full"
+            },
+            {
+              "id": "p-vee",
+              "name": "Vee Park",
+              "role": "member",
+              "level": "full"
+            }
+          ]
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "a grant dead by its stamp keeps passkeys changed when its person is then removed",
+      "steps": [
+        {
+          "as": "p-sam"
+        },
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "stamp": "stamp-2"
+        },
+        {
+          "people": [
+            {
+              "id": "p-owner",
+              "name": "Alex Rivera",
+              "role": "owner",
+              "level": "full"
+            },
+            {
+              "id": "p-vee",
+              "name": "Vee Park",
+              "role": "member",
+              "level": "view"
+            }
+          ]
+        },
+        {
+          "list": "p-owner",
+          "expect": {
+            "ended": [
+              "passkeys changed"
+            ]
+          }
+        }
+      ]
     }
   ]
 }
