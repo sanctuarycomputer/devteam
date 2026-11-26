@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "name": "@sanctuarycomputer/devteam",
+  "version": "1.0.0",
+  "layout": 2,
+  "integrity": "sha512-us5BDMc8pSP8gxXHeQxCImdaw0zIW0guI1y7I0JBXcUM233ptvZ7EtWA/9H3eQ1JFTMRhP0iqNiYCXajhyt9uQ==",
+  "integrity_ok": true,
+  "provenance_ok": true,
+  "provenance": {
+    "repo": "sanctuarycomputer/devteam",
+    "workflow": ".github/workflows/release.yml",
+    "ref": "refs/tags/v1.0.0",
+    "commit": "cf5cf870fc16a9f4e73582f1b2a10d4d90dcc300"
+  },
+  "at": "2026-11-26T09:00:00.000Z"
+}
