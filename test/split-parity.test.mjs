@@ -396,11 +396,30 @@ test('C15: time to first data, today and in the app; a page that asks for no dat
 });
 
 // ---- Y: the workflows ----
+const stress = fs.readFileSync(path.join(root, '.github/workflows/test-stress.yml'), 'utf8');
 const testYml = fs.readFileSync(path.join(root, '.github/workflows/test.yml'), 'utf8');
 test('C3: PARTS are test.yml\'s Node 24 parts, in order, with alone first in rest 1/5', () => {
   const rows = [...testYml.matchAll(/^\s*- \{ node: 24, part: ([^,]+), key: ([^,]+), groups: ([^,]+), shard: '?([^,'} ]*)'?(, alone: true)?/gm)];
   assert.ok(rows.length >= 2, 'test.yml has Node 24 rows');
   assert.deepEqual(PARTS.map((p) => [p.part, p.key, p.groups, p.shard, !!p.alone]), rows.map((m) => [m[1], m[2], m[3], m[4], !!m[5]]));
+});
+
+test('C31: the report step writes parity.md to the job summary and exits as the report, under GitHub\'s bash -e', () => {
+  const step = /^      - name: report\n        run: \|\n((?: {10}.*\n)+)/m.exec(job('parity-report') ?? '')?.[1]?.replace(/^ {10}/gm, '');
+  assert.ok(step, 'parity-report has a report step');
+  const d = path.join(tmp, 'c31'), bin = path.join(d, 'bin'), rt = path.join(d, 'rt');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.mkdirSync(path.join(rt, 'parity'), { recursive: true });
+  // a stand-in for node: writes the report files and exits 1, as a report that isn't clean does
+  write(path.join(bin, 'node'), '#!/bin/bash\necho "# parity@1: not clean" > "$RUNNER_TEMP/parity/parity.md"\necho summary\nexit 1\n');
+  fs.chmodSync(path.join(bin, 'node'), 0o755);
+  assert.equal(run('tar', ['-C', rt, '-cf', path.join(rt, 'parity-work.tar'), 'parity']).status, 0);
+  write(path.join(d, 'step.sh'), step);
+  const sum = path.join(d, 'summary.md');
+  write(sum, '');
+  const r = run('bash', ['--noprofile', '--norc', '-eo', 'pipefail', path.join(d, 'step.sh')], { cwd: d, env: { ...env, PATH: `${bin}:${env.PATH}`, RUNNER_TEMP: rt, GITHUB_STEP_SUMMARY: sum, SHA: 'a'.repeat(40) } });
+  assert.equal(r.status, 1, `the step exits as the report: ${r.stderr}`);
+  assert.match(fs.readFileSync(sum, 'utf8'), /# parity@1: not clean/, 'parity.md reaches the job summary');
 });
 
 test('C32: each part runs test.yml\'s commands for it: alone first where test.yml has it, then its group and shard', () => {
@@ -418,3 +437,37 @@ test('C32: each part runs test.yml\'s commands for it: alone first where test.ym
   }
 });
 
+test('C27: the parity parts get test.yml\'s tools and switches: the same pinned installs, the same rest parts, DEVTEAM_TEST_* passed through', () => {
+  const blocks = (y) => [...y.matchAll(/^ *- if: matrix\.gitleaks\n *run: \|\n((?: {10}.*\n)+)/gm)].map((m) => m[1].replace(/^ +/gm, ''));
+  assert.equal(blocks(testYml).length, 2, 'test.yml installs gitleaks, then sops and age');
+  assert.deepEqual(blocks(stress), blocks(testYml));
+  const gl = (y, re) => [...y.matchAll(re)].map((m) => m[1]);
+  assert.deepEqual(gl(stress, /^\s*- \{ part: ([^,]+), key: [^,}]+, gitleaks: true \}/gm), gl(testYml, /^\s*- \{ node: 24, part: ([^,]+),.*gitleaks: true/gm));
+  assert.match(stress, /DEVTEAM_TEST_GITLEAKS: \$\{\{ matrix\.gitleaks && '1' \|\| '' \}\}/);
+  assert.match(stress, /DEVTEAM_TEST_SOPS: \$\{\{ matrix\.gitleaks && '1' \|\| '' \}\}/);
+  const e = childEnv('/h', {}, { DEVTEAM_TEST_GITLEAKS: '1', DEVTEAM_TEST_SOPS: '1', DEVTEAM_ROLE: 'worker', DEVTEAM_RUN: '/x' });
+  assert.equal(e.DEVTEAM_TEST_GITLEAKS, '1');
+  assert.equal(e.DEVTEAM_TEST_SOPS, '1');
+  assert.equal(e.DEVTEAM_ROLE, undefined);
+  assert.equal(e.DEVTEAM_RUN, undefined);
+});
+
+const job = (name) => { const m = new RegExp(`^  ${name}:\\n((?:    .*\\n|\\s*\\n)*)`, 'm').exec(stress); return m ? m[1] : null; };
+test('C10: test-stress runs parity daily and on PRs touching test/split, apps or package.json; stress never on a PR; test.yml has no parity', () => {
+  const on = /^on:\n((?:  .*\n)+)/m.exec(stress)?.[1] ?? '';
+  assert.match(on, /^  pull_request:\n    paths: \['test\/split\/\*\*', 'apps\/\*\*', 'package\.json'\]\n/m);
+  assert.match(on, /^  schedule:/m);
+  assert.match(job('stress') ?? '', /^    if: github\.event_name != 'pull_request'$/m);
+  for (const j of ['parity-build', 'parity-test', 'parity-report']) assert.ok(job(j), `job ${j}`);
+  assert.match(job('parity-build'), /^    if: github\.event_name != 'workflow_dispatch'$/m);
+  assert.match(job('parity-report'), /name: parity-report\n/);
+  assert.doesNotMatch(testYml, /parity/);
+});
+
+test('C11: the header no longer says the workflow is never a pull_request check, and says when parity runs on one', () => {
+  const header = stress.slice(0, stress.indexOf('\non:'));
+  assert.doesNotMatch(header, /Never a pull_request check/);
+  assert.match(header, /pull request/i);
+  assert.match(header, /test\/split\/, apps\/ or the root package\.json/);
+  assert.match(header, /never required/i);
+});
