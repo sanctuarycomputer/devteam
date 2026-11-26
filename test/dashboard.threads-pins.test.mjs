@@ -83,7 +83,7 @@ test("threads on the dashboard page: Shift and point, the card, the pins and the
   // the subject and title its Shift+click gives, as :3344 asserts) and subtest 9's reply (:3373)
   T = F.owner(['thread', 'new', 'Narrow this to the EU launch', '--title', 'Launch checkout', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}`, quote: 'Launch checkout' })]).split('\n')[0];
   { const th = threads().find((x) => x.id === T); assert.deepEqual([th.subject.kind, th.subject.ref, th.title], ['item', `goal:${F.goal}`, 'Launch checkout']); }
-  F.sup(['thread', 'reply', T, 'That drops the measure to EU orders; want me to propose the change?']);
+  F.sup(['thread', 'reply', T, 'That drops the measure to EU orders; want me to propose the change?', '--no-ask', 'a test of the page, not of asks']);
   // its card open from the link, as subtests 7-10 leave it (:3443-3444)
   await p.ev(`location.hash = '#talk/${T}'`);
   await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the card from the link');

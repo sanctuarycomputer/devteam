@@ -562,7 +562,7 @@ test('R7b: a turn before a resolve is owed nothing after a reopen with no words:
     const T2 = F.owner(['thread', 'new', '--title', 'Later', '--', 'Never mind.']).split('\n')[0];
     F.owner(['thread', 'resolve', T2]);
     F.owner(['thread', 'reopen', T2]);
-    const after = F.run(F.old, ['thread', 'reply', T2, 'Anything else?', '--off-subject', 'checking in after the reopen'], SUP);
+    const after = F.run(F.old, ['thread', 'reply', T2, 'Anything else?', '--no-ask', 'a sign-off', '--off-subject', 'checking in after the reopen'], SUP);
     assert.equal(after.status, 0, after.err);
     assert.doesNotMatch(after.err, /answering/, 'a turn before a resolve is owed nothing after a bare reopen');
   } finally { F.done(); }
@@ -590,7 +590,7 @@ test('R7c: an owner turn and a non-owner turn at the same millisecond: the owner
     put('owner', { type: 'turn', thread: T, text: 'Same moment', routed_to: 'responder' });
     put('supervisor', { type: 'turn', thread: T, text: 'Same moment too' });
     assert.deepEqual(json(F.ok(F.old, ['thread', 'list', '--waiting', '--responder', '--json'], RESPONDER)), [], 'a tie is answered: nothing owed');
-    const r = F.run(F.old, ['thread', 'reply', T, 'Anything else?', '--off-subject', 'checking in after the tie'], SUP);
+    const r = F.run(F.old, ['thread', 'reply', T, 'Anything else?', '--no-ask', 'a sign-off', '--off-subject', 'checking in after the tie'], SUP);
     assert.equal(r.status, 0, r.err);
     assert.doesNotMatch(r.err, /answering/, 'nothing printed as answered');
   } finally { F.done(); }
