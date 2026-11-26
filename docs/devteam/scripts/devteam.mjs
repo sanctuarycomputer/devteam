@@ -7841,7 +7841,8 @@ worldFileFails.actOf = (ref) => {
 // self@2's and exterior@2's reader (log.schema.json#self2, #exterior): test/fixtures/world2/check.mjs's
 // rules, rule for rule (its reading of lines, fences, code, comments and links; parts; the title;
 // checkSelf; selfHeld, the names rule's words; and, since kit-863, namesWhole, entries, capitalised,
-// hosts and checkExterior, exterior.md's contract and names rule), so the kit gives every case of
+// hosts and checkExterior, exterior.md's contract and names rule, which since kit-933 reads every
+// heading form, headed), so the kit gives every case of
 // test/fixtures/world2/cases.json the result it lists. One closure, so none of its names meets
 // another of this file's; it reads nothing but its arguments, path and URL (a test runs this region
 // alone).
@@ -7963,10 +7964,11 @@ const selfPlain = (() => {
   // 1 when a fence's info string is exactly self or exterior, else 2.
   const version = (text) => (scan(text).fences.some((f) => f.info === 'self' || f.info === 'exterior') ? 1 : 2);
 
-  const LIST = /^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]/;
+  const LIST = /^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]|^ {0,3}\[\^[^\]\s]{1,999}\]:/; // a list item, or a footnote definition
   const HEAD = /^ {0,3}#{1,6}(?:[ \t]|$)/;
   // Each line's text, or null where it is not read: on a fence, in indented code (four spaces or a tab
-  // in, after a blank line or more of the same, outside a list), or in a comment that opens a line.
+  // in, after a blank line or more of the same, outside a list or a footnote), or in a comment that
+  // opens a line.
   const readable = last((text) => {
     let prev = 'blank';
     let list = false;
@@ -7983,9 +7985,9 @@ const selfPlain = (() => {
       return l;
     });
   });
-  // Code spans and inline comments of one block, masked by as many spaces. A span is a run of backticks
-  // to the next run of the same length; \` opens none.
-  function mask(block) {
+  // Code spans and inline comments of one block, masked by as many spaces (code spans only, comments
+  // false). A span is a run of backticks to the next run of the same length; \` opens none.
+  function mask(block, comments = true) {
     const runs = [...block.matchAll(/`+/g)].map((m) => ({ i: m.index, n: m[0].length }));
     const later = new Map(); // a run's size to the nearest later run of it, from the end back
     for (let k = runs.length - 1; k >= 0; k -= 1) { runs[k].close = later.get(runs[k].n); later.set(runs[k].n, k); }
@@ -8004,6 +8006,7 @@ const selfPlain = (() => {
       at = end;
     }
     out += block.slice(at);
+    if (!comments) return out;
     let done = '';
     at = 0;
     for (let i = out.indexOf('<!--'); i >= 0; i = out.indexOf('<!--', at)) {
@@ -8014,6 +8017,62 @@ const selfPlain = (() => {
     }
     return done + out.slice(at);
   }
+  // One block's text with what a page keeps as text masked, read left to right as a page reads it: each
+  // code span (md, a markdown block) by spaces, each comment by \0. It stops at anything else that could
+  // open HTML or an autolink (a < then anything but a space), a comment holding -- or never ended, or an
+  // escaped run of backticks, so a span or comment counts only where nothing before it could take in its
+  // opener.
+  function kept(s, md) {
+    const runs = md ? [...s.matchAll(/`+/g)].map((m) => ({ i: m.index, n: m[0].length })) : [];
+    const later = new Map();
+    for (let k = runs.length - 1; k >= 0; k -= 1) { runs[k].close = later.get(runs[k].n); later.set(runs[k].n, k); }
+    const escaped = (i) => { let n = 0; while (s[i - 1 - n] === '\\') n += 1; return md && n % 2 === 1; };
+    let out = '';
+    let at = 0;
+    let r = 0;
+    const hide = (i, end, by) => { out += s.slice(at, i) + s.slice(i, end).replace(/[^\n]/g, by); at = end; return end; };
+    for (let i = 0; i < s.length;) {
+      if (s[i] === '`' && md) {
+        while (runs[r].i < i) r += 1;
+        if (escaped(i)) break;
+        const { n, close } = runs[r];
+        i = close === undefined ? i + n : hide(i, runs[close].i + n, ' ');
+      } else if (s[i] !== '<') i += 1;
+      else if (escaped(i) || [undefined, ' ', '\t', '\n'].includes(s[i + 1])) i += 1;
+      else if (!s.startsWith('<!--', i)) break;
+      else if (s[i + 4] === '>') i = hide(i, i + 5, '\0');
+      else if (s.startsWith('->', i + 4)) i = hide(i, i + 6, '\0');
+      else {
+        const k = s.indexOf('--', i + 4);
+        if (k < 0 || s[k + 2] !== '>') break;
+        i = hide(i, k + 3, '\0');
+      }
+    }
+    return out + s.slice(at);
+  }
+  // A line with each table cell (between |s not escaped) read by kept on its own.
+  function cells(s) {
+    let out = '';
+    let at = 0;
+    for (let i = 0; i <= s.length; i += 1) {
+      if (i < s.length && s[i] !== '|') continue;
+      let n = 0;
+      while (s[i - 1 - n] === '\\') n += 1;
+      if (i < s.length && n % 2) continue;
+      out += kept(s.slice(at, i), true) + (i < s.length ? '|' : '');
+      at = i + 1;
+    }
+    return out;
+  }
+  // An HTML block's first line (CommonMark's kinds 1 to 6), and what ends it: a blank line where none.
+  const HTMLBLOCK = [
+    [/^<(?:pre|script|style|textarea)(?=[\s>]|$)/i, /<\/(?:pre|script|style|textarea)>/i],
+    [/^<!--/, /-->/],
+    [/^<\?/, /\?>/],
+    [/^<![A-Za-z]/, />/],
+    [/^<!\[CDATA\[/, /\]\]>/],
+    [/^<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|source|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?=[\s/>]|$)/i, null],
+  ];
   // The text outside code and comments, line for line. A block (what a span or link stays inside) ends
   // at a blank or unread line, a heading, a list item or a table row.
   const plain = last((text) => {
@@ -8475,10 +8534,198 @@ const selfPlain = (() => {
     return [...out];
   }
 
+  // Every heading a page shows, in document order: [{ level, text, line }]. Outside code and comments,
+  // an ATX heading of any level, at any indent a readable line has (one too deep for a heading reads as
+  // one: refusing errs that way), and a setext one, the paragraph's lines above a line of = (level 1)
+  // or of - (level 2); each also inside a block quote or a list item, their markers read away (a quote's
+  // line goes on the paragraph above, a list item's or a footnote's starts its own). And an HTML <h1>-<h6>
+  // tag wherever it stands, in code or a comment too, since an HTML block, a stray backtick or a
+  // comment's tail can show one the reading above takes for code: its text up to the next heading tag
+  // (HTMLHEAD). Each text is read as a heading's words; a # or ## one's also as a page shows them (seen),
+  // with its link hosts, when unnamedHeading asks.
+  // Linear in the text: each marker, line and tag read once.
+  // The block-quote, list-item and footnote-definition markers that open a line (none matches empty).
+  const OPENERS = /^(?:[ \t]*>[ \t]?|[ \t]*(?:[-*+]|\d{1,9}[.)])(?:[ \t]+|$)|[ \t]*\[\^[^\]\s]{1,999}\]:[ \t]*)*/;
+  const UNDER = /^[ \t]*(=+|-+)[ \t]*$/;
+  // An HTML heading tag and what follows it up to the next heading tag or the end; its own attributes
+  // are dropped up to their first >, so a < in a value can't hide it (one > in a value leaves some in,
+  // which only refuses more). Each tag inside reads as its alt text, as a page shows an image's.
+  const HTMLHEAD = /<h([1-6])(?=[\s/>])([\s\S]*?)(?=<\/?h[1-6][\s/>]|$)/gi;
+  const ALT = /\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`=]+))/i;
+  // A # or ## heading's words as a page shows them (seen), judged beside its text as written: a comment
+  // and a processing instruction dropped (each read to its end), an autolink as its address, each tag a
+  // line break or a block (BLOCK) as a space, each other tag as its alt text (an image's; none else
+  // has one) with no space, as inline tags show; then each character reference decoded and each
+  // default-ignorable character (a soft hyphen, a zero-width space or joiner, a word joiner), shown as
+  // nothing, dropped. A tag's quoted value is read whole, up to the next <, so linearly. Its text as
+  // written stays what is refused.
+  const SHOWN = /<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*)>|<\/?[A-Za-z][A-Za-z0-9-]*(?:[\s/](?:"[^"<]*"|'[^'<]*'|[^<>"'])*)?>/g;
+  const BLOCK = /^<\/?(?:br|p|div|hr|li|ul|ol|dl|dt|dd|table|thead|tbody|tfoot|tr|td|th|blockquote|pre|section|article|header|footer|nav|aside|figure|figcaption|details|summary|address|h[1-6])(?![A-Za-z0-9-])/i;
+  const INVISIBLE = /\p{Default_Ignorable_Code_Point}|&(?:shy|zwj|zwnj|lrm|rlm|ZeroWidthSpace|Negative(?:VeryThin|Thin|Medium|Thick)Space|NoBreak|it|InvisibleTimes|ic|InvisibleComma|af|ApplyFunction);/gu;
+  const alt = (tag) => { const a = ALT.exec(tag); return a ? (a[1] ?? a[2] ?? a[3]) : ''; };
+  const shown = (tag) => ` ${alt(tag)} `;
+  // s with each run from open to the next close taken out (an unclosed one kept), read once.
+  const cut = (s, open, close) => { let out = ''; let at = 0; for (let i = s.indexOf(open); i >= 0; i = s.indexOf(open, at)) { const j = s.indexOf(close, i + open.length); if (j < 0) break; out += s.slice(at, i); at = j + close.length; } return out + s.slice(at); };
+  const seen = (s) => decode(cut(cut(words(s), '<!--', '-->'), '<?', '?>').replace(INVISIBLE, '').replace(SHOWN, (t, url) => (url ?? (BLOCK.test(t) ? ' ' : alt(t))))).replace(INVISIBLE, '').replace(/\s+/g, ' ').trim();
+  const headed = last((text) => {
+    const out = [];
+    const add = (level, s, line, text = words(s), kind = {}) => out.push({ level, text, line, raw: s, ...kind });
+    let para = []; // the paragraph's lines so far: [line, its text past its markers]
+    readable(text).forEach((l, i) => {
+      if (l === null || !l.trim()) { para = []; return; }
+      const at = OPENERS.exec(l)[0].length;
+      const inner = l.slice(at);
+      const atx = /^[ \t]*(#{1,6})(?:[ \t]+(.*))?$/s.exec(inner);
+      if (atx) { add(atx[1].length, trimST(atx[2] ?? '').replace(/(?:^|[ \t])#+$/, ''), i + 1); para = []; return; }
+      const under = para.length && (UNDER.exec(l) ?? UNDER.exec(inner));
+      if (under) { add(under[1][0] === '=' ? 1 : 2, para.map((p) => p[1]).join(' '), para[0][0]); para = []; return; }
+      if (!inner.trim() || BREAK.test(inner)) { para = []; return; }
+      if (/[^> \t]/.test(l.slice(0, at))) para = []; // a list item's line starts its own paragraph
+      para.push([i + 1, inner]);
+    });
+    const raw = String(text).replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+    const starts = [0];
+    for (let i = raw.indexOf('\n'); i >= 0; i = raw.indexOf('\n', i + 1)) starts.push(i + 1);
+    const lineOf = (o) => { let a = 0; let b = starts.length - 1; while (a < b) { const m = (a + b + 1) >> 1; if (starts[m] <= o) a = m; else b = m - 1; } return a + 1; };
+    // Where a page keeps an HTML heading tag as text (code), so the names rule judges it as before: in a
+    // fence or indented code outside an HTML block, or wholly inside a comment, or in a code span whose
+    // two marks its line and cell hold (ruling m-20261126-121428851). The lines are cut into blocks as a
+    // page cuts them: an HTML block (CommonMark's seven kinds; a fence that opens in one is read as HTML
+    // to its end), and a paragraph, which a blank line, a heading, a rule, an underline, a list item, a
+    // table row or an HTML block ends. Each block is read by kept, once.
+    const ls = lines(text);
+    const sc = scan(text).lines;
+    const rd = readable(text);
+    const kind = []; // each line's: code, html or md
+    const blocks = []; // { a, b, md, alone }: first and last line
+    let end = null; // what ends the open HTML block: its pattern, or '' for a blank line
+    let taken = false; // in a fence that opened in an HTML block
+    let rc = false; // readable's comment, to tell its unread lines from indented code
+    for (let l = 0; l < ls.length; l += 1) {
+      const s = ls[l];
+      let comment = false;
+      if (!sc[l].code) { comment = rc || /^ {0,3}<!--/.test(s); if (comment) rc = !s.includes('-->'); }
+      if (end === '' && !s.trim()) end = null;
+      taken = sc[l].code && (sc[l].opens ? end !== null : taken);
+      const code = sc[l].code || (rd[l] === null && !comment);
+      const last = blocks[blocks.length - 1];
+      const para = kind[l - 1] === 'md' && !!ls[l - 1].trim() && !last.alone;
+      let k = -1;
+      let seven = false;
+      if (end === null && !code) {
+        const xs = [s.replace(/^ {0,3}/, ''), s.slice(OPENERS.exec(s)[0].length).replace(/^[ \t]*/, '')];
+        k = HTMLBLOCK.findIndex(([o]) => xs.some((x) => o.test(x)));
+        seven = k < 0 && !para && xs.some((x) => /^<\/?[A-Za-z]/.test(x) && trimST(x).endsWith('>'));
+      }
+      if (k >= 0 || seven) {
+        kind.push('html');
+        blocks.push({ a: l, b: l, md: false });
+        end = k >= 0 && HTMLBLOCK[k][1] ? HTMLBLOCK[k][1] : '';
+      } else if (end !== null || taken) {
+        kind.push('html');
+        if (kind[l - 1] === 'html') last.b = l; else blocks.push({ a: l, b: l, md: false });
+      } else if (code) kind.push('code');
+      else {
+        kind.push('md');
+        const alone = HEAD.test(s) || BREAK.test(s) || UNDER.test(s) || /^ {0,3}\|/.test(s);
+        if (!s.trim()) continue;
+        if (para && !alone && !LIST.test(s)) last.b = l;
+        else blocks.push({ a: l, b: l, md: true, alone });
+      }
+      if (end && kind[l] === 'html' && end.test(s)) end = null;
+    }
+    const km = []; // each line as kept reads its block
+    const from = []; // where the comment a line's first character is in opened, when on a line before
+    const dirty = [0]; // how many lines before each hold a list, quote or footnote marker or a |, or are more than three spaces in
+    for (const { a, b, md } of blocks) { let l = a; for (const t of kept(ls.slice(a, b + 1).join('\n'), md).split('\n')) { km[l] = t; if (l > a && (t === '' || t[0] === '\0') && (km[l - 1] === '' ? from[l - 1] !== undefined : km[l - 1].endsWith('\0'))) from[l] = from[l - 1] !== undefined && !/[^\0]/.test(km[l - 1]) ? from[l - 1] : l - 1; l += 1; } }
+    for (let l = 0; l < ls.length; l += 1) dirty.push(dirty[l] + (OPENERS.exec(ls[l])[0].length || ls[l].includes('|') || indent(ls[l]) > 3 ? 1 : 0));
+    const own = new Map(); // each line read alone: an HTML block's by kept, a markdown one's cell by cell
+    // A tag is code where its block's reading and its own line's (and cell's) both keep it as text; or in
+    // a comment from a line before, when every line from the one it opened on is at most three spaces in
+    // and holds no marker or |, so no quote, table row, list item, heading, rule or code the cut above
+    // misses (one in a list item is more than three spaces in) can end the comment or hold its opener.
+    const inCode = (o) => {
+      const l = lineOf(o) - 1;
+      const c = o - starts[l];
+      if (kind[l] === 'code') return true;
+      const ch = km[l]?.[c];
+      if (ch !== ' ' && ch !== '\0') return false;
+      if (!own.has(l)) own.set(l, kind[l] === 'html' ? kept(ls[l], false) : cells(ls[l]));
+      if (own.get(l)[c] !== '<') return true;
+      const f = from[l];
+      return ch === '\0' && f !== undefined && dirty[l + 1] === dirty[f];
+    };
+    for (const m of raw.matchAll(HTMLHEAD)) { const body = m[2].replace(/^[^>]*>/, ''); add(Number(m[1]), body, lineOf(m.index), words(body.replace(/<[^<>]*>/g, shown)), (inCode(m.index) ? { code: true } : { html: true })); }
+    return out.filter((h) => h.text).sort((a, b) => a.line - b.line);
+  });
+  // A top-level heading must be plain text (ruling a-20261126-080419596): a # or ## heading, in any form,
+  // and an HTML <h1> to <h6> one, is refused when its text as written (a markdown one's code spans aside)
+  // holds raw HTML (< then a letter, /, ! or ?), a character reference (& then # or a letter), a
+  // character in \p{C} but a tab or a line's end, a mark left after NFC, a default-ignorable character,
+  // ~~, or a [ or ]. Plain text, code spans and * _ emphasis stay, read by the readings below. An HTML
+  // heading tag in code or a comment (code) is shown as text: the names rule judges it, as before.
+  const NOT_PLAIN = /<[A-Za-z\/!?]|&[#A-Za-z]|[^\P{C}\t\n]|\p{M}|\p{Default_Ignorable_Code_Point}|~~|[\[\]]/u;
+  const plainHeading = (h) => h.code || (h.level > 2 && !h.html) || !NOT_PLAIN.test((h.html ? h.raw : mask(h.raw, false)).normalize('NFC'));
+  // Whether the names rule refuses a heading: one that is not plain text; one of level 3 to 6 unless names holds it whole; a # or ##
+  // one (the title and the sections, in plain words) when it holds a capitalised word, Exterior aside
+  // (the document's own name), or a link host, that names doesn't hold whole, read as written, as
+  // shown or joined. Each later reading is made only when the one before finds nothing, so a refused heading
+  // costs one.
+  // A # or ## heading's joined reading, judged beside the two above: its markup taken out with no
+  // separator and the spaces typed kept, as a page joins a word a tag or a mark splits. Its spans are
+  // cut two ways (joined, joinedAtGt); only a line break or a paragraph (<br>, <p> and their end tags)
+  // reads as a space. What is left is squeezed (squeeze). Linear: a span ends at its quote or its >.
+  // SPAN: a tag (a quoted value read to its quote), end tag, declaration or autolink, as CommonMark reads it.
+  const SPAN = /<\/?[A-Za-z][A-Za-z0-9-]*(?:\s+[^\s"'<>\/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*\s*\/?>|<![A-Za-z][^<>]*>|<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*>/g;
+  const BREAKS = /^<\/?(?:br|p)(?![A-Za-z0-9-])/i;
+  // The text joined after its cuts: each character reference decoded, NFKC-normalised, each format,
+  // default-ignorable and combining mark left over dropped, read as words, a reference link's label after
+  // its ] taken out, and each ~ * _ ` [ ] mark taken out.
+  const squeeze = (t) => words(decode(t).normalize('NFKC').replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\p{Mn}]/gu, '')).replace(/\]\[[^[\]]{0,999}\]/g, ']').replace(/[~*_`[\]]/g, '');
+  // s with each span cut where a page ends it, at its first > (quotes ignored), read once; a comment at
+  // -->, --!> or at once; <br>, <p> and their end tags a space. An unclosed span stays as text. Each end
+  // looked for is kept until passed, so each is found once.
+  const atGt = (s) => {
+    let out = '';
+    let at = 0;
+    const next = {};
+    const find = (t, from) => { if (next[t] === undefined || (next[t] >= 0 && next[t] < from)) next[t] = s.indexOf(t, from); return next[t]; };
+    for (let i = s.indexOf('<'); i >= 0; i = s.indexOf('<', at)) {
+      out += s.slice(at, i);
+      if (s.startsWith('<!--', i)) { // a comment ends at once (<!-->, <!--->), or at --> or --!>
+        if (s[i + 4] === '>' || s.startsWith('->', i + 4)) { at = i + (s[i + 4] === '>' ? 5 : 6); continue; }
+        const ends = [['-->', 3], ['--!>', 4]].map(([t, n]) => [find(t, i + 4), n]).filter(([e]) => e >= 0);
+        if (!ends.length) { at = i; break; }
+        const [e, n] = ends.reduce((a, b) => (b[0] < a[0] ? b : a));
+        at = e + n;
+        continue;
+      }
+      if (!/[A-Za-z/!?]/.test(s[i + 1] ?? '')) { out += '<'; at = i + 1; continue; }
+      const e = find('>', i + 1);
+      if (e < 0) { at = i; break; }
+      if (BREAKS.test(s.slice(i, Math.min(e + 1, i + 6)))) out += ' ';
+      at = e + 1;
+    }
+    return out + s.slice(at);
+  };
+  // The joined reading, cut two ways (ruling m-20261126-071801827): as CommonMark reads its spans
+  // (SPAN, a quoted value to its quote), and as a page ends them (atGt). The invisible characters and
+  // their named references go first, before decode. The CDATA cut can't change a verdict (CDATA is
+  // upper case, so the reading as written refuses it): kept for the reading's sake.
+  const joined = (s) => squeeze(cut(cut(cut(s.replace(INVISIBLE, ''), '<!--', '-->'), '<?', '?>'), '<![CDATA[', ']]>').replace(SPAN, (t) => (BREAKS.test(t) ? ' ' : '')));
+  const joinedAtGt = (s) => squeeze(atGt(s.replace(INVISIBLE, '')));
+  const unnamedWord = (t, names) => [...t.matchAll(WORD)].some((m) => { const w = capWord(m[0]); return w !== null && w.toLowerCase() !== 'exterior' && !namesWhole(names, w); });
+  const unnamedHeading = (h, names) => !plainHeading(h) || (h.level > 2
+    ? !namesWhole(names, h.text)
+    : unnamedWord(h.text, names) || unnamedWord(seen(h.raw), names) || unnamedWord(joined(h.raw), names)
+      || unnamedWord(joinedAtGt(h.raw), names) || hosts(h.raw).some((x) => !namesWhole(names, x)));
+
+  // The text of each heading that is not plain text, in document order.
+  const notPlain = (text) => headed(text).filter((h) => !plainHeading(h)).map((h) => h.text);
   // exterior.md: { errors, warnings, refused, held, hosts }. On a repo known private nothing is refused
-  // or held; visibility 'public' or 'unknown' keeps the names rule. A ### heading is judged by
-  // allowed.names (origin main's strategy and dependency names); a word or host by allowed.words (the
-  // strategy and the dependency files whole).
+  // or held; visibility 'public' or 'unknown' keeps the names rule. Every heading, in any form (headed),
+  // is judged by allowed.names (origin main's strategy and dependency names) and refused as
+  // unnamedHeading says; a word or host by allowed.words (the strategy and the dependency files whole).
   function checkExterior(text, { today, visibility, allowed }) {
     const errors = docErrors(text, 'exterior');
     const all = errors.length ? [] : entries(text);
@@ -8488,13 +8735,13 @@ const selfPlain = (() => {
     return {
       errors,
       warnings: all.flatMap((e) => entryWarnings(e, today, refs)),
-      refused: unknown(headings(text).filter((h) => h.level === 3).map((h) => h.text), allowed.names),
+      refused: open ? [] : headed(text).filter((h) => unnamedHeading(h, allowed.names)).map((h) => h.text),
       held: unknown(capitalised(text), allowed.words),
       hosts: unknown(hosts(text), allowed.words),
     };
   }
 
-  return { version, checkSelf, selfHeld, scan, plain, headings, links, parts, namesWhole, entries, capitalised, hosts, checkExterior };
+  return { version, checkSelf, selfHeld, scan, plain, headings, links, parts, namesWhole, checkExterior, notPlain };
 })();
 // 1 when a fence's info string is exactly self or exterior (version 1), else 2.
 const selfPlainVersion = selfPlain.version;
@@ -8928,9 +9175,9 @@ function cmdSelf() {
 // project/exterior.md, what the project relates to: since kit-863 a plain document
 // (log.schema.json#exterior2), judged by the self-plain region's checkExterior, which follows
 // test/fixtures/world2/check.mjs rule for rule: one # title, ### entries, a dated source for each, and
-// on a repo not known to be private the names rule (a ### heading named whole in origin main's
-// strategy or dependency names, else refused; every capitalised word and every link host held until
-// named on the chore). A draft must be one. Version 1 (log.schema.json#exterior@1, one fenced
+// on a repo not known to be private the names rule (every heading, in any form: one of level 3 to 6
+// named whole in origin main's strategy or dependency names, a # or ## one each capitalised word in
+// it, else refused; every capitalised word and every link host held until named on the chore). A draft must be one. Version 1 (log.schema.json#exterior@1, one fenced
 // `exterior` block) still validates on main, by kit-135's rules below, and raises one exterior-drift.
 const EXTERIOR_REL = () => `${projectRel}/exterior.md`;
 const EXTERIOR_NOT_DRAFTED = 'exterior.md is not drafted yet: the supervisor drafts it from the strategy and self.md (supervisor.md, Monitoring)';
@@ -8965,17 +9212,12 @@ function exteriorDoc(text) {
   return { version, block: errors.length ? null : v, errors };
 }
 const exteriorTreeText = () => readText(path.join(projectDir, 'exterior.md'));
-// A version 1 file's checks past its contract, for validate. The head's strategy.md and self.md blobs
-// (null for no file): ref's, or with ref null the working tree's (git hash-object, so an uncommitted
-// draft counts), with the strategy's text when it was read from the tree.
-function headBlobs(ref, root = projectDir) {
-  const rels = { strategy: strategyRel, self: `${projectRel}/self.md` };
-  if (ref) {
-    const at = (rel) => git(['rev-parse', '--verify', '--quiet', `${ref}:${rel}`], mainRoot);
-    return { strategyBlob: at(rels.strategy), selfBlob: at(rels.self), strategyText: null };
-  }
-  const tree = (name) => { const f = path.join(root, name); return fs.existsSync(f) ? git(['hash-object', '--', f], mainRoot) : null; };
-  return { strategyBlob: tree('strategy.md'), selfBlob: tree('self.md'), strategyText: readText(path.join(root, 'strategy.md')) };
+// A version 1 file's checks past its contract, for validate: the working tree's strategy.md and
+// self.md blobs (git hash-object, so an uncommitted draft counts; null for no file) and the strategy's
+// text.
+function headBlobs() {
+  const tree = (name) => { const f = path.join(projectDir, name); return fs.existsSync(f) ? git(['hash-object', '--', f], mainRoot) : null; };
+  return { strategyBlob: tree('strategy.md'), selfBlob: tree('self.md'), strategyText: readText(path.join(projectDir, 'strategy.md')) };
 }
 // Whether validate is at the draft: main can be read and the working tree's exterior.md is not
 // main's (none on main counts as differing). With no main (a depth-1 CI checkout) it is not.
@@ -9031,7 +9273,7 @@ function dependencyNames(ref = mainRef()) {
   return { text: names.join('\n'), warnings };
 }
 // What the names rule allows at ref (origin main; the branch's own files never count): names, which
-// a ### heading must be named in whole (main's strategy.md and its dependency names), and words, which
+// judge every heading (main's strategy.md and its dependency names), and words, which
 // hold every other capitalised word and every link host (main's strategy.md and its dependency files'
 // whole text, namesAllowedText); warnings, the dependency files'.
 function exteriorAllowed(ref = mainRef()) {
@@ -9044,7 +9286,13 @@ function exteriorAllowed(ref = mainRef()) {
 function exteriorDraft(text, allowed) {
   return selfPlain.checkExterior(text, { today: exteriorToday(), visibility: 'public', allowed });
 }
-const exteriorRefusedLine = (name) => `"${name}" (a ### heading) is not named whole in origin main's strategy.md or its dependency names: on a repo not known to be private an entry is headed only by a name they give; head it as a group or a topic, or have the strategy name it first`;
+// A refused heading's line: a level-3 ATX heading of text's (an entry) as kit-863 words it; any other
+// form or level as a heading.
+const exteriorRefusedLine = (name, text) => (selfPlain.notPlain(text).includes(name)
+  ? `"${name}" (a heading) is not plain text: a top-level heading must be plain text; put options, placeholders and markup in backticks (outside a code span a # or ## heading, or an HTML <h1> to <h6> one, holds no raw HTML, character reference, control, format or invisible character, mark left after NFC, ~~, [ or ]; * or _ emphasis is fine)`
+  : selfPlain.headings(text).some((h) => h.level === 3 && h.text === name)
+  ? `"${name}" (a ### heading) is not named whole in origin main's strategy.md or its dependency names: on a repo not known to be private an entry is headed only by a name they give; head it as a group or a topic, or have the strategy name it first`
+  : `"${name}" (a heading) is not named in origin main's strategy.md or its dependency names: on a repo not known to be private a heading of level 3 to 6 is only a name they give whole, and a # or ## heading holds no capitalised word or link host they don't name; name it in the strategy first, or reword it (a # or ## heading may lower-case the word, or use one the strategy holds)`);
 const exteriorWordLine = (w) => `"${w.word}" (${w.where}) is in neither origin main's strategy.md nor its dependency files: on a repo not known to be private, the draft is public once its branch is pushed; reword it, or check it and name it on the chore (chore pr --names-checked)`;
 // The draft's history (every version is pushed): the contract and dated sources on head ({ text }, or
 // null when there is no exterior.md at the head), then the names rule on each version ([{ commit,
@@ -9061,7 +9309,7 @@ function exteriorVersionsScan(head, versions, allowed) {
   const seen = new Set();
   for (const { commit, text } of versions) {
     const d = judge(text);
-    for (const name of d.refused) if (!seen.has(`n:${name}`)) { seen.add(`n:${name}`); named.push({ name, line: exteriorRefusedLine(name), commit }); }
+    for (const name of d.refused) if (!seen.has(`n:${name}`)) { seen.add(`n:${name}`); named.push({ name, line: exteriorRefusedLine(name, text), commit }); }
     for (const [list, where] of [[d.held, 'word'], [d.hosts, 'link host']]) for (const word of list) if (!seen.has(`w:${word}`)) { seen.add(`w:${word}`); words.push({ word, where, commit }); }
   }
   warns.push(...allowed.warnings);
@@ -9190,7 +9438,7 @@ function exteriorBase(main, blob) {
 // metrics' exterior findings, read from main with no network call (none with no main), each keyed so
 // observeFindings keeps one observation per name or blob pair. A version 1 exterior.md: one
 // exterior-drift (key exterior@1) asking for the plain version, and no other. A plain one:
-// exterior-drift once per ### heading main's strategy.md and dependency names no longer name, only
+// exterior-drift once per heading the names rule refuses against main's strategy.md and dependency names, only
 // where the repo was last known public (a machine with no record says nothing); exterior-stale while
 // main's strategy.md or self.md blob isn't the one at its base (exteriorBase; unknown raises none);
 // both low. exterior-missing while main has self.md, a written strategy linking it, and no
@@ -9215,10 +9463,10 @@ function exteriorFindings(add) {
   if (lastRepoVisibility() === 'public') {
     const allowed = exteriorAllowed(main);
     const seen = new Set();
-    for (const h of selfPlain.headings(m.text)) {
-      if (h.level !== 3 || seen.has(h.text.toLowerCase()) || selfPlain.namesWhole(allowed.names, h.text)) continue;
-      seen.add(h.text.toLowerCase());
-      add('low', 'exterior-drift', 'exterior', `exterior.md's entry "${h.text}" is named in neither main's strategy.md nor its dependency names`, 'draft a new version of exterior.md that heads it as a group or a topic, or have the strategy name it; run exterior check before chore pr', { key: h.text.toLowerCase() });
+    for (const name of exteriorDraft(m.text, allowed).refused) {
+      if (seen.has(name.toLowerCase())) continue;
+      seen.add(name.toLowerCase());
+      add('low', 'exterior-drift', 'exterior', `exterior.md's heading "${name}" is named in neither main's strategy.md nor its dependency names`, 'draft a new version of exterior.md that heads it in plain words, as a group or a topic, or have the strategy name it; run exterior check before chore pr', { key: name.toLowerCase() });
     }
   }
   const base = exteriorBase(main, m.blob);
@@ -9242,7 +9490,7 @@ function exteriorCheckLines() {
     const v = repoVisibility();
     if (v !== 'private') {
       const tail = v === 'unknown' ? " (the repo's visibility is unknown, which counts as not private)" : '';
-      errors.push(...d.refused.map((n) => `${exteriorRefusedLine(n)}${tail}`));
+      errors.push(...[...new Set(d.refused)].map((n) => `${exteriorRefusedLine(n, text)}${tail}`)); // a heading written twice is one line
       warnings.push(...[...d.held.map((word) => ({ word, where: 'word' })), ...d.hosts.map((word) => ({ word, where: 'link host' }))].map(exteriorWordLine));
     }
   }
@@ -9262,7 +9510,7 @@ function exteriorValidateLines() {
   if (text === null) return { errors: [], warnings: [] };
   const { block, errors } = exteriorDoc(text);
   if (!block) return { errors, warnings: [] };
-  return exteriorBlobLines(block, { draft: exteriorAtDraft(), ...headBlobs(null) });
+  return exteriorBlobLines(block, { draft: exteriorAtDraft(), ...headBlobs() });
 }
 // dashboard-data's exterior block (log.schema.json#exterior@1 dashboard), for a version 1 file whose
 // block holds: file order, relation_word or null, each signal's score weight×value. kit-868 drops it.
@@ -33392,6 +33640,127 @@ function cmdRecurring() {
   ].join('\n'));
 }
 
+// kit-install@1 (feature kit-package-dist): an instance pins the kit's npm package in two files, installs
+// it verified beside the copy it runs, and from layout 2 runs it. The rules every package, merge, chore,
+// dashboard and launcher step keeps:
+// - Settings. package_name (default @sanctuarycomputer/devteam) and alpha (default true) are owner
+//   settings. Every check reads package_name and upstream_repo from main's committed settings
+//   (settingsAt(main)), never from a PR's head or loadSettings().
+// - The pin pair. docs/devteam/package.json and docs/devteam/package-lock.json are packagePinPair's output
+//   for the registry's manifest of the version, byte for byte. layout is the manifest's devteam.layout (1
+//   or 2), read, never guessed: a manifest without one is refused, and so is one that disagrees with the
+//   tag's launcher marker (below). For a PR that changes either file the expected version is
+//   upstream_base at its head without the v; a pin naming another version is refused, and so is a PR
+//   that deletes the pair (the fix: restore main's pair, or package pin <tag>).
+// - npm. The calls are exactly npm view <name>@<version> [<field>] [--json], npm ci [--dry-run] and npm
+//   audit signatures, each with --registry=<the registry>, --ignore-scripts, --prefix=<the folder it runs
+//   in> and --workspaces=false, each once, and no other argument in any form (no second or scoped registry,
+//   no --reg or --registry <url>, no ignore-scripts negation, no other prefix or workspace flag, no
+//   --userconfig or --globalconfig). With the last two npm never walks up to a package.json, its workspaces,
+//   its lock or an .npmrc above that folder (a workspace root above .kit would otherwise install its own
+//   lock, bytes the pin never named), so a workspace root or an .npmrc above changes nothing and is not
+//   refused (C4 runs real npm to show it). Each runs with npm_config_userconfig and npm_config_globalconfig naming
+//   two different empty files (regular files; npm refuses one file for both), with no other npm_config_* or
+//   NPM_CONFIG_* variable in its environment, and in a folder the step made that holds no .npmrc: ci and
+//   audit in .kit/<version>-<hash>/, view in its own folder made outside the checkout (mkdtemp under
+//   os.tmpdir()) holding only a package.json the step writes ({}). An npm
+//   older than 9.5 can't verify attestations: a finding before layout 2, a refusal from it. A registry
+//   that can't be reached is not a refusal: a fetch or npm call that gets no answer in time, a network
+//   error, or any status but 200 and 404 (a 5xx, a 429), and an npm call that fails with a network code
+//   (ECONN*, ETIMEDOUT, EAI_AGAIN) or E5xx/E429, are unreachable, never a refusal. Unreachable is a finding
+//   before layout 2; from it the step stops, changes nothing (current, verified.json and the pair stay as
+//   they were, and nothing records the version as refused), and the next run tries again. An npm E404 for
+//   the version is unpublished: a finding before layout 2, a refusal from it. EINTEGRITY is a refusal.
+// - The registry is https://registry.npmjs.org/. DEVTEAM_NPM_REGISTRY, for tests, replaces it only when it
+//   is exactly http://127.0.0.1:<port>/ (port 1 to 65535, no leading zero, the final slash, nothing after
+//   it). Unset or empty, it is the public registry; any other value (localhost, [::1], https, a path) stops
+//   the command with exit 1 naming the
+//   variable, and is never used or passed over for the public one. Set, it is the --registry of every npm
+//   call and the base of the kit's own fetches, and package status names it. It adds no reach: whoever
+//   sets the kit's environment can already run code in it (NODE_OPTIONS, PATH). The kit's own fetches
+//   never follow a redirect (redirect: 'manual'): a 3xx is unreachable, so no answer comes from another
+//   host.
+// - Provenance. The bundle at <registry>-/npm/v1/attestations/<name>@<version> is fetched once (15 s, at
+//   most 1 MiB). Its guards, in order, each a refusal naming the first that fails: the fetch answers 200 or
+//   404 (else unreachable, as above); not a 404 (no attestation); JSON with an attestations list;
+//   exactly one entry whose predicateType is https://slsa.dev/provenance/v1; its bundle.dsseEnvelope.payload
+//   is base64 of a JSON in-toto statement; subject is exactly one entry, whose digest.sha512 (128 hex) is
+//   the integrity's sha512; predicate.buildDefinition.externalParameters.workflow has repository
+//   https://github.com/<upstream_repo>, path .github/workflows/release.yml and ref refs/tags/v<version>;
+//   predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit is the tag's commit in upstream_repo,
+//   on its default branch. npm audit signatures must then pass on the installed tree and report the
+//   package's attestation verified (its "has a verified attestation" line; passing on registry signatures
+//   alone is a refusal from layout 2, a finding before): it checks the signature, the kit the claims. The
+//   bundle the kit reads and the one npm verifies are fetched separately: a registry serving different
+//   bytes to each is a named limit.
+// - The install tree. docs/devteam/.kit/<version>-<first 12 hex of the integrity's sha512>/ holds the pair,
+//   node_modules/<name>/ (and whatever else npm writes there) and verified.json. Folders are made under
+//   withLock(.kit/.lock); current and the previous folder are kept, and a folder a live process holds open
+//   is never removed.
+// - current. docs/devteam/.kit/current is a relative symlink whose target is one folder's name, or, where
+//   the file system holds no symlink, a file of at most 64 bytes holding that name and one newline; every
+//   reader takes both, and switches it by an atomic rename. A name is <X.Y.Z>-<12 hex> and must be a
+//   real folder (not a symlink) directly beside current. Anything else (an absolute or ../ target, a / in
+//   the name, a missing folder, a folder that is a symlink, an empty file, a second line, a bigger file)
+//   is no current: never followed, read as nothing installed.
+// - Never committed. docs/devteam/.kit must be a real folder (lstat); a symlink or anything else there is
+//   read as nothing installed. Its ignore line is .kit, with no slash, so a symlink of that name is ignored
+//   too, and merge refuses a PR that adds or changes docs/devteam/.kit itself or any path under it, where
+//   each of a path's first three components is compared as git compares .git on any file system:
+//   case-insensitively, after Unicode NFC normalisation, with the code points HFS+ ignores removed (U+200C
+//   to U+200F, U+202A to U+202E, U+206A to U+206F, U+FEFF), with a trailing run of dots and spaces dropped,
+//   and a component that is the name's NTFS 8.3 short name (DEVTEA~<digit>, KIT~<digit>) matching too; a
+//   component is cut at its first ':' (an NTFS stream: .kit::$INDEX_ALLOCATION, .kit:x) and a '\' is read
+//   as a separator (.kit\x), as git's is_ntfs_dotgit does; so
+//   .KIT/, Docs/DevTeam/.kit/, .kit./ and KIT~1/ are .kit. An install is only ever made on the machine, by
+//   the step. The ignore line does not fold case on a case-sensitive file system; merge's refusal is what
+//   stops .KIT.
+// - verified.json: { v: 1, name, version, layout, integrity, integrity_ok, provenance_ok, provenance:
+//   { repo (owner/name), workflow, ref, commit }, at (UTC, toISOString) }, in that order, at most 4 KiB.
+//   The install step writes it last, by an atomic rename, only once both checks pass, so it never writes
+//   an _ok that is false. A reader takes a folder as verified only when its record parses, holds every
+//   field with its type, both _ok are true, and name, version, layout and integrity agree with the folder's
+//   name and its pair; anything else (no record, a false _ok, a field missing or of another type, a
+//   mismatch, too big) is unverified, and nothing runs or serves it.
+// - The hub tree. The install step, run for a verified layout-2 version newer than the hub's current, also
+//   installs it into ~/.devteam/hub/<version>-<hash>/ by the same step and checks, under
+//   withLock(~/.devteam/hub/.lock), with its own verified.json, then switches ~/.devteam/hub/current the
+//   same way. ~/.devteam/hub must be a real folder (lstat), and its current is read as .kit's is. The hub
+//   keeps current and the previous folder. A layout-1 install never touches it.
+// - The launcher. Its second line is exactly // devteam-launcher: kit-package@1. Merge's launcher-tag rule
+//   looks for it in a tag's docs/devteam/scripts/devteam.mjs (that tag is layout 2), and the launcher
+//   refuses to run a target that carries it.
+// - The command. devteam.mjs package pin <tag> | package install [--version v] [--into <dir>] (no project
+//   needed) | package status [--json].
+// The fakes: test/fixtures/kit-install/ (the trees, the pair, the registry's packages) and
+// test/lib/fake-registry.mjs (a loopback registry and an npm that keeps these rules or says which it saw
+// broken). packagePinPair is loaded alone by its test: it names nothing outside its body, and no line of
+// it is a bare closing brace but its last.
+function packagePinPair(pin) {
+  const no = (why) => { throw new Error(`packagePinPair: ${why}`); };
+  const KEYS = ['name', 'version', 'integrity', 'resolved', 'layout'];
+  if (!pin || typeof pin !== 'object' || Array.isArray(pin)) no('takes { name, version, integrity, resolved, layout }');
+  if (Object.keys(pin).some((k) => !KEYS.includes(k))) no('takes only name, version, integrity, resolved and layout');
+  const { name, version, integrity, resolved, layout } = pin;
+  if (typeof name !== 'string' || name.length > 214 || !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(name)) no('name is not an npm package name');
+  if (typeof version !== 'string' || !/^(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})$/.test(version)) no('version is not X.Y.Z');
+  if (typeof integrity !== 'string' || !/^sha512-[A-Za-z0-9+/]{86}==$/.test(integrity)) no('integrity is not one sha512');
+  if (resolved !== `https://registry.npmjs.org/${name}/-/${name.slice(name.indexOf('/') + 1)}-${version}.tgz`) no("resolved is not the public registry's tarball of name@version");
+  if (layout !== 1 && layout !== 2) no('layout is not 1 or 2');
+  const dependencies = { [name]: version };
+  const text = (o) => `${JSON.stringify(o, null, 2)}\n`;
+  return {
+    'package.json': text({ name: 'devteam-instance', private: true, dependencies, devteam: { layout } }),
+    'package-lock.json': text({ name: 'devteam-instance', lockfileVersion: 3, requires: true, packages: { '': { name: 'devteam-instance', dependencies }, [`node_modules/${name}`]: { version, resolved, integrity } } }),
+  };
+}
+// package pin|install|status (kit-install@1). Until each is built, it says so.
+function cmdPackage() {
+  const sub = positional[0];
+  if (['pin', 'install', 'status'].includes(sub)) die(`package ${sub}: not built yet`);
+  die('usage: package pin <tag> | package install [--version v] [--into <dir>] | package status [--json]');
+}
+
 // When a recurring job is next due (design C1), from its landings on main and its recorded results.
 // landings: [{ at, entry }] in any order, entry null when the job stopped; runs: [{ slot, at }], at the
 // run's start. An unanchored job's next slot is the last result's start plus every; an anchored one
@@ -40971,7 +41340,7 @@ const HELP_OBSERVE = `Observe and orient
   governance [--json]   the kit's governance and process files and the project's strategy, Self and exterior: title, last change, changed here
   self show [--json]   main's project/self.md, what the project is, printed as it is; --json is the dashboard's self block, null when not drafted or plain (self@2)
   self check   the working tree's self.md against self@2 (a plain document; a fenced self block is refused), each part link on disk, and the names rule; errors exit 1, warnings don't
-  exterior show [--json] | exterior check   show: main's project/exterior.md, what the project relates to, printed as it is (--json a version 1 block's dashboard data, else null); check: the working tree's draft against exterior@2 (a version 1 block refused), its dated sources, and on a repo not known to be private the names rule (a ### heading not named whole in origin main's strategy or dependency names refused; each other capitalised word and link host held until named on the chore); errors exit 1
+  exterior show [--json] | exterior check   show: main's project/exterior.md, what the project relates to, printed as it is (--json a version 1 block's dashboard data, else null); check: the working tree's draft against exterior@2 (a version 1 block refused), its dated sources, and on a repo not known to be private the names rule (a heading of any form refused: one of level 3 to 6 not named whole, or a # or ## one holding a capitalised word but Exterior, or a link host, not named whole, in origin main's strategy or dependency names, or a # or ## or HTML one holding raw HTML, a character reference, an invisible or control character, a lone mark, ~~, [ or ], since a top-level heading must be plain text; each other capitalised word and link host held until named on the chore); errors exit 1
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
   search "<words>" [--type <log type>|doc]… [--since <date>] [--limit n] [--json]   what the project already wrote about it, best first, quoted as data (supervisor.md §6)
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …`;
@@ -41033,7 +41402,7 @@ const COMMANDS_GRAPH = {
   feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, moves: cmdMoves, roadmap: cmdRoadmap,
 };
 const COMMANDS_CHECKS = {
-  'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
+  'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree, package: cmdPackage,
 };
 const COMMANDS_SESSIONS = {
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
