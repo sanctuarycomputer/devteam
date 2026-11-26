@@ -189,6 +189,14 @@ test('F8: a declaration whose names the scanner can not read whole stops the spl
   assert.match(r.stderr, /binds names the split can't read whole \(read: \(unnamed\)\): const \{ \[KEY\]: picked \}/);
   assert.match(r.stderr, /nothing written/);
   assert.equal(fs.existsSync(G.out), false);
+  // a second declaration on a declaration's line is never read, so it is refused the same way
+  for (const [i, [line, read]] of [['let p = 1; let q = 2;', 'p'], ['function pa() {} function pb() {}', 'pa'], ['const px = 1; class PY {}', 'px']].entries()) {
+    const H = fixtureRepo(`twoline${i}`, FIXTURE.replace('let counter = 0;', `${line}\nlet counter = 0;`));
+    const h = split(...H.opts, '--out', H.out);
+    assert.equal(h.status, 1, `${line}: ${h.stderr}`);
+    assert.ok(h.stderr.includes(`binds names the split can't read whole (read: ${read}): ${line}`), h.stderr);
+    assert.equal(fs.existsSync(H.out), false);
+  }
 });
 
 test('F9: verify names a declaration fileParts reads and the scanner does not', () => {
@@ -299,6 +307,13 @@ test('R2: split writes nothing outside --out', () => {
   const e = run(process.execPath, [tool, ...F.opts, '--out', path.join(gbox, 'out')], { cwd: os.tmpdir(), env: { ...env, GIT_DIR: path.join(L.dir, 'repo', '.git') } });
   assert.equal(e.status, 0, e.stderr);
   assert.ok(fs.existsSync(path.join(gbox, 'out', 'src', 'lib', 'four.mjs')));
+  // an --out that is a link, even a dangling one, is refused by name
+  const dl = path.join(gbox, 'dangling');
+  fs.symlinkSync(path.join(gbox, 'nowhere'), dl);
+  const d = split(...F.opts, '--out', dl);
+  assert.equal(d.status, 2, d.stderr);
+  assert.match(d.stderr, /^split: .*dangling is a link; give the folder itself$/m);
+  assert.equal(fs.existsSync(path.join(gbox, 'nowhere')), false);
 });
 
 // ---- the kit's own HEAD, with the real manifest ----
@@ -374,4 +389,18 @@ test('H4: at HEAD, verify is clean and the independent count is equal', { skip: 
   const j = JSON.parse(v.stdout).report[0];
   assert.deepEqual(j.problems, []);
   assert.ok(j.parts.equal && j.parts.source > 2000 && j.parts.source === j.parts.tree, JSON.stringify(j.parts));
+});
+
+test('F15: verify names a declaration not exported, one added, a module with no imports region, an unsorted region, declarations out of order, and a module over the cap', () => {
+  assert.equal(fSplit.status, 0, fSplit.stderr);
+  const has = (r, re) => { assert.equal(r.status, 1, r.stdout); assert.ok(r.stdout.split('\n').some((l) => re.test(l)), `${re} in:\n${r.stdout}`); };
+  has(mutated(fMod('one'), (s) => s.replace('export let counter = 0;', 'let counter = 0;'), fVerify), /^ {2}not exported: counter in src\/lib\/one\.mjs$/);
+  has(mutated(fMod('two'), (s) => `${s}export function extra() {}\n`, fVerify), /^ {2}added: extra \(in src\/lib\/two\.mjs\) is not in the source$/);
+  has(mutated(fMod('four'), (s) => s.split('\n').slice(4).join('\n'), fVerify), /^ {2}no imports region: src\/lib\/four\.mjs does not open with/);
+  has(mutated(fMod('four'), (s) => { const l = s.split('\n'); [l[1], l[2]] = [l[2], l[1]]; return l.join('\n'); }, fVerify), /^ {2}stale imports region: src\/lib\/four\.mjs; not sorted$/);
+  has(mutated(fMod('three'), (s) => s.replace('export var legacy = 1;\nexport const PRE = 2;', 'export const PRE = 2;\nexport var legacy = 1;'), fVerify), /^ {2}out of order: legacy in src\/lib\/three\.mjs comes after PRE, unlike the source$/);
+  const capDir = path.join(F.dir, 'split-cap');
+  fs.mkdirSync(capDir, { recursive: true });
+  fs.writeFileSync(path.join(capDir, 'manifest.json'), JSON.stringify({ ...F.M, cap: 5 }));
+  has(split('--repo', path.join(F.dir, 'repo'), '--split-dir', capDir, '--at', F.sha, '--verify', '--tree', F.out), /^ {2}over the cap: src\/lib\/one\.mjs is \d+ lines \(cap 5\)$/);
 });

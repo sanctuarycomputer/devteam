@@ -85,6 +85,7 @@ const outArg = opt('out');
 if (!outArg) refuse('--out <dir> is required (or --verify, or --count)');
 const out = path.resolve(outArg);
 const parent = path.dirname(out);
+if (fs.lstatSync(out, { throwIfNoEntry: false })?.isSymbolicLink()) refuse(`${out} is a link; give the folder itself`);
 if (!fs.statSync(parent, { throwIfNoEntry: false })?.isDirectory()) refuse(`${parent} does not exist; make it first (the tool writes nothing outside --out)`);
 const st = fs.statSync(out, { throwIfNoEntry: false });
 if (st && (!st.isDirectory() || fs.readdirSync(out).length)) refuse(`${out} exists and is not an empty folder`);

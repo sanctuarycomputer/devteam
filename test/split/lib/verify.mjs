@@ -30,6 +30,8 @@ export function verify(src, M, modules) {
   const T = items(st.text);
   for (const it of T.items) if (it.unread) problems.push(`unread: the declaration ${keyOf(it)} binds names the scanner can't read whole`);
   const want = new Map();
+  const rank = new Map(); // each key's first place in the source, for the order check
+  T.items.forEach((it, i) => { const k = keyOf(it); if (!rank.has(k)) rank.set(k, i); });
   for (const it of T.items) { const k = keyOf(it); if (!want.has(k)) want.set(k, []); want.get(k).push(bareOf(T, it)); }
   const got = new Map();
   const parsed = [];
@@ -47,6 +49,14 @@ export function verify(src, M, modules) {
       const k = keyOf(it);
       if (!got.has(k)) got.set(k, []);
       got.get(k).push({ text: t, file });
+    }
+    // a module's items keep the source's order
+    let prev = null;
+    for (const it of U.items) {
+      const k = keyOf(it);
+      if (!rank.has(k)) continue;
+      if (prev && rank.get(k) < rank.get(prev)) problems.push(`out of order: ${k} in ${file} comes after ${prev}, unlike the source`);
+      prev = k;
     }
     parsed.push({ file, region, U, own, lines: (region ? region.length + 2 : 0) + body.length });
   }

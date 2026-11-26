@@ -132,6 +132,21 @@ export function bindingNames(code) {
   }
 }
 
+// Whether a line's blanked code, from its start state, comes back to depth 0 (after a ; or a closing
+// bracket) and then begins another declaration on the same line.
+const NEXT_DECL = /^\s*(?:export\s+)?(?:async\s+function|function|class|const|let|var)(?=[\s{[*(])/;
+function secondDecl(c, st) {
+  if (!st || st.inside || st.depth === null) return false;
+  let d = st.depth;
+  for (let k = 0; k < c.length; k++) {
+    const ch = c[k];
+    if ('([{'.includes(ch)) d++;
+    else if (')]}'.includes(ch)) { d--; if (d === 0 && NEXT_DECL.test(c.slice(k + 1))) return true; }
+    else if (ch === ';' && d === 0 && NEXT_DECL.test(c.slice(k + 1))) return true;
+  }
+  return false;
+}
+
 const COMMENT = /^(?:\/\/|\/\*| ?\*)/;
 const MARK0 = /^(?:\/\*\s*([A-Za-z0-9_$.-]+)\s+(start|end)\s*\*\/|\/\/\s*([A-Za-z0-9_$.-]+)\s+(start|end))\s*$/;
 
@@ -180,6 +195,9 @@ export function items(src) {
     it.names = r.names.length ? r.names : ['(unnamed)'];
     it.unread = r.unread;
   }
+  // a declaration after another statement on the same line (let p = 1; let q = 2;) starts no item,
+  // so its names would be read by no one: its item is unread, and the caller refuses it
+  for (const it of out) for (let i = it.from; i <= it.to; i++) if (secondDecl(codeLines[i - 1], info[i - 1])) it.unread = true;
   for (const s of statements) s.item = out.findLast((x) => x.from <= s.line) ?? null;
   return { items: out, statements, lines, code, codeLines, info };
 }
