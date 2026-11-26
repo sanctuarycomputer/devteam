@@ -30,35 +30,6 @@ if (Number(process.versions.node.split('.')[0]) < 18) {
   process.exit(1);
 }
 
-// bash-ok, a Claude Code PreToolUse hook on Bash in every session the kit starts (claudePolicy,
-// supervisorPolicy): an inline rm of a path built from a variable, a glob, a brace or $(…) is
-// refused, with worker.md's "Scripts go in files" as the reason, before Claude Code can stop on its
-// permission prompt ("Dangerous rm operation") in a window nobody watches, and a subagent's prompt
-// stops its whole session behind it. The session reads the reason and writes the script file
-// instead. Run here, first: it needs no repo, no settings and no log, and runs on every command.
-// Anything it can't read goes through: it only ever refuses, never allows.
-const INLINE_RM_WHY = 'Run any multi-step shell command, heredoc, or `rm` of a variable, glob or `$(…)` as a script file you write with your file tool and then run, never inline: a permission prompt stops the whole session. In that file, delete only paths built with `${VAR:?}` on every part, under a directory the script made or names literally, and never a path read from a file or from `$(…)`.';
-function inlineRiskyRm(command) {
-  const text = String(command ?? '');
-  // each simple command: split on ; & | newlines and the shell's words that start one
-  for (const seg of text.split(/;|&&|\|\||\||\n|\b(?:then|do|else)\b/)) {
-    const words = seg.trim().split(/\s+/).filter(Boolean);
-    let i = 0;
-    while (i < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i]) || ['sudo', 'command', 'builtin', 'exec', 'nice', 'time', '{', '('].includes(words[i]))) i++;
-    if (!/^(?:\S*\/)?rm$/.test(words[i] ?? '')) continue;
-    const args = words.slice(i + 1).filter((w) => !/^-/.test(w));
-    if (args.some((w) => /[$`*?[{]/.test(w.replace(/^'[^']*'$/, '')))) return seg.trim();
-  }
-  return null;
-}
-if (process.argv[2] === 'bash-ok') {
-  let input = null;
-  if (!process.stdin.isTTY) try { input = JSON.parse(fs.readFileSync(0, 'utf8') || 'null'); } catch {}
-  const hit = input?.tool_name && input.tool_name !== 'Bash' ? null : inlineRiskyRm(input?.tool_input?.command);
-  if (hit) process.stdout.write(`${JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `devteam: refused before it could stop on a permission prompt nobody answers: \`${hit.slice(0, 160)}\` removes a path built from a variable, glob or $(…). ${INLINE_RM_WHY}` } })}\n`);
-  process.exit(0);
-}
-
 // A worktree's branch carries the kit as it was when the branch forked, but every session writes the
 // one live log and answers to the rules on main, so in a project the main checkout's copy runs: a
 // worker on an old branch otherwise gets old commands (an "unknown command" for one the docs name)
@@ -40154,8 +40125,11 @@ function responderDirty(wt, seeded) {
   for (const e of flags.stdout.split('\0').filter(Boolean)) if (e[0] !== 'H') hits.push(e.slice(2));
   return hits;
 }
-// The PreToolUse hook every session the kit starts gets: bash-ok, on Bash (see it at the top).
-const bashOkHook = () => [{ matcher: 'Bash', hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' bash-ok` }] }];
+// The PreToolUse hook every session the kit starts gets: scripts/bash-ok.mjs on Bash, which refuses
+// an inline rm of a variable, glob or $(…) before Claude Code can stop on its prompt (worker.md,
+// "Scripts go in files"). Its own small file, so it doesn't parse this one on every command; a
+// timeout so a stuck node never holds a command.
+const bashOkHook = () => [{ matcher: 'Bash', hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'bash-ok.mjs')}'`, timeout: 10 }] }];
 // A Claude Code policy file for one session, passed with --settings: the owner's worker deny rules,
 // naming the main branch of the repo it works in. A worker or planner also gets the Stop hook
 // (stop-ok); the responder doesn't. Its path.
@@ -40762,8 +40736,7 @@ const HELP_SESSIONS = `Sessions (worker.md)
   phase <to> [--task t] [--note n] [--usd x --in n --out n]   phase change or liveness ping; phase supervisor --usd x
   gate <name> [--junit f] -- <cmd…>   run a gate and record it   |   gate --all: every settings gate here
   send <to> "<text>" [--kind k] [--re m-…] [--sha s] [--owner] | send supervisor "<text>" --kind handoff --thread <t-id> (the responder's) | messages [--open] [--to x] [--json]
-  stop-ok                         for a stop hook: refuses while the last commit is newer than the last phase line
-  bash-ok                         for a PreToolUse hook on Bash: refuses an inline rm of a variable, glob or $(…)`;
+  stop-ok                         for a stop hook: refuses while the last commit is newer than the last phase line`;
 const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   links [--json]                  the registry: home and each link, each repo's effective settings, the component lines and their coverage
   link add <id> --kind url --url u --title t [--for scope…] [--notes n] [--source id] | link set <id> <field> [--] <value> | link rm <id>   supervisor: a url link, written to settings.md and logged as registry-edit

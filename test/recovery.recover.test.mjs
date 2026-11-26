@@ -89,7 +89,7 @@ test('recover: a dead machine with no tmux server brings the supervisor back on 
     // with its Stop hook (supervisor.md §6, Every ask is an Inbox question): the policy recover wrote
     assert.match(F.claudeCalls()[0], /^supervisor\|--settings \S+\/run\/agent\/supervisor-claude\.json /, F.claudeCalls()[0]);
     assert.match(fs.readFileSync(path.join(F.root, 'docs/devteam/run/agent/supervisor-claude.json'), 'utf8'), /devteam\.mjs' stop-ok --supervisor"/, 'its hook says whose window it is');
-    assert.match(fs.readFileSync(path.join(F.root, 'docs/devteam/run/agent/supervisor-claude.json'), 'utf8'), /"matcher": "Bash"[\s\S]*devteam\.mjs' bash-ok"/, 'and the inline-rm guard, which a subagent of its runs under too');
+    assert.match(fs.readFileSync(path.join(F.root, 'docs/devteam/run/agent/supervisor-claude.json'), 'utf8'), /"matcher": "Bash"[\s\S]*bash-ok\.mjs'"/, 'and the inline-rm guard, which a subagent of its runs under too');
     assert.ok(F.claudeCalls()[0].replace(/--settings \S+ /, '').startsWith(`supervisor|--resume ${SID} --dangerously-skip-permissions This machine restarted`), F.claudeCalls()[0]);
     assert.match(F.claudeCalls()[0], /Nothing about this restart came from the owner/, 'it carries no owner authority');
     assert.match(F.claudeCalls()[0], /keep the loop, as before the restart: run the tick \(§3\) now, then wait with devteam\.mjs wait and tick again when it returns, until the owner stops you\. A summary to the owner doesn't end it\.$/, 'and it ends by keeping the loop, never at a summary');
