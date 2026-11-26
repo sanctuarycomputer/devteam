@@ -399,7 +399,7 @@ export async function startHubGrantFake(opts = {}) {
       }
       if (c.expires <= now()) return oauthError(res, 'invalid_grant', 'that code has expired');
       if (c.stamp !== stamp) return oauthError(res, 'invalid_grant', 'the passkeys changed since this code was made: sign in again');
-      if (!personOf(c.person)) return oauthError(res, 'invalid_grant', 'this person is no longer on the hub');
+      if (c.dropped || !personOf(c.person)) return oauthError(res, 'invalid_grant', 'this person is no longer on the hub');
       const verifier = one('code_verifier');
       if (verifier === undefined || !/^[A-Za-z0-9\-._~]{43,128}$/.test(verifier)) return oauthError(res, 'invalid_request', 'code_verifier is missing or malformed');
       if (one('client_id') !== c.client_id || one('redirect_uri') !== c.redirect) return oauthError(res, 'invalid_grant', 'the client or redirect differs from the authorize request');
@@ -544,7 +544,12 @@ export async function startHubGrantFake(opts = {}) {
       const p = personOf(a.grant.person);
       return formatGrantMark({ id: a.grant.id, ownerAct: a.scopes.includes('owner:act') && mayHold(p, 'owner:act'), label: a.grant.label });
     },
-    setPeople: (list) => { people = list.map((p) => ({ ...p })); },
+    // §10: a person dropped from the list loses every grant and code at once, with their row, not at its next use
+    setPeople: (list) => {
+      people = list.map((p) => ({ ...p }));
+      for (const g of grants) if (!g.ended && g.stamp === stamp && !personOf(g.person)) end(g, 'person removed');
+      for (const c of codes.values()) if (!personOf(c.person)) c.dropped = true;
+    },
     actAs: (id) => { as = id; },
     setStamp: (s) => { stamp = s; },
     setMetadata: (url, answer) => metadata.set(url, answer),
