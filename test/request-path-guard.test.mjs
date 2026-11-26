@@ -19,22 +19,24 @@ const src = fs.readFileSync(SCRIPT, 'utf8');
 const HUB = PORTS + 50;
 const scratch = (name) => fs.mkdtempSync(path.join(os.tmpdir(), `request-path-${name}-`));
 
-// One request written byte for byte (no client tidies the target): its status line's code and body,
-// or status null when the connection closed with no answer.
-function raw(port, target, method = 'GET') {
+// One request written byte for byte (no client tidies the target), on the dashboard's own Host unless
+// told another, with any extra header lines: its status line's code, its header block and body, or
+// status null when the connection closed with no answer.
+function raw(port, target, method = 'GET', { host = `127.0.0.1:${port}`, extra = '' } = {}) {
   return new Promise((resolve) => {
     const s = net.connect(port, '127.0.0.1');
     const chunks = [];
     const done = () => {
       const text = Buffer.concat(chunks).toString('latin1');
       const m = /^HTTP\/1\.1 (\d{3})/.exec(text);
-      resolve({ status: m ? Number(m[1]) : null, body: text.split('\r\n\r\n').slice(1).join('\r\n\r\n') });
+      const [head, ...rest] = text.split('\r\n\r\n');
+      resolve({ status: m ? Number(m[1]) : null, head: head.toLowerCase(), body: rest.join('\r\n\r\n') });
     };
     s.on('data', (c) => { chunks.push(c); if (/\r\n\r\n/.test(Buffer.concat(chunks).toString('latin1'))) setTimeout(() => s.destroy(), 200); });
     s.on('close', done);
     s.on('error', () => {});
     s.setTimeout(30000, () => s.destroy());
-    s.write(`${method} ${target} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n${method === 'POST' ? 'Content-Length: 0\r\n' : ''}\r\n`);
+    s.write(`${method} ${target} HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n${extra}${method === 'POST' ? 'Content-Length: 0\r\n' : ''}\r\n`);
   });
 }
 const alive = async (port, what) => {
@@ -57,25 +59,24 @@ async function dashboard(t, { drop = [] } = {}) {
   t.after(() => dash.stop());
   return { dash, port, root };
 }
+
 test('R1 a request target that is no URL is a 400 on every method, and the dashboard serves on', { timeout: 300000 }, async (t) => {
   const { dash, port } = await dashboard(t);
   for (const target of BAD) {
     for (const method of ['GET', 'HEAD', 'POST']) {
       const r = await raw(port, target, method);
       assert.equal(r.status, 400, `R1 ${method} ${target} answers 400 (${dash.out().split('\n').filter((l) => /crash/.test(l)).slice(-1)[0] ?? ''})`);
+      assert.match(r.head, /\r\ncontent-type: text\/plain; charset=utf-8\r\n/, `R1 ${method} ${target}: the 400 is plain text`);
+      assert.match(r.head, /\r\ncache-control: no-store(\r\n|$)/, `R1 ${method} ${target}: the 400 is not kept`);
       if (method === 'GET') assert.match(r.body, /bad request/, `R1 ${method} ${target} says why`);
       await alive(port, `R1 after ${method} ${target}`);
     }
   }
-  // still refused before the parse: a request on another Host gets the Host refusal, not a 400
-  const s = await new Promise((resolve) => {
-    const c = net.connect(port, '127.0.0.1');
-    let o = '';
-    c.on('data', (b) => { o += b; });
-    c.on('close', () => resolve(Number(/^HTTP\/1\.1 (\d{3})/.exec(o)?.[1] ?? 0)));
-    c.write('GET // HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n');
-  });
-  assert.equal(s, 403, 'R1 another Host is refused first (403), as before');
+  // still refused before the parse: another Host gets the Host refusal, a relayed request the relay's
+  assert.equal((await raw(port, '//', 'GET', { host: 'example.com' })).status, 403, 'R1 another Host is refused first (403), as before');
+  const relayed = await raw(port, '//', 'GET', { extra: 'x-devteam-relay: 1\r\n' });
+  assert.equal(relayed.status, 403, 'R1 a relayed request is refused first (403), as before');
+  assert.match(relayed.body, /not through a preview relay/, 'R1 the relay refusal says why');
   assert.equal(dash.p.exitCode, null, 'R1 the dashboard process is still running');
 });
 
