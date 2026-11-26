@@ -1064,6 +1064,18 @@ try {
   body.view-only #av-remind-hand { opacity: .45; cursor: not-allowed; }
   @media (min-width: 901px) { body.threads-open #av-remind { left: calc((100% - var(--threads-w)) / 2); } }
 /* css-viewer end */
+/* css-av-ask start */
+  /* the ask before a close (kit-937): a dialog in the middle of a veil over the viewer's stage, above the frame, its pins,
+     the layer and a picture (#av-shot, 4); the viewer's bar stays above it */
+  #av-ask:not([hidden]) { position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center; padding: 16px; box-sizing: border-box; overflow: auto; background: color-mix(in srgb, var(--bg) 70%, transparent); }
+  .av-ask-in { width: min(440px, 100%); box-sizing: border-box; display: flex; flex-direction: column; gap: 10px; padding: 16px; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.18); font-size: 13px; }
+  .av-ask-in h2 { margin: 0; font-size: 15px; }
+  .av-ask-in p { margin: 0; }
+  .av-ask-do { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+  .av-ask-do button { margin: 0; }
+  #e-ava:empty { display: none; }
+  body.view-only #av-ask-hand { opacity: .45; cursor: not-allowed; }
+/* css-av-ask end */
 /* css-threads start */
   /* threads: the layer over the page (Shift and point at anything), outside <main> */
   .tl-aiming, .tl-aiming * { cursor: none !important; }
@@ -7220,6 +7232,8 @@ avNotes.draw = () => {
   if (avStep.off && (avStep.off.av !== AV || TL.open !== avStep.off.id)) avStep.off = null;
   if (!AV || AV.preview || TS.kind !== 'artifact') tShot.close(false);
   if (avNotes.av !== AV) { avNotes.av = AV; avNotes.say(''); }
+  // the ask was of the version it was raised on (kit-937): another one shown, or none, takes it away
+  if (AV_REMIND.asked && AV_REMIND.asked.av !== AV) AV_REMIND.askHide();
   const said = AV?.handed;
   if (said && (Date.now() > said.until || notes.some((t) => said.ids.includes(t.id) && tNoteState(t) !== 'open'))) AV.handed = null;
   const given = AV?.handed?.ids ?? [];
@@ -7398,8 +7412,9 @@ window.addEventListener('keydown', (e) => {
 avStep.press = { seen: new Map(), last: 0, on: false, down: null, closed: -Infinity, closedHidden: false, placed: null };
 avStep.up = () => !$('artifact-view').hidden;
 // The reminder's Hand over (kit-148): it comes up as the viewer closes, which a page can bring about, so it is a
-// decision held like the rest, while its card shows, stage or none. (Its Not now commits nothing: free.)
-avStep.REMIND = '#av-remind:not([hidden]) #av-remind-hand';
+// decision held like the rest, while its card shows, stage or none. (Its I'll come back commits nothing: free.)
+// The ask's Hand over and close (kit-937) the same: a frame Escape, which a page can post, raises the ask.
+avStep.REMIND = '#av-remind:not([hidden]) #av-remind-hand, #av-ask:not([hidden]) #av-ask-hand';
 avStep.reminds = () => !!document.querySelector(avStep.REMIND);
 // The decisions: not a field, a link, or Send of plain words (Send on a resolved thread reopens it)
 avStep.decides = (el) => {
@@ -7442,8 +7457,8 @@ avStep.sample = () => {
   // frames that stopped: what stood before them says nothing of now
   if (now - P.last > 250) was.clear();
   P.last = now;
-  const roots = `${avStep.up() ? '#tl-card, .av-bar' : '#tl-card .tl-addr'}, #av-remind:not([hidden])`;
-  for (const root of document.querySelectorAll(roots)) for (const el of root.querySelectorAll(`${VIEW_WRITES}, #av-remind-hand`)) {
+  const roots = `${avStep.up() ? '#tl-card, .av-bar, #av-ask:not([hidden])' : '#tl-card .tl-addr'}, #av-remind:not([hidden])`;
+  for (const root of document.querySelectorAll(roots)) for (const el of root.querySelectorAll(`${VIEW_WRITES}, #av-remind-hand, #av-ask-hand`)) {
     if (avStep.held(el) !== el) continue;
     const key = avStep.deed(el), n = count.get(key) ?? 0, k = `${n} ${key}`;
     count.set(key, n + 1);
@@ -7702,7 +7717,7 @@ function avRemindCard() {
   c.hidden = true;
   c.setAttribute('role', 'status');
   c.setAttribute('aria-live', 'polite');
-  c.innerHTML = '<p class="tx"></p><div class="av-remind-do"><button type="button" class="ghost" id="av-remind-later">Not now</button><button type="button" id="av-remind-hand"></button></div><span class="err" id="e-avr"></span>';
+  c.innerHTML = '<p class="tx"></p><div class="av-remind-do"><button type="button" class="ghost" id="av-remind-later">I\'ll come back</button><button type="button" id="av-remind-hand"></button></div><span class="err" id="e-avr"></span>';
   document.body.append(c);
   return c;
 }
@@ -7710,9 +7725,7 @@ function avRemindCard() {
 // are set as text: the title is a session's.
 function avRemindShow(taken) {
   if (!taken || !(taken.n > 0)) return;
-  const held = AV_REMIND.held.get(taken.slug);
-  const keyOf = (id) => { const t = TL.threads.find((x) => x.id === id); return t ? tKey(t.subject) : null; };
-  if (held && taken.ids.every((id) => held.ids.has(id) || held.keys.has(keyOf(id))) && taken.keys.every((k) => held.keys.has(k))) return;
+  if (avRemindShow.held(taken)) return;
   clearTimeout(AV_REMIND.timer);
   AV_REMIND.taken = taken;
   const c = avRemindCard(), one = taken.n === 1, sup = taken.to === 'supervisor';
@@ -7724,6 +7737,34 @@ function avRemindShow(taken) {
   // its Hand over under kit-145's press guard while it shows (avStep.REMIND): the guard's frames run until it hides
   avStep.watch();
 }
+// Whether every note a close took is held (by its id, or its subject key while it saved)
+avRemindShow.held = (taken) => {
+  const held = AV_REMIND.held.get(taken.slug);
+  const keyOf = (id) => { const t = TL.threads.find((x) => x.id === id); return t ? tKey(t.subject) : null; };
+  return !!held && taken.ids.every((id) => held.ids.has(id) || held.keys.has(keyOf(id))) && taken.keys.every((k) => held.keys.has(k));
+};
+// The notes a close took held, for this page load (I'll come back, the card's or the ask's)
+avRemindShow.hold = (t) => {
+  const h = AV_REMIND.held.get(t.slug) ?? { ids: new Set(), keys: new Set() };
+  for (const id of t.ids) h.ids.add(id);
+  for (const k of t.keys) h.keys.add(k);
+  AV_REMIND.held.set(t.slug, h);
+};
+// What the ask's hand-over said, shown as the card's result once the close has landed (closeArtifact): the
+// bar's words ("With <session>"), and where it waits when no pane took it
+avRemindShow.said = () => {
+  const said = AV_REMIND.said;
+  AV_REMIND.said = null;
+  if (!said) return;
+  clearTimeout(AV_REMIND.timer);
+  AV_REMIND.taken = null;
+  const c = avRemindCard();
+  c.querySelector('.tx').textContent = said.words;
+  $('e-avr').textContent = said.line;
+  c.querySelector('.av-remind-do').hidden = true;
+  c.hidden = false;
+  AV_REMIND.timer = setTimeout(avRemindHide, AV_REMIND_MS);
+};
 function avRemindHide() {
   clearTimeout(AV_REMIND.timer);
   AV_REMIND.taken = null;
@@ -7736,10 +7777,7 @@ document.addEventListener('click', (e) => {
   const b = e.target.closest?.('#av-remind-later, #av-remind-hand'), t = AV_REMIND.taken;
   if (!b || !t) return;
   if (b.id === 'av-remind-later') {
-    const h = AV_REMIND.held.get(t.slug) ?? { ids: new Set(), keys: new Set() };
-    for (const id of t.ids) h.ids.add(id);
-    for (const k of t.keys) h.keys.add(k);
-    AV_REMIND.held.set(t.slug, h);
+    avRemindShow.hold(t);
     avRemindHide();
     return;
   }
@@ -7760,11 +7798,92 @@ document.addEventListener('click', (e) => {
     AV_REMIND.timer = setTimeout(avRemindHide, AV_REMIND_MS);
   } }).finally(() => { AV_REMIND.busy = false; });
 });
+// The ask before a close the viewer owns (kit-937): X, the scrim, Escape (the dashboard's or the frame's), every
+// path through leaveArtifact, while the bar's Hand over (N) names notes that aren't held. The viewer stays up and a
+// dialog over its stage asks first, with the focus, kept inside. asked: what it was raised on ({ ...taken, av }).
+AV_REMIND.asked = null;
+AV_REMIND.said = null;
+AV_REMIND.askBusy = false;
+// answered: the owner chose to close (I'll come back, or Hand over and close that landed), so the close that follows
+// asks nothing, even of a note saved or added while the ask was up; used once
+AV_REMIND.answered = false;
+AV_REMIND.askShow = (taken) => {
+  let d = document.getElementById('av-ask');
+  if (!d) {
+    d = document.createElement('div');
+    d.id = 'av-ask';
+    d.hidden = true;
+    d.setAttribute('role', 'alertdialog');
+    d.setAttribute('aria-modal', 'true');
+    d.setAttribute('aria-labelledby', 'av-ask-h');
+    d.setAttribute('aria-describedby', 'av-ask-tx');
+    d.innerHTML = '<div class="av-ask-in"><h2 id="av-ask-h">Close without handing over?</h2><p id="av-ask-tx"></p><span class="err" id="e-ava"></span><div class="av-ask-do"><button type="button" class="ghost" id="av-ask-keep">Keep annotating</button><button type="button" class="ghost" id="av-ask-later">I\'ll come back</button><button type="button" id="av-ask-hand">Hand over and close</button></div></div>';
+    // Escape takes it away, and nothing else (no card behind it, no close); Tab goes round in its own buttons
+    d.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); return void AV_REMIND.askHide(); }
+      if (e.key !== 'Tab') return;
+      const all = [...d.querySelectorAll('button')], i = all.indexOf(document.activeElement);
+      e.preventDefault();
+      all[i < 0 ? 0 : (i + (e.shiftKey ? -1 : 1) + all.length) % all.length].focus();
+    });
+    // the focus never leaves it while it shows (a click on its own text, a script's focus elsewhere)
+    d.addEventListener('focusout', (e) => { if (AV_REMIND.asked && !d.contains(e.relatedTarget)) requestAnimationFrame(() => { if (AV_REMIND.asked && !d.contains(document.activeElement)) $('av-ask-keep').focus(); }); });
+  }
+  if (d.parentElement !== $('av-stage')) $('av-stage').append(d);
+  const one = taken.n === 1, sup = taken.to === 'supervisor';
+  // as text: the title is a session's
+  $('av-ask-tx').textContent = `${one ? '1 note' : `${taken.n} notes`} on ${taken.title} ${one ? 'isn\'t' : 'aren\'t'} handed over yet. ${sup ? 'The supervisor' : `${taken.to}, the session drawing it,`} won't start on ${one ? 'it' : 'them'} until you do.`;
+  $('e-ava').textContent = '';
+  AV_REMIND.asked = { ...taken, av: AV };
+  d.hidden = false;
+  $('av-ask-keep').focus();
+  avStep.watch();
+};
+// Gone, the viewer as it was; the frame's next Escape asks again
+AV_REMIND.askHide = () => {
+  const d = document.getElementById('av-ask');
+  const had = !!AV_REMIND.asked;
+  AV_REMIND.asked = null;
+  AV_FRAME_ESC = false;
+  if (!d || d.hidden) return;
+  d.hidden = true;
+  if (had && !$('artifact-view').hidden) $('av-close').focus();
+};
+// A click outside it (the stage's veil around it, the viewer's bar, the page): it goes. The X and the scrim are
+// leaveArtifact's, which takes it away itself; the X's own click that raised it is one of those.
+document.addEventListener('click', (e) => {
+  if (!AV_REMIND.asked || e.target.closest?.('.av-ask-in, #av-close, #scrim')) return;
+  AV_REMIND.askHide();
+});
+document.addEventListener('click', (e) => {
+  const b = e.target.closest?.('#av-ask-keep, #av-ask-later, #av-ask-hand'), t = AV_REMIND.asked;
+  if (!b || !t) return;
+  if (b.id === 'av-ask-keep') return void AV_REMIND.askHide();
+  if (b.id === 'av-ask-later') { avRemindShow.hold(t); AV_REMIND.askHide(); AV_REMIND.answered = true; return void leaveArtifact(); }
+  // a person who may only look: View only's words, and nothing handed over
+  if (document.body.classList.contains('view-only')) return void viewToast();
+  if (AV_REMIND.askBusy) return;
+  AV_REMIND.askBusy = true;
+  $('e-ava').textContent = '';
+  avHandOver({ slug: t.slug, at: t.at, done: (out, line = '') => {
+    if (AV_REMIND.asked !== t) return;
+    if (out?.error) { $('e-ava').textContent = `Not saved: ${out.error}`; AV_FRAME_ESC = false; return; }
+    // the notes it took are with that session from now (the bar believes it as its own press, avNotes.draw), so
+    // the close takes none of them and shows no card; the result shows once it has landed
+    if (AV === t.av) t.av.handed = { words: out?.count > 0 ? `With ${out.to}` : 'Nothing to hand over', ids: t.ids, until: Date.now() + 10000 };
+    AV_REMIND.said = { words: out?.count > 0 ? `With ${out.to}` : 'Nothing to hand over', line };
+    AV_REMIND.askHide();
+    AV_REMIND.answered = true;
+    leaveArtifact();
+  } }).finally(() => { AV_REMIND.askBusy = false; });
+});
 /* avRemind end */
 function closeArtifact() {
   if (!AV) return false;
   // what the reminder needs of the artifact let go of (kit-148), while it is still the one shown
   const taken = avRemindTake();
+  // an ask still up goes with the viewer (kit-937: Back, a link, while it shows)
+  AV_REMIND.askHide();
   AV = null;
   tsSet(null);
   tsPins();
@@ -7781,6 +7900,8 @@ function closeArtifact() {
   avFocus?.focus?.();
   // the reminder after the focus is back where the close put it: it takes none
   avRemindShow(taken);
+  // the ask's Hand over and close (kit-937): what it said, in the card's place
+  avRemindShow.said();
   return true;
 }
 // After a frame move, where the close lands, in place of the viewer's entry: over a page, that page as it was
@@ -7805,6 +7926,13 @@ function avReturn() {
 // thread's card (#talk/) routed again would open the viewer again, moved or not: the page under the card.
 function leaveArtifact() {
   if (VIEWER || !AV) return;
+  // the ask up (kit-937): Escape, the dashboard's or the frame's, takes it away; the viewer stays
+  if (AV_REMIND.asked) return void AV_REMIND.askHide();
+  // notes nobody handed over, not held: ask before closing (kit-937)
+  // (once the owner has answered it, the close goes ahead)
+  const taken = avRemindTake(), answered = AV_REMIND.answered;
+  AV_REMIND.answered = false;
+  if (!answered && taken && taken.n > 0 && !avRemindShow.held(taken)) return void AV_REMIND.askShow(taken);
   if (!AV_FROM || AV_RET?.startsWith('#talk/')) {
     const page = history.state?.page || '#library';
     history.replaceState({ page, depth: 0, openedHere: false }, '', page);
