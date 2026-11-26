@@ -153,7 +153,8 @@ export function gatewaySource() {
 // The forms in use: a read of path.join(<dir>, ['..',] 'cloud', 'gateway.mjs'); a read of a const that
 // names that path; and a read of path.join(<dir>, '..', <file>) in a file that names 'cloud/gateway.mjs'
 // (gateway.test.mjs's of(file)), which reads the helper for that file alone. Any other read of the
-// gateway's text is refused, so it shows in the report rather than reading the entry.
+// gateway's text on one line (readFileSync( with the gateway's path after it) is refused, so it shows in the
+// report rather than reading the entry.
 const GW_PATH = String.raw`path\.join\(\s*[A-Za-z_$][\w$]*\s*,\s*(?:'\.\.'\s*,\s*)?'cloud'\s*,\s*'gateway\.mjs'\s*\)`;
 export function rewireGatewayReads(file, text) {
   const sites = [], refused = [];
@@ -164,7 +165,7 @@ export function rewireGatewayReads(file, text) {
   };
   swap(new RegExp(String.raw`fs\.readFileSync\(\s*${GW_PATH}\s*,\s*'utf8'\s*\)`, 'g'), 'gatewaySource()', 'a read of cloud/gateway.mjs');
   for (const m of [...text.matchAll(new RegExp(String.raw`^\s*const ([A-Za-z_$][\w$]*) = ${GW_PATH};$`, 'gm'))]) {
-    swap(new RegExp(String.raw`fs\.readFileSync\(\s*${m[1]}\s*,\s*'utf8'\s*\)`, 'g'), 'gatewaySource()', `a read of ${m[1]} (cloud/gateway.mjs)`);
+    swap(new RegExp(String.raw`fs\.readFileSync\(\s*${m[1].replace(/\$/g, '\\$')}\s*,\s*'utf8'\s*\)`, 'g'), 'gatewaySource()', `a read of ${m[1]} (cloud/gateway.mjs)`);
   }
   if (out.includes("'cloud/gateway.mjs'")) {
     swap(/fs\.readFileSync\(path\.join\(([A-Za-z_$][\w$]*), '\.\.', ([A-Za-z_$][\w$]*)\), 'utf8'\)/g,
@@ -172,7 +173,7 @@ export function rewireGatewayReads(file, text) {
   }
   // what is left that reads the gateway's text
   out.split('\n').forEach((l, i) => {
-    if (/readFileSync\([^)]*(?:'cloud',\s*'gateway\.mjs'|cloud\/gateway\.mjs)/.test(l)) refused.push({ site: `line ${i + 1}`, why: `a read of the gateway's text the rule doesn't know: ${l.trim().slice(0, 100)}` });
+    if (/readFileSync\(.*(?:'cloud',\s*'gateway\.mjs'|cloud\/gateway\.mjs)/.test(l)) refused.push({ site: `line ${i + 1}`, why: `a read of the gateway's text the rule doesn't know: ${l.trim().slice(0, 100)}` });
   });
   if (sites.length) {
     const S = items(out);
@@ -181,10 +182,16 @@ export function rewireGatewayReads(file, text) {
     const lines = out.split('\n');
     if (!imports.length) refused.push({ site: 'imports', why: 'the file has no import statement to put the helper\'s after' });
     else {
-      let end = imports[imports.length - 1].to;
-      while (end < lines.length && !/;\s*$/.test(S.codeLines[end - 1])) end++;
-      lines.splice(end, 0, line);
-      out = lines.join('\n');
+      // the last import statement's own last line: from its first line to the line its ; ends (an item's
+      // `to` runs on over what follows it, so it can't be the place)
+      const last = imports[imports.length - 1];
+      let end = last.from;
+      while (end <= last.to && !/;\s*$/.test(S.codeLines[end - 1])) end++;
+      if (end > last.to) refused.push({ site: `line ${last.from}`, why: 'the last import statement has no ; to put the helper\'s import after' });
+      else {
+        lines.splice(end, 0, line);
+        out = lines.join('\n');
+      }
     }
   }
   return { text: out, sites, refused };

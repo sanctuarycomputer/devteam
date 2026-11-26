@@ -244,3 +244,33 @@ test('G7d: templates that is not a list of names is a problem', () => {
   assert.ok((v.gw?.problems ?? []).includes('manifest: templates must be a list of declaration names'), (v.gw?.problems ?? []).join(' | '));
   assert.equal(v.status, 1);
 });
+
+// The rewrite kit-893 folds into its rule, on the forms a test could take (task-2 review): the helper's
+// import goes after the last import statement, never into the code after it; a const named with a $ is
+// rewired like any other; a read whose arguments name the gateway but that the rule can't rewrite is refused.
+test('G8: rewireGatewayReads puts its import after the imports, rewires a $ const, and refuses a read it can\'t rewrite', async () => {
+  const { rewireGatewayReads } = await import(pathToFileURL(path.join(root, 'test', 'split', 'overlay', 'gateway', 'rules.mjs')).href);
+  const file = 'test/some.test.mjs';
+  const placed = rewireGatewayReads(file, [
+    "import fs from 'node:fs';",
+    "import path from 'node:path';",
+    '',
+    'function check(dir) {',
+    "  const text = fs.readFileSync(path.join(dir, 'cloud', 'gateway.mjs'), 'utf8');",
+    '  return text.length;',
+    '}',
+    '',
+  ].join('\n'));
+  assert.deepEqual(placed.text.split('\n').slice(0, 4), ["import fs from 'node:fs';", "import path from 'node:path';", "import { gatewaySource } from './lib/gateway-source.mjs';", ''], 'the helper\'s import follows the last import');
+  assert.match(placed.text, /^ {2}const text = gatewaySource\(\);$/m);
+  const checked = path.join(tmp, 'placed.mjs');
+  fs.writeFileSync(checked, placed.text);
+  const c = run(process.execPath, ['--check', checked]);
+  assert.equal(c.status, 0, `the rewired file parses: ${c.stderr}`);
+  const dollar = rewireGatewayReads(file, ["import fs from 'node:fs';", "import path from 'node:path';", "const $gw = path.join(root, 'cloud', 'gateway.mjs');", "const s = fs.readFileSync($gw, 'utf8');", ''].join('\n'));
+  assert.match(dollar.text, /^const s = gatewaySource\(\);$/m, 'a read of $gw is rewired');
+  assert.deepEqual(dollar.refused, []);
+  const nested = rewireGatewayReads(file, ["import fs from 'node:fs';", "import path from 'node:path';", "const s = fs.readFileSync(path.join(repoRoot(), 'cloud', 'gateway.mjs'), 'utf8');", ''].join('\n'));
+  assert.equal(nested.refused.length, 1, 'a read the rule can\'t rewrite is refused, naming its line');
+  assert.match(nested.refused[0].site, /^line 3$/);
+});
