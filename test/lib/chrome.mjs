@@ -162,6 +162,8 @@ export async function openChrome() {
   // the call fail soon; what was seen by then is said, and a look that failed says how.
   const whatChromeDid = async (tid, heard) => {
     const out = [];
+    // every process of this Chrome, read from /proc beside the looks at its endpoint (bounded at 4 s, so done by the 6 s cut), said last
+    const procs = processesOf(proc.pid);
     const stop = new AbortController();
     let b = null;
     const within = (ms, p) => { let t; return Promise.race([p, new Promise((_, no) => { t = setTimeout(() => no(new Error(`no answer in ${ms / 1000} s`)), ms); })]).finally(() => clearTimeout(t)); };
@@ -189,25 +191,22 @@ export async function openChrome() {
       const calls = new Map();
       b.onmessage = (m) => { const o = JSON.parse(m.data); const c = calls.get(o.id); if (!c) return; calls.delete(o.id); if (o.error) c.no(new Error(o.error.message)); else c.ok(o.result); };
       const call = (ms, method, params = {}, sessionId) => within(ms, new Promise((ok, no) => { const id = ++n; calls.set(id, { ok, no }); b.send(JSON.stringify({ id, method, params, ...(sessionId && { sessionId }) })); }));
-      const cpu = () => call(1000, 'SystemInfo.getProcessInfo').then((r) => new Map(r.processInfo.filter((p) => p.type === 'renderer').map((p) => [p.id, p.cpuTime])), () => null);
-      const c0 = await cpu();
-      const t0 = Date.now();
       // a second session on the same tab (closing the socket below ends it): does the page answer anyone?
       try {
         const { sessionId } = await call(1000, 'Target.attachToTarget', { targetId: tid, flatten: true });
         const t = Date.now();
         out.push(await call(2000, 'Runtime.evaluate', { expression: '1', returnByValue: true }, sessionId).then(() => `its page answers a second session in ${Date.now() - t} ms`, (e) => `its page gives a second session ${e.message}`));
       } catch (e) { out.push(`a second session: ${e.message}`); }
-      const c1 = await cpu();
-      const s = (Date.now() - t0) / 1000;
-      out.push(c0 && c1 ? `renderers: ${[...c1].map(([pid, c]) => `${pid} ${c0.has(pid) ? `${Math.round(((c - c0.get(pid)) / s) * 100)}% cpu` : 'new'}`).join(', ') || 'none'}` : 'renderers: no process info');
     })().catch((e) => { out.push(`Chrome's endpoint: ${e.message}`); });
     let cut;
     await Promise.race([looks, new Promise((r) => { cut = setTimeout(() => r(out.push('diagnosis cut at 6 s')), 6000); })]);
     clearTimeout(cut);
+    // what was said by now is the diagnosis: a look cut at 6 s and still running adds nothing after it
+    const said = out.splice(0);
     stop.abort();
     try { b?.close(); } catch {}
-    return out.join('; ');
+    said.push(await procs.catch((e) => `processes: ${e.message}`));
+    return said.join('; ');
   };
   const newPage = async () => {
     const target = await (await fetch(`${base}/json/new?about:blank`, { method: 'PUT' })).json();

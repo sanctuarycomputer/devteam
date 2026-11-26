@@ -1,7 +1,8 @@
 // kit-914: a call the test browser gives no answer still fails at 30 s, once, and now says what Chrome
 // was doing: the tab, a JS dialog open on it or another tab, what its socket last heard, whether the
-// page answers a second session, each renderer's CPU, and, when Chrome answers nothing at all, each
-// look's own "no answer" within a bound (docs/devteam/project/tickets/kit-914-chrome-no-answer-ci/spec.md, home).
+// page answers a second session, and, when Chrome answers nothing at all, each look's own "no answer"
+// within a bound (docs/devteam/project/tickets/kit-914-chrome-no-answer-ci/spec.md, home). kit-930: last,
+// every process of that Chrome, its type, state and CPU (processesOf, read from /proc).
 // The three cases wait 30 s each, so they run at once, each with its own Chrome.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -11,20 +12,19 @@ import { closeTab, oneTab } from './fixtures/artifact-viewer/harness.mjs';
 
 // a call's error and how long it took to come
 const failing = async (call) => { const t = Date.now(); const e = await call.then(() => null, (x) => x); return { e, ms: Date.now() - t }; };
-// What follows "Chrome running; " in a diagnosis, in each form chrome.mjs gives (kit-918): the second-session line and
-// the renderers line (each may say its own look ran out its bound); or the whole look cut at 6 s, after the
-// second-session line or before it; or Chrome's endpoint unreachable, in place of both. ss: the second-session
-// forms this tab may give. Anything else in that place is refused.
-const RENDERERS = String.raw`renderers: (\d+ (\d+% cpu|new)(, \d+ (\d+% cpu|new))*|no process info)`;
+// What follows "Chrome running; " in a diagnosis, in each form chrome.mjs gives (kit-918): the second-session line
+// (which may say its own look ran out its bound); or the whole look cut at 6 s, after the second-session line or
+// before it; or Chrome's endpoint unreachable, in place of both. ss: the second-session forms this tab may give.
+// Then, always last, the processes line (kit-930). Anything else in those places is refused.
 const CUT = 'diagnosis cut at 6 s';
 const ENDPOINT = String.raw`Chrome's endpoint: (no answer in 2 s|could not reach it)`;
 const HELD = String.raw`(its page gives a second session no answer in 2 s|a second session: no answer in 1 s)`;
 const ANY = String.raw`(its page answers a second session in \d+ ms|${HELD})`;
-const looks = (ss) => new RegExp(`; Chrome running; (${ss}; ${RENDERERS}|${ss}; ${CUT}|${CUT}|${ENDPOINT})$`);
 // one process (kit-930): its type, pid, state (letter and word) and CPU, or what of it was not read
 const TYPE = String.raw`(browser|zygote|GPU|network|storage|renderer|utility \S+|[a-z-]+|type unread)`;
 const ROW = String.raw`${TYPE} \d+ ([A-Za-z] [a-z]+ (\d+% cpu|cpu unread)|state unread|gone)`;
 const PROCESSES = String.raw`processes: ((${ROW}(, ${ROW})*|none found)(, cut at 4 s)?|no /proc here|the list of processes: [^;]*)`;
+const looks = (ss) => new RegExp(`; Chrome running; (${ss}; ${CUT}|${ss}|${CUT}|${ENDPOINT}); ${PROCESSES}$`);
 // What the test itself reads of a Chrome's processes, to check the line against, whatever build of Chrome this is:
 // each pid's type by the spec's table (kit-930) from its own /proc/<pid>/cmdline, null once it is gone.
 const typeSeen = (pid) => {
@@ -74,7 +74,15 @@ test('a call with no answer says what Chrome was doing', { skip: canDrive ? fals
         // (kit-918): each line is then the form that says so, and never a wrong one. The held page never answers the second session.
         assert.match(ra.e.message, looks(HELD));
         assert.match(rb.e.message, looks(ANY));
-        for (const r of [ra, rb]) if (/renderers: no process info|a second session: no answer|Chrome's list of tabs: no answer|diagnosis cut at 6 s|Chrome's endpoint: /.test(r.e.message)) t.diagnostic(`a look ran out its bound: ${r.e.message.slice(r.e.message.indexOf('; Chrome '))}`);
+        // kit-930: each of its Chrome's processes named by its type, with its state and CPU: each row the type the test
+        // itself reads for that pid (one gone since, skipped), the browser and a renderer among them
+        const line = ra.e.message.slice(ra.e.message.lastIndexOf('; processes: ') + 2);
+        if (!OUT_OF_BOUND.test(line)) {
+          const rows = rowsOf(line);
+          for (const [type, pid, rest] of rows) { assert.match(rest, /^[A-Za-z] [a-z]+ \d+% cpu$/, `${type} ${pid}: its state and CPU`); const seen = typeSeen(pid); if (seen) assert.equal(type, seen, `pid ${pid}'s type`); }
+          for (const type of ['browser', 'renderer']) assert.ok(rows.some(([t]) => t === type), `a ${type} named: ${line}`);
+        }
+        for (const r of [ra, rb]) if (/unread|cut at 4 s|a second session: no answer|Chrome's list of tabs: no answer|diagnosis cut at 6 s|Chrome's endpoint: /.test(r.e.message)) t.diagnostic(`a look ran out its bound: ${r.e.message.slice(r.e.message.indexOf('; Chrome '))}`);
         // answered by the test, the page goes on: the held call ran once
         await held.send('Page.handleJavaScriptDialog', { accept: true });
         await new Promise((r) => setTimeout(r, Math.max(500, until - Date.now() + 500)));
@@ -105,9 +113,20 @@ test('a call with no answer says what Chrome was doing', { skip: canDrive ? fals
         const p = await chrome.newPage();
         process.kill(-chrome.pid, 'SIGSTOP');
         let r;
-        try { r = await failing(p.send('Runtime.evaluate', { expression: '1' })); } finally { process.kill(-chrome.pid, 'SIGCONT'); }
+        let group;
+        try { r = await failing(p.send('Runtime.evaluate', { expression: '1' })); group = new Map(groupOf(chrome.pid).map((pid) => [pid, typeSeen(pid)])); } finally { process.kill(-chrome.pid, 'SIGCONT'); }
         assert.ok(r.ms >= 30000 && r.ms < 36500, `took ${r.ms} ms`);
-        assert.match(r.e.message, /^Runtime\.evaluate: no answer from Chrome in 30 s; tab [0-9A-F]{8} \(Chrome's list of tabs: no answer in 2 s\); last heard on its socket: nothing; Chrome running; Chrome's endpoint: no answer in 2 s$/);
+        const m = r.e.message.match(/^Runtime\.evaluate: no answer from Chrome in 30 s; tab [0-9A-F]{8} \(Chrome's list of tabs: no answer in 2 s\); last heard on its socket: nothing; Chrome running; Chrome's endpoint: no answer in 2 s; processes: (.*)$/);
+        assert.ok(m, `the diagnosis ends with every process of the stopped Chrome: ${r.e.message}`);
+        // kit-930: the /proc reads need nothing of Chrome, so a Chrome that answers nothing still has each of its processes
+        // named, each stopped: exactly its group, read by the test while it was stopped, each by its type
+        assert.match(`processes: ${m[1]}`, new RegExp(`^${PROCESSES}$`));
+        if (OUT_OF_BOUND.test(m[1])) t.diagnostic(`a look ran out its bound: processes: ${m[1]}`);
+        else {
+          const rows = rowsOf(m[1]);
+          for (const [type, pid, rest] of rows) { assert.equal(rest, 'T stopped 0% cpu', `${type} ${pid}: each process stopped, with no CPU`); assert.equal(type, group.get(pid), `pid ${pid}'s type`); }
+          assert.deepEqual(rows.map(([, pid]) => pid).sort((a, b) => a - b), [...group.keys()].sort((a, b) => a - b), 'every process of its group, once each');
+        }
       } finally { await chrome.close(); }
     }),
     // kit-930: which process holds is what the line is for: one stopped alone is the one named stopped. The storage
@@ -221,9 +240,10 @@ test('the harness closes each case\'s tab with closeTab: the last one before the
 });
 test('a diagnosis\'s last looks: each form chrome.mjs gives is taken, anything else in their place refused', () => {
   const at = (tail) => `Runtime.evaluate: no answer from Chrome in 30 s; tab 0123ABCD at about:blank; last heard on its socket: nothing; Chrome running; ${tail}`;
-  for (const tail of ['its page gives a second session no answer in 2 s; renderers: 12 0% cpu, 34 new', 'a second session: no answer in 1 s; renderers: no process info', 'its page gives a second session no answer in 2 s; diagnosis cut at 6 s', 'diagnosis cut at 6 s', "Chrome's endpoint: no answer in 2 s", "Chrome's endpoint: could not reach it"]) assert.match(at(tail), looks(HELD), tail);
-  assert.match(at('its page answers a second session in 3 ms; renderers: 12 100% cpu'), looks(ANY));
-  for (const tail of ['its page answers a second session in 3 ms; renderers: 12 0% cpu', 'its page gives a second session no answer in 2 s', 'renderers: 12 0% cpu', 'its page gives a second session no answer in 2 s; renderers: garbled', 'garbled; diagnosis cut at 6 s', 'its page gives a second session no answer in 2 s; renderers: 12 0% cpu; diagnosis cut at 6 s', "Chrome's endpoint: something else", "Chrome's endpoint: no answer in 2 s; renderers: 12 0% cpu", 'its page gives a second session no answer in 2 s; renderers: none']) assert.doesNotMatch(at(tail), looks(HELD), tail);
+  const procs = 'processes: browser 10 S sleeping 1% cpu, zygote 11 S sleeping 0% cpu, GPU 12 S sleeping 0% cpu, network 13 D uninterruptible 0% cpu, storage 14 T stopped 0% cpu, utility AudioService 15 R running 99% cpu, renderer 16 S sleeping cpu unread, type unread 17 S sleeping 0% cpu, renderer 18 gone, type unread 19 state unread';
+  for (const tail of [`its page gives a second session no answer in 2 s; ${procs}`, 'a second session: no answer in 1 s; processes: none found, cut at 4 s', `its page gives a second session no answer in 2 s; diagnosis cut at 6 s; ${procs}, cut at 4 s`, 'diagnosis cut at 6 s; processes: no /proc here', "Chrome's endpoint: no answer in 2 s; processes: renderer 16 T stopped 0% cpu", "Chrome's endpoint: could not reach it; processes: the list of processes: ps: no answer in 1 s"]) assert.match(at(tail), looks(HELD), tail);
+  assert.match(at(`its page answers a second session in 3 ms; ${procs}`), looks(ANY));
+  for (const tail of [`its page answers a second session in 3 ms; ${procs}`, 'its page gives a second session no answer in 2 s', "Chrome's endpoint: no answer in 2 s", `${procs}`, 'its page gives a second session no answer in 2 s; processes: garbled', 'its page gives a second session no answer in 2 s; processes: renderer 16 S sleeping', 'its page gives a second session no answer in 2 s; processes: renderer S sleeping 0% cpu', `garbled; diagnosis cut at 6 s; ${procs}`, `its page gives a second session no answer in 2 s; ${procs}; diagnosis cut at 6 s`, `Chrome's endpoint: something else; ${procs}`, `its page gives a second session no answer in 2 s; renderers: 12 0% cpu`]) assert.doesNotMatch(at(tail), looks(HELD), tail);
 });
 test('closeTab: a tab whose SAVING read gets no answer fails its caller at once, and is never sent Page.close', async () => {
   const held = 'Runtime.evaluate: no answer from Chrome in 30 s; tab 0123ABCD at about:blank; a beforeunload dialog ("", at about:blank) open on this tab for 30.0 s';
@@ -232,6 +252,7 @@ test('closeTab: a tab whose SAVING read gets no answer fails its caller at once,
   await assert.rejects(closeTab(p), { message: `closing the tab: ${held}` });
   assert.deepEqual(p.asked, ["ev typeof SAVING === 'number' ? SAVING : 0", 'socket closed']);
 });
+
 // kit-930: processesOf on a machine of the test's own making (no Chrome): what it reads, at most two reads at once, each bounded.
 // tree: pid -> { pgrp, state, state2, ticks, ticks2, cmdline, hang: 'stat'|'cmdline'|'stat2', gone2 }; ms: each read's delay; hang: 'list' too
 // release() settles every read held so far, giving its place back (the places are the module's, shared by every call)
