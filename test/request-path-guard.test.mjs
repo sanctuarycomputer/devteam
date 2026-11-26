@@ -48,9 +48,11 @@ const alive = async (port, what) => {
   assert.equal(r.status, 200, `${what}: the next GET /api/hello answers 200`);
 };
 
-// Each throws in new URL(t, 'http://x') on Node 18 and 22, and reaches the handler (Node's own parser
-// answers a target that is neither origin- nor absolute-form, such as two backslashes, itself).
-const BAD = ['//', '///', '//:', '//a:99999', '//a:x', '//[', '//[::1', '//a%zz', '//%', '/\\', '//@', '//a@', 'http://', 'https://a:99999/', '//xn--', '//256.256.256.256', '//1.2.3.4.5', '//[1::2::3]'];
+// Targets that reach the handler (Node's own parser answers one that is neither origin- nor
+// absolute-form, such as two backslashes, itself); BAD is those this Node's URL refuses against the
+// dashboard's base, which differ by version (Node 24 takes '//xn--', 18 and 22 refuse it).
+const CANDIDATES = ['//', '///', '//:', '//a:99999', '//a:x', '//[', '//[::1', '//a%zz', '//%', '/\\', '//@', '//a@', 'http://', 'https://a:99999/', '//xn--', '//256.256.256.256', '//1.2.3.4.5', '//[1::2::3]'];
+const BAD = CANDIDATES.filter((t) => { try { new URL(t, 'http://x'); return false; } catch { return true; } });
 
 async function dashboard(t, { drop = [] } = {}) {
   // one hook, in this order: the dashboard stopped (its group gone), then its fixture removed, so
@@ -72,6 +74,7 @@ async function dashboard(t, { drop = [] } = {}) {
 }
 
 test('R1 a request target that is no URL is a 400 on every method, and the dashboard serves on', { timeout: 300000 }, async (t) => {
+  assert.ok(BAD.includes('//') && BAD.length >= 10, `R1 this Node refuses '//' and at least ten of the targets (${BAD.length})`);
   const { dash, port } = await dashboard(t);
   for (const target of BAD) {
     for (const method of ['GET', 'HEAD', 'POST']) {

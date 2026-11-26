@@ -30853,33 +30853,37 @@ async function cmdDashboard() {
   every(logWatch.tick, 1000);
   const D = dashContext({ log, page, pageCsp, run, describing, versioning, remote, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, ACTION_JSON, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, sessionPrompts, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
   // A throw out of any route is that request's failure (dashRequestFailed), never the dashboard's
-  // stop: an async handler's rejection would reach processLog, which exits.
-  const server = http.createServer((req, res) => void (async () => {
-    if (draining) res.setHeader('connection', 'close');
-    // Node's five minutes for a body, for all but an upload (UPLOAD_REQUEST_MS, and its stall timer)
-    const bodyTimer = setTimeout(() => { if (!req.complete) req.destroy(); }, bodyMs);
-    bodyTimer.unref();
-    req.once('close', () => clearTimeout(bodyTimer));
-    // Every route answers only on the dashboard's own address: a page elsewhere that points its own
-    // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
-    const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
-    // the terminal's routes read these two refusals as JSON, with their why (terminal@1 §2)
-    const isTerm = req.url.startsWith('/api/term/');
-    const termNo = (why) => { log(`refused ${req.url.split('?')[0]}: ${why}`); termDrain(req); return send(res, 403, 'application/json', JSON.stringify(req.method === 'POST' ? { error: 'the terminal answers only on this page', why } : { why })); };
-    if (!okHost) return isTerm ? termNo('host') : send(res, 403, 'text/plain; charset=utf-8', 'the dashboard answers only on its own address');
-    // a request a preview's relay forwarded (it sends localhost as Host and Origin, which the owner checks accept): never the owner's
-    if (req.headers[RELAY_MARK] !== undefined) return isTerm ? termNo('relay') : send(res, 403, 'text/plain; charset=utf-8', 'not through a preview relay');
-    // /presence is a socket: a plain request gets its guard's status (presence@1 §2)
-    if (req.url === '/presence' || req.url.startsWith('/presence?')) return presence.refuse(req, res);
-    // the request's one parse, which every route reads (q.u): a target that is no URL here is a 400,
-    // never a throw out of this handler, which would stop the dashboard
-    let u;
-    try { u = new URL(req.url, 'http://x'); } catch { return send(res, 400, 'text/plain; charset=utf-8', 'bad request'); }
-    // the terminal: right after the global guards, before any other route
-    if (isTerm) return await term.handle(req, res, u);
-    const q = { okHost, bodyTimer, u };
-    for (const route of DASHBOARD_ROUTES) if (await route(D, req, res, q) !== DASH_NEXT) return;
-  })().catch((e) => dashRequestFailed(log, req, res, e)));
+  // stop: a rejection out of this async handler would reach processLog, which exits.
+  const server = http.createServer(async (req, res) => {
+    try {
+      if (draining) res.setHeader('connection', 'close');
+      // Node's five minutes for a body, for all but an upload (UPLOAD_REQUEST_MS, and its stall timer)
+      const bodyTimer = setTimeout(() => { if (!req.complete) req.destroy(); }, bodyMs);
+      bodyTimer.unref();
+      req.once('close', () => clearTimeout(bodyTimer));
+      // Every route answers only on the dashboard's own address: a page elsewhere that points its own
+      // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
+      const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
+      // the terminal's routes read these two refusals as JSON, with their why (terminal@1 §2)
+      const isTerm = req.url.startsWith('/api/term/');
+      const termNo = (why) => { log(`refused ${req.url.split('?')[0]}: ${why}`); termDrain(req); return send(res, 403, 'application/json', JSON.stringify(req.method === 'POST' ? { error: 'the terminal answers only on this page', why } : { why })); };
+      if (!okHost) return isTerm ? termNo('host') : send(res, 403, 'text/plain; charset=utf-8', 'the dashboard answers only on its own address');
+      // a request a preview's relay forwarded (it sends localhost as Host and Origin, which the owner checks accept): never the owner's
+      if (req.headers[RELAY_MARK] !== undefined) return isTerm ? termNo('relay') : send(res, 403, 'text/plain; charset=utf-8', 'not through a preview relay');
+      // /presence is a socket: a plain request gets its guard's status (presence@1 §2)
+      if (req.url === '/presence' || req.url.startsWith('/presence?')) return presence.refuse(req, res);
+      // the request's one parse, which every route reads (q.u): a target that is no URL here is a 400,
+      // never a throw out of this handler, which would stop the dashboard
+      let u;
+      try { u = new URL(req.url, 'http://x'); } catch { return send(res, 400, 'text/plain; charset=utf-8', 'bad request'); }
+      // the terminal: right after the global guards, before any other route
+      if (isTerm) return await term.handle(req, res, u);
+      const q = { okHost, bodyTimer, u };
+      for (const route of DASHBOARD_ROUTES) if (await route(D, req, res, q) !== DASH_NEXT) return;
+    } catch (e) {
+      dashRequestFailed(log, req, res, e);
+    }
+  });
   // Two dashboards starting at once can pick the same free port: the one that loses picks again.
   const tried = [];
   server.on('error', async (e) => {
