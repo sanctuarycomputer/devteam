@@ -1378,6 +1378,11 @@
                 "effect": {
                   "type": "string",
                   "maxLength": 400
+                },
+                "approves": {
+                  "type": "boolean",
+                  "const": true,
+                  "description": "On a one-way door's choice other than the recommendation: the owner may pick it instead, and their pick approves the plan built on it once that plan names it. Left out on a choice that declines."
                 }
               },
               "required": [

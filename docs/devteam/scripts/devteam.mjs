@@ -2758,6 +2758,18 @@ const isDoorQuestion = (v) => v?.kind === 'one-way-door' || v?.class === 'one-wa
 // A door answer approves a plan only as recommended: an owner who chose otherwise said no to the
 // plan built on the recommendation. A door asked with no recommendation is the owner's open choice.
 const doorAgreed = (v) => !v.recommendation || v.matched === true;
+// The owner's own pick of another listed choice on a door (not the recommendation, not words a
+// supervisor read) that the question marked "approves": true when it was asked: the label, or null. It approves the plan built on it once that plan names it
+// (doorPickNamed): picking a listed choice is the owner's yes to that choice, not a no to the plan.
+const doorPick = (v) => {
+  if (v?.status !== 'answered' || doorAgreed(v)) return null;
+  const pick = v.in_words === null ? v.label : v.choice;
+  if (typeof pick !== 'string') return null;
+  const c = (v.choices ?? []).find((x) => isObj(x) && String(x.label ?? '').trim().toLowerCase() === pick.trim().toLowerCase());
+  return c?.approves === true ? pick : null;
+};
+// Whether a plan says it is built on the owner's pick: a line naming the question and the label.
+const doorPickNamed = (plan, qid, pick) => String(plan ?? '').split('\n').some((l) => l.includes(qid) && l.toLowerCase().includes(pick.trim().toLowerCase()));
 
 // Folded questions in the shape the inbox uses.
 function questionView(q) {
@@ -10544,6 +10556,14 @@ function askLine({ thread, about } = {}) {
   if (def !== null && (kind === 'one-way-door' || reasons.includes('one-way-door'))) die('a one-way door has no --default: only the owner\'s answer goes through it');
   // a door's answer approves a plan only as recommended (doorAgreed), so a door says what it recommends
   if (kind === 'one-way-door' && !flagStr('recommendation')?.trim()) die('a one-way door needs --recommendation: the owner\'s yes to it is what approves the plan built on it');
+  // a door's other choices the owner may pick instead, each approving the plan built on it (doorPick):
+  // marked "approves": true; a choice that declines never is. Only a door's choices carry it
+  const approving = (jsonFlag('choices') ?? []).filter((c) => isObj(c) && Object.hasOwn(c, 'approves'));
+  if (approving.length && kind !== 'one-way-door' && !reasons.includes('one-way-door')) die('"approves" goes on a one-way door\'s choices: the other choices the owner may pick, each approving the plan built on it');
+  for (const c of approving) {
+    if (c.approves !== true) die(`--choices "${c.label}": "approves" is true or left out (a choice that declines leaves it out)`);
+    if (String(c.label ?? '').trim().toLowerCase() === String(flagStr('recommendation') ?? '').trim().toLowerCase()) die(`--choices "${c.label}" is the recommendation, which approves already: leave "approves" off it`);
+  }
   if (def !== null && (L.owner_only ?? []).includes(cls)) die(`${cls} is the owner's (constitution.md §1): no --default, only their answer approves it`);
   const blocks = asList(flags.blocks);
   for (const b of blocks) if (!tickets().has(b) && !isIncident(logGet(b)) && !(cls === 'production-remediation' && /^(remediation|release):\S+$/.test(b))) die(`--blocks ${b}: no such ticket (or incident)`);
@@ -16153,10 +16173,16 @@ function cmdAct() {
     const t = tickets().get(refs[0]);
     const doors = t.one_way_doors ?? [];
     let goalDoor = null;
+    // door questions answered with another listed choice: the plan must name each one it is built on
+    let picks = [];
     if (doorCited) {
       if (!doors.length) die(`${t.id} lists no one-way doors; ${approved} has nothing to cover`);
       if (approval.status !== 'answered') die(`${approved} was not answered by the owner; a one-way door needs the owner's answer, never a default`);
-      if (!doorAgreed(approval)) die(`${approved} was answered "${String(approval.answer ?? '').slice(0, 80)}", not its recommendation ("${approval.recommendation}"): a plan built on the recommendation isn't what the owner said yes to; replan to their answer and ask about that`);
+      if (!doorAgreed(approval)) {
+        const pick = doorPick(approval);
+        if (!pick) die(`${approved} was answered "${String(approval.answer ?? '').slice(0, 80)}", neither its recommendation ("${approval.recommendation}") nor another of its listed choices picked by the owner: a plan built on the recommendation isn't what the owner said yes to; replan to their answer and ask about that`);
+        picks.push({ id: approved, pick });
+      }
       if (approval.ticket !== t.id) {
         // a question asked for one ticket is that ticket's door, never a goal-level one for another
         if (approval.ticket) die(`${approved} was asked for ${approval.ticket}, not ${t.id}: a ticket's door answer covers that ticket only`);
@@ -16165,7 +16191,11 @@ function cmdAct() {
         if (!goals.includes(approval.goal)) die(`${approved} answered a one-way door for goal ${approval.goal}, but ${t.id}'s feature ${t.feature} serves ${goals.join(', ') || 'no goal'}; an answer for another goal never covers this plan`);
         goalDoor = approved;
       }
-    } else if (doors.length && !questions().some((q) => isDoorQuestion(q) && q.ticket === t.id && q.status === 'answered' && doorAgreed(q))) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved, or you cite the owner's answer to the goal's one-way-door question (--approved <qid>) and the plan review says it covers the plan (constitution.md §4)`);
+    } else if (doors.length && !questions().some((q) => isDoorQuestion(q) && q.ticket === t.id && q.status === 'answered' && doorAgreed(q))) {
+      // the owner picked another listed choice: that answer approves the plan built on it, named below
+      picks = questions().filter((q) => isDoorQuestion(q) && q.ticket === t.id && doorPick(q)).map((q) => ({ id: q.id, pick: doorPick(q) }));
+      if (!picks.length) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved, or you cite the owner's answer to the goal's one-way-door question (--approved <qid>) and the plan review says it covers the plan (constitution.md §4)`);
+    }
     // The plan opens with its TL;DR, so a low-risk plan can be approved from it (quality.md §6).
     // where the records are: home's ticket/<id> for records in home, else the ticket's repo (an act:
     // fails fast on a missing or wrong checkout)
@@ -16175,6 +16205,9 @@ function cmdAct() {
     if (plan === null) die(`no plan.md for ${t.id} on ticket/${t.id}; approve a plan once it is committed`);
     const tldr = tldrGap(plan);
     if (tldr) die(`${t.id}'s plan ${tldr}; send it back to the worker (quality.md §6)`);
+    // a plan on the owner's pick of another listed choice says so, so the approval is of that plan
+    const unnamed = picks.filter((p) => !doorPickNamed(plan, p.id, p.pick));
+    if (picks.length && unnamed.length === picks.length) die(`${unnamed.map((p) => `${p.id} was answered "${p.pick}", one of its listed choices but not its recommendation`).join('; ')}: the plan approves only when it is built on that pick and says so, on a line naming the question and the choice ("- One-way door ${unnamed[0].id}: ${unnamed[0].pick}"); replan to it and have the plan review approve it`);
     // A goal-level answer covers the plan only when its reviewer says the plan stays inside it.
     if (goalDoor) {
       const latest = latestPerTrack(ticketReviews(t.id, R.name === 'home' ? { ref } : { ref, repo: R }), 'plan').filter((r) => r.verdict === 'APPROVE');
