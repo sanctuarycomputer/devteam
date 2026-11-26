@@ -85,7 +85,7 @@ test('a repo on a kit from before recover comes back from the box\'s list, the w
       assert.ok(!JSON.parse(st.stdout).blockers.some((b) => /didn't make/.test(b)), `its own kit's fleet status: ${st.stdout}`);
     }
     assert.match(fs.readFileSync(path.join(old['v0.25.0'], 'docs/devteam/run/supervisor-prompt.txt'), 'utf8'), /missing: config\/master\.key.*Inbox.*--secrets.*file:<path>/s);
-    assert.match(claudeCalls(fresh)[0], /^supervisor\|--dangerously-skip-permissions .*supervisor/, 'its agent_command, with its own kit\'s prompt');
+    assert.match(claudeCalls(fresh)[0], /^supervisor\|(--settings \S+\/supervisor-claude\.json )?--dangerously-skip-permissions .*supervisor/, 'its agent_command (with its own kit\'s Stop hook), with its own kit\'s prompt');
     assert.deepEqual(windowsIn('home').sort(), ['operator', 'sup-old-fresh', 'sup-old-v0-25-0', 'sup-old-v0-28-0', 'sup-old-v0-30-0']);
     assert.ok(!fs.existsSync(upList), 'the list is used up once they are back, the stale entry with it');
 
