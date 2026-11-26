@@ -8,8 +8,9 @@
 //                                  DEVTEAM_NPM_REGISTRY env() sets; --ignore-scripts; --prefix=<the folder
 //                                  it runs in> and --workspaces=false, once each; each command's exact
 //                                  arguments and nothing else; no npm_config_* or NPM_CONFIG_* but two
-//                                  different empty regular config files; no .npmrc where it runs; view in
-//                                  an empty folder); real npm takes these
+//                                  different empty regular config files; no .npmrc where it runs, and none
+//                                  or a package.json with workspaces in any folder above; view in a folder
+//                                  holding only its package.json); real npm takes these
 //   `npm error code …`             what real npm does (10.x): a pair out of sync (package.json's version not
 //                                  the lock entry's, an entry missing, an entry with dependencies), a tarball
 //                                  whose sha512 isn't the lock's integrity, one file for both configs, a 404,
@@ -311,7 +312,13 @@ async function fakeNpm(stateFile, args) {
       if (extra.length || !once || !shape) return rule(`every call is exactly view <name>@<version> [<field>] [--json], ci [--dry-run] or audit signatures, with --registry=<the registry>, --ignore-scripts, --prefix=<the folder it runs in> and --workspaces=false and nothing else (got ${args.join(' ')})`);
     }
     if (fs.existsSync('.npmrc')) return rule('npm runs in a folder with no .npmrc');
-    if (plain[0] === 'view' && fs.readdirSync('.').length) return rule('view runs in its own empty folder');
+    if (plain[0] === 'view' && fs.readdirSync('.').join('/') !== 'package.json') return rule('view runs in its own folder holding only a package.json the step writes');
+    for (let d = path.dirname(fs.realpathSync('.')); ; d = path.dirname(d)) {
+      let ws = false;
+      try { ws = 'workspaces' in JSON.parse(fs.readFileSync(path.join(d, 'package.json'), 'utf8')); } catch { ws = false; }
+      if (ws || fs.existsSync(path.join(d, '.npmrc'))) return rule(`a folder above where npm runs holds an .npmrc or a package.json with workspaces (${d})`);
+      if (path.dirname(d) === d) break;
+    }
     const stray = Object.keys(npmEnv).filter((k) => !['npm_config_userconfig', 'npm_config_globalconfig'].includes(k));
     if (stray.length) return rule(`npm config from the environment reached npm: ${stray.sort().join(', ')}`);
     const u = npmEnv.npm_config_userconfig, g = npmEnv.npm_config_globalconfig;
