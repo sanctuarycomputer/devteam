@@ -166,6 +166,11 @@ test('P1t the region reads a hostile or large exterior text in under 2 s each', 
     ['an <h2> holding 100,000 <', `<h2>${'<'.repeat(100000)}Z</h2>`],
     ['a list marker, 100,000 spaces, then a setext line', `- ${' '.repeat(100000)}x\n---`],
     ['50,000 quote and item markers before a ###', `${'> - '.repeat(50000)}### Z`],
+    // finals 2 and 2b: a # or ## heading read as shown, its comments, instructions and quoted values whole
+    ['an ## heading of 100,000 unclosed <!--', `## a${'<!--'.repeat(100000)}`],
+    ['an ## heading of 100,000 unclosed <?', `## a${'<?'.repeat(100000)}`],
+    ['an ## heading of 50,000 unclosed quoted values', `## a${'<b title="'.repeat(50000)}`],
+    ['an ## heading of 50,000 quoted >', `## a${'<b title=">'.repeat(50000)}`],
   ]) {
     const start = process.hrtime.bigint();
     assert.doesNotThrow(() => P.checkExterior(`# T\n\n${x}\n`, { today: W2.today, visibility: 'public', allowed }), what);
@@ -508,6 +513,21 @@ const HEADING_FORMS = [
   // final-1 F3: a # or ## heading's link host is judged as its words are
   ['an ## heading of an autolink', '## <https://zorbly.example>', ['<https://zorbly.example>']],
   ['an ## heading whose link points at an unnamed host', '## [our partner](https://zorbly.example)', ['our partner']],
+  // final-2 F1-2: a footnote's indented continuation is read, as a list item's is
+  ['a lower-case #### in a footnote\'s continuation', 'See[^z].\n\n[^z]: a\n\n    #### zorbly', ['zorbly']],
+  ['an ## heading in a footnote\'s continuation', 'See[^z].\n\n[^z]: a\n\n    ## Zorbly Labs', ['Zorbly Labs']],
+  // final-2b I1, final-2 F4-2: invisible characters dropped; a quoted value, a comment and <?x?> read whole
+  ['an ## heading split by a quoted > in an attribute', '## Z<b title=">">orbly</b>', ['Z<b title=">">orbly</b>']],
+  ['an ## heading split by a comment holding >', '## Z<!-- a > b -->orbly', ['Z<!-- a > b -->orbly']],
+  ['an ## heading split by a processing instruction', '## Z<?x?>orbly', ['Z<?x?>orbly']],
+  ['an ## heading split by &shy;', '## Z&shy;orbly', ['Z&shy;orbly']],
+  ['an ## heading split by &#173;', '## Z&#173;orbly', ['Z&#173;orbly']],
+  ['an ## heading split by &#8203;', '## Z&#8203;orbly', ['Z&#8203;orbly']],
+  ['an ## heading split by &zwj;', '## Z&zwj;orbly', ['Z&zwj;orbly']],
+  ['an ## heading split by a soft hyphen', '## Z\u00ADorbly', ['Z\u00ADorbly']],
+  ['an ## heading split by a zero-width space', '## Z\u200Borbly', ['Z\u200Borbly']],
+  ['an ## heading split by a zero-width joiner', '## Z\u200Dorbly', ['Z\u200Dorbly']],
+  ['an ## heading split by a word joiner', '## Z\u2060orbly', ['Z\u2060orbly']],
 ];
 const NOT_REFUSED = [
   ['an ## heading in a fence', '```\n## Zorbly\n```'],
@@ -525,6 +545,9 @@ const NOT_REFUSED = [
   ['a named #### in a block quote', '> #### Acme Storage'],
   ['a dependency name as an <h5>', '<h5>inkwell-sync</h5>'],
   ['an ## heading of named words, one in an inline tag', '## <em>What</em> to watch'],
+  // final-2 F3-2: a line break or a block tag shows as a space
+  ['an ## heading of named words a <br> divides', '## What<br>to watch'],
+  ['an ## heading of named words a <p> divides', '## What<p>to watch</p>'],
 ];
 const formOpts = (visibility, names = allowed.names) => ({ today: W2.today, visibility, allowed: { ...allowed, names } });
 

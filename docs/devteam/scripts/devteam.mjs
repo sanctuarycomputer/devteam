@@ -7829,10 +7829,11 @@ const selfPlain = (() => {
   // 1 when a fence's info string is exactly self or exterior, else 2.
   const version = (text) => (scan(text).fences.some((f) => f.info === 'self' || f.info === 'exterior') ? 1 : 2);
 
-  const LIST = /^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]/;
+  const LIST = /^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]|^ {0,3}\[\^[^\]\s]{1,999}\]:/; // a list item, or a footnote definition
   const HEAD = /^ {0,3}#{1,6}(?:[ \t]|$)/;
   // Each line's text, or null where it is not read: on a fence, in indented code (four spaces or a tab
-  // in, after a blank line or more of the same, outside a list), or in a comment that opens a line.
+  // in, after a blank line or more of the same, outside a list or a footnote), or in a comment that
+  // opens a line.
   const readable = last((text) => {
     let prev = 'blank';
     let list = false;
@@ -8349,7 +8350,7 @@ const selfPlain = (() => {
   // tag wherever it stands, in code or a comment too, since an HTML block, a stray backtick or a
   // comment's tail can show one the reading above takes for code: its text up to the next heading tag
   // (HTMLHEAD). Each text is read as a heading's words; a # or ## one's also as a page shows them (seen),
-  // with its link hosts.
+  // with its link hosts, when unnamedHeading asks.
   // Linear in the text: each marker, line and tag read once.
   // The block-quote, list-item and footnote-definition markers that open a line (none matches empty).
   const OPENERS = /^(?:[ \t]*>[ \t]?|[ \t]*(?:[-*+]|\d{1,9}[.)])(?:[ \t]+|$)|[ \t]*\[\^[^\]\s]{1,999}\]:[ \t]*)*/;
@@ -8359,17 +8360,24 @@ const selfPlain = (() => {
   // which only refuses more). Each tag inside reads as its alt text, as a page shows an image's.
   const HTMLHEAD = /<h([1-6])(?=[\s/>])([\s\S]*?)(?=<\/?h[1-6][\s/>]|$)/gi;
   const ALT = /\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`=]+))/i;
-  // A # or ## heading's words as a page shows them (seen), judged beside its text as written: an
-  // autolink as its address, a comment dropped, each other tag as its alt text (an image's; none else
-  // has one) with no space, as inline tags show; then each character reference decoded. A comment or
-  // tag is read only up to the next < or >, so linearly. Its text as written stays what is refused.
-  const SHOWN = /<!--[^<>]*-->|<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*)>|<\/?[A-Za-z][A-Za-z0-9-]*(?:[\s/][^<>]*)?>/g;
+  // A # or ## heading's words as a page shows them (seen), judged beside its text as written: a comment
+  // and a processing instruction dropped (each read to its end), an autolink as its address, each tag a
+  // line break or a block (BLOCK) as a space, each other tag as its alt text (an image's; none else
+  // has one) with no space, as inline tags show; then each character reference decoded and each
+  // default-ignorable character (a soft hyphen, a zero-width space or joiner, a word joiner), shown as
+  // nothing, dropped. A tag's quoted value is read whole, up to the next <, so linearly. Its text as
+  // written stays what is refused.
+  const SHOWN = /<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*)>|<\/?[A-Za-z][A-Za-z0-9-]*(?:[\s/](?:"[^"<]*"|'[^'<]*'|[^<>"'])*)?>/g;
+  const BLOCK = /^<\/?(?:br|p|div|hr|li|ul|ol|dl|dt|dd|table|thead|tbody|tfoot|tr|td|th|blockquote|pre|section|article|header|footer|nav|aside|figure|figcaption|details|summary|address|h[1-6])(?![A-Za-z0-9-])/i;
+  const INVISIBLE = /\p{Default_Ignorable_Code_Point}|&(?:shy|zwj|zwnj|lrm|rlm|ZeroWidthSpace|Negative(?:VeryThin|Thin|Medium|Thick)Space|NoBreak|it|InvisibleTimes|ic|InvisibleComma|af|ApplyFunction);/gu;
   const alt = (tag) => { const a = ALT.exec(tag); return a ? (a[1] ?? a[2] ?? a[3]) : ''; };
   const shown = (tag) => ` ${alt(tag)} `;
-  const seen = (s) => decode(words(s).replace(SHOWN, (t, url) => (url ?? (t.startsWith('<!--') ? '' : alt(t))))).replace(/\s+/g, ' ').trim();
+  // s with each run from open to the next close taken out (an unclosed one kept), read once.
+  const cut = (s, open, close) => { let out = ''; let at = 0; for (let i = s.indexOf(open); i >= 0; i = s.indexOf(open, at)) { const j = s.indexOf(close, i + open.length); if (j < 0) break; out += s.slice(at, i); at = j + close.length; } return out + s.slice(at); };
+  const seen = (s) => decode(cut(cut(words(s), '<!--', '-->'), '<?', '?>').replace(INVISIBLE, '').replace(SHOWN, (t, url) => (url ?? (BLOCK.test(t) ? ' ' : alt(t))))).replace(INVISIBLE, '').replace(/\s+/g, ' ').trim();
   const headed = last((text) => {
     const out = [];
-    const add = (level, s, line, text = words(s)) => out.push({ level, text, line, ...(level > 2 ? {} : { seen: seen(s), hosts: hosts(s) }) });
+    const add = (level, s, line, text = words(s)) => out.push({ level, text, line, raw: s });
     let para = []; // the paragraph's lines so far: [line, its text past its markers]
     readable(text).forEach((l, i) => {
       if (l === null || !l.trim()) { para = []; return; }
@@ -8392,11 +8400,13 @@ const selfPlain = (() => {
   });
   // Whether the names rule refuses a heading: one of level 3 to 6 unless names holds it whole; a # or ##
   // one (the title and the sections, in plain words) when it holds a capitalised word, Exterior aside
-  // (the document's own name), or a link host, that names doesn't hold whole, read as written or as shown.
+  // (the document's own name), or a link host, that names doesn't hold whole, read as written or as
+  // shown. Each later reading is made only when the one before finds nothing, so a refused heading
+  // costs one.
+  const unnamedWord = (t, names) => [...t.matchAll(WORD)].some((m) => { const w = capWord(m[0]); return w !== null && w.toLowerCase() !== 'exterior' && !namesWhole(names, w); });
   const unnamedHeading = (h, names) => (h.level > 2
     ? !namesWhole(names, h.text)
-    : [...`${h.text} ${h.seen}`.matchAll(WORD)].some((m) => { const w = capWord(m[0]); return w !== null && w.toLowerCase() !== 'exterior' && !namesWhole(names, w); })
-      || h.hosts.some((x) => !namesWhole(names, x)));
+    : unnamedWord(h.text, names) || unnamedWord(seen(h.raw), names) || hosts(h.raw).some((x) => !namesWhole(names, x)));
 
   // exterior.md: { errors, warnings, refused, held, hosts }. On a repo known private nothing is refused
   // or held; visibility 'public' or 'unknown' keeps the names rule. Every heading, in any form (headed),
