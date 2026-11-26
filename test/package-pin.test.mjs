@@ -318,3 +318,19 @@ test('C9 the kit as shipped (SYNC_PINS false): chore start devteam-sync-<tag> st
     assert.deepEqual(I.pair(path.join(I.root, '.worktrees', 'chore-devteam-sync-v0.101.0', 'docs', 'devteam')), { 'package.json': null, 'package-lock.json': null }, 'C9 no pair in the sync\'s worktree');
   } finally { await reg.close(); }
 });
+
+test('C10 docs/devteam/.gitignore holds .kit beside run/: a file under .kit and a symlink named .kit are ignored', () => {
+  const I = instance('c9');
+  fs.mkdirSync(path.join(I.kitDir, '.kit', '0.101.0-abc'), { recursive: true });
+  fs.writeFileSync(path.join(I.kitDir, '.kit', '0.101.0-abc', 'verified.json'), '{}\n');
+  const ignored = (p) => spawnSync('git', ['check-ignore', '-q', '--no-index', p], { cwd: I.root }).status === 0;
+  assert.ok(ignored('docs/devteam/.kit/0.101.0-abc/verified.json'), 'C10 a file under docs/devteam/.kit is ignored');
+  assert.equal(I.g(['status', '--porcelain', '--untracked-files=all']), '', 'C10 git status shows nothing under .kit');
+  fs.rmSync(path.join(I.kitDir, '.kit'), { recursive: true });
+  fs.symlinkSync(scratch('elsewhere'), path.join(I.kitDir, '.kit'));
+  assert.ok(ignored('docs/devteam/.kit'), 'C10 a symlink named .kit is ignored too');
+  // and the kit's own file says it in those words
+  const lines = fs.readFileSync(path.join(kit, '.gitignore'), 'utf8').split('\n');
+  assert.ok(lines.includes('run/'), 'C10 run/ is still there');
+  assert.ok(lines.includes('.kit'), 'C10 the line is .kit, with no slash');
+});
