@@ -196,3 +196,240 @@ test('S8 servePage answers 500 for a page it cannot read; serveAppFiles refuses 
   const none = await listen(t, (req, res) => { if (serveAppFiles(path.join(K, 'gone'), '/next', req, res, POLICY) === NEXT) { res.writeHead(599); res.end(); } });
   assert.equal((await ask(none, '/next/')).status, 404, "S8 a folder that isn't there serves nothing");
 });
+
+// ---- the pages, as the base sent them ----------------------------------------------------------
+
+// Recorded at the base (6dce28e1, main before kit-983) with DEVTEAM_TEST_PAGE_SEAM_RECORD=1: each
+// response's status, its headers but date and the connection's own (connection, keep-alive,
+// content-length, transfer-encoding), and its body: { file } for the kit's file of that name, else
+// its text. {PORT} is the dashboard's port, {PORTS+n} a port of this file's block (the hub's is +50).
+const BASE = {
+  "dash GET /": {"status":200,"headers":{"cache-control":"no-store","content-security-policy":"frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:{PORTS+50}","content-type":"text/html; charset=utf-8"},"body":{"file":"index.html"}},
+  "dash GET /index.html": {"status":200,"headers":{"cache-control":"no-store","content-security-policy":"frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:{PORTS+50}","content-type":"text/html; charset=utf-8"},"body":{"file":"index.html"}},
+  "dash GET /view/artifact/<id>": {"status":200,"headers":{"cache-control":"no-store","content-security-policy":"frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:{PORTS+50}","content-type":"text/html; charset=utf-8","referrer-policy":"no-referrer"},"body":{"file":"index.html"}},
+  "dash GET /view/preview/<name>": {"status":200,"headers":{"cache-control":"no-store","content-security-policy":"frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:{PORTS+50}","content-type":"text/html; charset=utf-8","referrer-policy":"no-referrer"},"body":{"file":"index.html"}},
+  "dash GET /review/preview/devteam-ui.js": {"status":200,"headers":{"cache-control":"no-store","content-type":"text/javascript; charset=utf-8","x-content-type-options":"nosniff"},"body":{"file":"devteam-ui.js"}},
+  "dash GET /review/preview/devteam-ui.css": {"status":200,"headers":{"cache-control":"no-store","content-type":"text/css; charset=utf-8","x-content-type-options":"nosniff"},"body":{"file":"devteam-ui.css"}},
+  "dash GET /review/<qid>/devteam-ui.js": {"status":200,"headers":{"cache-control":"no-store","content-type":"text/javascript; charset=utf-8","x-content-type-options":"nosniff"},"body":{"file":"devteam-ui.js"}},
+  "dash GET /review/<qid>/devteam-ui.css?x=1": {"status":200,"headers":{"cache-control":"no-store","content-type":"text/css; charset=utf-8","x-content-type-options":"nosniff"},"body":{"file":"devteam-ui.css"}},
+  "dash GET /review/preview/other.js": {"status":404,"headers":{"cache-control":"no-store","content-type":"text/plain"},"body":"not found"},
+  "dash GET /review/Bad_Seg/devteam-ui.js": {"status":404,"headers":{"cache-control":"no-store","content-type":"text/plain"},"body":"not found"},
+  "dash HEAD /review/preview/devteam-ui.js": {"status":404,"headers":{"cache-control":"no-store","content-type":"text/plain"},"body":""},
+  "dash HEAD /": {"status":404,"headers":{"cache-control":"no-store","content-type":"text/plain"},"body":""},
+  "dash GET /nope": {"status":404,"headers":{"cache-control":"no-store","content-type":"text/plain"},"body":"not found"},
+  "dash HEAD /nope": {"status":404,"headers":{"cache-control":"no-store","content-type":"text/plain"},"body":""},
+  "dash GET /devteam-ui.js": {"status":404,"headers":{"cache-control":"no-store","content-type":"text/plain"},"body":"not found"},
+  "dash GET /_next/static/chunks/app.js": {"status":404,"headers":{"cache-control":"no-store","content-type":"text/plain"},"body":"not found"},
+  "dash GET /api/nope": {"status":404,"headers":{"cache-control":"no-store","content-type":"text/plain"},"body":"not found"},
+  "dash POST /api/nope": {"status":404,"headers":{"cache-control":"no-store","content-type":"text/plain"},"body":"not found"},
+  "dash PUT /": {"status":404,"headers":{"cache-control":"no-store","content-type":"text/plain"},"body":"not found"},
+  "dash POST /api/answer": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/correct": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/goal-hold": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/fleet": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/goal-met": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/goal-order": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/goal-decide": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/knowledge": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/ack": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/artifact-publish": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/preview-stop": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/preview-start": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/thread-new": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/thread-say": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/thread-resolve": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/thread-reopen": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/thread-accept": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/thread-accept-addressed": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/artifact-handoff": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/secret": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/review-draft": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/review-answer": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/pane-answer": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/owner-setting": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "dash POST /api/fleet-check": {"status":403,"headers":{"cache-control":"no-store","content-type":"application/json"},"body":"{\"error\":\"owner actions only from this dashboard's own page, in a browser (Sec-Fetch-Site same-origin or this page's Origin)\"}"},
+  "hub GET /": {"status":200,"headers":{"cache-control":"no-store","content-security-policy":"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src http://127.0.0.1:{PORTS+1} http://127.0.0.1:{PORTS+2} http://127.0.0.1:{PORTS+3} http://127.0.0.1:{PORTS+4} http://127.0.0.1:{PORTS+5} http://127.0.0.1:{PORTS+6} http://127.0.0.1:{PORTS+7} http://127.0.0.1:{PORTS+8} http://127.0.0.1:{PORTS+9} http://127.0.0.1:{PORTS+10} http://127.0.0.1:{PORTS+11} http://127.0.0.1:{PORTS+12} http://127.0.0.1:{PORTS+13} http://127.0.0.1:{PORTS+14} http://127.0.0.1:{PORTS+15} http://127.0.0.1:{PORTS+16} http://127.0.0.1:{PORTS+17} http://127.0.0.1:{PORTS+18} http://127.0.0.1:{PORTS+19} http://127.0.0.1:{PORTS+20} http://127.0.0.1:{PORTS+21} http://127.0.0.1:{PORTS+22} http://127.0.0.1:{PORTS+23} http://127.0.0.1:{PORTS+24} http://127.0.0.1:{PORTS+25}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'","content-type":"text/html; charset=utf-8","x-content-type-options":"nosniff"},"body":{"file":"hub.html"}},
+  "hub GET /nope": {"status":404,"headers":{"cache-control":"no-store","content-type":"text/plain; charset=utf-8","x-content-type-options":"nosniff"},"body":"not found"},
+  "hub GET /_next/static/chunks/app.js": {"status":404,"headers":{"cache-control":"no-store","content-type":"text/plain; charset=utf-8","x-content-type-options":"nosniff"},"body":"not found"},
+  "hub HEAD /": {"status":405,"headers":{"allow":"GET","cache-control":"no-store","content-type":"text/plain; charset=utf-8","x-content-type-options":"nosniff"},"body":""},
+  "hub POST /": {"status":405,"headers":{"allow":"GET","cache-control":"no-store","content-type":"text/plain; charset=utf-8","x-content-type-options":"nosniff"},"body":"the hub only lists, and takes the owner's threads with the operator"},
+  "browser GET /": {"status":200,"headers":{"cache-control":"no-store","content-security-policy":"frame-ancestors 'self'","content-type":"text/html; charset=utf-8","referrer-policy":"no-referrer","x-content-type-options":"nosniff"},"body":{"file":"browser.html"}},
+  "browser GET /?x=1": {"status":200,"headers":{"cache-control":"no-store","content-security-policy":"frame-ancestors 'self'","content-type":"text/html; charset=utf-8","referrer-policy":"no-referrer","x-content-type-options":"nosniff"},"body":{"file":"browser.html"}},
+  "browser HEAD /": {"status":200,"headers":{"cache-control":"no-store","content-security-policy":"frame-ancestors 'self'","content-type":"text/html; charset=utf-8","referrer-policy":"no-referrer","x-content-type-options":"nosniff"},"body":""},
+  "browser GET /nope": {"status":404,"headers":{"cache-control":"no-store","content-type":"text/plain; charset=utf-8","x-content-type-options":"nosniff"},"body":"not found\n"},
+  "browser GET /_next/static/chunks/app.js": {"status":404,"headers":{"cache-control":"no-store","content-type":"text/plain; charset=utf-8","x-content-type-options":"nosniff"},"body":"not found\n"},
+  "browser POST /": {"status":405,"headers":{"allow":"GET, HEAD","cache-control":"no-store","content-type":"text/plain; charset=utf-8","x-content-type-options":"nosniff"},"body":"method not allowed\n"},
+  "browser GET / on another Host": {"status":403,"headers":{"cache-control":"no-store","content-type":"text/plain; charset=utf-8","x-content-type-options":"nosniff"},"body":"forbidden\n"},
+};
+
+// What a server answered, in BASE's shape: the ports put back as {PORT} and {PORTS+n}.
+function shape(r, ports, files) {
+  const t = (s) => String(s).replaceAll(`:${ports.PORT}`, ':{PORT}').replace(/:(\d{4,5})\b/g, (m, n) => (Number(n) >= PORTS && Number(n) < PORTS + 100 ? `:{PORTS+${Number(n) - PORTS}}` : m));
+  const headers = {};
+  for (const k of Object.keys(r.headers).sort()) if (!['date', 'connection', 'keep-alive', 'content-length', 'transfer-encoding'].includes(k)) headers[k] = t(r.headers[k]);
+  const file = Object.entries(files).find(([, b]) => b.equals(r.body))?.[0];
+  return { status: r.status, headers, body: file ? { file } : t(r.body.toString('utf8')) };
+}
+function compare(got, name) {
+  if (RECORD) { process.stdout.write(`RECORD ${JSON.stringify(name)}: ${JSON.stringify(got)},\n`); return; }
+  assert.ok(BASE[name], `BASE has ${name}`);
+  assert.deepEqual(got, BASE[name], `${name}: as the base sent it`);
+}
+
+// The dashboard's own requests, each a name in BASE: the pages, the review helpers, and what must
+// still be refused or 404 with dashRoutesApp in the chain.
+const ARTIFACT = 'some-mock';
+const PREVIEW = 'quiet-otter';
+const QID = 'q-20261126-000000000-supervisor';
+function dashRequests(actions) {
+  return [
+    ['dash GET /', '/', {}],
+    ['dash GET /index.html', '/index.html', {}],
+    ['dash GET /view/artifact/<id>', `/view/artifact/${ARTIFACT}`, {}],
+    ['dash GET /view/preview/<name>', `/view/preview/${PREVIEW}`, {}],
+    ['dash GET /review/preview/devteam-ui.js', '/review/preview/devteam-ui.js', {}],
+    ['dash GET /review/preview/devteam-ui.css', '/review/preview/devteam-ui.css', {}],
+    ['dash GET /review/<qid>/devteam-ui.js', `/review/${QID}/devteam-ui.js`, {}],
+    ['dash GET /review/<qid>/devteam-ui.css?x=1', `/review/${QID}/devteam-ui.css?x=1`, {}],
+    ['dash GET /review/preview/other.js', '/review/preview/other.js', {}],
+    ['dash GET /review/Bad_Seg/devteam-ui.js', '/review/Bad_Seg/devteam-ui.js', {}],
+    ['dash HEAD /review/preview/devteam-ui.js', '/review/preview/devteam-ui.js', { method: 'HEAD' }],
+    ['dash HEAD /', '/', { method: 'HEAD' }],
+    ['dash GET /nope', '/nope', {}],
+    ['dash HEAD /nope', '/nope', { method: 'HEAD' }],
+    ['dash GET /devteam-ui.js', '/devteam-ui.js', {}],
+    ['dash GET /_next/static/chunks/app.js', '/_next/static/chunks/app.js', {}],
+    ['dash GET /api/nope', '/api/nope', {}],
+    ['dash POST /api/nope', '/api/nope', { method: 'POST', body: '{}' }],
+    ['dash PUT /', '/', { method: 'PUT', body: '' }],
+    // every owner POST, refused before anything runs (no Origin, no Sec-Fetch-Site): it reached dashRoutesOwner
+    ...actions.map((a) => [`dash POST /api/${a}`, `/api/${a}`, { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } }]),
+  ];
+}
+// Every name dashRoutesOwner takes a POST for: dashboardActions()'s ACTIONS and the six of its own.
+function ownerPosts() {
+  const { ACTIONS } = vm.runInNewContext(`${decl('function dashboardActions(')}\n;dashboardActions()`, {});
+  return [...Object.keys(ACTIONS), 'secret', 'review-draft', 'review-answer', 'pane-answer', 'owner-setting', 'fleet-check'];
+}
+
+test('S3 the dashboard and its hub send every page, review helper, 404 and refusal as the base did; /api/data says pageVersion', { timeout: 300000 }, async (t) => {
+  const base = scratch('dash');
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const root = bareProject(base, 'seam');
+  const dk = path.join(root, 'docs', 'devteam', 'dashboard');
+  const files = Object.fromEntries(['index.html', 'hub.html', 'devteam-ui.js', 'devteam-ui.css'].map((f) => [f, fs.readFileSync(path.join(dk, f))]));
+  // a preview whose app is a port nothing listens on: its viewer page needs only the record
+  const prev = path.join(root, 'docs', 'devteam', 'run', 'previews');
+  fs.mkdirSync(prev, { recursive: true });
+  fs.writeFileSync(path.join(prev, `${PREVIEW}.json`), JSON.stringify({ v: 1, name: PREVIEW, project: 'seam', session: 'supervisor', label: 'seam', port: PORTS + 51, cwd: root, at: new Date().toISOString(), expires: new Date(Date.now() + 86400000).toISOString() }));
+  const env = { ...process.env, HOME: scratch('home'), DEVTEAM_HUB_PORT: String(HUB), DEVTEAM_DATA_WAIT_MS: '0' };
+  const { dash, port } = await dashboardOnFreePort(root, env);
+  t.after(() => dash.stop());
+  const ports = { PORT: port };
+  for (const [name, p, o] of dashRequests(ownerPosts())) compare(shape(await ask(port, p, o), ports, files), name);
+  // the hub this dashboard started
+  for (let i = 0; i < 300; i++) { try { if ((await ask(HUB, '/instances.json')).status === 200) break; } catch {} await new Promise((r) => setTimeout(r, 100)); }
+  for (const [name, p, o] of [['hub GET /', '/', {}], ['hub GET /nope', '/nope', {}], ['hub GET /_next/static/chunks/app.js', '/_next/static/chunks/app.js', {}], ['hub HEAD /', '/', { method: 'HEAD' }], ['hub POST /', '/', { method: 'POST', body: '' }]]) compare(shape(await ask(HUB, p, o), ports, files), name);
+  // /api/data's x-devteam-page: the first 16 hex of index.html's sha256, as at the base
+  const d = await ask(port, '/api/data');
+  assert.equal(d.status, 200, `S3 /api/data: ${d.body.toString().slice(0, 300)}`);
+  assert.equal(d.headers['x-devteam-page'], sha(files['index.html']).slice(0, 16), 'S3 x-devteam-page is the sha256 of index.html');
+  if (!RECORD) assert.equal(seam().pageVersion('dashboard'), sha(fs.readFileSync(path.join(kit, 'dashboard', 'index.html'))).slice(0, 16), "S3 pageVersion('dashboard') gives it");
+});
+
+test("S4 the browser view's server sends its page, its 404, 405 and 403 as the base did, reads its page at creation and keeps it", async (t) => {
+  // a kit folder of its own, so its browser.html can change under the running server
+  const K = scratch('kit');
+  t.after(() => fs.rmSync(K, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(K, 'dashboard'));
+  const original = fs.readFileSync(path.join(kit, 'dashboard', 'browser.html'));
+  fs.writeFileSync(path.join(K, 'dashboard', 'browser.html'), original);
+  const { browserViewServer } = seam(K);
+  if (!RECORD) assert.throws(() => seam(path.join(K, 'nothing')).browserViewServer({}), /ENOENT/, 'S4 with no browser.html the server fails at its creation, as before');
+  const server = browserViewServer({});
+  // a kit sync after the daemon started: it keeps the page its code came with
+  fs.writeFileSync(path.join(K, 'dashboard', 'browser.html'), '<!doctype html><title>a newer page</title>');
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => new Promise((r) => { server.closeAllConnections?.(); server.close(() => r()); }));
+  const port = server.address().port;
+  const files = { 'browser.html': original };
+  for (const [name, p, o] of [
+    ['browser GET /', '/', {}],
+    ['browser GET /?x=1', '/?x=1', {}],
+    ['browser HEAD /', '/', { method: 'HEAD' }],
+    ['browser GET /nope', '/nope', {}],
+    ['browser GET /_next/static/chunks/app.js', '/_next/static/chunks/app.js', {}],
+    ['browser POST /', '/', { method: 'POST', body: '' }],
+    ['browser GET / on another Host', '/', { host: 'example.com' }],
+  ]) compare(shape(await ask(port, p, o), { PORT: port }, files), name);
+});
+
+// ---- the seam's wiring, read from the source ----------------------------------------------------
+
+test('S5 each server sends its page through servePage and its assets through servePageAsset; dashRoutesApp sits just before dashRoutesOwner', { skip: RECORD }, () => {
+  for (const [fn, page] of [['async function dashRoutesPage(', 'dashboard'], ['async function dashRoutesViewer(', 'dashboard'], ['function startHub(', 'hub'], ['function browserViewServer(', 'browser']]) {
+    const body = decl(fn);
+    assert.match(body, new RegExp(`servePage\\((?:D|null), req, res, '${page}', `), `S5 ${fn} calls servePage for ${page}`);
+    assert.doesNotMatch(body, /readFileSync\(page\)|'(?:index|hub|browser)\.html'/, `S5 ${fn} reads no page of its own`);
+  }
+  assert.match(decl('async function dashRoutesPage('), /'x-devteam-page': version/, 'S5 /api/data sends version');
+  assert.match(decl('async function dashRoutesPage('), /const version = pageVersion\('dashboard'\);/, "S5 version is pageVersion('dashboard')");
+  const review = decl('async function dashRoutesReviewPage(');
+  assert.match(review, /if \(file === 'devteam-ui\.css' \|\| file === 'devteam-ui\.js'\) return servePageAsset\(req, res, 'dashboard'\);/, 'S5 the review helpers go through servePageAsset');
+  assert.doesNotMatch(review, /path\.join\(kitDir, 'dashboard', file\)/, 'S5 and no read of its own');
+  assert.match(decl('function startHub('), /if \(servePageAsset\(req, res, 'hub'\) !== DASH_NEXT\) return;\n\s*return send\(404, /, "S5 the hub asks servePageAsset just before its 404");
+  assert.match(decl('function browserViewServer('), /!== '\/'\) return servePageAsset\(req, res, 'browser'\) !== DASH_NEXT \? undefined : no\(404\);/, "S5 the browser view asks servePageAsset before its 404");
+  // each caller's own policy, as at the base (a policy recorded at the base can't tell pageCsp() from pageCsp(frames) with no frames)
+  assert.match(decl('async function dashRoutesPage('), /servePage\(D, req, res, 'dashboard', pageCsp\(stageFrames\(\)\), \{ 'cache-control': 'no-store' \}\)/, "S5 / sends pageCsp(stageFrames())");
+  const viewer = decl('async function dashRoutesViewer(');
+  assert.match(viewer, /servePage\(D, req, res, 'dashboard', pageCsp\(\), \{ 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' \}\)/, "S5 /view/artifact/ sends pageCsp()");
+  assert.match(viewer, /servePage\(D, req, res, 'dashboard', pageCsp\(origin \? \[origin\] : \[\]\), \{ 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' \}\)/, "S5 /view/preview/ sends pageCsp(origin ? [origin] : [])");
+  const app = decl('function dashRoutesApp(');
+  assert.match(app, /if \(req\.method !== 'GET' && req\.method !== 'HEAD'\) return DASH_NEXT;\n\s*return servePageAsset\(req, res, 'dashboard'\);/, 'S5 dashRoutesApp takes GET and HEAD alone, then calls servePageAsset');
+  assert.ok(src.indexOf('\nfunction dashRoutesApp(') < src.indexOf('/* cmdDashboard start */'), 'S5 dashRoutesApp is outside the cmdDashboard region (ruling m-20261126-181134196)');
+  const routes = /^const DASHBOARD_ROUTES = \[([^\]]*)\];$/m.exec(src)[1].split(',').map((s) => s.trim());
+  assert.deepEqual(routes.slice(-2), ['dashRoutesApp', 'dashRoutesOwner'], 'S5 dashRoutesApp is second to last, just before dashRoutesOwner (ruling m-20261126-174823122)');
+  assert.equal(routes.filter((r) => r === 'dashRoutesApp').length, 1, 'S5 once');
+  assert.ok(!/serveAppFiles\(/.test(src.replace(decl('function serveAppFiles('), '')), 'S5 serveAppFiles has no caller at main');
+});
+
+// ---- the hub's seam is what the box image runs ---------------------------------------------------
+
+test("S7 box-pins changed names an edit to servePage or servePageAsset as an image change (the hub sends through them); serveAppFiles is not one", { timeout: 300000 }, (t) => {
+  // a kit repo from this checkout's tracked files, as they are in the working tree, tagged v9.1.0
+  const R = scratch('image');
+  t.after(() => fs.rmSync(R, { recursive: true, force: true }));
+  const REPO = path.resolve(testDir, '..');
+  const env = { ...process.env, HOME: scratch('image-home'), GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+  const git = (args) => execFileSync('git', args, { cwd: R, encoding: 'utf8', env });
+  git(['init', '-q', '-b', 'main']);
+  git(['remote', 'add', 'origin', 'git@github.com:sanctuarycomputer/devteam.git']);
+  for (const f of execFileSync('git', ['ls-files', '-z'], { cwd: REPO, encoding: 'utf8' }).split('\0').filter(Boolean)) {
+    const st = fs.lstatSync(path.join(REPO, f), { throwIfNoEntry: false });
+    if (!st) continue;
+    fs.mkdirSync(path.dirname(path.join(R, f)), { recursive: true });
+    if (st.isSymbolicLink()) fs.symlinkSync(fs.readlinkSync(path.join(REPO, f)), path.join(R, f));
+    else { fs.copyFileSync(path.join(REPO, f), path.join(R, f)); fs.chmodSync(path.join(R, f), st.mode & 0o777); }
+  }
+  git(['add', '-A']);
+  git(['commit', '-qm', 'v9.1.0']);
+  git(['tag', 'v9.1.0']);
+  const SCRIPT_REL = 'docs/devteam/scripts/devteam.mjs';
+  for (const [name, image] of [['servePage', true], ['servePageAsset', true], ['serveAppFiles', false]]) {
+    git(['checkout', '-q', '-B', `edit-${name}`, 'v9.1.0']);
+    const file = path.join(R, SCRIPT_REL);
+    const text = fs.readFileSync(file, 'utf8');
+    const head = new RegExp(`^function ${name}\\(.*\\{$`, 'm').exec(text);
+    assert.ok(head, `S7 devteam.mjs declares ${name}`);
+    fs.writeFileSync(file, text.replace(head[0], () => `${head[0]}\n  // kit-983 probe`));
+    git(['commit', '-qam', `edit ${name}`]);
+    const r = spawnSync(process.execPath, [file, 'box-pins', 'changed', '--since', 'v9.1.0'], { cwd: R, encoding: 'utf8', env, timeout: 240000 });
+    if (image) {
+      assert.equal(r.stdout, `image: ${SCRIPT_REL}#${name}\nkind: minor (1 changes the image runs)\n`, `S7 an edit to ${name} is an image change: ${r.stderr}`);
+      assert.equal(r.status, 3, `S7 ${name}: exit 3`);
+    } else {
+      assert.equal(r.stdout, 'kind: patch\n', `S7 an edit to ${name} is not: ${r.stderr}`);
+      assert.equal(r.status, 0, `S7 ${name}: exit 0`);
+    }
+  }
+});
