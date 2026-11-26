@@ -85,7 +85,7 @@ const rootWith = (html) => { const r = new El('div'); r.innerHTML = html; return
 // the JS block (and the router's table) in a context of its own
 const load = (ctx = {}) => {
   const c = vm.createContext({ URLSearchParams, ...ctx });
-  vm.runInContext(`${JS}\n${ROUTES_SRC}\n;globalThis.S = { withPage, escHtml, tabBar, tabStep, bindTabBar, dbTable, sortRows, nextSort, bindDbTable, props, goalSteps, heartbeat, PULSE_STATES, statusPill, fleetSwitch, bindFleetSwitch, registerPage, shellPages, threadsTabs, STATE_KEYS, parseHead, headFor, stampFor, closeTarget, REMEMBERED, rememberedFilters, saveFilters, SHELL_ROUTES };`, c);
+  vm.runInContext(`${JS}\n${ROUTES_SRC}\n;globalThis.S = { withPage, escHtml, tabBar, tabPanel, tabSelected, tabStep, bindTabBar, dbTable, sortRows, nextSort, bindDbTable, props, goalSteps, heartbeat, PULSE_STATES, statusPill, fleetSwitch, bindFleetSwitch, registerPage, shellPages, threadsTabs, STATE_KEYS, parseHead, headFor, stampFor, closeTarget, REMEMBERED, rememberedFilters, saveFilters, SHELL_ROUTES };`, c);
   return c.S;
 };
 const S = load();
@@ -229,6 +229,30 @@ test('tabBar: counts, disabled tabs, roving tabindex; arrows, Home and End skip 
   assert.equal(said.length, 6, 'a disabled tab and another key select nothing');
   fire(root, 'click', tab('a').children.length ? tab('a').children[0] : tab('a'));
   assert.equal(said.at(-1), 'a', 'a click on an enabled tab (or inside it) selects it');
+});
+
+test('terminal A2: the tab bar', () => {
+  const tabs = [{ id: 'open', label: 'Open', count: 2 }, { id: 'x', label: 'X', disabled: true }];
+  // A2a: panel and size add the tablist's size class and each tab's id and aria-controls
+  const sub = S.tabBar({ tabs, selected: 'open', panel: 'th-list', size: 'sub' });
+  assert.ok(sub.includes('<div class="tabbar sub" role="tablist">'), sub);
+  assert.ok(sub.includes('data-tab="open" id="tab-th-list-open" aria-controls="th-list"'), sub);
+  assert.ok(sub.includes('data-tab="x" id="tab-th-list-x" aria-controls="th-list"'), sub);
+  // A2b: tabPanel is labelled by the tab tabBar selects
+  assert.equal(S.tabPanel({ panel: 'th-list', tabs, selected: 'open' }, '<p>x</p>'), '<div role="tabpanel" id="th-list" aria-labelledby="tab-th-list-open"><p>x</p></div>');
+  assert.equal(S.tabPanel({ panel: 'th-list', tabs, selected: 'x' }, '<p>x</p>'), '<div role="tabpanel" id="th-list" aria-labelledby="tab-th-list-open"><p>x</p></div>', 'a disabled selection labels by the first enabled tab');
+  assert.equal(S.tabPanel({ panel: 'A b', tabs, selected: 'open' }, '<p>x</p>'), '<p>x</p>');
+  assert.equal(S.tabPanel({ panel: '', tabs, selected: 'open' }, '<p>x</p>'), '<p>x</p>');
+  assert.equal(S.tabPanel({ panel: 'th-list', tabs, selected: 'open' }, null), '<div role="tabpanel" id="th-list" aria-labelledby="tab-th-list-open"></div>');
+  const odd = [{ id: 'a b', label: 'A' }];
+  const oddBar = S.tabBar({ tabs: odd, selected: 'a b', panel: 'th-list' });
+  assert.ok(!oddBar.includes(' id="tab-') && !oddBar.includes('aria-controls'), oddBar);
+  assert.equal(S.tabPanel({ panel: 'th-list', tabs: odd, selected: 'a b' }, 'h'), '<div role="tabpanel" id="th-list">h</div>');
+  assert.equal(S.tabPanel({ panel: 'th-list', tabs: [{ id: 'x', label: 'X', disabled: true }] }, 'h'), '<div role="tabpanel" id="th-list">h</div>', 'no enabled tab: no aria-labelledby');
+  // A2e: without panel (and with a bad panel and size) it is today's output, a literal pasted from the unchanged builder
+  const today = '<div class="tabbar" role="tablist"><button type="button" role="tab" data-tab="open" aria-selected="true" tabindex="0">Open <span class="n">2</span></button><button type="button" role="tab" data-tab="x" aria-selected="false" tabindex="-1" aria-disabled="true">X</button></div>';
+  assert.equal(S.tabBar({ tabs, selected: 'open' }), today);
+  assert.equal(S.tabBar({ tabs, selected: 'open', panel: 'A b', size: 'big' }), today);
 });
 
 test('dbTable: numeric sort, a second press reverses, None when empty; onOpen gets the index as passed', () => {
@@ -665,6 +689,7 @@ const BREAK = {
 const EXTRA = [
   ['overflow', "document.querySelector('#small p').style.marginLeft = '-60px';"],
   ['header-pad', "document.querySelector('.pagebar').style.paddingRight = '24px';"],
+  ['tab-motion', "document.querySelector('.tabbar.sub [role=tab]').style.transition = 'color 1s'"],
 ];
 // a page's own prose and ignore add to the defaults
 test('measure options: a page adds to prose and ignore', async () => {
@@ -692,6 +717,9 @@ test('the measure: every check passes on the fixture at three sizes and fails on
   const res = await measureAt(p, url, { ready: 'window.__ready' });
   assert.deepEqual(Object.keys(res), SIZES.map(([w, h]) => `${w}x${h}`));
   for (const [size, fails] of Object.entries(res)) assert.deepEqual(fails, [], `the fixture at ${size}`);
+  // A4: the sub bar is 30px tall and its panel is labelled by its selected tab
+  assert.equal(await p.ev("(() => { const t = document.querySelector('.tabbar.sub [role=\"tab\"]'); return t && getComputedStyle(t).height; })()"), '30px', 'the fixture has a .tabbar.sub whose first tab is 30px tall');
+  assert.equal(await p.ev("(() => { const e = document.querySelector('[role=\"tabpanel\"]#fx-list'); return e && e.getAttribute('aria-labelledby'); })()"), 'tab-fx-list-open');
   // the c6 pair side by side at 720
   await p.send('Emulation.setDeviceMetricsOverride', { width: 720, height: 800, deviceScaleFactor: 1, mobile: false });
   await p.send('Page.navigate', { url });

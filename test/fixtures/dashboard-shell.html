@@ -32,6 +32,8 @@ const DAYS = Array.from({ length: 14 }, (_, i) => ({ day: new Date(Date.UTC(2026
 const head = (title, end = '') => `<div class="card-head"><span class="grow">${escHtml(title)}</span>${end}</div>`;
 const more = '<button type="button" class="end" aria-label="More">⋯</button>';
 document.getElementById('view').innerHTML = `${tabBar({ tabs: TABS, selected: 'active' })}
+${tabBar({ tabs: [{ id: 'open', label: 'Open', count: 1 }, { id: 'resolved', label: 'Resolved', count: 2 }], selected: 'open', panel: 'fx-list', size: 'sub' })}
+${tabPanel({ panel: 'fx-list', tabs: [{ id: 'open', label: 'Open', count: 1 }, { id: 'resolved', label: 'Resolved', count: 2 }], selected: 'open' }, '<p>One open thread.</p>')}
 <div style="height:16px"></div>
 <div class="g12" id="pair">
   <div class="c6 card" id="left">${head('The first goal', more)}<p>One short line of running text.</p>${goalSteps({ step: 3, built: { frac: 0.4, text: '4 of 10 points' }, met: null })}<div class="foot">Opened Nov 2</div></div>
