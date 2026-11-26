@@ -1327,6 +1327,8 @@ try {
   #view-only { color: var(--amber-fg); background: color-mix(in srgb, var(--amber) 16%, transparent); }
   #view-only-toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 60; max-width: min(90vw, 480px); padding: 8px 14px; border-radius: 8px; background: var(--fg); color: var(--bg); font-size: 13px; box-shadow: 0 4px 16px rgb(0 0 0 / .18); }
 /* css-view-only end */
+/* term-css start */
+/* term-css end */
 </style>
 </head>
 <body class="shell">
@@ -9926,7 +9928,8 @@ const tlOwn = (el) => !!el?.closest?.('#tl, #threads') && !inInbox(el);
 // as a press's (tlOwn), so the two can't drift.
 const layerField = tlOwn;
 // a text field in the Inbox tab: Escape there is the field's, and closes nothing (kit-100 spec §2.7)
-const inboxTyping = (el) => inInbox(el) && (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && el.type === 'text'));
+// and a terminal tab's screen (kit-614): its keys, Escape among them, are the terminal's
+const inboxTyping = (el) => (inInbox(el) && (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && el.type === 'text'))) || !!el?.closest?.('.term-screen');
 const tlShowing = () => !tlEl('tl-cursor').hidden;
 // A thread's card open floating (beside its pin, or a draft), not the panel's in-panel thread: an Escape
 // over the viewer closes it before the viewer (kit-141 spec §Approach 7).
@@ -10248,7 +10251,7 @@ async function tlRoute(id) {
   // clicked on (cold: talk's home), the recorded page head given th and t; the router's part draws it
   if (tlInPanel(t)) {
     const p = parseHead(thHead(), SHELL_ROUTES);
-    history.replaceState(withPage(history.state, headFor({ page: p.page, state: { ...p.state, th: TH_LISTS.includes(p.state.th) ? p.state.th : 'open', t: id } })), '');
+    history.replaceState(withPage(history.state, headFor({ page: p.page, state: { ...p.state, th: TH_LISTS.includes(p.state.th) && !isTermTab(p.state.th) ? p.state.th : 'open', t: id } })), '');
     HERE = history.state;
     TL.route = id;
     return void thRoute();
@@ -10256,7 +10259,7 @@ async function tlRoute(id) {
   // its subject's page head, the panel's th kept and t added (kit-89 spec §2.5)
   const cur = parseHead(thHead(), SHELL_ROUTES), sp = parseHead(subjectHead(t.subject), SHELL_ROUTES);
   // (a thread whose home is the Inbox keeps the th=inbox its subject's head has, kit-100 spec §2.6)
-  const head = headFor({ page: sp.page, state: { ...sp.state, ...(TH_LISTS.includes(cur.state?.th) && !tlInboxHome(t) ? { th: cur.state.th } : {}), t: id } });
+  const head = headFor({ page: sp.page, state: { ...sp.state, ...(TH_LISTS.includes(cur.state?.th) && !tlInboxHome(t) ? { th: isTermTab(cur.state.th) ? 'open' : cur.state.th } : {}), t: id } });
   history.replaceState(withPage(history.state, head), '');
   HERE = history.state;
   // the page head changed after the router's part drew the panel from the old one
@@ -10992,8 +10995,8 @@ function tlPinsInto(box, pins, held) {
 // thread whose row 'row' means), the thread the route last opened (opened: a t gone closes it), a + draft's
 // thread waiting for its id in the threads (adopt), and an Inbox road's ask that the panel come on top once drawn (front).
 const TH = { th: null, t: null, tabs: null, pane: null, focus: null, focusRow: null, opened: null, adopt: null, ask: null, front: false };
-const TH_LISTS = ['open', 'resolved', 'inbox'];
-const TH_TITLES = { supervisor: "The supervisor's terminal: the follow-on goal", shell: 'A plain shell at the repo root: the follow-on goal' };
+const TH_LISTS = ['open', 'resolved', 'inbox', 'supervisor', 'shell'];
+const TH_TITLES = { supervisor: "The supervisor's own terminal", shell: "A shell at the project's root, in its own window" };
 // An open thread's one state, by kit-84's rule (the hub's threads: { you, waiting, ready }), so the button
 // here and the hub's tab agree: ready to accept, else your move (the supervisor spoke last, or no turns),
 // else waiting on the supervisor. The owner's pending presses are laid over TL.threads, so a send moves it.
@@ -11060,8 +11063,9 @@ function thListHtml() {
 // /view/ tab (no Inbox data, no render()) the pane is one line to the dashboard's Inbox; the count is hello's (kit-100 spec §2.8).
 threadsTabs.register({ id: 'inbox', label: 'Inbox', count: () => inboxCount() || null, render: (el) => { el.innerHTML = VIEWER ? '<p><a class="linkish" href="/#overview?th=inbox">Answer questions on the dashboard.</a></p>' : ''; } });
 threadsTabs.register({ id: 'threads', label: 'Threads', count: () => tCounts(TL.threads).you || null, render: (el) => { el.innerHTML = thListHtml(); } });
-threadsTabs.register({ id: 'supervisor', label: 'Supervisor', disabled: true });
-threadsTabs.register({ id: 'shell', label: 'Shell', disabled: true });
+// The terminal tabs (kit-614, terminal@1): each pane is its tab's box, drawn by #term-js; disabled in the /view/ tab
+threadsTabs.register({ id: 'supervisor', label: 'Supervisor', disabled: !!VIEWER, render: (el) => termRender('supervisor', el) });
+threadsTabs.register({ id: 'shell', label: 'Shell', disabled: !!VIEWER, render: (el) => termRender('shell', el) });
 // The button: its thread count (none with no open thread) and its words, each written only when it changed,
 // so a press on it survives every poll. #tt-peek copies its content, label and title.
 function thButton() {
@@ -11091,9 +11095,11 @@ function thDraw({ view = false } = {}) {
   thButton();
   const tabs = $('th-tabs'), pane = $('th-pane');
   if (!tabs || !pane) return;
-  // th=inbox selects the Inbox tab; open and resolved, or none, Threads
-  const sel = TH.th === 'inbox' ? 'inbox' : 'threads';
-  const th = tabBar({ tabs: threadsTabs.list().map((t) => ({ ...t, waiting: t.id === 'threads' })), selected: sel });
+  // th=inbox selects the Inbox tab, supervisor and shell their terminal tabs (none while termTabsOff: a View person's
+  // refusal hides them); open and resolved, or none, Threads
+  const off = termTabsOff();
+  const sel = TH.th === 'inbox' || (isTermTab(TH.th) && !off) ? TH.th : 'threads';
+  const th = tabBar({ tabs: threadsTabs.list().filter((t) => !(off && isTermTab(t.id))).map((t) => ({ ...t, waiting: t.id === 'threads' })), selected: sel });
   if (th !== TH.tabs && (view || !tlHeld(tabs))) {
     TH.tabs = th;
     tabs.innerHTML = th;
@@ -11104,16 +11110,18 @@ function thDraw({ view = false } = {}) {
   const key = `${sel}:${html}`;
   if (key !== TH.pane && (view || !tlHeld(pane))) { TH.pane = key; threadsTabs.render(sel, pane); askDraw(); }
   // the Inbox: shown only while the panel is open on its tab (a closed panel keeps its boxes, kit-100 spec §2.2)
-  const inbox = $('th-inbox'), off = !TH.th || sel !== 'inbox' || !!VIEWER; // never in /view/: no data, its tab's pane says where to go
+  const inbox = $('th-inbox'), noInbox = !TH.th || sel !== 'inbox' || !!VIEWER; // never in /view/: no data, its tab's pane says where to go
   // shown or hidden, the pins and a floating card on its cards placed again (kit-100 spec §2.6)
-  if (inbox && inbox.hidden !== off) { inbox.hidden = off; tlReplace(); }
-  // and no in-panel card beside it: a + draft left on Threads waits there, hidden
+  if (inbox && inbox.hidden !== noInbox) { inbox.hidden = noInbox; tlReplace(); }
+  // and no in-panel card beside it or a terminal: a + draft left on Threads waits there, hidden
   const slot = $('th-card-slot');
-  if (slot && slot.hidden !== (sel === 'inbox')) slot.hidden = sel === 'inbox';
+  if (slot && slot.hidden !== (sel !== 'threads')) slot.hidden = sel !== 'threads';
+  // the terminal tabs follow: polling only the one shown, Wide and the hidden + (kit-614)
+  termSync(TH.th && sel === TH.th && isTermTab(sel) ? sel : null);
 }
 // Choosing a tab is a Threads change (kit-100 spec §2.2): Inbox gives th=inbox, Threads th=open; an in-panel t is
 // dropped either way (thGo keeps a floating one).
-bindTabBar($('th-tabs'), { onSelect: (id) => { thSync(); if (id !== (TH.th === 'inbox' ? 'inbox' : 'threads')) thGo({ th: id === 'inbox' ? 'inbox' : 'open', focus: 'tab' }); } });
+bindTabBar($('th-tabs'), { onSelect: (id) => { thSync(); const at = TH.th === 'inbox' || isTermTab(TH.th) ? TH.th : 'threads'; if (id !== at) thGo({ th: id === 'threads' ? 'open' : id, focus: 'tab' }); } });
 // The page head in force: the entry's own, or under a link head (a peek, the viewer, a preview, a review,
 // talk/) the page head under it, history.state.page.
 function thHead() {
@@ -11206,6 +11214,8 @@ function thDecide() {
   // bad values (the block's parseHead keeps any): th open or resolved, t a thread id
   if (s.th !== undefined && !TH_LISTS.includes(s.th)) delete s.th;
   if (s.t !== undefined && !TH_ID.test(s.t)) delete s.t;
+  // th=supervisor and th=shell exclude t and u (dashboard-shell@3, th): the panel shows the terminal, not a thread
+  if (isTermTab(s.th)) { delete s.t; delete s.u; }
   // a t named before the first read: that read decides it
   if (s.t && !TL.have && TH.ask?.t !== s.t) TH.ask = { t: s.t, seq: 0 };
   if (s.t && thReady()) {
@@ -11673,6 +11683,14 @@ window.addEventListener('message', (e) => {
   }
 });
 /* threads-layer end */
+/* term-js start */
+// The Supervisor and Shell tabs (kit-614; terminal@1): the routing parts' names, drawn by later tasks
+const TERM_IDS = ['supervisor', 'shell'];
+const isTermTab = (id) => TERM_IDS.includes(id);
+const termTabsOff = () => false;
+function termSync() {}
+function termRender() {}
+/* term-js end */
 
 // Not under someone mid-action: a redraw replaces the controls it draws, so typing, an IME
 // composition, an open select or file picker, a press not yet released (the click would land on
