@@ -49,14 +49,17 @@ const alive = async (port, what) => {
 const BAD = ['//', '///', '//:', '//a:99999', '//a:x', '//[', '//[::1', '//a%zz', '//%', '/\\', '//@', '//a@', 'http://', 'https://a:99999/', '//xn--', '//256.256.256.256', '//1.2.3.4.5', '//[1::2::3]'];
 
 async function dashboard(t, { drop = [] } = {}) {
+  // one hook, in this order: the dashboard stopped (its group gone), then its fixture removed, so
+  // nothing it started is still writing into a folder being removed
   const base = scratch('dash');
-  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  let dash = null;
+  t.after(async () => { await dash?.stop(); fs.rmSync(base, { recursive: true, force: true }); });
   const root = bareProject(base, 'guard');
   for (const f of drop) fs.rmSync(path.join(root, 'docs', 'devteam', 'dashboard', f));
   const env = { ...process.env, HOME: scratch('home'), DEVTEAM_HUB_PORT: String(HUB), DEVTEAM_DATA_WAIT_MS: '0' };
   for (const k of Object.keys(env)) if (k.startsWith('DEVTEAM_') && !['DEVTEAM_HUB_PORT', 'DEVTEAM_DATA_WAIT_MS', 'DEVTEAM_PORT_BASE', 'DEVTEAM_TEST_SHARED_TMP'].includes(k)) delete env[k];
-  const { dash, port } = await dashboardOnFreePort(root, env);
-  t.after(() => dash.stop());
+  let port;
+  ({ dash, port } = await dashboardOnFreePort(root, env));
   return { dash, port, root };
 }
 
