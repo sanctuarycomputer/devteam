@@ -293,3 +293,24 @@ test('terminal A18c: the first entry is stamped on load; hub-route keeps the mar
   await until(() => F.seen.filter((x) => x.host === hostA).length > loadsA && F.seen.filter((x) => x.host === hostA).at(-1).hash === '#goals', "alpha's new frame at its entry's head");
   assert.equal(await p.ev('history.length'), len0 + 3, 'the step pushes nothing');
 });
+
+test("terminal A18d: a frame's hub-route between a typed hash's popstate and its hashchange keeps its head but leaves the typed hash to open", CHROME, async (t) => {
+  const F = await fixture(t, { ports: 2 });
+  const [PA, PB] = F.ports;
+  F.list = [hello('alpha', PA), hello('beta', PB)];
+  const p = await hubPage(t, F, '#alpha');
+  await p.until("alpha's tab", isOn('alpha'));
+  await until(() => F.loadsAt(`127.0.0.1:${PA}`) > 0, "alpha's frame loaded");
+  await p.until("alpha's first head", `location.hash === '#alpha/overview'`);
+  // the race, made certain: alpha's frame's hub-route arrives after the typed hash's popstate and before its
+  // hashchange (a capture listener runs before the hub's own; the message carries the frame's own source and origin)
+  await p.ev(`(() => {
+    const it = items.get('/srv/alpha');
+    window.addEventListener('popstate', () => window.dispatchEvent(new MessageEvent('message', { data: { devteam: 'hub-route', head: '#board' }, origin: new URL(urlOf(it.x)).origin, source: it.frame.contentWindow })), { capture: true, once: true });
+    return true;
+  })()`);
+  await p.ev(`location.hash = '#beta', true`);
+  await p.until("beta's tab, from the typed hash", isOn('beta'));
+  assert.match(await p.ev('location.hash'), /^#beta/, 'the typed hash opened, not overwritten by the route');
+  assert.equal(await p.ev(`items.get('/srv/alpha').head`), '#board', "alpha's head kept from its route");
+});

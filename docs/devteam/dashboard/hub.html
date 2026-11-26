@@ -1348,7 +1348,8 @@ window.addEventListener('message', (ev) => {
   try { origin = new URL(urlOf(it.x)).origin; } catch {}
   if (!origin || ev.origin !== origin) return;
   it.head = m.head;
-  if (selected === it.x.root) hubWrite(it);
+  // not over a hash typed, pasted or linked whose hashchange hasn't run yet: that hashchange decides
+  if (selected === it.x.root && hubTyped !== location.hash) hubWrite(it);
   hubBase(it);
 });
 // An address the hub didn't write (a link, a push, one typed): a project at a head opens it there;
@@ -1357,6 +1358,7 @@ window.addEventListener('message', (ev) => {
 window.addEventListener('hashchange', () => {
   // never a choice, and nothing to do for a Back or Forward step the popstate below took
   hubChoosing = false;
+  hubTyped = null;
   if (hubPopAt !== null) { const was = hubPopAt; hubPopAt = null; if (was === location.hash) return; }
   const { key, head, ot } = hubHead();
   if (key === 'overview') {
@@ -1414,6 +1416,8 @@ tabsEl.addEventListener('keydown', (e) => {
 // a hub-route, a hash typed by hand, the step itself) replaces the entry and keeps it marked. A choice
 // is what runs inside a click on the hub's page, or the tab bar's keys (hubChoose).
 let hubChoosing = false;
+// a hash typed, pasted or linked: its popstate comes before its hashchange, and a frame's hub-route may land between
+let hubTyped = null;
 window.addEventListener('click', () => { hubChoosing = true; setTimeout(() => { hubChoosing = false; }); }, true);
 function hubChoose(root) {
   if (root === selected) return;
@@ -1423,6 +1427,7 @@ function hubChoose(root) {
 const hubMarked = (s) => Boolean(s) && typeof s === 'object' && s.hub === 1 && typeof s.key === 'string';
 // the address, marked with its key (the hash's first part, as written): a new entry only for a choice that changes it
 function hubAddr(url, mayPush = false) {
+  hubTyped = null;
   const state = { hub: 1, key: String(url).replace(/^#/, '').split('/')[0].split('?')[0] };
   if (mayPush && hubChoosing && url !== location.hash) { hubChoosing = false; history.pushState(state, '', url); }
   else history.replaceState(state, '', url);
@@ -1431,7 +1436,7 @@ function hubAddr(url, mayPush = false) {
 let hubPopAt = null;
 window.addEventListener('popstate', (e) => {
   hubChoosing = false;
-  if (!hubMarked(e.state)) return;
+  if (!hubMarked(e.state)) { hubTyped = location.hash; return; }
   let k;
   try { k = decodeURIComponent(e.state.key); } catch { return; }
   const it = k === 'overview' || k === 'settings' || k === 'terminal' ? null : hubFind(k);
