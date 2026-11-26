@@ -19292,6 +19292,12 @@ function cmdChore() {
     // the jobs' chore started past Upkeep's hold is the supervisor's call, so it is logged (kit-162)
     const holdRefs = ['upkeep', 'chore-recurring'];
     if (um !== 'run' && slugName === 'recurring') appendLog({ type: 'act', class: 'goal-hold', what: `started chore-recurring while Upkeep is ${um === 'drain' ? 'drained' : holdWords(um)}, with --force`, refs: holdRefs, reversible: true }, 'supervisor');
+    // a kit sync pins the release it copies (kit-install@1), best effort, in a new worktree only;
+    // whatever the pin says, the chore has started (packagePin's sync call, dormant until kit-957)
+    if (made && slugName.startsWith('devteam-sync-')) {
+      const p = packagePin(path.join(wt, kitRel), slugName.slice('devteam-sync-'.length), { sync: wt });
+      if (p) process.stderr.write(`${p.line}${p.exit ? '; the chore goes on' : ''}\n`);
+    }
     return out(wt);
   }
   if (sub === 'adopt' || sub === 'drop') {
@@ -33888,13 +33894,25 @@ function npmRun(args, { cwd, timeout = 120000 } = {}) {
 // package-lock.json into kitDir, packagePinPair's output for the registry's manifest of
 // <package_name from main's settings>@<tag without its v>, layout from the manifest's devteam.layout.
 // It returns { exit, line } and throws nothing; only the kit's own log write can still die (a refused
-// line, the log's lock past its wait). Best effort before layout 2: no npm on PATH, an npm older than 9.5, a registry that can't be reached and a version not published leave both files
+// line, the log's lock past its wait), which is why chore start runs it as a command of its own. Best effort before layout 2: no npm on PATH, an npm older than 9.5, a registry that can't be reached and a version not published leave both files
 // as they were, exit 0, and log a package-pin-skipped observation naming the cause, which
 // packagePinFindings turns into a finding; a pin written logs package-pinned, which clears it. A tag that
 // isn't vX.Y.Z, a bad DEVTEAM_NPM_REGISTRY, a temp folder it can't make, an unreadable main, a manifest packagePinPair won't take, a
 // failed write and any other npm failure exit 1 and write nothing (an npm failure is logged as a skip
 // too, so it shows).
-function packagePin(kitDir, tag) {
+// With { sync: <the worktree> } it is chore start's call for a kit sync: while SYNC_PINS is false it
+// does nothing and returns null (kit-955 ships the call dormant: until merge's checks take the pair,
+// kit-957, a sync PR carrying it would need an owner's answer); kit-957 sets it true. On, it runs
+// `package pin <tag>` as a command of its own in that worktree, so nothing the pin does (a die in its
+// log write included) ends the start, and returns { exit, line } from what that command printed.
+function packagePin(kitDir, tag, { sync = null } = {}) {
+  const SYNC_PINS = false;
+  if (sync !== null) {
+    if (!SYNC_PINS) return null;
+    const p = spawnSync(process.execPath, [fileURLToPath(import.meta.url), 'package', 'pin', String(tag)], { cwd: sync, encoding: 'utf8', timeout: 300000, stdio: ['ignore', 'pipe', 'pipe'] });
+    const said = `${p.stdout ?? ''}${p.stderr ?? ''}`.trim();
+    return { exit: p.status ?? 1, line: said || `package pin ${tag}: ended without a word (${p.error?.code ?? p.signal ?? `exit ${p.status}`})` };
+  }
   const m = /^v((?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8}))$/.exec(typeof tag === 'string' ? tag : '');
   if (!m) return { exit: 1, line: `package pin: ${JSON.stringify(String(tag ?? '').slice(0, 80))} is not a release tag vX.Y.Z; nothing pinned` };
   const version = m[1];

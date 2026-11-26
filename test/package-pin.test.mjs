@@ -30,10 +30,18 @@ function pinPairFn() {
 const packagePinPair = pinPairFn();
 
 // A fixture instance: the kit copied in, init run, main pushed to a bare origin of its own.
-function instance(name) {
+// { syncOn }: the fixture's kit with chore start's pin turned on (SYNC_PINS, which kit-957 sets; kit-955
+// ships it false)
+function instance(name, { syncOn = false } = {}) {
   const base = scratch(name);
   const origin = path.join(base, 'origin.git');
   const root = bareProject(base, 'pkg');
+  if (syncOn) {
+    const f = path.join(root, 'docs', 'devteam', 'scripts', 'devteam.mjs');
+    const src = fs.readFileSync(f, 'utf8');
+    assert.equal(src.split('const SYNC_PINS = false;').length, 2, 'the kit declares SYNC_PINS false, once');
+    fs.writeFileSync(f, src.replace('const SYNC_PINS = false;', 'const SYNC_PINS = true;'));
+  }
   const g = (args, cwd = root) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin]);
   g(['remote', 'add', 'origin', origin]);
@@ -247,5 +255,66 @@ test('C6 a tag that is not vX.Y.Z exits 1, asks npm nothing and writes nothing',
     assert.doesNotMatch(r.stderr, /\n\s+at /, 'C6 an unusable TMPDIR: no stack trace');
     assert.equal(reg.calls().length, 0, 'C6 npm is never called');
     assert.deepEqual(I.pair(), { 'package.json': null, 'package-lock.json': null }, 'C6 nothing written');
+  } finally { await reg.close(); }
+});
+
+test('C7 chore start devteam-sync-<tag> pins in the new worktree and prints the line; another slug pins nothing', async () => {
+  const I = instance('c7', { syncOn: true });
+  const reg = await startFakeRegistry();
+  try {
+    const env = { ...reg.env(I.clean), DEVTEAM_ROLE: 'supervisor' };
+    const want = await expected(reg, '0.101.0');
+    let r = I.dt(['chore', 'start', 'devteam-sync-v0.101.0'], env);
+    assert.equal(r.status, 0, `C7 the chore starts: ${r.stderr}`);
+    const wt = path.join(I.root, '.worktrees', 'chore-devteam-sync-v0.101.0');
+    assert.equal(fs.realpathSync(r.stdout.trim()), fs.realpathSync(wt), 'C7 stdout is the worktree, as before');
+    assert.match(r.stderr, /package pin v0\.101\.0: pinned @sanctuarycomputer\/devteam@0\.101\.0/, 'C7 the pin\'s line is printed');
+    assert.deepEqual(I.pair(path.join(wt, 'docs', 'devteam')), want.pair, 'C7 the worktree holds the pair');
+    assert.deepEqual(I.pair(), { 'package.json': null, 'package-lock.json': null }, 'C7 the main checkout is untouched');
+    const calls = reg.calls().length;
+    r = I.dt(['chore', 'start', 'notes-pin'], env);
+    assert.equal(r.status, 0, `C7 another chore starts: ${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /package pin/, 'C7 another slug prints no pin line');
+    assert.equal(reg.calls().length, calls, 'C7 another slug calls no npm');
+    assert.deepEqual(I.pair(path.join(I.root, '.worktrees', 'chore-notes-pin', 'docs', 'devteam')), { 'package.json': null, 'package-lock.json': null }, 'C7 another slug writes no pin');
+  } finally { await reg.close(); }
+});
+
+test('C8 a pin that fails never stops the chore from starting', async () => {
+  const I = instance('c8', { syncOn: true });
+  const reg = await startFakeRegistry({ fail: 'unreachable' });
+  try {
+    const env = { ...reg.env(I.clean), DEVTEAM_ROLE: 'supervisor' };
+    for (const [slug, e, says] of [
+      ['devteam-sync-v0.100.0', env, /package pin v0\.100\.0: skipped \(unreachable\)/],
+      ['devteam-sync-v0.99.0', { ...env, DEVTEAM_NPM_REGISTRY: 'http://localhost:1/' }, /DEVTEAM_NPM_REGISTRY/],
+      ['devteam-sync-v1.0.0', { ...env }, null],
+      ['devteam-sync-nightly', env, /is not a release tag vX\.Y\.Z/],
+    ]) {
+      if (says === null) {
+        // npm missing: a PATH holding git alone
+        const bin = scratch('git-only');
+        fs.symlinkSync(GIT, path.join(bin, 'git'));
+        e.PATH = bin;
+      }
+      const r = I.dt(['chore', 'start', slug], e);
+      assert.equal(r.status, 0, `C8 ${slug}: the chore starts (${r.stderr})`);
+      assert.ok(fs.existsSync(path.join(I.root, '.worktrees', `chore-${slug}`, 'docs', 'devteam', 'scripts', 'devteam.mjs')), `C8 ${slug}: its worktree is there`);
+      assert.match(r.stderr, says ?? /skipped \(no-npm\)/, `C8 ${slug}: the pin's line says why`);
+      assert.deepEqual(I.pair(path.join(I.root, '.worktrees', `chore-${slug}`, 'docs', 'devteam')), { 'package.json': null, 'package-lock.json': null }, `C8 ${slug}: no pair written`);
+    }
+  } finally { await reg.close(); }
+});
+
+test('C9 the kit as shipped (SYNC_PINS false): chore start devteam-sync-<tag> starts, pins nothing, asks npm nothing', async () => {
+  assert.equal(SRC.split('const SYNC_PINS = false;').length, 2, 'C9 the kit ships SYNC_PINS false, once');
+  const I = instance('c8b');
+  const reg = await startFakeRegistry();
+  try {
+    const r = I.dt(['chore', 'start', 'devteam-sync-v0.101.0'], { ...reg.env(I.clean), DEVTEAM_ROLE: 'supervisor' });
+    assert.equal(r.status, 0, `C9 the chore starts: ${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /package pin/, 'C9 no pin line');
+    assert.equal(reg.calls().length, 0, 'C9 no npm call');
+    assert.deepEqual(I.pair(path.join(I.root, '.worktrees', 'chore-devteam-sync-v0.101.0', 'docs', 'devteam')), { 'package.json': null, 'package-lock.json': null }, 'C9 no pair in the sync\'s worktree');
   } finally { await reg.close(); }
 });
