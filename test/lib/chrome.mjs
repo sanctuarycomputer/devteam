@@ -1,7 +1,7 @@
 // Real headless Chrome, driven over the DevTools Protocol: real mouse and key events, for what a
 // synthetic DOM event can't show (where focus goes, what a space bar scrolls). A machine with no
 // Chrome, or a Node with no WebSocket (before 22), skips what needs it.
-import { spawn, spawnSync } from 'node:child_process';
+import { execFile, spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -30,18 +30,121 @@ export const chromeArgs = (profile) => [
   'about:blank',
 ];
 
+// A process's state, the third field of /proc/<pid>/stat, in a word
+const STATES = { R: 'running', S: 'sleeping', D: 'uninterruptible', T: 'stopped', t: 'traced', Z: 'zombie', X: 'dead', I: 'idle', P: 'parked', W: 'paging', K: 'wakekill' };
+// A Chrome process's type, from its command line (Chrome rewrites it into one line: its --type=, and a
+// utility's --utility-sub-type=): no --type is the browser itself.
+const typeOf = (cmdline) => {
+  const type = cmdline.match(/(?:^|[\s\0])--type=([^\s\0]+)/)?.[1];
+  if (!type) return 'browser';
+  if (type === 'gpu-process') return 'GPU';
+  if (type !== 'utility') return type;
+  const sub = cmdline.match(/(?:^|[\s\0])--utility-sub-type=([^\s\0]+)/)?.[1] ?? '';
+  return { 'network.mojom.NetworkService': 'network', 'storage.mojom.StorageService': 'storage' }[sub] ?? (sub ? `utility ${sub.split('.').pop()}` : 'utility');
+};
+// /proc/<pid>/stat after the command's name (which may hold spaces and parentheses): its state, and utime + stime
+const statOf = (text) => { const f = text.slice(text.lastIndexOf(')') + 2).split(' '); return { state: f[0], ticks: Number(f[11]) + Number(f[12]) }; };
+
+// The machine's processes as [pid, process group] pairs, by one ps (which reads no command line), killed at ms
+const listed = (ms) => new Promise((ok, no) => execFile('ps', ['-e', '-o', 'pid=,pgid='], { timeout: ms, killSignal: 'SIGKILL' }, (e, out) => (e ? no(new Error(e.killed ? `ps: no answer in ${ms / 1000} s` : `ps: ${e.message.split('\n')[0]}`)) : ok(out.trim().split('\n').map((l) => l.trim().split(/\s+/).map(Number))))));
+
+// The two places every /proc read and ps in this test process takes, whichever call it is for: node's file reads share
+// one pool of threads (4 by default), so a read the kernel holds holds one of them until it settles, and two places in
+// all leave the pool at least two. A place is given back only when its read settles, never when a caller gives up.
+const places = { inFlight: 0, queue: [] };
+const take = () => (places.inFlight < 2 ? (places.inFlight++, Promise.resolve()) : new Promise((r) => places.queue.push(r)));
+const give = () => { const next = places.queue.shift(); if (next) next(); else places.inFlight--; };
+
+// Every process of the Chrome whose process group is pgid (the group close() signals), each with its type
+// (browser, zygote, GPU, network, storage, another utility, each renderer), its state and its CPU over about
+// `window` ms. Which processes: one ps of the machine; the rest from each one's /proc/<pid>/stat (twice) and
+// cmdline. Every read, the ps counted as one, takes one of the module's two places (above), so across every
+// call at once at most two reads are in flight. Each read is waited for `each` ms (the ps, a process to
+// start, `2 * each`) and the whole look `total` ms; what was not read by then says so (a call after held
+// reads that never settle reads nothing, and says so).
+// io ({ proc, list, readFile }) is this machine's unless a test gives its own.
+export async function processesOf(pgid, { io = { proc: fs.existsSync('/proc/self/stat'), list: listed, readFile: fs.promises.readFile }, each = 1000, window = 1000, total = 4000 } = {}) {
+  if (!io.proc) return 'processes: no /proc here';
+  let over = false;
+  const read = async (f, ms = each) => {
+    await take();
+    if (over) { give(); throw new Error('not read in time'); }
+    const r = Promise.resolve().then(f);
+    r.then(give, give);
+    let t;
+    try { return await Promise.race([r, new Promise((_, no) => { t = setTimeout(() => no(new Error(`no answer in ${ms / 1000} s`)), ms); })]); } finally { clearTimeout(t); }
+  };
+  const file = (pid, name) => read(() => io.readFile(`/proc/${pid}/${name}`, 'utf8'));
+  const rows = new Map(); // pid -> { type, s0, at0, s1, at1, gone }
+  let head = null; // what stops the list itself
+  const look = (async () => {
+    try { for (const [pid, pg] of await read(() => io.list(2 * each), 2 * each)) if (pg === pgid) rows.set(pid, {}); } catch (e) { head = `the list of processes: ${e.message}`; return; }
+    const at = (r, k) => async (p) => { const t = Date.now(); const s = statOf(await p); r[k] = s; r[`at${k[1]}`] = t; };
+    const each0 = [...rows].map(([pid, r]) => Promise.all([
+      file(pid, 'stat').then((x) => at(r, 's0')(x)).catch((e) => { if (e.code === 'ENOENT') r.gone = true; }),
+      file(pid, 'cmdline').then((x) => { r.type = typeOf(x); }, (e) => { if (e.code === 'ENOENT') r.gone = true; }),
+    ]));
+    await Promise.all(each0);
+    const firsts = [...rows.values()].filter((r) => r.s0).map((r) => r.at0);
+    if (!firsts.length) return;
+    await new Promise((ok) => setTimeout(ok, Math.max(0, Math.min(...firsts) + window - Date.now())));
+    await Promise.all([...rows].filter(([, r]) => r.s0 && !r.gone).map(([pid, r]) => file(pid, 'stat').then((x) => at(r, 's1')(x)).catch((e) => { if (e.code === 'ENOENT') r.gone = true; })));
+  })();
+  let cut;
+  const ended = await Promise.race([look.then(() => false), new Promise((r) => { cut = setTimeout(() => r(true), total); })]);
+  clearTimeout(cut);
+  over = true;
+  if (head) return `processes: ${head}`;
+  const said = [...rows].sort(([a], [b]) => a - b).map(([pid, r]) => {
+    const type = r.type ?? 'type unread';
+    if (r.gone) return `${type} ${pid} gone`;
+    const s = r.s1 ?? r.s0;
+    if (!s) return `${type} ${pid} state unread`;
+    // a tick is 10 ms (USER_HZ 100)
+    const cpu = r.s1 && r.s0 ? `${Math.round((((r.s1.ticks - r.s0.ticks) * 10) / Math.max(1, r.at1 - r.at0)) * 100)}% cpu` : 'cpu unread';
+    return `${type} ${pid} ${s.state} ${STATES[s.state] ?? 'unknown'} ${cpu}`;
+  });
+  if (!rows.size) said.push('none found');
+  if (ended) said.push(`cut at ${total / 1000} s`);
+  return `processes: ${said.join(', ')}`;
+}
+
+// What removes a Chrome's folder if this process dies without removing it (a SIGKILL, or a signal node
+// doesn't turn into 'exit'): a shell waiting on a pipe from this process. A line on it is "removed here",
+// and it exits. End of file with no line is this process gone: it kills Chrome's process group ($1) and
+// removes the folder ($2), trying for 5 s while the group's last processes go.
+export const REAPER = 'read -r line && exit 0; [ -n "$2" ] || exit 0; kill -9 "-$1" 2>/dev/null; i=0; while [ "$i" -lt 50 ]; do rm -rf -- "$2" 2>/dev/null; [ -e "$2" ] || exit 0; i=$((i + 1)); sleep 0.1; done';
+
 export async function openChrome() {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-chrome-'));
   // Its own process group, so its helpers go with it: one left holding the stderr pipe open keeps this
   // test process (and the job) alive after every test has finished.
-  // Chrome's own temp folders (org.chromium.Chromium.*) go in a short folder of this browser's, removed
-  // with it: a killed Chrome leaves them, and loose in the machine's temp folder they piled up by the
-  // thousand. Short: a socket's path is capped, so not inside the profile.
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dc'));
-  const proc = spawn(chromePath, chromeArgs(profile), { stdio: ['ignore', 'ignore', 'pipe'], detached: true, env: { ...process.env, TMPDIR: tmp } });
+  // Chrome's own temp folders (org.chromium.Chromium.*) go in t/ inside the profile, removed with it: a
+  // killed Chrome leaves them, and loose in the machine's temp folder they piled up by the thousand.
+  // Chrome is told TMPDIR=t, relative to its working folder, the profile: a socket's path is capped at
+  // 107 bytes, which an absolute one under a long temp folder passes.
+  const tmp = path.join(profile, 't');
+  fs.mkdirSync(tmp);
+  const proc = spawn(chromePath, chromeArgs(profile), { cwd: profile, stdio: ['ignore', 'ignore', 'pipe'], detached: true, env: { ...process.env, TMPDIR: 't' } });
   const signal = (sig) => { try { process.kill(-proc.pid, sig); } catch { try { proc.kill(sig); } catch {} } };
-  const atExit = () => { signal('SIGKILL'); for (const d of [profile, tmp]) try { fs.rmSync(d, { recursive: true, force: true }); } catch {} };
+  const reaper = spawn('/bin/sh', ['-c', REAPER, 'devteam-chrome-reaper', String(proc.pid), profile], { detached: true, stdio: ['pipe', 'ignore', 'ignore'] });
+  reaper.on('error', () => {});
+  reaper.stdin.on('error', () => {});
+  reaper.unref();
+  reaper.stdin.unref();
+  // Chrome's group killed and its folder removed, once: when Chrome exits, at close(), or as this process
+  // exits. The reaper stands down only once the folder is gone; otherwise it tries again.
+  let removed = false;
+  const remove = (retry) => {
+    if (removed) return;
+    removed = true;
+    signal('SIGKILL');
+    try { fs.rmSync(profile, { recursive: true, force: true, ...(retry && { maxRetries: 5, retryDelay: 100 }) }); } catch {}
+    try { reaper.stdin.end(fs.existsSync(profile) ? '' : 'removed\n'); } catch {}
+  };
+  const atExit = () => remove(false);
   process.once('exit', atExit);
+  proc.once('exit', () => remove(true));
   const base = await new Promise((resolve, reject) => {
     let err = '';
     const failing = setTimeout(() => { signal('SIGKILL'); reject(new Error(`chrome said nothing for 60 s: ${err.slice(0, 400)}`)); }, 60000);
@@ -66,7 +169,7 @@ export async function openChrome() {
       process.off('exit', atExit);
       proc.off('exit', done);
       proc.stderr.destroy();
-      for (const d of [profile, tmp]) try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch {}
+      remove(true);
       r();
     }
     // 'exit', not 'close': Chrome's helpers can hold its stderr open after it is gone
@@ -84,6 +187,9 @@ export async function openChrome() {
   // the call fail soon; what was seen by then is said, and a look that failed says how.
   const whatChromeDid = async (tid, heard) => {
     const out = [];
+    // every process of this Chrome, read from /proc beside the looks at its endpoint (bounded at 4 s, so done
+    // by the 6 s cut), said last
+    const procs = processesOf(proc.pid);
     const stop = new AbortController();
     let b = null;
     const within = (ms, p) => { let t; return Promise.race([p, new Promise((_, no) => { t = setTimeout(() => no(new Error(`no answer in ${ms / 1000} s`)), ms); })]).finally(() => clearTimeout(t)); };
@@ -111,25 +217,22 @@ export async function openChrome() {
       const calls = new Map();
       b.onmessage = (m) => { const o = JSON.parse(m.data); const c = calls.get(o.id); if (!c) return; calls.delete(o.id); if (o.error) c.no(new Error(o.error.message)); else c.ok(o.result); };
       const call = (ms, method, params = {}, sessionId) => within(ms, new Promise((ok, no) => { const id = ++n; calls.set(id, { ok, no }); b.send(JSON.stringify({ id, method, params, ...(sessionId && { sessionId }) })); }));
-      const cpu = () => call(1000, 'SystemInfo.getProcessInfo').then((r) => new Map(r.processInfo.filter((p) => p.type === 'renderer').map((p) => [p.id, p.cpuTime])), () => null);
-      const c0 = await cpu();
-      const t0 = Date.now();
       // a second session on the same tab (closing the socket below ends it): does the page answer anyone?
       try {
         const { sessionId } = await call(1000, 'Target.attachToTarget', { targetId: tid, flatten: true });
         const t = Date.now();
         out.push(await call(2000, 'Runtime.evaluate', { expression: '1', returnByValue: true }, sessionId).then(() => `its page answers a second session in ${Date.now() - t} ms`, (e) => `its page gives a second session ${e.message}`));
       } catch (e) { out.push(`a second session: ${e.message}`); }
-      const c1 = await cpu();
-      const s = (Date.now() - t0) / 1000;
-      out.push(c0 && c1 ? `renderers: ${[...c1].map(([pid, c]) => `${pid} ${c0.has(pid) ? `${Math.round(((c - c0.get(pid)) / s) * 100)}% cpu` : 'new'}`).join(', ') || 'none'}` : 'renderers: no process info');
     })().catch((e) => { out.push(`Chrome's endpoint: ${e.message}`); });
     let cut;
     await Promise.race([looks, new Promise((r) => { cut = setTimeout(() => r(out.push('diagnosis cut at 6 s')), 6000); })]);
     clearTimeout(cut);
+    // what was said by now is the diagnosis: a look cut at 6 s and still running adds nothing after it
+    const said = out.splice(0);
     stop.abort();
     try { b?.close(); } catch {}
-    return out.join('; ');
+    said.push(await procs.catch((e) => `processes: ${e.message}`));
+    return said.join('; ');
   };
   const newPage = async () => {
     const target = await (await fetch(`${base}/json/new?about:blank`, { method: 'PUT' })).json();

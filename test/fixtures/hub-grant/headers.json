@@ -1,0 +1,200 @@
+{
+  "cases": [
+    {
+      "name": "good",
+      "raw": [
+        "x-devteam-grant",
+        "g-x;owner-act=0;label=Alex%27s%20laptop"
+      ],
+      "expect": {
+        "id": "g-x",
+        "ownerAct": false,
+        "label": "Alex's laptop"
+      }
+    },
+    {
+      "name": "good, owner-act=1, a 40-byte label encoded to 120",
+      "raw": [
+        "X-Devteam-Grant",
+        "g-AbC_9-z;owner-act=1;label=%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9"
+      ],
+      "expect": {
+        "id": "g-AbC_9-z",
+        "ownerAct": true,
+        "label": "éééééééééééééééééééé"
+      }
+    },
+    {
+      "name": "no mark",
+      "raw": [
+        "host",
+        "p.box.example.dev"
+      ],
+      "expect": null
+    },
+    {
+      "name": "a second header",
+      "raw": [
+        "x-devteam-grant",
+        "g-x;owner-act=0;label=a",
+        "x-devteam-grant",
+        "g-y;owner-act=1;label=b"
+      ],
+      "expect": "refused"
+    },
+    {
+      "name": "a second header, another case",
+      "raw": [
+        "x-devteam-grant",
+        "g-x;owner-act=0;label=a",
+        "X-DEVTEAM-GRANT",
+        "g-x;owner-act=0;label=a"
+      ],
+      "expect": "refused"
+    },
+    {
+      "name": "owner-act=2",
+      "raw": [
+        "x-devteam-grant",
+        "g-x;owner-act=2;label=a"
+      ],
+      "expect": "refused"
+    },
+    {
+      "name": "junk before the id",
+      "raw": [
+        "x-devteam-grant",
+        "junk g-x;owner-act=0;label=a"
+      ],
+      "expect": "refused"
+    },
+    {
+      "name": "a bad id",
+      "raw": [
+        "x-devteam-grant",
+        "x-1;owner-act=0;label=a"
+      ],
+      "expect": "refused"
+    },
+    {
+      "name": "an empty id",
+      "raw": [
+        "x-devteam-grant",
+        "g-;owner-act=0;label=a"
+      ],
+      "expect": "refused"
+    },
+    {
+      "name": "an id with a slash",
+      "raw": [
+        "x-devteam-grant",
+        "g-a/b;owner-act=0;label=a"
+      ],
+      "expect": "refused"
+    },
+    {
+      "name": "an id of 65 characters",
+      "raw": [
+        "x-devteam-grant",
+        "g-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;owner-act=0;label=a"
+      ],
+      "expect": "refused"
+    },
+    {
+      "name": "a label holding a newline",
+      "raw": [
+        "x-devteam-grant",
+        "g-x;owner-act=0;label=a%0Ab"
+      ],
+      "expect": "refused"
+    },
+    {
+      "name": "a label holding ESC",
+      "raw": [
+        "x-devteam-grant",
+        "g-x;owner-act=0;label=a%1Bb"
+      ],
+      "expect": "refused"
+    },
+    {
+      "name": "a label holding U+202E",
+      "raw": [
+        "x-devteam-grant",
+        "g-x;owner-act=0;label=a%E2%80%AEb"
+      ],
+      "expect": "refused"
+    },
+    {
+      "name": "a label of 41 bytes",
+      "raw": [
+        "x-devteam-grant",
+        "g-x;owner-act=0;label=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ],
+      "expect": "refused"
+    },
+    {
+      "name": "a label holding ] encoded",
+      "raw": [
+        "x-devteam-grant",
+        "g-x;owner-act=0;label=a%5D"
+      ],
+      "expect": "refused"
+    },
+    {
+      "name": "a label not encoded (a space)",
+      "raw": [
+        "x-devteam-grant",
+        "g-x;owner-act=0;label=Alex's laptop"
+      ],
+      "expect": "refused"
+    },
+    {
+      "name": "a label that is not valid UTF-8",
+      "raw": [
+        "x-devteam-grant",
+        "g-x;owner-act=0;label=%C3"
+      ],
+      "expect": "refused"
+    },
+    {
+      "name": "a bad escape",
+      "raw": [
+        "x-devteam-grant",
+        "g-x;owner-act=0;label=%ZZ"
+      ],
+      "expect": "refused"
+    },
+    {
+      "name": "an empty label",
+      "raw": [
+        "x-devteam-grant",
+        "g-x;owner-act=0;label="
+      ],
+      "expect": "refused"
+    },
+    {
+      "name": "another parameter",
+      "raw": [
+        "x-devteam-grant",
+        "g-x;owner-act=0;label=a;x=1"
+      ],
+      "expect": "refused"
+    },
+    {
+      "name": "the parts out of order",
+      "raw": [
+        "x-devteam-grant",
+        "g-x;label=a;owner-act=0"
+      ],
+      "expect": "refused"
+    },
+    {
+      "name": "spaces",
+      "raw": [
+        "x-devteam-grant",
+        "g-x; owner-act=0; label=a"
+      ],
+      "expect": "refused"
+    }
+  ]
+}

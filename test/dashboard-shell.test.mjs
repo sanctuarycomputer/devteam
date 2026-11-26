@@ -85,15 +85,21 @@ const rootWith = (html) => { const r = new El('div'); r.innerHTML = html; return
 // the JS block (and the router's table) in a context of its own
 const load = (ctx = {}) => {
   const c = vm.createContext({ URLSearchParams, ...ctx });
-  vm.runInContext(`${JS}\n${ROUTES_SRC}\n;globalThis.S = { withPage, escHtml, tabBar, tabStep, bindTabBar, dbTable, sortRows, nextSort, bindDbTable, props, goalSteps, heartbeat, PULSE_STATES, statusPill, fleetSwitch, bindFleetSwitch, registerPage, shellPages, threadsTabs, STATE_KEYS, parseHead, headFor, stampFor, closeTarget, REMEMBERED, rememberedFilters, saveFilters, SHELL_ROUTES };`, c);
+  vm.runInContext(`${JS}\n${ROUTES_SRC}\n;globalThis.S = { withPage, escHtml, tabBar, tabPanel, tabSelected, tabStep, bindTabBar, dbTable, sortRows, nextSort, bindDbTable, props, goalSteps, heartbeat, PULSE_STATES, statusPill, fleetSwitch, bindFleetSwitch, registerPage, shellPages, threadsTabs, STATE_KEYS, parseHead, headFor, stampFor, closeTarget, REMEMBERED, rememberedFilters, saveFilters, SHELL_ROUTES };`, c);
   return c.S;
 };
 const S = load();
 const R = S.SHELL_ROUTES;
 
-test('shell.md says @2 and defines what the design lists', () => {
-  assert.match(SHELL_MD, /^Contract `dashboard-shell@2`\./m, 'shell.md is headed dashboard-shell@2');
+test('shell.md says @3 and defines what the design lists', () => {
+  assert.match(SHELL_MD, /^Contract `dashboard-shell@3`\./m, 'shell.md is headed dashboard-shell@3');
   assert.match(SHELL_MD, /^- \*\*@2\*\* \(`kit-267`\): /m, 'a @2 line in its History');
+  assert.match(SHELL_MD, /^- \*\*@3\*\* \(`kit-611`\): /m, 'a @3 line in its History');
+  // @3 (kit-611): the tab bar's panels and sub size, the terminal th values, a file peek's view, tab choices as history, §10 amended.
+  // Read with the History section cut off, so a rule deleted from its section goes red even though the @3 line names it
+  const body = SHELL_MD.split(/^## History$/m)[0];
+  assert.ok(body.length < SHELL_MD.length, 'shell.md has a History section');
+  for (const n of ['aria-controls', 'aria-labelledby', 'role=tabpanel', "size: 'sub'", 'tabPanel', 'tabSelected', 'th=supervisor', 'th=shell', 'view=raw', "Every tab set's choice is a state key", 'it is a history entry', 'while a peek is open replaces the entry', 'history.state = { hub: 1, key }', 'only selects the tab', 'no `openAt`', "After a reload the marker isn't enough", '**`hub-route` still replaces**', "{ devteam: 'hub-visible', visible }", '**A file peek\'s view** is in its query', '`inbox`, `open`, `resolved`, `supervisor`, `shell`']) assert.ok(body.includes(n), `shell.md @3 says ${n} outside its History`);
   assert.match(SHELL_MD, /^## 10\. The hub frame$/m, 'a §10');
   // §6, §7, §8 and §10 name what the design's 'Contract dashboard-shell@2' section says
   for (const n of ['`p=q/<id>`', '`i`', '`u`', 'SHELL_ROUTES.peeks', 'peekHead', 'legacy: true', '`tree/<id>`', '`wt/<worktree>`', '`path`', '`route`', '`talk/<t-id>?u=<u-id>`', 'th=inbox&i=', 'URLSearchParams', 'artifactPathOk', 'reads its page from the head', '`hub-route`', '`hub-base`', '2,048', '`null`', 'postHead()', '`box: 2`', '#<key>/<head>', '`#overview?ot=<id>`', 'test/fixtures/hub-frame-fake.html', 'test/fixtures/dashboard-frame-fake.html', 'An empty value is a value']) assert.ok(SHELL_MD.includes(n), `shell.md says ${n}`);
@@ -226,6 +232,53 @@ test('tabBar: counts, disabled tabs, roving tabindex; arrows, Home and End skip 
   assert.equal(said.length, 6, 'a disabled tab and another key select nothing');
   fire(root, 'click', tab('a').children.length ? tab('a').children[0] : tab('a'));
   assert.equal(said.at(-1), 'a', 'a click on an enabled tab (or inside it) selects it');
+});
+
+test('terminal A2: the tab bar', () => {
+  const tabs = [{ id: 'open', label: 'Open', count: 2 }, { id: 'x', label: 'X', disabled: true }];
+  // A2a: panel and size add the tablist's size class and each tab's id and aria-controls
+  const sub = S.tabBar({ tabs, selected: 'open', panel: 'th-list', size: 'sub' });
+  assert.ok(sub.includes('<div class="tabbar sub" role="tablist">'), sub);
+  assert.ok(sub.includes('data-tab="open" id="tab-th-list-open" aria-controls="th-list"'), sub);
+  assert.ok(sub.includes('data-tab="x" id="tab-th-list-x" aria-controls="th-list"'), sub);
+  // A2b: tabPanel is labelled by the tab tabBar selects
+  assert.equal(S.tabPanel({ panel: 'th-list', tabs, selected: 'open' }, '<p>x</p>'), '<div role="tabpanel" id="th-list" aria-labelledby="tab-th-list-open"><p>x</p></div>');
+  assert.equal(S.tabPanel({ panel: 'th-list', tabs, selected: 'x' }, '<p>x</p>'), '<div role="tabpanel" id="th-list" aria-labelledby="tab-th-list-open"><p>x</p></div>', 'a disabled selection labels by the first enabled tab');
+  assert.equal(S.tabPanel({ panel: 'A b', tabs, selected: 'open' }, '<p>x</p>'), '<p>x</p>');
+  assert.equal(S.tabPanel({ panel: '', tabs, selected: 'open' }, '<p>x</p>'), '<p>x</p>');
+  assert.equal(S.tabPanel({ panel: 'th-list', tabs, selected: 'open' }, null), '<div role="tabpanel" id="th-list" aria-labelledby="tab-th-list-open"></div>');
+  const odd = [{ id: 'a b', label: 'A' }];
+  const oddBar = S.tabBar({ tabs: odd, selected: 'a b', panel: 'th-list' });
+  assert.ok(!oddBar.includes(' id="tab-') && !oddBar.includes('aria-controls'), oddBar);
+  assert.equal(S.tabPanel({ panel: 'th-list', tabs: odd, selected: 'a b' }, 'h'), '<div role="tabpanel" id="th-list">h</div>');
+  assert.equal(S.tabPanel({ panel: 'th-list', tabs: [{ id: 'x', label: 'X', disabled: true }] }, 'h'), '<div role="tabpanel" id="th-list">h</div>', 'no enabled tab: no aria-labelledby');
+  // A2e: without panel (and with a bad panel and size) it is today's output, a literal pasted from the unchanged builder
+  const today = '<div class="tabbar" role="tablist"><button type="button" role="tab" data-tab="open" aria-selected="true" tabindex="0">Open <span class="n">2</span></button><button type="button" role="tab" data-tab="x" aria-selected="false" tabindex="-1" aria-disabled="true">X</button></div>';
+  assert.equal(S.tabBar({ tabs, selected: 'open' }), today);
+  assert.equal(S.tabBar({ tabs, selected: 'open', panel: 'A b', size: 'big' }), today);
+});
+
+test('terminal A2: the URL', () => {
+  // A2c: the side panel's Supervisor and Shell tabs (th=supervisor, th=shell) are kept and written back
+  for (const h of ['#overview?th=supervisor', '#board?goal=g-1&th=shell']) assert.equal(S.headFor(S.parseHead(h, R)), h, h);
+  // A2d: a file peek's view: the first value decides, raw or rendered only, written last
+  const fp = (q) => '#library?p=' + encodeURIComponent('file?' + q);
+  const raw = '#library?p=file%3Fpath%3Ddocs%252Fa.md%26ref%3Dmain%26view%3Draw';
+  const rendered = '#library?p=file%3Fpath%3Ddocs%252Fa.md%26ref%3Dmain%26view%3Drendered';
+  const noView = '#library?p=file%3Fpath%3Ddocs%252Fa.md%26ref%3Dmain';
+  assert.equal(S.parseHead(raw, R).state.p, 'file?path=docs%2Fa.md&ref=main&view=raw');
+  assert.equal(S.headFor(S.parseHead(fp('path=docs/a.md&ref=main&view=raw'), R)), raw);
+  assert.equal(S.headFor(S.parseHead(raw, R)), raw);
+  assert.equal(S.headFor(S.parseHead(fp('path=docs/a.md&ref=main&view=rendered'), R)), rendered);
+  assert.equal(S.headFor(S.parseHead(fp('path=docs/a.md&ref=main&view=wide'), R)), noView, 'a bad view is dropped');
+  assert.equal(S.headFor(S.parseHead(fp('path=docs/a.md&ref=main&view=Raw'), R)), noView, 'view is case-exact');
+  assert.equal(S.headFor(S.parseHead(fp('path=docs/a.md&ref=main&view=raw&view=wide'), R)), raw, 'the first value decides, one view');
+  assert.equal(S.headFor(S.parseHead(fp('path=docs/a.md&ref=main&view=wide&view=raw'), R)), noView, 'the first bad value decides');
+  assert.equal(S.headFor(S.parseHead(fp('path=docs/a.md&view=raw&ref=main'), R)), raw, 'view is written last');
+  // another kind: view is not read, so a ticket head keeps whatever it carries
+  const tk = '#board?p=' + encodeURIComponent('ticket/kit-1?view=wide');
+  assert.equal(S.parseHead(tk, R).state.p, 'ticket/kit-1?view=wide');
+  assert.equal(S.headFor(S.parseHead(tk, R)), tk);
 });
 
 test('dbTable: numeric sort, a second press reverses, None when empty; onOpen gets the index as passed', () => {
@@ -662,6 +715,7 @@ const BREAK = {
 const EXTRA = [
   ['overflow', "document.querySelector('#small p').style.marginLeft = '-60px';"],
   ['header-pad', "document.querySelector('.pagebar').style.paddingRight = '24px';"],
+  ['tab-motion', "document.querySelector('.tabbar.sub [role=tab]').style.transition = 'color 1s'"],
 ];
 // a page's own prose and ignore add to the defaults
 test('measure options: a page adds to prose and ignore', async () => {
@@ -689,6 +743,9 @@ test('the measure: every check passes on the fixture at three sizes and fails on
   const res = await measureAt(p, url, { ready: 'window.__ready' });
   assert.deepEqual(Object.keys(res), SIZES.map(([w, h]) => `${w}x${h}`));
   for (const [size, fails] of Object.entries(res)) assert.deepEqual(fails, [], `the fixture at ${size}`);
+  // A4: the sub bar is 30px tall and its panel is labelled by its selected tab
+  assert.equal(await p.ev("(() => { const t = document.querySelector('.tabbar.sub [role=\"tab\"]'); return t && getComputedStyle(t).height; })()"), '30px', 'the fixture has a .tabbar.sub whose first tab is 30px tall');
+  assert.equal(await p.ev("(() => { const e = document.querySelector('[role=\"tabpanel\"]#fx-list'); return e && e.getAttribute('aria-labelledby'); })()"), 'tab-fx-list-open');
   // the c6 pair side by side at 720
   await p.send('Emulation.setDeviceMetricsOverride', { width: 720, height: 800, deviceScaleFactor: 1, mobile: false });
   await p.send('Page.navigate', { url });

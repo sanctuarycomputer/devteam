@@ -620,6 +620,10 @@ const SETTINGS_DEFAULTS = {
   // The default is "ask" so a project adopted before this setting keeps asking. The owner's.
   upstream_sync: 'adopt',
   upstream_check_hours: 24,
+  // The npm package kit releases are published as and an instance installs (kit-install@1), and
+  // whether the live alpha's /next/ pages are served (alpha@1). Both the owner's, read as main has them.
+  package_name: '@sanctuarycomputer/devteam',
+  alpha: true,
   retro_every_days: 7,
   research_every_days: 7,
   slow_gate_minutes: 10,
@@ -633,7 +637,7 @@ const SETTINGS_DEFAULTS = {
 const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
   autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', responder_command: 'governance-edit', agent_trust_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
-  forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', merge_admin: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit',
+  forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', merge_admin: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit', package_name: 'governance-edit', alpha: 'governance-edit',
   release: 'governance-edit', secret_commands: 'governance-edit', incident_slots: 'governance-edit', remediations: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit', project: 'governance-edit',
 };
 // The supervisor's own settings the owner may ask for from the dashboard (an owner-setting act the
@@ -706,6 +710,8 @@ const SETTINGS_WORDS = Object.freeze({
   upstream_base: ['Upstream and releases', 'Kit release in use', 'the devteam release this project runs', 'value'],
   upstream_sync: ['Upstream and releases', 'Kit updates', 'adopt each release on its own, or ask you first', 'value'],
   upstream_check_hours: ['Upstream and releases', 'Check for kit releases every', 'hours between checks for a new devteam release', 'value'],
+  package_name: ['Upstream and releases', 'Kit package', 'the npm package devteam releases are published as and installed from', 'value'],
+  alpha: ['Upstream and releases', 'Live alpha', 'whether the new apps are served at /next/ beside the stable pages', 'value'],
   release: ['Upstream and releases', 'How a release reaches production', 'a tag, a production branch, or every merge to main', 'value'],
   sensors: ['Production', 'Sensors', 'the production signals the supervisor reads', 'names'],
   sensor_defaults: ['Production', 'Sensor defaults', 'settings every sensor starts from', 'names'],
@@ -733,6 +739,10 @@ const SETTING_SHAPES = Object.freeze({
   merge_method: (v) => ['merge', 'squash', 'rebase'].includes(v),
   upstream_sync: (v) => ['adopt', 'ask'].includes(v),
   release: (v) => v !== undefined && releaseProblem(v) === null,
+  alpha: (v) => typeof v === 'boolean',
+  // a scoped npm name, by a stricter rule than npm's own: @scope/name, each part lower-case letters,
+  // digits, - . _ and starting with a letter, digit or -; at most 214 characters in all
+  package_name: (v) => typeof v === 'string' && v.length <= 214 && /^@[a-z0-9-][a-z0-9._-]*\/[a-z0-9-][a-z0-9._-]*$/.test(v),
   upstream_base: (v) => v === null || (typeof v === 'string' && /^v\d+\.\d+\.\d+$/.test(v)),
   main_branch: settingName, tmux_session: settingName, project: settingName,
   usage_sources: settingLines, ignored_checks: settingLines, split_files: settingLines, worktree_files: settingLines, worker_denied_commands: settingLines,
@@ -804,12 +814,110 @@ function settingsAt(ref, { orNull = false } = {}) {
 // Whole keys as before, then the links registry entry by entry: an owner's class needs an
 // owner answer, a registry-edit the supervisor's act (merge checks both).
 function ownerSettingsChanged(base, head) {
-  const a = settingsAt(base), b = settingsAt(head);
+  let a = settingsAt(base), b = settingsAt(head);
   if (!a || !b) return null;
+  // Each side is what that side's kit runs (kit-978): settings.md over the defaults of the kit's
+  // scripts at that commit. Where a commit changes a kit script (a kit sync), an owner key
+  // settings.md leaves unset changes when its default does, and is the owner's to answer as an edit
+  // is; so is a key the head's kit makes the owner's. SETTINGS_DEFAULTS and OWNER_SETTINGS are read
+  // from whichever script under <kit>/scripts/ declares them (`const`, or `export const` in a module),
+  // as data, never run (read, below); a kit where either doesn't read so needs the owner's
+  // governance-edit answer. A commit that changes no kit script compares as it always has, and so
+  // does one where either side has no kit scripts at all.
+  let owner = OWNER_SETTINGS;
+  let drifted = () => null;
+  const unread = [];
+  const scripts = kitRel.startsWith('..') ? null : `${kitRel ? `${kitRel}/` : ''}scripts`;
+  // every path here is from the repo's top, wherever merge runs from (:(top), --full-tree, --full-name)
+  const mjs = `:(top)${scripts}/*.mjs`;
+  const touched = scripts && !!git(['diff', '--name-only', base, head, '--', mjs]);
+  const hasKit = (ref) => !!git(['ls-tree', '-r', '--full-tree', '--name-only', ref, '--', `${scripts}/`]);
+  if (touched && hasKit(base) && hasKit(head)) {
+    // a block that isn't an object (null, a list) sets nothing, as settingsAt reads it
+    const raw = (ref) => { const t = settingsBlockAt(ref); const j = t === null ? null : JSON.parse(t); return j && typeof j === 'object' && !Array.isArray(j) ? j : {}; };
+    const ra = raw(base), rb = raw(head);
+    const want = (ref, name, side) => { const r = read(ref, name); if (r?.v && typeof r.v === 'object' && !Array.isArray(r.v)) return r.v; unread.push({ key: `${name} in ${scripts}/ does not read at the ${side} as literal data, so the owner's defaults can't be compared`, cls: 'governance-edit' }); return null; };
+    const da = want(base, 'SETTINGS_DEFAULTS', 'base'), db = want(head, 'SETTINGS_DEFAULTS', 'head'), ob = want(head, 'OWNER_SETTINGS', 'head');
+    // unreadable: settings.md's own changes are still compared, over the running kit's defaults
+    if (!unread.length) {
+      owner = { ...ob, ...OWNER_SETTINGS };
+      a = { ...da, ...ra };
+      b = { ...db, ...rb };
+      const shown = (v) => { if (v === undefined) return 'none'; const s = canonical(v); return s.length > 120 ? `${s.slice(0, 119)}…` : s; };
+      drifted = (k) => (!Object.hasOwn(ra, k) && !Object.hasOwn(rb, k) && canonical(da[k]) !== canonical(db[k]) ? `${k}'s default changes from ${shown(da[k])} to ${shown(db[k])}, and settings.md leaves it unset` : null);
+    }
+  }
   // gates run in their order, one after another in one checkout, so their order is the owner's too:
   // compared as written (key order included), not canonically
   const differs = (k) => (k === 'gates' ? JSON.stringify(a[k]) !== JSON.stringify(b[k]) : canonical(a[k]) !== canonical(b[k]));
-  return [...Object.entries(OWNER_SETTINGS).filter(([k]) => differs(k)).map(([key, cls]) => ({ key, cls })), ...linkOwnerChanges(a.links, b.links)];
+  return [...unread, ...Object.entries(owner).filter(([k]) => differs(k)).map(([key, cls]) => ({ key: drifted(key) ?? key, cls })), ...linkOwnerChanges(a.links, b.links)];
+  // `const <name> = <value>` (or `export const`) at the start of a line, in exactly one .mjs
+  // under <kit>/scripts/ at ref, once, read as data: strings ('…' or "…", simple escapes), numbers,
+  // true, false, null, arrays and objects (comments and trailing commas allowed), and a bare name of
+  // another such const, one level deep. { v } or null: anything else (a call, an operator, a spread,
+  // a template string), a second declaration, or any line of a script, outside a // or * comment
+  // line, that writes into it (`<name>.x =`, `[k] ??=` and the other assignments, `++`, `delete`,
+  // Object.assign(<name>, …)) is unreadable. What this can't see is a default applied in code
+  // (`s.x ?? 'y'`) rather than in the const, or a write through another name for it.
+  function read(ref, name, depth = 0) {
+    const decl = `^(export )?const ${name} = `;
+    const files = (git(['grep', '-l', '--full-name', '-E', decl, ref, '--', mjs]) ?? '').split('\n').filter(Boolean);
+    if (files.length !== 1) return null;
+    const N = `(^|[^A-Za-z0-9_$.])${name}`, member = '(\\.[A-Za-z_$][A-Za-z0-9_$]*|\\[[^]]*\\])';
+    const writes = [
+      `${N}${member}[[:space:]]*(([-+*/%&|^]|\\*\\*|<<|>>>?|&&|\\|\\||\\?\\?)?=([^=]|$)|\\+\\+|--)`,
+      `(\\+\\+|--|delete[[:space:]]+)${name}${member}`,
+      `Object\\.(assign|defineProperty|defineProperties|setPrototypeOf)\\([[:space:]]*${name}([^A-Za-z0-9_$]|$)`,
+    ].join('|');
+    const hits = (git(['grep', '-h', '-E', writes, ref, '--', mjs]) ?? '').split('\n').filter((l) => l && !/^\s*(\/\/|\/?\*)/.test(l));
+    if (hits.length) return null;
+    const src = git(['show', files[0]]);
+    const at = [...(src ?? '').matchAll(new RegExp(decl, 'gm'))];
+    if (at.length !== 1) return null;
+    let i = at[0].index + at[0][0].length;
+    const fail = () => { throw new Error('unreadable'); };
+    const ws = () => { for (;;) { if (/\s/.test(src[i] ?? '')) i++; else if (src.startsWith('//', i)) { const e = src.indexOf('\n', i); i = e < 0 ? src.length : e; } else if (src.startsWith('/*', i)) { const e = src.indexOf('*/', i + 2); if (e < 0) fail(); i = e + 2; } else return; } };
+    const ESC = { n: '\n', t: '\t', r: '\r', '\\': '\\', "'": "'", '"': '"', '/': '/' };
+    const str = () => { const q = src[i++]; let s = ''; for (;;) { const c = src[i++]; if (c === undefined || c === '\n') fail(); if (c === q) return s; if (c !== '\\') { s += c; continue; } const e = src[i++]; if (e === 'u' && /^[0-9a-fA-F]{4}$/.test(src.slice(i, i + 4))) { s += String.fromCharCode(parseInt(src.slice(i, i + 4), 16)); i += 4; } else if (Object.hasOwn(ESC, e)) s += ESC[e]; else fail(); } };
+    const word = () => { const m = /^[A-Za-z_$][\w$]*/.exec(src.slice(i, i + 200)); if (!m) fail(); i += m[0].length; return m[0]; };
+    const value = () => {
+      ws();
+      const c = src[i];
+      if (c === '{' || c === '[') {
+        i++;
+        const obj = c === '{', out = obj ? {} : [];
+        for (;;) {
+          ws();
+          if (src[i] === (obj ? '}' : ']')) { i++; return out; }
+          if (obj) {
+            const k = src[i] === "'" || src[i] === '"' ? str() : word();
+            ws();
+            if (src[i++] !== ':') fail();
+            // defined, not assigned: a key "__proto__" is a key like any other
+            Object.defineProperty(out, k, { value: value(), enumerable: true, writable: true, configurable: true });
+          } else out.push(value());
+          ws();
+          if (src[i] === ',') i++;
+          else if (src[i] !== (obj ? '}' : ']')) fail();
+        }
+      }
+      if (c === "'" || c === '"') return str();
+      const n = /^-?(?:\d+(?:\.\d+)?)(?:[eE][+-]?\d+)?(?![\w$.])/.exec(src.slice(i, i + 40));
+      if (n) { i += n[0].length; return Number(n[0]); }
+      const w = word();
+      if (w === 'true' || w === 'false') return w === 'true';
+      if (w === 'null') return null;
+      const r = depth < 1 ? read(ref, w, depth + 1) : null;
+      if (!r) fail();
+      return r.v;
+    };
+    try {
+      const v = value();
+      ws();
+      if (src[i] !== ';' && src[i] !== undefined) fail();
+      return { v };
+    } catch { return null; }
+  }
 }
 // Adding a gate is the supervisor's call when it only adds (constitution.md §4: development-only
 // tools are the supervisor's): a new check makes merges stricter, never looser. A gate's command runs
@@ -2755,9 +2863,34 @@ const questionHash = (q) => crypto.createHash('sha256').update(canonical(Object.
 // (questionView's status "answered", bound to the question's hash), never a default or a line the
 // supervisor wrote, and the class is hashed, so setting it after the answer reopens the question.
 const isDoorQuestion = (v) => v?.kind === 'one-way-door' || v?.class === 'one-way-door';
-// A door answer approves a plan only as recommended: an owner who chose otherwise said no to the
-// plan built on the recommendation. A door asked with no recommendation is the owner's open choice.
+// A door answer approves the plan built on the recommendation only as recommended: an owner who
+// chose otherwise said no to that plan (their pick of a marked alternative approves the plan built on
+// it instead: doorPick). A door asked with no recommendation is the owner's open choice.
 const doorAgreed = (v) => !v.recommendation || v.matched === true;
+// The owner's own pick of another listed choice on a door, one the question marked "approves": true
+// when it was asked: the label, or null. Only the owner's own pick counts: their choice on the card
+// or answer --choice (a keyed choice, cli or dashboard, with no words beside it that could take it
+// back), never an answer the supervisor recorded from chat or a turn, nor words it read. Picking a
+// marked choice is the owner's yes to that choice, not a no to the plan; it approves the plan built
+// on it once the plan and its approving review name it (DOOR_PICK_LINE).
+const doorPick = (v) => {
+  if (v?.status !== 'answered' || doorAgreed(v)) return null;
+  if (v.in_words !== false || typeof v.choice !== 'string' || String(v.words ?? '').trim()) return null;
+  if (v.answered_by !== 'owner' || ['chat', 'thread'].includes(v.channel)) return null;
+  const c = (v.choices ?? []).find((x) => isObj(x) && String(x.label ?? '').trim().toLowerCase() === v.choice.trim().toLowerCase());
+  return c?.approves === true && !DECLINING_LABEL.test(String(c.label)) ? c.label : null;
+};
+// Only the owner's latest word on a door counts: a pick is undone once the same door was asked again
+// (the same ticket and goal, nearly the same question, as ask's re-ask check reads it), while that
+// re-ask is open, and once it is answered, whatever the answer; the re-ask is then the one to cite.
+const doorPickUndone = (v, all) => all.some((q) => q.id !== v.id && isDoorQuestion(q) && (q.ticket ?? null) === (v.ticket ?? null) && (q.goal ?? null) === (v.goal ?? null) && nearlySameQuestion(q.question, v.question) && String(q.asked_at ?? '') > String(v.asked_at ?? '') && (q.status === 'open' || q.status === 'answered'));
+// The line a plan, and the plan review that approves it, carry for a pick: exactly
+// "- One-way door <qid>: <choice>", the choice as labelled (case aside).
+const DOOR_PICK_LINE = /^-[ \t]*One-way door[ \t]+(q-\S+?):[ \t]*(.+?)[ \t]*$/gm;
+const doorPickNamed = (text, qid, pick) => [...String(text ?? '').matchAll(DOOR_PICK_LINE)].some((m) => m[1] === qid && m[2].trim().toLowerCase() === pick.trim().toLowerCase());
+// A choice that declines reads as one: never marked "approves".
+// A word list is never complete, so the plan reviewer checks too (quality.md §3); this catches the plain ones.
+const DECLINING_LABEL = /^\s*(no|nope|nah|not( now| yet)?|none|neither|don['’]?t|do not|do nothing|never|hold( off)?|wait|later|maybe( later)?|skip|decline|reject|cancel|stop|abort|revert|undo|pause|park( it)?|postpone|defer|delay|status quo|(keep|leave|stay)\b.*\b(as (it|they|things) (is|are|was|were|stand)|as is|unchanged|the same)|leave it)\b/i;
 
 // Folded questions in the shape the inbox uses.
 function questionView(q) {
@@ -5912,6 +6045,8 @@ function parseReview(file, text) {
   const dateRaw = text.match(/^-[ \t]*Date:[ \t]*(\d{4}-\d{2}-\d{2}(?:[T ][\d:.]+Z?)?)[ \t]*$/m)?.[1] ?? null;
   const dateMs = dateRaw ? Date.parse(dateRaw.length === 10 ? `${dateRaw}T00:00:00Z` : dateRaw.replace(' ', 'T').replace(/(\d)$/, '$1Z')) : NaN;
   const doors = [...text.matchAll(/^-[ \t]*Goal-level door:[ \t]*(q-\S+)[ \t]+covers this plan\.?[ \t]*$/gm)].map((d) => d[1]);
+  // and one built on the owner's pick of a door's marked alternative names it, as the plan does: "- One-way door <qid>: <choice>"
+  const doorPicks = [...text.matchAll(DOOR_PICK_LINE)].map((d) => ({ id: d[1], pick: d[2].trim() }));
   const findings = [];
   let dispIdx = -1;
   let sevIdx = 1;
@@ -5934,7 +6069,7 @@ function parseReview(file, text) {
   return {
     file, stage: m ? m[1] : file.replace(/\.md$/, ''), pass: m ? Number(m[2]) : 0, variant: m ? m[3] : '',
     verdict: verdict ? verdict[1] : null, sha: verdict ? verdict[2] : null, shaValid: verdict ? /^[0-9a-f]{40}$/.test(verdict[2]) : false,
-    reviewer: reviewerRaw && !reviewerRaw.startsWith('<') ? reviewerRaw : null, findings, doors,
+    reviewer: reviewerRaw && !reviewerRaw.startsWith('<') ? reviewerRaw : null, findings, doors, doorPicks,
     records: recordsRaw && /^[0-9a-f]{40}$/.test(recordsRaw) ? recordsRaw : null,
     // a date after now is author-asserted and would sit in last_7d forever: undated
     date: Number.isFinite(dateMs) && dateMs <= Date.now() + 5 * 60000 ? dateMs : null,
@@ -7706,7 +7841,8 @@ worldFileFails.actOf = (ref) => {
 // self@2's and exterior@2's reader (log.schema.json#self2, #exterior): test/fixtures/world2/check.mjs's
 // rules, rule for rule (its reading of lines, fences, code, comments and links; parts; the title;
 // checkSelf; selfHeld, the names rule's words; and, since kit-863, namesWhole, entries, capitalised,
-// hosts and checkExterior, exterior.md's contract and names rule), so the kit gives every case of
+// hosts and checkExterior, exterior.md's contract and names rule, which since kit-933 reads every
+// heading form, headed), so the kit gives every case of
 // test/fixtures/world2/cases.json the result it lists. One closure, so none of its names meets
 // another of this file's; it reads nothing but its arguments, path and URL (a test runs this region
 // alone).
@@ -7828,10 +7964,11 @@ const selfPlain = (() => {
   // 1 when a fence's info string is exactly self or exterior, else 2.
   const version = (text) => (scan(text).fences.some((f) => f.info === 'self' || f.info === 'exterior') ? 1 : 2);
 
-  const LIST = /^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]/;
+  const LIST = /^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]|^ {0,3}\[\^[^\]\s]{1,999}\]:/; // a list item, or a footnote definition
   const HEAD = /^ {0,3}#{1,6}(?:[ \t]|$)/;
   // Each line's text, or null where it is not read: on a fence, in indented code (four spaces or a tab
-  // in, after a blank line or more of the same, outside a list), or in a comment that opens a line.
+  // in, after a blank line or more of the same, outside a list or a footnote), or in a comment that
+  // opens a line.
   const readable = last((text) => {
     let prev = 'blank';
     let list = false;
@@ -7848,9 +7985,9 @@ const selfPlain = (() => {
       return l;
     });
   });
-  // Code spans and inline comments of one block, masked by as many spaces. A span is a run of backticks
-  // to the next run of the same length; \` opens none.
-  function mask(block) {
+  // Code spans and inline comments of one block, masked by as many spaces (code spans only, comments
+  // false). A span is a run of backticks to the next run of the same length; \` opens none.
+  function mask(block, comments = true) {
     const runs = [...block.matchAll(/`+/g)].map((m) => ({ i: m.index, n: m[0].length }));
     const later = new Map(); // a run's size to the nearest later run of it, from the end back
     for (let k = runs.length - 1; k >= 0; k -= 1) { runs[k].close = later.get(runs[k].n); later.set(runs[k].n, k); }
@@ -7869,6 +8006,7 @@ const selfPlain = (() => {
       at = end;
     }
     out += block.slice(at);
+    if (!comments) return out;
     let done = '';
     at = 0;
     for (let i = out.indexOf('<!--'); i >= 0; i = out.indexOf('<!--', at)) {
@@ -7879,6 +8017,62 @@ const selfPlain = (() => {
     }
     return done + out.slice(at);
   }
+  // One block's text with what a page keeps as text masked, read left to right as a page reads it: each
+  // code span (md, a markdown block) by spaces, each comment by \0. It stops at anything else that could
+  // open HTML or an autolink (a < then anything but a space), a comment holding -- or never ended, or an
+  // escaped run of backticks, so a span or comment counts only where nothing before it could take in its
+  // opener.
+  function kept(s, md) {
+    const runs = md ? [...s.matchAll(/`+/g)].map((m) => ({ i: m.index, n: m[0].length })) : [];
+    const later = new Map();
+    for (let k = runs.length - 1; k >= 0; k -= 1) { runs[k].close = later.get(runs[k].n); later.set(runs[k].n, k); }
+    const escaped = (i) => { let n = 0; while (s[i - 1 - n] === '\\') n += 1; return md && n % 2 === 1; };
+    let out = '';
+    let at = 0;
+    let r = 0;
+    const hide = (i, end, by) => { out += s.slice(at, i) + s.slice(i, end).replace(/[^\n]/g, by); at = end; return end; };
+    for (let i = 0; i < s.length;) {
+      if (s[i] === '`' && md) {
+        while (runs[r].i < i) r += 1;
+        if (escaped(i)) break;
+        const { n, close } = runs[r];
+        i = close === undefined ? i + n : hide(i, runs[close].i + n, ' ');
+      } else if (s[i] !== '<') i += 1;
+      else if (escaped(i) || [undefined, ' ', '\t', '\n'].includes(s[i + 1])) i += 1;
+      else if (!s.startsWith('<!--', i)) break;
+      else if (s[i + 4] === '>') i = hide(i, i + 5, '\0');
+      else if (s.startsWith('->', i + 4)) i = hide(i, i + 6, '\0');
+      else {
+        const k = s.indexOf('--', i + 4);
+        if (k < 0 || s[k + 2] !== '>') break;
+        i = hide(i, k + 3, '\0');
+      }
+    }
+    return out + s.slice(at);
+  }
+  // A line with each table cell (between |s not escaped) read by kept on its own.
+  function cells(s) {
+    let out = '';
+    let at = 0;
+    for (let i = 0; i <= s.length; i += 1) {
+      if (i < s.length && s[i] !== '|') continue;
+      let n = 0;
+      while (s[i - 1 - n] === '\\') n += 1;
+      if (i < s.length && n % 2) continue;
+      out += kept(s.slice(at, i), true) + (i < s.length ? '|' : '');
+      at = i + 1;
+    }
+    return out;
+  }
+  // An HTML block's first line (CommonMark's kinds 1 to 6), and what ends it: a blank line where none.
+  const HTMLBLOCK = [
+    [/^<(?:pre|script|style|textarea)(?=[\s>]|$)/i, /<\/(?:pre|script|style|textarea)>/i],
+    [/^<!--/, /-->/],
+    [/^<\?/, /\?>/],
+    [/^<![A-Za-z]/, />/],
+    [/^<!\[CDATA\[/, /\]\]>/],
+    [/^<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|source|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?=[\s/>]|$)/i, null],
+  ];
   // The text outside code and comments, line for line. A block (what a span or link stays inside) ends
   // at a blank or unread line, a heading, a list item or a table row.
   const plain = last((text) => {
@@ -8340,10 +8534,198 @@ const selfPlain = (() => {
     return [...out];
   }
 
+  // Every heading a page shows, in document order: [{ level, text, line }]. Outside code and comments,
+  // an ATX heading of any level, at any indent a readable line has (one too deep for a heading reads as
+  // one: refusing errs that way), and a setext one, the paragraph's lines above a line of = (level 1)
+  // or of - (level 2); each also inside a block quote or a list item, their markers read away (a quote's
+  // line goes on the paragraph above, a list item's or a footnote's starts its own). And an HTML <h1>-<h6>
+  // tag wherever it stands, in code or a comment too, since an HTML block, a stray backtick or a
+  // comment's tail can show one the reading above takes for code: its text up to the next heading tag
+  // (HTMLHEAD). Each text is read as a heading's words; a # or ## one's also as a page shows them (seen),
+  // with its link hosts, when unnamedHeading asks.
+  // Linear in the text: each marker, line and tag read once.
+  // The block-quote, list-item and footnote-definition markers that open a line (none matches empty).
+  const OPENERS = /^(?:[ \t]*>[ \t]?|[ \t]*(?:[-*+]|\d{1,9}[.)])(?:[ \t]+|$)|[ \t]*\[\^[^\]\s]{1,999}\]:[ \t]*)*/;
+  const UNDER = /^[ \t]*(=+|-+)[ \t]*$/;
+  // An HTML heading tag and what follows it up to the next heading tag or the end; its own attributes
+  // are dropped up to their first >, so a < in a value can't hide it (one > in a value leaves some in,
+  // which only refuses more). Each tag inside reads as its alt text, as a page shows an image's.
+  const HTMLHEAD = /<h([1-6])(?=[\s/>])([\s\S]*?)(?=<\/?h[1-6][\s/>]|$)/gi;
+  const ALT = /\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`=]+))/i;
+  // A # or ## heading's words as a page shows them (seen), judged beside its text as written: a comment
+  // and a processing instruction dropped (each read to its end), an autolink as its address, each tag a
+  // line break or a block (BLOCK) as a space, each other tag as its alt text (an image's; none else
+  // has one) with no space, as inline tags show; then each character reference decoded and each
+  // default-ignorable character (a soft hyphen, a zero-width space or joiner, a word joiner), shown as
+  // nothing, dropped. A tag's quoted value is read whole, up to the next <, so linearly. Its text as
+  // written stays what is refused.
+  const SHOWN = /<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*)>|<\/?[A-Za-z][A-Za-z0-9-]*(?:[\s/](?:"[^"<]*"|'[^'<]*'|[^<>"'])*)?>/g;
+  const BLOCK = /^<\/?(?:br|p|div|hr|li|ul|ol|dl|dt|dd|table|thead|tbody|tfoot|tr|td|th|blockquote|pre|section|article|header|footer|nav|aside|figure|figcaption|details|summary|address|h[1-6])(?![A-Za-z0-9-])/i;
+  const INVISIBLE = /\p{Default_Ignorable_Code_Point}|&(?:shy|zwj|zwnj|lrm|rlm|ZeroWidthSpace|Negative(?:VeryThin|Thin|Medium|Thick)Space|NoBreak|it|InvisibleTimes|ic|InvisibleComma|af|ApplyFunction);/gu;
+  const alt = (tag) => { const a = ALT.exec(tag); return a ? (a[1] ?? a[2] ?? a[3]) : ''; };
+  const shown = (tag) => ` ${alt(tag)} `;
+  // s with each run from open to the next close taken out (an unclosed one kept), read once.
+  const cut = (s, open, close) => { let out = ''; let at = 0; for (let i = s.indexOf(open); i >= 0; i = s.indexOf(open, at)) { const j = s.indexOf(close, i + open.length); if (j < 0) break; out += s.slice(at, i); at = j + close.length; } return out + s.slice(at); };
+  const seen = (s) => decode(cut(cut(words(s), '<!--', '-->'), '<?', '?>').replace(INVISIBLE, '').replace(SHOWN, (t, url) => (url ?? (BLOCK.test(t) ? ' ' : alt(t))))).replace(INVISIBLE, '').replace(/\s+/g, ' ').trim();
+  const headed = last((text) => {
+    const out = [];
+    const add = (level, s, line, text = words(s), kind = {}) => out.push({ level, text, line, raw: s, ...kind });
+    let para = []; // the paragraph's lines so far: [line, its text past its markers]
+    readable(text).forEach((l, i) => {
+      if (l === null || !l.trim()) { para = []; return; }
+      const at = OPENERS.exec(l)[0].length;
+      const inner = l.slice(at);
+      const atx = /^[ \t]*(#{1,6})(?:[ \t]+(.*))?$/s.exec(inner);
+      if (atx) { add(atx[1].length, trimST(atx[2] ?? '').replace(/(?:^|[ \t])#+$/, ''), i + 1); para = []; return; }
+      const under = para.length && (UNDER.exec(l) ?? UNDER.exec(inner));
+      if (under) { add(under[1][0] === '=' ? 1 : 2, para.map((p) => p[1]).join(' '), para[0][0]); para = []; return; }
+      if (!inner.trim() || BREAK.test(inner)) { para = []; return; }
+      if (/[^> \t]/.test(l.slice(0, at))) para = []; // a list item's line starts its own paragraph
+      para.push([i + 1, inner]);
+    });
+    const raw = String(text).replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+    const starts = [0];
+    for (let i = raw.indexOf('\n'); i >= 0; i = raw.indexOf('\n', i + 1)) starts.push(i + 1);
+    const lineOf = (o) => { let a = 0; let b = starts.length - 1; while (a < b) { const m = (a + b + 1) >> 1; if (starts[m] <= o) a = m; else b = m - 1; } return a + 1; };
+    // Where a page keeps an HTML heading tag as text (code), so the names rule judges it as before: in a
+    // fence or indented code outside an HTML block, or wholly inside a comment, or in a code span whose
+    // two marks its line and cell hold (ruling m-20261126-121428851). The lines are cut into blocks as a
+    // page cuts them: an HTML block (CommonMark's seven kinds; a fence that opens in one is read as HTML
+    // to its end), and a paragraph, which a blank line, a heading, a rule, an underline, a list item, a
+    // table row or an HTML block ends. Each block is read by kept, once.
+    const ls = lines(text);
+    const sc = scan(text).lines;
+    const rd = readable(text);
+    const kind = []; // each line's: code, html or md
+    const blocks = []; // { a, b, md, alone }: first and last line
+    let end = null; // what ends the open HTML block: its pattern, or '' for a blank line
+    let taken = false; // in a fence that opened in an HTML block
+    let rc = false; // readable's comment, to tell its unread lines from indented code
+    for (let l = 0; l < ls.length; l += 1) {
+      const s = ls[l];
+      let comment = false;
+      if (!sc[l].code) { comment = rc || /^ {0,3}<!--/.test(s); if (comment) rc = !s.includes('-->'); }
+      if (end === '' && !s.trim()) end = null;
+      taken = sc[l].code && (sc[l].opens ? end !== null : taken);
+      const code = sc[l].code || (rd[l] === null && !comment);
+      const last = blocks[blocks.length - 1];
+      const para = kind[l - 1] === 'md' && !!ls[l - 1].trim() && !last.alone;
+      let k = -1;
+      let seven = false;
+      if (end === null && !code) {
+        const xs = [s.replace(/^ {0,3}/, ''), s.slice(OPENERS.exec(s)[0].length).replace(/^[ \t]*/, '')];
+        k = HTMLBLOCK.findIndex(([o]) => xs.some((x) => o.test(x)));
+        seven = k < 0 && !para && xs.some((x) => /^<\/?[A-Za-z]/.test(x) && trimST(x).endsWith('>'));
+      }
+      if (k >= 0 || seven) {
+        kind.push('html');
+        blocks.push({ a: l, b: l, md: false });
+        end = k >= 0 && HTMLBLOCK[k][1] ? HTMLBLOCK[k][1] : '';
+      } else if (end !== null || taken) {
+        kind.push('html');
+        if (kind[l - 1] === 'html') last.b = l; else blocks.push({ a: l, b: l, md: false });
+      } else if (code) kind.push('code');
+      else {
+        kind.push('md');
+        const alone = HEAD.test(s) || BREAK.test(s) || UNDER.test(s) || /^ {0,3}\|/.test(s);
+        if (!s.trim()) continue;
+        if (para && !alone && !LIST.test(s)) last.b = l;
+        else blocks.push({ a: l, b: l, md: true, alone });
+      }
+      if (end && kind[l] === 'html' && end.test(s)) end = null;
+    }
+    const km = []; // each line as kept reads its block
+    const from = []; // where the comment a line's first character is in opened, when on a line before
+    const dirty = [0]; // how many lines before each hold a list, quote or footnote marker or a |, or are more than three spaces in
+    for (const { a, b, md } of blocks) { let l = a; for (const t of kept(ls.slice(a, b + 1).join('\n'), md).split('\n')) { km[l] = t; if (l > a && (t === '' || t[0] === '\0') && (km[l - 1] === '' ? from[l - 1] !== undefined : km[l - 1].endsWith('\0'))) from[l] = from[l - 1] !== undefined && !/[^\0]/.test(km[l - 1]) ? from[l - 1] : l - 1; l += 1; } }
+    for (let l = 0; l < ls.length; l += 1) dirty.push(dirty[l] + (OPENERS.exec(ls[l])[0].length || ls[l].includes('|') || indent(ls[l]) > 3 ? 1 : 0));
+    const own = new Map(); // each line read alone: an HTML block's by kept, a markdown one's cell by cell
+    // A tag is code where its block's reading and its own line's (and cell's) both keep it as text; or in
+    // a comment from a line before, when every line from the one it opened on is at most three spaces in
+    // and holds no marker or |, so no quote, table row, list item, heading, rule or code the cut above
+    // misses (one in a list item is more than three spaces in) can end the comment or hold its opener.
+    const inCode = (o) => {
+      const l = lineOf(o) - 1;
+      const c = o - starts[l];
+      if (kind[l] === 'code') return true;
+      const ch = km[l]?.[c];
+      if (ch !== ' ' && ch !== '\0') return false;
+      if (!own.has(l)) own.set(l, kind[l] === 'html' ? kept(ls[l], false) : cells(ls[l]));
+      if (own.get(l)[c] !== '<') return true;
+      const f = from[l];
+      return ch === '\0' && f !== undefined && dirty[l + 1] === dirty[f];
+    };
+    for (const m of raw.matchAll(HTMLHEAD)) { const body = m[2].replace(/^[^>]*>/, ''); add(Number(m[1]), body, lineOf(m.index), words(body.replace(/<[^<>]*>/g, shown)), (inCode(m.index) ? { code: true } : { html: true })); }
+    return out.filter((h) => h.text).sort((a, b) => a.line - b.line);
+  });
+  // A top-level heading must be plain text (ruling a-20261126-080419596): a # or ## heading, in any form,
+  // and an HTML <h1> to <h6> one, is refused when its text as written (a markdown one's code spans aside)
+  // holds raw HTML (< then a letter, /, ! or ?), a character reference (& then # or a letter), a
+  // character in \p{C} but a tab or a line's end, a mark left after NFC, a default-ignorable character,
+  // ~~, or a [ or ]. Plain text, code spans and * _ emphasis stay, read by the readings below. An HTML
+  // heading tag in code or a comment (code) is shown as text: the names rule judges it, as before.
+  const NOT_PLAIN = /<[A-Za-z\/!?]|&[#A-Za-z]|[^\P{C}\t\n]|\p{M}|\p{Default_Ignorable_Code_Point}|~~|[\[\]]/u;
+  const plainHeading = (h) => h.code || (h.level > 2 && !h.html) || !NOT_PLAIN.test((h.html ? h.raw : mask(h.raw, false)).normalize('NFC'));
+  // Whether the names rule refuses a heading: one that is not plain text; one of level 3 to 6 unless names holds it whole; a # or ##
+  // one (the title and the sections, in plain words) when it holds a capitalised word, Exterior aside
+  // (the document's own name), or a link host, that names doesn't hold whole, read as written, as
+  // shown or joined. Each later reading is made only when the one before finds nothing, so a refused heading
+  // costs one.
+  // A # or ## heading's joined reading, judged beside the two above: its markup taken out with no
+  // separator and the spaces typed kept, as a page joins a word a tag or a mark splits. Its spans are
+  // cut two ways (joined, joinedAtGt); only a line break or a paragraph (<br>, <p> and their end tags)
+  // reads as a space. What is left is squeezed (squeeze). Linear: a span ends at its quote or its >.
+  // SPAN: a tag (a quoted value read to its quote), end tag, declaration or autolink, as CommonMark reads it.
+  const SPAN = /<\/?[A-Za-z][A-Za-z0-9-]*(?:\s+[^\s"'<>\/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*\s*\/?>|<![A-Za-z][^<>]*>|<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*>/g;
+  const BREAKS = /^<\/?(?:br|p)(?![A-Za-z0-9-])/i;
+  // The text joined after its cuts: each character reference decoded, NFKC-normalised, each format,
+  // default-ignorable and combining mark left over dropped, read as words, a reference link's label after
+  // its ] taken out, and each ~ * _ ` [ ] mark taken out.
+  const squeeze = (t) => words(decode(t).normalize('NFKC').replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\p{Mn}]/gu, '')).replace(/\]\[[^[\]]{0,999}\]/g, ']').replace(/[~*_`[\]]/g, '');
+  // s with each span cut where a page ends it, at its first > (quotes ignored), read once; a comment at
+  // -->, --!> or at once; <br>, <p> and their end tags a space. An unclosed span stays as text. Each end
+  // looked for is kept until passed, so each is found once.
+  const atGt = (s) => {
+    let out = '';
+    let at = 0;
+    const next = {};
+    const find = (t, from) => { if (next[t] === undefined || (next[t] >= 0 && next[t] < from)) next[t] = s.indexOf(t, from); return next[t]; };
+    for (let i = s.indexOf('<'); i >= 0; i = s.indexOf('<', at)) {
+      out += s.slice(at, i);
+      if (s.startsWith('<!--', i)) { // a comment ends at once (<!-->, <!--->), or at --> or --!>
+        if (s[i + 4] === '>' || s.startsWith('->', i + 4)) { at = i + (s[i + 4] === '>' ? 5 : 6); continue; }
+        const ends = [['-->', 3], ['--!>', 4]].map(([t, n]) => [find(t, i + 4), n]).filter(([e]) => e >= 0);
+        if (!ends.length) { at = i; break; }
+        const [e, n] = ends.reduce((a, b) => (b[0] < a[0] ? b : a));
+        at = e + n;
+        continue;
+      }
+      if (!/[A-Za-z/!?]/.test(s[i + 1] ?? '')) { out += '<'; at = i + 1; continue; }
+      const e = find('>', i + 1);
+      if (e < 0) { at = i; break; }
+      if (BREAKS.test(s.slice(i, Math.min(e + 1, i + 6)))) out += ' ';
+      at = e + 1;
+    }
+    return out + s.slice(at);
+  };
+  // The joined reading, cut two ways (ruling m-20261126-071801827): as CommonMark reads its spans
+  // (SPAN, a quoted value to its quote), and as a page ends them (atGt). The invisible characters and
+  // their named references go first, before decode. The CDATA cut can't change a verdict (CDATA is
+  // upper case, so the reading as written refuses it): kept for the reading's sake.
+  const joined = (s) => squeeze(cut(cut(cut(s.replace(INVISIBLE, ''), '<!--', '-->'), '<?', '?>'), '<![CDATA[', ']]>').replace(SPAN, (t) => (BREAKS.test(t) ? ' ' : '')));
+  const joinedAtGt = (s) => squeeze(atGt(s.replace(INVISIBLE, '')));
+  const unnamedWord = (t, names) => [...t.matchAll(WORD)].some((m) => { const w = capWord(m[0]); return w !== null && w.toLowerCase() !== 'exterior' && !namesWhole(names, w); });
+  const unnamedHeading = (h, names) => !plainHeading(h) || (h.level > 2
+    ? !namesWhole(names, h.text)
+    : unnamedWord(h.text, names) || unnamedWord(seen(h.raw), names) || unnamedWord(joined(h.raw), names)
+      || unnamedWord(joinedAtGt(h.raw), names) || hosts(h.raw).some((x) => !namesWhole(names, x)));
+
+  // The text of each heading that is not plain text, in document order.
+  const notPlain = (text) => headed(text).filter((h) => !plainHeading(h)).map((h) => h.text);
   // exterior.md: { errors, warnings, refused, held, hosts }. On a repo known private nothing is refused
-  // or held; visibility 'public' or 'unknown' keeps the names rule. A ### heading is judged by
-  // allowed.names (origin main's strategy and dependency names); a word or host by allowed.words (the
-  // strategy and the dependency files whole).
+  // or held; visibility 'public' or 'unknown' keeps the names rule. Every heading, in any form (headed),
+  // is judged by allowed.names (origin main's strategy and dependency names) and refused as
+  // unnamedHeading says; a word or host by allowed.words (the strategy and the dependency files whole).
   function checkExterior(text, { today, visibility, allowed }) {
     const errors = docErrors(text, 'exterior');
     const all = errors.length ? [] : entries(text);
@@ -8353,13 +8735,13 @@ const selfPlain = (() => {
     return {
       errors,
       warnings: all.flatMap((e) => entryWarnings(e, today, refs)),
-      refused: unknown(headings(text).filter((h) => h.level === 3).map((h) => h.text), allowed.names),
+      refused: open ? [] : headed(text).filter((h) => unnamedHeading(h, allowed.names)).map((h) => h.text),
       held: unknown(capitalised(text), allowed.words),
       hosts: unknown(hosts(text), allowed.words),
     };
   }
 
-  return { version, checkSelf, selfHeld, scan, plain, headings, links, parts, namesWhole, entries, capitalised, hosts, checkExterior };
+  return { version, checkSelf, selfHeld, scan, plain, headings, links, parts, namesWhole, checkExterior, notPlain };
 })();
 // 1 when a fence's info string is exactly self or exterior (version 1), else 2.
 const selfPlainVersion = selfPlain.version;
@@ -8793,9 +9175,9 @@ function cmdSelf() {
 // project/exterior.md, what the project relates to: since kit-863 a plain document
 // (log.schema.json#exterior2), judged by the self-plain region's checkExterior, which follows
 // test/fixtures/world2/check.mjs rule for rule: one # title, ### entries, a dated source for each, and
-// on a repo not known to be private the names rule (a ### heading named whole in origin main's
-// strategy or dependency names, else refused; every capitalised word and every link host held until
-// named on the chore). A draft must be one. Version 1 (log.schema.json#exterior@1, one fenced
+// on a repo not known to be private the names rule (every heading, in any form: one of level 3 to 6
+// named whole in origin main's strategy or dependency names, a # or ## one each capitalised word in
+// it, else refused; every capitalised word and every link host held until named on the chore). A draft must be one. Version 1 (log.schema.json#exterior@1, one fenced
 // `exterior` block) still validates on main, by kit-135's rules below, and raises one exterior-drift.
 const EXTERIOR_REL = () => `${projectRel}/exterior.md`;
 const EXTERIOR_NOT_DRAFTED = 'exterior.md is not drafted yet: the supervisor drafts it from the strategy and self.md (supervisor.md, Monitoring)';
@@ -8830,17 +9212,12 @@ function exteriorDoc(text) {
   return { version, block: errors.length ? null : v, errors };
 }
 const exteriorTreeText = () => readText(path.join(projectDir, 'exterior.md'));
-// A version 1 file's checks past its contract, for validate. The head's strategy.md and self.md blobs
-// (null for no file): ref's, or with ref null the working tree's (git hash-object, so an uncommitted
-// draft counts), with the strategy's text when it was read from the tree.
-function headBlobs(ref, root = projectDir) {
-  const rels = { strategy: strategyRel, self: `${projectRel}/self.md` };
-  if (ref) {
-    const at = (rel) => git(['rev-parse', '--verify', '--quiet', `${ref}:${rel}`], mainRoot);
-    return { strategyBlob: at(rels.strategy), selfBlob: at(rels.self), strategyText: null };
-  }
-  const tree = (name) => { const f = path.join(root, name); return fs.existsSync(f) ? git(['hash-object', '--', f], mainRoot) : null; };
-  return { strategyBlob: tree('strategy.md'), selfBlob: tree('self.md'), strategyText: readText(path.join(root, 'strategy.md')) };
+// A version 1 file's checks past its contract, for validate: the working tree's strategy.md and
+// self.md blobs (git hash-object, so an uncommitted draft counts; null for no file) and the strategy's
+// text.
+function headBlobs() {
+  const tree = (name) => { const f = path.join(projectDir, name); return fs.existsSync(f) ? git(['hash-object', '--', f], mainRoot) : null; };
+  return { strategyBlob: tree('strategy.md'), selfBlob: tree('self.md'), strategyText: readText(path.join(projectDir, 'strategy.md')) };
 }
 // Whether validate is at the draft: main can be read and the working tree's exterior.md is not
 // main's (none on main counts as differing). With no main (a depth-1 CI checkout) it is not.
@@ -8896,7 +9273,7 @@ function dependencyNames(ref = mainRef()) {
   return { text: names.join('\n'), warnings };
 }
 // What the names rule allows at ref (origin main; the branch's own files never count): names, which
-// a ### heading must be named in whole (main's strategy.md and its dependency names), and words, which
+// judge every heading (main's strategy.md and its dependency names), and words, which
 // hold every other capitalised word and every link host (main's strategy.md and its dependency files'
 // whole text, namesAllowedText); warnings, the dependency files'.
 function exteriorAllowed(ref = mainRef()) {
@@ -8909,7 +9286,13 @@ function exteriorAllowed(ref = mainRef()) {
 function exteriorDraft(text, allowed) {
   return selfPlain.checkExterior(text, { today: exteriorToday(), visibility: 'public', allowed });
 }
-const exteriorRefusedLine = (name) => `"${name}" (a ### heading) is not named whole in origin main's strategy.md or its dependency names: on a repo not known to be private an entry is headed only by a name they give; head it as a group or a topic, or have the strategy name it first`;
+// A refused heading's line: a level-3 ATX heading of text's (an entry) as kit-863 words it; any other
+// form or level as a heading.
+const exteriorRefusedLine = (name, text) => (selfPlain.notPlain(text).includes(name)
+  ? `"${name}" (a heading) is not plain text: a top-level heading must be plain text; put options, placeholders and markup in backticks (outside a code span a # or ## heading, or an HTML <h1> to <h6> one, holds no raw HTML, character reference, control, format or invisible character, mark left after NFC, ~~, [ or ]; * or _ emphasis is fine)`
+  : selfPlain.headings(text).some((h) => h.level === 3 && h.text === name)
+  ? `"${name}" (a ### heading) is not named whole in origin main's strategy.md or its dependency names: on a repo not known to be private an entry is headed only by a name they give; head it as a group or a topic, or have the strategy name it first`
+  : `"${name}" (a heading) is not named in origin main's strategy.md or its dependency names: on a repo not known to be private a heading of level 3 to 6 is only a name they give whole, and a # or ## heading holds no capitalised word or link host they don't name; name it in the strategy first, or reword it (a # or ## heading may lower-case the word, or use one the strategy holds)`);
 const exteriorWordLine = (w) => `"${w.word}" (${w.where}) is in neither origin main's strategy.md nor its dependency files: on a repo not known to be private, the draft is public once its branch is pushed; reword it, or check it and name it on the chore (chore pr --names-checked)`;
 // The draft's history (every version is pushed): the contract and dated sources on head ({ text }, or
 // null when there is no exterior.md at the head), then the names rule on each version ([{ commit,
@@ -8926,7 +9309,7 @@ function exteriorVersionsScan(head, versions, allowed) {
   const seen = new Set();
   for (const { commit, text } of versions) {
     const d = judge(text);
-    for (const name of d.refused) if (!seen.has(`n:${name}`)) { seen.add(`n:${name}`); named.push({ name, line: exteriorRefusedLine(name), commit }); }
+    for (const name of d.refused) if (!seen.has(`n:${name}`)) { seen.add(`n:${name}`); named.push({ name, line: exteriorRefusedLine(name, text), commit }); }
     for (const [list, where] of [[d.held, 'word'], [d.hosts, 'link host']]) for (const word of list) if (!seen.has(`w:${word}`)) { seen.add(`w:${word}`); words.push({ word, where, commit }); }
   }
   warns.push(...allowed.warnings);
@@ -9055,7 +9438,7 @@ function exteriorBase(main, blob) {
 // metrics' exterior findings, read from main with no network call (none with no main), each keyed so
 // observeFindings keeps one observation per name or blob pair. A version 1 exterior.md: one
 // exterior-drift (key exterior@1) asking for the plain version, and no other. A plain one:
-// exterior-drift once per ### heading main's strategy.md and dependency names no longer name, only
+// exterior-drift once per heading the names rule refuses against main's strategy.md and dependency names, only
 // where the repo was last known public (a machine with no record says nothing); exterior-stale while
 // main's strategy.md or self.md blob isn't the one at its base (exteriorBase; unknown raises none);
 // both low. exterior-missing while main has self.md, a written strategy linking it, and no
@@ -9080,10 +9463,10 @@ function exteriorFindings(add) {
   if (lastRepoVisibility() === 'public') {
     const allowed = exteriorAllowed(main);
     const seen = new Set();
-    for (const h of selfPlain.headings(m.text)) {
-      if (h.level !== 3 || seen.has(h.text.toLowerCase()) || selfPlain.namesWhole(allowed.names, h.text)) continue;
-      seen.add(h.text.toLowerCase());
-      add('low', 'exterior-drift', 'exterior', `exterior.md's entry "${h.text}" is named in neither main's strategy.md nor its dependency names`, 'draft a new version of exterior.md that heads it as a group or a topic, or have the strategy name it; run exterior check before chore pr', { key: h.text.toLowerCase() });
+    for (const name of exteriorDraft(m.text, allowed).refused) {
+      if (seen.has(name.toLowerCase())) continue;
+      seen.add(name.toLowerCase());
+      add('low', 'exterior-drift', 'exterior', `exterior.md's heading "${name}" is named in neither main's strategy.md nor its dependency names`, 'draft a new version of exterior.md that heads it in plain words, as a group or a topic, or have the strategy name it; run exterior check before chore pr', { key: name.toLowerCase() });
     }
   }
   const base = exteriorBase(main, m.blob);
@@ -9107,7 +9490,7 @@ function exteriorCheckLines() {
     const v = repoVisibility();
     if (v !== 'private') {
       const tail = v === 'unknown' ? " (the repo's visibility is unknown, which counts as not private)" : '';
-      errors.push(...d.refused.map((n) => `${exteriorRefusedLine(n)}${tail}`));
+      errors.push(...[...new Set(d.refused)].map((n) => `${exteriorRefusedLine(n, text)}${tail}`)); // a heading written twice is one line
       warnings.push(...[...d.held.map((word) => ({ word, where: 'word' })), ...d.hosts.map((word) => ({ word, where: 'link host' }))].map(exteriorWordLine));
     }
   }
@@ -9127,7 +9510,7 @@ function exteriorValidateLines() {
   if (text === null) return { errors: [], warnings: [] };
   const { block, errors } = exteriorDoc(text);
   if (!block) return { errors, warnings: [] };
-  return exteriorBlobLines(block, { draft: exteriorAtDraft(), ...headBlobs(null) });
+  return exteriorBlobLines(block, { draft: exteriorAtDraft(), ...headBlobs() });
 }
 // dashboard-data's exterior block (log.schema.json#exterior@1 dashboard), for a version 1 file whose
 // block holds: file order, relation_word or null, each signal's score weight×value. kit-868 drops it.
@@ -10544,6 +10927,15 @@ function askLine({ thread, about } = {}) {
   if (def !== null && (kind === 'one-way-door' || reasons.includes('one-way-door'))) die('a one-way door has no --default: only the owner\'s answer goes through it');
   // a door's answer approves a plan only as recommended (doorAgreed), so a door says what it recommends
   if (kind === 'one-way-door' && !flagStr('recommendation')?.trim()) die('a one-way door needs --recommendation: the owner\'s yes to it is what approves the plan built on it');
+  // a door's other choices the owner may pick instead, each approving the plan built on it (doorPick):
+  // marked "approves": true; a choice that declines never is. Only a door's choices carry it
+  const approving = (jsonFlag('choices') ?? []).filter((c) => isObj(c) && Object.hasOwn(c, 'approves'));
+  if (approving.length && kind !== 'one-way-door' && cls !== 'one-way-door') die('"approves" goes on a one-way door\'s choices: the other choices the owner may pick, each approving the plan built on it');
+  for (const c of approving) {
+    if (c.approves !== true) die(`--choices "${c.label}": "approves" is true or left out (a choice that declines leaves it out)`);
+    if (DECLINING_LABEL.test(String(c.label ?? ''))) die(`--choices "${c.label}" reads as a no: a choice that declines never approves a plan, so it never carries "approves"`);
+    if (String(c.label ?? '').trim().toLowerCase() === String(flagStr('recommendation') ?? '').trim().toLowerCase()) die(`--choices "${c.label}" is the recommendation, which approves already: leave "approves" off it`);
+  }
   if (def !== null && (L.owner_only ?? []).includes(cls)) die(`${cls} is the owner's (constitution.md §1): no --default, only their answer approves it`);
   const blocks = asList(flags.blocks);
   for (const b of blocks) if (!tickets().has(b) && !isIncident(logGet(b)) && !(cls === 'production-remediation' && /^(remediation|release):\S+$/.test(b))) die(`--blocks ${b}: no such ticket (or incident)`);
@@ -11417,8 +11809,16 @@ function threadViews(objects) {
   }
   // source: where a note to check shows now (noteSource), read from git and the worktrees
   let holds = null;
+  const standing = new Map();
+  // gone: no worktree of that name at all (ENOENT), never one the kit merely can't read now
+  const missing = (name) => { try { fs.lstatSync(path.join(mainRoot, '.worktrees', name)); return false; } catch (e) { return e?.code === 'ENOENT'; } };
+  const gone = (name) => { if (!standing.has(name)) standing.set(name, !draftWorktree(name) && missing(name)); return standing.get(name); };
   return [...objects.values()].filter((o) => o.type === 'thread').map((t) => {
-    const v = threadView(t, (turns.get(t.id) ?? []).sort(byTime), (asked.get(t.id) ?? []).sort(byTime), (marks.get(t.id) ?? []).sort(byTime));
+    let v = threadView(t, (turns.get(t.id) ?? []).sort(byTime), (asked.get(t.id) ?? []).sort(byTime), (marks.get(t.id) ?? []).sort(byTime));
+    if (v.status === 'open' && v.subject?.kind === 'artifact' && v.handed && !v.check && v.handed.to !== 'supervisor' && gone(v.handed.to)) {
+      // waiting as for a note handed to the supervisor: its reply or the responder's, not the gone session's own words
+      v = { ...v, with: 'supervisor', waiting: v.turns.some((u) => u.by !== 'owner' && u.writer !== v.handed.to && u.at > v.handed.at) ? 'session' : 'supervisor' };
+    }
     return noteToCheck(v) ? { ...v, source: noteSource(v, (holds ??= shotHoldsOnce())) } : v;
   });
 }
@@ -14212,33 +14612,87 @@ function shotSweep(id, now) {
   }
 }
 /* note-shots end */
-// An artifact's versions, newest first: its drafts (a worktree's copy that differs from main's), then
-// main's version (landed) and the ones before it (earlier), from the walk artifactTreeOk makes, so
-// every tree listed is one /artifact/tree/ serves. Only trees with an artifact.json, each once at its
-// newest commit; main's capped at ARTIFACT_VERSIONS_MAX versions, counted after those filters. Null
-// when there is nothing at all.
+// A tree's fingerprint, the one describeArtifact gives the same files (kit-947): fingerprint() over
+// git ls-tree -r's paths and blob ids. Kept in run/cache by tree id (a tree id's files never change),
+// the newest 20,000, written once as the process ends; null, and nothing kept, when git can't read it.
+function treeFingerprint(tree) {
+  const file = path.join(runDir, 'cache', 'artifact-tree-fps.json');
+  const kept = treeFingerprint.kept ??= (() => {
+    const k = { data: {}, dirty: false };
+    try { const d = JSON.parse(fs.readFileSync(file, 'utf8')); if (isObj(d)) k.data = d; } catch {}
+    process.on('exit', () => {
+      if (!k.dirty) return;
+      const ids = Object.keys(k.data);
+      for (const id of ids.slice(0, Math.max(0, ids.length - 20000))) delete k.data[id];
+      try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(k.data)); } catch {}
+    });
+    return k;
+  })();
+  if (typeof kept.data[tree] === 'string') return kept.data[tree];
+  const raw = /^[0-9a-f]{40,64}$/.test(tree ?? '') ? git(['ls-tree', '-r', '-z', tree], mainRoot) : null;
+  if (raw === null) return null;
+  const entries = raw.split('\0').filter(Boolean).map((l) => { const tab = l.indexOf('\t'); return { path: l.slice(tab + 1), oid: l.slice(0, tab).split(' ')[2] }; });
+  kept.data[tree] = fingerprint(entries);
+  kept.dirty = true;
+  return kept.data[tree];
+}
+// When a draft's page last changed, ISO (kit-947), never its branch's head: a branch from another
+// machine, its folder's last commit up to the tip; a worktree that is its own checkout, its files'
+// newest time while it has changes there (git status, taking no lock in another session's checkout),
+// otherwise its folder's last commit up to HEAD; a plain folder, its files' newest time. A commit's
+// time is kept in run/cache by the tip or HEAD and the slug (the newest 2,000), written once as the
+// process ends; with no commit, or git failing, the files' time.
+function draftChangedAt(row) {
+  const file = path.join(runDir, 'cache', 'artifact-draft-times.json');
+  const kept = draftChangedAt.kept ??= (() => {
+    const k = { data: {}, dirty: false };
+    try { const d = JSON.parse(fs.readFileSync(file, 'utf8')); if (isObj(d)) k.data = d; } catch {}
+    process.on('exit', () => {
+      if (!k.dirty) return;
+      const keys = Object.keys(k.data);
+      for (const key of keys.slice(0, Math.max(0, keys.length - 2000))) delete k.data[key];
+      try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(k.data)); } catch {}
+    });
+    return k;
+  })();
+  const files = row.updated_at ?? null;
+  const lastCommit = (sha, cwd, folder) => {
+    if (!/^[0-9a-f]{40,64}$/.test(sha ?? '')) return files;
+    const key = `${sha} ${row.slug}`;
+    if (typeof kept.data[key] === 'string') return kept.data[key];
+    const t = git(['log', '-1', '--format=%cI', sha, '--', folder], cwd);
+    if (!t || Number.isNaN(Date.parse(t))) return files;
+    kept.data[key] = new Date(t).toISOString();
+    kept.dirty = true;
+    return kept.data[key];
+  };
+  if (row.remote) return lastCommit(row.commit, mainRoot, `${ARTIFACTS_REL}/${row.slug}`);
+  const root = draftWorktree(row.at);
+  if (!root) return files;
+  // a plain folder under .worktrees/ has no checkout of its own: git would walk up to main's
+  const top = git(['rev-parse', '--show-toplevel'], root);
+  try { if (!top || fs.realpathSync(top) !== root) return files; } catch { return files; }
+  const folder = path.join(root, ARTIFACTS_REL, row.slug);
+  const st = git(['--no-optional-locks', 'status', '--porcelain', '-z', '--untracked-files=all', '--', folder], root);
+  if (st === null || st !== '') return files;
+  return lastCommit(git(['rev-parse', 'HEAD'], root), root, folder);
+}
+// An artifact's versions in one list, newest first by time: main's distinct contents (each at the
+// first commit that made it; landed is the one main holds now) and the drafts with content of their
+// own (dated by their page's last change), keyed by fingerprint, so a copy is never its own entry.
+// Only servable trees (with an artifact.json), from the walk artifactTreeOk makes, so every tree
+// listed is one /artifact/tree/ serves. The whole list is capped at ARTIFACT_VERSIONS_MAX, never
+// cutting landed. Null when there is nothing at all.
 const ARTIFACT_VERSIONS_MAX = 200;
 function artifactVersions(slug) {
-  const drafts = draftArtifacts().filter((a) => a.slug === slug)
-    .sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))
-    .map((a) => {
-      const root = draftWorktree(a.at);
-      // a plain folder under .worktrees/ has no checkout of its own: git would walk up to main's
-      const top = root ? git(['rev-parse', '--show-toplevel'], root) : null;
-      let commit = null;
-      try { commit = top && fs.realpathSync(top) === root ? git(['rev-parse', 'HEAD'], root) : null; } catch {}
-      if (a.remote) return { kind: 'draft', at: a.at, worktree: a.at, branch: a.branch, commit: a.commit, time: a.updated_at, fp: a.fp, url: `/artifact/origin/${encodeURIComponent(a.branch)}/${slug}/` };
-      return { kind: 'draft', at: a.at, worktree: a.at, commit, time: a.updated_at, fp: a.fp, url: `/artifact/wt/${a.at}/${slug}/` };
-    });
   const ref = mainRef();
   let main = [];
-  let truncated = false;
   if (ref) {
     const folder = `${ARTIFACTS_REL}/${slug}`;
     const raw = git(['log', '--format=%x01%H %cI', '--raw', '--no-abbrev', '-t', '-m', '--first-parent', '--no-renames', ref, '--', folder], mainRoot);
     // a failed read is a failure (exit 1), never an empty history (exit 3)
     if (raw === null) die(`${slug}: could not read main's history`);
-    const seen = new Set();
+    // every commit that made a tree, newest first; a revert's tree is kept here and collapsed below
     for (const chunk of raw.split('\x01').slice(1)) {
       const [head, ...lines] = chunk.split('\n');
       const [commit, time] = head.split(' ');
@@ -14247,8 +14701,7 @@ function artifactVersions(slug) {
         const m = /^:(\d+) (\d+) ([0-9a-f]+) ([0-9a-f]+) \S+\t(.*)$/.exec(l);
         if (m && m[5] === folder && m[2] === '040000') { tree = m[4]; break; }
       }
-      if (!tree || /^0+$/.test(tree) || seen.has(tree)) continue;
-      seen.add(tree);
+      if (!tree || /^0+$/.test(tree)) continue;
       main.push({ tree, commit, time });
     }
     // only servable: a tree without artifact.json at its top (from before the manifest) is left out
@@ -14263,12 +14716,51 @@ function artifactVersions(slug) {
     // a folder missing on main is an empty answer (""), not a failure: only null is
     if (nowLs === null) die(`${slug}: could not read main's history`);
     const nowTree = treeNow(nowLs);
-    main = main.map((e) => ({ kind: e.tree === nowTree ? 'landed' : 'earlier', at: `tree:${e.tree}`, tree: e.tree, commit: e.commit, time: e.time, url: `/artifact/tree/${e.tree}/${slug}/` }));
-    truncated = main.length > ARTIFACT_VERSIONS_MAX;
-    main = main.slice(0, ARTIFACT_VERSIONS_MAX);
+    const nowFp = nowTree ? treeFingerprint(nowTree) : null;
+    // one entry per content, at the first commit that made it: walked oldest first, the first of each
+    // fingerprint kept (a tree git can't fingerprint stands alone, by its id), then newest first again,
+    // so each sits at its earliest commit's place in the walk
+    const firsts = new Map();
+    for (const e of [...main].reverse()) {
+      const fp = treeFingerprint(e.tree);
+      const key = fp ?? `tree:${e.tree}`;
+      if (!firsts.has(key)) firsts.set(key, { ...e, fp });
+    }
+    main = [...firsts.values()].reverse().map((e) => {
+      const landed = !!nowTree && (e.fp ? e.fp === nowFp : e.tree === nowTree);
+      const tree = landed ? nowTree : e.tree;
+      return { kind: landed ? 'landed' : 'earlier', at: `tree:${tree}`, tree, commit: e.commit, time: e.time, fp: e.fp, url: `/artifact/tree/${tree}/${slug}/` };
+    });
   }
-  if (!drafts.length && !main.length) return null;
-  return { slug, versions: [...drafts, ...main], truncated };
+  // the drafts with content of their own: a copy of any of main's is none, and copies of one page are
+  // one entry, the copy made first (on a tie, the first listed), each dated by its page's last change
+  const onMain = new Set(main.map((e) => e.fp).filter(Boolean));
+  const byFp = new Map();
+  for (const a of draftArtifacts().filter((d) => d.slug === slug && !onMain.has(d.fp))) {
+    const time = draftChangedAt(a);
+    let v;
+    if (a.remote) v = { kind: 'draft', at: a.at, worktree: a.at, branch: a.branch, commit: a.commit, time, fp: a.fp, url: `/artifact/origin/${encodeURIComponent(a.branch)}/${slug}/` };
+    else {
+      const root = draftWorktree(a.at);
+      // a plain folder under .worktrees/ has no checkout of its own: git would walk up to main's
+      const top = root ? git(['rev-parse', '--show-toplevel'], root) : null;
+      let commit = null;
+      try { commit = top && fs.realpathSync(top) === root ? git(['rev-parse', 'HEAD'], root) : null; } catch {}
+      v = { kind: 'draft', at: a.at, worktree: a.at, commit, time, fp: a.fp, url: `/artifact/wt/${a.at}/${slug}/` };
+    }
+    const was = byFp.get(a.fp);
+    if (!was || Date.parse(time) < Date.parse(was.time)) byFp.set(a.fp, v);
+  }
+  // one list by instant (main's times keep git's offset, drafts' are UTC), newest first; the sort is
+  // stable, so a tie keeps drafts first and main's in walk order
+  const at = (v) => { const t = Date.parse(v.time); return Number.isNaN(t) ? -Infinity : t; };
+  let list = [...byFp.values(), ...main].sort((a, b) => at(b) - at(a));
+  if (!list.length) return null;
+  const truncated = list.length > ARTIFACT_VERSIONS_MAX;
+  // the cap never cuts landed: past it, landed takes the last place, which keeps the order
+  const li = list.findIndex((v) => v.kind === 'landed');
+  list = li >= ARTIFACT_VERSIONS_MAX ? [...list.slice(0, ARTIFACT_VERSIONS_MAX - 1), list[li]] : list.slice(0, ARTIFACT_VERSIONS_MAX);
+  return { slug, versions: list, truncated };
 }
 // A broken manifest is listed by its slug and error, never its unvalidated title.
 function describeArtifact(slug, at, src) {
@@ -14305,6 +14797,37 @@ function landedArtifacts() {
 // removed shows nothing.
 function draftArtifacts(landed = landedArtifacts()) {
   const fpOf = new Map(landed.map((a) => [a.slug, a.fp]));
+  const msha = mainSha();
+  // A copy of any version main has had is no draft either (kit-947): the fingerprints of every tree
+  // in main's history of a slug, asked only for a slug with a copy that differs from landed, kept in
+  // run/cache by main's sha (a new sha starts afresh) and slug, written once as the process ends.
+  // With no main, or git failing, nothing is kept and nothing more is dropped.
+  const mf = draftArtifacts.mainFps ??= (() => {
+    const file = path.join(runDir, 'cache', 'artifacts-main-fps.json');
+    const k = { data: { sha: null, slugs: {} }, dirty: false };
+    try { const d = JSON.parse(fs.readFileSync(file, 'utf8')); if (isObj(d) && typeof d.sha === 'string' && isObj(d.slugs)) k.data = d; } catch {}
+    process.on('exit', () => { if (k.dirty) try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(k.data)); } catch {} });
+    return k;
+  })();
+  if (msha && mf.data.sha !== msha) { mf.data = { sha: msha, slugs: {} }; mf.dirty = true; }
+  const mainFps = (slug) => {
+    const have = msha ? mf.data.slugs[slug] : null;
+    if (Array.isArray(have)) return new Set(have);
+    if (!msha) return new Set();
+    const a = treeFolderArgs(msha, slug);
+    const log = git(a.log, mainRoot), now = git(a.now, mainRoot);
+    if (log === null || now === null) return new Set();
+    const trees = new Set();
+    for (const l of log.split('\n')) {
+      const m = /^:\d+ \d+ [0-9a-f]+ ([0-9a-f]+) \S+\t(.*)$/.exec(l);
+      if (m && m[2] === `${ARTIFACTS_REL}/${slug}` && !/^0+$/.test(m[1])) trees.add(m[1]);
+    }
+    if (treeNow(now)) trees.add(treeNow(now));
+    const fps = [...trees].map(treeFingerprint);
+    // one tree git couldn't read: this answer is used, never kept
+    if (fps.every(Boolean)) { mf.data.slugs[slug] = fps; mf.dirty = true; }
+    return new Set(fps.filter(Boolean));
+  };
   const res = [];
   let names = [];
   // no .worktrees/ is no worktree drafts; drafts from other machines are still listed below
@@ -14317,7 +14840,7 @@ function draftArtifacts(landed = landedArtifacts()) {
       const src = artifactSource(w, s);
       if (!src) continue;
       const d = describeArtifact(s, w, src);
-      if (fpOf.get(s) !== d.fp) res.push(d);
+      if (fpOf.get(s) !== d.fp && !mainFps(s).has(d.fp)) res.push(d);
     }
   }
   // Drafts from other machines (kit-750): each branch the dashboard fetched into refs/devteam-remote/
@@ -14327,7 +14850,7 @@ function draftArtifacts(landed = landedArtifacts()) {
   // kept on origin shows nothing. A branch's slugs are kept by its tip and main's (artifacts-remote),
   // a description by tree id (artifacts-remote-trees). A worktree draft of the same slug wins, and
   // names the branches it hides (remote_branches).
-  const ref = mainRef(), msha = mainSha(), mainB = loadSettings().main_branch;
+  const ref = mainRef(), mainB = loadSettings().main_branch;
   const refs = ref ? git(['for-each-ref', '--sort=-committerdate', '--format=%(refname) %(objectname) %(committerdate:iso-strict)', 'refs/devteam-remote/'], mainRoot) : null;
   if (!refs) return res;
   // a branch this machine has too (refs/heads/<b>: its own pushed work) is not from another machine
@@ -14372,7 +14895,7 @@ function draftArtifacts(landed = landedArtifacts()) {
         }
         for (const slug of [...new Set(slugs)].filter((x) => LINK_ID.test(x ?? '')).sort()) {
           const tree = treeNow(git(['ls-tree', sha, '--', `${ARTIFACTS_REL}/${slug}`], mainRoot));
-          if (tree && !mainHas(slug, tree)) kept.push([slug, tree]);
+          if (tree && !mainHas(slug, tree) && !mainFps(slug).has(treeFingerprint(tree))) kept.push([slug, tree]);
         }
       }
     }
@@ -14570,9 +15093,10 @@ function artifactNotesCmd(slug, at) {
 /* artifactNotes end */
 /* artifactHandoff start */
 // artifact handoff <slug> [--at <where>] [--json]: the owner hands the open notes there to the session
-// drawing that copy: a line on each note, then one message, which names ids and counts and never
-// anything a page wrote. A recipient with no pane keeps it in its messages, and the supervisor is
-// nudged with the same line.
+// drawing that copy, and with them any note that came back from a session whose worktree is gone (its
+// view's with isn't handed.to): a line on each note, then one message, which names ids and counts and
+// never anything a page wrote. A recipient with no pane keeps it in its messages, and the supervisor is
+// nudged with the same line; nobody (in --json too) says when the supervisor has no pane either.
 function artifactHandoffCmd(slug, at) {
   const { by } = ownerWriter('the owner hands notes over: they press Hand over on the dashboard, or run artifact handoff in their own terminal');
   const to = artifactRecipient(at);
@@ -14580,21 +15104,24 @@ function artifactHandoffCmd(slug, at) {
   fs.mkdirSync(runDir, { recursive: true });
   const notes = withLock(runPath('artifact-handoff'), () => {
     logCache = null;
-    const open = artifactNoteSet(slug, at).filter((v) => noteState(v) === 'open');
+    const open = artifactNoteSet(slug, at).filter((v) => noteState(v) === 'open' || (!v.check && v.handed && v.with !== v.handed.to));
     for (const v of open) appendLog({ type: 'thread', op: 'set', id: v.id, handed: { to, at: nowIso() } }, by);
     return open;
   });
   const count = notes.length;
-  if (!count) return flags.json ? json({ to, typed: false, count }) : out(`no open notes on artifact ${slug} at ${at}: nothing handed over`);
+  if (!count) return flags.json ? json({ to, typed: false, count, nobody: false }) : out(`no open notes on artifact ${slug} at ${at}: nothing handed over`);
   const report = {};
   sendLine({ to, kind: 'info', from: by, text: `${plural(count, 'note')} on artifact ${slug} ${count === 1 ? 'is' : 'are'} yours: \`devteam.mjs artifact notes ${slug} --at ${at}\`. Mark each with \`devteam.mjs artifact addressed <thread> --note "what changed"\`.` }, report);
+  // nobody's pane took it: the session's isn't there, and the supervisor's isn't either
+  const nobody = to !== 'supervisor' && !report.typed && !!resolvePane(supervisorTarget()).problem;
   if (to !== 'supervisor' && !report.typed) nudgeSupervisor(report.line);
-  if (flags.json) return json({ to, typed: !!report.typed, count });
+  if (flags.json) return json({ to, typed: !!report.typed, count, nobody });
   out(`handed ${plural(count, 'note')} on artifact ${slug} to ${to}`);
   out(report.typed === true ? `typed into ${to}'s pane`
     : report.typed ? `held for ${to}'s pane: ${heldWords(report.typed, to === 'supervisor' ? "the supervisor's" : `${to}'s`)}`
       : to === 'supervisor' ? 'not typed: the supervisor has no pane; it stays in its messages and unread'
-        : `not typed: ${to} has no pane; it stays in ${to}'s messages, and the supervisor is nudged with the same line`);
+        : nobody ? `not typed: neither ${to} nor the supervisor has a pane; it stays in ${to}'s messages and the supervisor's unread, and nobody works it until one of them is back`
+          : `not typed: ${to} has no pane; it stays in ${to}'s messages, and the supervisor is nudged with the same line`);
 }
 /* artifactHandoff end */
 /* artifactAddressed start */
@@ -16248,10 +16775,16 @@ function cmdAct() {
     const t = tickets().get(refs[0]);
     const doors = t.one_way_doors ?? [];
     let goalDoor = null;
+    // door questions answered with a marked alternative: any one named in the plan and its review approves
+    let picks = [];
     if (doorCited) {
       if (!doors.length) die(`${t.id} lists no one-way doors; ${approved} has nothing to cover`);
       if (approval.status !== 'answered') die(`${approved} was not answered by the owner; a one-way door needs the owner's answer, never a default`);
-      if (!doorAgreed(approval)) die(`${approved} was answered "${String(approval.answer ?? '').slice(0, 80)}", not its recommendation ("${approval.recommendation}"): a plan built on the recommendation isn't what the owner said yes to; replan to their answer and ask about that`);
+      if (!doorAgreed(approval)) {
+        const pick = doorPick(approval) && !doorPickUndone(approval, questions()) ? doorPick(approval) : null;
+        if (!pick) die(`${approved} was answered "${String(approval.answer ?? '').slice(0, 80)}", not its recommendation ("${approval.recommendation}") nor a choice it marked "approves" that the owner picked themselves, with no later answer to the same door: a plan built on the recommendation isn't what the owner said yes to; replan to their answer and ask about that`);
+        picks.push({ id: approved, pick });
+      }
       if (approval.ticket !== t.id) {
         // a question asked for one ticket is that ticket's door, never a goal-level one for another
         if (approval.ticket) die(`${approved} was asked for ${approval.ticket}, not ${t.id}: a ticket's door answer covers that ticket only`);
@@ -16260,7 +16793,13 @@ function cmdAct() {
         if (!goals.includes(approval.goal)) die(`${approved} answered a one-way door for goal ${approval.goal}, but ${t.id}'s feature ${t.feature} serves ${goals.join(', ') || 'no goal'}; an answer for another goal never covers this plan`);
         goalDoor = approved;
       }
-    } else if (doors.length && !questions().some((q) => isDoorQuestion(q) && q.ticket === t.id && q.status === 'answered' && doorAgreed(q))) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved, or you cite the owner's answer to the goal's one-way-door question (--approved <qid>) and the plan review says it covers the plan (constitution.md §4)`);
+    } else if (doors.length && !questions().some((q) => isDoorQuestion(q) && q.ticket === t.id && q.status === 'answered' && doorAgreed(q))) {
+      // the owner picked a marked alternative: that answer approves the plan built on it, once the
+      // plan and its approving review name it (below); any one named pick approves, as any one agreed door does
+      const qs = questions();
+      picks = qs.filter((q) => isDoorQuestion(q) && q.ticket === t.id && doorPick(q) && !doorPickUndone(q, qs)).map((q) => ({ id: q.id, pick: doorPick(q) }));
+      if (!picks.length) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved, or you cite the owner's answer to the goal's one-way-door question (--approved <qid>) and the plan review says it covers the plan (constitution.md §4)`);
+    }
     // The plan opens with its TL;DR, so a low-risk plan can be approved from it (quality.md §6).
     // where the records are: home's ticket/<id> for records in home, else the ticket's repo (an act:
     // fails fast on a missing or wrong checkout)
@@ -16270,6 +16809,13 @@ function cmdAct() {
     if (plan === null) die(`no plan.md for ${t.id} on ticket/${t.id}; approve a plan once it is committed`);
     const tldr = tldrGap(plan);
     if (tldr) die(`${t.id}'s plan ${tldr}; send it back to the worker (quality.md §6)`);
+    // a plan on the owner's pick of a marked alternative says so, and the latest approving plan review
+    // says the same, so the approval is of the plan built on that pick (quality.md §3)
+    if (picks.length) {
+      const reviewsOk = latestPerTrack(ticketReviews(t.id, R.name === 'home' ? { ref } : { ref, repo: R }), 'plan').filter((r) => r.verdict === 'APPROVE');
+      const named = picks.find((p) => doorPickNamed(plan, p.id, p.pick) && reviewsOk.some((r) => (r.doorPicks ?? []).some((d) => d.id === p.id && d.pick.toLowerCase() === p.pick.trim().toLowerCase())));
+      if (!named) die(`${picks.map((p) => `${p.id} was answered "${p.pick}", a choice it marked "approves" but not its recommendation`).join('; ')}: the plan approves only when it is built on that pick and both the plan and its latest approving plan review say so, each on the line "- One-way door ${picks[0].id}: ${picks[0].pick}"; replan to it and have the plan reviewed`);
+    }
     // A goal-level answer covers the plan only when its reviewer says the plan stays inside it.
     if (goalDoor) {
       const latest = latestPerTrack(ticketReviews(t.id, R.name === 'home' ? { ref } : { ref, repo: R }), 'plan').filter((r) => r.verdict === 'APPROVE');
@@ -25242,6 +25788,33 @@ const boxHealthParts = () => [
 // What a section needs before it is in the answer at all, and stands in for while a part's own fields
 // are checked alone.
 const BOX_HEALTH_BASE = { headroom: {}, pool: { projects: [], allocated: [], recent: [] }, claude: { accounts: [] }, box: {} };
+// The hub's one budget of file reads (kit-919), the sampler's and every part's. Node runs each async
+// file call on one of its file threads (libuv's pool, UV_THREADPOOL_SIZE read once as C's atoi reads
+// it: 4 when unset, 1 for 0 or no number, 1024 at most and for a negative one), and a read that hangs
+// (a dead volume, a process whose memory is locked) holds its thread until it returns. Box health has
+// one fewer than the threads at once, so one is always left for the rest of the hub, and never two
+// reads of one file. boxHealthIo(file, fn) gives null, calling nothing, when that file is out or the
+// budget is (boxHealthIoFull() tells which); otherwise fn's promise, the one its caller awaits, with
+// the file out until it settles, however long, whatever run asked or whether that run has stopped:
+// the budget is this process's, not a sampler's, so a start after a stop still counts what the old
+// run left out. fn makes its file calls one after another, so it holds one thread at a time. A refusal
+// is null itself, never a promise of null, so it is never taken for a missing file: each reader keeps
+// its last value on it (a volume, a gap), and one that finds the budget full says BOX_HEALTH_FULL.
+const BOX_HEALTH_THREADS = (() => {
+  const v = process.env.UV_THREADPOOL_SIZE;
+  if (v === undefined) return 4;
+  const n = Number(/^\s*([+-]?\d+)/.exec(v)?.[1] ?? 0);
+  return n === 0 ? 1 : n < 0 || n > 1024 ? 1024 : n;
+})();
+const BOX_HEALTH_IO = BOX_HEALTH_THREADS - 1;
+const boxHealthIoOut = new Set();
+const boxHealthIoFull = () => boxHealthIoOut.size >= BOX_HEALTH_IO;
+function boxHealthIo(file, fn) {
+  if (boxHealthIoOut.has(file) || boxHealthIoFull()) return null;
+  boxHealthIoOut.add(file);
+  return (async () => fn())().finally(() => boxHealthIoOut.delete(file));
+}
+const BOX_HEALTH_FULL = "the hub's box-health file reads are all in use: a read that can't start keeps its last value";
 // the engine's own then, and the call that applies it, taken once as the region loads: it attaches to a
 // native promise whatever that promise's own then is, and nothing patched later changes it
 const boxHealthThen = Promise.prototype.then, boxHealthApply = Reflect.apply;
@@ -25388,25 +25961,53 @@ function boxHealth(log, scan, { kit = null, parts = boxHealthParts(), real = () 
   };
   const ctx = ctxFor('sampler');
   const running = parts.map(([name, part]) => ({ name, part, ctx: ctxFor(name), up: false }));
+  // The roots as memoryRoots names them, but each root's settings read one at a time through the
+  // budget (kit-919): one that can't start, or hasn't answered in 2 s of real(), keeps that root's last.
+  const settingsOf = new Map();
   const readRoots = async () => {
     let list = [];
     try { list = await scan(); } catch { list = []; }
-    ({ roots, ceiling } = await memoryRoots(list));
+    let registry = [];
+    try { registry = machineRepos(); } catch { registry = []; }
+    const scanned = (Array.isArray(list) ? list : []).filter((s) => memoryIsMap(s) && typeof s.root === 'string').map((s) => ({ root: s.root, name: typeof s.name === 'string' ? s.name : '' }));
+    const all = [...new Set([...registry, ...scanned.map((s) => s.root)].filter((r) => typeof r === 'string').map((r) => r.replace(/\/+$/, '')))].filter((r) => r.startsWith('/'));
+    const late = Symbol('late');
+    for (const r of all) {
+      if (stopped) return;
+      const p = boxHealthIo(path.join(r, 'docs', 'devteam', 'project', 'settings.md'), () => memorySettings(r));
+      if (p === null) { if (boxHealthIoFull()) ctx.say(BOX_HEALTH_FULL); continue; }
+      let end = () => {};
+      const got = await Promise.race([p, new Promise((res) => { end = ctx.timeout(BOX_HEALTH_STATFS_MS, () => res(late)); })]);
+      end();
+      if (got !== late) settingsOf.set(r, got);
+    }
+    for (const r of [...settingsOf.keys()]) if (!all.includes(r)) settingsOf.delete(r);
+    ({ roots, ceiling } = memoryNameRoots(registry, scanned, (r) => settingsOf.get(r) ?? null));
   };
   // [device, its entry], one a distinct volume. At most two reads are ever out, so a volume that hangs
-  // can't hold the threads every file read shares, and no root of it is asked while one is.
+  // can't hold the threads every file read shares, and no root of it is asked while one is. Each is a
+  // read of the budget: one that can't start counts as not answered (a gap, its volume not forgotten);
+  // with the budget full the tick asks no more, and a root whose own read is out is passed over.
   const readDisks = async () => {
     const found = new Map();
     const queue = roots.map((r) => r.root), waiting = [];
-    let over = false;
+    let over = false, skipped = false;
     const one = async (root) => {
       asking.add(root);
       try {
-        const { dev } = await fs.promises.stat(root);
-        deviceOf.set(root, dev);
-        if ([...asking].some((r) => r !== root && deviceOf.get(r) === dev)) { waiting.push(root); return; }
-        const s = await fs.promises.statfs(root);
-        if (!found.has(dev)) found.set(dev, s);
+        const p = boxHealthIo(root, async () => {
+          const { dev } = await fs.promises.stat(root);
+          deviceOf.set(root, dev);
+          if ([...asking].some((r) => r !== root && deviceOf.get(r) === dev)) { waiting.push(root); return; }
+          const s = await fs.promises.statfs(root);
+          if (!found.has(dev)) found.set(dev, s);
+        });
+        if (p === null) {
+          skipped = true;
+          if (boxHealthIoFull()) { over = true; ctx.say(BOX_HEALTH_FULL); }
+          return;
+        }
+        await p;
       } catch {} finally { asking.delete(root); }
     };
     const worker = async () => {
@@ -25426,7 +26027,7 @@ function boxHealth(log, scan, { kit = null, parts = boxHealthParts(), real = () 
     end();
     if (asking.size) ctx.say('a volume did not answer within 2 s');
     // every root answered or is gone: a volume with none left is forgotten
-    if (!asking.size && !queue.length) volumes = volumes.filter((dev) => found.has(dev));
+    if (!asking.size && !queue.length && !skipped) volumes = volumes.filter((dev) => found.has(dev));
     const got = new Map(found);
     for (const dev of got.keys()) if (!volumes.includes(dev)) volumes.push(dev);
     return volumes.flatMap((dev) => {
@@ -25594,6 +26195,10 @@ function boxHealth(log, scan, { kit = null, parts = boxHealthParts(), real = () 
 //             dropped. At most two processes' reads are ever out, across walks, and never two for
 //             one process, so a read that hangs (a process whose memory is locked) holds at most
 //             one of the threads every file read shares, and only while it hangs (final-1 F1).
+//             Each process's two reads are one read of the hub's budget (boxHealthIo, kit-919): one
+//             that can't start leaves its last info as it was, and with the budget full the walk
+//             starts no more. The run/ files and the sensors listing are too: one that can't
+//             start ends that pids read, keeping the last pids, and the next walk asks again.
 //             What is left of the 2 s ends the reading, not the walk: a process not read yet
 //             counts as unknown (outside, never a stray) until its read settles. Only the kind, whether it starts a test run, whether it is devteam's or tmux,
 //             and its cwd are kept, and only in this region. One whose cmdline can't be read is
@@ -25699,19 +26304,27 @@ const boxHealthProcesses = (() => {
     } catch { return null; } finally { await fh?.close().catch(() => {}); }
   };
   // the pids the known roots' run/ folders record
+  // Each read is one of the hub's budget (kit-919): one that can't start ends this read, so the last
+  // pids are kept and the next walk asks again.
   const readPids = async (ctx, r, roots) => {
     const pids = new Set();
     const add = (v) => { if (Number.isSafeInteger(v) && v > 1) pids.add(v); };
-    const json = async (f) => { try { const o = JSON.parse(await readSmall(f) ?? 'null'); return memoryIsMap(o) ? o : null; } catch { return null; } };
-    for (const { root } of roots) {
-      const dir = path.join(root, 'docs', 'devteam', 'run');
-      const b = await json(path.join(dir, 'browser', 'state.json'));
-      add(b?.daemon_pid); add(b?.chrome_pid);
-      add((await json(path.join(dir, 'supervisor-up.json')))?.pid);
-      let sensors = [];
-      try { sensors = await fs.promises.readdir(path.join(dir, 'sensors')); } catch { sensors = []; }
-      for (const s of sensors) { const t = (await readSmall(path.join(dir, 'sensors', s, 'stream.pid')))?.trim(); if (/^\d+$/.test(t ?? '')) add(Number(t)); }
-    }
+    const refused = Symbol('refused');
+    const io = (key, fn) => { const p = boxHealthIo(key, fn); if (p !== null) return p; if (boxHealthIoFull()) ctx.say(BOX_HEALTH_FULL); throw refused; };
+    const small = (f) => io(f, () => readSmall(f));
+    const json = async (f) => { const t = await small(f); try { const o = JSON.parse(t ?? 'null'); return memoryIsMap(o) ? o : null; } catch { return null; } };
+    try {
+      for (const { root } of roots) {
+        const dir = path.join(root, 'docs', 'devteam', 'run');
+        const b = await json(path.join(dir, 'browser', 'state.json'));
+        add(b?.daemon_pid); add(b?.chrome_pid);
+        add((await json(path.join(dir, 'supervisor-up.json')))?.pid);
+        let sensors = [];
+        const listed = path.join(dir, 'sensors');
+        try { sensors = await io(listed, () => fs.promises.readdir(listed)); } catch (e) { if (e === refused) throw e; sensors = []; }
+        for (const s of sensors) { const t = (await small(path.join(dir, 'sensors', s, 'stream.pid')))?.trim(); if (/^\d+$/.test(t ?? '')) add(Number(t)); }
+      }
+    } catch (e) { if (e === refused) return; throw e; }
     if (run === r) { r.pids = pids; r.pidsOf = roots; }
   };
   // readPids, one at a time, waited for at most 2 s; a late one sets the pids when it ends
@@ -25724,11 +26337,16 @@ const boxHealthProcesses = (() => {
     if (was) ctx.say("a root's run/ files did not answer within 2 s: the last pids are kept");
   };
   // a process's info: { cwd, kind, test, own }; one whose cmdline can't be read is known as nothing
+  // undefined: a read of the hub's budget (kit-919) that can't start, so the last info stands
   const readInfo = async (ctx, pid) => {
-    const dir = path.join(ctx.proc, String(pid));
-    const text = await readSmall(path.join(dir, 'cmdline'));
+    const dir = path.join(ctx.proc, String(pid)), cmdline = path.join(dir, 'cmdline');
+    const p = boxHealthIo(cmdline, async () => {
+      const text = await readSmall(cmdline);
+      return text === null ? { text } : { text, cwd: await fs.promises.readlink(path.join(dir, 'cwd')).catch(() => null) };
+    });
+    if (p === null) { if (boxHealthIoFull()) ctx.say(BOX_HEALTH_FULL); return undefined; }
+    const { text, cwd } = await p;
     if (text === null) return { cwd: null, kind: null, test: false, own: false, none: true };
-    const cwd = await fs.promises.readlink(path.join(dir, 'cwd')).catch(() => null);
     return { cwd, ...procClassify(memoryWords(text)) };
   };
   const walk = async (ctx, r) => {
@@ -25764,6 +26382,8 @@ const boxHealthProcesses = (() => {
           r.out.add(k);
           try {
             const info = await readInfo(ctx, pid);
+            // the budget full: this walk reads no more; one whose file is out is passed over
+            if (info === undefined) { if (boxHealthIoFull()) over = true; continue; }
             if (run === r) r.info.set(k, { at: ctx.real(), ...info });
           } finally { r.out.delete(k); }
         }
@@ -25923,7 +26543,8 @@ const boxHealthProcesses = (() => {
 // A killed du stuck in the kernel stays alive until it closes: while one is, its worktree gets no
 // second du (its row stays), and while two are, no du starts at all (every row stays). The
 // .worktrees/ folders are listed one at a time inside the one look, so a volume that hangs holds at
-// most one of the threads every file read shares, and no look starts until it answers.
+// most one of the threads every file read shares, and no look starts until it answers. Each listing
+// is a read of the hub's budget (boxHealthIo, kit-919): one that can't start keeps that root's rows.
 //
 // part(ctx, parts) gives undefined until a read has ended, then (a new object after each read):
 //   worktrees   [{ root, worktree, disk, disk_at }], in the order the roots and their folders were
@@ -25965,12 +26586,29 @@ const boxHealthDisk = (() => {
     const found = [], order = [];
     for (const { root } of ctx.roots()) {
       let list = [];
-      try { list = await fs.promises.readdir(path.join(root, '.worktrees'), { withFileTypes: true }); } catch (e) {
+      const dir = path.join(root, '.worktrees');
+      // a read of the hub's budget (kit-919): one that can't start keeps the root's rows, as an unreadable one does.
+      // The names, then each one's lstat one after another, so the read holds one file thread at a time:
+      // withFileTypes, on a volume that leaves entry types unknown, starts every entry's lstat at once
+      // (final-1 F1). An entry gone before its lstat is left out.
+      const p = boxHealthIo(dir, async () => {
+        const dirs = [];
+        for (const name of await fs.promises.readdir(dir)) {
+          try { if ((await fs.promises.lstat(path.join(dir, name))).isDirectory()) dirs.push(name); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
+        }
+        return dirs;
+      });
+      if (p === null) {
+        if (boxHealthIoFull()) ctx.say(BOX_HEALTH_FULL);
+        for (const k of r.order) if (k.startsWith(`${root}\0`)) order.push(k);
+        continue;
+      }
+      try { list = await p; } catch (e) {
         // missing: no worktrees; unreadable (EACCES, EIO): its rows stay as they are, none read again
         if (e?.code !== 'ENOENT') for (const k of r.order) if (k.startsWith(`${root}\0`)) order.push(k);
         continue;
       }
-      for (const d of list) if (d.isDirectory()) { found.push({ root, worktree: d.name }); order.push(keyOf({ root, worktree: d.name })); }
+      for (const name of list) { found.push({ root, worktree: name }); order.push(keyOf({ root, worktree: name })); }
     }
     if (ctx.stopped() || run !== r) return;
     r.order = order;
@@ -26123,7 +26761,8 @@ const boxHealthState = (() => {
 // with 2 s of real(): one that hasn't answered keeps that root's last read (its at still ages it), and
 // isn't asked again until it settles. At most two reads are out at once, across every project: while
 // two are, a root whose read can't start keeps its last read too, so hung files never hold more than
-// two of the hub's file threads.
+// two of the hub's file threads. Each is a read of the hub's budget (boxHealthIo, kit-919) as well: one
+// the budget can't start is late at once, the same way.
 //
 // A project's dashboard, from the hub's scan (which can't tell a refused port from a slow one):
 //   up     a hello names the root: its port and its fleet's mode are the hello's
@@ -26189,8 +26828,11 @@ const boxHealthPool = (() => {
   const LATE = Symbol('late');
   const settled = (ctx, r, file, max) => {
     if (r.out.has(file) || r.out.size >= POOL_READS) { ctx.say("two file reads are out: a project whose read can't start keeps its last read"); return Promise.resolve(LATE); }
+    // and a read of the hub's budget (kit-919): one that can't start is late too
+    const read = boxHealthIo(file, () => readCapped(file, max));
+    if (read === null) { if (boxHealthIoFull()) ctx.say(BOX_HEALTH_FULL); return Promise.resolve(LATE); }
     r.out.add(file);
-    const p = readCapped(file, max).finally(() => r.out.delete(file));
+    const p = read.finally(() => r.out.delete(file));
     let end = () => {};
     const late = new Promise((res) => { end = ctx.timeout(POOL_FILE_MS, () => res(LATE)); });
     return Promise.race([p, late]).finally(() => end());
@@ -26401,8 +27043,8 @@ const boxHealthPool = (() => {
 // Every 15 s of now() it reads again once a minute of now() has passed since the last read (the first
 // read follows the sampler's first read of the roots). A read: for each known root, one at a time,
 // <root>/docs/devteam/run/accounts.json (at most 256 KB + 1), raced with 2 s of real(). At most two
-// reads are out at once, never two of one file: a read that can't start, or hasn't answered in 2 s,
-// keeps that file's last read. The record used is the freshest (by its at) whose capacity.list is a
+// reads are out at once, never two of one file: a read that can't start (here, or in the hub's budget,
+// boxHealthIo: kit-919), or hasn't answered in 2 s, keeps that file's last read. The record used is the freshest (by its at) whose capacity.list is a
 // list, among those within 5 minutes of real() (one older, or ahead: a wrong clock, is dropped); with none, claude is absent (no cswap,
 // an older kit's record, or a stopped tick). Each read that finds one adds a reading to the ring.
 //
@@ -26622,8 +27264,11 @@ const boxHealthClaude = (() => {
   // raced with 2 s of real(); at most two out, never two of one file: one that can't start is late
   const settled = (ctx, r, file) => {
     if (r.out.has(file) || r.out.size >= CLAUDE_READS) { ctx.say("two file reads are out: a project whose accounts.json read can't start keeps its last read"); return Promise.resolve(LATE); }
+    // and a read of the hub's budget (kit-919): one that can't start is late too
+    const read = boxHealthIo(file, () => readCapped(file, CLAUDE_MAX_BYTES));
+    if (read === null) { if (boxHealthIoFull()) ctx.say(BOX_HEALTH_FULL); return Promise.resolve(LATE); }
     r.out.add(file);
-    const p = readCapped(file, CLAUDE_MAX_BYTES).finally(() => r.out.delete(file));
+    const p = read.finally(() => r.out.delete(file));
     let end = () => {};
     const late = new Promise((res) => { end = ctx.timeout(CLAUDE_FILE_MS, () => res(LATE)); });
     return Promise.race([p, late]).finally(() => end());
@@ -40671,7 +41316,7 @@ const HELP_OBSERVE = `Observe and orient
   governance [--json]   the kit's governance and process files and the project's strategy, Self and exterior: title, last change, changed here
   self show [--json]   main's project/self.md, what the project is, printed as it is; --json is the dashboard's self block, null when not drafted or plain (self@2)
   self check   the working tree's self.md against self@2 (a plain document; a fenced self block is refused), each part link on disk, and the names rule; errors exit 1, warnings don't
-  exterior show [--json] | exterior check   show: main's project/exterior.md, what the project relates to, printed as it is (--json a version 1 block's dashboard data, else null); check: the working tree's draft against exterior@2 (a version 1 block refused), its dated sources, and on a repo not known to be private the names rule (a ### heading not named whole in origin main's strategy or dependency names refused; each other capitalised word and link host held until named on the chore); errors exit 1
+  exterior show [--json] | exterior check   show: main's project/exterior.md, what the project relates to, printed as it is (--json a version 1 block's dashboard data, else null); check: the working tree's draft against exterior@2 (a version 1 block refused), its dated sources, and on a repo not known to be private the names rule (a heading of any form refused: one of level 3 to 6 not named whole, or a # or ## one holding a capitalised word but Exterior, or a link host, not named whole, in origin main's strategy or dependency names, or a # or ## or HTML one holding raw HTML, a character reference, an invisible or control character, a lone mark, ~~, [ or ], since a top-level heading must be plain text; each other capitalised word and link host held until named on the chore); errors exit 1
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
   search "<words>" [--type <log type>|doc]… [--since <date>] [--limit n] [--json]   what the project already wrote about it, best first, quoted as data (supervisor.md §6)
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …`;

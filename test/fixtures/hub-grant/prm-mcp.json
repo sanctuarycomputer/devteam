@@ -1,0 +1,12 @@
+{
+  "resource": "https://box.example.dev/mcp",
+  "authorization_servers": [
+    "https://box.example.dev"
+  ],
+  "scopes_supported": [
+    "mcp"
+  ],
+  "bearer_methods_supported": [
+    "header"
+  ]
+}

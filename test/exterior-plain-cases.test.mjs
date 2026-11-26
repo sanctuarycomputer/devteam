@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { write } from './lib/kit.mjs';
 import { fixture, SUP } from './lib/next-step-fixture.mjs';
-import { checkExterior as refCheckExterior } from './fixtures/world2/check.mjs';
+import { checkExterior as refCheckExterior, headings as refHeadings } from './fixtures/world2/check.mjs';
 
 const P = 'docs/devteam/project';
 const STRAT = `${P}/strategy.md`;
@@ -25,6 +25,9 @@ const SHIFT = Math.round((Date.parse(`${TODAY}T00:00:00Z`) - Date.parse(`${W2.to
 const realDay = (d) => { const t = new Date(`${d}T00:00:00Z`); return !Number.isNaN(t.getTime()) && t.toISOString().slice(0, 10) === d; };
 const shifted = (text) => text.replace(/(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)/g, (d) => (realDay(d) ? new Date(Date.parse(`${d}T00:00:00Z`) + SHIFT * DAY).toISOString().slice(0, 10) : d));
 // what the reference says of a case, as the fixture reads it
+// The wording a refused heading's line takes: "(a ### heading)" only where text heads an entry with
+// it (a level-3 ATX heading), "(a heading)" for any other form or level (kit-933).
+const formOf = (text, n) => (refHeadings(text).some((h) => h.level === 3 && h.text === n) ? '(a ### heading)' : '(a heading)');
 const oracle = (c) => refCheckExterior(shifted(world2(c.file)), { today: TODAY, visibility: c.visibility, allowed });
 
 function proj(name) {
@@ -85,10 +88,12 @@ test('P3 check-pr gives each world2 exterior case the reference\'s result', with
       assert.deepEqual(contract, o.errors, `P3 check-pr's contract lines on ${c.file}\n${r.out}`);
       const pub = c.visibility === 'public';
       const unk = c.visibility === 'unknown';
-      const named = (lines) => lines.filter((l) => l.includes('(a ### heading)')).map((l) => l.replace(/^.*?"(.*?)" \(a ### heading\).*$/, '$1'));
+      // each refused heading's name and wording, which pins its form
+      const named = (lines) => lines.filter((l) => /"[^"]*" \(a (?:### )?heading\)/.test(l)).map((l) => /^.*?"(.*?)" (\(a (?:### )?heading\)).*$/.exec(l).slice(1, 3));
+      const formed = o.refused.map((n) => [n, formOf(shifted(world2(c.file)), n)]);
       const words = (lines) => lines.filter((l) => / names ".*?" \((word|link host)\)/.test(l)).map((l) => l.replace(/^.*? names "(.*?)" \((word|link host)\).*$/, '$1'));
-      assert.deepEqual(named(fails), pub ? o.refused : [], `P3 check-pr fails each refused heading on a public repo: ${c.file}\n${r.out}`);
-      assert.deepEqual(named(warns), unk ? o.refused : [], `P3 check-pr warns of each on an unknown one: ${c.file}\n${r.out}`);
+      assert.deepEqual(named(fails), pub ? formed : [], `P3 check-pr fails each refused heading on a public repo: ${c.file}\n${r.out}`);
+      assert.deepEqual(named(warns), unk ? formed : [], `P3 check-pr warns of each on an unknown one: ${c.file}\n${r.out}`);
       assert.deepEqual(words(fails), pub ? [...o.held, ...o.hosts] : [], `P3 check-pr fails each held word and host on a public repo: ${c.file}\n${r.out}`);
       assert.deepEqual(words(warns), unk ? [...o.held, ...o.hosts] : [], `P3 check-pr warns of each on an unknown one: ${c.file}\n${r.out}`);
       assert.equal(fails.length, contract.length + named(fails).length + words(fails).length, `P3 no other fail on ${c.file}\n${r.out}`);

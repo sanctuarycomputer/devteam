@@ -144,12 +144,12 @@ test('the panel and its button', { skip: SKIP, timeout: 300000 }, async (t) => {
   assert.equal(head.h, 49, '.threads-head is 49px');
   assert.ok(Math.abs(head.hb - head.bb) <= 1, `level with .pagebar: ${JSON.stringify(head)}`);
 
-  // the tabs: Inbox (kit-100), Threads, then two disabled slots, with their titles
-  assert.deepEqual(await p.ev('threadsTabs.list().map((t) => [t.id, t.disabled])'), [['inbox', false], ['threads', false], ['supervisor', true], ['shell', true]]);
+  // the tabs: Inbox (kit-100), Threads, then the terminal tabs (kit-614), with their titles
+  assert.deepEqual(await p.ev('threadsTabs.list().map((t) => [t.id, t.disabled])'), [['inbox', false], ['threads', false], ['supervisor', false], ['shell', false]]);
   const tabs = await p.ev("[...document.querySelectorAll('#th-tabs [role=\"tab\"]')].map((b) => ({ id: b.dataset.tab, sel: b.getAttribute('aria-selected'), dis: b.getAttribute('aria-disabled'), title: b.getAttribute('title'), n: b.querySelector('.n')?.className ?? null, nt: b.querySelector('.n')?.textContent ?? null, text: b.textContent }))");
-  assert.deepEqual(tabs.map((x) => [x.id, x.sel, x.dis]), [['inbox', 'false', null], ['threads', 'true', null], ['supervisor', 'false', 'true'], ['shell', 'false', 'true']]);
-  assert.equal(tabs[2].title, "The supervisor's terminal: the follow-on goal");
-  assert.equal(tabs[3].title, 'A plain shell at the repo root: the follow-on goal');
+  assert.deepEqual(tabs.map((x) => [x.id, x.sel, x.dis]), [['inbox', 'false', null], ['threads', 'true', null], ['supervisor', 'false', null], ['shell', 'false', null]]);
+  assert.equal(tabs[2].title, "The supervisor's own terminal");
+  assert.equal(tabs[3].title, "A shell at the project's root, in its own window");
   assert.deepEqual([tabs[1].n, tabs[1].nt], ['n blue', '2'], 'Threads counts the two your-move threads, in blue');
   assert.match(tabs[1].text, /^Threads/);
 
