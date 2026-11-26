@@ -633,10 +633,56 @@ export function hosts(text) {
   return [...out];
 }
 
+// Every heading a page shows, in document order: [{ level, text, line }]. Outside code and comments,
+// an ATX heading of any level, at any indent a readable line has (one too deep for a heading reads as
+// one: refusing errs that way), and a setext one, the paragraph's lines above a line of = (level 1)
+// or of - (level 2); each also inside a block quote or a list item, their markers read away (a quote's
+// line goes on the paragraph above, a list item's starts its own). And an HTML <h1>-<h6> tag wherever
+// it stands, in code or a comment too, since an HTML block, a stray backtick or a comment's tail can
+// show one the reading above takes for code: its text up to the next heading tag (HTMLHEAD). Each
+// text is read as a heading's words. Linear in the text: each marker, line and tag read once.
+// The block-quote and list-item markers that open a line (none matches empty).
+const OPENERS = /^(?:[ \t]*>[ \t]?|[ \t]*(?:[-*+]|\d{1,9}[.)])(?:[ \t]+|$))*/;
+const UNDER = /^[ \t]*(=+|-+)[ \t]*$/;
+// An HTML heading tag and what follows it up to the next heading tag or the end; its own attributes
+// are dropped up to their first >, so a < in a value can't hide it (one > in a value leaves some in,
+// which only refuses more). Each tag inside reads as its alt text, as a page shows an image's.
+const HTMLHEAD = /<h([1-6])(?=[\s/>])([\s\S]*?)(?=<\/?h[1-6][\s/>]|$)/gi;
+const ALT = /\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`=]+))/i;
+const shown = (tag) => { const a = ALT.exec(tag); return ` ${a ? (a[1] ?? a[2] ?? a[3]) : ''} `; };
+export const headed = last((text) => {
+  const out = [];
+  let para = []; // the paragraph's lines so far: [line, its text past its markers]
+  readable(text).forEach((l, i) => {
+    if (l === null || !l.trim()) { para = []; return; }
+    const at = OPENERS.exec(l)[0].length;
+    const inner = l.slice(at);
+    const atx = /^[ \t]*(#{1,6})(?:[ \t]+(.*))?$/s.exec(inner);
+    if (atx) { out.push({ level: atx[1].length, text: words(trimST(atx[2] ?? '').replace(/(?:^|[ \t])#+$/, '')), line: i + 1 }); para = []; return; }
+    const under = para.length && (UNDER.exec(l) ?? UNDER.exec(inner));
+    if (under) { out.push({ level: under[1][0] === '=' ? 1 : 2, text: words(para.map((p) => p[1]).join(' ')), line: para[0][0] }); para = []; return; }
+    if (!inner.trim() || BREAK.test(inner)) { para = []; return; }
+    if (/[^> \t]/.test(l.slice(0, at))) para = []; // a list item's line starts its own paragraph
+    para.push([i + 1, inner]);
+  });
+  const raw = String(text).replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+  const starts = [0];
+  for (let i = raw.indexOf('\n'); i >= 0; i = raw.indexOf('\n', i + 1)) starts.push(i + 1);
+  const lineOf = (o) => { let a = 0; let b = starts.length - 1; while (a < b) { const m = (a + b + 1) >> 1; if (starts[m] <= o) a = m; else b = m - 1; } return a + 1; };
+  for (const m of raw.matchAll(HTMLHEAD)) out.push({ level: Number(m[1]), text: words(m[2].replace(/^[^>]*>/, '').replace(/<[^<>]*>/g, shown)), line: lineOf(m.index) });
+  return out.filter((h) => h.text).sort((a, b) => a.line - b.line);
+});
+// Whether the names rule refuses a heading: one of level 3 to 6 unless names holds it whole; a # or ##
+// one (the title and the sections, in plain words) when it holds a capitalised word, Exterior aside
+// (the document's own name), that names doesn't hold whole.
+const unnamedHeading = (h, names) => (h.level > 2
+  ? !namesWhole(names, h.text)
+  : [...h.text.matchAll(WORD)].some((m) => { const w = capWord(m[0]); return w !== null && w.toLowerCase() !== 'exterior' && !namesWhole(names, w); }));
+
 // exterior.md: { errors, warnings, refused, held, hosts }. On a repo known private nothing is refused
-// or held; visibility 'public' or 'unknown' keeps the names rule. A ### heading is judged by
-// allowed.names (origin main's strategy and dependency names); a word or host by allowed.words (the
-// strategy and the dependency files whole).
+// or held; visibility 'public' or 'unknown' keeps the names rule. Every heading, in any form (headed),
+// is judged by allowed.names (origin main's strategy and dependency names) and refused as
+// unnamedHeading says; a word or host by allowed.words (the strategy and the dependency files whole).
 export function checkExterior(text, { today, visibility, allowed }) {
   const errors = docErrors(text, 'exterior');
   const all = errors.length ? [] : entries(text);
@@ -646,7 +692,7 @@ export function checkExterior(text, { today, visibility, allowed }) {
   return {
     errors,
     warnings: all.flatMap((e) => entryWarnings(e, today, refs)),
-    refused: unknown(headings(text).filter((h) => h.level === 3).map((h) => h.text), allowed.names),
+    refused: open ? [] : headed(text).filter((h) => unnamedHeading(h, allowed.names)).map((h) => h.text),
     held: unknown(capitalised(text), allowed.words),
     hosts: unknown(hosts(text), allowed.words),
   };

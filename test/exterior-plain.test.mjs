@@ -156,6 +156,13 @@ test('P1t the region reads a hostile or large exterior text in under 2 s each', 
     ['5,000 ### entries, each dated', Array.from({ length: 5000 }, (_, i) => `### ${name(i)}\n\n[p](https://x.example/) (read 2026-11-20)\n`).join('\n')],
     ['a user of 100,000 commas', `[x](https://${'a,'.repeat(100000)}@b.example)`],
     ['www. 2,000 times', 'www.'.repeat(2000)],
+    // kit-933: every heading form, read in linear time
+    ['50,000 setext headings', Array.from({ length: 50000 }, (_, i) => `${name(i)}\n---`).join('\n\n')],
+    ['one paragraph of 50,000 lines over a setext line', `${distinct(50000).replace(/ /g, '\n')}\n===`],
+    ['20,000 <h2 never closed, then 20,000 <h2>', `${'<h2 '.repeat(20000)}${'<h2>Z '.repeat(20000)}`],
+    ['an <h2> holding 100,000 <', `<h2>${'<'.repeat(100000)}Z</h2>`],
+    ['a list marker, 100,000 spaces, then a setext line', `- ${' '.repeat(100000)}x\n---`],
+    ['50,000 quote and item markers before a ###', `${'> - '.repeat(50000)}### Z`],
   ]) {
     const start = process.hrtime.bigint();
     assert.doesNotThrow(() => P.checkExterior(`# T\n\n${x}\n`, { today: W2.today, visibility: 'public', allowed }), what);
@@ -447,3 +454,89 @@ test('H HELP_OBSERVE\'s exterior line says exterior@2 and the document', () => {
   assert.doesNotMatch(help, /exterior@1|signals and scores/, `H no version 1 words: ${help}`);
   assert.match(help, /exterior@2/, `H names exterior@2: ${help}`);
 });
+
+// kit-933: every heading a page shows is judged on a repo not known to be private. Level 3 to 6, in
+// any form, is refused unless named whole; a # or ## heading (the title and sections, in plain words)
+// is refused when it holds a capitalised word, Exterior aside, not named whole; both in origin main's
+// strategy or dependency names. The reference and the region agree on each.
+const formDoc = (x) => `# Exterior\n\n## Rivals\n\n${x}\n`;
+const HEADING_FORMS = [
+  ['an ## heading', '## Zorbly Labs', ['Zorbly Labs']],
+  ['a second # heading', '# Zorbly', ['Zorbly']],
+  ['a #### heading', '#### Zorbly', ['Zorbly']],
+  ['a ###### heading, closing #s', '###### Zorbly ###', ['Zorbly']],
+  ['a setext = heading', 'Zorbly\n======', ['Zorbly']],
+  ['a setext - heading of two lines', 'Zorbly\nLabs\n---', ['Zorbly Labs']],
+  ['an HTML <h2>, with an attribute', '<h2 class="x">Zorbly</h2>', ['Zorbly']],
+  ['an HTML <h3>, a tag inside', '<h3><em>Zorbly</em></h3>', ['Zorbly']],
+  ['an HTML <h6> never closed', '<h6>Zorbly', ['Zorbly']],
+  ['an HTML <H1> in capitals', '<H1>Zorbly</H1>', ['Zorbly']],
+  ['a ### in a list item', '- ### Zorbly', ['Zorbly']],
+  ['an ## in an ordered item', '1. ## Zorbly', ['Zorbly']],
+  ['a ### in a block quote', '> ### Zorbly', ['Zorbly']],
+  ['a #### in a list in a block quote', '> - #### Zorbly', ['Zorbly']],
+  ['a setext heading in a list item', '- Zorbly\n  ---', ['Zorbly']],
+  ['a setext heading in a block quote', '> Zorbly\n> ===', ['Zorbly']],
+  ['a lower-case ####', '#### zorbly co', ['zorbly co']],
+  ['a lower-case ### in a block quote', '> ### zorbly', ['zorbly']],
+  ['a lower-case <h4>', '<h4>zorbly</h4>', ['zorbly']],
+  ['a setext heading of two quoted lines', '> Zorbly\n> Vendors\n> ---', ['Zorbly Vendors']],
+  ['a setext heading of two lines in a list item', '- Zorbly\n  Labs\n  ---', ['Zorbly Labs']],
+  ['an <h2> in a fence', '```\n<h2>Zorbly</h2>\n```', ['Zorbly']],
+  ['an <h2> in a comment', '<!--\n<h2>Zorbly</h2>\n-->', ['Zorbly']],
+  ['an <h2> after a comment on its line', '<!-- x --> <h2>Zorbly</h2>', ['Zorbly']],
+  ['an <h2> in a code span', 'See `<h2>Zorbly</h2>` here.', ['Zorbly']],
+  ['an <h2> between fence lines in a <div>', '<div>\n```\n<h2>Zorbly</h2>\n```\n</div>', ['Zorbly']],
+  ['an <h2> whose backtick pairs with a later tag\'s', '<h2 title="`">Zorbly Labs</h2><span title="`"></span>', ['Zorbly Labs']],
+  ['an <h2>, a blank line, then its text', '<h2>\n\nZorbly', ['Zorbly']],
+  ['an indented <h2> in a <pre> after a blank line', '<pre>\n\n    <h2>Zorbly</h2>\n</pre>', ['Zorbly']],
+  ['an <h2> whose attribute holds a <', '<h2 title="a<b">Zorbly Labs</h2>', ['Zorbly Labs']],
+  ['an <h4> whose attribute is a lone <', '<h4 data-x="<">zorbly</h4>', ['zorbly']],
+  ['an <h2> whose attribute reads like a heading tag', "<h2 title='<h3'>Zorbly</h2>", ['Zorbly']],
+  ['an image in an <h2>', '<h2><img alt="Zorbly" src="z.png"></h2>', ['Zorbly']],
+];
+const NOT_REFUSED = [
+  ['an ## heading in a fence', '```\n## Zorbly\n```'],
+  ['a setext heading in a ~~~ fence', '~~~\nZorbly\n---\n~~~'],
+  ['an ## heading in indented code', '    ## Zorbly'],
+  ['an ## heading in a comment', '<!--\n## Zorbly\n-->'],
+  ['an ## heading in a code span', 'See `## Zorbly` here.'],
+  ['a # with no space', '#Zorbly is a tag.'],
+  ['a break after a blank line', 'Zorbly is here.\n\n---'],
+  ['a lower-case ## heading', '## zorbly co'],
+  ['an ## heading of named words', '## What to watch'],
+  ['an <h2> of a named word', '<h2>Vendors</h2>'],
+  ['a setext heading of a named word', 'Forces\n==='],
+  ['a named ### in a list item', '- ### Ledgerpad'],
+  ['a named #### in a block quote', '> #### Acme Storage'],
+  ['a dependency name as an <h5>', '<h5>inkwell-sync</h5>'],
+];
+const formOpts = (visibility, names = allowed.names) => ({ today: W2.today, visibility, allowed: { ...allowed, names } });
+
+test('F1 every heading form is refused on a public or unknown repo, in the reference and the region', () => {
+  const P = plainOf();
+  const wrong = []; // every form that fails, each named, so a red run shows them all
+  for (const [what, x, want] of HEADING_FORMS) {
+    for (const [who, check] of [['reference', refCheckExterior], ['region', P.checkExterior]]) {
+      for (const v of ['public', 'unknown']) { const got = copy(check(formDoc(x), formOpts(v)).refused); if (JSON.stringify(got) !== JSON.stringify(want)) wrong.push(`${who} ${v}: ${what} refused ${JSON.stringify(got)}`); }
+      const got = copy(check(formDoc(x), formOpts('private')).refused);
+      if (got.length) wrong.push(`${who} private: ${what} refused ${JSON.stringify(got)}`);
+    }
+  }
+  assert.deepEqual(wrong, [], `F1 each form refused as listed:\n${wrong.join('\n')}`);
+  const all = formDoc('## Zorbly\n\nBrindle\n---\n\n<h4>Cartwell</h4>\n\n> ### Zorbly');
+  for (const [who, check] of [['reference', refCheckExterior], ['region', P.checkExterior]]) assert.deepEqual(copy(check(all, formOpts('public')).refused), ['Zorbly', 'Brindle', 'Cartwell', 'Zorbly'], `F1 ${who}: in document order, each time`);
+});
+
+test('F2 what a page does not show as a heading, or shows with named words, is not refused', () => {
+  const P = plainOf();
+  for (const [what, x] of NOT_REFUSED) {
+    for (const [who, check] of [['reference', refCheckExterior], ['region', P.checkExterior]]) assert.deepEqual(copy(check(formDoc(x), formOpts('public')).refused), [], `F2 ${who}: ${what} is not refused`);
+  }
+  // the title's own word: Exterior counts as named in a # or ## heading, though nothing names it
+  for (const [who, check] of [['reference', refCheckExterior], ['region', P.checkExterior]]) {
+    assert.deepEqual(copy(check('# Exterior\n\n### inkwell-sync\n', formOpts('public', 'inkwell-sync')).refused), [], `F2 ${who}: the # Exterior title is not refused`);
+    assert.deepEqual(copy(check('# Exterior\n\n### Exterior\n', formOpts('public', 'inkwell-sync')).refused), ['Exterior'], `F2 ${who}: a ### Exterior is judged whole, as before`);
+  }
+});
+
