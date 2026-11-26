@@ -28,7 +28,13 @@ const FAST = ['test/goal-approval-choices.test.mjs', 'test/world-contract.test.m
 const pHome = path.join(tmp, 'p-home');
 fs.mkdirSync(pHome);
 const pWork = path.join(tmp, 'p-work');
-const P = run(process.execPath, [tool, '--at', 'HEAD', '--repo', root, '--work', pWork, '--files', FAST.join(','), '--startup-runs', '3', '--json'], { cwd: tmp, env: { ...env, HOME: pHome, DEVTEAM_TEST_CONCURRENCY: '2' }, timeout: 240000 });
+// P judges the parity run alone: a split dir with every manifest*.json and no overlay, as
+// split-tool's H tests do. An overlay area may change what FAST reads (pages-docs empties the
+// dashboard page goal-approval-choices reads); each area's own test judges that area.
+const pSplit = path.join(tmp, 'p-split');
+fs.mkdirSync(pSplit);
+for (const m of fs.readdirSync(path.join(root, 'test', 'split')).filter((f) => /^manifest.*\.json$/.test(f))) fs.copyFileSync(path.join(root, 'test', 'split', m), path.join(pSplit, m));
+const P = run(process.execPath, [tool, '--at', 'HEAD', '--repo', root, '--split-dir', pSplit, '--work', pWork, '--files', FAST.join(','), '--startup-runs', '3', '--json'], { cwd: tmp, env: { ...env, HOME: pHome, DEVTEAM_TEST_CONCURRENCY: '2' }, timeout: 240000 });
 const pr = (() => { try { return JSON.parse(P.stdout); } catch { return null; } })();
 
 test('P1: --at HEAD writes parity.json and parity.md with every field the summary names', () => {
