@@ -14389,6 +14389,37 @@ function archiveRecords() {
   }
   return m;
 }
+// The landed artifacts an archive question for goal g may archive: landed by `at` (an ISO time; null
+// is now), every scope in their for a goal:, feature: or ticket: scope resolving to met goals, at
+// least one of them g. A feature resolves to the goals it serves when every one is met; a ticket
+// through its feature. An all, project, component: or link: scope, an unknown id, a running goal, a
+// draft and an empty for are never archivable. The one rule kit-935's question and kit-936 read.
+function archivableArtifacts(goalId, at = null) {
+  const goals = new Map(logObjects('goal').map((g) => [g.id, g]));
+  const met = (id) => goals.get(id)?.status === 'met';
+  if (!met(goalId)) return [];
+  const served = (fid) => { const gs = features().get(fid)?.goals ?? []; return gs.length && gs.every(met) ? gs : null; };
+  const resolve = (s) => {
+    const i = String(s).indexOf(':');
+    const kind = i < 0 ? s : s.slice(0, i), id = i < 0 ? '' : s.slice(i + 1);
+    if (kind === 'goal') return met(id) ? [id] : null;
+    if (kind === 'feature') return served(id);
+    if (kind === 'ticket') { const t = tickets().get(id); return t ? served(t.feature) : null; }
+    return null;
+  };
+  let landed = landedArtifacts();
+  if (at) {
+    // main as it stood at `at`: its last first-parent commit by then, and the folders it held
+    const ref = mainRef();
+    const c = ref ? git(['rev-list', '-1', '--first-parent', `--before=${at}`, ref], mainRoot) : null;
+    const then = new Set(c ? (git(['ls-tree', '--name-only', `${c}:${ARTIFACTS_REL}`], mainRoot) ?? '').split('\n').filter(Boolean) : []);
+    landed = landed.filter((a) => then.has(a.slug));
+  }
+  return landed.filter((a) => {
+    const rs = (a.for ?? []).map(resolve);
+    return rs.length > 0 && rs.every(Boolean) && rs.flat().includes(goalId);
+  }).sort((a, b) => a.slug.localeCompare(b.slug));
+}
 // ----- publishing: the owner makes a landed artifact readable by anyone, from the cloud box -----
 // The gateway does the publishing (its confirm page, its own copy of the bytes); the kit says what
 // main has, and records the owner's word as an owner act (the public-artifacts design).
@@ -14681,6 +14712,23 @@ function cmdArtifact() {
     return sub === 'handoff' ? artifactHandoffCmd(slug, at) : artifactNotesCmd(slug, at);
   }
   if (sub === 'addressed') return artifactAddressedCmd(args[0]);
+  // artifact archivable <goal> [--at <time>] [--json]: what an archive question for that goal may
+  // archive (archivableArtifacts), landed by --at; it writes nothing
+  if (sub === 'archivable') {
+    const gid = args[0] ?? die('usage: artifact archivable <goal-id> [--at <time>] [--json]');
+    if (logGet(gid)?.type !== 'goal') die(`no goal ${gid}`);
+    let at = null;
+    if (flags.at !== undefined) {
+      const ms = Date.parse(flagStr('at') ?? '');
+      if (!/^\d{4}-\d{2}-\d{2}T/.test(flagStr('at') ?? '') || Number.isNaN(ms)) die('--at is a time: 2026-11-26T09:00:00Z');
+      at = new Date(ms).toISOString();
+    }
+    const list = archivableArtifacts(gid, at);
+    if (flags.json) return json(list);
+    if (!list.length) return out(`nothing archivable for ${gid}${at ? ` as of ${at}` : ''}`);
+    for (const a of list) out(`${a.slug} ${a.error ? `(broken: ${a.error})` : quoteData(a.title)} for ${a.for.join(', ')}`);
+    return;
+  }
   die('usage: artifact new <slug> --title t --summary s [--for json] [--kind mock|diagram|docs] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact versions <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner | artifact handoff <slug> [--at <where>] [--json] | artifact notes <slug> [--at <where>] [--json] | artifact addressed <t-id> --note "<what changed>" [--sha <commit>] [--draft <worktree>]');
 }
 function cmdArtifacts() {
