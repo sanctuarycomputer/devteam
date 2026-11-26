@@ -620,6 +620,10 @@ const SETTINGS_DEFAULTS = {
   // The default is "ask" so a project adopted before this setting keeps asking. The owner's.
   upstream_sync: 'adopt',
   upstream_check_hours: 24,
+  // The npm package kit releases are published as and an instance installs (kit-install@1), and
+  // whether the live alpha's /next/ pages are served (alpha@1). Both the owner's, read as main has them.
+  package_name: '@sanctuarycomputer/devteam',
+  alpha: true,
   retro_every_days: 7,
   research_every_days: 7,
   slow_gate_minutes: 10,
@@ -633,7 +637,7 @@ const SETTINGS_DEFAULTS = {
 const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
   autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', responder_command: 'governance-edit', agent_trust_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
-  forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', merge_admin: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit',
+  forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', merge_admin: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit', package_name: 'governance-edit', alpha: 'governance-edit',
   release: 'governance-edit', secret_commands: 'governance-edit', incident_slots: 'governance-edit', remediations: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit', project: 'governance-edit',
 };
 // The supervisor's own settings the owner may ask for from the dashboard (an owner-setting act the
@@ -706,6 +710,8 @@ const SETTINGS_WORDS = Object.freeze({
   upstream_base: ['Upstream and releases', 'Kit release in use', 'the devteam release this project runs', 'value'],
   upstream_sync: ['Upstream and releases', 'Kit updates', 'adopt each release on its own, or ask you first', 'value'],
   upstream_check_hours: ['Upstream and releases', 'Check for kit releases every', 'hours between checks for a new devteam release', 'value'],
+  package_name: ['Upstream and releases', 'Kit package', 'the npm package devteam releases are published as and installed from', 'value'],
+  alpha: ['Upstream and releases', 'Live alpha', 'whether the new apps are served at /next/ beside the stable pages', 'value'],
   release: ['Upstream and releases', 'How a release reaches production', 'a tag, a production branch, or every merge to main', 'value'],
   sensors: ['Production', 'Sensors', 'the production signals the supervisor reads', 'names'],
   sensor_defaults: ['Production', 'Sensor defaults', 'settings every sensor starts from', 'names'],
@@ -733,6 +739,10 @@ const SETTING_SHAPES = Object.freeze({
   merge_method: (v) => ['merge', 'squash', 'rebase'].includes(v),
   upstream_sync: (v) => ['adopt', 'ask'].includes(v),
   release: (v) => v !== undefined && releaseProblem(v) === null,
+  alpha: (v) => typeof v === 'boolean',
+  // a scoped npm name, by a stricter rule than npm's own: @scope/name, each part lower-case letters,
+  // digits, - . _ and starting with a letter, digit or -; at most 214 characters in all
+  package_name: (v) => typeof v === 'string' && v.length <= 214 && /^@[a-z0-9-][a-z0-9._-]*\/[a-z0-9-][a-z0-9._-]*$/.test(v),
   upstream_base: (v) => v === null || (typeof v === 'string' && /^v\d+\.\d+\.\d+$/.test(v)),
   main_branch: settingName, tmux_session: settingName, project: settingName,
   usage_sources: settingLines, ignored_checks: settingLines, split_files: settingLines, worktree_files: settingLines, worker_denied_commands: settingLines,
