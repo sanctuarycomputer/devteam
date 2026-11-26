@@ -3,9 +3,16 @@ name: test-stress
 # Daily on main it runs the chrome and rest groups three times; dispatched (gh workflow run
 # test-stress.yml --ref <branch> -f files=... -f repeat=... -f load=... -f node=...) it runs chosen
 # files, with CPU burners beside them if asked, on the Node major chosen (18 to 24; 24 by default, and on a
-# schedule). The job summary names every file that failed on any repeat.
-# Never a pull_request check and never required: test.yml is the gate.
+# schedule). The job summary names every file that failed on any repeat. The stress job is never a
+# pull request check.
+# The parity jobs (parity@1, test/split/parity.mjs) run daily on main and on pull requests that touch
+# test/split/, apps/ or the root package.json, and on no other pull request: they build the cutover
+# tree, run test.yml's Node 24 parts in it beside the same parts at the commit, and keep the report
+# (parity.json, parity.md) as the run's parity-report artifact. Until the tree is at 1:1 the report job
+# is red by design. The stress and parity jobs are never required: test.yml is the gate.
 on:
+  pull_request:
+    paths: ['test/split/**', 'apps/**', 'package.json']
   schedule:
     - cron: '23 6 * * *'
   workflow_dispatch:
@@ -33,11 +40,15 @@ on:
         default: '24'
 permissions:
   contents: read
+# A newer push to a pull request cancels its older run (keyed on the PR's number, as test.yml). Other
+# runs share one group per ref and never cancel one in progress; GitHub keeps at most one pending
+# run per group, so a newer one replaces a run still waiting.
 concurrency:
-  group: test-stress-${{ github.ref }}
-  cancel-in-progress: false
+  group: test-stress-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   stress:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     # a full scheduled run is about 30 to 40 minutes; run.mjs's own watchdog bounds each file
     timeout-minutes: 240
@@ -172,3 +183,154 @@ jobs:
           if [ "$rc" -ne 0 ]; then exit "$rc"; fi
           exit "$s"
           # --- end run ---
+  # ---- parity@1: build the tree once, run each Node 24 part in it and at the commit, then report ----
+  parity-build:
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # a pull request's own head, never the merge GitHub makes of it
+      SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ env.SHA }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: command -v tmux || (sudo apt-get update -q && sudo apt-get install -yq tmux)
+      - name: build
+        run: |
+          set -euo pipefail
+          node test/split/parity.mjs build --at "$SHA" --work "$RUNNER_TEMP/parity"
+          tar -C "$RUNNER_TEMP" -cf "$RUNNER_TEMP/parity-work.tar" parity
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parity-work
+          overwrite: true
+          path: ${{ runner.temp }}/parity-work.tar
+          if-no-files-found: error
+          retention-days: 7
+  parity-test:
+    needs: parity-build
+    name: parity (${{ matrix.part }})
+    runs-on: ubuntu-latest
+    # one part of test.yml's Node 24 column, twice: in the tree and at the commit. test.yml bounds each
+    # of a part's steps at 11 minutes (alone, then the part), so a part here is at most 44 minutes
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { part: chain, key: chain }
+          - { part: rest 1/5, key: rest-1, gitleaks: true }
+          - { part: rest 2/5, key: rest-2, gitleaks: true }
+          - { part: rest 3/5, key: rest-3, gitleaks: true }
+          - { part: rest 4/5, key: rest-4, gitleaks: true }
+          - { part: rest 5/5, key: rest-5, gitleaks: true }
+          - { part: chrome 1/4, key: chrome-1 }
+          - { part: chrome 2/4, key: chrome-2 }
+          - { part: chrome 3/4, key: chrome-3 }
+          - { part: chrome 4/4, key: chrome-4 }
+    env:
+      SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PART: ${{ matrix.part }}
+      # as test.yml: in every rest part the gitleaks and sops tests run for real, never skip
+      DEVTEAM_TEST_GITLEAKS: ${{ matrix.gitleaks && '1' || '' }}
+      DEVTEAM_TEST_SOPS: ${{ matrix.gitleaks && '1' || '' }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SHA }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: command -v tmux || (sudo apt-get update -q && sudo apt-get install -yq tmux)
+      # test.yml's pinned gitleaks, sops and age, copied as they are (the parity test checks they match)
+      - if: matrix.gitleaks
+        run: |
+          set -euo pipefail
+          V=8.30.1
+          SHA=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          curl -fsSL --retry 3 -o /tmp/gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${V}/gitleaks_${V}_linux_x64.tar.gz"
+          echo "${SHA}  /tmp/gitleaks.tgz" | sha256sum -c -
+          sudo tar -xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks
+          gitleaks version
+      - if: matrix.gitleaks
+        run: |
+          set -euo pipefail
+          SOPS=3.13.3
+          SOPS_SHA=e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b
+          AGE=1.3.2
+          AGE_SHA=cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10
+          curl -fsSL --retry 3 -o /tmp/sops "https://github.com/getsops/sops/releases/download/v${SOPS}/sops-v${SOPS}.linux.amd64"
+          echo "${SOPS_SHA}  /tmp/sops" | sha256sum -c -
+          sudo install -m 0755 /tmp/sops /usr/local/bin/sops
+          curl -fsSL --retry 3 -o /tmp/age.tgz "https://github.com/FiloSottile/age/releases/download/v${AGE}/age-v${AGE}-linux-amd64.tar.gz"
+          echo "${AGE_SHA}  /tmp/age.tgz" | sha256sum -c -
+          sudo tar -xzf /tmp/age.tgz -C /usr/local/bin --strip-components=1 age/age age/age-keygen
+          sops --version --check-for-updates=false 2>/dev/null || sops --version
+          age-keygen --version
+      - uses: actions/download-artifact@v4
+        with:
+          name: parity-work
+          path: ${{ runner.temp }}
+      - name: test
+        run: |
+          set -euo pipefail
+          tar -C "$RUNNER_TEMP" -xf "$RUNNER_TEMP/parity-work.tar"
+          node test/split/parity.mjs test --work "$RUNNER_TEMP/parity" --part "$PART"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-part-${{ matrix.key }}
+          overwrite: true
+          path: ${{ runner.temp }}/parity/parts/${{ matrix.key }}.json
+          if-no-files-found: warn
+          retention-days: 7
+  parity-report:
+    needs: [parity-build, parity-test]
+    # after a failed or cancelled part too: a missing part is named in the report
+    if: always() && needs.parity-build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ env.SHA }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: parity-work
+          path: ${{ runner.temp }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: parity-part-*
+          path: ${{ runner.temp }}/parity/parts
+          merge-multiple: true
+      - name: report
+        run: |
+          set -uo pipefail
+          tar -C "$RUNNER_TEMP" -xf "$RUNNER_TEMP/parity-work.tar"
+          # the report exits 1 until 1:1; GitHub runs this under bash -e, so catch it to write the summary
+          rc=0
+          node test/split/parity.mjs report --at "$SHA" --work "$RUNNER_TEMP/parity" > "$RUNNER_TEMP/report.txt" || rc=$?
+          cat "$RUNNER_TEMP/report.txt"
+          if [ -f "$RUNNER_TEMP/parity/parity.md" ]; then cat "$RUNNER_TEMP/parity/parity.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          exit "$rc"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-report
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/parity/parity.json
+            ${{ runner.temp }}/parity/parity.md
+          if-no-files-found: error
+          retention-days: 30
