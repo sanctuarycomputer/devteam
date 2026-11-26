@@ -2782,7 +2782,7 @@ const DOOR_PICK_LINE = /^-[ \t]*One-way door[ \t]+(q-\S+?):[ \t]*(.+?)[ \t]*$/gm
 const doorPickNamed = (text, qid, pick) => [...String(text ?? '').matchAll(DOOR_PICK_LINE)].some((m) => m[1] === qid && m[2].trim().toLowerCase() === pick.trim().toLowerCase());
 // A choice that declines reads as one: never marked "approves".
 // A word list is never complete, so the plan reviewer checks too (quality.md §3); this catches the plain ones.
-const DECLINING_LABEL = /^\s*(no|nope|nah|not( now| yet)?|none|neither|don['’]?t|do not|never|hold( off)?|wait|later|skip|decline|reject|cancel|stop|abort|revert|undo|pause|postpone|defer|delay|status quo|(keep|leave)( it| things| everything)? (as|how) (it )?(is|was)|leave it)\b/i;
+const DECLINING_LABEL = /^\s*(no|nope|nah|not( now| yet)?|none|neither|don['’]?t|do not|do nothing|never|hold( off)?|wait|later|maybe( later)?|skip|decline|reject|cancel|stop|abort|revert|undo|pause|park( it)?|postpone|defer|delay|status quo|(keep|leave|stay)\b.*\b(as (it|they|things) (is|are|was|were|stand)|as is|unchanged|the same)|leave it)\b/i;
 
 // Folded questions in the shape the inbox uses.
 function questionView(q) {
@@ -10574,7 +10574,7 @@ function askLine({ thread, about } = {}) {
   // a door's other choices the owner may pick instead, each approving the plan built on it (doorPick):
   // marked "approves": true; a choice that declines never is. Only a door's choices carry it
   const approving = (jsonFlag('choices') ?? []).filter((c) => isObj(c) && Object.hasOwn(c, 'approves'));
-  if (approving.length && kind !== 'one-way-door' && cls !== 'one-way-door' && !reasons.includes('one-way-door')) die('"approves" goes on a one-way door\'s choices: the other choices the owner may pick, each approving the plan built on it');
+  if (approving.length && kind !== 'one-way-door' && cls !== 'one-way-door') die('"approves" goes on a one-way door\'s choices: the other choices the owner may pick, each approving the plan built on it');
   for (const c of approving) {
     if (c.approves !== true) die(`--choices "${c.label}": "approves" is true or left out (a choice that declines leaves it out)`);
     if (DECLINING_LABEL.test(String(c.label ?? ''))) die(`--choices "${c.label}" reads as a no: a choice that declines never approves a plan, so it never carries "approves"`);
@@ -16312,7 +16312,7 @@ function cmdAct() {
     const t = tickets().get(refs[0]);
     const doors = t.one_way_doors ?? [];
     let goalDoor = null;
-    // door questions answered with another listed choice: the plan must name each one it is built on
+    // door questions answered with a marked alternative: any one named in the plan and its review approves
     let picks = [];
     if (doorCited) {
       if (!doors.length) die(`${t.id} lists no one-way doors; ${approved} has nothing to cover`);

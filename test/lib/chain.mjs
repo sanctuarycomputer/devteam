@@ -3204,6 +3204,11 @@ http.createServer((req, res) => {
     write(path.join(tdir, 'reviews/plan-1.md'), review('reviewer-a', p3).replace('\n\n|', `\n- One-way door ${Dtk}: Archive them 90 days\n\n|`));
     commit('plan review of the ticket door\'s pick');
     must(['act', '--class', 'approve-plan', '--refs', 'bill-09-door', '--', 'plan on the ticket door pick ok'], sup);
+    // asked again on the ticket-level path: while the re-ask is open the old pick approves nothing
+    const Dtk2 = hand({ kind: 'owner-decision', class: 'one-way-door', ticket: 'bill-09-door', question: 'Purge the old gate logs?', recommendation: 'yes', choices: [{ label: 'yes' }, { label: 'Archive them 90 days', approves: true }, { label: 'no' }] });
+    assert.match(ap().err, /lists one-way doors/, 'an open re-ask of the ticket door voids its earlier pick');
+    must(['answer', Dtk2, '--choice', 'Archive them 90 days']);
+    assert.match(ap().err, new RegExp(`${Dtk2} was answered "Archive them 90 days", a choice it marked "approves"`), 'answered, the re-ask is the one the plan names');
     must(['answer', Dt, 'yes']);
     must(['act', '--class', 'approve-plan', '--refs', 'bill-09-door', '--', 'plan ok'], sup);
     // another listed choice the door marked "approves": the owner's pick of it approves the plan built
@@ -3245,33 +3250,34 @@ http.createServer((req, res) => {
     const Dn2 = hand({ kind: 'owner-decision', class: 'one-way-door', goal: G, question: 'Retire the gate audit export?', recommendation: 'yes', choices: [{ label: 'yes' }, { label: 'Keep it 30 days', approves: true }, { label: 'no' }] });
     must(['answer', Dn2, 'but only if finance agrees', '--choice', 'Keep it 30 days']);
     covers(Dn2, Dz);
-    assert.match(ap('--approved', Dn2).err, /not its recommendation/, 'a pick with words beside it approves nothing');
+    assert.match(ap('--approved', Dn2).err, /not its recommendation \("yes"\) nor a choice it marked "approves" that the owner picked themselves/, 'a pick with words beside it approves nothing');
     // a declining choice someone marked anyway (ask refuses it; an older or hand-written line may not) never approves
     const Dhold = hand({ kind: 'owner-decision', class: 'one-way-door', goal: G, question: 'Retire the gate webhooks?', recommendation: 'yes', choices: [{ label: 'yes' }, { label: 'Hold for now', approves: true }] });
     must(['answer', Dhold, '--choice', 'Hold for now']);
     covers(Dhold, Dz);
-    assert.match(ap('--approved', Dhold).err, /not its recommendation/, 'a marked "Hold" is still a no');
+    assert.match(ap('--approved', Dhold).err, /not its recommendation \("yes"\) nor a choice it marked "approves" that the owner picked themselves/, 'a marked "Hold" is still a no');
     // only the owner's own keyed pick counts: the same label in their words, or recorded from chat, approves nothing
     const Dw = hand({ kind: 'owner-decision', class: 'one-way-door', goal: G, question: 'Retire the old gate this week?', recommendation: 'yes', choices: [{ label: 'yes' }, { label: 'Keep it 30 days', approves: true }, { label: 'no' }] });
     must(['answer', Dw, 'Keep it 30 days — actually no']);
     covers(Dw, Dz);
-    assert.match(ap('--approved', Dw).err, /not its recommendation/, 'words beginning with the label are not a pick');
+    assert.match(ap('--approved', Dw).err, /not its recommendation \("yes"\) nor a choice it marked "approves" that the owner picked themselves/, 'words beginning with the label are not a pick');
     const Dh = hand({ kind: 'owner-decision', class: 'one-way-door', goal: G, question: 'Retire the old gate next week?', recommendation: 'yes', choices: [{ label: 'yes' }, { label: 'Keep it 30 days', approves: true }, { label: 'no' }] });
     assert.match(dt(['answer', Dh, '--choice', 'Keep it 30 days', '--from-chat', '--said', 'keep it 30 days'], sup).err, /not with --from-chat/, 'a pick is never recorded from chat');
     must(['answer', Dh, 'Keep it 30 days', '--from-chat', '--said', 'keep it 30 days'], sup);
     covers(Dh, Dz);
-    assert.match(ap('--approved', Dh).err, /not its recommendation/, 'a pick recorded from chat is not the owner\'s own');
+    assert.match(ap('--approved', Dh).err, /not its recommendation \("yes"\) nor a choice it marked "approves" that the owner picked themselves/, 'a pick recorded from chat is not the owner\'s own');
     // an unmarked alternative approves nothing, picked or not
     const Du = hand({ kind: 'owner-decision', class: 'one-way-door', goal: G, question: 'Retire the old gate in a month?', recommendation: 'yes', choices: [{ label: 'yes' }, { label: 'Keep it 60 days' }, { label: 'no' }] });
     must(['answer', Du, '--choice', 'Keep it 60 days']);
     covers(Du, Dz);
-    assert.match(ap('--approved', Du).err, /not its recommendation/, 'an unmarked alternative approves nothing');
+    assert.match(ap('--approved', Du).err, /not its recommendation \("yes"\) nor a choice it marked "approves" that the owner picked themselves/, 'an unmarked alternative approves nothing');
     // ask: "approves" goes only on a door's choices other than the recommendation, and only as true
     const ch = (c) => JSON.stringify([{ label: 'yes' }, c, { label: 'no' }]);
     assert.match(dt(['ask', '--kind', 'owner-decision', '--question', 'Rename the gate package?', '--recommendation', 'yes', '--choices', ch({ label: 'Rename later', approves: true })], sup).err, /"approves" goes on a one-way door's choices/);
     assert.match(dt(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'Delete the gate audit rows?', '--recommendation', 'yes', '--choices', ch({ label: 'Archive them', approves: false })], sup).err, /"approves" is true or left out/);
     assert.match(dt(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'Delete the gate audit rows?', '--recommendation', 'yes', '--choices', JSON.stringify([{ label: 'yes', approves: true }, { label: 'no' }])], sup).err, /is the recommendation, which approves already/);
     assert.match(dt(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'Delete the gate audit rows?', '--recommendation', 'yes', '--choices', ch({ label: 'Not now', approves: true })], sup).err, /reads as a no/, 'a declining choice is never marked');
+    assert.match(dt(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'Delete the gate audit rows?', '--recommendation', 'yes', '--choices', ch({ label: 'Keep things as they are', approves: true })], sup).err, /reads as a no/, 'a declining choice is never marked');
     const Qa = must(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'Delete the gate audit rows?', '--recommendation', 'yes', '--choices', ch({ label: 'Archive them', approves: true })], sup).trim().split('\n')[0];
     assert.equal(json(must(['questions', '--id', Qa, '--json']))[0].choices[1].approves, true, 'ask stores the mark');
     // ask: class one-way-door is asked as a one-way door, never as another kind, and never with a default
