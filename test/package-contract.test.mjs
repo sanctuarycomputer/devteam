@@ -355,7 +355,9 @@ test('C13 each failure, driven once', async () => {
     await reg.fail(null);
     assert.equal(npm(reg, ['view', `${NAME}@0.101.0`, '--json', ...FLAGS(reg)]).status, 0, 'C13 no failure again: answered');
     assert.equal(npm(reg, ['ci', ...FLAGS(reg)], { cwd: d }).status, 0, 'C13 no failure again: installed');
-  } finally { await Promise.all([reg.close(), reg.close()]); }
+  } finally {
+    await Promise.all([reg.close(), reg.close()]).catch((e) => assert.fail(`C13 close(), twice at once, stops the fake once: ${e.message}`));
+  }
   assert.ok(!fs.existsSync(reg.dir), 'C13 close(), even twice at once, removes the fake\'s folder');
   assert.deepEqual(seen, FAILURES, 'C13 every failure was driven');
 });
