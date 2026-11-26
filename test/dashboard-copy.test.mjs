@@ -96,7 +96,7 @@ const NOT_EMPTY_STATES = [
   'No measured rate yet', 'Nothing measured: spend shows only what agents reported', 'No goal approved yet', 'No tickets planned yet',
   'No readings from … to …', 'No projects running',
   // an artifact's notes (kit-145): a press's answer, where a note is, the composer's placeholder
-  'Nothing to hand over', 'Not on this view', 'Not yet? Say what is still wrong', 'Not typed: … has no pane. It reads this when it next checks.',
+  'Nothing to hand over', 'Not on this view', 'Not yet? Say what is still wrong', /^Not typed: (?:… has no pane\. It waits in its messages until … or the supervisor reads it|the supervisor has no pane\. It waits in its messages until it reads them|neither … nor the supervisor has a pane\. It waits in their messages until one of them is back)\.$/,
   // the hand-over reminder (kit-148): its Not now button, and an open note's card line
   'Not now', 'Not handed over yet. Hand over sends it to ….',
   // consequences, and where to act instead
