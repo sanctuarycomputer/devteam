@@ -33897,9 +33897,10 @@ function npmRun(args, { cwd, timeout = 120000 } = {}) {
 // line, the log's lock past its wait), which is why chore start runs it as a command of its own. Best effort before layout 2: no npm on PATH, an npm older than 9.5, a registry that can't be reached and a version not published leave both files
 // as they were, exit 0, and log a package-pin-skipped observation naming the cause, which
 // packagePinFindings turns into a finding; a pin written logs package-pinned, which clears it. A tag that
-// isn't vX.Y.Z, a bad DEVTEAM_NPM_REGISTRY, a temp folder it can't make, an unreadable main, a manifest packagePinPair won't take, a
-// failed write and any other npm failure exit 1 and write nothing (an npm failure is logged as a skip
-// too, so it shows).
+// isn't vX.Y.Z, a bad DEVTEAM_NPM_REGISTRY, a temp folder it can't make, an unreadable main, a
+// manifest packagePinPair won't take and any other npm failure exit 1 and write nothing (an npm failure
+// is logged as a skip too, so it shows); a failed write exits 1 with its temp files removed, and a stop
+// between the two renames leaves the new lock beside the old package.json, which merge refuses.
 // With { sync: <the worktree> } it is chore start's call for a kit sync: while SYNC_PINS is false it
 // does nothing and returns null (kit-955 ships the call dormant: until merge's checks take the pair,
 // kit-957, a sync PR carrying it would need an owner's answer); kit-957 sets it true. On, it runs
@@ -33976,8 +33977,8 @@ function packagePin(kitDir, tag, { sync = null } = {}) {
     try {
       for (const f of ['package-lock.json', 'package.json']) {
         const t = path.join(kitDir, `.${f}.${process.pid}-${crypto.randomBytes(4).toString('hex')}.tmp`);
-        fs.writeFileSync(t, pair[f], { flag: 'wx' });
         tmps.push([t, path.join(kitDir, f)]);
+        fs.writeFileSync(t, pair[f], { flag: 'wx' });
       }
       for (const [t, f] of tmps) fs.renameSync(t, f);
     } catch (e) {
@@ -34009,8 +34010,10 @@ function cmdPackage() {
   const sub = positional[0];
   if (sub === 'pin') {
     if (positional.length !== 2) die('usage: package pin <tag>');
-    if (!commonDir || !projectInRepo || kitRel.startsWith('..')) die('package pin needs a git checkout with the kit and the project inside it');
-    const r = packagePin(path.join(repoRoot, kitRel), positional[1]);
+    // the pair goes into the kit folder of the home checkout it runs in (a sync worktree's own), never
+    // into another repo the command happens to run from
+    if (!cwdIsHome || !projectInRepo) die('package pin runs in one of home\'s checkouts (its main checkout or a worktree of it): cd there');
+    const r = packagePin(devteamDir, positional[1]);
     if (r.exit) { process.stderr.write(`devteam: ${r.line}\n`); process.exit(r.exit); }
     return out(r.line);
   }

@@ -253,6 +253,14 @@ test('C6 a tag that is not vX.Y.Z exits 1, asks npm nothing and writes nothing',
     assert.equal(r.status, 1, `C6 an unusable TMPDIR: exit 1 (${r.stderr})`);
     assert.match(r.stderr, /package pin v0\.101\.0: can't make a folder under .*no-such-tmp/, 'C6 an unusable TMPDIR: the pin says so');
     assert.doesNotMatch(r.stderr, /\n\s+at /, 'C6 an unusable TMPDIR: no stack trace');
+    // run from another git repo (a link's checkout has a docs/devteam too): refused, nothing written anywhere
+    const other = scratch('other-repo');
+    execFileSync('git', ['init', '-q', '-b', 'main', other]);
+    fs.mkdirSync(path.join(other, 'docs', 'devteam'), { recursive: true });
+    const o = I.dt(['package', 'pin', 'v0.101.0'], reg.env(I.clean), other);
+    assert.equal(o.status, 1, `C6 from another repo: exit 1 (${o.stdout}${o.stderr})`);
+    assert.match(o.stderr, /package pin runs in one of home's checkouts/, 'C6 from another repo: says where it runs');
+    assert.deepEqual(I.pair(path.join(other, 'docs', 'devteam')), { 'package.json': null, 'package-lock.json': null }, 'C6 from another repo: nothing written there');
     assert.equal(reg.calls().length, 0, 'C6 npm is never called');
     assert.deepEqual(I.pair(), { 'package.json': null, 'package-lock.json': null }, 'C6 nothing written');
   } finally { await reg.close(); }
