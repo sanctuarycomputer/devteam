@@ -14369,7 +14369,26 @@ function draftArtifacts(landed = landedArtifacts()) {
   save(treeFile, nextTrees, trees);
   return [...res, ...remote];
 }
-const allArtifacts = () => { const l = landedArtifacts(); return [...l, ...draftArtifacts(l)]; };
+// A landed entry the log says is archived carries archived {at, goal, question} (kit-934): read from
+// the log on every call, never kept in the landed cache or in artifact.json. A draft never carries it.
+const allArtifacts = () => {
+  const l = landedArtifacts();
+  const rec = archiveRecords();
+  const view = (a) => (a?.class === 'artifact-archive' ? { at: a.created_at, goal: (a.refs ?? []).find((r) => logGet(r)?.type === 'goal') ?? null, question: a.approved_by ?? null } : null);
+  return [...l.map((a) => { const v = view(rec.get(a.slug)); return v ? { ...a, archived: v } : a; }), ...draftArtifacts(l)];
+};
+// ----- archiving: a met goal's Library items leave the Library, and nothing is deleted (kit-934) -----
+// Each slug's newest act of class artifact-archive or artifact-restore that names it (refs
+// artifact:<slug>), in fold order, as publishRecords reads publish state. Only the supervisor's lines
+// count; the log's integrity check already refuses either class from the owner (neither is in OWNER_ACTS).
+function archiveRecords() {
+  const m = new Map();
+  for (const a of logObjects('act')) {
+    if (a.created_by !== 'supervisor' || !['artifact-archive', 'artifact-restore'].includes(a.class)) continue;
+    for (const r of a.refs ?? []) if (typeof r === 'string' && r.startsWith('artifact:')) m.set(r.slice('artifact:'.length), a);
+  }
+  return m;
+}
 // ----- publishing: the owner makes a landed artifact readable by anyone, from the cloud box -----
 // The gateway does the publishing (its confirm page, its own copy of the bytes); the kit says what
 // main has, and records the owner's word as an owner act (the public-artifacts design).
@@ -14669,7 +14688,7 @@ function cmdArtifacts() {
   const all = allArtifacts();
   if (flags.json) return json(all);
   if (!all.length) return out('no artifacts');
-  for (const a of all) out(`${a.slug} [${a.at === 'main' ? 'landed' : `draft in ${a.at}`}] ${a.error ? `(broken: ${a.error})` : quoteData(a.title)}${a.for.length ? ` for ${a.for.join(', ')}` : ''}`);
+  for (const a of all) out(`${a.slug} [${a.at === 'main' ? 'landed' : `draft in ${a.at}`}] ${a.archived ? '[archived] ' : ''}${a.error ? `(broken: ${a.error})` : quoteData(a.title)}${a.for.length ? ` for ${a.for.join(', ')}` : ''}`);
 }
 // The starter page: the dashboard's light and dark tokens copied inline, since an artifact can't
 // load the dashboard's files.
