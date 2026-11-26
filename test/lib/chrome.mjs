@@ -109,18 +109,42 @@ export async function processesOf(pgid, { io = { proc: fs.existsSync('/proc/self
   return `processes: ${said.join(', ')}`;
 }
 
+// What removes a Chrome's folder if this process dies without removing it (a SIGKILL, or a signal node
+// doesn't turn into 'exit'): a shell waiting on a pipe from this process. A line on it is "removed here",
+// and it exits. End of file with no line is this process gone: it kills Chrome's process group ($1) and
+// removes the folder ($2), trying for 5 s while the group's last processes go.
+export const REAPER = 'read -r line && exit 0; [ -n "$2" ] || exit 0; kill -9 "-$1" 2>/dev/null; i=0; while [ "$i" -lt 50 ]; do rm -rf -- "$2" 2>/dev/null; [ -e "$2" ] || exit 0; i=$((i + 1)); sleep 0.1; done';
+
 export async function openChrome() {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-chrome-'));
   // Its own process group, so its helpers go with it: one left holding the stderr pipe open keeps this
   // test process (and the job) alive after every test has finished.
-  // Chrome's own temp folders (org.chromium.Chromium.*) go in a short folder of this browser's, removed
-  // with it: a killed Chrome leaves them, and loose in the machine's temp folder they piled up by the
-  // thousand. Short: a socket's path is capped, so not inside the profile.
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dc'));
-  const proc = spawn(chromePath, chromeArgs(profile), { stdio: ['ignore', 'ignore', 'pipe'], detached: true, env: { ...process.env, TMPDIR: tmp } });
+  // Chrome's own temp folders (org.chromium.Chromium.*) go in t/ inside the profile, removed with it: a
+  // killed Chrome leaves them, and loose in the machine's temp folder they piled up by the thousand.
+  // Chrome is told TMPDIR=t, relative to its working folder, the profile: a socket's path is capped at
+  // 107 bytes, which an absolute one under a long temp folder passes.
+  const tmp = path.join(profile, 't');
+  fs.mkdirSync(tmp);
+  const proc = spawn(chromePath, chromeArgs(profile), { cwd: profile, stdio: ['ignore', 'ignore', 'pipe'], detached: true, env: { ...process.env, TMPDIR: 't' } });
   const signal = (sig) => { try { process.kill(-proc.pid, sig); } catch { try { proc.kill(sig); } catch {} } };
-  const atExit = () => { signal('SIGKILL'); for (const d of [profile, tmp]) try { fs.rmSync(d, { recursive: true, force: true }); } catch {} };
+  const reaper = spawn('/bin/sh', ['-c', REAPER, 'devteam-chrome-reaper', String(proc.pid), profile], { detached: true, stdio: ['pipe', 'ignore', 'ignore'] });
+  reaper.on('error', () => {});
+  reaper.stdin.on('error', () => {});
+  reaper.unref();
+  reaper.stdin.unref();
+  // Chrome's group killed and its folder removed, once: when Chrome exits, at close(), or as this process
+  // exits. The reaper stands down only once the folder is gone; otherwise it tries again.
+  let removed = false;
+  const remove = (retry) => {
+    if (removed) return;
+    removed = true;
+    signal('SIGKILL');
+    try { fs.rmSync(profile, { recursive: true, force: true, ...(retry && { maxRetries: 5, retryDelay: 100 }) }); } catch {}
+    try { reaper.stdin.end(fs.existsSync(profile) ? '' : 'removed\n'); } catch {}
+  };
+  const atExit = () => remove(false);
   process.once('exit', atExit);
+  proc.once('exit', () => remove(true));
   const base = await new Promise((resolve, reject) => {
     let err = '';
     const failing = setTimeout(() => { signal('SIGKILL'); reject(new Error(`chrome said nothing for 60 s: ${err.slice(0, 400)}`)); }, 60000);
@@ -145,7 +169,7 @@ export async function openChrome() {
       process.off('exit', atExit);
       proc.off('exit', done);
       proc.stderr.destroy();
-      for (const d of [profile, tmp]) try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch {}
+      remove(true);
       r();
     }
     // 'exit', not 'close': Chrome's helpers can hold its stderr open after it is gone
