@@ -933,21 +933,21 @@ function showOnly(key) {
 }
 function selectOverview() {
   selected = OVERVIEW;
-  history.replaceState(null, '', tlHash());
+  hubAddr(tlHash(), true);
   showOnly(OVERVIEW);
   paintOverview();
   tlRefresh();
 }
 function selectSettings() {
   selected = SETTINGS;
-  history.replaceState(null, '', '#settings');
+  hubAddr('#settings', true);
   showOnly(SETTINGS);
   paintSettings();
 }
 function selectTerminal() {
   if (!term) return;
   selected = TERM;
-  history.replaceState(null, '', '#terminal');
+  hubAddr('#terminal', true);
   if (!term.frame) {
     term.frame = document.createElement('iframe');
     term.frame.title = 'Terminal';
@@ -968,7 +968,7 @@ function select(root) {
   if (!it) return;
   selected = root;
   // the address the view its kept frame shows: the head its frame last said (§10)
-  hubWrite(it);
+  hubWrite(it, true);
   frameFor(it);
   showOnly(root);
   hubBase(it);
@@ -1317,10 +1317,10 @@ function hubFind(key) {
 // a project's kept head: the last its frame said (null when over 2,048 characters), or where the hub pointed it
 const hubKept = (it) => (typeof it.head === 'string' && it.head.length > 1 ? it.head : '');
 // the selected project's address: its key and its kept head, in place (the frame's own hash change made the entry)
-function hubWrite(it) {
+function hubWrite(it, mayPush = false) {
   const key = encodeURIComponent(keyOf(it));
   const head = hubKept(it);
-  history.replaceState(null, '', head ? `#${key}/${head.slice(1)}` : `#${key}`);
+  hubAddr(head ? `#${key}/${head.slice(1)}` : `#${key}`, mayPush);
 }
 // The address Copy link copies for that project, sent to its frame's origin alone: on a box: 2 box its
 // own host, else the hub's own address for it.
@@ -1353,11 +1353,14 @@ window.addEventListener('message', (ev) => {
 // an operator thread opens its card. Registered before the plain tab switch below, which then has
 // nothing left to do for these.
 window.addEventListener('hashchange', () => {
+  // never a choice, and nothing to do for a Back or Forward step the popstate below took
+  hubChoosing = false;
+  if (hubPopAt !== null) { const was = hubPopAt; hubPopAt = null; if (was === location.hash) return; }
   const { key, head, ot } = hubHead();
   if (key === 'overview') {
     if (selected !== OVERVIEW) selectOverview();
     // then the address settles on the thread actually open (an ot naming no listed thread opens nothing)
-    if (ot) tlOpen(ot).finally(() => { if (selected === OVERVIEW) history.replaceState(null, '', tlHash()); });
+    if (ot) tlOpen(ot).finally(() => { if (selected === OVERVIEW) hubAddr(tlHash()); });
     return;
   }
   const it = hubFind(key);
@@ -1415,6 +1418,30 @@ function hubChoose(root) {
   hubChoosing = true;
   try { select(root); } finally { hubChoosing = false; }
 }
+const hubMarked = (s) => Boolean(s) && typeof s === 'object' && s.hub === 1 && typeof s.key === 'string';
+// the address, marked with its key (the hash's first part, as written): a new entry only for a choice that changes it
+function hubAddr(url, mayPush = false) {
+  const state = { hub: 1, key: String(url).replace(/^#/, '').split('/')[0].split('?')[0] };
+  if (mayPush && hubChoosing && url !== location.hash) { hubChoosing = false; history.pushState(state, '', url); }
+  else history.replaceState(state, '', url);
+}
+// the hash a popstate this page took left: the hashchange that follows it has nothing to do
+let hubPopAt = null;
+window.addEventListener('popstate', (e) => {
+  hubChoosing = false;
+  if (!hubMarked(e.state)) return;
+  let k;
+  try { k = decodeURIComponent(e.state.key); } catch { return; }
+  const it = k === 'overview' || k === 'settings' || k === 'terminal' ? null : hubFind(k);
+  const root = k === 'overview' ? OVERVIEW : k === 'settings' ? SETTINGS : k === 'terminal' ? (term ? TERM : null) : it ? it.x.root : null;
+  // a tab no longer here: as unmarked (the hashchange opens it as @2 §10 says)
+  if (root === null) return;
+  const { head } = hubHead();
+  // after a reload a project has no frame or kept head yet: it opens at the entry's head, as @2 says
+  if (it && head && (!it.frame || !hubKept(it))) openAt(root, head);
+  else if (root !== selected) select(root);
+  hubPopAt = location.hash;
+});
 /* hubHistory end */
 // a card's ⋯: its root and port, and two ways to open its dashboard
 let menuPop = null;
@@ -2876,7 +2903,7 @@ function tlRelay() {
   TL.pend = TL.pend.filter((p) => !(p.confirmed && tLanded(TL.raw, p)));
   TL.threads = tOverlay(TL.raw, TL.pend);
 }
-function tlClose() { TL.open = null; TL.draft = null; if (selected === OVERVIEW) history.replaceState(null, '', tlHash()); tlDraw(); }
+function tlClose() { TL.open = null; TL.draft = null; if (selected === OVERVIEW) hubAddr(tlHash()); tlDraw(); }
 async function tlOpen(id, go = true) {
   if (!TL.threads.some((x) => x.id === id)) await tlRefresh();
   const t = TL.threads.find((x) => x.id === id);
@@ -2884,7 +2911,7 @@ async function tlOpen(id, go = true) {
   TL.draft = null;
   TL.open = id;
   TL.openAt = -1;
-  if (selected === OVERVIEW) history.replaceState(null, '', tlHash());
+  if (selected === OVERVIEW) hubAddr(tlHash());
   // from the dock, what it is about is brought into view first
   if (go) tlTarget(t.subject)?.scrollIntoView({ block: 'nearest' });
   tlDraw();
@@ -3294,6 +3321,7 @@ async function draw() {
   empty.hidden = items.size > 0 || Boolean(term) || selected === OVERVIEW || selected === SETTINGS;
   if (!items.size) empty.textContent = 'No projects running';
   if (!selected || (selected !== TERM && selected !== OVERVIEW && selected !== SETTINGS && !items.has(selected))) {
+    hubChoosing = false;
     const { key: want, head, ot } = hubHead();
     // the address picks a tab, at the head it names; with none, the Overview (the terminal when the
     // address says so), at the operator thread it names
