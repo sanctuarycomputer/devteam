@@ -54,6 +54,19 @@ const verifyTree = () => {
   return verified;
 };
 
+test('G1a: the gateway area is applied whole, and nothing of it is stale', () => {
+  assert.equal(made.status, 0, `split: ${made.stderr}`);
+  assert.deepEqual(gwItems, ['rule here', 'rule gateway-source', 'rule entry', 'rule test-reads', 'patch dockerfile-gateway-modules.patch'], 'every item of the gateway area is applied');
+  assert.deepEqual((report.stale ?? []).filter((s) => /gateway/.test(`${s.area} ${s.name}`)), [], 'nothing of the gateway is stale');
+});
+
+test('G1b: cloud/gateway.mjs is an entry: it declares nothing and loads each module under cloud/gateway/', () => {
+  assert.deepEqual(modsInTree(), ['assets.mjs', 'base.mjs', 'pages.mjs', 'server.mjs']);
+  const entry = read('cloud/gateway.mjs');
+  assert.doesNotMatch(entry, /^(?:export )?(?:async )?(?:function|const|let|var|class) /m, 'the entry declares nothing');
+  for (const m of modsInTree()) assert.match(entry, new RegExp(`^import '\\./gateway/${m.replace('.', '\\.')}';$`, 'm'), `the entry loads ${m}`);
+});
+
 test('G1c: every module but server.mjs is at most 2,000 lines', () => {
   const over = modsInTree().filter((m) => m !== 'server.mjs').map((m) => [m, lines(read(`cloud/gateway/${m}`))]).filter(([, n]) => n > 2000);
   assert.deepEqual(over, [], 'modules over 2,000 lines');
@@ -74,6 +87,122 @@ test('G1f: and none in the CLI\'s, so verify exits 0', () => {
   const v = verifyTree();
   assert.deepEqual(v.of('docs/devteam/scripts/devteam.mjs')?.problems, [], `the CLI verifies: ${v.out.slice(0, 2000)}`);
   assert.equal(v.status, 0, v.out.slice(0, 2000));
+});
+
+// Every name a kit test takes from cloud/gateway.mjs: named imports, and G.<name> on a module bound by
+// `const G = await import(... gateway.mjs ...)`.
+function namesTestsImport() {
+  const names = new Set();
+  const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) { if (!['fixtures', 'split'].includes(e.name)) walk(p); } else if (e.name.endsWith('.mjs')) scan(fs.readFileSync(p, 'utf8')); } };
+  const scan = (t) => {
+    for (const m of t.matchAll(/import\s*\{([^}]*)\}\s*from\s*'[^']*cloud\/gateway\.mjs'/g)) for (const b of m[1].split(',')) { const n = b.trim().split(/\s+as\s+/)[0]; if (n) names.add(n); }
+    for (const m of t.matchAll(/const ([A-Za-z_$][\w$]*) = await import\(([^;]*?)\);/g)) {
+      if (!/gateway\.mjs/.test(m[2]) || !/cloud/.test(m[2])) continue;
+      for (const u of t.matchAll(new RegExp(`(?<![\\w$.])${m[1].replace('$', '\\$')}\\.([A-Za-z_$][\\w$]*)`, 'g'))) names.add(u[1]);
+    }
+  };
+  walk(path.join(root, 'test'));
+  return [...names].sort();
+}
+const exportsOf = (file) => {
+  const r = run(process.execPath, ['--input-type=module', '-e', `const m = await import(${JSON.stringify(file)}); console.log(JSON.stringify(Object.keys(m).sort()));`], { cwd: tmp, env: quiet, timeout: 30e3 });
+  assert.equal(r.status, 0, r.stderr);
+  return JSON.parse(r.stdout);
+};
+
+test('G2: every name the kit\'s tests import from cloud/gateway.mjs is exported by the entry, which exports what the single file did', () => {
+  const wanted = namesTestsImport();
+  assert.ok(wanted.length >= 20 && wanted.includes('createGateway') && wanted.includes('paneSignature'), `the scan finds the tests' names: ${wanted.join(', ')}`);
+  const have = exportsOf(inTree('cloud/gateway.mjs'));
+  assert.deepEqual(wanted.filter((n) => !have.includes(n)), [], 'names the tests import that the entry does not export');
+  assert.deepEqual(have, exportsOf(path.join(root, 'cloud', 'gateway.mjs')), 'the same exports as the single file');
+});
+
+test('G3: test/lib/gateway-source.mjs gives the single file\'s text, but for the here line the overlay rewrote', async () => {
+  assert.ok(fs.existsSync(inTree('test/lib/gateway-source.mjs')), 'the overlay writes test/lib/gateway-source.mjs');
+  const { gatewaySource } = await import(inTree('test/lib/gateway-source.mjs'));
+  const a = gatewaySource().split('\n'), b = source.split('\n');
+  assert.equal(a.length, b.length, 'as many lines as the source');
+  const diff = a.map((l, i) => [i + 1, l, b[i]]).filter(([, x, y]) => x !== y);
+  assert.deepEqual(diff.map(([, x, y]) => [y, x]), [["const here = path.dirname(fileURLToPath(import.meta.url));", "const here = path.dirname(fileURLToPath(new URL('../gateway.mjs', import.meta.url)));"]]);
+});
+
+// The kit's tests that hold the gateway's copies equal to the script's (the claim-link rule, BRANCH_AT, the
+// preview lens and its framing rules, the upload rules), and the other tests that read the gateway's text,
+// run inside the tree by name.
+const COPIES = [
+  ['test/gateway.test.mjs', ["the kit's preview lens and framing rules are the gateway's own: the laptop's relay serves the same bytes", "C5i the gateway's BRANCH_AT is the kit's, character for character", 'C4h a bad /c/ link does the same MAC work on an unlisted name', 'only boxImage reads DEVTEAM_KIT_RELEASE and DEVTEAM_BOX_TOOLS in gateway.mjs']],
+  ['test/org-access.invites.test.mjs', ["org-access A2: the gateway's and devteam.mjs's claim-link rules are one, and a press the gateway redacted still reads as signed", "org-access A5: only a finished sign-in method flow mints a session (the gateway's source)"]],
+  ['test/attachments.upload.test.mjs', ["the upload rules: devteam.mjs's copy equals the gateway's (A8)"]],
+  ['test/dashboard.relay.test.mjs', ["the laptop's relay: the lens on GET alone, the app with localhost as its Host and Origin, its framing given way only to its lens"]],
+];
+const reEscape = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+for (const [file, names] of COPIES) {
+  test(`G4: in the tree, ${file}'s tests on the gateway's copies and text pass (${names.length})`, { timeout: 200e3 }, () => {
+    const pattern = `^(?:${names.map(reEscape).join('|')})$`;
+    const r = run(process.execPath, ['--test', '--test-reporter=tap', '--test-concurrency=1', `--test-name-pattern=${pattern}`, file], { cwd: tree, env: quiet, timeout: 180e3 });
+    // each named test, at the top level of the TAP, as ok
+    const top = new Map([...r.stdout.matchAll(/^(ok|not ok) \d+ - (.*)$/gm)].map((m) => [m[2], m[1]]));
+    assert.deepEqual(names.map((n) => [n, top.get(n) ?? 'did not run']), names.map((n) => [n, 'ok']), `${file} in the tree:\n${r.stdout.slice(-3000)}${r.stderr.slice(-1000)}`);
+    assert.equal(r.status, 0);
+  });
+}
+
+test('G5a: the gateway\'s here is the entry\'s folder', () => {
+  assert.match(read('cloud/gateway/base.mjs') ?? '', /^export const here = path\.dirname\(fileURLToPath\(new URL\('\.\.\/gateway\.mjs', import\.meta\.url\)\)\);$/m);
+});
+
+test('G5b: the main-module check is the entry\'s own, so importing the entry serves nothing', () => {
+  // imported by a script file, as a test imports it: process.argv[1] is that file, not the entry
+  const importer = path.join(tmp, 'imports-the-gateway.mjs');
+  fs.writeFileSync(importer, `await import(${JSON.stringify(pathToFileURL(inTree('cloud/gateway.mjs')).href)});\n`);
+  const r = run(process.execPath, [importer], { cwd: tmp, env: { ...quiet, PORT: '1' }, timeout: 20e3 });
+  assert.deepEqual([r.error?.code, r.status, r.stdout, r.stderr], [undefined, 0, '', ''], 'importing the entry exits by itself and prints nothing: no server started');
+  assert.doesNotMatch(read('cloud/gateway/pages.mjs') ?? 'no pages.mjs: process.argv', /process\.argv/, 'the command line is not in a module');
+  assert.match(read('cloud/gateway.mjs'), /^if \(process\.argv\[1\] && fileURLToPath\(import\.meta\.url\) === fs\.realpathSync\(process\.argv\[1\]\)\) \{$/m, 'the entry runs it, on its own import.meta.url');
+});
+
+const freePort = () => new Promise((ok) => { const s = net.createServer().listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => ok(port)); }); });
+
+test('G5c: `node gateway.mjs serve` from the box\'s layout (gateway.mjs, gateway/, hub.html side by side) answers /healthz', { timeout: 60e3 }, async () => {
+  assert.ok(fs.existsSync(inTree('cloud/gateway')), 'the tree has cloud/gateway/');
+  const box = path.join(tmp, 'opt');
+  fs.mkdirSync(box);
+  fs.cpSync(inTree('cloud/gateway.mjs'), path.join(box, 'gateway.mjs'));
+  fs.cpSync(inTree('cloud/gateway'), path.join(box, 'gateway'), { recursive: true });
+  fs.writeFileSync(path.join(box, 'hub.html'), '<!doctype html><title>hub</title>');
+  fs.writeFileSync(path.join(box, 'ttyd.html'), 'ttyd');
+  const uploads = path.join(home, 'uploads');
+  fs.mkdirSync(uploads, { mode: 0o750 });
+  const port = await freePort();
+  const c = spawn(process.execPath, [path.join(box, 'gateway.mjs'), 'serve'], { env: { ...quiet, DEVTEAM_GATEWAY_DIR: path.join(home, 'gw'), DEVTEAM_UPLOADS_DIR: uploads, DEVTEAM_PUBLIC_URL: `http://box.localhost:${port}`, PORT: String(port), DEVTEAM_TTYD_PORT: String(await freePort()) }, stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  c.stdout.on('data', (b) => { out += b; });
+  c.stderr.on('data', (b) => { out += b; });
+  try {
+    let body = null;
+    for (const end = Date.now() + 20e3; body === null && c.exitCode === null && Date.now() < end;) {
+      body = await fetch(`http://127.0.0.1:${port}/healthz`).then((r) => (r.ok ? r.text() : null), () => null);
+      if (body === null) await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.equal(body, 'ok', `/healthz from the entry: ${out}`);
+    assert.match(out, /^image: none$/m, 'the command line ran');
+  } finally {
+    if (c.exitCode === null && c.signalCode === null) await new Promise((r) => { c.once('exit', r); c.kill('SIGTERM'); });
+  }
+});
+
+test('G6: the tree\'s cloud/Dockerfile copies cloud/gateway/ beside gateway.mjs, mode 644, before the chmod -R that keeps it readable', () => {
+  const d = read('cloud/Dockerfile');
+  const L = d.split('\n');
+  const at = (re) => L.findIndex((l) => re.test(l));
+  const gw = at(/^COPY --chmod=644 cloud\/gateway\.mjs \/opt\/devteam\/gateway\.mjs$/);
+  const mods = at(/^COPY --chmod=644 cloud\/gateway\/ \/opt\/devteam\/gateway\/$/);
+  const chmod = L.findIndex((l, i) => i > mods && /chmod -R u=rwX,go=rX \/opt\/devteam/.test(l));
+  assert.ok(gw >= 0, 'the entry is copied as today');
+  assert.ok(mods > gw, 'the modules are copied beside it');
+  assert.ok(chmod > mods, 'a chmod -R u=rwX,go=rX /opt/devteam after it makes the folder 755 and every module 644');
+  assert.equal(d.replace(/\n# Its modules, beside it[^\n]*\n[^\n]*\nCOPY --chmod=644 cloud\/gateway\/ \/opt\/devteam\/gateway\/\n/, '\n'), fs.readFileSync(path.join(root, 'cloud', 'Dockerfile'), 'utf8'), 'and nothing else changes');
 });
 
 // The manifest's templates: verify accepts fileParts' reads inside a named declaration only.

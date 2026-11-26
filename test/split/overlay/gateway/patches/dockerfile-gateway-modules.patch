@@ -1,0 +1,14 @@
+diff --git a/cloud/Dockerfile b/cloud/Dockerfile
+index 74daf098..9eae7ca5 100644
+--- a/cloud/Dockerfile
++++ b/cloud/Dockerfile
+@@ -150,6 +150,9 @@ RUN usermod -l dev -d /data/home node && groupmod -n dev node \
+ # file's own mode (Render's did, so the gateway's user couldn't reach its own file).
+ RUN install -d -m 755 /opt/devteam
+ COPY --chmod=644 cloud/gateway.mjs /opt/devteam/gateway.mjs
++# Its modules, beside it as the entry imports them (./gateway/<module>.mjs); the chmod -R below makes
++# the folder 755, so the gateway's user can reach them.
++COPY --chmod=644 cloud/gateway/ /opt/devteam/gateway/
+ COPY --chmod=644 docs/devteam/dashboard/hub.html /opt/devteam/hub.html
+ # The kit, whole (it reads its schema beside it), as of the minor this image was built for:
+ # box-deploy.yml deploys at each minor, so a repo's kit can be newer than this one, or older. The box's
