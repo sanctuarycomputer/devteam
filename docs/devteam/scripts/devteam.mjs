@@ -22344,7 +22344,6 @@ function presenceChanged(dir, onChange) {
 }
 
 function startHub(log, { kit = null, image = false, standalone = false } = {}) {
-  const page = path.join(kitDir, 'dashboard', 'hub.html');
   // the hub alone runs its owner actions where it was started, as box-thread's run: on a box that is
   // where the image's kit is no checkout; a dashboard's run in its project
   const actionCwd = standalone ? process.cwd() : mainRoot;
@@ -22486,7 +22485,7 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
       const act = req.method === 'POST' && req.url.startsWith('/operator/') && Object.hasOwn(HUB_ACTIONS, req.url.slice(10)) ? HUB_ACTIONS[req.url.slice(10)] : null;
       if (act) return ownerPost(req, send, act);
       if (req.method !== 'GET') return send(405, 'text/plain; charset=utf-8', 'the hub only lists, and takes the owner\'s threads with the operator', { allow: 'GET' });
-      if (req.url === '/') return send(200, 'text/html; charset=utf-8', fs.readFileSync(page), { 'content-security-policy': `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src ${PORT_RANGE.map((p) => `http://127.0.0.1:${p}`).join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'` });
+      if (req.url === '/') return servePage(null, req, res, 'hub', `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src ${PORT_RANGE.map((p) => `http://127.0.0.1:${p}`).join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`, { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
       // The list is for the hub's own page: another site's page doesn't get to make the hub probe
       // the block (a browser always says where a request came from). The page itself opens from
       // anywhere, a link in a README included.
@@ -22516,6 +22515,7 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
         if (req.headers['if-none-match'] === tag) { res.writeHead(304, { etag: tag, 'cache-control': 'private, no-cache' }); return res.end(); }
         return send(200, 'application/json', body, { etag: tag, 'cache-control': 'private, no-cache' });
       }
+      if (servePageAsset(req, res, 'hub') !== DASH_NEXT) return;
       return send(404, 'text/plain; charset=utf-8', 'not found');
     }));
     current = hub;
@@ -28231,6 +28231,8 @@ const IMAGE_RUNS = {
     'cmdHub', 'cmdMachine', 'cmdOperatorThread', 'cmdRecover', 'cmdBoxPins',
     // what they are built from that serves only the image: the hub
     'probeHello', 'HUB_BODY_MAX', 'hubTurnOk', 'HUB_ACTIONS', 'startHub', 'hubLogger', 'imageHub',
+    // the seam the hub sends its page through, and asks before its 404 (page-seam@1, kit-983)
+    'servePage', 'servePageAsset',
     // recover --machine (a project's own recover runs from that project's kit, never the image's;
     // its recoverOne is listed below as a crossing, since it writes supervisor-up.json)
     'siblingOf', 'isAdopted', 'machineProjects', 'projectKit', 'projectJson', 'kitHasRecover', 'notedPaneOf', 'tmuxName', 'readUpList', 'recoverMachine', 'LEGACY_RECOVER_MESSAGE', 'legacyRecover',
@@ -29187,6 +29189,124 @@ function artifactRemoteRefs({ root, main, onMoved = () => {}, env = process.env 
     stop() { clearTimeout(timer); timer = null; if (child) try { process.kill(-child.pid, 'SIGTERM'); } catch {} },
   };
 }
+// page-seam@1 (kit-983): every page the CLI's servers send goes through servePage, pageVersion and
+// servePageAsset, and serveAppFiles is the one static server by alpha-build@1's rules. At main they
+// send today's pages (dashboard/index.html, hub.html, browser.html) exactly as before; the generated
+// tree overrides only these declarations to serve the apps (designs/kit-package-apps.md).
+// servePage sends one of today's pages: 'dashboard', 'hub' or 'browser', read from the kit's
+// dashboard folder on each request, as text/html with the caller's headers and policy, and no body
+// to a HEAD. A page it can't read is a 500. D.keep, when the caller gives one, holds the page's bytes
+// for the server's life (the browser view, whose page must match the daemon that serves it): called
+// with no res, at the server's creation, it only reads the page into D.keep, and throws when it
+// can't, so that server fails at start.
+function servePage(D, req, res, page, policy, headers = {}) {
+  const file = { dashboard: 'index.html', hub: 'hub.html', browser: 'browser.html' }[page];
+  if (!file) throw new Error(`servePage: no page ${page}`);
+  if (!res) { D.keep[page] = fs.readFileSync(path.join(kitDir, 'dashboard', file)); return; }
+  // 'in', not a read: the dashboard's D (dashContext) throws on a name it was not given
+  const keep = D && 'keep' in D ? D.keep : null;
+  let body = keep?.[page];
+  if (!body) {
+    try { body = fs.readFileSync(path.join(kitDir, 'dashboard', file)); } catch {
+      res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+      return res.end('this page could not be read\n');
+    }
+    if (keep) keep[page] = body;
+  }
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': body.length, ...headers, 'content-security-policy': policy });
+  return res.end(req.method === 'HEAD' ? undefined : body);
+}
+// The x-devteam-page value of a page: the first 16 hex of the sha256 of its file, or '' when it
+// can't be read. An open tab compares it with the one it first saw, and offers a reload.
+function pageVersion(page) {
+  const file = { dashboard: 'index.html', hub: 'hub.html', browser: 'browser.html' }[page];
+  if (!file) return '';
+  try { return sha256(fs.readFileSync(path.join(kitDir, 'dashboard', file))).slice(0, 16); } catch { return ''; }
+}
+// A page's own file, for a request no route of server ('dashboard', 'hub' or 'browser') took, or
+// DASH_NEXT, "not mine": the caller's own answer (its 404) follows. At main only the dashboard has
+// any: the review pages' helpers, /review/<seg>/devteam-ui.css and .js (dashRoutesReviewPage checks
+// <seg> first), to a GET, as before (a HEAD there is the dashboard's 404). Every other method, and
+// every other path, is DASH_NEXT; in the tree it may answer GET and HEAD, and nothing else.
+function servePageAsset(req, res, server) {
+  if (req.method !== 'GET') return DASH_NEXT;
+  const m = server === 'dashboard' ? /^\/review\/[^/]+\/(devteam-ui\.(?:css|js))$/.exec(new URL(req.url, 'http://x').pathname) : null;
+  if (!m) return DASH_NEXT;
+  res.writeHead(200, { 'content-type': m[1].endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+  return res.end(fs.readFileSync(path.join(kitDir, 'dashboard', m[1])));
+}
+// A static export served from folder at base, by alpha-build@1's rules and
+// test/fixtures/alpha-serving.json. A caller's mistake throws before any request is read: a base
+// that is not '' (the root) or '/<name>[/<name>…]' (no trailing slash, no empty, '?' or '#' part),
+// or a folder that is not a non-empty string. Then, in order: DASH_NEXT for a method but GET and
+// HEAD, or a path (the query cut off, and ignored from here on) that is neither base nor under
+// base/; inside it, it always answers. A 404 (text/plain, 'not found') for a request over 2048
+// bytes; a segment that does not decode (each is decoded once), an empty segment but the last, '.',
+// '..', or a decoded '/', '\' or NUL; a real path (symlinks followed) that is missing or outside the
+// folder's real path; a file asked for with a trailing slash; a folder's index.html whose real path
+// is missing or outside; anything not a regular file; a type not in the known list. A 301 for base
+// itself (to base/) and for a folder without its slash (to the path with one, no query). A folder
+// is its index.html. A 200 carries the type, content-length, cache-control: no-store and nosniff,
+// and no body to a HEAD. An .html file carries the policy policyFor(<route>) gives, <route> being
+// its folder as csp-hashes.json keys a route ('/', '/threads/one/'), so a page that is not a
+// route's index.html gets its folder's policy; policyFor is asked only for .html, and a policy that
+// is not a non-empty string, or a throw, is a 500. A folder that isn't there serves 404s.
+function serveAppFiles(folder, base, req, res, policyFor) {
+  if (typeof base !== 'string' || (base !== '' && !/^\/[^/?#]+(?:\/[^/?#]+)*$/.test(base))) throw new Error(`serveAppFiles: base ${JSON.stringify(base)} is not '' or /<name>`);
+  if (typeof folder !== 'string' || !folder) throw new Error('serveAppFiles: no folder');
+  const KNOWN = { html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', txt: 'text/plain; charset=utf-8', json: 'application/json', svg: 'image/svg+xml', png: 'image/png', ico: 'image/x-icon', webp: 'image/webp', woff2: 'font/woff2' };
+  if (req.method !== 'GET' && req.method !== 'HEAD') return DASH_NEXT;
+  const raw = String(req.url);
+  const p = raw.split('?')[0];
+  if (p !== base && !p.startsWith(`${base}/`)) return DASH_NEXT;
+  const answer = (code, headers, body) => { res.writeHead(code, { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...headers }); return res.end(req.method === 'HEAD' ? undefined : body); };
+  const none = () => answer(404, { 'content-type': 'text/plain; charset=utf-8' }, 'not found\n');
+  if (Buffer.byteLength(raw) > 2048) return none();
+  if (p === base) return answer(301, { location: `${base}/` });
+  const segs = p.slice(base.length + 1).split('/');
+  const parts = [];
+  for (const [i, s] of segs.entries()) {
+    let d;
+    try { d = decodeURIComponent(s); } catch { return none(); }
+    if (d === '') { if (i === segs.length - 1) continue; return none(); }
+    if (d === '.' || d === '..' || /[/\\\0]/.test(d)) return none();
+    parts.push(d);
+  }
+  let top, real, st;
+  try { top = fs.realpathSync(folder); real = fs.realpathSync(path.join(top, ...parts)); st = fs.statSync(real); } catch { return none(); }
+  const inside = (f) => f === top || f.startsWith(top + path.sep);
+  if (!inside(real)) return none();
+  if (!st.isDirectory() && parts.length && p.endsWith('/')) return none();
+  if (st.isDirectory()) {
+    if (!p.endsWith('/')) return answer(301, { location: `${p}/` });
+    try { real = fs.realpathSync(path.join(real, 'index.html')); st = fs.statSync(real); } catch { return none(); }
+    if (!inside(real)) return none();
+  }
+  if (!st.isFile()) return none();
+  const ext = path.extname(real).slice(1).toLowerCase();
+  const type = Object.hasOwn(KNOWN, ext) ? KNOWN[ext] : null;
+  if (!type) return none();
+  let body;
+  try { body = fs.readFileSync(real); } catch { return none(); }
+  const headers = { 'content-type': type, 'content-length': body.length };
+  if (ext === 'html') {
+    const rel = path.relative(top, path.dirname(real)).split(path.sep).join('/');
+    const route = rel ? `/${rel}/` : '/';
+    let policy;
+    try { policy = policyFor(route); } catch { policy = null; }
+    if (typeof policy !== 'string' || !policy) return answer(500, { 'content-type': 'text/plain; charset=utf-8' }, 'no policy for this page\n');
+    headers['content-security-policy'] = policy;
+  }
+  return answer(200, headers, body);
+}
+// The dashboard's route for a page's own file that no route group took (servePageAsset), GET and
+// HEAD only, before dashRoutesOwner, which answers every POST /api/<name> and the 404 for everything
+// else. A plain function, not an async dashRoutes* group, so it sits here with the seam, outside the
+// dashboardRoutes region; the route loop awaits what it returns all the same.
+function dashRoutesApp(D, req, res, q) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return DASH_NEXT;
+  return servePageAsset(req, res, 'dashboard');
+}
 /* cmdDashboard start */
 /* dashboardRoutes start */
 // What a route group returns when none of its routes matched the request.
@@ -29308,7 +29428,7 @@ async function dashRoutesPage(D, req, res, q) {
     const rest = body.slice(open + 1);
     return `{"${key}":${JSON.stringify(key === 'viewer' ? { level } : level)}${rest.trimStart().startsWith('}') ? '' : ','}${rest}`;
   };
-  const { page, pageCsp, send, helloBody, stageFrames, dashboardData, logWatch } = D;
+  const { pageCsp, send, helloBody, stageFrames, dashboardData, logWatch } = D;
   // hello carries it too, as level: the artifact and preview viewer reads no /api/data, and polls this already
   if (req.method === 'GET' && req.url === '/api/hello') return send(res, 200, 'application/json', withViewer(helloBody(), 'level'));
   // frame-src 'self': a frame of this page (a review page, an HTML mock) may navigate itself, and
@@ -29316,8 +29436,7 @@ async function dashRoutesPage(D, req, res, q) {
   if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
     // frame-ancestors: only this dashboard and the machine's hub may frame it, so another site
     // can't lay it under its own page and steer a click onto an owner action.
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': pageCsp(stageFrames()) });
-    return res.end(fs.readFileSync(page));
+    return servePage(D, req, res, 'dashboard', pageCsp(stageFrames()), { 'cache-control': 'no-store' });
   }
   if (req.method === 'GET' && req.url.startsWith('/api/data')) {
     // the log looked at now, so a change the watch hasn't delivered yet makes the kept build stale
@@ -29331,8 +29450,7 @@ async function dashRoutesPage(D, req, res, q) {
     if (!r.ok && !D.lastData) return send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
     // The page in use says which version of itself it is: an open tab keeps the code it loaded,
     // so after a kit update it compares this with the first one it saw and offers a reload.
-    let version = '';
-    try { version = sha256(fs.readFileSync(page)).slice(0, 16); } catch {}
+    const version = pageVersion('dashboard');
     // a run that failed or timed out serves the last good data, marked stale
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-devteam-page': version, ...(r.ok ? {} : { 'x-devteam-stale': 'true' }) });
     // a fresh run's or the kept last good data, with the viewer for a box's level (D.lastData untouched)
@@ -29343,7 +29461,7 @@ async function dashRoutesPage(D, req, res, q) {
 // /view/artifact/…, /view/preview/…, /api/artifact-fp, /api/view, /api/artifact-versions
 async function dashRoutesViewer(D, req, res, q) {
   const { u } = q;
-  const { page, pageCsp, run, describing, versioning, send, previewStage, remote } = D;
+  const { pageCsp, run, describing, versioning, send, previewStage, remote } = D;
   // The viewer (spec §7): this page in viewer mode, one artifact on its stage. Its frames are this
   // dashboard's own pages. It may be framed by itself and the machine's hub, by policy alone and
   // never X-Frame-Options: on a box the gateway adds the public name to frame-ancestors for its
@@ -29351,8 +29469,7 @@ async function dashRoutesViewer(D, req, res, q) {
   const vw = req.method === 'GET' ? /^\/view\/artifact\/([^/]+)$/.exec(u.pathname) : null;
   if (vw) {
     if (!LINK_ID.test(vw[1]) || !ARTIFACT_AT.test(u.searchParams.get('at') || 'main')) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': pageCsp() });
-    return res.end(fs.readFileSync(page));
+    return servePage(D, req, res, 'dashboard', pageCsp(), { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
   }
   // A preview's viewer: the same page, framing the preview's lens where it is served (previewStage):
   // frame-src names exactly that origin, the preview's own name on a box (the gateway rewrites no
@@ -29363,8 +29480,7 @@ async function dashRoutesViewer(D, req, res, q) {
     const rec = PREVIEW_NAME.test(vp[1]) ? readPreviews().find((r) => r.name === vp[1]) : null;
     if (!rec) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
     const { origin } = await previewStage(rec);
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': pageCsp(origin ? [origin] : []) });
-    return res.end(fs.readFileSync(page));
+    return servePage(D, req, res, 'dashboard', pageCsp(origin ? [origin] : []), { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
   }
   // A draft's fingerprint, for the viewer's 2 s draft poll (responder contract, artifact-fp@1): the
   // same fp artifact describe gives, from stat calls and the oid cache (diskOid hashes only a file
@@ -29710,10 +29826,7 @@ async function dashRoutesReviewPage(D, req, res, q) {
   if (rvm) {
     const [, seg, file] = rvm;
     if (seg !== 'preview' && !ID.test(seg)) return send(res, 404, 'text/plain', 'not found');
-    if (file === 'devteam-ui.css' || file === 'devteam-ui.js') {
-      res.writeHead(200, { 'content-type': file.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
-      return res.end(fs.readFileSync(path.join(kitDir, 'dashboard', file)));
-    }
+    if (file === 'devteam-ui.css' || file === 'devteam-ui.js') return servePageAsset(req, res, 'dashboard');
     if (file !== '') return send(res, 404, 'text/plain', 'not found');
     // Opened top-level it would be same-origin with the owner API; it is served only into a frame
     // of this page (and its policy makes its origin opaque even then).
@@ -29935,7 +30048,7 @@ async function dashRoutesOwner(D, req, res, q) {
   });
   return;
 }
-const DASHBOARD_ROUTES = [dashRoutesUpload, dashRoutesPage, dashRoutesViewer, dashRoutesThreads, dashRoutesReads, dashRoutesFiles, dashRoutesArtifacts, dashRoutesReviewPage, dashRoutesOwner];
+const DASHBOARD_ROUTES = [dashRoutesUpload, dashRoutesPage, dashRoutesViewer, dashRoutesThreads, dashRoutesReads, dashRoutesFiles, dashRoutesArtifacts, dashRoutesReviewPage, dashRoutesApp, dashRoutesOwner];
 /* dashboardRoutes end */
 async function cmdDashboard() {
   // the kit as this process loaded it, printed first, before any wait (kit-288): a sync landing
@@ -40205,7 +40318,9 @@ function browserViewInput(ctx, v, text) {
 // The view server: GET or HEAD / (Host one of the two loopback forms) is browser.html, read once here;
 // an upgrade passes five guards in order, each refusal a short HTTP answer and a FIN. One viewer.
 function browserViewServer(ctx) {
-  const page = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dashboard', 'browser.html'));
+  // its page, read now and kept for its life: browser.html must match this daemon's code
+  const D = { keep: {} };
+  servePage(D, null, null, 'browser');
   const plain = (code) => `${http.STATUS_CODES[code].toLowerCase()}\n`;
   const server = http.createServer((req, res) => {
     req.on('error', () => {});
@@ -40213,10 +40328,9 @@ function browserViewServer(ctx) {
     req.resume();
     const no = (code, extra = {}) => { res.writeHead(code, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', connection: 'close', ...extra }); res.end(plain(code)); };
     if (!browserViewHost(req, server.address()?.port)) return no(403);
-    if (String(req.url).split('?')[0] !== '/') return no(404);
+    if (String(req.url).split('?')[0] !== '/') return servePageAsset(req, res, 'browser') !== DASH_NEXT ? undefined : no(404);
     if (req.method !== 'GET' && req.method !== 'HEAD') return no(405, { allow: 'GET, HEAD' });
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': page.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': "frame-ancestors 'self'" });
-    res.end(req.method === 'HEAD' ? undefined : page);
+    servePage(D, req, res, 'browser', "frame-ancestors 'self'", { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' });
   });
   server.on('clientError', (e, s) => s.destroy());
   server.on('upgrade', (req, sock, head) => {
