@@ -729,7 +729,13 @@ function peekHead(v, routes) {
   const path = q < 0 ? h : h.slice(0, q);
   const query = new URLSearchParams(q < 0 ? '' : h.slice(q + 1));
   const peeks = routes.peeks || [];
-  if (path === 'file') return peeks.includes('file') && query.get('path') ? `file?${query}` : null;
+  if (path === 'file') {
+    if (!peeks.includes('file') || !query.get('path')) return null;
+    const view = query.get('view');
+    query.delete('view');
+    if (view === 'raw' || view === 'rendered') query.append('view', view);
+    return `file?${query}`;
+  }
   const s = path.indexOf('/');
   const kind = s < 0 ? path : path.slice(0, s), rest = s < 0 ? '' : path.slice(s + 1);
   if (!rest || !peeks.includes(kind) || kind === 'file') return null;

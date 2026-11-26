@@ -255,6 +255,29 @@ test('terminal A2: the tab bar', () => {
   assert.equal(S.tabBar({ tabs, selected: 'open', panel: 'A b', size: 'big' }), today);
 });
 
+test('terminal A2: the URL', () => {
+  // A2c: the side panel's Supervisor and Shell tabs (th=supervisor, th=shell) are kept and written back
+  for (const h of ['#overview?th=supervisor', '#board?goal=g-1&th=shell']) assert.equal(S.headFor(S.parseHead(h, R)), h, h);
+  // A2d: a file peek's view: the first value decides, raw or rendered only, written last
+  const fp = (q) => '#library?p=' + encodeURIComponent('file?' + q);
+  const raw = '#library?p=file%3Fpath%3Ddocs%252Fa.md%26ref%3Dmain%26view%3Draw';
+  const rendered = '#library?p=file%3Fpath%3Ddocs%252Fa.md%26ref%3Dmain%26view%3Drendered';
+  const noView = '#library?p=file%3Fpath%3Ddocs%252Fa.md%26ref%3Dmain';
+  assert.equal(S.parseHead(raw, R).state.p, 'file?path=docs%2Fa.md&ref=main&view=raw');
+  assert.equal(S.headFor(S.parseHead(fp('path=docs/a.md&ref=main&view=raw'), R)), raw);
+  assert.equal(S.headFor(S.parseHead(raw, R)), raw);
+  assert.equal(S.headFor(S.parseHead(fp('path=docs/a.md&ref=main&view=rendered'), R)), rendered);
+  assert.equal(S.headFor(S.parseHead(fp('path=docs/a.md&ref=main&view=wide'), R)), noView, 'a bad view is dropped');
+  assert.equal(S.headFor(S.parseHead(fp('path=docs/a.md&ref=main&view=Raw'), R)), noView, 'view is case-exact');
+  assert.equal(S.headFor(S.parseHead(fp('path=docs/a.md&ref=main&view=raw&view=wide'), R)), raw, 'the first value decides, one view');
+  assert.equal(S.headFor(S.parseHead(fp('path=docs/a.md&ref=main&view=wide&view=raw'), R)), noView, 'the first bad value decides');
+  assert.equal(S.headFor(S.parseHead(fp('path=docs/a.md&view=raw&ref=main'), R)), raw, 'view is written last');
+  // another kind: view is not read, so a ticket head keeps whatever it carries
+  const tk = '#board?p=' + encodeURIComponent('ticket/kit-1?view=wide');
+  assert.equal(S.parseHead(tk, R).state.p, 'ticket/kit-1?view=wide');
+  assert.equal(S.headFor(S.parseHead(tk, R)), tk);
+});
+
 test('dbTable: numeric sort, a second press reverses, None when empty; onOpen gets the index as passed', () => {
   const rows = [['kit-10', '<b>ten</b>'], ['kit-2', 'two'], ['kit-1', 'one'], { cells: ['kit-x', 'x'], sort: ['kit-3', 'x'] }];
   const order = (html) => [...html.matchAll(/data-row="(\d+)"/g)].map((m) => Number(m[1]));
