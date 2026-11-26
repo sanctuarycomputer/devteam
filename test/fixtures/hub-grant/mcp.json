@@ -1,0 +1,344 @@
+{
+  "cases": [
+    {
+      "name": "no token",
+      "token": "none",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize"
+      },
+      "expect": {
+        "status": 401,
+        "authenticate": [
+          "resource_metadata=\"$origin/.well-known/oauth-protected-resource/mcp\"",
+          "scope=\"mcp\""
+        ],
+        "authenticate_not": [
+          "error="
+        ]
+      }
+    },
+    {
+      "name": "a bad token",
+      "token": "bad",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize"
+      },
+      "expect": {
+        "status": 401,
+        "authenticate": [
+          "error=\"invalid_token\"",
+          "resource_metadata=",
+          "scope=\"mcp\""
+        ]
+      }
+    },
+    {
+      "name": "a malformed token (20 characters)",
+      "token": "short",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize"
+      },
+      "expect": {
+        "status": 401,
+        "authenticate": [
+          "error=\"invalid_token\"",
+          "resource_metadata="
+        ]
+      }
+    },
+    {
+      "name": "the / token",
+      "token": "root",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize"
+      },
+      "expect": {
+        "status": 403,
+        "authenticate": [
+          "error=\"insufficient_scope\"",
+          "scope=\"mcp\""
+        ]
+      }
+    },
+    {
+      "name": "initialize",
+      "token": "mcp",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2026-07-28",
+          "capabilities": {},
+          "clientInfo": {
+            "name": "x",
+            "version": "1"
+          }
+        }
+      },
+      "expect": {
+        "status": 200,
+        "json": {
+          "jsonrpc": "2.0",
+          "id": 7,
+          "result": {
+            "protocolVersion": "2026-07-28",
+            "capabilities": {
+              "tools": {
+                "listChanged": false
+              }
+            }
+          }
+        },
+        "serverName": "devteam"
+      }
+    },
+    {
+      "name": "initialize, no version",
+      "token": "mcp",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": "a",
+        "method": "initialize"
+      },
+      "expect": {
+        "status": 200,
+        "json": {
+          "jsonrpc": "2.0",
+          "id": "a",
+          "result": {
+            "protocolVersion": "2026-07-28"
+          }
+        }
+      }
+    },
+    {
+      "name": "initialize, an unknown version",
+      "token": "mcp",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": "b",
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2099-01-01"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "json": {
+          "jsonrpc": "2.0",
+          "id": "b",
+          "result": {
+            "protocolVersion": "2026-07-28"
+          }
+        }
+      }
+    },
+    {
+      "name": "initialize, an older version it knows",
+      "token": "mcp",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": "c",
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-03-26"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "json": {
+          "jsonrpc": "2.0",
+          "id": "c",
+          "result": {
+            "protocolVersion": "2025-03-26"
+          }
+        }
+      }
+    },
+    {
+      "name": "a body over 1 MB",
+      "token": "mcp",
+      "pad": 1048576,
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "ping"
+      },
+      "expect": {
+        "status": 413
+      }
+    },
+    {
+      "name": "tools/list",
+      "token": "mcp",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list"
+      },
+      "expect": {
+        "status": 200,
+        "json": {
+          "jsonrpc": "2.0",
+          "id": 2,
+          "result": {
+            "tools": []
+          }
+        }
+      }
+    },
+    {
+      "name": "ping",
+      "token": "mcp",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "ping"
+      },
+      "expect": {
+        "status": 200,
+        "json": {
+          "jsonrpc": "2.0",
+          "id": 3,
+          "result": {}
+        }
+      }
+    },
+    {
+      "name": "tools/call",
+      "token": "mcp",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+          "name": "x"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "json": {
+          "jsonrpc": "2.0",
+          "id": 4,
+          "error": {
+            "code": -32601,
+            "message": "the tools come with the MCP goal"
+          }
+        }
+      }
+    },
+    {
+      "name": "a notification",
+      "token": "mcp",
+      "body": {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+      },
+      "expect": {
+        "status": 202,
+        "empty": true
+      }
+    },
+    {
+      "name": "not JSON",
+      "token": "mcp",
+      "raw": "{",
+      "expect": {
+        "status": 400,
+        "json": {
+          "error": {
+            "code": -32700
+          }
+        }
+      }
+    },
+    {
+      "name": "a batch",
+      "token": "mcp",
+      "body": [
+        {
+          "jsonrpc": "2.0",
+          "id": 1,
+          "method": "ping"
+        }
+      ],
+      "expect": {
+        "status": 400,
+        "json": {
+          "error": {
+            "code": -32600
+          }
+        }
+      }
+    },
+    {
+      "name": "GET",
+      "token": "mcp",
+      "method": "GET",
+      "expect": {
+        "status": 405
+      }
+    },
+    {
+      "name": "two Authorization headers",
+      "token": "mcp",
+      "twice": true,
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "ping"
+      },
+      "expect": {
+        "status": 400
+      }
+    },
+    {
+      "name": "a cookie and a token",
+      "token": "mcp",
+      "cookie": "devteam_session=x",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "ping"
+      },
+      "expect": {
+        "status": 400
+      }
+    },
+    {
+      "name": "a token in the query",
+      "token": "mcp",
+      "query": "?access_token=$mcp_token",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "ping"
+      },
+      "expect": {
+        "status": 400
+      }
+    },
+    {
+      "name": "the scheme in capitals",
+      "token": "mcp",
+      "scheme": "BEARER",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "ping"
+      },
+      "expect": {
+        "status": 200
+      }
+    }
+  ]
+}

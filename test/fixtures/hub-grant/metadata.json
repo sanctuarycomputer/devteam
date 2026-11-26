@@ -1,0 +1,162 @@
+{
+  "cases": [
+    {
+      "name": "good",
+      "url": "https://app.example.com/oauth/client.json",
+      "answer": {
+        "status": 200,
+        "file": "metadata/good.json"
+      },
+      "ok": true
+    },
+    {
+      "name": "client_id mismatch",
+      "url": "https://app.example.com/oauth/client.json",
+      "answer": {
+        "status": 200,
+        "file": "metadata/client-id-mismatch.json"
+      },
+      "ok": false
+    },
+    {
+      "name": "a redirect to loopback not listed",
+      "url": "https://app.example.com/oauth/client.json",
+      "answer": {
+        "status": 200,
+        "file": "metadata/https-only.json"
+      },
+      "ok": true,
+      "redirect_uri": "http://127.0.0.1:5000/cb",
+      "redirect_ok": false
+    },
+    {
+      "name": "6 KB",
+      "url": "https://app.example.com/oauth/client.json",
+      "answer": {
+        "status": 200,
+        "file": "metadata/6kb.json"
+      },
+      "ok": false
+    },
+    {
+      "name": "portless loopback redirects and extra fields, as a native client lists them",
+      "url": "https://app.example.com/oauth/client.json",
+      "answer": {
+        "status": 200,
+        "file": "metadata/native-portless.json"
+      },
+      "ok": true,
+      "redirect_uri": "http://localhost:54321/callback"
+    },
+    {
+      "name": "a [::1] redirect listed",
+      "url": "https://app.example.com/oauth/client.json",
+      "answer": {
+        "status": 200,
+        "file": "metadata/ipv6-loopback.json"
+      },
+      "ok": true,
+      "redirect_uri": "http://[::1]:9000/cb"
+    },
+    {
+      "name": "a 302 to the document",
+      "url": "https://app.example.com/oauth/client.json",
+      "answer": {
+        "status": 302,
+        "file": "metadata/good.json"
+      },
+      "ok": false
+    },
+    {
+      "name": "a 404",
+      "url": "https://app.example.com/oauth/client.json",
+      "answer": {
+        "status": 404,
+        "body": "not found"
+      },
+      "ok": false
+    },
+    {
+      "name": "not JSON",
+      "url": "https://app.example.com/oauth/client.json",
+      "answer": {
+        "status": 200,
+        "body": "<html>"
+      },
+      "ok": false
+    },
+    {
+      "name": "slower than 5 s",
+      "url": "https://app.example.com/oauth/client.json",
+      "answer": {
+        "status": 200,
+        "file": "metadata/good.json",
+        "ms": 5001
+      },
+      "ok": false
+    },
+    {
+      "name": "a javascript: redirect listed",
+      "url": "https://app.example.com/oauth/client.json",
+      "answer": {
+        "status": 200,
+        "file": "metadata/javascript-redirect.json"
+      },
+      "ok": false
+    },
+    {
+      "name": "http, not https",
+      "url": "http://app.example.com/oauth/client.json",
+      "answer": {
+        "status": 200,
+        "body": "{\"client_id\":\"http://app.example.com/oauth/client.json\",\"client_name\":\"Example App\",\"redirect_uris\":[\"https://app.example.com/oauth/cb\"]}"
+      },
+      "ok": false
+    },
+    {
+      "name": "no path",
+      "url": "https://app.example.com/",
+      "answer": {
+        "status": 200,
+        "body": "{\"client_id\":\"https://app.example.com/\",\"client_name\":\"Example App\",\"redirect_uris\":[\"https://app.example.com/oauth/cb\"]}"
+      },
+      "ok": false
+    },
+    {
+      "name": "user info",
+      "url": "https://u:p@app.example.com/oauth/client.json",
+      "answer": {
+        "status": 200,
+        "body": "{\"client_id\":\"https://u:p@app.example.com/oauth/client.json\",\"client_name\":\"Example App\",\"redirect_uris\":[\"https://app.example.com/oauth/cb\"]}"
+      },
+      "ok": false
+    },
+    {
+      "name": "a dot segment in the client_id",
+      "url": "https://app.example.com/oauth/../client.json",
+      "answer": {
+        "status": 200,
+        "body": "{\"client_id\":\"https://app.example.com/oauth/../client.json\",\"client_name\":\"Example App\",\"redirect_uris\":[\"https://app.example.com/oauth/cb\"]}"
+      },
+      "ok": false
+    },
+    {
+      "name": "an encoded dot in the client_id",
+      "url": "https://app.example.com/oauth/%2e%2e/client.json",
+      "answer": {
+        "status": 200,
+        "body": "{\"client_id\":\"https://app.example.com/oauth/%2e%2e/client.json\",\"client_name\":\"Example App\",\"redirect_uris\":[\"https://app.example.com/oauth/cb\"]}"
+      },
+      "ok": false
+    },
+    {
+      "name": "a query in the client_id",
+      "url": "https://app.example.com/oauth/client.json?x=1",
+      "answer": {
+        "status": 200,
+        "body": "{\"client_id\":\"https://app.example.com/oauth/client.json?x=1\",\"client_name\":\"Example App\",\"redirect_uris\":[\"https://app.example.com/oauth/cb\"]}"
+      },
+      "ok": false
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "client_id": "https://app.example.com/oauth/client.json",
+  "client_name": "\u0007\u001b‮ ",
+  "redirect_uris": [
+    "https://app.example.com/oauth/cb"
+  ]
+}

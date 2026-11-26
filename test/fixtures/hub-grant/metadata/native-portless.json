@@ -1,0 +1,17 @@
+{
+  "client_id": "https://app.example.com/oauth/client.json",
+  "client_name": "A Native App",
+  "client_uri": "https://app.example.com",
+  "redirect_uris": [
+    "http://localhost/callback",
+    "http://127.0.0.1/callback"
+  ],
+  "grant_types": [
+    "authorization_code",
+    "refresh_token"
+  ],
+  "response_types": [
+    "code"
+  ],
+  "token_endpoint_auth_method": "none"
+}
