@@ -33755,8 +33755,11 @@ function cmdRecurring() {
 //   its lock or an .npmrc above that folder (a workspace root above .kit would otherwise install its own
 //   lock, bytes the pin never named), so a workspace root or an .npmrc above changes nothing and is not
 //   refused (C4 runs real npm to show it). Each runs with npm_config_userconfig and npm_config_globalconfig naming
-//   two different empty files (regular files; npm refuses one file for both), with no other npm_config_* or
-//   NPM_CONFIG_* variable in its environment, and in a folder the step made that holds no .npmrc: ci and
+//   two different empty files (regular files; npm refuses one file for both), with no other variable whose
+//   name starts with npm_config_ in any letter case in its environment: those two names are lower-case,
+//   and NPM_CONFIG_USERCONFIG or any other spelling is another variable to drop (npm reads the prefix in
+//   any letter case: npm_config_*, NPM_CONFIG_* and a mixed spelling such as Npm_Config_* alike, a scoped
+//   npm_config_@scope:registry included), and in a folder the step made that holds no .npmrc: ci and
 //   audit in .kit/<version>-<hash>/, view in its own folder made outside the checkout (mkdtemp under
 //   os.tmpdir()) holding only a package.json the step writes ({}). An npm
 //   older than 9.5 can't verify attestations: a finding before layout 2, a refusal from it. A registry
