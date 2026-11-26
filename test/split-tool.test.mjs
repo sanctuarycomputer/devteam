@@ -206,6 +206,22 @@ test('F8: a declaration whose names the scanner can not read whole stops the spl
     assert.ok(h.stderr.includes(`binds names the split can't read whole (read: ${item}`), `${line}: ${h.stderr}`);
     assert.equal(fs.existsSync(H.out), false);
   }
+  // and so is one after a comment or template that ends mid-line, and one on the source's first line
+  const after = (text) => FIXTURE.replace('let counter = 0;', `${text}\nlet counter = 0;`);
+  for (const [i, [form, source]] of [
+    ['comment closed mid-line', after('let p = 1;\n/* a\n */ let q = 2;')],
+    ['comment closed mid-line, text on its last line', after('let p = 1;\n/*\n a */ let q = 2;')],
+    ['template closed mid-line', after('let p = `a\nb`; let q = 2;')],
+    ['indented, first line after the shebang', FIXTURE.replace(/^(#!.*\n)/, '$1  let q = 2;\n')],
+    ['indented, first line', `  let q = 2;\n${FIXTURE.replace(/^#!.*\n/, '')}`],
+    ['after a comment, first line', `/* c */ let q = 2;\n${FIXTURE.replace(/^#!.*\n/, '')}`],
+  ].entries()) {
+    const H = fixtureRepo(`midline${i}`, source);
+    const h = split(...H.opts, '--out', H.out);
+    assert.equal(h.status, 1, `${form}: ${h.stderr}`);
+    assert.match(h.stderr, /binds names the split can't read whole/, form);
+    assert.equal(fs.existsSync(H.out), false, form);
+  }
 });
 
 test('F9: verify names a declaration fileParts reads and the scanner does not', () => {

@@ -1,17 +1,19 @@
 // A small JavaScript scanner for the split tool: no parser, only what a split needs. It blanks
 // comments, strings, template text and regex literals (keeping every newline and every ${} code), and
 // records each line's state at its start: the bracket depth, and whether the line starts inside a
-// comment, string or template. The regex-or-division guess is the one test/devteam-mjs-regions uses.
+// comment, string or template, and if so where on the line its code resumes (resume: { col, depth }).
+// The regex-or-division guess is the one test/devteam-mjs-regions uses.
 const REGEX_AFTER = '(,=:[!&|?{};+-*%<>~^';
 const REGEX_WORDS = new Set(['return', 'typeof', 'case', 'in', 'of', 'void', 'delete', 'throw', 'new', 'else', 'do', 'yield', 'await', 'instanceof']);
 
-// { code, lines: [{ depth, inside }] } with lines[0] for line 1.
+// { code, lines: [{ depth, inside, resume? }] } with lines[0] for line 1.
 export function scan(src) {
   const o = src.split('');
   const n = src.length;
   const sp = (a, b) => { for (let k = a; k < b && k < n; k++) if (o[k] !== '\n') o[k] = ' '; };
   const lines = [{ depth: 0, inside: false }];
   const lineAt = []; // offset of each newline handled as code
+  const resumes = []; // [offset, depth] where code resumes after a comment or template text over a newline
   const template = (start) => {
     for (let k = start; k < n;) {
       if (src[k] === '\\') { k += 2; continue; }
@@ -24,11 +26,19 @@ export function scan(src) {
   };
   const tpl = [];
   let depth = 0, other = 0, last = '', word = '', i = 0;
-  const afterTemplate = (r) => { i = r.end; if (r.open) { tpl.push(depth); depth++; last = '{'; } else last = 'x'; word = ''; };
+  const afterTemplate = (r) => {
+    const over = src.slice(i, r.end).includes('\n');
+    i = r.end; if (r.open) { tpl.push(depth); depth++; last = '{'; } else last = 'x'; word = '';
+    if (over) resumes.push([i, depth + other]);
+  };
   while (i < n) {
     const c = src[i], d = src[i + 1];
     if (c === '/' && d === '/') { const e = src.indexOf('\n', i); const end = e < 0 ? n : e; sp(i, end); i = end; continue; }
-    if (c === '/' && d === '*') { const e = src.indexOf('*/', i + 2); const end = e < 0 ? n : e + 2; sp(i, end); i = end; continue; }
+    if (c === '/' && d === '*') {
+      const e = src.indexOf('*/', i + 2); const end = e < 0 ? n : e + 2;
+      if (src.slice(i, end).includes('\n')) resumes.push([end, depth + other]);
+      sp(i, end); i = end; continue;
+    }
     if (c === "'" || c === '"') {
       let k = i + 1;
       while (k < n && src[k] !== c && src[k] !== '\n') k += src[k] === '\\' ? 2 : 1;
@@ -67,10 +77,17 @@ export function scan(src) {
   // every line starts inside something unless its newline was read as code
   const code = o.join('');
   const starts = new Map(lineAt.map(([at, dp]) => [at, dp]));
-  let at = src.indexOf('\n');
+  let at = src.indexOf('\n'), r = 0;
   while (at !== -1) {
-    lines.push(starts.has(at) ? { depth: starts.get(at), inside: false } : { depth: null, inside: true });
-    at = src.indexOf('\n', at + 1);
+    const next = src.indexOf('\n', at + 1), end = next < 0 ? n : next;
+    if (starts.has(at)) lines.push({ depth: starts.get(at), inside: false });
+    else {
+      while (r < resumes.length && resumes[r][0] <= at) r++;
+      const line = { depth: null, inside: true };
+      if (r < resumes.length && resumes[r][0] <= end) line.resume = { col: resumes[r][0] - at - 1, depth: resumes[r][1] };
+      lines.push(line);
+    }
+    at = next;
   }
   return { code, lines };
 }
@@ -132,12 +149,10 @@ export function bindingNames(code) {
   }
 }
 
-// Whether a line's blanked code, from its start state, comes back to depth 0 (after a ; or a closing
+// Whether a line's blanked code, from depth d, comes back to depth 0 (after a ; or a closing
 // bracket) and then begins another declaration on the same line.
 const NEXT_DECL = /^\s*(?:export\s+)?(?:async\s+function|function|class|const|let|var)(?=[\s{[*(])/;
-function secondDecl(c, st) {
-  if (!st || st.inside || st.depth === null) return false;
-  let d = st.depth;
+function secondDecl(c, d) {
   for (let k = 0; k < c.length; k++) {
     const ch = c[k];
     if ('([{'.includes(ch)) d++;
@@ -197,9 +212,17 @@ export function items(src) {
   }
   // a declaration after another statement on the same line (let p = 1; let q = 2;) starts no item,
   // so its names would be read by no one: its item is unread, and the caller refuses it
-  // and so does a top-level declaration not at column 0 (indented, or after a comment on its line)
-  const offColumn = (i) => !info[i - 1]?.inside && info[i - 1]?.depth === 0 && NEXT_DECL.test(codeLines[i - 1]);
-  for (const it of out) for (let i = it.from; i <= it.to; i++) if (secondDecl(codeLines[i - 1], info[i - 1]) || (i !== it.line && offColumn(i))) it.unread = true;
+  // and so does a top-level declaration not at column 0: indented, after a comment, or after a comment
+  // or template that ends mid-line. One rule: wherever a line's code starts (column 0, or where what it
+  // starts inside ends), that code at depth 0 begins no declaration, except a declaration item's own line
+  for (const it of out) for (let i = it.from; i <= it.to; i++) {
+    const st = info[i - 1];
+    const at = !st ? null : !st.inside ? { col: 0, depth: st.depth } : st.resume;
+    if (!at) continue;
+    const c = codeLines[i - 1].slice(at.col);
+    const own = it.kind === 'decl' && i === it.line;
+    if (secondDecl(c, at.depth) || (!own && at.depth === 0 && NEXT_DECL.test(c))) it.unread = true;
+  }
   for (const s of statements) s.item = out.findLast((x) => x.from <= s.line) ?? null;
   return { items: out, statements, lines, code, codeLines, info };
 }
