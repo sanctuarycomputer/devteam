@@ -1637,7 +1637,6 @@ const CLASS_WORDS = Object.freeze({
   'registry-attest': 'Confirming the registry is complete',
   'new-dependency': 'Adding a new dependency',
   'artifact-publish': 'Publishing a page',
-  'artifact-restore': 'Bringing an archived page back into the Library',
   'recurring-edit': 'Adding, changing or stopping a job',
   'pane-answer': "Answering the supervisor's terminal",
   'goal-order': 'Putting the goals in order',
