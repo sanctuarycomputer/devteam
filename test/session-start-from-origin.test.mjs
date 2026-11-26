@@ -1069,6 +1069,25 @@ test('home: a new ticket\'s worktree starts from origin, not from local refs', a
       assert.equal(git(['rev-parse', 'HEAD'], wt('ch-54-r')), main, 'X33: the retry starts at origin\'s main');
       assert.equal(git(['status', '--porcelain'], wt('ch-54-r')), '', 'X33: and clean');
     });
+    await t.test('X34: a branch move that fails with the branch left where it was and the lock replaced: a retry says the files may not be checked out', tmux, () => {
+      const { at, main } = behind('ch-24-x', 'X34');
+      // just before the start moves its branch, git's lock on the branch is held (so the move fails and the
+      // branch stays at its own commit) and the worktree's lock is replaced (so the undo leaves it, with the mark)
+      const held = path.join(old, '.git/refs/heads/ticket/ch-24-x.lock');
+      const b = before('git-holds-branch-X34', `*' update-ref --no-deref refs/heads/ticket/ch-24-x '*`, (g) => `{ echo held > '${held}' && '${g}' -C '${old}' worktree unlock '${wt('ch-24-x')}' && '${g}' -C '${old}' worktree lock --reason person '${wt('ch-24-x')}'; }`);
+      let r;
+      try { r = run(old, ['worker', 'ch-24-x', '--resume'], b.env); } finally { fs.rmSync(held, { force: true }); }
+      assert.ok(fs.existsSync(b.said), 'X34: the branch was held');
+      assert.notEqual(r.status, 0, `X34: A refused: ${r.out}`);
+      assert.ok(r.err.includes(`could not move ticket/ch-24-x to ${main.slice(0, 8)}: something moved it while it was checked out, so nothing was started; something else locked ${wt('ch-24-x')} while it was made, so the undo left it, and ticket/ch-24-x at ${at.slice(0, 8)}`), `X34: A says the move failed and the worktree was left: ${r.err}`);
+      assert.equal(git(['rev-parse', 'refs/heads/ticket/ch-24-x'], old), at, 'X34: the branch where it was');
+      assert.equal(git(['rev-parse', 'HEAD'], wt('ch-24-x')), at, 'X34: HEAD where it was');
+      assert.equal(git(['status', '--porcelain', '--untracked-files=no'], wt('ch-24-x')), '', 'X34: its files are its own commit\'s, so git sees no change');
+      const again = run(old, ['worker', 'ch-24-x', '--resume'], SUP);
+      assert.notEqual(again.status, 0, `X34: the retry is refused: ${again.out}`);
+      assert.ok(again.err.includes(`the worktree ${wt('ch-24-x')} is at ${at.slice(0, 8)}, but a start was moving its branch from ${at.slice(0, 8)} to ${main.slice(0, 8)} and may not have checked out its files`), `X34: named as a move that may not have checked out: ${again.err}`);
+      assert.doesNotMatch(again.err, /its files are in place/, 'X34: not that its files are in place');
+    });
     await t.test('X32: a start killed after its files landed and before its mark came off is refused in words that say the files are in place', tmux, () => {
       const { at, main } = behind('ch-55-s', 'X32');
       // killed at the read of HEAD's branch after the fill: the files are main's, the mark still there
