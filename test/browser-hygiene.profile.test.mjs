@@ -137,25 +137,57 @@ hygiene.push(['G1 the daemon\'s death takes Chrome with it', async (h) => {
   await stopped(h);
 }]);
 
-// A leftover Chrome the test starts itself on P's profile, kept off the network (its group is the test's).
+// What Chrome left loose in this test process's temp folder (its own: test/lib/private-tmp.mjs, or
+// test/run.mjs's).
+const looseChromeTemp = () => fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('org.chromium.'));
+const linkOf = (f) => { try { return fs.readlinkSync(f); } catch { return null; } };
+// A leftover Chrome the test starts itself on P's profile, kept off the network, in its own group (the test's):
+// { pid, own (its own folder), end }, once it is up and ownTemp() has passed (end() runs first if either
+// fails). Its TMPDIR is own, a folder of its own in the temp folder, so its
+// org.chromium.Chromium.* folders go there, never loose in the temp folder, where a killed Chrome leaves them
+// (kit-1023). own is absolute, so the leftover's SingletonSocket link is too and still guards its profile from a
+// second Chrome, as a real leftover's does: Chrome reads a relative link from its own working folder. Only if the
+// socket's path would pass 107 bytes is TMPDIR own's name, relative to the temp folder, Chrome's working folder.
+// ownTemp() waits for the leftover's own link (not one an earlier Chrome left) to name a live socket, and checks
+// that socket is in own, and that the link is absolute when it can be. end() kills the group, removes own, and
+// returns what of Chrome is newly loose in the temp folder.
 async function leftoverOn(P) {
-  const c = spawn(chromePath, ['--headless=new', `--user-data-dir=${P.profile}`, '--proxy-server=127.0.0.1:9', '--disable-background-networking', '--no-first-run', '--no-sandbox', 'about:blank'], { detached: true, stdio: 'ignore' });
+  const own = fs.mkdtempSync(path.join(os.tmpdir(), 'c'));
+  // <own>/org.chromium.Chromium.XXXXXX/SingletonSocket
+  const fits = Buffer.byteLength(own) + 46 <= 107;
+  const link = path.join(P.profile, 'SingletonSocket');
+  const was = linkOf(link);
+  const loose = new Set(looseChromeTemp());
+  const c = spawn(chromePath, ['--headless=new', `--user-data-dir=${P.profile}`, '--proxy-server=127.0.0.1:9', '--disable-background-networking', '--no-first-run', '--no-sandbox', 'about:blank'], { cwd: os.tmpdir(), detached: true, stdio: 'ignore', env: { ...process.env, TMPDIR: fits ? own : path.basename(own) } });
   ownGroups.add(c.pid);
-  await until(() => carries(c.pid, P), 'the leftover Chrome up');
-  return c.pid;
+  const ownTemp = async () => {
+    const l = await until(() => { const v = linkOf(link); return v && v !== was && fs.existsSync(path.resolve(os.tmpdir(), v)) && v; }, 'the leftover links its SingletonSocket');
+    const sock = path.resolve(os.tmpdir(), l);
+    assert.ok(sock.startsWith(own + path.sep), `the leftover's temp folder is its own (${own}), not ${path.dirname(sock)}`);
+    if (fits) assert.ok(path.isAbsolute(l), `the leftover's SingletonSocket link is absolute, so it guards its profile: ${l}`);
+  };
+  const end = async () => { await killGroup(c.pid); fs.rmSync(own, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); return looseChromeTemp().filter((n) => !loose.has(n)); };
+  try {
+    await until(() => carries(c.pid, P), 'the leftover Chrome up');
+    await ownTemp();
+  } catch (e) { await end(); throw e; }
+  return { pid: c.pid, own, end };
 }
 
 hygiene.push(['G2 a leftover Chrome with state.json deleted: the SingletonLock names it', async (h) => {
   await stopped(h);
   fs.rmSync(h.state, { force: true });
-  const pid = await leftoverOn(h);
+  const { pid, own, end } = await leftoverOn(h);
+  let left;
   try {
     await until(() => { try { return fs.readlinkSync(path.join(h.profile, 'SingletonLock')) === `${os.hostname()}-${pid}`; } catch { return false; } }, 'the SingletonLock names the leftover');
     await started(h);
     assert.equal(alive(pid), false, 'the leftover Chrome is gone');
     assert.equal((await statusJson(h)).restarted, true);
     await stopped(h);
-  } finally { await killGroup(pid); }
+  } finally { left = await end(); }
+  assert.deepEqual(left, [], 'the killed leftover left nothing loose in the temp folder');
+  assert.equal(fs.existsSync(own), false, "the leftover's own folder is removed with it");
 }]);
 
 hygiene.push(['G3 DevToolsActivePort is never read', async (h) => {
