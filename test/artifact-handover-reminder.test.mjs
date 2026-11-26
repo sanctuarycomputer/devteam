@@ -144,8 +144,22 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
   const notShown = async (V, what) => { await V.settle(REMIND, 1000); assert.equal(await V.p.ev(REMIND), false, `${what}: #av-remind is shown`); };
   const TWO_REM = "2 notes on Viewer A aren't handed over. plan-rem, the session drawing it, won't start on them until you do.";
 
-  // R1: every closer shows it, its words, and it takes no focus.
-  for (const kind of ['x', 'escape-dash', 'escape-frame', 'scrim', 'back', 'link']) {
+  // R1: a close the page can't stop (Back, a link) shows it, its words, and it takes no focus. A close the viewer
+  // owns (X, both Escapes, the scrim) asks first instead (kit-937's #av-ask): the viewer stays and no card shows.
+  const ASK = "(() => { const d = document.getElementById('av-ask'); return !!d && !d.hidden && d.getBoundingClientRect().height > 0; })()";
+  for (const kind of ['x', 'escape-dash', 'escape-frame', 'scrim']) {
+    await sub(`R1: ${kind} asks first (kit-937), no card`, async () => {
+      const V = await visit('#library');
+      await openW(V, 'plan-rem');
+      await hasThreads(V, V_REM);
+      await V.close(kind);
+      await V.settle(ASK, 3000);
+      assert.equal(await V.p.ev(ASK), true, `R1 ${kind}: #av-ask is shown`);
+      assert.equal(await V.p.ev(VIEWER_UP), true, `R1 ${kind}: the viewer stays open`);
+      await notShown(V, `R1 ${kind}`);
+    });
+  }
+  for (const kind of ['back', 'link']) {
     await sub(`R1: ${kind} shows the reminder`, async () => {
       const V = await visit('#library');
       await openW(V, 'plan-rem');
@@ -154,26 +168,27 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
       const s = await shownSoon(V, `R1 ${kind}`);
       assert.equal(s.tx, TWO_REM, `R1 ${kind}: the words`);
       assert.deepEqual([s.role, s.live], ['status', 'polite'], `R1 ${kind}: role status, aria-live polite`);
-      assert.deepEqual([s.later, s.hand], ['Not now', 'Hand over to plan-rem'], `R1 ${kind}: the buttons`);
+      assert.deepEqual([s.later, s.hand], ["I'll come back", 'Hand over to plan-rem'], `R1 ${kind}: the buttons`);
       assert.equal(s.focusIn, false, `R1 ${kind}: the focus is not in the reminder`);
     });
   }
 
   // R2: one note, and the supervisor as recipient.
+  // (From here each case closes by Back, a close the page can't stop: the card's own cases; kit-937.)
   await sub('R2: one note, and the supervisor', async () => {
     const V = await visit('#library');
     await openW(V, 'rem-one');
-    await closeBy(V, 'x');
+    await closeBy(V, 'back');
     let s = await shownSoon(V, 'R2 one');
     assert.equal(s.tx, "1 note on Viewer A isn't handed over. The supervisor won't start on it until you do.", 'R2: one note, the supervisor');
     assert.equal(s.hand, 'Hand over to the supervisor', 'R2: the button names the supervisor');
     await openW(V, 'rem-x');
-    await closeBy(V, 'x');
+    await closeBy(V, 'back');
     s = await shownSoon(V, 'R2 two');
     assert.equal(s.tx, "2 notes on Viewer A aren't handed over. The supervisor won't start on them until you do.", 'R2: two notes, the supervisor');
     // a ticket in the graph (the harness's TK) with its worktree: that ticket's session
     await openW(V, 'ch-01-tidy-docs');
-    await closeBy(V, 'x');
+    await closeBy(V, 'back');
     s = await shownSoon(V, 'R2 a ticket');
     assert.equal(s.tx, "2 notes on Viewer A aren't handed over. ch-01-tidy-docs, the session drawing it, won't start on them until you do.", 'R2: a ticket worktree');
     assert.equal(s.hand, 'Hand over to ch-01-tidy-docs', 'R2: the button names the ticket');
@@ -185,7 +200,7 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     // the page's next read a fresh build, not one up to 20 s old
     F.owner(['thread', 'say', T, 'The Library reads again']);
     await V.soon("!(DATA?.library?.artifacts ?? []).some((x) => x.at === 'plan-gone')", 'setup: the Library no longer lists plan-gone');
-    await closeBy(V, 'x');
+    await closeBy(V, 'back');
     s = await shownSoon(V, 'R2 a planner gone');
     assert.equal(s.tx, "2 notes on Viewer A aren't handed over. The supervisor won't start on them until you do.", 'R2: a planner whose worktree is gone');
   });
@@ -198,10 +213,10 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     await over(V, V_QUIET[1], { status: 'resolved', outcome: 'done' });
     await over(V, V_QUIET[2], { check: 'addressed', addressed: { by: 'supervisor', at, note: 'The button is primary now', sha: null, draft: null }, waiting: 'owner' });
     await openW(V, 'rem-quiet');
-    await closeBy(V, 'x');
+    await closeBy(V, 'back');
     await notShown(V, 'R3 handed, resolved, to check');
     await V.open('#artifact/main/viewer-b');
-    await closeBy(V, 'x');
+    await closeBy(V, 'back');
     await notShown(V, 'R3 viewer-b, no notes');
   });
 
@@ -210,7 +225,7 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
   await sub('R4: Hand over from the reminder', async () => {
     let V = await visit('#library');
     await openW(V, 'rem-busy');
-    await closeBy(V, 'x');
+    await closeBy(V, 'back');
     await shownSoon(V, 'R4 busy');
     await wrap(V);
     await V.p.ev("window.__stub['artifact-handoff'] = { status: 200, body: { to: 'supervisor', typed: false, count: 2 }, ms: 1500 }; void 0");
@@ -225,7 +240,7 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     // the real action: handed to the supervisor, the card gone, and the next close quiet
     V = await visit('#library');
     await openW(V, 'rem-sup');
-    await closeBy(V, 'x');
+    await closeBy(V, 'back');
     await shownSoon(V, 'R4 real');
     await wrap(V);
     await pressArmed(V, 'av-remind-hand');
@@ -237,13 +252,13 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     for (const id of V_SUP) assert.equal(JSON.parse(F.owner(['thread', 'show', id, '--json'])).handed?.to, 'supervisor', `R4: ${id} handed to the supervisor`);
     await V.soon(`${J(V_SUP)}.every((id) => TL.threads.find((t) => t.id === id)?.handed)`, 'R4: the page read the notes as handed');
     await openW(V, 'rem-sup');
-    await closeBy(V, 'x');
+    await closeBy(V, 'back');
     await notShown(V, 'R4 after Hand over');
 
     // a refusal
     V = await visit('#library');
     await openW(V, 'rem-x');
-    await closeBy(V, 'x');
+    await closeBy(V, 'back');
     await shownSoon(V, 'R4 refusal');
     await wrap(V);
     await V.p.ev("window.__stub['artifact-handoff'] = { status: 400, body: { error: 'x' } }; void 0");
@@ -305,7 +320,7 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     // (d) a person who may only look: View only's words, as the bar's Hand over gets, and nothing posted
     const W = await visit('#library');
     await openW(W, 'rem-busy');
-    await closeBy(W, 'x');
+    await closeBy(W, 'back');
     await shownSoon(W, 'R4b view only');
     await wrap(W);
     // (kept at view through the page's polls, as kit-145's A24 does)
@@ -320,7 +335,7 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
   // R13 (kit-916): the guard's words ("That moved just now. Press again in a second.", #av-held) and View only's
   // (#view-only-toast) never cover the card's buttons while it shows, at 1280 and 375 px wide, and stay inside the
   // window. A sampler in the page reads, every frame once the frame's own callbacks have run (what is drawn),
-  // whether either message's box meets Not now's or Hand over's, or leaves the window. Three ways in, each its own
+  // whether either message's box meets I'll come back's or Hand over's, or leaves the window. Three ways in, each its own
   // case: (a) held, as the card appears; (b) View only's words up, then the card comes up under them; (c) View
   // only, pressed on the card's own Hand over.
   const SAMPLE = `(() => {
@@ -384,7 +399,7 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     await sub(`R13c: at ${w} px View only's words, pressed on the card, clear its buttons`, async () => {
       const W = await visit('#library', { width: w, height: h });
       await openW(W, 'rem-busy');
-      await closeBy(W, 'x');
+      await closeBy(W, 'back');
       await shownSoon(W, `R13c ${w}`);
       await wrap(W);
       await W.p.ev(VIEW);
@@ -396,22 +411,22 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
       assert.deepEqual(await W.p.ev("window.__posts.filter((p) => p.action === 'artifact-handoff')"), [], 'setup: R13c view only posted nothing');
     });
   }
-  // R5: Not now holds; a new note shows it again; Hand over ends the hold; a reload ends it; no storage.
-  await sub('R5: Not now and the hold', async () => {
+  // R5: I'll come back (kit-148's Not now, kit-937) holds; a new note shows it again; Hand over ends the hold; a reload ends it; no storage.
+  await sub("R5: I'll come back and the hold", async () => {
     let V = await visit('#library');
     await openW(V, 'rem-hold');
-    await closeBy(V, 'x');
+    await closeBy(V, 'back');
     await shownSoon(V, 'R5 first');
     await pressId(V, 'av-remind-later');
     await V.settle(`!${REMIND}`, 2000);
-    assert.equal(await V.p.ev(REMIND), false, 'R5: Not now hides it');
+    assert.equal(await V.p.ev(REMIND), false, "R5: I'll come back hides it");
     await openW(V, 'rem-hold');
-    await closeBy(V, 'x');
+    await closeBy(V, 'back');
     await notShown(V, 'R5 held');
     const C = note('rem-hold', 'Note 3 on rem-hold');
     await hasThreads(V, [C]);
     await openW(V, 'rem-hold');
-    await closeBy(V, 'x');
+    await closeBy(V, 'back');
     let s = await shownSoon(V, 'R5 a new note');
     assert.match(s.tx, /^3 notes on Viewer A aren't handed over\./, 'R5: a new note');
     await pressId(V, 'av-remind-later');
@@ -423,30 +438,30 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     // (read now, not at the page's next 5 s poll)
     await V.p.ev('tlRefresh(); void 0');
     await V.soon(`TL.threads.find((t) => t.id === ${J(V_HOLD[0])})?.handed == null`, 'R5: the reply sent A back');
-    await closeBy(V, 'x');
+    await closeBy(V, 'back');
     s = await shownSoon(V, 'R5 sent back');
     assert.match(s.tx, /^1 note on Viewer A isn't handed over\./, 'R5: the note sent back');
     assert.deepEqual(await V.p.ev("[...Object.keys(localStorage), ...Object.keys(sessionStorage)].filter((k) => /remind/i.test(k))"), [], 'R5: nothing stored');
     await pressId(V, 'av-remind-later');
     await V.reload();
     await openW(V, 'rem-hold');
-    await closeBy(V, 'x');
+    await closeBy(V, 'back');
     await shownSoon(V, 'R5 after a reload');
   });
 
-  // R5b: a second Not now on another version of the artifact adds to the hold, never replaces it.
+  // R5b: a second I'll come back on another version of the artifact adds to the hold, never replaces it.
   await sub('R5b: the hold adds up across versions', async () => {
     const V = await visit('#library');
     await openW(V, 'rem-u1');
-    await closeBy(V, 'x');
+    await closeBy(V, 'back');
     await shownSoon(V, 'R5b first');
     await pressId(V, 'av-remind-later');
     await openW(V, 'rem-u2');
-    await closeBy(V, 'x');
+    await closeBy(V, 'back');
     await shownSoon(V, 'R5b the other version');
     await pressId(V, 'av-remind-later');
     await openW(V, 'rem-u1');
-    await closeBy(V, 'x');
+    await closeBy(V, 'back');
     await notShown(V, 'R5b the first version, still held');
   });
 
@@ -456,12 +471,12 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     await openW(V, 'plan-rem');
     await wrap(V);
     const len0 = await V.p.ev('history.length');
-    await closeBy(V, 'x');
+    await closeBy(V, 'back');
     await shownSoon(V, 'R6');
     await pressId(V, 'av-remind-later');
-    assert.deepEqual(await V.p.ev('[history.length, window.__pushes, location.hash]'), [len0, 0, '#library'], 'R6: showing it and Not now add no entry');
+    assert.deepEqual(await V.p.ev('[history.length, window.__pushes, location.hash]'), [len0, 0, '#library'], "R6: showing it and I'll come back add no entry");
     await openW(V, 'rem-x');
-    await closeBy(V, 'x');
+    await closeBy(V, 'back');
     await shownSoon(V, 'R6 again');
     const len = await V.p.ev('history.length');
     const link = await V.p.ev(`(() => { const a = [...document.querySelectorAll('nav.nav a[href^="#"]')].find((x) => x.getAttribute('href') !== location.hash && x.getBoundingClientRect().width > 0); if (!a) return null; const r = a.getBoundingClientRect(); return { href: a.getAttribute('href'), x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
@@ -477,13 +492,13 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     // a viewer opening hides it
     const W = await visit('#library');
     await openW(W, 'plan-rem');
-    await closeBy(W, 'x');
+    await closeBy(W, 'back');
     await shownSoon(W, 'R6 before a viewer opens');
     await W.open('#artifact/main/viewer-b');
     assert.equal(await W.p.ev(REMIND), false, 'R6: an artifact opening hides it');
     const X = await visit('#library');
     await openW(X, 'plan-rem');
-    await closeBy(X, 'x');
+    await closeBy(X, 'back');
     await shownSoon(X, 'R6 before a preview opens');
     await X.open(PV);
     assert.equal(await X.p.ev(REMIND), false, 'R6: a preview opening hides it');
@@ -492,7 +507,7 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     const Y = await visit('#library?th=open', { width: 1000, height: 800 });
     await Y.soon("document.body.classList.contains('threads-open')", 'setup: the Threads panel open');
     await openW(Y, 'plan-rem');
-    await closeBy(Y, 'x');
+    await closeBy(Y, 'back');
     await shownSoon(Y, 'R6 with the panel open');
     const g = await Y.p.ev("(() => { const r = document.getElementById('av-remind').getBoundingClientRect(), p = document.querySelector('.threads').getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2; return { right: r.right, panel: p.left, top: !!document.elementFromPoint(x, y)?.closest('#av-remind'), z: [getComputedStyle(document.getElementById('av-remind')).zIndex, getComputedStyle(document.querySelector('.threads')).zIndex].map(Number) }; })()");
     assert.ok(g.right <= g.panel, `R6: the card ${J(g)} is left of the panel`);
@@ -522,7 +537,7 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     };
     let V = await visit7('#library');
     await V.open(PV);
-    await closeBy(V, 'x');
+    await closeBy(V, 'back');
     await notShown(V, 'R7 a preview');
     V = await visit7('#library');
     await openW(V, 'plan-rem');
@@ -532,7 +547,7 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     await notShown(V, 'R7 replaced by a preview');
     V = await visit7('#library', { width: 375, height: 700 });
     await openW(V, 'plan-rem');
-    await closeBy(V, 'x');
+    await closeBy(V, 'back');
     await shownSoon(V, 'R7 375');
     const box = await V.p.ev("(() => { const r = document.getElementById('av-remind').getBoundingClientRect(); return { l: r.left, r: r.right, w: innerWidth, sw: document.scrollingElement.scrollWidth }; })()");
     assert.ok(box.l >= 0 && box.r <= box.w, `R7: the box ${J(box)} inside the window`);

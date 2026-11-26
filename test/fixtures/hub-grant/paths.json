@@ -1,0 +1,76 @@
+{
+  "cases": [
+    {
+      "path": "/api/thread-say/../answer",
+      "ok": false
+    },
+    {
+      "path": "/api/%2e%2e/answer",
+      "ok": false
+    },
+    {
+      "path": "/api/%2E%2E/answer",
+      "ok": false
+    },
+    {
+      "path": "/api/thread-say%2F..%2Fanswer",
+      "ok": false
+    },
+    {
+      "path": "/api/thread-say%2f..%2fanswer",
+      "ok": false
+    },
+    {
+      "path": "//api/thread-say",
+      "ok": false
+    },
+    {
+      "path": "/api/./thread-say",
+      "ok": false
+    },
+    {
+      "path": "/api/thread-say/.",
+      "ok": false
+    },
+    {
+      "path": "/api/thread-say/..",
+      "ok": false
+    },
+    {
+      "path": "/api/thread-say%5c..%5canswer",
+      "ok": false
+    },
+    {
+      "path": "/api\\thread-say",
+      "ok": false
+    },
+    {
+      "path": "/api/thread-say//",
+      "ok": false
+    },
+    {
+      "path": "/api/%2Ethread-say",
+      "ok": false
+    },
+    {
+      "path": "/api/thread-say",
+      "ok": true
+    },
+    {
+      "path": "/api/thread-say?x=../%2F",
+      "ok": true
+    },
+    {
+      "path": "/api/answer",
+      "ok": true
+    },
+    {
+      "path": "/box.json",
+      "ok": true
+    },
+    {
+      "path": "/api/thread-say.json",
+      "ok": true
+    }
+  ]
+}

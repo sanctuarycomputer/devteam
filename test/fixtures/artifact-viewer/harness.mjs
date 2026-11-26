@@ -238,6 +238,8 @@ export async function harness(t, fixture) {
   const TA = idOf(F.owner(['thread', 'new', 'This button', '--subject', J({ kind: 'artifact', slug: 'viewer-a', at: 'main', path: 'index.html', anchor: { selector: '#pin-me', tag: 'button', text: 'Pin me', point: { x: 60, y: 20 } } })]));
   // TR: one on viewer-a's #pin-right, placed from the frame's right edge (DW6: a stale rect misses it)
   const TR = idOf(F.owner(['thread', 'new', 'That button', '--subject', J({ kind: 'artifact', slug: 'viewer-a', at: 'main', path: 'index.html', anchor: { selector: '#pin-right', tag: 'button', text: 'Pin me right', point: { x: 60, y: 20 } } })]));
+  // TA and TR handed over, as an owner done noting does: a close of viewer-a closes, with no ask before it (kit-937)
+  F.owner(['artifact', 'handoff', 'viewer-a', '--at', 'main']);
   const TK = 'ch-01-tidy-docs';
   F.sup(['ticket', 'add', TK, '--json', J({ title: 'Tidy the docs', feature: 'chores', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['docs/**'], done_when: ['the docs check passes in CI'], notes: 'n' })]);
   const A = await app();
@@ -256,8 +258,14 @@ export async function harness(t, fixture) {
   const tabs = oneTab(chrome);
   later(() => tabs.done());
   // (a viewer tab, opts.path 'view/artifact/viewer-a', is ready when the page says it is the viewer and has read its threads)
-  async function visit(hash, { path = '', width = 1280, height = 800 } = {}) {
+  async function visit(hash, opts = {}) {
     const p = await tabs.next();
+    return visitOn(p, hash, opts);
+  }
+  // (opts.hub: the hub's address to load, and opts.inHub the dashboard's origin in its project frame: the case drives
+  // that dashboard, every evaluation in its page and every mouse event at the frame's place; kit-937)
+  async function visitOn(raw, hash, { path = '', width = 1280, height = 800, hub = null, inHub = null } = {}) {
+    let p = raw;
     // the tab in front: a hidden one draws nothing, and the mouse is hit-tested against what it drew
     await p.send('Page.bringToFront');
     await p.send('Page.enable');
@@ -266,8 +274,21 @@ export async function harness(t, fixture) {
     if (CPU_THROTTLE) await p.send('Emulation.setCPUThrottlingRate', { rate: CPU_THROTTLE });
     if (RECTS_DELAY_MS) await p.send('Page.addScriptToEvaluateOnNewDocument', { source: RECTS_DELAY });
     await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
-    await p.send('Page.addScriptToEvaluateOnNewDocument', { source: WATCH });
-    await p.send('Page.navigate', { url: `${B}/${path}${hash}` });
+    await p.send('Page.addScriptToEvaluateOnNewDocument', { source: hub ? WATCH.replace('if (window !== top) return;', 'if (window === top || window.parent !== top) return;') : WATCH });
+    await p.send('Page.navigate', { url: hub ?? `${B}/${path}${hash}` });
+    if (hub) {
+      // the dashboard in the hub's project frame: every evaluation in its page, every mouse event at its frame's place in the hub
+      const off = () => raw.ev("(() => { const f = [...document.querySelectorAll('iframe')].find((x) => !x.hidden && x.getBoundingClientRect().width > 0); if (!f) return null; const r = f.getBoundingClientRect(); return { x: r.left + f.clientLeft, y: r.top + f.clientTop }; })()");
+      const end = Date.now() + 20000;
+      while (!(await off()) && Date.now() < end) await new Promise((r) => setTimeout(r, 100));
+      if (!(await off())) assert.fail(`setup: the hub shows no project frame: ${J(await raw.ev("({ href: location.href, frames: [...document.querySelectorAll('iframe')].map((f) => [f.getAttribute('src'), f.hidden, f.getBoundingClientRect().width]), text: document.body.innerText.slice(0, 600) })"))}`);
+      const at = async () => (await off()) ?? { x: 0, y: 0 };
+      p = { ...raw,
+        ev: (e) => raw.evIn(inHub, e),
+        move: async (x, y, m) => { const o = await at(); return raw.move(x + o.x, y + o.y, m); },
+        clickAt: async (x, y, m) => { const o = await at(); return raw.clickAt(x + o.x, y + o.y, m); },
+      };
+    }
     const soon = soonIn(p, 20000, () => dash.out());
     const settle = settleIn(p);
     await soon(path.startsWith('view/') ? VIEWER_TAB : LOADED, path ? 'setup: the viewer tab and its threads read' : 'setup: the dashboard and its threads read');
@@ -277,6 +298,10 @@ export async function harness(t, fixture) {
     // how many words the frames' pages have said so far
     V.mark = () => p.ev('window.__own.length');
     const said = (from, page, hash = null) => `window.__own.slice(${from}).some((m) => m.own === 'at' && m.page === ${J(page)}${hash === null ? '' : ` && m.hash === ${J(hash)}`})`;
+    // the stage's own frame said, since from, where page's elements are, drawn: none of them 0x0. A page's
+    // word on its load can find its frame not yet drawn and say 0x0, its drawn word two frames later; up
+    // on the first, an aim read at once found nothing, and a word held from then on was the drawn one (kit-948)
+    const drawn = (from, page) => `window.__own.slice(${from}).some((m) => m.own === 'at' && m.page === ${J(page)} && window.__ownFrom.get(m) === tsFrame() && !!m.rects && Object.values(m.rects).every((r) => r.w > 0 && r.h > 0))`;
     // the viewer opened by its head (a new entry, as a link in the dashboard makes), up and its page loaded
     V.open = async (head) => {
       const n = await V.mark();
@@ -284,15 +309,15 @@ export async function harness(t, fixture) {
       await V.up(head, n);
       if (RECTS_DELAY_MS) await p.ev('window.__rectsDelay = true');
     };
-    // up on head's stage: the lens ready (and a preview's app at /), the page's own word heard since from
+    // up on head's stage: the lens ready (and a preview's app at /), the page's own drawn word heard since from
     V.up = async (head, from) => {
       if (head.startsWith('#preview/')) {
         await soon(`${VIEWER_UP} && TS.kind === 'preview' && TS.ready && TS.route === '/'`, `setup: the preview's lens ready at / (the relay in the page's policy?): ${head}`);
-        await soon(said(from, 'app/'), "setup: the app's page loaded in the lens");
+        await soon(drawn(from, 'app/'), "setup: the app's page loaded in the lens and said where its elements are drawn");
       } else {
         const slug = /^#artifact\/main\/(.+)$/.exec(head)[1];
         await soon(`${VIEWER_UP} && TS.kind === 'artifact' && TS.slug === ${J(slug)} && TS.ready`, `setup: the viewer up on ${slug}, its lens ready`);
-        await soon(said(from, `${slug}/index.html`), `setup: ${slug}'s page loaded in the frame`);
+        await soon(drawn(from, `${slug}/index.html`), `setup: ${slug}'s page loaded in the frame and said where its elements are drawn`);
       }
     };
     // A real press at (x, y) on the dashboard's own element what (its id): drawn first and the mouse

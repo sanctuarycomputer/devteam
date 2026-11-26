@@ -75,4 +75,26 @@ test('frameClick aims only at the page now on the stage', { skip: canDrive ? fal
     assert.ok(await V.p.ev('window.__ownLetGo()') > 0, "setup: index.html's new words let go");
     await V.frameClick('to-b', 'viewer-a/b.html');
   });
+
+  // A6: a page's first word, said on its load, can find its frame not yet drawn and say its elements are 0x0;
+  // its drawn word comes two frames later (CI runs 45734741421, A1, and 45743125606, A3: V.open returned
+  // between the two, so A3's aim read at once was null and A1's hold kept back the drawn word). The viewer is
+  // up only once the stage's own frame has said where the page's elements are drawn (kit-948): here the frame
+  // is kept undrawn, and a drawn word from a window that is not the stage's frame never counts.
+  await sub("A6: the viewer is up only once the stage's own page said where its elements are drawn", async () => {
+    const V = await visit('#board');
+    await V.p.ev("(() => { const s = document.createElement('style'); s.id = 'undrawn'; s.textContent = '#av-frame { display: none !important; }'; document.head.append(s); return true; })()");
+    let up = false;
+    const opened = V.open(AV_A).then(() => { up = true; });
+    opened.catch(() => {});
+    await V.soon("window.__own.some((m) => m.page === 'viewer-a/index.html' && m.rects?.['to-b']?.w === 0)", "setup: the stage page's undrawn word heard");
+    const other = { own: 'at', page: 'viewer-a/index.html', hash: '', rects: { 'to-b': { x: 40, y: 40, w: 160, h: 32 } } };
+    await V.p.ev(`window.postMessage(${J(other)}, '*'), true`);
+    await V.soon("window.__own.filter((m) => m.rects?.['to-b']?.w === 160).length > 0", "setup: the other window's drawn word heard");
+    await new Promise((r) => setTimeout(r, 1000));
+    assert.equal(up, false, "V.open returned before the stage's own frame said where #to-b is drawn");
+    await V.p.ev("document.getElementById('undrawn').remove(), true");
+    await opened;
+    assert.ok(await V.p.ev(AIM('to-b')), 'the aim, read at once after V.open, finds #to-b');
+  });
 });

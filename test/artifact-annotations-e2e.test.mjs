@@ -144,13 +144,25 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
     await pinsAre(V, ['N4'], 'b.html#section-2');
   });
 
-  // step 4: every close closes; each case from a fresh visit, so one failing closer leaves nothing for the next
+  // the ask before a close (kit-937): up over the viewer, which stays; its I'll come back closes as the closer would have
+  const ASK = "(() => { const d = document.getElementById('av-ask'); return !!d && !d.hidden && d.getBoundingClientRect().height > 0; })()";
+  const askThenLater = async (V, what) => {
+    assert.ok(await V.settle(ASK, 3000), `${what}: #av-ask is shown`);
+    assert.equal(await V.p.ev(VIEWER_UP), true, `${what}: the viewer stays open under the ask`);
+    await V.p.ev(FRAMES);
+    const r = await V.p.ev("(() => { const r = document.getElementById('av-ask-later').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()");
+    await V.press(r.x, r.y, 'av-ask-later');
+  };
+
+  // step 4: every close closes; each case from a fresh visit, so one failing closer leaves nothing for the next.
+  // The draft's four notes aren't handed over, so each closer asks first and I'll come back closes (kit-937).
   for (const kind of ['x', 'escape-dash', 'escape-frame', 'scrim']) {
     await step(`step 4: ${kind} after an in-frame move closes the viewer`, async () => {
       const V = await visit('#library', WIN);
       await openDraft(V);
       await V.frameClick('to-a', 'pricing/a.html');
       await V.close(kind);
+      await askThenLater(V, `step 4 ${kind}`);
       await V.closedOn('#library', `${kind} after an in-frame move`);
     });
   }
@@ -184,25 +196,24 @@ test('artifact annotations, end to end', { skip: canDrive ? false : 'needs Chrom
   // the reminder shows as the close lands; a window of polls in which it would have, if it were going to
   const staysHidden = async (V, what) => assert.equal(await V.settle(shown, 1500), false, what);
 
-  await step('step 5: the first close shows the reminder; Not now hides it and the next close shows none', async () => {
+  await step("step 5: the first close asks first; I'll come back closes and the next close asks nothing", async () => {
     const V = await visit('#library', WIN);
     await openDraft(V);
     await V.soon(`document.getElementById('av-handover').textContent === 'Hand over (4)'`, 'setup: the bar reads Hand over (4) before the close');
     await V.close('x');
+    // the ask's words for 4 notes (kit-937): the title the Library's, plan-pricing the draft's session
+    const sentence = "4 notes on Pricing mock aren't handed over yet. plan-pricing, the session drawing it, won't start on them until you do.";
+    assert.ok(await V.settle(ASK, 3000), 'C4a: the first close of pricing asks first (#av-ask)');
+    assert.equal(await V.p.ev("document.getElementById('av-ask-tx').textContent"), sentence, "C4a: the ask's sentence");
+    await askThenLater(V, 'step 5 first close');
     await V.closedOn('#library', 'step 5 first close');
-    // merged avRemindShow's template for 4 notes: the title the Library's, plan-pricing the draft's session
-    const sentence = "4 notes on Pricing mock aren't handed over. plan-pricing, the session drawing it, won't start on them until you do.";
-    assert.ok(await V.settle(shown, 3000), 'C4a: the first close of pricing shows #av-remind');
-    assert.equal(await V.p.ev("document.querySelector('#av-remind .tx').textContent"), sentence, "C4a: the reminder's sentence");
-    await V.p.ev(FRAMES);
-    const at = await centre(V, 'av-remind-later');
-    await V.press(at.x, at.y, 'av-remind-later');
-    assert.ok(await V.settle(`!(${shown})`, 3000), 'C4b: Not now hides the reminder');
+    await staysHidden(V, "C4b: I'll come back closes with no reminder");
     await openDraft(V);
     await V.soon(`document.getElementById('av-handover').textContent === 'Hand over (4)'`, 'setup: the draft opened again with its four notes');
     await V.close('x');
     await V.closedOn('#library', 'step 5 second close');
-    await staysHidden(V, 'C4b: after Not now the next close shows no reminder');
+    assert.equal(await V.settle(ASK, 1500), false, "C4b: after I'll come back the next close asks nothing");
+    await staysHidden(V, "C4b: after I'll come back the next close shows no reminder");
   });
 
   await step('step 5: Hand over (4) sends one message to plan-pricing; no reminder after', async () => {
