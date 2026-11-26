@@ -1,4 +1,4 @@
-// An artifact's versions (kit-172): its drafts, main's version and earlier ones by date, as
+// An artifact's versions (kit-172, kit-947): one list by time, newest first, each content once: its drafts, main's version and earlier ones, as
 // `artifact versions <slug> --json` lists them over a real git history.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -69,7 +69,7 @@ test('versions: landed then earlier by date, each with its commit and time', asy
   assert.deepEqual(F.owner(['artifact', 'versions', 'viewer-mock']).split('\n'), r.versions.map((v) => `${v.kind} ${v.tree.slice(0, 12)} ${v.commit.slice(0, 12)} ${v.time}`));
 });
 
-test('versions: the draft first, with its worktree and its own commit', async (t) => {
+test('versions: drafts with their worktree and own commit, in time order', async (t) => {
   const F = threadsFixture('versions-a2');
   const later = cleanup(t);
   later(() => F.done());
@@ -101,9 +101,8 @@ test('versions: the draft first, with its worktree and its own commit', async (t
   put('demo-02-plain', mock('d2'));
   touch('demo-02-plain', new Date(Date.now() - 3600 * 1000));
   r = cliVersions(F, 'viewer-mock');
-  assert.deepEqual(r.versions.filter((v) => v.kind === 'draft').map((v) => [v.worktree, v.commit]), [['demo-01-draft', wtHead], ['demo-02-plain', null]], 'newest first; a plain folder has no commit, never main\'s HEAD');
-  assert.equal(r.versions[1].url, '/artifact/wt/demo-02-plain/viewer-mock/');
-  assert.deepEqual(r.versions.slice(2), main);
+  assert.deepEqual(r.versions.map((v) => [v.kind, v.worktree ?? null, v.commit ?? null]), [['draft', 'demo-01-draft', wtHead], ['landed', null, main[0].commit], ['earlier', null, main[1].commit], ['draft', 'demo-02-plain', null]], 'an hour-old draft below main\'s; a plain folder has no commit, never main\'s HEAD');
+  assert.equal(r.versions[3].url, '/artifact/wt/demo-02-plain/viewer-mock/');
   touch('demo-02-plain', new Date(Date.now() + 60 * 1000));
   r = cliVersions(F, 'viewer-mock');
   assert.deepEqual(r.versions.filter((v) => v.kind === 'draft').map((v) => v.worktree), ['demo-02-plain', 'demo-01-draft'], 'touched, it is the newer');
@@ -128,7 +127,7 @@ test('versions: only servable, deduped, and kept after a delete', async (t) => {
   const withManifest = landArtifact(F, 'old-mock', mock(1));
   assert.deepEqual(cliVersions(F, 'old-mock').versions.map(shape), [mainEntry('landed', 'old-mock', withManifest)]);
   assert.deepEqual(await apiJson(B, 'old-mock'), cliVersions(F, 'old-mock'));
-  // (b) a revert to an older tree: listed once, at its newest commit
+  // (b) a revert to an older tree: listed once, at its first commit
   const T1 = landArtifact(F, 'viewer-mock', mock(1));
   const T2 = landArtifact(F, 'viewer-mock', mock(2));
   const T3 = landArtifact(F, 'viewer-mock', mock(3));
@@ -136,17 +135,17 @@ test('versions: only servable, deduped, and kept after a delete', async (t) => {
   assert.equal(back.tree, T1.tree, 'the exact files, the same tree');
   let r = cliVersions(F, 'viewer-mock');
   assert.deepEqual(await apiJson(B, 'viewer-mock'), r);
-  assert.deepEqual(r.versions.map(shape), [mainEntry('landed', 'viewer-mock', back), mainEntry('earlier', 'viewer-mock', T3), mainEntry('earlier', 'viewer-mock', T2)]);
+  assert.deepEqual(r.versions.map(shape), [mainEntry('earlier', 'viewer-mock', T3), mainEntry('earlier', 'viewer-mock', T2), mainEntry('landed', 'viewer-mock', T1)]);
   // (c) the folder deleted on main: no landed, and its history kept
   F.g(['rm', '-rq', `${ARTIFACTS_REL}/viewer-mock`], F.old);
   F.g(['commit', '-qm', 'artifact: viewer-mock gone'], F.old);
   F.g(['push', '-q', 'origin', 'main'], F.old);
   r = cliVersions(F, 'viewer-mock');
-  assert.deepEqual(r.versions.map(shape), [mainEntry('earlier', 'viewer-mock', back), mainEntry('earlier', 'viewer-mock', T3), mainEntry('earlier', 'viewer-mock', T2)]);
+  assert.deepEqual(r.versions.map(shape), [mainEntry('earlier', 'viewer-mock', T3), mainEntry('earlier', 'viewer-mock', T2), mainEntry('earlier', 'viewer-mock', T1)]);
   assert.equal(r.truncated, false);
   assert.deepEqual(await apiJson(B, 'viewer-mock'), r);
   // each url is still served, with the bytes of its own version
-  for (const [v, n] of [[r.versions[0], 1], [r.versions[1], 3], [r.versions[2], 2]]) {
+  for (const [v, n] of [[r.versions[0], 3], [r.versions[1], 2], [r.versions[2], 1]]) {
     const res = await fetch(B + v.url);
     assert.equal(res.status, 200, v.url);
     assert.equal(await res.text(), mock(n)['index.html'], v.url);
