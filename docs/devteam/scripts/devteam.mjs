@@ -26758,8 +26758,201 @@ const boxHealthPark = (() => {
 })();
 /* box-health-park end */
 /* box-health-room start */
-// answer.headroom, answer.pool.what_if and each sample's room (kit-844's).
-const boxHealthRoom = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+// answer.headroom, answer.pool.what_if and each sample's room (kit-844): how many more workers the box
+// could hold and what limits it, and what if the pool were 0 to 20 more than it is. Nothing is read,
+// written, stored or sent here, and no timer is set: part() works from what the sampler and the parts
+// before it gave this tick, and every time is ctx.now()'s.
+//
+// Sessions. From the processes part's walks of the last five minutes of now() (each new result object is
+// one walk): a session is a worktree place (<root>/.worktrees/<name>, planners' too) with an agent in it.
+// What one holds is the 75th percentile (nearest rank) of its resident memory over every session of
+// every walk kept, and its CPU the mean over those with CPU, times total over attributed: the walks'
+// CPU of every place and outside, plus unattributed, over the first (1 when nothing is attributed), so
+// work nobody's process shows isn't free. Until the first walk kept is five minutes of now() old, or
+// with no session in the walks kept (or no /proc: no walks), memory and cpu are absent: there is
+// nothing to measure from.
+//   memory   (ceiling × max − used) ÷ what one holds, of the sampler's now.memory, whole, never below 0
+//   cpu      0 when now.cpu.some60 is 40 or more; else (90% of now.cpu.limit − the mean of the samples'
+//            cpu over the last minute) ÷ a session's CPU, whole, never below 0
+// The token forecast, worked out again only when parts.claude is a new object (once a minute, at its
+// read) or the hours it is built from change (the pool part gives a new object every walk, so its
+// object alone is not a change), with the time then:
+//   the hour   over every project with a pool.json (fresh or stale, as park's total): each hour is
+//              usd_hour when every one has every price, else new_hour, as park weighs them. now is
+//              their workers holding a slot; measured those whose tokens are measured. m is the mean of
+//              a measured worker's hour and its reviewers' (another provider's worker is measured at
+//              0 and counts); o is every file's other. An unmeasured worker is taken as average, and its
+//              reviewers' hours count in neither. The whole hour (for no-claude-use) is o and every
+//              worker's own and reviewers' hours.
+//   burn(W)    R × (o + m·W) ÷ (o + m·now), R the claude part's rate; R itself at W = now
+//   steps      W from 0 to now + 20, each projectClaude(rows, burn(W), the time) as lasts, runs_out_at
+//              and paused_until; most_that_lasts the most workers whose step lasts
+//   why        no forecast: the first that holds of no-cswap (no parts.claude), measuring,
+//              no-projection (no projection, or a step that has none), too-many (now over 60),
+//              no-claude-use (the whole hour is 0), none-measured, none-by-workers (m is 0)
+// headroom.claude, one rule with the steps (claude_why whenever it is absent):
+//   no parts.claude: absent, no-cswap. No account with room now: 0. With a forecast: absent (lasts)
+//   when the top step lasts, 0 when none does, else most_that_lasts − now, never below 0. With none:
+//   absent with why when why is no-cswap or measuring, or with no-projection when the claude part has
+//   no projection; absent with no-claude-use when
+//   the hour has no Claude use, or with none-by-workers when workers are measured and none used any
+//   (even with too-many); else 0 when the claude part's projection runs out, absent (lasts) when it
+//   lasts.
+// headroom.room is the least of memory, cpu and claude (absent when none is there); binds is ready when
+// every fleet is known (parts.pool gave ready and no ready_unknown) and ready is under room, else the
+// first of memory, cpu, claude that is the least; starts the least of room and ready, only when every
+// fleet is known. With no room figure, neither starts nor binds: there is nothing to compare ready to. sample.room is room. pool.what_if, once the first walk kept is five minutes old and
+// parts.pool is there: now, measured, steps (each with the forecast's fields when there is one; none
+// over 60 workers), most_that_lasts, memory_full_at and cpu_full_at (now + that room + 1), why. It gives
+// the same object while nothing in it changed.
+const ROOM_WALKS_MS = 300000, ROOM_CPU_MS = 60000, ROOM_PRESSURE = 40, ROOM_CPU_SHARE = 0.9, ROOM_MORE = 20, ROOM_POOL_MAX = 60;
+const boxHealthRoom = (() => {
+  let run = null;
+  const num = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  const whole = (n) => Math.max(0, Math.floor(n + 1e-9));
+  // one walk, as what is kept of it
+  const digest = (procs) => {
+    const sessions = [];
+    let attributed = 0;
+    for (const p of procs.places) {
+      if (!memoryIsMap(p)) continue;
+      if (num(p.cpu)) attributed += p.cpu;
+      if (p.worktree !== undefined && p.agents > 0 && num(p.rss)) sessions.push({ rss: p.rss, cpu: num(p.cpu) ? p.cpu : undefined });
+    }
+    if (num(procs.outside?.cpu)) attributed += procs.outside.cpu;
+    const un = procs.unattributed?.cpu;
+    return { at: procs.at, sessions, attributed: procs.over_s === undefined ? undefined : attributed, unattributed: num(un) ? un : undefined };
+  };
+  // what one session holds and uses, from the walks kept, or null
+  const perSession = (walks) => {
+    const rss = walks.flatMap((w) => w.sessions.map((s) => s.rss)).sort((a, b) => a - b);
+    if (!rss.length) return null;
+    const mem = rss[Math.ceil(0.75 * rss.length) - 1];
+    const cpus = walks.flatMap((w) => w.sessions.map((s) => s.cpu)).filter(num);
+    let attr = 0, all = 0;
+    for (const w of walks) if (w.attributed !== undefined && w.unattributed !== undefined) { attr += w.attributed; all += w.attributed + w.unattributed; }
+    const scale = attr > 0 ? all / attr : 1;
+    return { mem, cpu: cpus.length ? (cpus.reduce((a, b) => a + b, 0) / cpus.length) * scale : undefined };
+  };
+  const memoryRoom = (now, one) => {
+    const m = now?.memory;
+    if (!one || !(one.mem > 0) || !memoryIsMap(m) || !num(m.ceiling) || !num(m.max) || !num(m.used)) return undefined;
+    return whole((m.ceiling * m.max - m.used) / one.mem);
+  };
+  const cpuRoom = (ctx, now, samples, one) => {
+    const c = now?.cpu;
+    if (!one || !memoryIsMap(c)) return undefined;
+    if (num(c.some60) && c.some60 >= ROOM_PRESSURE) return 0;
+    if (!(one.cpu > 0) || !num(c.limit)) return undefined;
+    const t = ctx.now();
+    const last = (Array.isArray(samples) ? samples : []).filter((s) => memoryIsMap(s) && num(s.cpu) && t - Date.parse(s.at) < ROOM_CPU_MS).map((s) => s.cpu);
+    if (!last.length) return undefined;
+    return whole((ROOM_CPU_SHARE * c.limit - last.reduce((a, b) => a + b, 0) / last.length) / one.cpu);
+  };
+  const knownOf = (pool) => (Array.isArray(pool?.projects) ? pool.projects : []).filter((p) => memoryIsMap(p) && memoryIsMap(p.pool));
+  // what the forecast is built from, of the pool: its counts, states and hours
+  const hoursOf = (pool) => JSON.stringify(knownOf(pool).map(({ pool: f }) => [f.other, f.goals.map((g) => g.usd_hour === null),
+    f.workers.map((w) => [w.tokens.state, w.tokens.usd_hour, w.tokens.new_hour, w.tokens.reviews_usd_hour, w.tokens.reviews_new_hour])]));
+  // the token forecast: { now, measured, steps?, most?, why?, noUse, noneByWorkers }
+  const forecast = (ctx, claude, pool) => {
+    const known = knownOf(pool);
+    const priced = known.every(({ pool: f }) => f.other.usd_hour !== null && f.goals.every((g) => g.usd_hour !== null)
+      && f.workers.every((w) => w.tokens.usd_hour !== null && w.tokens.reviews_usd_hour !== null));
+    const k = priced ? 'usd_hour' : 'new_hour', rk = priced ? 'reviews_usd_hour' : 'reviews_new_hour';
+    const hour = (v) => (num(v) ? v : 0);
+    let now = 0, measured = 0, mine = 0, o = 0, all = 0;
+    for (const { pool: f } of known) {
+      o += hour(f.other[k]);
+      for (const w of f.workers) {
+        now++;
+        const h = hour(w.tokens[k]) + hour(w.tokens[rk]);
+        all += h;
+        if (w.tokens.state === 'measured') { measured++; mine += h; }
+      }
+    }
+    all += o;
+    const m = measured ? mine / measured : 0;
+    const out = { now, measured, noUse: !(all > 0), noneByWorkers: measured > 0 && !(m > 0) };
+    const why = !memoryIsMap(claude) ? 'no-cswap' : claude.measuring || !num(claude.rate) ? 'measuring' : !memoryIsMap(claude.projection) ? 'no-projection'
+      : now > ROOM_POOL_MAX ? 'too-many' : out.noUse ? 'no-claude-use' : !measured ? 'none-measured' : out.noneByWorkers ? 'none-by-workers' : null;
+    if (why) return { ...out, why };
+    const t = ctx.now(), R = claude.rate, steps = [];
+    for (let W = 0; W <= now + ROOM_MORE; W++) {
+      const burn = W === now ? R : (R * (o + m * W)) / (o + m * now);
+      const p = projectClaude(claude.rows, burn, t);
+      if (!p) return { ...out, why: 'no-projection' };
+      steps.push(boxHealthPresent({ workers: W, lasts: p.lasts, runs_out_at: p.runs_out_at, paused_until: p.paused_until }));
+    }
+    const lasting = steps.filter((s) => s.lasts);
+    return { ...out, steps, ...(lasting.length ? { most: lasting.at(-1).workers } : {}) };
+  };
+  const claudeLimit = (claude, f) => {
+    if (!memoryIsMap(claude)) return { why: 'no-cswap' };
+    if (claude.has_room === false) return { n: 0 };
+    if (f.steps) {
+      if (f.steps.at(-1).lasts) return { why: 'lasts' };
+      return { n: f.most === undefined ? 0 : Math.max(0, f.most - f.now) };
+    }
+    if (f.why === 'no-cswap' || f.why === 'measuring' || !memoryIsMap(claude.projection)) return { why: f.why };
+    if (f.noUse) return { why: 'no-claude-use' };
+    if (f.noneByWorkers) return { why: 'none-by-workers' };
+    return claude.projection.lasts === false ? { n: 0 } : { why: 'lasts' };
+  };
+  return {
+    start() { run = { walks: [], first: undefined, procs: undefined, memo: null, given: undefined, key: undefined }; },
+    part(ctx, parts) {
+      const r = run;
+      if (!r) return undefined;
+      const t = ctx.now();
+      const procs = memoryIsMap(parts.processes) && Array.isArray(parts.processes.places) ? parts.processes : undefined;
+      if (procs && procs !== r.procs && num(procs.at)) {
+        r.procs = procs;
+        r.walks.push(digest(procs));
+        if (r.first === undefined) r.first = procs.at;
+      }
+      r.walks = r.walks.filter((w) => w.at > t - ROOM_WALKS_MS);
+      const ready = r.first !== undefined && t - r.first >= ROOM_WALKS_MS;
+      const one = ready ? perSession(r.walks) : null;
+      const memory = memoryRoom(parts.now, one), cpu = cpuRoom(ctx, parts.now, parts.samples, one);
+      const claude = memoryIsMap(parts.claude) ? parts.claude : undefined, pool = memoryIsMap(parts.pool) ? parts.pool : undefined;
+      const hours = hoursOf(pool);
+      if (!r.memo || r.memo.claude !== claude || r.memo.hours !== hours) r.memo = { claude, hours, f: forecast(ctx, claude, pool) };
+      const f = r.memo.f;
+      const lim = claudeLimit(claude, f);
+      const headroom = {};
+      const limits = [['memory', memory], ['cpu', cpu], ['claude', lim.n]].filter(([, v]) => v !== undefined);
+      const fleetsKnown = !!pool && num(pool.ready) && !(Array.isArray(pool.ready_unknown) && pool.ready_unknown.length);
+      if (limits.length) {
+        const room = Math.min(...limits.map(([, v]) => v));
+        headroom.room = room;
+        if (fleetsKnown) headroom.starts = Math.min(room, pool.ready);
+        headroom.binds = fleetsKnown && pool.ready < room ? 'ready' : limits.find(([, v]) => v === room)[0];
+      }
+      if (memory !== undefined) headroom.memory = memory;
+      if (cpu !== undefined) headroom.cpu = cpu;
+      if (lim.n !== undefined) headroom.claude = lim.n; else headroom.claude_why = lim.why;
+      const answer = { headroom };
+      if (ready && pool) {
+        const w = { now: f.now, measured: f.measured };
+        if (f.now <= ROOM_POOL_MAX) {
+          w.steps = f.steps ? f.steps.map((s) => ({ ...s })) : Array.from({ length: f.now + ROOM_MORE + 1 }, (_, i) => ({ workers: i }));
+        }
+        if (f.most !== undefined) w.most_that_lasts = f.most;
+        if (memory !== undefined) w.memory_full_at = f.now + memory + 1;
+        if (cpu !== undefined) w.cpu_full_at = f.now + cpu + 1;
+        if (!f.steps) w.why = f.why;
+        answer.pool = { what_if: w };
+      }
+      const given = { answer, ...(headroom.room !== undefined ? { sample: { room: headroom.room } } : {}) };
+      const key = JSON.stringify(given);
+      if (key === r.key) return r.given;
+      r.key = key;
+      r.given = given;
+      return given;
+    },
+    stop() { run = null; },
+  };
+})();
 /* box-health-room end */
 // The machine's own caps, not the host's: a platform caps CPU and memory in the cgroup, while
 // /proc/meminfo and the CPU count say what the whole host has (a 4-CPU, 16 GB box reads 32 CPUs, 123 GB).
