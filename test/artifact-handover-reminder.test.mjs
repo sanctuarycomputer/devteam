@@ -511,11 +511,12 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     // A tab that got its response and never committed (CI, kit-924): Chrome holds every call to a tab while its
     // navigation is pending, so the visit's first wait gets "no answer from Chrome in 30 s", the tab not yet at a URL
     // and the answer to Page.navigate the last thing its socket heard (kit-914's diagnosis). That shape alone is said
-    // as such, with the tickets that look for why (kit-924, kit-930); any other failure is thrown as it was.
+    // as such (kit-924); the diagnosis's processes line names each Chrome process's state and CPU (kit-930). Any other
+    // failure is thrown as it was.
     const NEVER_COMMITTED = /no answer from Chrome in 30 s; tab \S+ at ; last heard on its socket: [^;]*the answer to Page\.navigate [\d.]+ s ago; /;
     const visit7 = async (hash, opts) => {
       try { return await visit(hash, opts); } catch (e) {
-        if (NEVER_COMMITTED.test(e.message)) assert.fail(`R7: the tab sent to ${hash} got its response and never committed its navigation, and Chrome held every call to it: a stall inside Chrome, not this case's (kit-924; kit-930 names the process holding it). ${e.message}`);
+        if (NEVER_COMMITTED.test(e.message)) assert.fail(`R7: the tab sent to ${hash} got its response and never committed its navigation: a stall inside Chrome, not this case's (kit-924; its processes line says which Chrome process was doing what, kit-930). ${e.message}`);
         throw e;
       }
     };
