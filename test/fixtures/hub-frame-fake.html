@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hub frame fake</title>
+</head>
+<body>
+<!-- The hub's side of dashboard-shell@2 §10 (test/contracts/shell.md), for the tickets that build against it:
+     it frames ?src= (one project, keyed ?key=), sends hub-base to the frame's origin on every load of the frame
+     and after each hub-route it accepts, accepts hub-route only from its frame's window at the frame's origin
+     with a head that is a string starting with # (at most 2,048 characters) or null, and keeps the last one in its own hash by
+     replaceState: #<key>/<head without #>, or the bare #<key> for null. window.__log has every message it
+     receives (accepted or not) and every hub-base it sends, in order. -->
+<iframe id="f" title="dashboard" style="width: 800px; height: 600px; border: 0"></iframe>
+<script>
+const q = new URLSearchParams(location.search);
+const src = q.get('src') || 'about:blank', key = q.get('key') || 'project';
+const frame = document.getElementById('f');
+const origin = new URL(src, location.href).origin;
+// what Copy link copies inside this hub, as on a laptop: the hub's own address, then the project's key
+const base = `${location.origin}${location.pathname}#${encodeURIComponent(key)}/`;
+window.__log = [];
+function sendBase(why) {
+  try { frame.contentWindow.postMessage({ devteam: 'hub-base', base }, origin); window.__log.push({ sent: 'hub-base', why }); } catch {}
+}
+// every load: the dashboard reloading itself, or a sign-in inside the frame, is a new document that needs it again.
+// With ?hold, the first load's is held until window.__release(), so a test can see the frame post nothing before it.
+let hold = q.has('hold');
+window.__held = false;
+window.__release = () => { window.__held = false; sendBase('load'); };
+frame.addEventListener('load', () => { if (hold) { hold = false; window.__held = true; return; } sendBase('load'); });
+window.addEventListener('message', (ev) => {
+  const m = ev.data;
+  const ok = ev.source === frame.contentWindow && ev.origin === origin && !!m && typeof m === 'object' && m.devteam === 'hub-route' && (m.head === null || (typeof m.head === 'string' && m.head.startsWith('#') && m.head.length <= 2048));
+  window.__log.push({ got: m && typeof m === 'object' ? m.devteam : null, head: m && typeof m === 'object' ? m.head : undefined, origin: ev.origin, accepted: ok });
+  if (!ok) return;
+  history.replaceState(history.state, '', `#${encodeURIComponent(key)}${m.head ? `/${m.head.slice(1)}` : ''}`);
+  sendBase('hub-route');
+});
+frame.src = src;
+</script>
+</body>
+</html>

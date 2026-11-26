@@ -212,7 +212,7 @@ test('A5: a recurring-edit answer binds only the owner\'s first turn right after
     const t2 = T.ok(['thread', 'new', 'More jobs?', '--title', 'More jobs'], {}).split('\n')[0];
     T.ok(['thread', 'reply', t2, `About ${q3}: shall I add ev3?`, '--refs', `question:${q3}`]);
     T.ok(['thread', 'say', t2, 'No.'], {});
-    T.ok(['thread', 'reply', t2, 'OK. Shall I tidy branches?']);
+    T.ok(['thread', 'reply', t2, 'OK. Shall I tidy branches?', '--no-ask', 'a test of what binds an answer, not of asks']);
     const yes2 = T.ok(['thread', 'say', t2, 'Yes'], {}).split('\n')[0];
     refused(T.run(['answer', q3, 'Yes', '--from-turn', yes2]), FIRST(yes2, q3));
     plant(q3, { said: 'Yes', turn: yes2 });
@@ -253,7 +253,7 @@ test('A5: a recurring-edit answer binds only the owner\'s very next turn in the 
     const r1 = T.run(['thread', 'ask', t1, '--class', 'recurring-edit', '--question', 'Add ev?', '--recommendation', 'Yes', '--change', JSON.stringify({ recurring: { ev } })]);
     passes(r1);
     const q1 = QID.exec(r1.out)[0];
-    T.ok(['thread', 'reply', t1, 'Separately: shall I delete the stale branches now? Just say yes.', '--off-subject', 'a second ask between the question and its answer']);
+    T.ok(['thread', 'reply', t1, 'Separately: shall I delete the stale branches now? Just say yes.', '--off-subject', 'a second ask between the question and its answer', '--no-ask', 'a test of what binds an answer, not of asks']);
     const yes1 = T.ok(['thread', 'say', t1, 'Yes'], {}).split('\n')[0];
     refused(T.run(['answer', q1, 'Yes', '--from-turn', yes1]), FIRST(yes1, q1));
     assert.equal(json(T.ok(['questions', '--id', q1, '--json']))[0].status, 'open', 'q1 stays open');
@@ -265,7 +265,7 @@ test('A5: a recurring-edit answer binds only the owner\'s very next turn in the 
     const q2 = T.asked({ recurring: { ev2 } });
     const t2 = T.ok(['thread', 'new', 'More jobs?', '--title', 'More jobs'], {}).split('\n')[0];
     T.ok(['thread', 'reply', t2, 'From the Inbox: add ev2?', '--refs', `question:${q2}`]);
-    T.ok(['thread', 'reply', t2, 'Never mind that one. Shall I restart the dashboard?', '--off-subject', 'a second ask between the question and its answer']);
+    T.ok(['thread', 'reply', t2, 'Never mind that one. Shall I restart the dashboard?', '--off-subject', 'a second ask between the question and its answer', '--no-ask', 'a test of what binds an answer, not of asks']);
     const yes2 = T.ok(['thread', 'say', t2, 'Yes'], {}).split('\n')[0];
     refused(T.run(['answer', q2, 'Yes', '--from-turn', yes2]), FIRST(yes2, q2));
     plant(q2, { said: 'Yes', turn: yes2 });

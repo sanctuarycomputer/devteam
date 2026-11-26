@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Dashboard frame fake</title>
+</head>
+<body>
+<!-- The dashboard's side of dashboard-shell@2 §10 (test/contracts/shell.md), for the tickets that build against it:
+     only straight under the top window, framed by a parent on another origin, it keeps a hub-base from that
+     parent whose base is an http: or https: URL with no credentials (at most 2,048 characters), and from the
+     first one it accepts posts hub-route { head } to that message's origin after every change to its hash:
+     location.hash, or null when that is over 2,048 characters. Before any hub-base it posts nothing.
+     window.__bases has each base it kept, window.__seen counts the hub-base messages it read. -->
+<p id="head"></p>
+<script>
+const framed = window.parent !== window && window.parent === window.top;
+let BASE = null, HUB = null;
+window.__bases = [];
+window.__seen = 0;
+window.__base = () => BASE;
+const baseOk = (b) => {
+  if (typeof b !== 'string' || b.length > 2048) return false;
+  try { const u = new URL(b); return (u.protocol === 'http:' || u.protocol === 'https:') && !u.username && !u.password; } catch { return false; }
+};
+function postHead() {
+  document.getElementById('head').textContent = location.hash;
+  if (!framed || HUB === null) return;
+  const head = location.hash.length > 2048 ? null : location.hash;
+  try { window.parent.postMessage({ devteam: 'hub-route', head }, HUB); } catch {}
+}
+window.addEventListener('message', (ev) => {
+  if (!framed || ev.source !== window.parent || ev.origin === location.origin || ev.origin === 'null') return;
+  const m = ev.data;
+  if (!m || typeof m !== 'object' || m.devteam !== 'hub-base') return;
+  window.__seen++;
+  if (!baseOk(m.base)) return;
+  const first = HUB === null;
+  BASE = m.base;
+  HUB = ev.origin;
+  window.__bases.push(m.base);
+  // the first base: the head it has had since it loaded, at once
+  if (first) postHead();
+});
+window.addEventListener('hashchange', postHead);
+// a head written on load, before any hub-base (as the router canonicalises one): posted to no one
+history.replaceState(history.state, '', location.hash || '#overview');
+postHead();
+</script>
+</body>
+</html>
