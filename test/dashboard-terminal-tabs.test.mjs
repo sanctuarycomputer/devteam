@@ -538,6 +538,14 @@ test('terminal A14: Wide widens the panel to half the window on a terminal tab, 
   await R.soon(`Math.round(${w}) === 720`, 'half the 1440 px window');
   assert.equal(await R.p.ev(`localStorage.getItem('devteam.threads.wide')`), '1', 'remembered');
   assert.equal(await R.p.ev(`document.getElementById('th-wide').getAttribute('aria-pressed')`), 'true');
+  // the page reads the panel's width back in pixels (a new card is placed left of it, never under it)
+  assert.equal(Math.round(await R.p.ev(`thWidth()`)), 720, 'thWidth() is the wide panel in pixels');
+  // pressed looks pressed, with the mouse off the button (its hover is the same well)
+  await R.p.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 });
+  const look = `(() => { const c = getComputedStyle(document.getElementById('th-wide')); return c.backgroundColor + ' ' + c.boxShadow; })()`;
+  const pressed = await R.p.ev(look);
+  const unpressed = await R.p.ev(`(() => { const b = document.getElementById('th-wide'); b.setAttribute('aria-pressed', 'false'); const v = ${look}; b.setAttribute('aria-pressed', 'true'); return v; })()`);
+  assert.notEqual(pressed, unpressed, 'pressed looks pressed');
   // a side peek's right edge meets the panel's left edge
   await R.p.ev(`location.hash = '#file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md'`);
   await R.soon(`document.body.classList.contains('peek-open') || document.querySelector('.shell.peek-open')`, 'a peek');
@@ -563,6 +571,7 @@ test('terminal A14: Ctrl+] releases focus; Escape goes to the pane; the + button
   await R.p.send('Input.dispatchKeyEvent', { type: 'keyDown', key: ']', code: 'BracketRight', modifiers: 2, windowsVirtualKeyCode: 221 });
   await R.p.send('Input.dispatchKeyEvent', { type: 'keyUp', key: ']', code: 'BracketRight', modifiers: 2, windowsVirtualKeyCode: 221 });
   await R.soon(`!document.activeElement?.classList.contains('xterm-helper-textarea')`, 'released');
+  assert.equal(await R.p.ev(`document.activeElement?.dataset.tab`), 'supervisor', 'focus goes to the selected tab');
   await sleep(300);
   assert.equal(R.fake.typed('supervisor').join(''), '\x1b', 'Ctrl+] is not typed');
   assert.ok(await R.p.ev(`document.querySelector('.term-box[data-term="supervisor"] .term-hint').textContent.includes('to leave it')`), 'the hint says so');
