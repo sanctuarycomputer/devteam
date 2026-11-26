@@ -8451,50 +8451,78 @@ const selfPlain = (() => {
     w = w.slice(0, end);
     return /^\p{Lu}/u.test(w) && [...w].length >= 2 ? w : null;
   }
-  // self.md's capitalised words for the names rule, each once in order (kit-862). Every word counts but
-  // a prose sentence's first: prose is a paragraph's text outside code, comments and a link's words; a
-  // sentence starts a paragraph or follows . ! or ? and a space. A heading, a list item (its lines up to
-  // a blank one), a table row (a line holding | outside code), code (a fence, indented code, a span), a
-  // comment and a link's words count whole, their first word too: a part's name stands there.
+  // self.md's capitalised words for the names rule, each once in order (kit-862, kit-926). Every word
+  // counts but a bare prose sentence's first: prose is a paragraph's text outside code, comments and
+  // brackets; a sentence starts a paragraph or follows . ! or ? and a space. A heading (# or a setext
+  // one, every line over its = or - line), a list item (its lines up to a blank one), a quote (its
+  // lines up to a blank one, a list item inside it too), a table row (a line holding | outside code, and
+  // the lines after it up to a blank one), code (a fence, indented code, a span), a comment and the
+  // words inside [ ] (a link's, an image's alt text, a reference-style link's) count whole, their first
+  // word too: a part's name stands there. So does a first word with a mark just before it (bold,
+  // italic or a quote mark: ** _ " “ ').
   function selfHeld(text) {
     const src = lines(text);
     const read = readable(text);
     const pl = plain(text).split('\n');
     const at = [];
     pl.reduce((o, l, i) => { at[i] = o; return o + l.length + 1; }, 0);
+    const QUOTE = /^ {0,3}>/;
+    // a setext heading's lines: a paragraph's (from its first line, or the line after a heading), over
+    // a line of = or - alone at most three spaces in (- and a space is one, not a list item); a list
+    // item or a quote opens no heading's text
+    const setext = [];
+    let from = -1;
+    read.forEach((l, i) => {
+      if (l === null || !l.trim() || HEAD.test(l)) from = -1;
+      else if (from >= 0 && /^ {0,3}(?:=+|-+)[ \t]*$/.test(l)) { for (let j = from; j < i; j += 1) setext[j] = true; from = -1; }
+      else if (BREAK.test(l) || LIST.test(l) || QUOTE.test(l)) from = -1;
+      else if (from < 0) from = i;
+    });
     // the links' words, [ to ], sorted and apart (a link inside another's words is none), read by a
     // pointer that only moves on, as the words come in order: each word one look
     const spans = links(text).map((k) => [k.index, k.close]);
     let k = 0;
     const inLink = (o) => { while (k < spans.length && spans[k][1] <= o) k += 1; return k < spans.length && o > spans[k][0]; };
+    // how many [ are open after s, from d: \[ and \] are none, a ] closes one only when one is open
+    const brackets = (s, d) => { for (let j = 0; j < s.length; j += 1) { if (s[j] === '\\') j += 1; else if (s[j] === '[') d += 1; else if (s[j] === ']' && d) d -= 1; } return d; };
     const out = new Set();
     const add = (w) => { const c = capWord(w); if (c) out.add(c); };
     let item = false; // in a list item, until a blank line
+    let quote = false; // in a quote, until a blank line
+    let table = false; // after a table row, until a blank line
     let start = true; // the next prose word starts a sentence
     let gap = '';
+    let depth = 0; // the [ open in this paragraph
     src.forEach((s, i) => {
       const l = read[i];
-      if (l === null || !l.trim() || HEAD.test(l) || BREAK.test(l) || LIST.test(l) || item || pl[i].includes('|')) {
-        if (l !== null && !l.trim()) item = false;
+      if (l === null || !l.trim() || HEAD.test(l) || BREAK.test(l) || LIST.test(l) || item || pl[i].includes('|') || table || setext[i] || quote || QUOTE.test(l)) {
+        if (l !== null && !l.trim()) { item = false; quote = false; table = false; }
         else if (l !== null && LIST.test(l)) item = true;
-        else if (l !== null && (HEAD.test(l) || BREAK.test(l))) item = false;
+        else if (l !== null && (HEAD.test(l) || BREAK.test(l))) { item = false; quote = false; table = false; }
+        if (l !== null && QUOTE.test(l)) quote = true;
+        if (pl[i].includes('|')) table = true;
         for (const m of s.matchAll(WORD)) add(m[0]);
         start = true;
         gap = '';
+        depth = 0;
         return;
       }
       const p = pl[i];
       let prev = 0;
       for (const m of s.matchAll(WORD)) {
-        gap += p.slice(prev, m.index);
+        const before = p.slice(prev, m.index);
+        gap += before;
+        depth = brackets(before, depth);
         prev = m.index + m[0].length;
         const o = at[i] + m.index;
-        const whole = p.slice(m.index, prev) !== m[0] || inLink(o);
+        const whole = p.slice(m.index, prev) !== m[0] || inLink(o) || depth > 0 || (gap !== '' && !/\s$/.test(gap));
         if (whole || !(start || /[.!?]\s/.test(gap))) add(m[0]);
         start = false;
         gap = '';
       }
-      gap += `${p.slice(prev)}\n`;
+      const rest = p.slice(prev);
+      gap += `${rest}\n`;
+      depth = brackets(rest, depth);
     });
     return [...out];
   }
@@ -9028,15 +9056,24 @@ function partPath(p) {
   return String(p).split('/').filter((s) => s !== '' && s !== '.').join('/');
 }
 // Whether a normalised path is on disk under the repo root (the project folder, for a project outside
-// its repo: selfRoot), each segment matched by its exact case (as git reads it), so App/ is missing
-// beside app/ on a disk that folds case too.
+// its repo: selfRoot) where git's tree could hold it, as hasAt reads a commit (kit-926): each segment
+// matched by its exact case (as git reads it), so App/ is missing beside app/ on a disk that folds case
+// too; never through a symlink (a symlink is a file to git: one may be the last segment, never a
+// folder on the way); never into .git, in any case (git keeps no .git in a tree); and never at or
+// into a folder holding its own .git (a nested repo or a submodule, which the tree holds as a gitlink
+// at most). A file not committed yet is still found: self check reads a draft before its commit.
 function hasOnDisk(n) {
   let dir = projectInRepo ? projectRoot : projectDir;
-  for (const seg of n === '' ? [] : n.split('/')) {
+  const segs = n === '' ? [] : n.split('/');
+  for (const [i, seg] of segs.entries()) {
+    if (seg.toLowerCase() === '.git') return false;
     let names;
     try { names = fs.readdirSync(dir); } catch { return false; }
     if (!names.includes(seg)) return false;
     dir = path.join(dir, seg);
+    const st = fs.lstatSync(dir, { throwIfNoEntry: false });
+    if (!st || (st.isSymbolicLink() && i < segs.length - 1)) return false;
+    if (st.isDirectory() && fs.existsSync(path.join(dir, '.git'))) return false;
   }
   return true;
 }
