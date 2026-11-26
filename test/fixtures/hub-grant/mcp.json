@@ -328,6 +328,19 @@
       }
     },
     {
+      "name": "a scheme other than Bearer",
+      "token": "mcp",
+      "scheme": "Basic",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "ping"
+      },
+      "expect": {
+        "status": 400
+      }
+    },
+    {
       "name": "the scheme in capitals",
       "token": "mcp",
       "scheme": "BEARER",

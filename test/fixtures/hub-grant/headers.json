@@ -61,6 +61,14 @@
       "expect": "refused"
     },
     {
+      "name": "junk before the id",
+      "raw": [
+        "x-devteam-grant",
+        "junk g-x;owner-act=0;label=a"
+      ],
+      "expect": "refused"
+    },
+    {
       "name": "a bad id",
       "raw": [
         "x-devteam-grant",

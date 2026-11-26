@@ -197,6 +197,7 @@ export function addressAllowed(ip) {
 // §6: why a client_id URL can't be fetched, or null.
 export function clientIdUrlProblem(url) {
   if (typeof url !== 'string' || !url.startsWith('https://') || url.includes('#')) return 'not an https URL without a fragment';
+  if (/\\|%5c/i.test(url)) return 'a backslash';
   let u;
   try { u = new URL(url); } catch { return 'not a URL'; }
   if (u.username || u.password) return 'user info';

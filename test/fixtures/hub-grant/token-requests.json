@@ -1406,6 +1406,166 @@
       ]
     },
     {
+      "name": "RFC 7009 revoke by an access token ends the grant",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r1",
+            "access_token": "m1"
+          }
+        },
+        {
+          "revoke": [
+            [
+              "token",
+              "$m1"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a repeated parameter at the token endpoint",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_request"
+          }
+        }
+      ]
+    },
+    {
+      "name": "an unknown scope at authorize",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "set": {
+              "scope": "hub:read hub:write"
+            }
+          },
+          "expect": {
+            "redirect": {
+              "error": "invalid_scope"
+            }
+          }
+        }
+      ]
+    },
+    {
       "name": "the passkeys change: every grant is dead by its stamp",
       "steps": [
         {
@@ -1509,7 +1669,7 @@
           "authorize": {
             "use": "kit",
             "set": {
-              "scope": "bridge"
+              "scope": "hub:read bridge"
             }
           },
           "expect": {
