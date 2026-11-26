@@ -7703,12 +7703,13 @@ worldFileFails.actOf = (ref) => {
 // exterior.md.
 
 /* self-plain start */
-// self@2's reader (log.schema.json#self2): test/fixtures/world2/check.mjs's self rules, rule for rule
-// (its reading of lines, fences, code, comments and links; parts; the title; checkSelf; selfHeld, the
-// names rule's words), so the kit
-// gives every case of test/fixtures/world2/cases.json the result it lists. One closure, so none of
-// its names meets another of this file's; it reads nothing but its arguments and path (a test runs
-// this region alone). kit-863 may read exterior.md with it too.
+// self@2's and exterior@2's reader (log.schema.json#self2, #exterior): test/fixtures/world2/check.mjs's
+// rules, rule for rule (its reading of lines, fences, code, comments and links; parts; the title;
+// checkSelf; selfHeld, the names rule's words; and, since kit-863, namesWhole, entries, capitalised,
+// hosts and checkExterior, exterior.md's contract and names rule), so the kit gives every case of
+// test/fixtures/world2/cases.json the result it lists. One closure, so none of its names meets
+// another of this file's; it reads nothing but its arguments, path and URL (a test runs this region
+// alone).
 const selfPlain = (() => {
   // A line ends at LF, CR or CRLF, as markdown reads it.
   const lines = (text) => String(text).replace(/^﻿/, '').split(/\r\n?|\n/);
@@ -8117,7 +8118,248 @@ const selfPlain = (() => {
     return [...out];
   }
 
-  return { version, checkSelf, selfHeld, scan, plain, headings, links, parts };
+  // Whether text names name: as whole words (no letter or digit just before or after), ignoring case
+  // as a regular expression's i and u flags do (each code point by its simple case folding). The text
+  // is indexed once: each of its code points stands for the class of those equal to it ignoring case,
+  // so a name is a plain search and its two ends a look at the code points beside it.
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const LN = /[\p{L}\p{N}]/iu;
+  // The classes of a text's code points: each new code point's class is looked for first among those
+  // of its case bucket (its upper case's lower case, which almost always holds its class), then by one
+  // search of every class's first code point; none, and it starts one.
+  function classes() {
+    const reps = [];
+    let all = '';
+    const at = new Map(); // a class's offset in all to the class
+    const bucket = new Map();
+    const id = new Map();
+    const find = (c, add) => {
+      if (id.has(c)) return id.get(c);
+      const re = new RegExp(esc(c), 'iu');
+      const b = c.toUpperCase().toLowerCase();
+      let k = (bucket.get(b) ?? []).find((x) => re.test(reps[x]));
+      if (k === undefined) { const o = all.search(re); k = o < 0 ? -1 : at.get(o); }
+      if (k < 0 && add) { k = reps.length; reps.push(c); at.set(all.length, k); all += c; }
+      if (k >= 0) { if (!bucket.has(b)) bucket.set(b, []); if (!bucket.get(b).includes(k)) bucket.get(b).push(k); }
+      id.set(c, k);
+      return k;
+    };
+    return { find, count: () => reps.length };
+  }
+  const indexes = [];
+  function indexed(text) {
+    const had = indexes.find((x) => x.text === text);
+    if (had) return had;
+    const cps = Array.from(text);
+    const cl = classes();
+    for (const c of new Set(cps)) cl.find(c, true);
+    if (cl.count() >= 0xd700) return null; // more classes than keys: the caller asks the regular expression
+    const key = (k) => String.fromCharCode(0x100 + k);
+    const x = { text, cps, key, classOf: (c) => cl.find(c, false), keys: cps.map((c) => key(cl.find(c, false))).join('') };
+    indexes.unshift(x);
+    indexes.length = Math.min(indexes.length, 4);
+    return x;
+  }
+  function namesWhole(text, name) {
+    if (name.length > 500) return false;
+    if (!name) return new RegExp('(?<![\\p{L}\\p{N}])(?![\\p{L}\\p{N}])', 'iu').test(text);
+    const x = indexed(String(text));
+    if (!x) return new RegExp(`(?<![\\p{L}\\p{N}])${esc(name)}(?![\\p{L}\\p{N}])`, 'iu').test(text);
+    let want = '';
+    for (const c of name) { const k = x.classOf(c); if (k < 0) return false; want += x.key(k); }
+    const n = want.length;
+    for (let i = x.keys.indexOf(want); i >= 0; i = x.keys.indexOf(want, i + 1)) {
+      if (!(i > 0 && LN.test(x.cps[i - 1])) && !(i + n < x.cps.length && LN.test(x.cps[i + n]))) return true;
+    }
+    return false;
+  }
+
+  // The ### entries: [{ name, body }], body up to the next heading of level 3 or less.
+  function entries(text) {
+    const h = headings(text).filter((x) => x.level <= 3);
+    const all = plain(text).split('\n');
+    return h.flatMap((x, i) => (x.level === 3 ? [{ name: x.text, body: all.slice(x.line, (h[i + 1]?.line ?? all.length + 1) - 1).join('\n') }] : []));
+  }
+  const realDay = (d) => { const t = new Date(`${d}T00:00:00Z`); return !Number.isNaN(t.getTime()) && t.toISOString().slice(0, 10) === d; };
+  // A source is a web address, or a reference link whose definition (anywhere in the file) is one.
+  function entryWarnings({ name, body }, today, refs) {
+    const days = [...body.matchAll(/(?<![\p{L}\p{N}])read\s+(\d{4}-\d{2}-\d{2})(?!\d)/giu)].map((m) => m[1]).filter(realDay);
+    const web = /https?:\/\/[^\s/]/i.test(body) || [...body.matchAll(/\[([^[\]]+)\](?:\[([^[\]]*)\])?/g)].some((m) => refs.has((m[2] || m[1]).toLowerCase()));
+    const w = days.filter((d) => d > today).map((d) => `"${name}": read date ${d} is in the future`);
+    if (!web || !days.length) w.push(`"${name}" has no dated source`);
+    return w;
+  }
+  const webRefs = (text) => new Set([...plain(text).matchAll(/^ {0,3}\[([^[\]\n]+)\]:[ \t]*<?https?:\/\//gim)].map((m) => m[1].toLowerCase()));
+
+  // Every capitalised word of the whole text, no place skipped, each once in order: letters, digits,
+  // ' ’ and -, starting with a letter, a trailing 's dropped, upper-case first, two letters or more.
+  function capitalised(text) {
+    const out = new Set();
+    for (const m of String(text).matchAll(WORD)) {
+      const w = capWord(m[0]);
+      if (w) out.add(w);
+    }
+    return [...out];
+  }
+  // Character references as markdown and HTML read them, once: numeric ones, and the named ones whose
+  // value is one ASCII character. Any other is left as written.
+  const NAMED = { AMP: '&', DiacriticalGrave: '`', GT: '>', Hat: '^', LT: '<', NewLine: '\n', QUOT: '"', Tab: '\t', UnderBar: '_', VerticalLine: '|', amp: '&', apos: "'", ast: '*', bsol: '\\', colon: ':', comma: ',', commat: '@', dollar: '$', equals: '=', excl: '!', grave: '`', gt: '>', lbrace: '{', lbrack: '[', lcub: '{', lowbar: '_', lpar: '(', lsqb: '[', lt: '<', midast: '*', num: '#', percnt: '%', period: '.', plus: '+', quest: '?', quot: '"', rbrace: '}', rbrack: ']', rcub: '}', rpar: ')', rsqb: ']', semi: ';', sol: '/', verbar: '|', vert: '|' };
+  const numeric = (d, x) => { const c = d ? Number(d) : parseInt(x, 16); return String.fromCodePoint(c === 0 || c > 0x10ffff || (c >= 0xd800 && c <= 0xdfff) ? 0xfffd : c); };
+  // As markdown reads text: each backslash escape of ASCII punctuation and each character reference
+  // (with its ;) decoded, once.
+  const decode = (t, squeeze = false) => t.replace(/\\([!-/:-@[-`{-~])|&(?:#(\d{1,7})|#[xX]([0-9a-fA-F]{1,6})|([A-Za-z][A-Za-z0-9]{1,31}));/g, (all, p, d, x, n) => {
+    if (p) return squeeze && (p === '<' || p === '>') ? '' : p;
+    const v = n ? (Object.hasOwn(NAMED, n) ? NAMED[n] : all) : numeric(d, x);
+    return squeeze && /^[\s<>]$/u.test(v) ? '' : v;
+  });
+  // As a browser reads an HTML attribute's value (quoted or not, after = and any white space): its
+  // character references decoded, numeric ones and &amp; &lt; &gt; &quot; with or without the ;, then
+  // its tabs and line breaks taken out, as a URL is read.
+  const LEGACY = { amp: '&', AMP: '&', lt: '<', LT: '<', gt: '>', GT: '>', quot: '"', QUOT: '"' };
+  const attrs = (t, squeeze = false) => t.replace(/(=\s*)("[^"]*"|'[^']*'|[^\s"'=<>`]+)/g, (all, eq, v) => eq + v
+    .replace(/&(?:#(\d{1,7});?|#[xX]([0-9a-fA-F]{1,6});?|([A-Za-z][A-Za-z0-9]{1,31});|(amp|AMP|lt|LT|gt|GT|quot|QUOT)(?![A-Za-z0-9]))/g, (r, d, x, n, l) => (l ? LEGACY[l] : n ? (Object.hasOwn(NAMED, n) ? NAMED[n] : r) : numeric(d, x)))
+    .replace(squeeze ? /[\s<>]/gu : /[\t\r\n]/g, ''));
+  // The text with the white space inside each angle-bracket destination taken out ([x](<…>), [x]: <…>).
+  const angles = (t) => {
+    let out = '';
+    let at = 0;
+    for (let i = t.indexOf(']'); i >= 0; i = t.indexOf(']', i + 1)) {
+      if (i < at || (t[i + 1] !== '(' && t[i + 1] !== ':')) continue;
+      let j = i + 2;
+      while (t[j] === ' ' || t[j] === '\t') j += 1;
+      if (t[j] === '\n') { j += 1; while (t[j] === ' ' || t[j] === '\t' || t[j] === '>') j += 1; } // a quote's > markers too
+      if (t[j] !== '<') continue;
+      let k = j + 1;
+      while (k < t.length && t[k] !== '<' && t[k] !== '>' && t[k] !== '\n') k += 1;
+      if (t[k] !== '>') continue;
+      out += t.slice(at, j + 1) + t.slice(j + 1, k).replace(/\s/gu, '');
+      at = k;
+      i = k;
+    }
+    return out + t.slice(at);
+  };
+  // What follows a host to drop: anything not a letter or digit, from the end back.
+  const tail = (h) => { const c = Array.from(h); while (c.length && !/[\p{L}\p{N}]/u.test(c[c.length - 1])) c.pop(); return c.join(''); };
+  // One address's host from its authority: past the last @ (a user), else up to what ends a sentence
+  // or a link in prose (, ; ' " ` ( ) [ ] |); less a port and what follows the host.
+  const host = (a) => { const at = a.lastIndexOf('@'); const h = at >= 0 ? a.slice(at + 1) : a.replace(/[,;'"`()[\]|].*$/s, ''); return tail(h.replace(/:\d*$/, '')).toLowerCase(); };
+  // With no @, the authority whole as well, up to what a host may not hold ([ ] | ^ % :): a browser keeps
+  // , ; ' " ` ( ) in a host, so prose's ends are read both ways.
+  const whole = (a) => (a.includes('@') ? '' : tail(a.replace(/[[\]|^%:].*$/s, '')).toLowerCase());
+  // Every host in the whole text, lower case, each once: read as markdown decodes the text, then again
+  // with each HTML attribute's value read as a browser does. The authority after http: or https: and
+  // any slashes or backslashes (or ftp:, ws:, wss:, the browser's other schemes that read a host so),
+  // two or more slashes or backslashes not inside a word or path, up to a slash, backslash, ?, #,
+  // white space, < or >; another scheme's // up to a slash, ?, #, white space, < or > (a backslash
+  // is part of its authority); and where it holds ]( (a link's
+  // words ending in an address), each part of it on either side as well. Each address of a mailto:; an
+  // e-mail autolink <local@domain> (CommonMark's local-part characters); an e-mail address's host, as
+  // GitHub links a bare one (a letter, digit, . _ + or - before the @, a dot in the host); and a bare
+  // www. name.
+  const HOST = /<[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@([\p{L}\p{N}.-]+)>|(?:(?:https?|ftp|wss?):[/\\]*|(?<![\p{L}\p{N}/\\._-])[/\\]{2,})([^\s/\\?#<>]+)|mailto:([^\s/\\?#<>"`()[\]|]+)|(?<=[\p{L}\p{N}._+-])@([\p{L}\p{N}_-][\p{L}\p{N}._-]*)|(?<![\p{L}\p{N}/.@-])(www\.[^\s/\\?#<>]+)|(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/([^\s/?#<>]+)/giu;
+  // The third reading: the second, with the white space a URL keeps inside its user taken out, where
+  // markdown or HTML lets it stand inside an address (angle-bracket destinations, attribute values,
+  // references), the < and > a user may hold there too, and every white space but the ASCII ones.
+  // A plain link destination ([x](…), [x]: …, not <…>; after form feeds and vertical tabs, one line break and a quote's > markers
+  // too, as pandoc reads them), up to white space, with
+  // its < and > taken out: a browser encodes them inside a user.
+  const dests = (t) => t.replace(/(\]\(|\]:)([ \t\f\v]*(?:\n[ \t\f\v]*(?:>[ \t\f\v]*)*)?)(\S*)/g, (all, o, sp, v) => (v[0] === '<' ? all : o + sp + v.replace(/\\?[<>]/g, '')));
+  // Each quoted value after an = (and any white space), read on its own as ="…" or ='…', so a stray
+  // quote elsewhere cannot pair with an attribute's own and leave its value unread. Each value ends at
+  // the next quote of its kind, so the values of one kind do not overlap: linear.
+  const values = (t) => {
+    const out = [];
+    for (let i = t.indexOf('='); i >= 0; i = t.indexOf('=', i + 1)) {
+      let j = i + 1;
+      while (j < t.length && (t[j] === ' ' || t[j] === '\t' || t[j] === '\n' || t[j] === '\f' || t[j] === '\r')) j += 1;
+      const q = t[j];
+      if (q !== '"' && q !== "'") continue;
+      const k = t.indexOf(q, j + 1);
+      if (k > 0) out.push(`=${t.slice(j, k + 1)}`);
+    }
+    return out.join(' ');
+  };
+  // Every address as a browser reads it: a scheme (at a word's start, any length), a colon, and what
+  // follows up to white space, < or >, read by node's URL. Its host, percent-decoded (URL decodes a
+  // special scheme's; another's is decoded here); for mailto:, each address of its path and of its
+  // to, cc and bcc fields, decoded, past the last @. This closes the class the rules above spell out
+  // form by form: a host percent-encoded, behind punctuation a host keeps, or after a long scheme.
+  const ADDRESS = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:[^\s<>]*/giu;
+  // Each run of %xx decoded on its own, as a browser or a mail client does; a malformed one kept as written.
+  const pct = (s) => s.replace(/(?:%[0-9a-f]{2})+/gi, (r) => { try { return decodeURIComponent(r); } catch { return r.replace(/%([0-9a-f]{2})/gi, (x, h) => (parseInt(h, 16) < 128 ? String.fromCharCode(parseInt(h, 16)) : x)); } });
+  // An authority read again percent-decoded: whole, past its @, and by node's URL with an https base
+  // (so a scheme-relative //host, /\host or www. host is read as a browser on a web page reads it).
+  function decoded(a) {
+    if (!a.includes('%') && /^[\x20-\x7e]*$/.test(a)) return []; // nothing to decode: the readings above hold it
+    const d = pct(a);
+    const cut = a.replace(/[[\]|^"'`].*$/s, '');
+    const u = URL.canParse(`https://${cut}/`) ? new URL(`https://${cut}/`).hostname : '';
+    return [whole(d), host(d), tail(pct(u)).toLowerCase()];
+  }
+  // A mailto value's addresses: its path and its to, cc and bcc fields, each run of %xx decoded on its
+  // own, split at , and ;, the domain past each address's last @ up to what ends it in prose.
+  function mailHosts(v) {
+    const q = v.indexOf('?');
+    const fields = [q < 0 ? v : v.slice(0, q)];
+    if (q >= 0) for (const p of v.slice(q + 1).split('&')) { const e = p.indexOf('='); if (e > 0 && /^(?:to|cc|bcc)$/i.test(p.slice(0, e))) fields.push(p.slice(e + 1)); }
+    const out = [];
+    for (const f of fields) for (const a of pct(f).split(/[,;]/)) { const at = a.lastIndexOf('@'); if (at >= 0) out.push(a.slice(at + 1).replace(/[\s()[\]|^"'`<>].*$/s, '')); }
+    return out;
+  }
+  const MAILTO = /mailto:([^\s<>]*)/gi;
+  function urlHosts(s) {
+    if (/^mailto:/i.test(s)) return mailHosts(s.slice(7));
+    if (!URL.canParse(s)) return [];
+    const h = new URL(s).hostname;
+    return h ? [pct(h)] : [];
+  }
+  const third = (t) => decode(attrs(angles(dests(t)), true), true).replace(/[^\S\t\n\v\f\r ]/gu, '');
+  function hosts(text) {
+    const out = new Set();
+    const add = (h) => { if (h) out.add(h); };
+    const t = String(text).replace(/\r\n?/g, '\n'); // a line ends at LF, CR or CRLF
+    // A URL keeps white space inside its user (a browser encodes it), so a third reading takes out the
+    // white space inside angle-bracket destinations, attribute values, and what references decode to.
+    const v = values(t);
+    for (const each of new Set([decode(t), decode(attrs(t)), third(t), decode(attrs(v)), decode(attrs(v, true), true)])) { // each distinct reading once
+      for (const m of each.matchAll(HOST)) {
+        if (m[1] !== undefined) add(tail(m[1]).toLowerCase());
+        else if (m[2] !== undefined || m[6] !== undefined) {
+          const a = m[2] ?? m[6];
+          add(host(a)); add(whole(a));
+          for (const h of decoded(a)) add(h);
+          if (a.includes('](')) for (const b of a.split('](')) { add(host(b)); add(whole(b)); for (const h of decoded(b)) add(h); }
+        }
+        else if (m[3] !== undefined) { for (const a of m[3].split(/[,;]/)) if (a.includes('@')) add(host(a)); }
+        else if (m[4] !== undefined) { const h = tail(m[4]).toLowerCase(); if (h.includes('.')) add(h); }
+        else if (m[5] !== undefined) { add(host(m[5])); add(whole(m[5])); for (const h of decoded(m[5])) add(h); }
+      }
+      for (const m of each.matchAll(MAILTO)) for (const h of mailHosts(m[1])) add(tail(h).toLowerCase());
+      for (const u of each.matchAll(ADDRESS)) for (const h of urlHosts(u[0])) add(tail(h).toLowerCase());
+    }
+    return [...out];
+  }
+
+  // exterior.md: { errors, warnings, refused, held, hosts }. On a repo known private nothing is refused
+  // or held; visibility 'public' or 'unknown' keeps the names rule. A ### heading is judged by
+  // allowed.names (origin main's strategy and dependency names); a word or host by allowed.words (the
+  // strategy and the dependency files whole).
+  function checkExterior(text, { today, visibility, allowed }) {
+    const errors = docErrors(text, 'exterior');
+    const all = errors.length ? [] : entries(text);
+    const open = visibility === 'private';
+    const unknown = (list, by) => (open ? [] : list.filter((w) => !namesWhole(by, w)));
+    const refs = webRefs(text);
+    return {
+      errors,
+      warnings: all.flatMap((e) => entryWarnings(e, today, refs)),
+      refused: unknown(headings(text).filter((h) => h.level === 3).map((h) => h.text), allowed.names),
+      held: unknown(capitalised(text), allowed.words),
+      hosts: unknown(hosts(text), allowed.words),
+    };
+  }
+
+  return { version, checkSelf, selfHeld, scan, plain, headings, links, parts, namesWhole, entries, capitalised, hosts, checkExterior };
 })();
 // 1 when a fence's info string is exactly self or exterior (version 1), else 2.
 const selfPlainVersion = selfPlain.version;
@@ -8548,19 +8790,32 @@ function cmdSelf() {
 }
 /* self-model end */
 /* world-model start */
-// project/exterior.md, what the project relates to (log.schema.json#exterior@1): a markdown file whose
-// one fenced `exterior` block holds the contract. Rules 1 to 7 are kit-139's worldDocErrors; 8 to 10
-// follow test/fixtures/world/check.mjs, so the two refuse the same invalid/ cases.
+// project/exterior.md, what the project relates to: since kit-863 a plain document
+// (log.schema.json#exterior2), judged by the self-plain region's checkExterior, which follows
+// test/fixtures/world2/check.mjs rule for rule: one # title, ### entries, a dated source for each, and
+// on a repo not known to be private the names rule (a ### heading named whole in origin main's
+// strategy or dependency names, else refused; every capitalised word and every link host held until
+// named on the chore). A draft must be one. Version 1 (log.schema.json#exterior@1, one fenced
+// `exterior` block) still validates on main, by kit-135's rules below, and raises one exterior-drift.
 const EXTERIOR_REL = () => `${projectRel}/exterior.md`;
 const EXTERIOR_NOT_DRAFTED = 'exterior.md is not drafted yet: the supervisor drafts it from the strategy and self.md (supervisor.md, Monitoring)';
-// An exterior.md's text in: its parsed block (null unless it holds) and its contract errors. Past the
-// schema: an id shared across entities and signals (8), relation_word only and always for other (9),
-// and the prose outside the block naming each entity, as whole words in any case (10).
+// The day a read date is judged against: today, in UTC.
+const exteriorToday = () => new Date().toISOString().slice(0, 10);
+// An exterior.md's text in, as validate reads it: { version, block, errors }. Version 2 (no fenced self
+// or exterior block, selfPlainVersion) against exterior@2's form: the title, and no block. Version 1
+// against exterior@1, its block parsed when it holds; one whose block exterior@1's reader can't find (a
+// ~~~ fence, one indented or in a list item) gets exterior@2's block error. Past exterior@1's schema:
+// an id shared across entities and signals (8), relation_word only and always for other (9), and the
+// prose outside the block naming each entity, as whole words in any case (10).
 function exteriorDoc(text) {
+  const version = selfPlainVersion(text);
+  const plain = () => ({ version, block: null, errors: selfPlain.checkExterior(text, { today: exteriorToday(), visibility: 'private', allowed: { names: '', words: '' } }).errors });
+  if (version === 2) return plain();
+  const fb = fencedBlocks(text);
+  if (!fb.unclosed && !fb.blocks.some((x) => x.info === 'self' || x.info === 'exterior')) return plain();
   const errors = worldDocErrors(text, 'exterior');
-  if (errors.length) return { block: null, errors };
-  const b = fencedBlocks(text);
-  const v = JSON.parse(b.blocks.find((x) => x.info === 'exterior').body);
+  if (errors.length) return { version, block: null, errors };
+  const v = JSON.parse(fb.blocks.find((x) => x.info === 'exterior').body);
   const seen = new Set();
   const ids = v.entities.flatMap((e, i) => [[`exterior.entities[${i}].id`, e.id], ...e.signals.map((x, j) => [`exterior.entities[${i}].signals[${j}].id`, x.id])]);
   for (const [where, id] of ids) {
@@ -8570,14 +8825,14 @@ function exteriorDoc(text) {
   v.entities.forEach((e, i) => {
     if (e.relation === 'other' && e.relation_word === undefined) errors.push(`exterior.entities[${i}].relation_word is required when relation is other`);
     if (e.relation !== 'other' && e.relation_word !== undefined) errors.push(`exterior.entities[${i}].relation_word is only for relation other`);
-    if (!namesWhole(b.prose, e.name)) errors.push(`exterior.entities[${i}] "${e.name}": the prose outside the block never names it`);
+    if (!namesWhole(fb.prose, e.name)) errors.push(`exterior.entities[${i}] "${e.name}": the prose outside the block never names it`);
   });
-  return { block: errors.length ? null : v, errors };
+  return { version, block: errors.length ? null : v, errors };
 }
 const exteriorTreeText = () => readText(path.join(projectDir, 'exterior.md'));
-// The head's strategy.md and self.md blobs (null for no file): ref's, or with ref null the working
-// tree's (git hash-object, so an uncommitted draft counts), with the strategy's text when it was read
-// from the tree (a blob hash-object didn't write can't be read back with cat-file).
+// A version 1 file's checks past its contract, for validate. The head's strategy.md and self.md blobs
+// (null for no file): ref's, or with ref null the working tree's (git hash-object, so an uncommitted
+// draft counts), with the strategy's text when it was read from the tree.
 function headBlobs(ref, root = projectDir) {
   const rels = { strategy: strategyRel, self: `${projectRel}/self.md` };
   if (ref) {
@@ -8588,17 +8843,16 @@ function headBlobs(ref, root = projectDir) {
   return { strategyBlob: tree('strategy.md'), selfBlob: tree('self.md'), strategyText: readText(path.join(root, 'strategy.md')) };
 }
 // Whether validate is at the draft: main can be read and the working tree's exterior.md is not
-// main's (none on main counts as differing). With no main (a depth-1 CI checkout) it is not: the
-// stale state never errors, and check-pr and merge --chore run the draft's checks (spec, The check).
+// main's (none on main counts as differing). With no main (a depth-1 CI checkout) it is not.
 function exteriorAtDraft() {
   if (!projectInRepo || !mainRef()) return false;
   const f = path.join(projectDir, 'exterior.md');
   if (!fs.existsSync(f)) return false;
   return git(['hash-object', '--', f], mainRoot) !== git(['rev-parse', '--verify', '--quiet', `${mainRef()}:${EXTERIOR_REL()}`], mainRoot);
 }
-// Steps 2 and 3 of the check (spec, The check). Each quote is a verbatim part of the strategy_blob
-// object's text, always; a strategy_blob the repo can't read is an error at the draft and a warning
-// otherwise. At the draft, strategy_blob and self_blob are the head's strategy.md and self.md.
+// A version 1 block's quotes, each a verbatim part of its strategy_blob's text; a strategy_blob the
+// repo can't read is an error at the draft and a warning otherwise. At the draft, strategy_blob and
+// self_blob are the head's strategy.md and self.md.
 function exteriorBlobLines(block, { draft, strategyBlob, selfBlob, strategyText = null }) {
   const errors = [];
   const warnings = [];
@@ -8641,84 +8895,53 @@ function dependencyNames(ref = mainRef()) {
   }
   return { text: names.join('\n'), warnings };
 }
-// The names rule (spec, The names rule): an organisation or work is allowed when origin main's
-// strategy.md names it as whole words in any case, or, for depends_on, its dependency names do. The
-// branch's own strategy never counts; with no ref, nothing allows it. A group is never checked here
-// (its words are, in exteriorWords). refused: [{ index, name, line }]; warnings: the dependency files'.
-function exteriorNameLines(block, ref = mainRef()) {
-  const strategy = fileAtRef(strategyRel, ref) ?? '';
+// What the names rule allows at ref (origin main; the branch's own files never count): names, which
+// a ### heading must be named in whole (main's strategy.md and its dependency names), and words, which
+// hold every other capitalised word and every link host (main's strategy.md and its dependency files'
+// whole text, namesAllowedText); warnings, the dependency files'.
+function exteriorAllowed(ref = mainRef()) {
   const deps = dependencyNames(ref);
-  const refused = [];
-  block.entities.forEach((e, i) => {
-    if (e.kind !== 'organisation' && e.kind !== 'work') return;
-    const dep = e.relation === 'depends_on';
-    if (namesWhole(strategy, e.name) || (dep && namesWhole(deps.text, e.name))) return;
-    refused.push({ index: i, name: e.name, line: `exterior.entities[${i}] "${e.name}" (${e.kind}) is not named in origin main's strategy.md${dep ? ', nor its dependency files' : ''}: name it as a group, or have the strategy name it first` });
-  });
-  return { refused, warnings: deps.warnings };
+  return { names: `${fileAtRef(strategyRel, ref) ?? ''}\n${deps.text}`, words: namesAllowedText(ref), warnings: deps.warnings };
 }
-// An exterior.md's pieces for kit-139's capitalised words: the text outside the exterior block
-// (sentences; every other fenced block is in it, as selfPieces reads self.md), each name (every word, so a group's first word counts), each matters, strategy quote and signal
-// what (sentences), and each relation_word. With no parsed block, the whole text as prose.
-function exteriorPieces(text, block) {
-  if (!block) return [{ where: 'prose', text: String(text), sentences: true }];
-  const lines = String(text).split(/\r?\n/);
-  const b = fencedBlocks(text).blocks.find((x) => x.info === 'exterior');
-  // the block's lines, opening fence to closing, become one blank line
-  lines.splice(b.line - 1, b.body.split('\n').length + 2, '');
-  const pieces = [{ where: 'prose', text: lines.join('\n'), sentences: true }];
-  const add = (where, t, sentences) => pieces.push({ where, text: t, sentences });
-  block.entities.forEach((e, i) => {
-    add(`entities[${i}].name`, e.name, false);
-    add(`entities[${i}].matters`, e.matters, true);
-    e.strategy.forEach((q, j) => add(`entities[${i}].strategy[${j}]`, q, true));
-    e.signals.forEach((x, j) => add(`entities[${i}].signals[${j}].what`, x.what, true));
-    if (e.relation_word !== undefined) add(`entities[${i}].relation_word`, e.relation_word, false);
-  });
-  return pieces;
+// The one judgment of an exterior.md draft (exterior@2): the self-plain region's checkExterior, as on a
+// repo not known to be private: { errors, warnings, refused, held, hosts }. A caller on a private repo
+// drops refused, held and hosts; a version 1 block is an error, alone.
+function exteriorDraft(text, allowed) {
+  return selfPlain.checkExterior(text, { today: exteriorToday(), visibility: 'public', allowed });
 }
-// One exterior.md text's words that origin main's strategy and dependency files don't name.
-function exteriorWords(text, block, ref = mainRef()) {
-  return unknownNames(exteriorPieces(text, block), `${namesAllowedText(ref)}\n${dependencyNames(ref).text}`);
-}
+const exteriorRefusedLine = (name) => `"${name}" (a ### heading) is not named whole in origin main's strategy.md or its dependency names: on a repo not known to be private an entry is headed only by a name they give; head it as a group or a topic, or have the strategy name it first`;
 const exteriorWordLine = (w) => `"${w.word}" (${w.where}) is in neither origin main's strategy.md nor its dependency files: on a repo not known to be private, the draft is public once its branch is pushed; reword it, or check it and name it on the chore (chore pr --names-checked)`;
-// The draft's history (spec, The check, every version): steps 1 to 3 on head ({ text, blobs }, or
-// null when there is no exterior.md at the head), then the names rule and the words on each version
-// ([{ commit, text }], commit null for the head's own, each name and word kept at its first version).
-// { errors, warns, named: [{ line, commit }], words: [{ word, where, commit }] }.
-function exteriorVersionsScan(head, versions) {
+// The draft's history (every version is pushed): the contract and dated sources on head ({ text }, or
+// null when there is no exterior.md at the head), then the names rule on each version ([{ commit,
+// text }], commit null for the head's own): each refused heading and each held word or link host kept
+// at its first version. { errors, warns, named: [{ name, line, commit }], words: [{ word, where, commit }] }.
+function exteriorVersionsScan(head, versions, allowed) {
+  const judged = new Map();
+  const judge = (t) => { if (!judged.has(t)) judged.set(t, exteriorDraft(t, allowed)); return judged.get(t); };
   const errors = [];
   const warns = [];
-  if (head) {
-    const { block, errors: e } = exteriorDoc(head.text);
-    errors.push(...e);
-    if (block) { const b = exteriorBlobLines(block, { draft: true, ...head.blobs }); errors.push(...b.errors); warns.push(...b.warnings); }
-  }
+  if (head) { const d = judge(head.text); errors.push(...d.errors); warns.push(...d.warnings); }
   const named = [];
   const words = [];
   const seen = new Set();
-  let depWarns = null;
   for (const { commit, text } of versions) {
-    const block = exteriorDoc(text).block;
-    if (block) {
-      const n = exteriorNameLines(block);
-      depWarns ??= n.warnings;
-      for (const r of n.refused) if (!seen.has(`n:${r.name}`)) { seen.add(`n:${r.name}`); named.push({ line: r.line, commit }); }
-    }
-    for (const w of exteriorWords(text, block)) if (!seen.has(`w:${w.word}`)) { seen.add(`w:${w.word}`); words.push({ ...w, commit }); }
+    const d = judge(text);
+    for (const name of d.refused) if (!seen.has(`n:${name}`)) { seen.add(`n:${name}`); named.push({ name, line: exteriorRefusedLine(name), commit }); }
+    for (const [list, where] of [[d.held, 'word'], [d.hosts, 'link host']]) for (const word of list) if (!seen.has(`w:${word}`)) { seen.add(`w:${word}`); words.push({ word, where, commit }); }
   }
-  warns.push(...(depWarns ?? []));
+  warns.push(...allowed.warnings);
   return { errors, warns, named, words };
 }
 // A line's tail naming the commit that carries it, for a version that isn't the head's own.
 const exteriorCarries = (commit) => (commit ? `; commit ${commit.slice(0, 12)} carries it: rewrite the branch (once pushed, chore drop <slug> --reason "…" first; then git reset --soft origin/main and chore pr again)` : '');
 const EXTERIOR_NO_BASE = "no merge base with main: exterior.md's drafts can't be checked";
-// check-pr's hold on a PR changing exterior.md (spec, Commands), for checkPr in home: with exterior.md
-// at sha and a commit in merge-base..sha changing it, steps 1 to 3 at sha, and the names rule (public a
-// fail, unknown a warning, private nothing) and namesHoldLines over every version. With no
-// exterior.md at sha, steps 1 to 3 are skipped (a deletion of main's is kit-138's gate) but every
-// version since the base is still read: one added then deleted would land in main's history (final-1
-// F2). With no main, one warning (merge, which has main, checks it). { fails, warns }.
+// check-pr's hold on a PR changing exterior.md, for checkPr in home: with exterior.md at sha and a
+// commit in merge-base..sha changing it, the contract at sha (a fail) and its dated sources (warnings),
+// and over every version since the base the names rule: a refused heading a fail on a public repo and
+// a warning on an unknown one, each held word or link host namesHoldLines' (public a fail, unknown a
+// warning, cleared by a names-checked act on the chore), a private repo nothing. With no exterior.md at
+// sha the contract is skipped (a deletion of main's is kit-138's gate) but every version is still read:
+// one added then deleted would land in main's history. With no main, one warning. { fails, warns }.
 function exteriorDraftLines(base, sha, branch) {
   const rel = EXTERIOR_REL();
   const none = { fails: [], warns: [] };
@@ -8730,11 +8953,10 @@ function exteriorDraftLines(base, sha, branch) {
   if (!blobs.length) return none;
   const read = (b) => git(['cat-file', 'blob', b], mainRoot) ?? '';
   const versions = [...(headBlob ? [{ commit: null, text: read(headBlob) }] : []), ...blobs.filter((b) => b.blob !== headBlob).map((b) => ({ commit: b.commit, text: read(b.blob) }))];
-  const x = exteriorVersionsScan(headBlob ? { text: read(headBlob), blobs: headBlobs(sha) } : null, versions);
+  const x = exteriorVersionsScan(headBlob ? { text: read(headBlob) } : null, versions, exteriorAllowed());
   let vis;
   const visibility = () => (vis ??= repoVisibility());
-  const contract = new Set(headBlob ? exteriorDoc(read(headBlob)).errors : []);
-  const fails = x.errors.map((e) => (contract.has(e) ? `${rel} breaks exterior@1 at ${sha.slice(0, 12)}: ${e}` : `${rel} at ${sha.slice(0, 12)}: ${e}`));
+  const fails = x.errors.map((e) => `${rel} breaks exterior@2 at ${sha.slice(0, 12)}: ${e}`);
   const warns = x.warns.map((w) => `${rel}: ${w}`);
   if (x.named.length) {
     const lines = x.named.map((n) => `${rel}: ${n.line}${exteriorCarries(n.commit)}`);
@@ -8747,14 +8969,15 @@ function exteriorDraftLines(base, sha, branch) {
   const h = namesHoldLines({ rel, words: x.words, act, checked: namesChecked(act, 'exterior', since), visibility });
   return { fails: [...fails, ...h.fails], warns: [...warns, ...h.warns] };
 }
-// chore pr's hold on an exterior.md draft (spec, Commands), every read in the chore's worktree wt.
-// phase 'tree', before git add: the working tree's exterior.md and every blob already committed
-// since base, so a name in a hand commit refuses before anything new is committed. phase 'range',
-// after the commit and before the push: every blob since base, the head's first. At the draft only:
-// the tree's file differs from main's, a commit since base changes it, or there is no origin main
-// (then only the tree and HEAD's blob are read). A refused name, or on a repo not known to be
-// private a word checkedWords doesn't name, fails; unknown visibility counts as not private.
-// { fails, warns, words (to log once named), changed }.
+// chore pr's hold on an exterior.md draft, every read in the chore's worktree wt. phase 'tree', before
+// git add: the working tree's exterior.md and every blob already committed since base, so a name in a
+// hand commit refuses before anything new is committed. phase 'range', after the commit and before the
+// push: every blob since base, the head's first. At the draft only: the tree's file differs from
+// main's, a commit since base changes it, or there is no origin main (then only the tree and HEAD's
+// blob are read). The contract at the head fails; on a repo not known to be private (unknown counts as
+// not private) a refused heading fails, whatever --names-checked says, and so does a held word or link
+// host checkedWords doesn't name. A private repo holds no name. { fails, warns (the dated sources and
+// the dependency files', printed once pushed), words (to log once named), changed }.
 function exteriorChoreLines(wt, phase, { base, checkedWords }) {
   const rel = EXTERIOR_REL();
   const none = { fails: [], warns: [], words: [], changed: false };
@@ -8770,18 +8993,17 @@ function exteriorChoreLines(wt, phase, { base, checkedWords }) {
   const treeDraft = treeText !== null && (!main || git(['hash-object', '--', treeFile], wt) !== at(main));
   if (!treeDraft && !blobs.length) return none;
   const read = (b) => git(['cat-file', 'blob', b], wt) ?? '';
-  const root = path.join(wt, projectRel);
   let versions;
   let headDoc;
   if (phase === 'tree') {
     versions = [...blobs.map((b) => ({ commit: b.commit, text: read(b.blob) })), ...(treeText !== null ? [{ commit: null, text: treeText }] : [])];
-    headDoc = treeText !== null ? { text: treeText, blobs: headBlobs(null, root) } : null;
+    headDoc = treeText !== null ? { text: treeText } : null;
   } else {
     versions = [...(headBlob ? [{ commit: null, text: read(headBlob) }] : []), ...blobs.filter((b) => b.blob !== headBlob).map((b) => ({ commit: b.commit, text: read(b.blob) }))];
-    headDoc = headBlob ? { text: read(headBlob), blobs: headBlobs(head) } : null;
+    headDoc = headBlob ? { text: read(headBlob) } : null;
   }
-  const x = exteriorVersionsScan(headDoc, versions);
-  const fails = [...x.errors];
+  const x = exteriorVersionsScan(headDoc, versions, exteriorAllowed());
+  const fails = x.errors.map((e) => `exterior.md: ${e}`);
   const warns = [...x.warns];
   let vis;
   const visibility = () => (vis ??= repoVisibility());
@@ -8789,54 +9011,15 @@ function exteriorChoreLines(wt, phase, { base, checkedWords }) {
   if (x.named.length && visibility() !== 'private') fails.push(...x.named.map((n) => `${n.line}${visibility() === 'unknown' ? ` (${unknown})` : ''}${exteriorCarries(n.commit)}`));
   const shown = (w) => `"${w.word}" (${w.where})${w.commit ? ` in ${w.commit.slice(0, 12)}` : ''}`;
   const open = x.words.filter((w) => !checkedWords?.has(w.word));
-  if (open.length && visibility() === 'private') warns.push(...open.map((w) => `${shown(w)} is in neither origin main's strategy.md nor its dependency files: the repo is private, so it may be pushed`));
-  else if (open.length) {
-    fails.push(`exterior.md names words origin main's strategy.md and dependency files don't, and ${visibility() === 'public' ? 'this repo is public' : unknown}, so the draft is public once pushed: ${open.map(shown).join(', ')}; reword them, or check each and name it: --names-checked ${x.words.map((w) => w.word).join(',')}`);
+  if (open.length && visibility() !== 'private') {
+    // --names-checked splits at commas, so a word or host holding one can't be named: only rewording clears it
+    const nameable = x.words.filter((w) => !w.word.includes(','));
+    const commas = open.filter((w) => w.word.includes(','));
+    fails.push(`exterior.md names words origin main's strategy.md and dependency files don't, and ${visibility() === 'public' ? 'this repo is public' : unknown}, so the draft is public once pushed: ${open.map(shown).join(', ')}; reword them, or check each and name it${nameable.length ? `: --names-checked ${nameable.map((w) => w.word).join(',')}` : ''}`);
+    if (commas.length) fails.push(`${commas.map(shown).join(', ')} ${commas.length > 1 ? 'hold' : 'holds'} a comma, which --names-checked can't name: reword ${commas.length > 1 ? 'them' : 'it'}`);
     for (const c of [...new Set(open.map((w) => w.commit).filter(Boolean))]) fails.push(`${c.slice(0, 12)} carries a word: rewrite the branch (once pushed, chore drop ${path.basename(wt).replace(/^chore-/, '')} --reason "…" first; then git reset --soft origin/main and chore pr again), or check and name the word`);
   }
   return { fails, warns, words: open.length ? [] : x.words.map((w) => w.word), changed: true };
-}
-// exterior check's lines for the working tree's exterior.md (null text: none): the contract, the
-// blobs as at the draft, then (at the draft) the names rule by the repo's visibility (public an
-// error, unknown a warning, private nothing; gh asked only when a name is refused) and the words.
-// errors exit 1; warnings leave the exit as it is.
-function exteriorCheckLines({ draft = true } = {}) {
-  const text = exteriorTreeText();
-  if (text === null) return { errors: [], warnings: [] };
-  const { block, errors } = exteriorDoc(text);
-  if (!block) return { errors, warnings: draft ? exteriorWords(text, null).map(exteriorWordLine) : [] };
-  const r = exteriorBlobLines(block, { draft, ...headBlobs(null) });
-  if (!draft) return r;
-  const names = exteriorNameLines(block);
-  r.warnings.push(...names.warnings);
-  if (names.refused.length) {
-    const v = repoVisibility();
-    if (v === 'public') r.errors.push(...names.refused.map((x) => x.line));
-    else if (v === 'unknown') r.warnings.push(...names.refused.map((x) => `${x.line} (the repo's visibility is unknown, which counts as not private)`));
-  }
-  r.warnings.push(...exteriorWords(text, block).map(exteriorWordLine));
-  return r;
-}
-// validate's lines for the working tree's exterior.md: the contract and the quotes, and the blobs at
-// the draft (exteriorAtDraft); none when there is no file. Never the names rule.
-function exteriorValidateLines() {
-  const text = exteriorTreeText();
-  if (text === null) return { errors: [], warnings: [] };
-  const { block, errors } = exteriorDoc(text);
-  if (!block) return { errors, warnings: [] };
-  return exteriorBlobLines(block, { draft: exteriorAtDraft(), ...headBlobs(null) });
-}
-// The contract's relations, in the order show and the dashboard group them by.
-const EXTERIOR_RELATIONS = ['serves', 'depends_on', 'builds_on_it', 'alternative', 'collaborates', 'governs', 'affects', 'other'];
-// dashboard-data's exterior block (log.schema.json#exterior@1 dashboard), as check.mjs's
-// dashboardExterior gives it: file order, relation_word or null, each signal's score weight×value.
-function exteriorDashboard(block) {
-  return {
-    entities: block.entities.map((e) => ({
-      entity: e.id, relation: e.relation, relation_word: e.relation_word ?? null, kind: e.kind, name: e.name, matters: e.matters, weight: e.weight,
-      signals: e.signals.map((x) => ({ signal: x.id, what: x.what, value: x.value, score: e.weight * x.value })),
-    })),
-  };
 }
 // main's exterior.md: { text, blob }, or null when main has none; with no main, or the project
 // outside the repo, the working tree's (as selfMainText reads self.md).
@@ -8848,72 +9031,133 @@ function exteriorOnMain() {
   const text = exteriorTreeText();
   return text === null ? null : { text, blob: null };
 }
-// exterior show's lines: the Self's what, then each relation that has entities, in the contract's
-// order; under it its entities in file order, each with why it matters and its signals by score,
-// high to low, ties in file order (a stable sort).
-function exteriorShowLines(block, selfWhat) {
-  const lines = [`Self: ${selfWhat ?? 'not drafted yet'}`];
-  if (!block.entities.length) return [...lines, 'no entity drawn yet'];
-  for (const rel of EXTERIOR_RELATIONS) {
-    const es = block.entities.filter((e) => e.relation === rel);
-    if (!es.length) continue;
-    lines.push('', rel);
-    for (const e of es) {
-      lines.push(`  ${e.name} (${e.kind}, weight ${e.weight})${e.relation === 'other' ? `: ${e.relation_word}` : ''}`, `    ${e.matters}`);
-      const sig = e.signals.map((x) => ({ score: e.weight * x.value, what: x.what })).sort((a, b) => b.score - a.score);
-      for (const x of sig) lines.push(`    ${x.score}  ${x.what}`);
-    }
+// The commit main's exterior.md (blob) was drawn at, whose strategy.md and self.md it stands on (the
+// design's Staleness, from git): 1. the pinned commit of the latest exterior-change question the owner
+// answered with its recommendation whose pinned blob is blob (a refused one never counts), when this
+// clone has that commit; 2. else the commit that last changed the file on main, unless it is a
+// shallow clone's boundary (whose change can't be read); 3. else unknown. { commit, from } or
+// { commit: null, why }.
+function exteriorBase(main, blob) {
+  const rel = EXTERIOR_REL();
+  const pins = questions().filter((v) => v.class === 'exterior-change' && v.status === 'answered' && v.answered_by === 'owner' && v.matched === true)
+    .map((v) => ({ id: v.id, at: String(v.answered_at ?? ''), pin: (v.links ?? []).find((l) => isObj(l) && l.path === rel && l.blob === blob && typeof l.ref === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(l.ref)) }))
+    .filter((x) => x.pin).sort((a, b) => a.at.localeCompare(b.at));
+  const last = pins.pop();
+  if (last && git(['cat-file', '-e', `${last.pin.ref}^{commit}`], mainRoot) !== null) return { commit: last.pin.ref, from: `${last.id}'s draft` };
+  const changed = git(['log', '-1', '--format=%H', main, '--', rel], mainRoot);
+  if (!changed) return { commit: null, why: 'no commit on main changes it' };
+  if (git(['rev-parse', '--is-shallow-repository'], mainRoot) === 'true') {
+    const shallow = readText(path.resolve(mainRoot, git(['rev-parse', '--git-path', 'shallow'], mainRoot) ?? '.git/shallow')) ?? '';
+    if (shallow.split('\n').includes(changed)) return { commit: null, why: `the last commit changing it, ${changed.slice(0, 12)}, is this shallow clone's boundary` };
   }
-  return lines;
+  return { commit: changed, from: 'the last commit changing it on main' };
 }
 // metrics' exterior findings, read from main with no network call (none with no main), each keyed so
-// observeFindings keeps one observation per name or blob pair (spec, Findings):
-// exterior-drift once per organisation or work the names rule no longer allows against main's files,
-// unless the visibility last recorded is private; exterior-stale while main's strategy.md or self.md
-// blob isn't the one exterior.md drew from; both low. exterior-missing while main has self.md, a
-// written strategy linking it, and no exterior.md: high until an exterior-change question is asked,
-// medium while it is open (worldMissingSeverity, kit-814). A main exterior.md breaking the contract
-// raises none (validate errors on it).
+// observeFindings keeps one observation per name or blob pair. A version 1 exterior.md: one
+// exterior-drift (key exterior@1) asking for the plain version, and no other. A plain one:
+// exterior-drift once per ### heading main's strategy.md and dependency names no longer name, only
+// where the repo was last known public (a machine with no record says nothing); exterior-stale while
+// main's strategy.md or self.md blob isn't the one at its base (exteriorBase; unknown raises none);
+// both low. exterior-missing while main has self.md, a written strategy linking it, and no
+// exterior.md: high until an exterior-change question is asked, medium while it is open
+// (worldMissingSeverity, kit-814).
 function exteriorFindings(add) {
   const main = projectInRepo ? mainRef() : null;
   if (!main) return;
-  const blobAt = (rel) => git(['rev-parse', '--verify', '--quiet', `${main}:${rel}`], mainRoot);
-  const strategyBlob = blobAt(strategyRel);
-  const selfBlob = blobAt(selfRel());
+  const blobAt = (c, rel) => git(['rev-parse', '--verify', '--quiet', `${c}:${rel}`], mainRoot);
+  const strategyBlob = blobAt(main, strategyRel);
+  const selfBlob = blobAt(main, selfRel());
   const pair = `${strategyBlob}-${selfBlob}`;
   const m = exteriorOnMain();
   if (!m) {
     if (selfBlob && strategyState() === 'written' && linksSelf(strategyMainText())) add(worldMissingSeverity('exterior-change'), 'exterior-missing', 'exterior', 'main has self.md and a strategy linking it, and no exterior.md', 'draft exterior.md from the strategy and self.md (supervisor.md, Monitoring) in a chore, run exterior check, and ask exterior-change', { key: pair });
     return;
   }
-  const { block } = exteriorDoc(m.text);
-  if (!block) return;
-  if (lastRepoVisibility() !== 'private') {
-    for (const r of exteriorNameLines(block, main).refused) add('low', 'exterior-drift', 'exterior', `exterior.md names "${r.name}", which main's strategy.md${block.entities[r.index].relation === 'depends_on' ? ' and dependency files' : ''} no longer name`, 'draft a new version of exterior.md that names it as a group, or have the strategy name it; run exterior check before chore pr', { key: r.name.toLowerCase() });
+  if (selfPlainVersion(m.text) === 1) {
+    add('low', 'exterior-drift', 'exterior', "main's exterior.md is version 1 (a fenced exterior block)", 'draft exterior.md as a plain document in a chore (exterior check, then chore pr and ask exterior-change; supervisor.md, Monitoring)', { key: 'exterior@1' });
+    return;
   }
-  if (block.strategy_blob !== strategyBlob || block.self_blob !== selfBlob) add('low', 'exterior-stale', 'exterior', `exterior.md drew from ${block.strategy_blob !== strategyBlob ? 'a strategy.md' : 'a self.md'} main has moved on from`, 're-read self.md first and draft a new one if it no longer holds; then draft a new version of exterior.md from the strategy and that self.md', { key: pair });
+  if (lastRepoVisibility() === 'public') {
+    const allowed = exteriorAllowed(main);
+    const seen = new Set();
+    for (const h of selfPlain.headings(m.text)) {
+      if (h.level !== 3 || seen.has(h.text.toLowerCase()) || selfPlain.namesWhole(allowed.names, h.text)) continue;
+      seen.add(h.text.toLowerCase());
+      add('low', 'exterior-drift', 'exterior', `exterior.md's entry "${h.text}" is named in neither main's strategy.md nor its dependency names`, 'draft a new version of exterior.md that heads it as a group or a topic, or have the strategy name it; run exterior check before chore pr', { key: h.text.toLowerCase() });
+    }
+  }
+  const base = exteriorBase(main, m.blob);
+  if (!base.commit) return;
+  const sb = blobAt(base.commit, strategyRel);
+  const fb = blobAt(base.commit, selfRel());
+  if (sb !== strategyBlob || fb !== selfBlob) add('low', 'exterior-stale', 'exterior', `exterior.md drew from ${sb !== strategyBlob ? 'a strategy.md' : 'a self.md'} main has moved on from (at ${base.commit.slice(0, 12)}, ${base.from})`, 're-read self.md first and draft a new one if it no longer holds; then draft a new version of exterior.md from the strategy and that self.md', { key: pair });
 }
-// exterior show [--json]: the working tree's exterior.md and self.md. exterior check: the working
-// tree's, the draft.
+// exterior check's lines for the working tree's exterior.md, the draft: the contract (errors) and its
+// dated sources (warnings); then, on a repo not known to be private (gh asked only when a name is
+// refused or held), each refused heading an error and each held word or link host a warning; and,
+// with a plain exterior.md on main whose base can't be read, a warning that its staleness is unknown.
+function exteriorCheckLines() {
+  const text = exteriorTreeText();
+  if (text === null) return { errors: [], warnings: [] };
+  const allowed = exteriorAllowed();
+  const d = exteriorDraft(text, allowed);
+  const errors = [...d.errors];
+  const warnings = [...d.warnings, ...allowed.warnings];
+  if (d.refused.length || d.held.length || d.hosts.length) {
+    const v = repoVisibility();
+    if (v !== 'private') {
+      const tail = v === 'unknown' ? " (the repo's visibility is unknown, which counts as not private)" : '';
+      errors.push(...d.refused.map((n) => `${exteriorRefusedLine(n)}${tail}`));
+      warnings.push(...[...d.held.map((word) => ({ word, where: 'word' })), ...d.hosts.map((word) => ({ word, where: 'link host' }))].map(exteriorWordLine));
+    }
+  }
+  const main = projectInRepo ? mainRef() : null;
+  const m = main ? exteriorOnMain() : null;
+  if (m && selfPlainVersion(m.text) === 2) {
+    const base = exteriorBase(main, m.blob);
+    if (!base.commit) warnings.push(`whether main's exterior.md is stale is unknown: ${base.why}, and no answered exterior-change question pins a commit this clone has`);
+  }
+  return { errors, warnings };
+}
+// validate's lines for the working tree's exterior.md: the contract (either version), and for a
+// version 1 file its quotes, and its blobs at the draft (exteriorAtDraft); none when there is no file.
+// Never the names rule, nor the dated sources.
+function exteriorValidateLines() {
+  const text = exteriorTreeText();
+  if (text === null) return { errors: [], warnings: [] };
+  const { block, errors } = exteriorDoc(text);
+  if (!block) return { errors, warnings: [] };
+  return exteriorBlobLines(block, { draft: exteriorAtDraft(), ...headBlobs(null) });
+}
+// dashboard-data's exterior block (log.schema.json#exterior@1 dashboard), for a version 1 file whose
+// block holds: file order, relation_word or null, each signal's score weight×value. kit-868 drops it.
+function exteriorDashboard(block) {
+  return {
+    entities: block.entities.map((e) => ({
+      entity: e.id, relation: e.relation, relation_word: e.relation_word ?? null, kind: e.kind, name: e.name, matters: e.matters, weight: e.weight,
+      signals: e.signals.map((x) => ({ signal: x.id, what: x.what, value: x.value, score: e.weight * x.value })),
+    })),
+  };
+}
+// exterior show [--json]: main's exterior.md, printed as it is, either version (--json: a version 1
+// block's dashboard data, else null). exterior check: the working tree's, the draft
+// (exteriorCheckLines: errors exit 1; warnings leave the exit as it is).
 function cmdExterior() {
   const sub = positional[0];
   if (sub === 'show') {
-    const text = exteriorTreeText();
-    if (text === null) return flags.json ? json(null) : out(EXTERIOR_NOT_DRAFTED);
-    const { block, errors } = exteriorDoc(text);
-    if (errors.length) {
-      for (const e of errors) out(`error: exterior.md: ${e}`);
-      process.exit(1);
-    }
-    if (flags.json) return json(exteriorDashboard(block));
-    const selfText = readText(path.join(projectDir, 'self.md'));
-    const self = selfText === null ? null : selfDoc(selfText).block;
-    return out(exteriorShowLines(block, self?.what ?? null).join('\n'));
+    gitReadCache = new Map();
+    const m = exteriorOnMain();
+    if (m === null) return flags.json ? json(null) : out(EXTERIOR_NOT_DRAFTED);
+    if (flags.json) { const d = exteriorDoc(m.text); return json(d.block ? exteriorDashboard(d.block) : null); }
+    out(`Exterior: ${EXTERIOR_REL()} ${projectInRepo && mainRef() ? 'on main' : 'in the working tree'}`);
+    out('');
+    out(String(m.text).replace(/\s+$/, ''));
+    return;
   }
   if (sub === 'check') {
     if (exteriorTreeText() === null) return out('no exterior.md: nothing to check');
     gitReadCache = new Map();
-    const { errors, warnings } = exteriorCheckLines({ draft: true });
+    const { errors, warnings } = exteriorCheckLines();
     for (const e of errors) out(`error: exterior.md: ${e}`);
     for (const w of warnings) out(`warn: exterior.md: ${w}`);
     process.exit(errors.length ? 1 : 0);
@@ -37230,6 +37474,7 @@ async function browserRetryPort(name, lost) {
   const left = pool.filter((p) => !lost.has(p) && !held.has(p) && previewPortOk(p) === true);
   for (let i = left.length - 1; i > 0; i--) { const j = crypto.randomInt(i + 1); [left[i], left[j]] = [left[j], left[i]]; }
   for (const p of left) if (await portFree(p)) return p;
+  removePreview(name); // kit-917: the last try's record goes with it, never left naming a lost port
   die(`browser: no free view port left in ${PREVIEW_PICK[0]}-${PREVIEW_PICK.at(-1)} to retry on: this start lost ${[...lost].join(', ')} to other servers' binds; try again once one is free`);
 }
 // A live daemon, or one started: in the browser preview's window, under the start lock, the memory
@@ -38379,7 +38624,9 @@ const browserPgidOf = (pid) => {
 };
 // browser reap (internal): the dead daemon's Chrome given 3 s to end, then killed (its group, and each
 // process on the profile in that group); the session files deleted once no process holds the profile,
-// or the failure said in last-error. It stands down, on any pass, when the profile is gone, a live
+// or the failure said in last-error; once no session file is left, a last-error line that says they
+// stay is made true (kit-917): a shutdown's reason, or a failed delete's own words, kept and ended with
+// "the session files were deleted after the daemon ended"; a report of its own about them removed. It stands down, on any pass, when the profile is gone, a live
 // daemon runs (state.json's daemon_pid, a browser serve), or a start holds the start lock. It makes no
 // folder. DEVTEAM_TEST_BROWSER_REAP_DONE=<file> (tests): "done <exit code>" appended as it ends.
 async function browserReap() {
@@ -38401,8 +38648,20 @@ async function browserReapRun() {
     const p = /^([1-9]\d*)-/.exec(t ?? '')?.[1];
     return !!p && browserAlive(Number(p));
   };
+  // a file that can't even be looked at (EACCES, EIO) counts as left, so its failed delete is still said
+  const left = () => browserSessionFiles(profile).some((f) => { try { return !!fs.lstatSync(f, { throwIfNoEntry: false }); } catch { return true; } });
+  const gone = () => {
+    if (standDown()) return 0;
+    const text = browserReadLastError()?.replace(/^\S+ /, '') ?? '';
+    const i = text.indexOf('; the session files stay: '), done = '; the session files were deleted after the daemon ended';
+    const keep = i > 0 ? text.slice(0, i) : text.startsWith("browser: couldn't delete ") ? text : null; // a reason, or a failed delete's own words
+    if (keep !== null) browserLastError(`${keep.slice(0, 300 - done.length)}${done}`, { make: false });
+    else if (text.includes('session files stay')) { try { fs.rmSync(browserErrorFile(), { force: true }); } catch {} } // the reaper's own report
+    return 0;
+  };
   const report = (msg) => {
     if (standDown()) return 0;
+    if (!left()) return gone(); // kit-917: nothing stays, so nothing says it does
     if (!fs.existsSync(BROWSER_DIR())) return 1;
     browserReportDelete(browserReadLastError()?.replace(/^\S+ /, '') ?? null, msg, { make: false });
     return 1;
@@ -38422,7 +38681,7 @@ async function browserReapRun() {
     const procs = browserProcsOn(profile);
     if (procs === null) return report("browser: couldn't list this machine's processes after the daemon ended, so the session files stay");
     if (!procs.length) {
-      try { browserDeleteSession(profile); return 0; } catch (e) { return report(String(e?.message ?? e)); }
+      try { browserDeleteSession(profile); return gone(); } catch (e) { return report(String(e?.message ?? e)); }
     }
     if (Date.now() > end) return report(`browser: the daemon ended and a process (pid ${procs[0]}) still had the profile 5 s later; its session files stay until browser stop or the next start`);
   }
@@ -40101,7 +40360,7 @@ const HELP_OBSERVE = `Observe and orient
   governance [--json]   the kit's governance and process files and the project's strategy, Self and exterior: title, last change, changed here
   self show [--json]   main's project/self.md, what the project is, printed as it is; --json is the dashboard's self block, null when not drafted or plain (self@2)
   self check   the working tree's self.md against self@2 (a plain document; a fenced self block is refused), each part link on disk, and the names rule; errors exit 1, warnings don't
-  exterior show [--json] | exterior check   the working tree's project/exterior.md, what the project relates to, by relation, with each entity's signals and scores (--json the dashboard's exterior block, null when not drafted); check: the working tree's against exterior@1, its blobs and quotes at the draft, and the names rule; errors exit 1
+  exterior show [--json] | exterior check   show: main's project/exterior.md, what the project relates to, printed as it is (--json a version 1 block's dashboard data, else null); check: the working tree's draft against exterior@2 (a version 1 block refused), its dated sources, and on a repo not known to be private the names rule (a ### heading not named whole in origin main's strategy or dependency names refused; each other capitalised word and link host held until named on the chore); errors exit 1
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
   search "<words>" [--type <log type>|doc]… [--since <date>] [--limit n] [--json]   what the project already wrote about it, best first, quoted as data (supervisor.md §6)
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …`;
