@@ -9049,7 +9049,7 @@ function openLib(id) {
 const avDay = (t) => { const d = new Date(t); return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); };
 // a version's words, as the pill and the list say them
 function avVersionLabel(v) {
-  if (v.kind === 'draft') return `Draft · live in ${v.worktree ?? v.at}`;
+  if (v.kind === 'draft') return `Draft · live in ${v.worktree ?? v.at}${v.time ? ` · ${avDay(v.time)}` : ''}`;
   if (v.kind === 'landed') return `Landed on main${v.time ? ` · ${avDay(v.time)}` : ''}`;
   return [avDay(v.time), String(v.commit ?? '').slice(0, 7)].filter(Boolean).join(' · ');
 }
