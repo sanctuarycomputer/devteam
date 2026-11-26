@@ -930,6 +930,7 @@ function showOnly(key) {
   // the one tab panel, labelled by the selected tab (none under Settings)
   const on = key === TERM ? term?.tab : key === OVERVIEW ? ovTab : items.get(key)?.tab;
   if (on?.id) framesEl.setAttribute('aria-labelledby', on.id); else framesEl.removeAttribute('aria-labelledby');
+  hubShow(key);
 }
 function selectOverview() {
   selected = OVERVIEW;
@@ -1330,6 +1331,7 @@ function hubBase(it) {
   if (!(f instanceof HTMLIFrameElement) || !url) return;
   const base = box?.v === 2 ? `${url}#` : `${location.origin}${location.pathname}#${encodeURIComponent(keyOf(it))}/`;
   try { f.contentWindow?.postMessage({ devteam: 'hub-base', base }, new URL(url).origin); } catch {}
+  hubVisible(it);
 }
 // the Overview's address: the operator thread open on it, if one with a name is
 const tlHash = () => (TL.open && !String(TL.open).startsWith('pending-') ? `#overview?ot=${encodeURIComponent(TL.open)}` : '#overview');
@@ -1443,6 +1445,25 @@ window.addEventListener('popstate', (e) => {
   hubPopAt = location.hash;
 });
 /* hubHistory end */
+/* hubVisible start */
+// dashboard-shell@3 §10's hub-visible: a project's frame hears true when its tab is selected, false
+// when it is left, and where it stands after every hub-base. Sent to the frame's origin alone.
+let hubShown = null;
+function hubVisible(it, visible = selected === it?.x.root) {
+  const f = it?.frame;
+  const url = it ? urlOf(it.x) : null;
+  if (!(f instanceof HTMLIFrameElement) || !url) return;
+  try { f.contentWindow?.postMessage({ devteam: 'hub-visible', visible }, new URL(url).origin); } catch {}
+}
+function hubShow(key) {
+  if (key === hubShown) return;
+  const was = items.get(hubShown);
+  hubShown = key;
+  if (was) hubVisible(was, false);
+  const now = items.get(key);
+  if (now) hubVisible(now, true);
+}
+/* hubVisible end */
 // a card's ⋯: its root and port, and two ways to open its dashboard
 let menuPop = null;
 // closed, the keyboard goes back to the ⋯ it came from (Escape), found by its data-k after a redraw
