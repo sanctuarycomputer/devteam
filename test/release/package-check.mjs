@@ -198,11 +198,14 @@ export function check(o, root = process.cwd()) {
 
   // 3. the version
   if (!tree.has('package.json')) refuse('the tree has no package.json');
+  const object = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
   let treePkg;
-  try { treePkg = JSON.parse(git(root, ['cat-file', 'blob', tree.get('package.json')]).toString('utf8')); } catch { refuse(`${rev}'s package.json isn't JSON`); }
+  try { treePkg = JSON.parse(git(root, ['cat-file', 'blob', tree.get('package.json')]).toString('utf8')); } catch { /* refused below */ }
+  if (!object(treePkg)) refuse(`${rev}'s package.json isn't a JSON object`);
   const pkgPath = path.join(root, 'package.json');
   let pkg;
-  try { pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')); } catch { refuse('the checkout\'s package.json is missing or isn\'t JSON'); }
+  try { pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')); } catch { /* refused below */ }
+  if (!object(pkg)) refuse('the checkout\'s package.json is missing or isn\'t a JSON object');
   pkg.version = version;
   fs.writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
 

@@ -131,6 +131,7 @@ test('R2 release.yml runs on release: published, only a full release in sanctuar
   assert.deepEqual(w.on.pull_request, { paths: ['.github/workflows/release.yml', 'package.json', 'apps/**', 'test/release/**'] }, 'R2 pull_request paths');
   assert.deepEqual(Object.keys(w.on).sort(), ['pull_request', 'release'], 'R2 no other trigger');
   assert.deepEqual(w.permissions, {}, 'R2 no permission by default');
+  assert.deepEqual(Object.keys(w).sort(), ['jobs', 'name', 'on', 'permissions'], 'R2 nothing else at the top (no env or defaults that reach every job)');
   assert.equal(w.jobs.publish.if, "github.event_name == 'release' && github.repository == 'sanctuarycomputer/devteam' && !github.event.release.prerelease", 'R2 publish: a full release, here only');
   assert.equal(w.jobs.build.if, "github.event_name == 'pull_request' || (github.repository == 'sanctuarycomputer/devteam' && !github.event.release.prerelease)", 'R2 build: a PR, or a full release here');
 });
@@ -352,6 +353,7 @@ test('R12 it refuses a tag that isn\'t vX.Y.Z, an npm older than --min-npm, and 
 function tgz(entries) {
   const blocks = [];
   for (const e of entries) {
+    if (e.zero) { blocks.push(Buffer.alloc(512)); continue; }
     const body = Buffer.from(e.body ?? '');
     const h = Buffer.alloc(512);
     h.write(e.name, 0, 100, 'utf8');
@@ -372,6 +374,7 @@ test('R13 the tarball reader reads files and pax paths, and refuses links, dupli
   const ok = untar(tgz([{ name: 'package/a.txt', body: 'a' }, { name: 'PaxHeader', type: 'x', body: paxRecord('path', 'package/long/b.txt') }, { name: 'package/short', body: 'b' }]));
   assert.deepEqual([...ok.keys()], ['package/a.txt', 'package/long/b.txt'], 'R13 a file, and a pax path');
   assert.equal(ok.get('package/long/b.txt').toString(), 'b', 'R13 its bytes');
+  assert.deepEqual([...untar(tgz([{ name: 'package/a', body: 'a' }, { zero: true }, { name: 'package/after', body: 'b' }])).keys()], ['package/a'], 'R13 a zero block ends the archive');
   assert.match(refusal(() => untar(tgz([{ name: 'package/l', type: '2' }]))) ?? '', /the tarball holds package\/l, which isn't a regular file \(type 2\)/, 'R13 a link refuses');
   assert.match(refusal(() => untar(tgz([{ name: 'package/a', body: '1' }, { name: 'package/a', body: '2' }]))) ?? '', /the tarball holds package\/a twice/, 'R13 a duplicate refuses');
   assert.match(refusal(() => untar(tgz([{ name: 'package/a', body: 'a', size: 999999 }]))) ?? '', /the tarball is truncated or has a bad size field/, 'R13 a bad size refuses');
@@ -417,12 +420,21 @@ test('R14 package-check refuses bad usage, a bad --out or --alpha, the wrong fol
   const notJson = fixtureRepo('tree-not-json', { extra: { 'package.json': '{ not json\n' } });
   const r4 = check(notJson, []);
   assert.equal(r4.status, 1, `R14 a tree package.json that isn't JSON: refused (${r4.err})`);
-  assert.match(r4.err, /^package-check: refusing: refs\/tags\/v1\.2\.3's package\.json isn't JSON$/m, 'R14 a tree package.json that isn\'t JSON: says so');
+  assert.match(r4.err, /^package-check: refusing: refs\/tags\/v1\.2\.3's package\.json isn't a JSON object$/m, 'R14 a tree package.json that isn\'t JSON: says so');
+  const treeNull = fixtureRepo('tree-null', { extra: { 'package.json': 'null\n' } });
+  const r4b = check(treeNull, []);
+  assert.equal(r4b.status, 1, `R14 a tree package.json of null: refused (${r4b.err})`);
+  assert.match(r4b.err, /^package-check: refusing: refs\/tags\/v1\.2\.3's package\.json isn't a JSON object$/m, 'R14 a tree package.json of null: says so');
+  const coNull = fixtureRepo('checkout-null');
+  fs.writeFileSync(path.join(coNull.repo, 'package.json'), '[]\n');
+  const r5b = check(coNull, []);
+  assert.equal(r5b.status, 1, `R14 a checkout package.json that's an array: refused (${r5b.err})`);
+  assert.match(r5b.err, /^package-check: refusing: the checkout's package\.json is missing or isn't a JSON object$/m, 'R14 a checkout package.json that\'s an array: says so');
   const gone = fixtureRepo('checkout-no-package');
   fs.rmSync(path.join(gone.repo, 'package.json'));
   const r5 = check(gone, []);
   assert.equal(r5.status, 1, `R14 no package.json in the checkout: refused (${r5.err})`);
-  assert.match(r5.err, /^package-check: refusing: the checkout's package\.json is missing or isn't JSON$/m, 'R14 no package.json in the checkout: says so');
+  assert.match(r5.err, /^package-check: refusing: the checkout's package\.json is missing or isn't a JSON object$/m, 'R14 no package.json in the checkout: says so');
   const other = fixtureRepo('apps-symlink', { apps: ['dashboard'], before: (repo) => fs.symlinkSync('package.json', path.join(repo, 'apps', 'dashboard', 'link.json')) });
   const r6 = check(other, ['--alpha', alphaDir(other.d, { apps: ['dashboard'] })]);
   assert.equal(r6.status, 0, `R14 a symlink elsewhere under apps/ doesn't block (${r6.err})`);
@@ -441,6 +453,7 @@ test('R15 package-check refuses a tarball carrying anything else or missing a ki
   const r2 = check(fx2, []);
   assert.equal(r2.status, 1, `R15 a kit file left out: refused (${r2.err})`);
   assert.match(r2.err, /the tarball is missing docs\/devteam\/process\//, 'R15 says so');
+  assert.ok(!fs.existsSync(path.join(fx2.d, 'out', 'package.tgz')), 'R15 a kit file left out: no tarball at the publish path');
   // a fake npm first on PATH: it logs each call's arguments and npm_config_* variables, runs the real npm,
   // and with FAKE_NPM_DROP set leaves the last file out of a dry run's list
   const fx3 = fixtureRepo('fake-npm');
@@ -457,12 +470,14 @@ fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ a, cfg }) + '\\n');
 const r = spawnSync(${JSON.stringify(realNpm)}, a, { encoding: 'utf8', env: process.env });
 let out = r.stdout;
 if (process.env.FAKE_NPM_DROP && a.includes('--dry-run')) { const j = JSON.parse(out); j[0].files.pop(); out = JSON.stringify(j); }
+if (process.env.FAKE_NPM_TGZ && !a.includes('--dry-run') && r.status === 0) { const d = a[a.indexOf('--pack-destination') + 1]; for (const f of fs.readdirSync(d)) if (f.endsWith('.tgz')) fs.copyFileSync(process.env.FAKE_NPM_TGZ, require('node:path').join(d, f)); }
 process.stdout.write(out); process.stderr.write(r.stderr); process.exit(r.status ?? 1);
 `, { mode: 0o755 });
   const hostile = { PATH: `${bin}${path.delimiter}${process.env.PATH}`, npm_config_registry: 'http://127.0.0.1:9/', NPM_CONFIG_IGNORE_SCRIPTS: 'false' };
   const r3 = check(fx3, [], { extraEnv: { ...hostile, FAKE_NPM_DROP: '1' } });
   assert.equal(r3.status, 1, `R15 a dry run that differs: refused (${r3.err})`);
   assert.match(r3.err, /npm pack --dry-run listed \d+ files and the tarball holds \d+: they differ/, 'R15 says so');
+  assert.ok(!fs.existsSync(path.join(fx3.d, 'out', 'package.tgz')), 'R15 a dry run that differs: no tarball at the publish path');
   const calls = read(log).trim().split('\n').map((l) => JSON.parse(l));
   assert.ok(calls.some((c) => c.a.includes('pack')), 'R15 npm pack ran through the fake');
   for (const c of calls) {
@@ -470,5 +485,14 @@ process.stdout.write(out); process.stderr.write(r.stderr); process.exit(r.status
     assert.deepEqual(Object.keys(c.cfg).sort(), ['npm_config_globalconfig', 'npm_config_userconfig'], `R15 no npm_config_* but the two empty files on npm ${c.a.join(' ')}`);
     assert.notEqual(c.cfg.npm_config_userconfig, c.cfg.npm_config_globalconfig, 'R15 two files');
     for (const f of Object.values(c.cfg)) assert.equal(read(f), '', `R15 ${f} is empty`);
+  }
+  for (const [i, bad] of ['other/x.txt', 'package/../x.txt', 'package//x.txt'].entries()) {
+    const fx = fixtureRepo(`outside-${i}`);
+    const swap = path.join(fx.d, 'swap.tgz');
+    fs.writeFileSync(swap, tgz([{ name: bad, body: 'x' }]));
+    const r = check(fx, [], { extraEnv: { PATH: hostile.PATH, FAKE_NPM_TGZ: swap } });
+    assert.equal(r.status, 1, `R15 an entry ${bad}: refused (${r.err})`);
+    assert.match(r.err, /, outside package\/$/m, `R15 an entry ${bad}: says so`);
+    assert.ok(!fs.existsSync(path.join(fx.d, 'out', 'package.tgz')), `R15 an entry ${bad}: no tarball at the publish path`);
   }
 });
