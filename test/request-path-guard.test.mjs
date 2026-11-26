@@ -79,13 +79,15 @@ test('R2 servePageAsset: with the helper gone the dashboard gets a 500 and nothi
     const code = src.slice(i + 1, src.indexOf('\n}\n', i + 1) + 3);
     const NEXT = Symbol('next');
     const servePageAsset = vm.runInContext(`${code}\n;servePageAsset`, vm.createContext({ fs, path, URL, kitDir: K, DASH_NEXT: NEXT }));
-    const res = () => { const o = { code: null, body: null, writeHead(c) { o.code = c; }, end(b) { o.body = b; } }; return o; };
+    const res = () => { const o = { code: null, headers: null, body: null, writeHead(c, h) { o.code = c; o.headers = h; }, end(b) { o.body = b; } }; return o; };
     for (const f of ['devteam-ui.js', 'devteam-ui.css']) {
       const r = res();
       let threw = null;
       try { servePageAsset({ method: 'GET', url: `/review/preview/${f}` }, r, 'dashboard'); } catch (e) { threw = e; }
       assert.equal(threw, null, `R2 servePageAsset dashboard ${f} gone: no throw (${threw?.code ?? ''})`);
       assert.equal(r.code, 500, `R2 servePageAsset dashboard ${f} gone: a 500`);
+      assert.deepEqual({ ...r.headers }, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }, `R2 servePageAsset dashboard ${f} gone: the 500's headers, as servePage's`);
+      assert.equal(r.body, 'this file could not be read\n', `R2 servePageAsset dashboard ${f} gone: the 500 says why, and nothing of the path`);
       for (const server of ['hub', 'browser']) {
         const h = res();
         assert.equal(servePageAsset({ method: 'GET', url: `/review/preview/${f}` }, h, server), NEXT, `R2 servePageAsset ${server} ${f}: not its (DASH_NEXT)`);
