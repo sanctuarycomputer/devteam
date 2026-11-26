@@ -162,12 +162,13 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
 
   await sub('G4d: the reminder\'s Hand over says the bar\'s line when no pane took it, under With <to>', async () => {
     const V = await tabOf({ [N.trial]: ROW.C20() });
-    // each case: the viewer opened on an open note and closed, so kit-148's reminder shows; its Hand over answered typed: false
+    // each case: the viewer opened on an open note and closed by Back (a close the page can't stop, so kit-148's
+    // reminder shows; the X would ask first, kit-937); its Hand over answered typed: false
     for (const [to, words, nobody = false] of [['plan-pricing', 'Not typed: plan-pricing has no pane. It waits in its messages until plan-pricing or the supervisor reads it.'], ['supervisor', 'Not typed: the supervisor has no pane. It waits in its messages until it reads them.'], ['plan-pricing', 'Not typed: neither plan-pricing nor the supervisor has a pane. It waits in their messages until one of them is back.', true]]) {
       await V.rows({ [N.trial]: ROW.C20() });
       await openAt(V, AV_WT, 'plan-pricing');
       await has(V, '#av-handover', `${to}: setup: an open note`);
-      await V.p.click('#av-close');
+      await V.p.ev('history.back(); void 0');
       assert.ok(await V.settle(shown('#av-remind'), 4000), `${to}: setup: the reminder shows`);
       assert.equal(await V.p.ev(text('#e-avr')), '', `${to}: a new card shows no line from the one before`);
       await V.p.ev(`(window.__replies['artifact-handoff'] = { body: { to: ${J(to)}, typed: false, count: 1, nobody: ${nobody} } }, true)`);

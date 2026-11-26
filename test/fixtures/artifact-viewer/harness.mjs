@@ -238,6 +238,8 @@ export async function harness(t, fixture) {
   const TA = idOf(F.owner(['thread', 'new', 'This button', '--subject', J({ kind: 'artifact', slug: 'viewer-a', at: 'main', path: 'index.html', anchor: { selector: '#pin-me', tag: 'button', text: 'Pin me', point: { x: 60, y: 20 } } })]));
   // TR: one on viewer-a's #pin-right, placed from the frame's right edge (DW6: a stale rect misses it)
   const TR = idOf(F.owner(['thread', 'new', 'That button', '--subject', J({ kind: 'artifact', slug: 'viewer-a', at: 'main', path: 'index.html', anchor: { selector: '#pin-right', tag: 'button', text: 'Pin me right', point: { x: 60, y: 20 } } })]));
+  // TA and TR handed over, as an owner done noting does: a close of viewer-a closes, with no ask before it (kit-937)
+  F.owner(['artifact', 'handoff', 'viewer-a', '--at', 'main']);
   const TK = 'ch-01-tidy-docs';
   F.sup(['ticket', 'add', TK, '--json', J({ title: 'Tidy the docs', feature: 'chores', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['docs/**'], done_when: ['the docs check passes in CI'], notes: 'n' })]);
   const A = await app();
@@ -256,8 +258,14 @@ export async function harness(t, fixture) {
   const tabs = oneTab(chrome);
   later(() => tabs.done());
   // (a viewer tab, opts.path 'view/artifact/viewer-a', is ready when the page says it is the viewer and has read its threads)
-  async function visit(hash, { path = '', width = 1280, height = 800 } = {}) {
+  async function visit(hash, opts = {}) {
     const p = await tabs.next();
+    return visitOn(p, hash, opts);
+  }
+  // (opts.hub: the hub's address to load, and opts.inHub the dashboard's origin in its project frame: the case drives
+  // that dashboard, every evaluation in its page and every mouse event at the frame's place; kit-937)
+  async function visitOn(raw, hash, { path = '', width = 1280, height = 800, hub = null, inHub = null } = {}) {
+    let p = raw;
     // the tab in front: a hidden one draws nothing, and the mouse is hit-tested against what it drew
     await p.send('Page.bringToFront');
     await p.send('Page.enable');
@@ -266,8 +274,21 @@ export async function harness(t, fixture) {
     if (CPU_THROTTLE) await p.send('Emulation.setCPUThrottlingRate', { rate: CPU_THROTTLE });
     if (RECTS_DELAY_MS) await p.send('Page.addScriptToEvaluateOnNewDocument', { source: RECTS_DELAY });
     await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
-    await p.send('Page.addScriptToEvaluateOnNewDocument', { source: WATCH });
-    await p.send('Page.navigate', { url: `${B}/${path}${hash}` });
+    await p.send('Page.addScriptToEvaluateOnNewDocument', { source: hub ? WATCH.replace('if (window !== top) return;', 'if (window === top || window.parent !== top) return;') : WATCH });
+    await p.send('Page.navigate', { url: hub ?? `${B}/${path}${hash}` });
+    if (hub) {
+      // the dashboard in the hub's project frame: every evaluation in its page, every mouse event at its frame's place in the hub
+      const off = () => raw.ev("(() => { const f = [...document.querySelectorAll('iframe')].find((x) => !x.hidden && x.getBoundingClientRect().width > 0); if (!f) return null; const r = f.getBoundingClientRect(); return { x: r.left + f.clientLeft, y: r.top + f.clientTop }; })()");
+      const end = Date.now() + 20000;
+      while (!(await off()) && Date.now() < end) await new Promise((r) => setTimeout(r, 100));
+      if (!(await off())) assert.fail(`setup: the hub shows no project frame: ${J(await raw.ev("({ href: location.href, frames: [...document.querySelectorAll('iframe')].map((f) => [f.getAttribute('src'), f.hidden, f.getBoundingClientRect().width]), text: document.body.innerText.slice(0, 600) })"))}`);
+      const at = async () => (await off()) ?? { x: 0, y: 0 };
+      p = { ...raw,
+        ev: (e) => raw.evIn(inHub, e),
+        move: async (x, y, m) => { const o = await at(); return raw.move(x + o.x, y + o.y, m); },
+        clickAt: async (x, y, m) => { const o = await at(); return raw.clickAt(x + o.x, y + o.y, m); },
+      };
+    }
     const soon = soonIn(p, 20000, () => dash.out());
     const settle = settleIn(p);
     await soon(path.startsWith('view/') ? VIEWER_TAB : LOADED, path ? 'setup: the viewer tab and its threads read' : 'setup: the dashboard and its threads read');
