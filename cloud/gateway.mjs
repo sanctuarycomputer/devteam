@@ -2,7 +2,7 @@
 // devteam's gateway: the one public listener on a cloud box. It lets in only the owner, by a
 // passkey registered when the box was claimed, and passes the owner through to the machine's hub
 // (box.example.com), a web terminal on the box's tmux server (term.box.example.com), and each
-// project's dashboard at a host of its own, its name (alpha.box.example.com: project-hosts@1, below).
+// project's dashboard at a host of its own, its name (alpha.box.example.com: project-hosts@2, below).
 // Signed out, a navigation on a project's host gets the gateway's signed-out page, the same for a
 // listed name and a made-up one, which sends the whole address, hash included, to sign-in. Signing
 // in and passkeys are under /auth on the box's name, so an installed hub signs in without leaving
@@ -28,10 +28,10 @@
 // doubt, gets the published bytes. A project's host reads the cookie on a published page for that
 // choice alone.
 // Node only, no dependencies. Usage: node gateway.mjs [serve | reclaim]
-// project-hosts@1: where a project is on a box
+// project-hosts@2: where a project is on a box
 // This section is the definition the gateway moves to: the address of a project on a box. Until the
 // gateway follows it, the lines above describe today's names. A new reserved segment, or any change
-// to these rules, bumps the version.
+// to these rules, bumps the version (@2 reserved `next`, the path of the dashboard's next apps).
 // A project is https://<project>.<box>/, its dashboard, behind the owner's sign-in. <project> is the
 // project's name (the name /api/hello gives: settings.md's `project`, else the folder's name) when
 // it passes the label rule.
@@ -45,7 +45,7 @@
 // project's is not served under it: the name is the project's. A host is known from the hub's list
 // (projects first, then previews) or the gateway's store (published pages).
 // Reserved first segments, the paths the dashboard and the gateway answer on a project's host: `api`,
-// `artifact`, `c`, `healthz`, `index.html`, `presence`, `public-manifest`, `review`, `upload`, `view`. They are
+// `artifact`, `c`, `healthz`, `index.html`, `next`, `presence`, `public-manifest`, `review`, `upload`, `view`. They are
 // checked before the store, so a page stored under one never answers on a project's host, and
 // Publish refuses those names. The path decides first, in this order. A reserved segment is never a
 // published page: it is checked as on today's names (`healthz` is the gateway's own answer, a `c`
@@ -60,7 +60,7 @@
 // (https://{port}.<box>/); its other keys stay.
 // The cases are in test/fixtures/project-hosts.json, which the gateway's, the hub's and the
 // dashboard's tests read.
-// end project-hosts@1
+// end project-hosts@2
 // people@1: who is on a box, in the gateway's state.json beside today's fields
 // Today's fields keep their meaning, the owner's: `passkeys` (the owner's passkeys), `sessions` (the
 // owner's sessions; each new one also names the passkey it was opened with as `method`), `pushSubs`
@@ -3372,7 +3372,7 @@ export function createGateway(opts = {}) {
         return send(res, 404, 'text/plain', 'not found');
       }
       // /box.json, box: 2: { box, terminal, project, passkeys, previews, push, image }. project is where a
-      // project is (project-hosts@1), {project} its name. image is what the
+      // project is (project-hosts@2), {project} its name. image is what the
       // box's image says it is (boxImage, from the image's ENV: its release and its tools' pins):
       // { release: 'vX.Y.Z' | null, tools: { name: version } } in the ENV's order, or null with neither
       // set (a laptop, an older image). Versions only. An additive change keeps box: 2.
