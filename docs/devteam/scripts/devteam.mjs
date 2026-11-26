@@ -30851,9 +30851,13 @@ async function cmdDashboard() {
     if (req.headers[RELAY_MARK] !== undefined) return isTerm ? termNo('relay') : send(res, 403, 'text/plain; charset=utf-8', 'not through a preview relay');
     // /presence is a socket: a plain request gets its guard's status (presence@1 §2)
     if (req.url === '/presence' || req.url.startsWith('/presence?')) return presence.refuse(req, res);
+    // the request's one parse, which every route reads (q.u): a target that is no URL here is a 400,
+    // never a throw out of this handler, which would stop the dashboard
+    let u;
+    try { u = new URL(req.url, 'http://x'); } catch { return send(res, 400, 'text/plain; charset=utf-8', 'bad request'); }
     // the terminal: right after the global guards, before any other route
-    if (isTerm) return await term.handle(req, res, new URL(req.url, 'http://x'));
-    const q = { okHost, bodyTimer, get u() { return this._u ??= new URL(req.url, 'http://x'); } };
+    if (isTerm) return await term.handle(req, res, u);
+    const q = { okHost, bodyTimer, u };
     for (const route of DASHBOARD_ROUTES) if (await route(D, req, res, q) !== DASH_NEXT) return;
   });
   // Two dashboards starting at once can pick the same free port: the one that loses picks again.

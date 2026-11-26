@@ -42,6 +42,10 @@ const alive = async (port, what) => {
   assert.equal(r.status, 200, `${what}: the next GET /api/hello answers 200`);
 };
 
+// Each throws in new URL(t, 'http://x') on Node 18 and 22, and reaches the handler (Node's own parser
+// answers a target that is neither origin- nor absolute-form, such as two backslashes, itself).
+const BAD = ['//', '///', '//:', '//a:99999', '//a:x', '//[', '//[::1', '//a%zz', '//%', '/\\', '//@', '//a@', 'http://', 'https://a:99999/', '//xn--', '//256.256.256.256', '//1.2.3.4.5', '//[1::2::3]'];
+
 async function dashboard(t, { drop = [] } = {}) {
   const base = scratch('dash');
   t.after(() => fs.rmSync(base, { recursive: true, force: true }));
@@ -53,6 +57,28 @@ async function dashboard(t, { drop = [] } = {}) {
   t.after(() => dash.stop());
   return { dash, port, root };
 }
+test('R1 a request target that is no URL is a 400 on every method, and the dashboard serves on', { timeout: 300000 }, async (t) => {
+  const { dash, port } = await dashboard(t);
+  for (const target of BAD) {
+    for (const method of ['GET', 'HEAD', 'POST']) {
+      const r = await raw(port, target, method);
+      assert.equal(r.status, 400, `R1 ${method} ${target} answers 400 (${dash.out().split('\n').filter((l) => /crash/.test(l)).slice(-1)[0] ?? ''})`);
+      if (method === 'GET') assert.match(r.body, /bad request/, `R1 ${method} ${target} says why`);
+      await alive(port, `R1 after ${method} ${target}`);
+    }
+  }
+  // still refused before the parse: a request on another Host gets the Host refusal, not a 400
+  const s = await new Promise((resolve) => {
+    const c = net.connect(port, '127.0.0.1');
+    let o = '';
+    c.on('data', (b) => { o += b; });
+    c.on('close', () => resolve(Number(/^HTTP\/1\.1 (\d{3})/.exec(o)?.[1] ?? 0)));
+    c.write('GET // HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n');
+  });
+  assert.equal(s, 403, 'R1 another Host is refused first (403), as before');
+  assert.equal(dash.p.exitCode, null, 'R1 the dashboard process is still running');
+});
+
 test('R2 a missing review helper is a 500 and the dashboard and its hub serve on', { timeout: 300000 }, async (t) => {
   const { dash, port } = await dashboard(t, { drop: ['devteam-ui.js', 'devteam-ui.css'] });
   for (const f of ['devteam-ui.js', 'devteam-ui.css']) {
@@ -95,4 +121,15 @@ test('R2 servePageAsset: with the helper gone the dashboard gets a 500 and nothi
       }
     }
   } finally { fs.rmSync(K, { recursive: true, force: true }); }
+});
+
+test('R3 every new URL(req.url …) in the dashboard handler, its routes and servePageAsset sits inside a try', () => {
+  const a = src.indexOf('/* cmdDashboard start */');
+  const b = src.indexOf('/* cmdDashboard end */');
+  assert.ok(a > 0 && b > a, 'devteam.mjs marks the cmdDashboard region');
+  const i = src.indexOf('\nfunction servePageAsset(');
+  const text = `${src.slice(i, src.indexOf('\n}\n', i + 1))}\n${src.slice(a, b)}`;
+  const lines = text.split('\n').filter((l) => /new URL\(req\.url\b/.test(l));
+  assert.ok(lines.length >= 3, `R3 found the parses (${lines.length})`);
+  for (const l of lines) assert.match(l, /try \{[^}]*new URL\(req\.url\b/, `R3 inside a try: ${l.trim().slice(0, 160)}`);
 });
