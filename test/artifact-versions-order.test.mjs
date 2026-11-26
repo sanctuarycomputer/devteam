@@ -84,6 +84,39 @@ test('A -> B -> A on main: one A entry, landed, dated by its first commit', (t) 
   assert.deepEqual(vs.map((v) => [v.kind, v.tree, v.commit, Date.parse(v.time)]), [['earlier', B.tree, B.commit, Date.parse(B.when)], ['landed', A1.tree, A1.commit, Date.parse(A1.when)]], 'O2: B, then A landed at its first commit');
 });
 
+test('landed is chosen by fingerprint: A back on main under another tree id (a mode change) is the one landed A', (t) => {
+  const F = threadsFixture('order-landed-fp');
+  cleanup(t)(() => F.done());
+  const A1 = landAt(F, 'order-mock', page('A'), '2026-01-01T00:00:00Z');
+  const B = landAt(F, 'order-mock', page('B'), '2026-02-01T00:00:00Z');
+  // A's bytes again, index.html executable: the same fingerprint (paths and blobs), another tree id
+  const dir = path.join(F.old, ARTIFACTS_REL, 'order-mock');
+  fs.rmSync(dir, { recursive: true, force: true });
+  putIn(dir, page('A'));
+  fs.chmodSync(path.join(dir, 'index.html'), 0o755);
+  gitAt(F.old, '2026-03-01T00:00:00Z', ['add', '-A', dir]);
+  gitAt(F.old, '2026-03-01T00:00:00Z', ['commit', '-qm', 'order-mock: A, executable']);
+  gitAt(F.old, null, ['push', '-q', 'origin', 'main']);
+  const now = gitAt(F.old, null, ['rev-parse', `HEAD:${ARTIFACTS_REL}/order-mock`]);
+  assert.notEqual(now, A1.tree, 'another tree id');
+  const vs = versions(F, 'order-mock');
+  assert.deepEqual(vs.map((v) => [v.kind, v.tree, v.commit]), [['earlier', B.tree, B.commit], ['landed', now, A1.commit]], 'one A entry, landed (main\'s tree now), at A\'s first commit');
+});
+
+test('a draft is dated by committer time, not author time (a rebased page is dated by its rebase)', (t) => {
+  const F = threadsFixture('order-committer');
+  cleanup(t)(() => F.done());
+  landAt(F, 'order-mock', page(1), '2026-01-01T00:00:00Z');
+  const root = path.join(F.old, '.worktrees', 'demo-08-rebased');
+  putIn(wtDir(F, 'demo-08-rebased', 'order-mock'), page('rebased'));
+  gitAt(root, null, ['init', '-q']);
+  gitAt(root, null, ['add', '-A']);
+  execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'rebased'], { cwd: root, env: { ...process.env, GIT_AUTHOR_DATE: '2026-02-10T00:00:00Z', GIT_COMMITTER_DATE: '2026-04-01T00:00:00Z' } });
+  touchAll(wtDir(F, 'demo-08-rebased', 'order-mock'), new Date());
+  const d = versions(F, 'order-mock').find((v) => v.kind === 'draft');
+  assert.equal(d?.time, ISO('2026-04-01T00:00:00Z'), 'the committer time (April), not the author time (February)');
+});
+
 test('each entry carries its fingerprint, describe\'s, and a main tree\'s is kept in run/cache by tree id', (t) => {
   const F = threadsFixture('order-o3');
   cleanup(t)(() => F.done());
