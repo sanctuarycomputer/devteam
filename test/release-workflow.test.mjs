@@ -495,4 +495,17 @@ process.stdout.write(out); process.stderr.write(r.stderr); process.exit(r.status
     assert.match(r.err, /, outside package\/$/m, `R15 an entry ${bad}: says so`);
     assert.ok(!fs.existsSync(path.join(fx.d, 'out', 'package.tgz')), `R15 an entry ${bad}: no tarball at the publish path`);
   }
+  // an alpha file the alpha staged, with other bytes; and one it never staged (final-1 F1)
+  for (const [i, [what, entry, says]] of [
+    ['an alpha file whose bytes differ', { name: 'package/docs/devteam/alpha/dashboard/index.html', body: 'not the staged bytes' }, /^package-check: refusing: the tarball's docs\/devteam\/alpha\/dashboard\/index\.html differs from the alpha's$/m],
+    ['an alpha file the alpha didn\'t stage', { name: 'package/docs/devteam/alpha/dashboard/extra.html', body: 'x' }, /^package-check: refusing: the tarball holds docs\/devteam\/alpha\/dashboard\/extra\.html, which the alpha didn't stage$/m],
+  ].entries()) {
+    const fx = fixtureRepo(`alpha-swap-${i}`, { apps: ['dashboard'] });
+    const swap = path.join(fx.d, 'swap.tgz');
+    fs.writeFileSync(swap, tgz([entry]));
+    const r = check(fx, ['--alpha', alphaDir(fx.d, { apps: ['dashboard'] })], { extraEnv: { PATH: hostile.PATH, FAKE_NPM_TGZ: swap } });
+    assert.equal(r.status, 1, `R15 ${what}: refused (${r.err})`);
+    assert.match(r.err, says, `R15 ${what}: says so`);
+    assert.ok(!fs.existsSync(path.join(fx.d, 'out', 'package.tgz')), `R15 ${what}: no tarball at the publish path`);
+  }
 });
