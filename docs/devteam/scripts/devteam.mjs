@@ -8537,17 +8537,25 @@ const selfPlain = (() => {
       if (end && kind[l] === 'html' && end.test(s)) end = null;
     }
     const km = []; // each line as kept reads its block
-    for (const { a, b, md } of blocks) { let l = a; for (const t of kept(ls.slice(a, b + 1).join('\n'), md).split('\n')) { km[l] = t; l += 1; } }
-    const cellsOf = new Map();
+    const from = []; // where the comment a line's first character is in opened, when on a line before
+    const dirty = [0]; // how many lines before each hold a list, quote or footnote marker or a |
+    for (const { a, b, md } of blocks) { let l = a; for (const t of kept(ls.slice(a, b + 1).join('\n'), md).split('\n')) { km[l] = t; if (l > a && (t === '' || t[0] === '\0') && (km[l - 1] === '' ? from[l - 1] !== undefined : km[l - 1].endsWith('\0'))) from[l] = from[l - 1] !== undefined && !/[^\0]/.test(km[l - 1]) ? from[l - 1] : l - 1; l += 1; } }
+    for (let l = 0; l < ls.length; l += 1) dirty.push(dirty[l] + (OPENERS.exec(ls[l])[0].length || ls[l].includes('|') ? 1 : 0));
+    const own = new Map(); // each line read alone: an HTML block's by kept, a markdown one's cell by cell
+    // A tag is code where its block's reading and its own line's (and cell's) both keep it as text; or in
+    // a comment from a line before, when no line from the one it opened on holds a marker or a | and that
+    // line is at most three spaces in, so no quote, table row, list item or code the cut above misses can
+    // end the comment or hold its opener.
     const inCode = (o) => {
       const l = lineOf(o) - 1;
       const c = o - starts[l];
       if (kind[l] === 'code') return true;
       const ch = km[l]?.[c];
       if (ch !== ' ' && ch !== '\0') return false;
-      if (kind[l] === 'html' || (ch === '\0' && !ls[l].includes('|'))) return true;
-      if (!cellsOf.has(l)) cellsOf.set(l, cells(ls[l]));
-      return cellsOf.get(l)[c] !== '<';
+      if (!own.has(l)) own.set(l, kind[l] === 'html' ? kept(ls[l], false) : cells(ls[l]));
+      if (own.get(l)[c] !== '<') return true;
+      const f = from[l];
+      return ch === '\0' && f !== undefined && dirty[l + 1] === dirty[f] && indent(ls[f]) <= 3;
     };
     for (const m of raw.matchAll(HTMLHEAD)) { const body = m[2].replace(/^[^>]*>/, ''); add(Number(m[1]), body, lineOf(m.index), words(body.replace(/<[^<>]*>/g, shown)), (inCode(m.index) ? { code: true } : { html: true })); }
     return out.filter((h) => h.text).sort((a, b) => a.line - b.line);
