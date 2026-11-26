@@ -107,6 +107,7 @@
   :where(.shell) .tabbar .n:not(:where(.no-shell, .no-shell *)) { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
   :where(.shell) .tabbar .n.blue:not(:where(.no-shell, .no-shell *)) { color: var(--blue-fg); font-weight: 500; }
   :where(.shell) .tabbar .spacer:not(:where(.no-shell, .no-shell *)) { flex: 1; }
+  :where(.shell) .tabbar.sub [role="tab"]:not(:where(.no-shell, .no-shell *)) { height: 30px; font-size: 12px; padding: 0 8px; }
   /* the record table: sortable monospace headers, every row opens its record, "None" when empty */
   :where(.shell) .db-t:not(:where(.no-shell, .no-shell *)) { width: 100%; border-collapse: collapse; }
   :where(.shell) .db-t th:not(:where(.no-shell, .no-shell *)), :where(.shell) .db-t td:not(:where(.no-shell, .no-shell *)) { text-align: left; border-bottom: 1px solid var(--line); }
@@ -504,13 +505,30 @@ const escHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;
 const shellText = (html) => String(html ?? '').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').trim();
 
 // ---- the tab bar: counts, a disabled state, roving tabindex, arrows that skip disabled tabs ----
-function tabBar({ tabs = [], selected = null } = {}) {
-  const sel = tabs.some((t) => t.id === selected && !t.disabled) ? selected : (tabs.find((t) => !t.disabled) || {}).id;
-  return `<div class="tabbar" role="tablist">${tabs.map((t) => {
+const TAB_PANEL = /^[a-z][a-z0-9-]*$/;
+const TAB_ID = /^[A-Za-z0-9_-]+$/;
+const goodPanel = (p) => typeof p === 'string' && TAB_PANEL.test(p);
+const goodTabId = (id) => TAB_ID.test(String(id ?? ''));
+// the tab a bar selects: selected if it is enabled, else the first enabled tab (undefined: none)
+function tabSelected(tabs, selected) {
+  return tabs.some((t) => t.id === selected && !t.disabled) ? selected : (tabs.find((t) => !t.disabled) || {}).id;
+}
+function tabBar({ tabs = [], selected = null, panel = null, size = null } = {}) {
+  const sel = tabSelected(tabs, selected);
+  return `<div class="tabbar${size === 'sub' ? ' sub' : ''}" role="tablist">${tabs.map((t) => {
     const on = t.id === sel;
+    const ctl = goodPanel(panel) && goodTabId(t.id) ? ` id="tab-${panel}-${t.id}" aria-controls="${panel}"` : '';
     const n = t.count === undefined || t.count === null || t.count === '' ? '' : ` <span class="n${t.waiting ? ' blue' : ''}">${escHtml(t.count)}</span>`;
-    return `<button type="button" role="tab" data-tab="${escHtml(t.id)}" aria-selected="${on}" tabindex="${on ? 0 : -1}"${t.disabled ? ' aria-disabled="true"' : ''}>${escHtml(t.label)}${n}</button>`;
+    return `<button type="button" role="tab" data-tab="${escHtml(t.id)}"${ctl} aria-selected="${on}" tabindex="${on ? 0 : -1}"${t.disabled ? ' aria-disabled="true"' : ''}>${escHtml(t.label)}${n}</button>`;
   }).join('')}</div>`;
+}
+// the panel a tab bar controls, labelled by the tab the bar selects; a bad panel gives html unwrapped
+function tabPanel({ panel, tabs = [], selected = null } = {}, html) {
+  const body = html ?? '';
+  if (!goodPanel(panel)) return body;
+  const sel = tabSelected(tabs, selected);
+  const lab = sel !== undefined && goodTabId(sel) ? ` aria-labelledby="tab-${panel}-${sel}"` : '';
+  return `<div role="tabpanel" id="${panel}"${lab}>${body}</div>`;
 }
 // the tab an arrow, Home or End moves to from fromId, wrapping and skipping disabled tabs (null: not a move)
 function tabStep(tabs, fromId, key) {
@@ -697,10 +715,48 @@ const threadsTabs = (() => {
   };
 })();
 
-// ---- the URL: page heads (#<page>[?state]) and today's link heads ----
-const STATE_KEYS = { '*': ['th', 't'], board: ['goal', 'feat', 'repo', 'att'], progress: ['goal', 'narrow', 'show'], library: ['kind', 'goal'], goals: ['gt'], sensors: ['st'], loop: ['lt', 'kind', 'orient'] };
+// ---- the URL (dashboard-shell@2): page heads (#<page>[?state], p the open peek or viewer) and link heads ----
+const STATE_KEYS = { '*': ['th', 't', 'i', 'u', 'p'], board: ['goal', 'feat', 'repo', 'att'], progress: ['goal', 'narrow', 'show'], library: ['kind', 'goal'], goals: ['gt'], sensors: ['st'], loop: ['lt', 'kind', 'orient'] };
 const stateKeys = (page) => [...(STATE_KEYS[page] || []), ...STATE_KEYS['*']];
-// routes (the page's own table, outside this block): { pages, links: { kind: home }, files: [[RegExp, home]], redirects: { head: head } }
+// A peek's or a viewer's head without '#' (a p value, or a legacy head's), as the canonical head of that view, or
+// null when it names none: its kind one of routes.peeks; a file by its query (path required); an artifact's
+// version main, wt/<worktree> or tree/<40 or 64 hex> (anything else is main), its slug an artifact slug, its page
+// kept only when the server can serve it (index.html is the default); a preview's route kept unless '/'. A query
+// is read with URLSearchParams and written with it again, so a page or a route holding & = # round-trips.
+function peekHead(v, routes) {
+  const h = String(v ?? '');
+  const q = h.indexOf('?');
+  const path = q < 0 ? h : h.slice(0, q);
+  const query = new URLSearchParams(q < 0 ? '' : h.slice(q + 1));
+  const peeks = routes.peeks || [];
+  if (path === 'file') {
+    if (!peeks.includes('file') || !query.get('path')) return null;
+    const view = query.get('view');
+    query.delete('view');
+    if (view === 'raw' || view === 'rendered') query.append('view', view);
+    return `file?${query}`;
+  }
+  const s = path.indexOf('/');
+  const kind = s < 0 ? path : path.slice(0, s), rest = s < 0 ? '' : path.slice(s + 1);
+  if (!rest || !peeks.includes(kind) || kind === 'file') return null;
+  if (kind === 'artifact') {
+    const segs = rest.split('/'), slug = segs.pop();
+    if (!/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(slug)) return null;
+    let at = 'main';
+    if (segs.length === 2 && segs[0] === 'wt' && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(segs[1])) at = `wt/${segs[1]}`;
+    if (segs.length === 2 && segs[0] === 'tree' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(segs[1])) at = `tree/${segs[1]}`;
+    const page = query.get('path');
+    const keep = page !== null && page !== 'index.html' && /^[A-Za-z0-9._/-]+$/.test(page) && page.split('/').every((x) => x && !x.startsWith('.'));
+    return `artifact/${at}/${slug}${keep ? `?${new URLSearchParams({ path: page })}` : ''}`;
+  }
+  if (kind === 'preview') {
+    if (rest.includes('/')) return null;
+    const route = query.get('route');
+    return `preview/${rest}${route && route !== '/' ? `?${new URLSearchParams({ route })}` : ''}`;
+  }
+  return h;
+}
+// routes (the page's own table, outside this block): { pages, peeks, links: { kind: home }, files: [[RegExp, home]], redirects: { head: head } }
 function parseHead(hash, routes) {
   let h = String(hash ?? '').replace(/^#/, '');
   let redirected = false;
@@ -716,12 +772,17 @@ function parseHead(hash, routes) {
       const hit = (routes.files || []).find(([re]) => re.test(path));
       home = hit ? hit[1] : 'library';
     }
+    // a peek's or a viewer's link head is legacy: its home page with it as p (none when it names no view)
+    if ((routes.peeks || []).includes(kind)) { const p = peekHead(h, routes); return { page: home, state: p ? { p } : {}, legacy: true }; }
     return { link: h, kind, home };
   }
   const page = (routes.pages || []).includes(first) ? first : 'overview';
   const got = new URLSearchParams(q < 0 ? '' : h.slice(q + 1));
   const state = {};
   for (const k of stateKeys(page)) if (got.has(k)) state[k] = got.get(k);
+  // i is a card in the Inbox tab: only with th=inbox; p only a view routes.peeks names, as its canonical head
+  if (state.i !== undefined && state.th !== 'inbox') delete state.i;
+  if (state.p !== undefined) { const p = peekHead(state.p, routes); if (p) state.p = p; else delete state.p; }
   return redirected ? { page, state, redirected } : { page, state };
 }
 function headFor(p) {
@@ -731,13 +792,17 @@ function headFor(p) {
   const s = qs.toString();
   return `#${p.page}${s ? `?${s}` : ''}`;
 }
-// history.state for an entry: { page, depth, openedHere }. entry = { hash, state }, here = what was on
-// screen (its stamp), cold = the visit's first route
+// history.state for an entry: { page, depth, openedHere }, page the entry's head without p. entry = { hash, state },
+// here = what was on screen (its stamp), cold = the visit's first route
 function stampFor(entry, here, cold, routes) {
   if (entry.state && typeof entry.state.page === 'string') return entry.state;
   const p = parseHead(entry.hash, routes);
-  if (p.link === undefined) return { page: headFor(p), depth: 0, openedHere: !cold };
-  if (cold || !here) return { page: headFor(parseHead(p.home, routes)), depth: 1, openedHere: false };
+  const link = p.link !== undefined || !!p.legacy;
+  if (!link && p.state.p === undefined) return { page: headFor(p), depth: 0, openedHere: !cold };
+  // a p head names its page; a link or a legacy head is over its kind's home on a cold load, else over what is on screen
+  const page = link ? null : headFor({ page: p.page, state: { ...p.state, p: undefined } });
+  if (cold || !here) return { page: page ?? headFor(parseHead(p.link !== undefined ? p.home : p.page, routes)), depth: 1, openedHere: false };
+  if (page !== null && page !== here.page) return { page, depth: 1, openedHere: false };
   // from a peek: every entry down to the page was pushed in this visit only if the peek below's were
   if (here.depth > 0) return { page: here.page, depth: here.depth + 1, openedHere: !!here.openedHere };
   return { page: here.page, depth: 1, openedHere: true };
@@ -746,7 +811,7 @@ function stampFor(entry, here, cold, routes) {
 const withPage = (state, page) => ({ ...state, page });
 // closing a peek: back to the page under it, by history when this visit pushed the entries, else in place
 const closeTarget = (state) => (state && state.openedHere && state.depth > 0 ? { go: -state.depth } : { replace: (state && state.page) || '#overview' });
-// remembered filters: a page's own keys, applied only to a fresh entry whose head carries none of them
+// remembered filters: a page's own keys, applied only to a fresh entry whose head carries none of them and no p
 const REMEMBERED = { board: ['goal', 'feat', 'repo', 'att'], progress: ['goal'], library: ['goal', 'kind'] };
 // stored as one flat object ({ goal, feat, repo, att, kind }), so the goal is shared by the pages that remember it
 const FILTERS_KEY = 'devteam.board.filters';
@@ -754,7 +819,8 @@ function storedFilters() { try { return JSON.parse(localStorage.getItem(FILTERS_
 function rememberedFilters(page, keys, fresh, stored = storedFilters()) {
   const own = REMEMBERED[page] || [];
   if (!fresh || !own.length || !stored || typeof stored !== 'object') return null;
-  if ((keys || []).some((k) => own.includes(k))) return null;
+  // a head that names one of the page's filters (an empty value too) or a peek says what it shows
+  if ((keys || []).some((k) => own.includes(k) || k === 'p')) return null;
   const out = {};
   for (const k of own) if (typeof stored[k] === 'string' && stored[k]) out[k] = stored[k];
   return Object.keys(out).length ? out : null;
@@ -834,7 +900,8 @@ let ovTab = null;
 const SETTINGS = '\u0000settings';
 const setEl = $('settings-view');
 const byRoot = (a, b) => String(a).localeCompare(String(b));
-const wanted = () => { try { return decodeURIComponent(location.hash.slice(1)); } catch { return ''; } };
+// the key the address names: a project's, or overview, settings or terminal (hubHead reads the rest)
+const wanted = () => hubHead().key;
 
 // Whatever is selected, only its own view shows: the Overview, the terminal or one dashboard.
 function showOnly(key) {
@@ -856,7 +923,7 @@ function showOnly(key) {
 }
 function selectOverview() {
   selected = OVERVIEW;
-  history.replaceState(null, '', '#overview');
+  history.replaceState(null, '', tlHash());
   showOnly(OVERVIEW);
   paintOverview();
   tlRefresh();
@@ -890,9 +957,11 @@ function select(root) {
   const it = items.get(root);
   if (!it) return;
   selected = root;
-  history.replaceState(null, '', `#${encodeURIComponent(keyOf(it))}`);
+  // the address the view its kept frame shows: the head its frame last said (§10)
+  hubWrite(it);
   frameFor(it);
   showOnly(root);
+  hubBase(it);
 }
 // A project's dashboard in its frame, made once and kept; hidden until its tab is chosen. The
 // Overview's fleet controls use it too: the dashboard does the owner action, on its own origin.
@@ -944,8 +1013,10 @@ function frameFor(it) {
     // a frame that loaded was let in: its origin may make the hub reload again, once, if refused later.
     // A refused frame fires load too (its error page), after the violation: this page's seen says so.
     const f = it.frame;
+    // on every load, not once: the dashboard reloads itself, and a sign-in inside the frame is a navigation
+    f.addEventListener('load', () => hubBase(it));
     f.addEventListener('load', () => { let origin; try { origin = new URL(f.src).origin; } catch { return; } setTimeout(() => { if (!frameRefused.seen.has(origin)) frameRefused.drop(origin); }, 300); });
-    it.frame.src = urlOf(it.x);
+    it.frame.src = `${urlOf(it.x)}${hubKept(it)}`;
     framesEl.append(it.frame);
   }
   return it.frame;
@@ -1195,10 +1266,97 @@ function countsEl(x, stat = false) {
 function openAt(root, hash) {
   const it = items.get(root);
   if (!it) return;
+  // kept as its head, so the hub's address names it at once (its hub-route then agrees)
+  it.head = hash;
+  const had = it.frame;
   const f = frameFor(it);
-  if (f instanceof HTMLIFrameElement) f.src = `${urlOf(it.x)}${hash}`;
+  // a frame made just now is already at that head; one that was there is pointed at it in place, pushing
+  // no history entry of its own, so Back and Forward step through the hub's own addresses
+  if (had && f instanceof HTMLIFrameElement) {
+    const to = `${urlOf(it.x)}${hash}`;
+    try { f.contentWindow.location.replace(to); } catch { f.src = to; }
+  }
   select(root);
 }
+/* hubFrameRoute start */
+// The hub's half of dashboard-shell@2 §10 (test/contracts/shell.md). The hub's heads are
+// #<key>[/<dashboard head>], #overview[?ot=<operator thread id>], #settings and #terminal. The key is
+// written URI-encoded, so the first literal '/' ends it; it is decoded only after that split, and the
+// dashboard's head after it is kept exactly as written.
+function hubHead(hash = location.hash) {
+  const raw = String(hash).replace(/^#/, '');
+  const cut = raw.indexOf('/');
+  const first = cut < 0 ? raw : raw.slice(0, cut);
+  const q = first.indexOf('?');
+  let key = '';
+  try { key = decodeURIComponent(q < 0 ? first : first.slice(0, q)); } catch {}
+  const rest = cut < 0 ? '' : raw.slice(cut + 1);
+  let ot = null;
+  if (key === 'overview' && cut < 0 && q >= 0) ot = new URLSearchParams(first.slice(q + 1)).get('ot') || null;
+  return { key, head: rest ? `#${rest}` : null, ot };
+}
+// The project a key names: its own key, or else the one listed project of that name (its twin, which
+// made both keys hex-suffixed, has gone). The hub's own views are never a project's name here.
+function hubFind(key) {
+  const all = [...items.values()].sort((a, b) => byRoot(a.x.root, b.x.root));
+  const own = all.find((o) => keyOf(o) === key);
+  if (own || !key || HUB_VIEWS.includes(key)) return own ?? null;
+  const named = all.filter((o) => !o.goneAt && o.x.name === key);
+  return named.length === 1 ? named[0] : null;
+}
+// a project's kept head: the last its frame said (null when over 2,048 characters), or where the hub pointed it
+const hubKept = (it) => (typeof it.head === 'string' && it.head.length > 1 ? it.head : '');
+// the selected project's address: its key and its kept head, in place (the frame's own hash change made the entry)
+function hubWrite(it) {
+  const key = encodeURIComponent(keyOf(it));
+  const head = hubKept(it);
+  history.replaceState(null, '', head ? `#${key}/${head.slice(1)}` : `#${key}`);
+}
+// The address Copy link copies for that project, sent to its frame's origin alone: on a box: 2 box its
+// own host, else the hub's own address for it.
+function hubBase(it) {
+  const f = it.frame;
+  const url = urlOf(it.x);
+  if (!(f instanceof HTMLIFrameElement) || !url) return;
+  const base = box?.v === 2 ? `${url}#` : `${location.origin}${location.pathname}#${encodeURIComponent(keyOf(it))}/`;
+  try { f.contentWindow?.postMessage({ devteam: 'hub-base', base }, new URL(url).origin); } catch {}
+}
+// the Overview's address: the operator thread open on it, if one with a name is
+const tlHash = () => (TL.open && !String(TL.open).startsWith('pending-') ? `#overview?ot=${encodeURIComponent(TL.open)}` : '#overview');
+// A dashboard's head, from its own frame window on its own origin only, and only a head: a string
+// starting with '#' of at most 2,048 characters (the dashboard sends null for a longer one), or null.
+// Kept per project; the address follows only the selected one's.
+window.addEventListener('message', (ev) => {
+  const m = ev.data;
+  if (!m || typeof m !== 'object' || m.devteam !== 'hub-route') return;
+  if (!(m.head === null || (typeof m.head === 'string' && m.head.startsWith('#') && m.head.length <= 2048))) return;
+  const it = [...items.values()].find((o) => o.frame instanceof HTMLIFrameElement && o.frame.contentWindow === ev.source);
+  if (!it || !ev.source) return;
+  let origin = null;
+  try { origin = new URL(urlOf(it.x)).origin; } catch {}
+  if (!origin || ev.origin !== origin) return;
+  it.head = m.head;
+  if (selected === it.x.root) hubWrite(it);
+  hubBase(it);
+});
+// An address the hub didn't write (a link, a push, one typed): a project at a head opens it there;
+// an operator thread opens its card. Registered before the plain tab switch below, which then has
+// nothing left to do for these.
+window.addEventListener('hashchange', () => {
+  const { key, head, ot } = hubHead();
+  if (key === 'overview') {
+    if (selected !== OVERVIEW) selectOverview();
+    // then the address settles on the thread actually open (an ot naming no listed thread opens nothing)
+    if (ot) tlOpen(ot).finally(() => { if (selected === OVERVIEW) history.replaceState(null, '', tlHash()); });
+    return;
+  }
+  const it = hubFind(key);
+  if (!it) return;
+  if (head) return void openAt(it.x.root, head);
+  if (it.x.root !== selected) select(it.x.root);
+  else hubWrite(it);
+});
+/* hubFrameRoute end */
 // a card's ⋯: its root and port, and two ways to open its dashboard
 let menuPop = null;
 // closed, the keyboard goes back to the ⋯ it came from (Escape), found by its data-k after a redraw
@@ -2659,7 +2817,7 @@ function tlRelay() {
   TL.pend = TL.pend.filter((p) => !(p.confirmed && tLanded(TL.raw, p)));
   TL.threads = tOverlay(TL.raw, TL.pend);
 }
-function tlClose() { TL.open = null; TL.draft = null; tlDraw(); }
+function tlClose() { TL.open = null; TL.draft = null; if (selected === OVERVIEW) history.replaceState(null, '', tlHash()); tlDraw(); }
 async function tlOpen(id, go = true) {
   if (!TL.threads.some((x) => x.id === id)) await tlRefresh();
   const t = TL.threads.find((x) => x.id === id);
@@ -2667,6 +2825,7 @@ async function tlOpen(id, go = true) {
   TL.draft = null;
   TL.open = id;
   TL.openAt = -1;
+  if (selected === OVERVIEW) history.replaceState(null, '', tlHash());
   // from the dock, what it is about is brought into view first
   if (go) tlTarget(t.subject)?.scrollIntoView({ block: 'nearest' });
   tlDraw();
@@ -3062,7 +3221,8 @@ async function draw() {
     if (!it.frame) continue;
     const url = urlOf(it.x);
     if (url === it.addr) continue;
-    if (url && it.addr && it.frame instanceof HTMLIFrameElement) { it.frame.src = url; it.addr = url; continue; }
+    // at its kept head, so the view on screen survives the move
+    if (url && it.addr && it.frame instanceof HTMLIFrameElement) { it.frame.src = `${url}${hubKept(it)}`; it.addr = url; continue; }
     it.frame.remove();
     it.frame = null;
     it.loaded = null;
@@ -3078,14 +3238,15 @@ async function draw() {
   empty.hidden = items.size > 0 || Boolean(term) || selected === OVERVIEW || selected === SETTINGS;
   if (!items.size) empty.textContent = 'No projects running';
   if (!selected || (selected !== TERM && selected !== OVERVIEW && selected !== SETTINGS && !items.has(selected))) {
-    const want = wanted();
-    const ordered = [...items.values()].sort((a, b) => byRoot(a.x.root, b.x.root));
-    // the address picks a tab; with none, the Overview (the terminal when the address says so)
-    const pick = ordered.find((it) => keyOf(it) === want);
-    if (pick) select(pick.x.root);
+    const { key: want, head, ot } = hubHead();
+    // the address picks a tab, at the head it names; with none, the Overview (the terminal when the
+    // address says so), at the operator thread it names
+    const pick = hubFind(want);
+    if (pick && head) openAt(pick.x.root, head);
+    else if (pick) select(pick.x.root);
     else if (term && want === 'terminal') selectTerminal();
     else if (want === 'settings') selectSettings();
-    else selectOverview();
+    else { selectOverview(); if (want === 'overview' && ot) tlOpen(ot); }
   }
   paintOverview();
   paintSettings();

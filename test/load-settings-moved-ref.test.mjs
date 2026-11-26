@@ -429,7 +429,7 @@ test('origin unreadable at a relaunch or a recover: refused with the reason, and
         assert.equal(r.status, 0, `${r.stderr}|${r.stdout}`);
         await until(() => F.claudeCalls().length === 1, 'the supervisor started');
         assert.doesNotMatch(F.claudeCalls()[0], /--planted/);
-        assert.match(F.claudeCalls()[0], /^supervisor\|--dangerously-skip-permissions /);
+        assert.match(F.claudeCalls()[0], /^supervisor\|--settings \S+\/run\/agent\/supervisor-claude\.json --dangerously-skip-permissions /, 'with its Stop hook');
       });
     } finally {
       spawnSync('tmux', ['kill-server'], { env: { ...process.env, TMUX_TMPDIR: dir } });
