@@ -271,7 +271,13 @@ test('C7 chore start devteam-sync-<tag> pins in the new worktree and prints the 
     assert.match(r.stderr, /package pin v0\.101\.0: pinned @sanctuarycomputer\/devteam@0\.101\.0/, 'C7 the pin\'s line is printed');
     assert.deepEqual(I.pair(path.join(wt, 'docs', 'devteam')), want.pair, 'C7 the worktree holds the pair');
     assert.deepEqual(I.pair(), { 'package.json': null, 'package-lock.json': null }, 'C7 the main checkout is untouched');
-    const calls = reg.calls().length;
+    let calls = reg.calls().length;
+    // started again, the worktree isn't new: no pin
+    r = I.dt(['chore', 'start', 'devteam-sync-v0.101.0'], env);
+    assert.equal(r.status, 0, `C7 the same chore again: ${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /package pin/, 'C7 a worktree not new prints no pin line');
+    assert.equal(reg.calls().length, calls, 'C7 a worktree not new calls no npm');
+    calls = reg.calls().length;
     r = I.dt(['chore', 'start', 'notes-pin'], env);
     assert.equal(r.status, 0, `C7 another chore starts: ${r.stderr}`);
     assert.doesNotMatch(r.stderr, /package pin/, 'C7 another slug prints no pin line');
@@ -285,11 +291,12 @@ test('C8 a pin that fails never stops the chore from starting', async () => {
   const reg = await startFakeRegistry({ fail: 'unreachable' });
   try {
     const env = { ...reg.env(I.clean), DEVTEAM_ROLE: 'supervisor' };
-    for (const [slug, e, says] of [
-      ['devteam-sync-v0.100.0', env, /package pin v0\.100\.0: skipped \(unreachable\)/],
-      ['devteam-sync-v0.99.0', { ...env, DEVTEAM_NPM_REGISTRY: 'http://localhost:1/' }, /DEVTEAM_NPM_REGISTRY/],
-      ['devteam-sync-v1.0.0', { ...env }, null],
-      ['devteam-sync-nightly', env, /is not a release tag vX\.Y\.Z/],
+    // fails: the pin command exits 1, and the line says the chore goes on
+    for (const [slug, e, says, fails] of [
+      ['devteam-sync-v0.100.0', env, /package pin v0\.100\.0: skipped \(unreachable\)/, false],
+      ['devteam-sync-v0.99.0', { ...env, DEVTEAM_NPM_REGISTRY: 'http://localhost:1/' }, /DEVTEAM_NPM_REGISTRY/, true],
+      ['devteam-sync-v1.0.0', { ...env }, null, false],
+      ['devteam-sync-nightly', env, /is not a release tag vX\.Y\.Z/, true],
     ]) {
       if (says === null) {
         // npm missing: a PATH holding git alone
@@ -301,6 +308,7 @@ test('C8 a pin that fails never stops the chore from starting', async () => {
       assert.equal(r.status, 0, `C8 ${slug}: the chore starts (${r.stderr})`);
       assert.ok(fs.existsSync(path.join(I.root, '.worktrees', `chore-${slug}`, 'docs', 'devteam', 'scripts', 'devteam.mjs')), `C8 ${slug}: its worktree is there`);
       assert.match(r.stderr, says ?? /skipped \(no-npm\)/, `C8 ${slug}: the pin's line says why`);
+      assert.equal(/; the chore goes on\n/.test(r.stderr), fails, `C8 ${slug}: the line says the chore goes on only when the pin failed`);
       assert.deepEqual(I.pair(path.join(I.root, '.worktrees', `chore-${slug}`, 'docs', 'devteam')), { 'package.json': null, 'package-lock.json': null }, `C8 ${slug}: no pair written`);
     }
   } finally { await reg.close(); }
