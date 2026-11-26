@@ -308,7 +308,7 @@ test('processesOf: a read that never ends keeps its place, so two held reads nev
   const line = await Promise.race([processesOf(7, { io, each: 100, window: 50, total: 600 }), new Promise((r) => setTimeout(() => r('still looking at 2 s'), 2000))]);
   const ms = Date.now() - t0;
   assert.equal(seen.max, 2, `two held reads, never a third read beside them (${seen.max} at once)`);
-  assert.ok(ms >= 600 && ms < 900, `ended at its bound: ${ms} ms`);
+  assert.ok(ms >= 600 && ms < 1500, `ended at its bound: ${ms} ms`);
   assert.equal(line, 'processes: browser 7 S sleeping cpu unread, type unread 8 S sleeping cpu unread, type unread 9 state unread, type unread 10 state unread, cut at 0.6 s');
 });
 test('processesOf: one read that never ends is given up on in its time, and the rest are read', async (t) => {

@@ -42,8 +42,8 @@ const typeOf = (cmdline) => {
   const sub = cmdline.match(/(?:^|[\s\0])--utility-sub-type=([^\s\0]+)/)?.[1] ?? '';
   return { 'network.mojom.NetworkService': 'network', 'storage.mojom.StorageService': 'storage' }[sub] ?? (sub ? `utility ${sub.split('.').pop()}` : 'utility');
 };
-// /proc/<pid>/stat after the command's name (which may hold spaces and parentheses): state, ppid, pgrp, …, utime, stime
-const statOf = (text) => { const f = text.slice(text.lastIndexOf(')') + 2).split(' '); return { state: f[0], pgrp: Number(f[2]), ticks: Number(f[11]) + Number(f[12]) }; };
+// /proc/<pid>/stat after the command's name (which may hold spaces and parentheses): its state, and utime + stime
+const statOf = (text) => { const f = text.slice(text.lastIndexOf(')') + 2).split(' '); return { state: f[0], ticks: Number(f[11]) + Number(f[12]) }; };
 
 // The machine's processes as [pid, process group] pairs, by one ps (which reads no command line), killed at ms
 const listed = (ms) => new Promise((ok, no) => execFile('ps', ['-e', '-o', 'pid=,pgid='], { timeout: ms, killSignal: 'SIGKILL' }, (e, out) => (e ? no(new Error(e.killed ? `ps: no answer in ${ms / 1000} s` : `ps: ${e.message.split('\n')[0]}`)) : ok(out.trim().split('\n').map((l) => l.trim().split(/\s+/).map(Number))))));
@@ -59,8 +59,9 @@ const give = () => { const next = places.queue.shift(); if (next) next(); else p
 // (browser, zygote, GPU, network, storage, another utility, each renderer), its state and its CPU over about
 // `window` ms. Which processes: one ps of the machine; the rest from each one's /proc/<pid>/stat (twice) and
 // cmdline. Every read, the ps counted as one, takes one of the module's two places (above), so across every
-// call at once at most two reads are in flight. Each read is waited for `each` ms (the ps, a process to start, `2 * each`) and the whole look `total` ms;
-// what was not read by then says so (a call after held reads that never settle reads nothing, and says so).
+// call at once at most two reads are in flight. Each read is waited for `each` ms (the ps, a process to
+// start, `2 * each`) and the whole look `total` ms; what was not read by then says so (a call after held
+// reads that never settle reads nothing, and says so).
 // io ({ proc, list, readFile }) is this machine's unless a test gives its own.
 export async function processesOf(pgid, { io = { proc: fs.existsSync('/proc/self/stat'), list: listed, readFile: fs.promises.readFile }, each = 1000, window = 1000, total = 4000 } = {}) {
   if (!io.proc) return 'processes: no /proc here';
@@ -162,7 +163,8 @@ export async function openChrome() {
   // the call fail soon; what was seen by then is said, and a look that failed says how.
   const whatChromeDid = async (tid, heard) => {
     const out = [];
-    // every process of this Chrome, read from /proc beside the looks at its endpoint (bounded at 4 s, so done by the 6 s cut), said last
+    // every process of this Chrome, read from /proc beside the looks at its endpoint (bounded at 4 s, so done
+    // by the 6 s cut), said last
     const procs = processesOf(proc.pid);
     const stop = new AbortController();
     let b = null;
