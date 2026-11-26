@@ -139,31 +139,6 @@ test('a call with no answer says what Chrome was doing', { skip: canDrive ? fals
         }
       } finally { await chrome.close(); }
     }),
-    // kit-930: which process holds is what the line is for: one stopped alone is the one named stopped. The storage
-    // service, else the network service, else the GPU process: whichever this Chrome has, by the test's own read.
-    t.test('a Chrome process stopped alone is named stopped, by its type, and the others are not', async () => {
-      const chrome = await openChrome();
-      try {
-        const p = await chrome.newPage();
-        await p.send('Page.navigate', { url: 'data:text/html,<p>here' });
-        let target;
-        for (let i = 0; i < 100 && !target; i++) {
-          const types = new Map(groupOf(chrome.pid).map((pid) => [typeSeen(pid), pid]));
-          target = ['storage', 'network', 'GPU'].filter((x) => types.has(x)).map((x) => [x, types.get(x)])[0];
-          if (!target) await new Promise((r) => setTimeout(r, 100));
-        }
-        assert.ok(target, 'setup: Chrome has a storage service, a network service or a GPU process');
-        const [type, pid] = target;
-        process.kill(pid, 'SIGSTOP');
-        let line;
-        try { line = await processesOf(chrome.pid); } finally { process.kill(pid, 'SIGCONT'); }
-        assert.match(line, new RegExp(`^${PROCESSES}$`));
-        if (OUT_OF_BOUND.test(line)) return t.diagnostic(`a look ran out its bound: ${line}`);
-        assert.match(line, new RegExp(`(: |, )${type} ${pid} T stopped 0% cpu(, |$)`), line);
-        assert.equal(line.match(/ T stopped /g).length, 1, `only the ${type} stopped: ${line}`);
-        assert.ok(rowsOf(line).some(([t]) => t === 'browser'), `the browser named: ${line}`);
-      } finally { await chrome.close(); }
-    }),
     // kit-918: the artifact viewer's harness closes each case's tab with closeTab (Page.close runs the page's beforeunload)
     t.test('a tab close the page holds with a dialog fails its caller, saying what Chrome was doing', async () => {
       const chrome = await openChrome();
@@ -208,6 +183,32 @@ test('a call with no answer says what Chrome was doing', { skip: canDrive ? fals
       } finally { await chrome.close(); }
     }),
   ]);
+  // kit-930 final-1 F2: run after the others, so this case's Chrome adds no load to kit-914's dropped-socket race
+  // kit-930: which process holds is what the line is for: one stopped alone is the one named stopped. The storage
+  // service, else the network service, else the GPU process: whichever this Chrome has, by the test's own read.
+  await t.test('a Chrome process stopped alone is named stopped, by its type, and the others are not', async () => {
+    const chrome = await openChrome();
+    try {
+      const p = await chrome.newPage();
+      await p.send('Page.navigate', { url: 'data:text/html,<p>here' });
+      let target;
+      for (let i = 0; i < 100 && !target; i++) {
+        const types = new Map(groupOf(chrome.pid).map((pid) => [typeSeen(pid), pid]));
+        target = ['storage', 'network', 'GPU'].filter((x) => types.has(x)).map((x) => [x, types.get(x)])[0];
+        if (!target) await new Promise((r) => setTimeout(r, 100));
+      }
+      assert.ok(target, 'setup: Chrome has a storage service, a network service or a GPU process');
+      const [type, pid] = target;
+      process.kill(pid, 'SIGSTOP');
+      let line;
+      try { line = await processesOf(chrome.pid); } finally { process.kill(pid, 'SIGCONT'); }
+      assert.match(line, new RegExp(`^${PROCESSES}$`));
+      if (OUT_OF_BOUND.test(line)) return t.diagnostic(`a look ran out its bound: ${line}`);
+      assert.match(line, new RegExp(`(: |, )${type} ${pid} T stopped 0% cpu(, |$)`), line);
+      assert.equal(line.match(/ T stopped /g).length, 1, `only the ${type} stopped: ${line}`);
+      assert.ok(rowsOf(line).some(([t]) => t === 'browser'), `the browser named: ${line}`);
+    } finally { await chrome.close(); }
+  });
 });
 
 // kit-918: closeTab's order and bounds, on a page of its own making (no Chrome): what it was asked, and what it says.
@@ -365,5 +366,12 @@ test('rowProblems: a gone row is taken; a row without state or CPU, a wrong type
   assert.deepEqual(rowProblems('processes: browser 10 S sleeping, renderer 16 S sleeping 0% cpu', seen({})), ['browser 10: no state and CPU (S sleeping)']);
   assert.deepEqual(rowProblems('processes: renderer 16 S sleeping 0% cpu', seen({})), ['no browser named']);
   assert.deepEqual(rowProblems('processes: browser 10 S sleeping 0% cpu, renderer 16 gone', seen({})), ['no renderer named']);
+});
+// kit-930 final-1 F1: the machine's own path (one ps, /proc reads) names a real process: this test's own, in its group
+test('processesOf on this machine names this test process, by its group, with its state and CPU', { skip: fs.existsSync('/proc/self/stat') ? false : 'needs /proc' }, async () => {
+  const st = fs.readFileSync('/proc/self/stat', 'utf8');
+  const pgid = Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[2]);
+  const line = await processesOf(pgid, { each: 3000, window: 200, total: 10000 });
+  assert.match(line, new RegExp(`(: |, )browser ${process.pid} [A-Za-z] [a-z]+ \\d+% cpu(, |$)`), line);
 });
 
