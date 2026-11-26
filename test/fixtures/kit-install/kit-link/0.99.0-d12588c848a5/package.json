@@ -1,0 +1,10 @@
+{
+  "name": "devteam-instance",
+  "private": true,
+  "dependencies": {
+    "@sanctuarycomputer/devteam": "0.99.0"
+  },
+  "devteam": {
+    "layout": 1
+  }
+}

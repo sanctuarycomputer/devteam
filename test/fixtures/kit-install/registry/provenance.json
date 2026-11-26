@@ -1,0 +1,26 @@
+{
+  "0.101.0": {
+    "repo": "sanctuarycomputer/devteam",
+    "workflow": ".github/workflows/release.yml",
+    "ref": "refs/tags/v0.101.0",
+    "commit": "59adb94f015c75b3de8fd7725bd7a08860e7bb43"
+  },
+  "1.0.0": {
+    "repo": "sanctuarycomputer/devteam",
+    "workflow": ".github/workflows/release.yml",
+    "ref": "refs/tags/v1.0.0",
+    "commit": "cf5cf870fc16a9f4e73582f1b2a10d4d90dcc300"
+  },
+  "0.100.0": {
+    "repo": "sanctuarycomputer/devteam",
+    "workflow": ".github/workflows/release.yml",
+    "ref": "refs/tags/v0.100.0",
+    "commit": "c7f5efbdd7032447f1ca87440d19e5fbdea29e3b"
+  },
+  "0.99.0": {
+    "repo": "someone-else/devteam",
+    "workflow": ".github/workflows/release.yml",
+    "ref": "refs/tags/v0.99.0",
+    "commit": "5fa5108070d61ce4405ac8bcb84b98fe117684ac"
+  }
+}

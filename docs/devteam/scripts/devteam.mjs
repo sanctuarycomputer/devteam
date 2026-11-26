@@ -33284,6 +33284,101 @@ function cmdRecurring() {
   ].join('\n'));
 }
 
+// kit-install@1 (feature kit-package-dist): an instance pins the kit's npm package in two files, installs
+// it verified beside the copy it runs, and from layout 2 runs it. The rules every package, merge, chore,
+// dashboard and launcher step keeps:
+// - Settings. package_name (default @sanctuarycomputer/devteam) and alpha (default true) are owner
+//   settings. Every check reads package_name and upstream_repo from main's committed settings
+//   (settingsAt(main)), never from a PR's head or loadSettings().
+// - The pin pair. docs/devteam/package.json and docs/devteam/package-lock.json are packagePinPair's output
+//   for the registry's manifest of the version, byte for byte. layout is the manifest's devteam.layout (1
+//   or 2), read, never guessed: a manifest without one is refused, and so is one that disagrees with the
+//   tag's launcher marker (below). For a PR that changes either file the expected version is
+//   upstream_base at its head without the v; a pin naming another version is refused, and so is a PR
+//   that deletes the pair (the fix: restore main's pair, or package pin <tag>).
+// - npm. Every call (view, ci, audit signatures) passes --registry=<the registry> and --ignore-scripts, runs
+//   with npm_config_userconfig and npm_config_globalconfig naming two different empty files (npm refuses one
+//   file for both), and with no other npm_config_* or NPM_CONFIG_* variable in its environment. An npm
+//   older than 9.5 can't verify attestations: a finding before layout 2, a refusal from it. A registry
+//   that can't be reached is not a refusal: a fetch or npm call that gets no answer in time, a network
+//   error, or any status but 200 and 404 (a 5xx, a 429), and an npm call that fails with a network code
+//   (ECONN*, ETIMEDOUT, EAI_AGAIN) or E5xx/E429, are unreachable, never a refusal. Unreachable is a finding
+//   before layout 2; from it the step stops, changes nothing (current, verified.json and the pair stay as
+//   they were, and nothing records the version as refused), and the next run tries again.
+// - The registry is https://registry.npmjs.org/. DEVTEAM_NPM_REGISTRY, for tests, replaces it only when it
+//   is exactly http://127.0.0.1:<port>/ (port 1 to 65535, no leading zero, the final slash, nothing after
+//   it); any other value (localhost, [::1], https, a path) stops the command with exit 1 naming the
+//   variable, and is never used or passed over for the public one. Set, it is the --registry of every npm
+//   call and the base of the kit's own fetches, and package status names it. It adds no reach: whoever
+//   sets the kit's environment can already run code in it (NODE_OPTIONS, PATH).
+// - Provenance. The bundle at <registry>-/npm/v1/attestations/<name>@<version> is fetched once (15 s, at
+//   most 1 MiB). Its guards, in order, each a refusal naming the first that fails: the fetch answers 200 or
+//   404 (else unreachable, as above); not a 404 (no attestation); JSON with an attestations list;
+//   exactly one entry whose predicateType is https://slsa.dev/provenance/v1; its bundle.dsseEnvelope.payload
+//   is base64 of a JSON in-toto statement; subject is exactly one entry, whose digest.sha512 (128 hex) is
+//   the integrity's sha512; predicate.buildDefinition.externalParameters.workflow has repository
+//   https://github.com/<upstream_repo>, path .github/workflows/release.yml and ref refs/tags/v<version>;
+//   predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit is the tag's commit in upstream_repo,
+//   on its default branch. npm audit signatures must then pass on the installed tree (it checks the
+//   signature; the kit checks the claims). The bundle the kit reads and the one npm verifies are fetched
+//   separately: a registry serving different bytes to each is a named limit.
+// - The install tree. docs/devteam/.kit/<version>-<first 12 hex of the integrity's sha512>/ holds the pair,
+//   node_modules/<name>/ (and whatever else npm writes there) and verified.json. Folders are made under
+//   withLock(.kit/.lock); current and the previous folder are kept, and a folder a live process holds open
+//   is never removed.
+// - current. docs/devteam/.kit/current is a relative symlink whose target is one folder's name, or, where
+//   the file system holds no symlink, a file of at most 64 bytes holding that name and one newline; every
+//   reader takes both, and switches it by an atomic rename. A name is <X.Y.Z>-<12 hex> and must be a
+//   real folder (not a symlink) directly beside current. Anything else (an absolute or ../ target, a / in
+//   the name, a missing folder, a folder that is a symlink, an empty file, a second line, a bigger file)
+//   is no current: never followed, read as nothing installed.
+// - Never committed. docs/devteam/.kit/ is ignored, and merge refuses a PR that adds or changes any path
+//   under it: an install is only ever made on the machine, by the step.
+// - verified.json: { v: 1, name, version, layout, integrity, integrity_ok, provenance_ok, provenance:
+//   { repo (owner/name), workflow, ref, commit }, at (UTC, toISOString) }, in that order, at most 4 KiB.
+//   The install step writes it last, by an atomic rename, only once both checks pass, so it never writes
+//   an _ok that is false. A reader takes a folder as verified only when its record parses, holds every
+//   field with its type, both _ok are true, and name, version, layout and integrity agree with the folder's
+//   name and its pair; anything else (no record, a false _ok, a field missing or of another type, a
+//   mismatch, too big) is unverified, and nothing runs or serves it.
+// - The hub tree. The install step, run for a verified layout-2 version newer than the hub's current, also
+//   installs it into ~/.devteam/hub/<version>-<hash>/ by the same step and checks, under
+//   withLock(~/.devteam/hub/.lock), with its own verified.json, then switches ~/.devteam/hub/current the
+//   same way. The hub keeps current and the previous folder. A layout-1 install never touches it.
+// - The launcher. Its second line is exactly // devteam-launcher: kit-package@1. Merge's launcher-tag rule
+//   looks for it in a tag's docs/devteam/scripts/devteam.mjs (that tag is layout 2), and the launcher
+//   refuses to run a target that carries it.
+// - The command. devteam.mjs package pin <tag> | package install [--version v] [--into <dir>] (no project
+//   needed) | package status [--json].
+// The fakes: test/fixtures/kit-install/ (the trees, the pair, the registry's packages) and
+// test/lib/fake-registry.mjs (a loopback registry and an npm that keeps these rules or says which it saw
+// broken). packagePinPair is loaded alone by its test: it names nothing outside its body, and no line of
+// it is a bare closing brace but its last.
+function packagePinPair(pin) {
+  const no = (why) => { throw new Error(`packagePinPair: ${why}`); };
+  const KEYS = ['name', 'version', 'integrity', 'resolved', 'layout'];
+  if (!pin || typeof pin !== 'object' || Array.isArray(pin)) no('takes { name, version, integrity, resolved, layout }');
+  if (Object.keys(pin).some((k) => !KEYS.includes(k))) no('takes only name, version, integrity, resolved and layout');
+  const { name, version, integrity, resolved, layout } = pin;
+  if (typeof name !== 'string' || name.length > 214 || !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(name)) no('name is not an npm package name');
+  if (typeof version !== 'string' || !/^(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})$/.test(version)) no('version is not X.Y.Z');
+  if (typeof integrity !== 'string' || !/^sha512-[A-Za-z0-9+/]{86}==$/.test(integrity)) no('integrity is not one sha512');
+  if (resolved !== `https://registry.npmjs.org/${name}/-/${name.slice(name.indexOf('/') + 1)}-${version}.tgz`) no("resolved is not the public registry's tarball of name@version");
+  if (layout !== 1 && layout !== 2) no('layout is not 1 or 2');
+  const dependencies = { [name]: version };
+  const text = (o) => `${JSON.stringify(o, null, 2)}\n`;
+  return {
+    'package.json': text({ name: 'devteam-instance', private: true, dependencies, devteam: { layout } }),
+    'package-lock.json': text({ name: 'devteam-instance', lockfileVersion: 3, requires: true, packages: { '': { name: 'devteam-instance', dependencies }, [`node_modules/${name}`]: { version, resolved, integrity } } }),
+  };
+}
+// package pin|install|status (kit-install@1). Until each is built, it says so.
+function cmdPackage() {
+  const sub = positional[0];
+  if (['pin', 'install', 'status'].includes(sub)) die(`package ${sub}: not built yet`);
+  die('usage: package pin <tag> | package install [--version v] [--into <dir>] | package status [--json]');
+}
+
 // When a recurring job is next due (design C1), from its landings on main and its recorded results.
 // landings: [{ at, entry }] in any order, entry null when the job stopped; runs: [{ slot, at }], at the
 // run's start. An unanchored job's next slot is the last result's start plus every; an anchored one
@@ -40925,7 +41020,7 @@ const COMMANDS_GRAPH = {
   feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, moves: cmdMoves, roadmap: cmdRoadmap,
 };
 const COMMANDS_CHECKS = {
-  'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
+  'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree, package: cmdPackage,
 };
 const COMMANDS_SESSIONS = {
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
