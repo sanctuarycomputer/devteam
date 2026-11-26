@@ -282,7 +282,7 @@ test('bare #<key>, #overview and #settings open as today; a key with a / round-t
   // and the address follows whatever head the frame then reports (a dashboard canonicalises a bare load), or stays bare;
   // read once the frame has its first hub-base, so its own load-time head is written
   await until(() => F.gotAt(`127.0.0.1:${PA}`).length > 0, "alpha's first hub-base");
-  const own =await into(p, F.lo(PA), 'location.hash');
+  const own = await into(p, F.lo(PA), 'location.hash');
   await p.until('the address at the head the frame reports', `${hubHash} === ${JSON.stringify(own.length > 1 ? `#alpha/${own.slice(1)}` : '#alpha')}`);
   await p.go('#overview');
   await p.until('the Overview', `selected === '\\u0000overview' && !document.getElementById('overview').hidden`);
@@ -302,6 +302,14 @@ test('bare #<key>, #overview and #settings open as today; a key with a / round-t
   await p.ev(`location.hash = '#alpha/progress?goal=g-9', true`);
   await p.until("alpha's tab, from the hashchange", tabOn('alpha'));
   await until(() => F.hashAt(`127.0.0.1:${PA}`) === '#progress?goal=g-9', "alpha's frame at the hashchange's head");
+  await p.until("the address at alpha's deep head", `${hubHash} === '#alpha/progress?goal=g-9'`);
+  // a bare #<key> while the hub is open, as a push sends: the project on screen goes back to its kept head,
+  // and another project is selected at its own kept head
+  await p.ev(`location.hash = '#alpha', true`);
+  await p.until("a bare #alpha on alpha: the address back at alpha's kept head", `${hubHash} === '#alpha/progress?goal=g-9'`);
+  await p.ev(`location.hash = '#team%2Fapp', true`);
+  await p.until("a bare key for team/app: its tab", tabOn('team/app'));
+  await p.until("and the address at team/app's kept head", `${hubHash} === '#team%2Fapp/goals'`);
   // two projects named gamma: keys gamma-<hex>; one goes, and the other (still keyed by hex while the
   // gone one's tab lingers) is opened by its name
   F.list = [hello('alpha', PA), hello('gamma', PG1, '/srv/g1'), hello('gamma', PG2, '/srv/g2')];
@@ -313,6 +321,11 @@ test('bare #<key>, #overview and #settings open as today; a key with a / round-t
   await p.ev(`location.hash = '#gamma/board', true`);
   await p.until('the one gamma listed, by its name', `selected === '/srv/g1'`);
   await until(() => F.hashAt(`127.0.0.1:${PG1}`) === '#board', "gamma's frame at the head");
+  // and a bare #<name> while the hub is open (only the name, not a key): that project too
+  await p.ev(`location.hash = '#alpha', true`);
+  await p.until("alpha's tab again", tabOn('alpha'));
+  await p.ev(`location.hash = '#gamma', true`);
+  await p.until('a bare #gamma: the one gamma listed, by its name', `selected === '/srv/g1'`);
 });
 
 test("on a box: 2 box the base is the project's own host; on box: 1 it is the hub's laptop form; #terminal opens the terminal", CHROME, async (t) => {
