@@ -92,9 +92,6 @@ export function kitParts(text) {
   return vm.runInContext(`${text.slice(a, b)}\n;({ fileParts, leafTexts })`, vm.createContext({}));
 }
 
-// The independent count (F6-18): the declaration leaves fileParts finds in the source and in the
-// tree's modules (export stripped first on both sides), compared as multisets of text. { equal, source, tree,
-// onlySource, onlyTree } with the first line of each leaf that differs.
 // The names fileParts reads as declarations in the source that the scanner doesn't declare: a
 // declaration the scanner missed (a line it wrongly reads as inside a template or comment), or a
 // column-0 line inside a template that fileParts reads as one. Either way the split can't be sure.
@@ -111,9 +108,12 @@ export function partsNames(kit, src, srcFile) {
   }
   return out;
 }
+// The independent count: the declaration leaves fileParts finds in the source and in the tree's
+// modules (export stripped first on both sides), compared as multisets of text. { equal, source,
+// tree, onlySource, onlyTree } with the first line of each leaf that differs.
 export function partsCount(kit, src, srcFile, modules) {
   const leaves = (text, file) => [...kit.leafTexts(kit.fileParts(text, file))].filter(([k]) => k.startsWith('d:')).map(([, v]) => v);
-  const bare = (text) => text.replace(/^export (?=(?:async\s+)?function|class\s|const\s|let\s|var\s)/gm, '');
+  const bare = (text) => text.replace(/^export\s+(?=(?:async\s+)?function|class\s|(?:const|let|var)[\s{[])/gm, '');
   const s = leaves(bare(src), srcFile);
   const t = modules.flatMap(({ file, text }) => leaves(bare(text), file));
   const count = new Map();

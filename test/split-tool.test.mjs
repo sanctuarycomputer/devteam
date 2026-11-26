@@ -1,9 +1,9 @@
-// The split tool (kit-890, cutover-tree@1): test/split/split.mjs writes the kit at a commit with its
-// CLI in modules, --verify proves a tree moved every declaration unchanged, and --count is K1's count.
+// The split tool (kit-890): test/split/split.mjs writes the kit at a commit with its CLI in
+// modules, --verify proves a tree moved every declaration unchanged, and --count is the sizing count.
 // The F and R tests run on a fixture repo the test makes, so they always run. The H tests split this
 // checkout's own HEAD with the real manifest; when HEAD has drifted from the manifest (a start renamed,
 // a module past the cap, a form the scanner can't read) they skip and name it, so a regular PR is
-// never failed by the package's work (the design's anti-goal); the parity run reports that drift.
+// never failed by drift the split tool hasn't caught up with yet.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -69,6 +69,7 @@ async function load() { return A; }
 function* gen() { yield B; }
 var legacy = 1;
 export const PRE = 2;
+const{packed}=({packed:3});
 // tail end
 class Shape { area() { return legacy + PRE; } }
 `;
@@ -272,6 +273,32 @@ test('R2: split writes nothing outside --out', () => {
   assert.equal(split(...F.opts, '--out', path.join(box, 'out')).status, 2);
   assert.equal(split(...F.opts, '--out', path.join(box, 'no', 'out')).status, 2);
   assert.equal(fs.existsSync(path.join(box, 'no')), false);
+  // a flag is never taken for --out's value
+  const stray = path.join(os.tmpdir(), '--json');
+  const f = split(...F.opts, '--out', '--json');
+  const wrote = fs.existsSync(stray);
+  fs.rmSync(stray, { recursive: true, force: true });
+  assert.equal(f.status, 2, f.stderr);
+  assert.equal(wrote, false, 'nothing written at ./--json');
+  // a link the commit tracks above a generated file is never written through
+  const L = fixtureRepo('link');
+  const elsewhere = path.join(L.dir, 'elsewhere');
+  fs.mkdirSync(elsewhere);
+  fs.symlinkSync('../../elsewhere', path.join(L.dir, 'repo', 'src', 'lib'));
+  assert.equal(run('git', ['-C', path.join(L.dir, 'repo'), 'add', 'src/lib']).status, 0);
+  assert.equal(run('git', ['-C', path.join(L.dir, 'repo'), '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'link']).status, 0);
+  const lsha = run('git', ['-C', path.join(L.dir, 'repo'), 'rev-parse', 'HEAD']).stdout.trim();
+  const l = split('--repo', path.join(L.dir, 'repo'), '--split-dir', path.join(L.dir, 'split'), '--at', lsha, '--out', path.join(L.dir, 'out'));
+  assert.equal(l.status, 1, l.stderr);
+  assert.match(l.stderr, /^split: src\/lib is a link in [0-9a-f]{8}; the split would write through it$/m);
+  assert.deepEqual(fs.readdirSync(elsewhere), []);
+  assert.equal(fs.existsSync(path.join(L.dir, 'out')), false);
+  // the caller's GIT_* variables decide neither the repository read nor the refusal
+  const gbox = path.join(tmp, 'gbox');
+  fs.mkdirSync(gbox);
+  const e = run(process.execPath, [tool, ...F.opts, '--out', path.join(gbox, 'out')], { cwd: os.tmpdir(), env: { ...env, GIT_DIR: path.join(L.dir, 'repo', '.git') } });
+  assert.equal(e.status, 0, e.stderr);
+  assert.ok(fs.existsSync(path.join(gbox, 'out', 'src', 'lib', 'four.mjs')));
 });
 
 // ---- the kit's own HEAD, with the real manifest ----
@@ -281,8 +308,8 @@ const tree = path.join(tmp, 'head');
 const lib = path.join(tree, M.dir);
 const headSplit = split('--at', sha, '--out', tree);
 const headVerify = headSplit.status === 0 ? split('--verify', '--at', sha, '--tree', tree) : null;
-// HEAD drifted from the manifest: the H tests skip, naming what drifted. Only the drift kinds the
-// spec names skip (a start gone or out of order, a module past the cap, a form the scanner can't
+// HEAD drifted from the manifest: the H tests skip, naming what drifted. Only these drift kinds
+// skip (a start gone or out of order, a module past the cap, a form the scanner can't
 // read, a declaration fileParts and the scanner read differently); any other problem, or a crash,
 // runs the H tests, which fail on it. The F tests carry every form, so a tool defect fails there too.
 const DRIFT = [/^split: manifest\.json: manifest: module .+ (?:is not in the source|starts at line \d+, not after .+|must start at line 1)$/,

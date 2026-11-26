@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // The split tool (cutover-tree@1). At any commit, generate the kit with its CLI in modules, prove a
-// generated tree moved every declaration unchanged, or count what a split needs (K1).
+// generated tree moved every declaration unchanged, or count what a split needs.
 //   node test/split/split.mjs --at <sha> --out <dir>            write a full copy of the kit, split
 //   node test/split/split.mjs --verify --at <sha> --tree <dir>  check a tree against the commit
-//   node test/split/split.mjs --count --at <sha>                K1's sizing count, as markdown
+//   node test/split/split.mjs --count --at <sha>                the sizing count, as markdown
 // Options: --repo <dir> (default: this checkout), --split-dir <dir> (where manifest*.json are;
 // default: this folder), --json. Exit 0 clean, 1 problems (each named), 2 refused (nothing written).
 // Node 18+, built-ins only; needs git and tar. It writes nothing outside --out.
@@ -18,10 +18,13 @@ import { kitParts, partsCount, partsNames, verify } from './lib/verify.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const flag = (n) => args.includes(`--${n}`);
-const opt = (n) => { const i = args.indexOf(`--${n}`); return i >= 0 ? args[i + 1] : undefined; };
+// an option's value is the word after it, never another option
+const opt = (n) => { const i = args.indexOf(`--${n}`); if (i < 0) return undefined; const v = args[i + 1]; if (v === undefined || v.startsWith('--')) refuse(`--${n} needs a value`); return v; };
 const say = (s) => process.stdout.write(`${s}\n`);
 const refuse = (s) => { process.stderr.write(`split: ${s}\n`); process.exit(2); };
-const run = (cmd, a, o = {}) => spawnSync(cmd, a, { maxBuffer: 1 << 30, ...o });
+// git reads only the repository and folders named here, never the caller's GIT_* variables
+const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_')));
+const run = (cmd, a, o = {}) => spawnSync(cmd, a, { maxBuffer: 1 << 30, env, ...o });
 const git = (repo, a, o) => run('git', ['-C', repo, ...a], o);
 
 const repoTop = git(here, ['rev-parse', '--show-toplevel'], { encoding: 'utf8' });
@@ -88,6 +91,7 @@ if (st && (!st.isDirectory() || fs.readdirSync(out).length)) refuse(`${out} exis
 // inside a work tree, or inside a repository's own .git folder
 const inGit = git(st ? out : parent, ['rev-parse', '--absolute-git-dir'], { encoding: 'utf8' });
 if (inGit.status === 0) refuse(`${out} is inside the git repository ${inGit.stdout.trim()}; write the tree outside any checkout`);
+if (!/not a git repository/.test(inGit.stderr)) refuse(`can't tell whether ${out} is inside a git repository: ${inGit.stderr.trim()}`);
 
 const builds = sources.map(({ name, M, src }) => ({ name, M, b: build(src, M, { sha }) }));
 const problems = builds.flatMap(({ name, b }) => b.problems.map((p) => `${name}: ${p}`));
@@ -98,6 +102,9 @@ for (const f of files) {
 }
 const there = git(repo, ['ls-tree', '-r', '--name-only', sha, '--', ...new Set(files.map((f) => f.file))], { encoding: 'utf8' }).stdout.split('\n').filter(Boolean);
 for (const f of there) problems.push(`${f} is already in ${sha.slice(0, 8)}; the split would overwrite it`);
+// a folder above a generated file that the commit tracks as a link would be written through
+const above = [...new Set(files.flatMap((f) => { const p = f.file.split('/'); return p.slice(1).map((_, i) => p.slice(0, i + 1).join('/')); }))];
+if (above.length) for (const l of git(repo, ['ls-tree', sha, '--', ...above], { encoding: 'utf8' }).stdout.split('\n').filter((x) => x.startsWith('120000 '))) problems.push(`${l.split('\t')[1]} is a link in ${sha.slice(0, 8)}; the split would write through it`);
 if (problems.length) { for (const p of problems) process.stderr.write(`split: ${p}\n`); process.stderr.write('split: nothing written\n'); process.exit(1); }
 
 if (!st) fs.mkdirSync(out);

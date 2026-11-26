@@ -1,4 +1,4 @@
-// split --count: K1's sizing count (cutover-tree@1, risk K1) of one source by its manifest, as
+// split --count: the sizing count of one source by its manifest, as
 // markdown: top-level declarations per module, load-time statement sites, uses of import.meta.url
 // meaning the CLI, lets assigned from another module or banner section, and marker regions over
 // 2,000 lines.
