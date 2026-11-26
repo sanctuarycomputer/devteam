@@ -1,7 +1,7 @@
 # Publishes every kit release to npm as @sanctuarycomputer/devteam, with provenance (kit-954). Only on
 # this repository (a fork does nothing) and only a full release: a prerelease publishes nothing.
 #
-# Two jobs, so nothing that installs or builds can publish (alpha-build@1):
+# Building and publishing are separate jobs, so nothing that installs or builds can publish (alpha-build@1):
 # - build, with contents: read and no secrets, builds each apps/<app>/ present (npm ci --ignore-scripts,
 #   then npm run build with DEVTEAM_BASE_PATH=/next) and hands only its out/ on, as the artifact alpha.
 # - publish, with id-token: write in the npm-publish environment, installs and builds nothing: it runs
@@ -9,8 +9,9 @@
 #   byte for byte the tag's, the version from the tag), then publishes the tarball that check packed. It
 #   reads no npm token: npm's trusted publisher for this file trusts the run by OIDC and makes the
 #   provenance itself.
-# A pull request that changes this file, package.json, apps/ or test/release/ runs build and check, the
-# same check with no publish rights, so the PR shows the packed file list in its run's summary.
+# - check, a third job that runs only on a pull request that changes this file, package.json, apps/ or
+#   test/release/: after build, the same package check with no publish rights, so the PR shows the packed
+#   file list in its run's summary. On a pull request publish is skipped; on a release, check is.
 #
 # The owner's one-time setup, before the first release that carries this file:
 # 1. In this repository's settings, the environment npm-publish, limited to tags matching v*: a run

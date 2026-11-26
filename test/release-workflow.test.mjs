@@ -92,6 +92,25 @@ const wf = () => yaml(wfText());
 const runs = (job) => job.steps.map((s) => s.run ?? '').join('\n');
 const uses = (job) => job.steps.map((s) => s.uses).filter(Boolean);
 
+// The check and publish jobs' steps, exactly: any added step, `if`, `continue-on-error` or `env` breaks
+// what R3 and R5 hold (a check that can't stop the publish, something run before it, a file swapped in).
+const SETUP = [
+  { uses: 'actions/setup-node@v5', with: { 'node-version': '24', 'check-latest': 'true', 'package-manager-cache': 'false' } },
+  { uses: 'actions/download-artifact@v4', with: { pattern: 'alpha', 'merge-multiple': 'true', path: '${{ runner.temp }}/alpha' } },
+];
+const SUMMARY = `{ echo '### Packed files'; echo; echo '\`\`\`'; cat "$RUNNER_TEMP/pack/files.txt"; echo '\`\`\`'; } >> "$GITHUB_STEP_SUMMARY"\n`;
+const CHECK_STEPS = [
+  { uses: 'actions/checkout@v5', with: { 'persist-credentials': 'false' } },
+  ...SETUP,
+  { name: 'Check the package', shell: 'bash', run: `set -euo pipefail\nnode test/release/package-check.mjs --tag v0.0.0 --tree HEAD --alpha "$RUNNER_TEMP/alpha" --out "$RUNNER_TEMP/pack" --min-npm 11.5.1\n${SUMMARY}` },
+];
+const PUBLISH_STEPS = [
+  { uses: 'actions/checkout@v5', with: { 'fetch-depth': '0', 'persist-credentials': 'false' } },
+  ...SETUP,
+  { name: 'Check the package', shell: 'bash', env: { TAG: '${{ github.event.release.tag_name }}' }, run: `set -euo pipefail\nnode test/release/package-check.mjs --tag "$TAG" --alpha "$RUNNER_TEMP/alpha" --out "$RUNNER_TEMP/pack" --min-npm 11.5.1\n${SUMMARY}` },
+  { name: 'Publish', shell: 'bash', run: 'npm publish "$RUNNER_TEMP/pack/package.tgz" --access public --provenance --ignore-scripts' },
+];
+
 // ---- R1: the root package.json -------------------------------------------------------------------
 test('R1 package.json names @sanctuarycomputer/devteam, no dependencies, no bin, files docs/devteam/ less project/ and run/, layout 1', () => {
   const p = JSON.parse(read(path.join(REPO, 'package.json')));
@@ -126,6 +145,7 @@ test('R3 on a pull_request the publish job is skipped and check runs the same pa
   assert.equal(w.jobs.check.environment, undefined, 'R3 check: no environment');
   assert.match(runs(w.jobs.check), /^node test\/release\/package-check\.mjs --tag v0\.0\.0 --tree HEAD --alpha "\$RUNNER_TEMP\/alpha" --out "\$RUNNER_TEMP\/pack" --min-npm 11\.5\.1$/m, 'R3 check runs package-check');
   assert.match(runs(w.jobs.check), /cat "\$RUNNER_TEMP\/pack\/files\.txt"; echo '```'; \} >> "\$GITHUB_STEP_SUMMARY"/, 'R3 the packed file list in the summary');
+  assert.deepEqual(w.jobs.check.steps, CHECK_STEPS, 'R3 the check job\'s steps, exactly');
 });
 
 test('R4 build: contents: read only, no secrets, builds each apps/<app>/ with npm ci --ignore-scripts and npm run build at /next, uploads only out/', () => {
@@ -165,6 +185,7 @@ test('R5 publish: id-token: write in npm-publish, no npm ci and no build, packag
   assert.equal(p.steps.find((s) => s.uses?.startsWith('actions/checkout@'))?.with?.['fetch-depth'], '0', 'R5 the tag is fetched');
   const dl = p.steps.find((s) => s.uses?.startsWith('actions/download-artifact@'));
   assert.deepEqual(dl.with, { pattern: 'alpha', 'merge-multiple': 'true', path: '${{ runner.temp }}/alpha' }, 'R5 it downloads only the alpha');
+  assert.deepEqual(p.steps, PUBLISH_STEPS, 'R5 the publish job\'s steps, exactly');
 });
 
 test('R6 the newest Node 24 everywhere, no cache; no npm token or secret read anywhere in the file', () => {
