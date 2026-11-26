@@ -582,12 +582,15 @@ test('terminal A14: Ctrl+] releases focus; Escape goes to the pane; the + button
 test('terminal measure: the measure check passes at 1440, 720 and 390 px with a terminal tab open', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
   const R = await open(t, { hash: '#overview?th=supervisor', fake: { lines: ['a line of the supervisor\'s screen, wider than half the grid would ever let running text be, as code is'] } });
   const o = { view: '#no-such-view', inbox: '#no-such-inbox', ignore: '.term-screen' };
-  const res = await measureAt(R.p, `${R.url}/#overview?th=supervisor`, { ready: `${PANEL_AT_REST} && !!document.querySelector('.term-box[data-term="supervisor"] .xterm-rows')`, ...o });
+  // each size is the same address, so a hash change, not a load: the page keeps easing its margin from the size
+  // before (Wide's 720 px at 1440 down to 0 at 720), and is measured only once nothing is moving
+  const settled = `!document.getAnimations().some((a) => a.playState === 'running')`;
+  const res = await measureAt(R.p, `${R.url}/#overview?th=supervisor`, { ready: `${PANEL_AT_REST} && !!document.querySelector('.term-box[data-term="supervisor"] .xterm-rows') && ${settled}`, ...o });
   for (const [size, fails] of Object.entries(res)) assert.deepEqual(fails, [], `the screen, ${size}: ${fails.join('; ')}`);
   // the tab's running text at its widest: Wide on, the supervisor not running
   await R.p.ev(`localStorage.setItem('devteam.threads.wide', '1'); true`);
   R.fake.set({ supervisor: 'gone' });
-  const gone = await measureAt(R.p, `${R.url}/#overview?th=supervisor`, { ready: `${PANEL_AT_REST} && !!document.querySelector('.term-box[data-term="supervisor"] .term-state:not([hidden]) code')`, ...o });
+  const gone = await measureAt(R.p, `${R.url}/#overview?th=supervisor`, { ready: `${PANEL_AT_REST} && !!document.querySelector('.term-box[data-term="supervisor"] .term-state:not([hidden]) code') && ${settled}`, ...o });
   for (const [size, fails] of Object.entries(gone)) assert.deepEqual(fails, [], `not running, Wide, ${size}: ${fails.join('; ')}`);
 });
 
