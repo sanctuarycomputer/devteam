@@ -5,8 +5,10 @@
 // the contract's calling rules, so a consumer's test sees the rule kept, not only the answer. Two kinds of
 // refusal, told apart by their text:
 //   `fake npm: … (kit-install@1)`  a contract rule (exactly one --registry= naming this registry, the
-//                                  DEVTEAM_NPM_REGISTRY env() sets; --ignore-scripts; no npm_config_* or
-//                                  NPM_CONFIG_* but two different empty config files); real npm takes these
+//                                  DEVTEAM_NPM_REGISTRY env() sets; --ignore-scripts; each command's exact
+//                                  arguments and nothing else; no npm_config_* or NPM_CONFIG_* but two
+//                                  different empty regular config files; no .npmrc where it runs); real npm
+//                                  takes these
 //   `npm error code …`             what real npm does (10.x): a pair out of sync (package.json's version not
 //                                  the lock entry's, an entry missing, an entry with dependencies), a tarball
 //                                  whose sha512 isn't the lock's integrity, one file for both configs, a 404,
@@ -37,6 +39,7 @@
 //   server-error    every request is a 503 (an outage: unreachable to the kit, never a refusal)
 //   attestation-gone
 //                   manifests advertise attestations but the bundle is a 404 (real npm's audit fails E404)
+//   redirect        the bundle is a 302 to another host (http://127.0.0.2:9/); the kit must not follow it
 //
 // The registry is the fixture's four packages (registry/devteam-<version>.tgz; each manifest is the
 // tarball's package.json with dist and _id) and their provenance (registry/provenance.json, commits
@@ -55,7 +58,7 @@ const SELF = fileURLToPath(import.meta.url);
 export const FIXTURES = path.resolve(path.dirname(SELF), '..', 'fixtures', 'kit-install');
 export const NAME = '@sanctuarycomputer/devteam';
 export const PUBLIC = 'https://registry.npmjs.org/';
-export const FAILURES = ['unreachable', 'integrity', 'no-attestation', 'repo', 'workflow', 'ref', 'commit', 'digest', 'old-npm', 'hostile-env', 'server-error', 'attestation-gone'];
+export const FAILURES = ['unreachable', 'integrity', 'no-attestation', 'repo', 'workflow', 'ref', 'commit', 'digest', 'old-npm', 'hostile-env', 'server-error', 'attestation-gone', 'redirect'];
 export const NPM_VERSION = '10.9.0';
 export const OLD_NPM_VERSION = '9.4.2';
 const SLSA = 'https://slsa.dev/provenance/v1';
@@ -158,6 +161,7 @@ function serve(stateFile) {
     if (at) {
       const pk = at[1] === NAME && pkgs.get(at[2]);
       if (!pk || state.fail === 'no-attestation' || state.fail === 'attestation-gone') return notFound();
+      if (state.fail === 'redirect') { res.writeHead(302, { location: `http://127.0.0.2:9${req.url}` }); return res.end(); }
       return send(200, 'application/json', JSON.stringify(attestations(pk, state.fail)));
     }
     if (p === `/${NAME}`) {
@@ -283,12 +287,23 @@ async function fakeNpm(stateFile, args) {
     const reg = args.filter((a) => a.startsWith('--registry=')).map((a) => a.slice(11));
     if (reg.length !== 1 || reg[0] !== state.url) return rule(`every call passes exactly one --registry=, the registry DEVTEAM_NPM_REGISTRY names (got ${reg.length ? reg.join(' ') : 'none'})`);
     if (!args.includes('--ignore-scripts')) return rule('every call passes --ignore-scripts');
+    // each command's exact arguments: the two flags once, its own, and nothing that undoes them
+    const known = { view: ['--json'], ci: ['--dry-run'], audit: [] };
+    const plain = args.filter((a) => !a.startsWith('-'));
+    if (known[plain[0]]) {
+      const extra = args.filter((a) => a.startsWith('-') && !a.startsWith('--registry=') && a !== '--ignore-scripts' && !known[plain[0]].includes(a));
+      const once = args.filter((a) => a === '--ignore-scripts').length === 1 && known[plain[0]].every((f) => args.filter((a) => a === f).length <= 1);
+      const shape = plain[0] === 'view' ? plain.length >= 2 && plain.length <= 3 && (plain.length === 2 || /^[A-Za-z_][\w.]*$/.test(plain[2]))
+        : plain[0] === 'ci' ? plain.length === 1 : plain.length === 2 && plain[1] === 'signatures';
+      if (extra.length || !once || !shape) return rule(`every call is exactly view <name>@<version> [<field>] [--json], ci [--dry-run] or audit signatures, with --registry=<the registry> and --ignore-scripts and nothing else (got ${args.join(' ')})`);
+    }
+    if (fs.existsSync('.npmrc')) return rule('npm runs in a folder with no .npmrc');
     const stray = Object.keys(npmEnv).filter((k) => !['npm_config_userconfig', 'npm_config_globalconfig'].includes(k));
     if (stray.length) return rule(`npm config from the environment reached npm: ${stray.sort().join(', ')}`);
     const u = npmEnv.npm_config_userconfig, g = npmEnv.npm_config_globalconfig;
     if (!u || !g) return rule('npm_config_userconfig and npm_config_globalconfig both name an empty file');
     if (path.resolve(u) === path.resolve(g)) return err('ECONFIG', `double-loading config "${g}" as "global", previously loaded as "user"`);
-    for (const f of [u, g]) { let size; try { size = fs.statSync(f).size; } catch { size = -1; } if (size !== 0) return rule(`${f} is an empty file`); }
+    for (const f of [u, g]) { let st; try { st = fs.statSync(f); } catch { st = null; } if (!st?.isFile() || st.size !== 0) return rule(`${f} is an empty file (a regular one)`); }
     const words = args.filter((a) => !a.startsWith('-'));
     // an answer that isn't 200: a 5xx or a 429 is npm's E<status> (an outage), anything else its E404
     const notOk = (r, what) => (r.status >= 500 || r.status === 429

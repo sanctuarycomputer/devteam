@@ -33296,9 +33296,13 @@ function cmdRecurring() {
 //   tag's launcher marker (below). For a PR that changes either file the expected version is
 //   upstream_base at its head without the v; a pin naming another version is refused, and so is a PR
 //   that deletes the pair (the fix: restore main's pair, or package pin <tag>).
-// - npm. Every call (view, ci, audit signatures) passes --registry=<the registry> and --ignore-scripts, runs
-//   with npm_config_userconfig and npm_config_globalconfig naming two different empty files (npm refuses one
-//   file for both), and with no other npm_config_* or NPM_CONFIG_* variable in its environment. An npm
+// - npm. The calls are exactly npm view <name>@<version> [<field>] [--json], npm ci [--dry-run] and npm
+//   audit signatures, each with --registry=<the registry> and --ignore-scripts and no other argument in any
+//   form (no second or scoped registry, no --reg or --registry <url>, no ignore-scripts negation, no
+//   --userconfig or --globalconfig). Each runs with npm_config_userconfig and npm_config_globalconfig naming
+//   two different empty files (regular files; npm refuses one file for both), with no other npm_config_* or
+//   NPM_CONFIG_* variable in its environment, and in a folder the step made that holds no .npmrc: ci and
+//   audit in .kit/<version>-<hash>/, view in its own empty folder. An npm
 //   older than 9.5 can't verify attestations: a finding before layout 2, a refusal from it. A registry
 //   that can't be reached is not a refusal: a fetch or npm call that gets no answer in time, a network
 //   error, or any status but 200 and 404 (a 5xx, a 429), and an npm call that fails with a network code
@@ -33308,10 +33312,13 @@ function cmdRecurring() {
 //   the version is unpublished: a finding before layout 2, a refusal from it. EINTEGRITY is a refusal.
 // - The registry is https://registry.npmjs.org/. DEVTEAM_NPM_REGISTRY, for tests, replaces it only when it
 //   is exactly http://127.0.0.1:<port>/ (port 1 to 65535, no leading zero, the final slash, nothing after
-//   it); any other value (localhost, [::1], https, a path) stops the command with exit 1 naming the
+//   it). Unset or empty, it is the public registry; any other value (localhost, [::1], https, a path) stops
+//   the command with exit 1 naming the
 //   variable, and is never used or passed over for the public one. Set, it is the --registry of every npm
 //   call and the base of the kit's own fetches, and package status names it. It adds no reach: whoever
-//   sets the kit's environment can already run code in it (NODE_OPTIONS, PATH).
+//   sets the kit's environment can already run code in it (NODE_OPTIONS, PATH). The kit's own fetches
+//   never follow a redirect (redirect: 'manual'): a 3xx is unreachable, so no answer comes from another
+//   host.
 // - Provenance. The bundle at <registry>-/npm/v1/attestations/<name>@<version> is fetched once (15 s, at
 //   most 1 MiB). Its guards, in order, each a refusal naming the first that fails: the fetch answers 200 or
 //   404 (else unreachable, as above); not a 404 (no attestation); JSON with an attestations list;
@@ -33320,9 +33327,11 @@ function cmdRecurring() {
 //   the integrity's sha512; predicate.buildDefinition.externalParameters.workflow has repository
 //   https://github.com/<upstream_repo>, path .github/workflows/release.yml and ref refs/tags/v<version>;
 //   predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit is the tag's commit in upstream_repo,
-//   on its default branch. npm audit signatures must then pass on the installed tree (it checks the
-//   signature; the kit checks the claims). The bundle the kit reads and the one npm verifies are fetched
-//   separately: a registry serving different bytes to each is a named limit.
+//   on its default branch. npm audit signatures must then pass on the installed tree and report the
+//   package's attestation verified (its "has a verified attestation" line; passing on registry signatures
+//   alone is a refusal from layout 2, a finding before): it checks the signature, the kit the claims. The
+//   bundle the kit reads and the one npm verifies are fetched separately: a registry serving different
+//   bytes to each is a named limit.
 // - The install tree. docs/devteam/.kit/<version>-<first 12 hex of the integrity's sha512>/ holds the pair,
 //   node_modules/<name>/ (and whatever else npm writes there) and verified.json. Folders are made under
 //   withLock(.kit/.lock); current and the previous folder are kept, and a folder a live process holds open
@@ -33333,8 +33342,10 @@ function cmdRecurring() {
 //   real folder (not a symlink) directly beside current. Anything else (an absolute or ../ target, a / in
 //   the name, a missing folder, a folder that is a symlink, an empty file, a second line, a bigger file)
 //   is no current: never followed, read as nothing installed.
-// - Never committed. docs/devteam/.kit/ is ignored, and merge refuses a PR that adds or changes any path
-//   under it: an install is only ever made on the machine, by the step.
+// - Never committed. docs/devteam/.kit must be a real folder (lstat); a symlink or anything else there is
+//   read as nothing installed. Its ignore line is .kit, with no slash, so a symlink of that name is ignored
+//   too, and merge refuses a PR that adds or changes docs/devteam/.kit itself or any path under it: an
+//   install is only ever made on the machine, by the step.
 // - verified.json: { v: 1, name, version, layout, integrity, integrity_ok, provenance_ok, provenance:
 //   { repo (owner/name), workflow, ref, commit }, at (UTC, toISOString) }, in that order, at most 4 KiB.
 //   The install step writes it last, by an atomic rename, only once both checks pass, so it never writes
@@ -33345,7 +33356,8 @@ function cmdRecurring() {
 // - The hub tree. The install step, run for a verified layout-2 version newer than the hub's current, also
 //   installs it into ~/.devteam/hub/<version>-<hash>/ by the same step and checks, under
 //   withLock(~/.devteam/hub/.lock), with its own verified.json, then switches ~/.devteam/hub/current the
-//   same way. The hub keeps current and the previous folder. A layout-1 install never touches it.
+//   same way. ~/.devteam/hub must be a real folder (lstat), and its current is read as .kit's is. The hub
+//   keeps current and the previous folder. A layout-1 install never touches it.
 // - The launcher. Its second line is exactly // devteam-launcher: kit-package@1. Merge's launcher-tag rule
 //   looks for it in a tag's docs/devteam/scripts/devteam.mjs (that tag is layout 2), and the launcher
 //   refuses to run a target that carries it.

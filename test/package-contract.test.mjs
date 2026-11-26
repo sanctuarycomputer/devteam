@@ -137,6 +137,8 @@ test('C5 packagePinPair refuses bad input, guards in order, quoting nothing it w
   }
   refused({ ...pin, name: `@a/${'b'.repeat(212)}` }, 'name', 'a name over 214 characters');
   refused({ ...pin, name: 'Upper/Case' }, 'name', 'not a package name');
+  refused({ ...pin, name: 'Devteam' }, 'name', 'an upper-case name');
+  refused({ ...pin, name: '@Scope/devteam' }, 'name', 'an upper-case scope');
   // each guard before the next: an input bad in both is refused by the earlier
   const bad = { name: 'Not A Name', version: 'v1.0.0', integrity: 'sha1-x', resolved: 'http://x/', layout: 3 };
   const order = ['name', 'version', 'integrity', 'resolved', 'layout'];
@@ -251,6 +253,8 @@ test('C12 the fake registry serves the manifest, the tarball and the attestation
     const which = spawnSync('sh', ['-c', 'command -v npm'], { env: reg.env(), encoding: 'utf8' });
     assert.equal(which.stdout.trim(), path.join(reg.bin, 'npm'), 'C12 the fake npm is first on PATH');
     assert.equal(reg.env().DEVTEAM_NPM_REGISTRY, reg.url, 'C12 env() names the registry for the kit');
+    const bundle = await (await fetch(`${reg.url}-/npm/v1/attestations/${NAME.replace('/', '%2f')}@0.101.0`)).json();
+    assert.deepEqual(bundle.attestations.map((a) => a.predicateType), ['https://github.com/npm/attestation/tree/main/specs/publish/v0.1', 'https://slsa.dev/provenance/v1'], 'C12 the bundle is two attestations, publish and one SLSA, as real npm serves');
     assert.equal(reg.env({ ...process.env, HOME: os.homedir() }).HOME, reg.home, "C12 env() sets a HOME of the fake's own");
     assert.ok(reg.home.startsWith(reg.dir) && fs.statSync(reg.home).isDirectory(), "C12 inside the fake's folder");
     const m = await (await fetch(`${reg.url}${NAME.replace('/', '%2f')}/0.101.0`)).json();
@@ -286,7 +290,7 @@ test('C12 the fake registry serves the manifest, the tarball and the attestation
 });
 
 test('C13 each failure, driven once', async () => {
-  assert.deepEqual(FAILURES, ['unreachable', 'integrity', 'no-attestation', 'repo', 'workflow', 'ref', 'commit', 'digest', 'old-npm', 'hostile-env', 'server-error', 'attestation-gone'], 'C13 the failures kit-install@1 names, and an outage and an advertised bundle gone');
+  assert.deepEqual(FAILURES, ['unreachable', 'integrity', 'no-attestation', 'repo', 'workflow', 'ref', 'commit', 'digest', 'old-npm', 'hostile-env', 'server-error', 'attestation-gone', 'redirect'], 'C13 the failures kit-install@1 names, an outage, an advertised bundle gone, and a redirect');
   const reg = await startFakeRegistry();
   const seen = [];
   try {
@@ -342,6 +346,11 @@ test('C13 each failure, driven once', async () => {
         const au = npm(reg, ['audit', 'signatures', ...FLAGS(reg)], { cwd: (await installed(reg)) });
         assert.equal(au.status, 1, 'C13 attestation-gone: audit signatures fails, as real npm does');
         assert.match(au.stderr, /npm error code E404/, 'C13 attestation-gone: E404');
+      } else if (f === 'redirect') {
+        const r = await fetch(`${reg.url}-/npm/v1/attestations/${NAME.replace('/', '%2f')}@0.101.0`, { redirect: 'manual' });
+        assert.equal(r.status, 302, 'C13 redirect: the bundle is a 302');
+        assert.equal(new URL(r.headers.get('location')).host, '127.0.0.2:9', 'C13 redirect: to another host');
+        assert.equal((await fetch(`${reg.url}${NAME.replace('/', '%2f')}/0.101.0`)).status, 200, 'C13 redirect: the bundle only');
       } else if (f === 'hostile-env') {
         const e = reg.env();
         assert.ok(Object.keys(e).some((k) => /^npm_config_registry$/i.test(k)) && Object.keys(e).some((k) => /^NPM_CONFIG_/.test(k)), 'C13 hostile-env: env() carries npm config pointing elsewhere');
@@ -394,6 +403,38 @@ test('C14 the fake npm refuses a call that breaks the calling rules', async () =
     fs.writeFileSync(full, 'registry=http://127.0.0.1:9/\n');
     refused([...view, ...FLAGS(reg)], { env: { ...env, npm_config_userconfig: full } }, /is an empty file/, 'a config file that is not empty');
     refused(['install', ...FLAGS(reg)], {}, /isn't answered/, 'a command the contract does not use');
+    const exact = /every call is exactly view <name>@<version> \[<field>\] \[--json\], ci \[--dry-run\] or audit signatures/;
+    refused([...view, ...FLAGS(reg), '--registry', 'http://127.0.0.1:9/'], {}, exact, 'a second registry in the space form');
+    refused([...view, ...FLAGS(reg), '--@sanctuarycomputer:registry=http://127.0.0.1:9/'], {}, exact, 'a scoped registry');
+    refused([...view, ...FLAGS(reg), '--reg=http://127.0.0.1:9/'], {}, exact, 'an abbreviated registry');
+    refused([...view, ...FLAGS(reg), '--ignore-scripts=false'], {}, exact, '--ignore-scripts=false after it');
+    refused([...view, ...FLAGS(reg), '--no-ignore-scripts'], {}, exact, '--no-ignore-scripts after it');
+    refused([...view, ...FLAGS(reg), '--ignore-scripts'], {}, exact, '--ignore-scripts twice');
+    refused([...view, ...FLAGS(reg), `--userconfig=${full}`], {}, exact, 'a --userconfig flag');
+    refused([...view, ...FLAGS(reg), `--globalconfig=${full}`], {}, exact, 'a --globalconfig flag');
+    refused(['ci', '--json', ...FLAGS(reg)], {}, exact, 'ci with another flag');
+    refused(['audit', 'signatures', '--json', ...FLAGS(reg)], {}, exact, 'audit with another flag');
+    refused(['view', `${NAME}@0.101.0`, 'dist', 'extra', ...FLAGS(reg)], {}, exact, 'view with a fourth word');
+    refused([...view, ...FLAGS(reg)], { env: { ...env, npm_config_userconfig: '/dev/null' } }, /is an empty file/, 'a config that is not a regular file');
+    const bare = Object.fromEntries(Object.entries(env).filter(([k]) => !/^npm_config_/i.test(k)));
+    refused([...view, ...FLAGS(reg)], { env: bare }, /npm_config_userconfig and npm_config_globalconfig both name an empty file/, 'no config files');
+    const rc = scratch('with-npmrc');
+    fs.writeFileSync(path.join(rc, '.npmrc'), 'strict-ssl=false\n');
+    refused([...view, ...FLAGS(reg)], { cwd: rc }, /runs in a folder with no \.npmrc/, 'a .npmrc where npm runs');
+    // what real npm refuses or does (spec S9), so a consumer's broken pair fails as it would for real
+    const npmSays = (d, args, re, what) => {
+      const r = npm(reg, args, { cwd: d });
+      assert.equal(r.status, 1, `C14 ${what}: fails`);
+      assert.match(r.stderr, re, `C14 ${what}: ${r.stderr}`);
+    };
+    const edited = (f) => { const d = pinDir(); const l = JSON.parse(fs.readFileSync(path.join(d, 'package-lock.json'), 'utf8')); f(l); fs.writeFileSync(path.join(d, 'package-lock.json'), JSON.stringify(l)); return d; };
+    npmSays(edited((l) => { l.packages[`node_modules/${NAME}`].version = '0.100.0'; }), ['ci', '--dry-run', ...FLAGS(reg)], /npm error code ENOTCACHED/, 'a pair out of sync');
+    npmSays(edited((l) => { l.packages[`node_modules/${NAME}`].dependencies = { x: '1.0.0' }; }), ['ci', '--dry-run', ...FLAGS(reg)], /npm error code ENOTCACHED/, 'an entry with dependencies');
+    npmSays(edited((l) => { l.packages[`node_modules/${NAME}`].resolved = 'http://127.0.0.1:9/x.tgz'; }), ['ci', '--dry-run', ...FLAGS(reg)], /resolved is on the public registry/, 'a resolved off the public registry');
+    npmSays(reg.dir, ['view', `${NAME}@9.9.9`, '--json', ...FLAGS(reg)], /npm error code E404/, 'an unpublished version');
+    const dry = pinDir();
+    assert.equal(npm(reg, ['ci', '--dry-run', ...FLAGS(reg)], { cwd: dry }).status, 0, 'C14 ci --dry-run passes');
+    assert.ok(!fs.existsSync(path.join(dry, 'node_modules')), 'C14 ci --dry-run installs nothing');
   } finally { await reg.close(); }
 });
 
@@ -574,7 +615,19 @@ test('C16 the comment above packagePinPair states kit-install@1, and the alpha-b
     ['npm 9.5', /older than 9\.5[\s\S]*a finding before layout 2, a refusal from it/],
     ['npm\'s answers', /npm E404 for the version is unpublished: a finding before layout 2, a refusal from it\. EINTEGRITY is\s+a refusal/],
     ['an outage is unreachable, never a refusal', /any status but 200 and 404 \(a 5xx, a 429\)[\s\S]*E5xx\/E429, are unreachable, never a refusal\. Unreachable is a finding\s+before layout 2; from it the step stops, changes nothing[\s\S]*nothing records the version as refused\), and the next run tries again/],
-    ['never committed', /merge refuses a PR that adds or changes any path\s+under it/],
+    ['never committed', /docs\/devteam\/\.kit must be a real folder \(lstat\); a symlink or anything else there is read as nothing installed\. Its ignore line is \.kit, with no slash[\s\S]*merge refuses a PR that adds or changes docs\/devteam\/\.kit itself or any path under it/],
+    ['the hub folder is a real folder', /~\/\.devteam\/hub must be a real folder \(lstat\)/],
+    ['an empty registry variable', /Unset or empty, it is the public registry; any other value/],
+    ['the port, the slash, nothing after', /\(port 1 to 65535, no leading zero, the final slash, nothing after it\)/],
+    ['no redirect', /never follow a redirect \(redirect: 'manual'\): a 3xx is unreachable/],
+    ['the exact calls', /exactly npm view <name>@<version> \[<field>\] \[--json\], npm ci \[--dry-run\] and npm audit signatures[\s\S]*no other argument in any form \(no second or scoped registry/],
+    ['the folders npm runs in', /in a folder the step made that holds no \.npmrc: ci and audit in \.kit\/<version>-<hash>\/, view in its own empty folder/],
+    ['audit reports the attestation', /npm audit signatures must then pass on the installed tree and report the package's attestation verified/],
+    ['the bundle fetched once in 15 s', /is fetched once \(15 s, at most 1 MiB\)/],
+    ['the install lock', /Folders are made under withLock\(\.kit\/\.lock\)/],
+    ['the hub lock', /withLock\(~\/\.devteam\/hub\/\.lock\)/],
+    ['current switched by an atomic rename', /every reader takes both, and switches it by an atomic rename/],
+    ['current\'s absolute and ../ targets', /Anything else \(an absolute or \.\.\/ target/],
     ['layout read from the manifest', /layout is the manifest's devteam\.layout[\s\S]*never guessed/],
     ['provenance: the statement and its five facts', /-\/npm\/v1\/attestations[\s\S]*https:\/\/slsa\.dev\/provenance\/v1[\s\S]*sha512[\s\S]*release\.yml[\s\S]*refs\/tags\/v[\s\S]*gitCommit[\s\S]*default branch/],
     ['the bundle\'s guards', /at most 1 MiB[\s\S]*answers 200 or\s+404 \(else unreachable, as above\)[\s\S]*not a 404 \(no attestation\)[\s\S]*exactly one entry whose predicateType[\s\S]*subject is exactly one entry/],
