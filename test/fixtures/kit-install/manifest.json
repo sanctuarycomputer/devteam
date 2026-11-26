@@ -1,0 +1,21 @@
+{
+  "name": "@sanctuarycomputer/devteam",
+  "version": "0.101.0",
+  "description": "devteam (a test fixture of kit-install@1)",
+  "license": "MIT",
+  "devteam": {
+    "layout": 1
+  },
+  "dist": {
+    "tarball": "https://registry.npmjs.org/@sanctuarycomputer/devteam/-/devteam-0.101.0.tgz",
+    "integrity": "sha512-Y5WeJ9YW0DuhZAHBm8IFNVL7N6XjEHge3wquXH/Y1YrDywDD/Scrt8MqWKkfmE/pV/oI8Y+idCpcIakZpIk+vQ==",
+    "shasum": "9b49ee01c721fe3df24eb54147e96b65e9bddfa3",
+    "attestations": {
+      "url": "https://registry.npmjs.org/-/npm/v1/attestations/@sanctuarycomputer%2fdevteam@0.101.0",
+      "provenance": {
+        "predicateType": "https://slsa.dev/provenance/v1"
+      }
+    }
+  },
+  "_id": "@sanctuarycomputer/devteam@0.101.0"
+}

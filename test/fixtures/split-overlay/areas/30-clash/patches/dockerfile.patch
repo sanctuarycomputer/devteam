@@ -1,0 +1,7 @@
+--- a/cloud/Dockerfile
++++ b/cloud/Dockerfile
+@@ -1,3 +1,4 @@
+ FROM node:22
+ COPY docs/devteam /opt/devteam/kit
++COPY elsewhere /opt/devteam/elsewhere
+ CMD ["node"]

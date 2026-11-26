@@ -1,0 +1,91 @@
+{
+  "grants": [
+    {
+      "id": "g-3kq9",
+      "person": {
+        "id": "p-owner",
+        "name": "Alex Rivera"
+      },
+      "client_id": "devteam",
+      "client_name": "devteam",
+      "label": "Alex's MacBook",
+      "scopes": [
+        "hub:read",
+        "threads:write",
+        "mcp"
+      ],
+      "resources": [
+        "https://box.example.dev/",
+        "https://box.example.dev/mcp"
+      ],
+      "created_at": 1764115200000,
+      "last_used": 1764118800000,
+      "ended": null
+    },
+    {
+      "id": "g-7Hx2",
+      "person": {
+        "id": "p-owner",
+        "name": "Alex Rivera"
+      },
+      "client_id": "https://app.example.com/oauth/client.json",
+      "client_name": "Example App",
+      "label": "Example App",
+      "scopes": [
+        "mcp"
+      ],
+      "resources": [
+        "https://box.example.dev/mcp"
+      ],
+      "created_at": 1764028800000,
+      "last_used": null,
+      "ended": null
+    },
+    {
+      "id": "g-a1B2",
+      "person": {
+        "id": "p-sam",
+        "name": "Sam Lee"
+      },
+      "client_id": "devteam",
+      "client_name": "devteam",
+      "label": "sam-thinkpad",
+      "scopes": [
+        "hub:read",
+        "mcp"
+      ],
+      "resources": [
+        "https://box.example.dev/",
+        "https://box.example.dev/mcp"
+      ],
+      "created_at": 1763942400000,
+      "last_used": 1763946000000,
+      "ended": {
+        "at": 1764000000000,
+        "reason": "refresh reused"
+      }
+    },
+    {
+      "id": "g-old1",
+      "person": {
+        "id": "p-owner",
+        "name": "Alex Rivera"
+      },
+      "client_id": "devteam",
+      "client_name": "devteam",
+      "label": "old-desktop",
+      "scopes": [
+        "hub:read"
+      ],
+      "resources": [
+        "https://box.example.dev/"
+      ],
+      "created_at": 1763856000000,
+      "last_used": 1763859600000,
+      "ended": {
+        "at": 1763900000000,
+        "reason": "revoked"
+      }
+    }
+  ]
+}

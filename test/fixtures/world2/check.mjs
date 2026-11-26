@@ -121,10 +121,11 @@ export const scan = last(function scanText(text) {
 // 1 when a fence's info string is exactly self or exterior, else 2.
 export const version = (text) => (scan(text).fences.some((f) => f.info === 'self' || f.info === 'exterior') ? 1 : 2);
 
-const LIST = /^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]/;
+const LIST = /^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]|^ {0,3}\[\^[^\]\s]{1,999}\]:/; // a list item, or a footnote definition
 const HEAD = /^ {0,3}#{1,6}(?:[ \t]|$)/;
 // Each line's text, or null where it is not read: on a fence, in indented code (four spaces or a tab
-// in, after a blank line or more of the same, outside a list), or in a comment that opens a line.
+// in, after a blank line or more of the same, outside a list or a footnote), or in a comment that
+// opens a line.
 const readable = last((text) => {
   let prev = 'blank';
   let list = false;
@@ -141,9 +142,9 @@ const readable = last((text) => {
     return l;
   });
 });
-// Code spans and inline comments of one block, masked by as many spaces. A span is a run of backticks
-// to the next run of the same length; \` opens none.
-function mask(block) {
+// Code spans and inline comments of one block, masked by as many spaces (code spans only, comments
+// false). A span is a run of backticks to the next run of the same length; \` opens none.
+function mask(block, comments = true) {
   const runs = [...block.matchAll(/`+/g)].map((m) => ({ i: m.index, n: m[0].length }));
   const later = new Map(); // a run's size to the nearest later run of it, from the end back
   for (let k = runs.length - 1; k >= 0; k -= 1) { runs[k].close = later.get(runs[k].n); later.set(runs[k].n, k); }
@@ -162,6 +163,7 @@ function mask(block) {
     at = end;
   }
   out += block.slice(at);
+  if (!comments) return out;
   let done = '';
   at = 0;
   for (let i = out.indexOf('<!--'); i >= 0; i = out.indexOf('<!--', at)) {
@@ -172,6 +174,62 @@ function mask(block) {
   }
   return done + out.slice(at);
 }
+// One block's text with what a page keeps as text masked, read left to right as a page reads it: each
+// code span (md, a markdown block) by spaces, each comment by \0. It stops at anything else that could
+// open HTML or an autolink (a < then anything but a space), a comment holding -- or never ended, or an
+// escaped run of backticks, so a span or comment counts only where nothing before it could take in its
+// opener.
+function kept(s, md) {
+  const runs = md ? [...s.matchAll(/`+/g)].map((m) => ({ i: m.index, n: m[0].length })) : [];
+  const later = new Map();
+  for (let k = runs.length - 1; k >= 0; k -= 1) { runs[k].close = later.get(runs[k].n); later.set(runs[k].n, k); }
+  const escaped = (i) => { let n = 0; while (s[i - 1 - n] === '\\') n += 1; return md && n % 2 === 1; };
+  let out = '';
+  let at = 0;
+  let r = 0;
+  const hide = (i, end, by) => { out += s.slice(at, i) + s.slice(i, end).replace(/[^\n]/g, by); at = end; return end; };
+  for (let i = 0; i < s.length;) {
+    if (s[i] === '`' && md) {
+      while (runs[r].i < i) r += 1;
+      if (escaped(i)) break;
+      const { n, close } = runs[r];
+      i = close === undefined ? i + n : hide(i, runs[close].i + n, ' ');
+    } else if (s[i] !== '<') i += 1;
+    else if (escaped(i) || [undefined, ' ', '\t', '\n'].includes(s[i + 1])) i += 1;
+    else if (!s.startsWith('<!--', i)) break;
+    else if (s[i + 4] === '>') i = hide(i, i + 5, '\0');
+    else if (s.startsWith('->', i + 4)) i = hide(i, i + 6, '\0');
+    else {
+      const k = s.indexOf('--', i + 4);
+      if (k < 0 || s[k + 2] !== '>') break;
+      i = hide(i, k + 3, '\0');
+    }
+  }
+  return out + s.slice(at);
+}
+// A line with each table cell (between |s not escaped) read by kept on its own.
+function cells(s) {
+  let out = '';
+  let at = 0;
+  for (let i = 0; i <= s.length; i += 1) {
+    if (i < s.length && s[i] !== '|') continue;
+    let n = 0;
+    while (s[i - 1 - n] === '\\') n += 1;
+    if (i < s.length && n % 2) continue;
+    out += kept(s.slice(at, i), true) + (i < s.length ? '|' : '');
+    at = i + 1;
+  }
+  return out;
+}
+// An HTML block's first line (CommonMark's kinds 1 to 6), and what ends it: a blank line where none.
+const HTMLBLOCK = [
+  [/^<(?:pre|script|style|textarea)(?=[\s>]|$)/i, /<\/(?:pre|script|style|textarea)>/i],
+  [/^<!--/, /-->/],
+  [/^<\?/, /\?>/],
+  [/^<![A-Za-z]/, />/],
+  [/^<!\[CDATA\[/, /\]\]>/],
+  [/^<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|source|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?=[\s/>]|$)/i, null],
+];
 // The text outside code and comments, line for line. A block (what a span or link stays inside) ends
 // at a blank or unread line, a heading, a list item or a table row.
 export const plain = last((text) => {
@@ -633,10 +691,198 @@ export function hosts(text) {
   return [...out];
 }
 
+// Every heading a page shows, in document order: [{ level, text, line }]. Outside code and comments,
+// an ATX heading of any level, at any indent a readable line has (one too deep for a heading reads as
+// one: refusing errs that way), and a setext one, the paragraph's lines above a line of = (level 1)
+// or of - (level 2); each also inside a block quote or a list item, their markers read away (a quote's
+// line goes on the paragraph above, a list item's or a footnote's starts its own). And an HTML <h1>-<h6>
+// tag wherever it stands, in code or a comment too, since an HTML block, a stray backtick or a
+// comment's tail can show one the reading above takes for code: its text up to the next heading tag
+// (HTMLHEAD). Each text is read as a heading's words; a # or ## one's also as a page shows them (seen),
+// with its link hosts, when unnamedHeading asks.
+// Linear in the text: each marker, line and tag read once.
+// The block-quote, list-item and footnote-definition markers that open a line (none matches empty).
+const OPENERS = /^(?:[ \t]*>[ \t]?|[ \t]*(?:[-*+]|\d{1,9}[.)])(?:[ \t]+|$)|[ \t]*\[\^[^\]\s]{1,999}\]:[ \t]*)*/;
+const UNDER = /^[ \t]*(=+|-+)[ \t]*$/;
+// An HTML heading tag and what follows it up to the next heading tag or the end; its own attributes
+// are dropped up to their first >, so a < in a value can't hide it (one > in a value leaves some in,
+// which only refuses more). Each tag inside reads as its alt text, as a page shows an image's.
+const HTMLHEAD = /<h([1-6])(?=[\s/>])([\s\S]*?)(?=<\/?h[1-6][\s/>]|$)/gi;
+const ALT = /\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`=]+))/i;
+// A # or ## heading's words as a page shows them (seen), judged beside its text as written: a comment
+// and a processing instruction dropped (each read to its end), an autolink as its address, each tag a
+// line break or a block (BLOCK) as a space, each other tag as its alt text (an image's; none else
+// has one) with no space, as inline tags show; then each character reference decoded and each
+// default-ignorable character (a soft hyphen, a zero-width space or joiner, a word joiner), shown as
+// nothing, dropped. A tag's quoted value is read whole, up to the next <, so linearly. Its text as
+// written stays what is refused.
+const SHOWN = /<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*)>|<\/?[A-Za-z][A-Za-z0-9-]*(?:[\s/](?:"[^"<]*"|'[^'<]*'|[^<>"'])*)?>/g;
+const BLOCK = /^<\/?(?:br|p|div|hr|li|ul|ol|dl|dt|dd|table|thead|tbody|tfoot|tr|td|th|blockquote|pre|section|article|header|footer|nav|aside|figure|figcaption|details|summary|address|h[1-6])(?![A-Za-z0-9-])/i;
+const INVISIBLE = /\p{Default_Ignorable_Code_Point}|&(?:shy|zwj|zwnj|lrm|rlm|ZeroWidthSpace|Negative(?:VeryThin|Thin|Medium|Thick)Space|NoBreak|it|InvisibleTimes|ic|InvisibleComma|af|ApplyFunction);/gu;
+const alt = (tag) => { const a = ALT.exec(tag); return a ? (a[1] ?? a[2] ?? a[3]) : ''; };
+const shown = (tag) => ` ${alt(tag)} `;
+// s with each run from open to the next close taken out (an unclosed one kept), read once.
+const cut = (s, open, close) => { let out = ''; let at = 0; for (let i = s.indexOf(open); i >= 0; i = s.indexOf(open, at)) { const j = s.indexOf(close, i + open.length); if (j < 0) break; out += s.slice(at, i); at = j + close.length; } return out + s.slice(at); };
+const seen = (s) => decode(cut(cut(words(s), '<!--', '-->'), '<?', '?>').replace(INVISIBLE, '').replace(SHOWN, (t, url) => (url ?? (BLOCK.test(t) ? ' ' : alt(t))))).replace(INVISIBLE, '').replace(/\s+/g, ' ').trim();
+export const headed = last((text) => {
+  const out = [];
+  const add = (level, s, line, text = words(s), kind = {}) => out.push({ level, text, line, raw: s, ...kind });
+  let para = []; // the paragraph's lines so far: [line, its text past its markers]
+  readable(text).forEach((l, i) => {
+    if (l === null || !l.trim()) { para = []; return; }
+    const at = OPENERS.exec(l)[0].length;
+    const inner = l.slice(at);
+    const atx = /^[ \t]*(#{1,6})(?:[ \t]+(.*))?$/s.exec(inner);
+    if (atx) { add(atx[1].length, trimST(atx[2] ?? '').replace(/(?:^|[ \t])#+$/, ''), i + 1); para = []; return; }
+    const under = para.length && (UNDER.exec(l) ?? UNDER.exec(inner));
+    if (under) { add(under[1][0] === '=' ? 1 : 2, para.map((p) => p[1]).join(' '), para[0][0]); para = []; return; }
+    if (!inner.trim() || BREAK.test(inner)) { para = []; return; }
+    if (/[^> \t]/.test(l.slice(0, at))) para = []; // a list item's line starts its own paragraph
+    para.push([i + 1, inner]);
+  });
+  const raw = String(text).replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+  const starts = [0];
+  for (let i = raw.indexOf('\n'); i >= 0; i = raw.indexOf('\n', i + 1)) starts.push(i + 1);
+  const lineOf = (o) => { let a = 0; let b = starts.length - 1; while (a < b) { const m = (a + b + 1) >> 1; if (starts[m] <= o) a = m; else b = m - 1; } return a + 1; };
+  // Where a page keeps an HTML heading tag as text (code), so the names rule judges it as before: in a
+  // fence or indented code outside an HTML block, or wholly inside a comment, or in a code span whose
+  // two marks its line and cell hold (ruling m-20261126-121428851). The lines are cut into blocks as a
+  // page cuts them: an HTML block (CommonMark's seven kinds; a fence that opens in one is read as HTML
+  // to its end), and a paragraph, which a blank line, a heading, a rule, an underline, a list item, a
+  // table row or an HTML block ends. Each block is read by kept, once.
+  const ls = lines(text);
+  const sc = scan(text).lines;
+  const rd = readable(text);
+  const kind = []; // each line's: code, html or md
+  const blocks = []; // { a, b, md, alone }: first and last line
+  let end = null; // what ends the open HTML block: its pattern, or '' for a blank line
+  let taken = false; // in a fence that opened in an HTML block
+  let rc = false; // readable's comment, to tell its unread lines from indented code
+  for (let l = 0; l < ls.length; l += 1) {
+    const s = ls[l];
+    let comment = false;
+    if (!sc[l].code) { comment = rc || /^ {0,3}<!--/.test(s); if (comment) rc = !s.includes('-->'); }
+    if (end === '' && !s.trim()) end = null;
+    taken = sc[l].code && (sc[l].opens ? end !== null : taken);
+    const code = sc[l].code || (rd[l] === null && !comment);
+    const last = blocks[blocks.length - 1];
+    const para = kind[l - 1] === 'md' && !!ls[l - 1].trim() && !last.alone;
+    let k = -1;
+    let seven = false;
+    if (end === null && !code) {
+      const xs = [s.replace(/^ {0,3}/, ''), s.slice(OPENERS.exec(s)[0].length).replace(/^[ \t]*/, '')];
+      k = HTMLBLOCK.findIndex(([o]) => xs.some((x) => o.test(x)));
+      seven = k < 0 && !para && xs.some((x) => /^<\/?[A-Za-z]/.test(x) && trimST(x).endsWith('>'));
+    }
+    if (k >= 0 || seven) {
+      kind.push('html');
+      blocks.push({ a: l, b: l, md: false });
+      end = k >= 0 && HTMLBLOCK[k][1] ? HTMLBLOCK[k][1] : '';
+    } else if (end !== null || taken) {
+      kind.push('html');
+      if (kind[l - 1] === 'html') last.b = l; else blocks.push({ a: l, b: l, md: false });
+    } else if (code) kind.push('code');
+    else {
+      kind.push('md');
+      const alone = HEAD.test(s) || BREAK.test(s) || UNDER.test(s) || /^ {0,3}\|/.test(s);
+      if (!s.trim()) continue;
+      if (para && !alone && !LIST.test(s)) last.b = l;
+      else blocks.push({ a: l, b: l, md: true, alone });
+    }
+    if (end && kind[l] === 'html' && end.test(s)) end = null;
+  }
+  const km = []; // each line as kept reads its block
+  const from = []; // where the comment a line's first character is in opened, when on a line before
+  const dirty = [0]; // how many lines before each hold a list, quote or footnote marker or a |, or are more than three spaces in
+  for (const { a, b, md } of blocks) { let l = a; for (const t of kept(ls.slice(a, b + 1).join('\n'), md).split('\n')) { km[l] = t; if (l > a && (t === '' || t[0] === '\0') && (km[l - 1] === '' ? from[l - 1] !== undefined : km[l - 1].endsWith('\0'))) from[l] = from[l - 1] !== undefined && !/[^\0]/.test(km[l - 1]) ? from[l - 1] : l - 1; l += 1; } }
+  for (let l = 0; l < ls.length; l += 1) dirty.push(dirty[l] + (OPENERS.exec(ls[l])[0].length || ls[l].includes('|') || indent(ls[l]) > 3 ? 1 : 0));
+  const own = new Map(); // each line read alone: an HTML block's by kept, a markdown one's cell by cell
+  // A tag is code where its block's reading and its own line's (and cell's) both keep it as text; or in
+  // a comment from a line before, when every line from the one it opened on is at most three spaces in
+  // and holds no marker or |, so no quote, table row, list item, heading, rule or code the cut above
+  // misses (one in a list item is more than three spaces in) can end the comment or hold its opener.
+  const inCode = (o) => {
+    const l = lineOf(o) - 1;
+    const c = o - starts[l];
+    if (kind[l] === 'code') return true;
+    const ch = km[l]?.[c];
+    if (ch !== ' ' && ch !== '\0') return false;
+    if (!own.has(l)) own.set(l, kind[l] === 'html' ? kept(ls[l], false) : cells(ls[l]));
+    if (own.get(l)[c] !== '<') return true;
+    const f = from[l];
+    return ch === '\0' && f !== undefined && dirty[l + 1] === dirty[f];
+  };
+  for (const m of raw.matchAll(HTMLHEAD)) { const body = m[2].replace(/^[^>]*>/, ''); add(Number(m[1]), body, lineOf(m.index), words(body.replace(/<[^<>]*>/g, shown)), (inCode(m.index) ? { code: true } : { html: true })); }
+  return out.filter((h) => h.text).sort((a, b) => a.line - b.line);
+});
+// A top-level heading must be plain text (ruling a-20261126-080419596): a # or ## heading, in any form,
+// and an HTML <h1> to <h6> one, is refused when its text as written (a markdown one's code spans aside)
+// holds raw HTML (< then a letter, /, ! or ?), a character reference (& then # or a letter), a
+// character in \p{C} but a tab or a line's end, a mark left after NFC, a default-ignorable character,
+// ~~, or a [ or ]. Plain text, code spans and * _ emphasis stay, read by the readings below. An HTML
+// heading tag in code or a comment (code) is shown as text: the names rule judges it, as before.
+const NOT_PLAIN = /<[A-Za-z\/!?]|&[#A-Za-z]|[^\P{C}\t\n]|\p{M}|\p{Default_Ignorable_Code_Point}|~~|[\[\]]/u;
+const plainHeading = (h) => h.code || (h.level > 2 && !h.html) || !NOT_PLAIN.test((h.html ? h.raw : mask(h.raw, false)).normalize('NFC'));
+// Whether the names rule refuses a heading: one that is not plain text; one of level 3 to 6 unless names holds it whole; a # or ##
+// one (the title and the sections, in plain words) when it holds a capitalised word, Exterior aside
+// (the document's own name), or a link host, that names doesn't hold whole, read as written, as
+// shown or joined. Each later reading is made only when the one before finds nothing, so a refused heading
+// costs one.
+// A # or ## heading's joined reading, judged beside the two above: its markup taken out with no
+// separator and the spaces typed kept, as a page joins a word a tag or a mark splits. Its spans are
+// cut two ways (joined, joinedAtGt); only a line break or a paragraph (<br>, <p> and their end tags)
+// reads as a space. What is left is squeezed (squeeze). Linear: a span ends at its quote or its >.
+// SPAN: a tag (a quoted value read to its quote), end tag, declaration or autolink, as CommonMark reads it.
+const SPAN = /<\/?[A-Za-z][A-Za-z0-9-]*(?:\s+[^\s"'<>\/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*\s*\/?>|<![A-Za-z][^<>]*>|<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*>/g;
+const BREAKS = /^<\/?(?:br|p)(?![A-Za-z0-9-])/i;
+// The text joined after its cuts: each character reference decoded, NFKC-normalised, each format,
+// default-ignorable and combining mark left over dropped, read as words, a reference link's label after
+// its ] taken out, and each ~ * _ ` [ ] mark taken out.
+const squeeze = (t) => words(decode(t).normalize('NFKC').replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\p{Mn}]/gu, '')).replace(/\]\[[^[\]]{0,999}\]/g, ']').replace(/[~*_`[\]]/g, '');
+// s with each span cut where a page ends it, at its first > (quotes ignored), read once; a comment at
+// -->, --!> or at once; <br>, <p> and their end tags a space. An unclosed span stays as text. Each end
+// looked for is kept until passed, so each is found once.
+const atGt = (s) => {
+  let out = '';
+  let at = 0;
+  const next = {};
+  const find = (t, from) => { if (next[t] === undefined || (next[t] >= 0 && next[t] < from)) next[t] = s.indexOf(t, from); return next[t]; };
+  for (let i = s.indexOf('<'); i >= 0; i = s.indexOf('<', at)) {
+    out += s.slice(at, i);
+    if (s.startsWith('<!--', i)) { // a comment ends at once (<!-->, <!--->), or at --> or --!>
+      if (s[i + 4] === '>' || s.startsWith('->', i + 4)) { at = i + (s[i + 4] === '>' ? 5 : 6); continue; }
+      const ends = [['-->', 3], ['--!>', 4]].map(([t, n]) => [find(t, i + 4), n]).filter(([e]) => e >= 0);
+      if (!ends.length) { at = i; break; }
+      const [e, n] = ends.reduce((a, b) => (b[0] < a[0] ? b : a));
+      at = e + n;
+      continue;
+    }
+    if (!/[A-Za-z/!?]/.test(s[i + 1] ?? '')) { out += '<'; at = i + 1; continue; }
+    const e = find('>', i + 1);
+    if (e < 0) { at = i; break; }
+    if (BREAKS.test(s.slice(i, Math.min(e + 1, i + 6)))) out += ' ';
+    at = e + 1;
+  }
+  return out + s.slice(at);
+};
+// The joined reading, cut two ways (ruling m-20261126-071801827): as CommonMark reads its spans
+// (SPAN, a quoted value to its quote), and as a page ends them (atGt). The invisible characters and
+// their named references go first, before decode. The CDATA cut can't change a verdict (CDATA is
+// upper case, so the reading as written refuses it): kept for the reading's sake.
+const joined = (s) => squeeze(cut(cut(cut(s.replace(INVISIBLE, ''), '<!--', '-->'), '<?', '?>'), '<![CDATA[', ']]>').replace(SPAN, (t) => (BREAKS.test(t) ? ' ' : '')));
+const joinedAtGt = (s) => squeeze(atGt(s.replace(INVISIBLE, '')));
+const unnamedWord = (t, names) => [...t.matchAll(WORD)].some((m) => { const w = capWord(m[0]); return w !== null && w.toLowerCase() !== 'exterior' && !namesWhole(names, w); });
+const unnamedHeading = (h, names) => !plainHeading(h) || (h.level > 2
+  ? !namesWhole(names, h.text)
+  : unnamedWord(h.text, names) || unnamedWord(seen(h.raw), names) || unnamedWord(joined(h.raw), names)
+    || unnamedWord(joinedAtGt(h.raw), names) || hosts(h.raw).some((x) => !namesWhole(names, x)));
+
+// The text of each heading that is not plain text, in document order.
+export const notPlain = (text) => headed(text).filter((h) => !plainHeading(h)).map((h) => h.text);
 // exterior.md: { errors, warnings, refused, held, hosts }. On a repo known private nothing is refused
-// or held; visibility 'public' or 'unknown' keeps the names rule. A ### heading is judged by
-// allowed.names (origin main's strategy and dependency names); a word or host by allowed.words (the
-// strategy and the dependency files whole).
+// or held; visibility 'public' or 'unknown' keeps the names rule. Every heading, in any form (headed),
+// is judged by allowed.names (origin main's strategy and dependency names) and refused as
+// unnamedHeading says; a word or host by allowed.words (the strategy and the dependency files whole).
 export function checkExterior(text, { today, visibility, allowed }) {
   const errors = docErrors(text, 'exterior');
   const all = errors.length ? [] : entries(text);
@@ -646,7 +892,7 @@ export function checkExterior(text, { today, visibility, allowed }) {
   return {
     errors,
     warnings: all.flatMap((e) => entryWarnings(e, today, refs)),
-    refused: unknown(headings(text).filter((h) => h.level === 3).map((h) => h.text), allowed.names),
+    refused: open ? [] : headed(text).filter((h) => unnamedHeading(h, allowed.names)).map((h) => h.text),
     held: unknown(capitalised(text), allowed.words),
     hosts: unknown(hosts(text), allowed.words),
   };

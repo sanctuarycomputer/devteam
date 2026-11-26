@@ -807,6 +807,10 @@ const SETTINGS_DEFAULTS = {
   // The default is "ask" so a project adopted before this setting keeps asking. The owner's.
   upstream_sync: 'adopt',
   upstream_check_hours: 24,
+  // The npm package kit releases are published as and an instance installs (kit-install@1), and
+  // whether the live alpha's /next/ pages are served (alpha@1). Both the owner's, read as main has them.
+  package_name: '@sanctuarycomputer/devteam',
+  alpha: true,
   retro_every_days: 7,
   research_every_days: 7,
   slow_gate_minutes: 10,
@@ -820,7 +824,7 @@ const SETTINGS_DEFAULTS = {
 const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
   autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', responder_command: 'governance-edit', agent_trust_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
-  forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', merge_admin: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit',
+  forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', merge_admin: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit', package_name: 'governance-edit', alpha: 'governance-edit',
   release: 'governance-edit', secret_commands: 'governance-edit', incident_slots: 'governance-edit', remediations: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit', project: 'governance-edit',
 };
 // The supervisor's own settings the owner may ask for from the dashboard (an owner-setting act the
@@ -893,6 +897,8 @@ const SETTINGS_WORDS = Object.freeze({
   upstream_base: ['Upstream and releases', 'Kit release in use', 'the devteam release this project runs', 'value'],
   upstream_sync: ['Upstream and releases', 'Kit updates', 'adopt each release on its own, or ask you first', 'value'],
   upstream_check_hours: ['Upstream and releases', 'Check for kit releases every', 'hours between checks for a new devteam release', 'value'],
+  package_name: ['Upstream and releases', 'Kit package', 'the npm package devteam releases are published as and installed from', 'value'],
+  alpha: ['Upstream and releases', 'Live alpha', 'whether the new apps are served at /next/ beside the stable pages', 'value'],
   release: ['Upstream and releases', 'How a release reaches production', 'a tag, a production branch, or every merge to main', 'value'],
   sensors: ['Production', 'Sensors', 'the production signals the supervisor reads', 'names'],
   sensor_defaults: ['Production', 'Sensor defaults', 'settings every sensor starts from', 'names'],
@@ -920,6 +926,10 @@ const SETTING_SHAPES = Object.freeze({
   merge_method: (v) => ['merge', 'squash', 'rebase'].includes(v),
   upstream_sync: (v) => ['adopt', 'ask'].includes(v),
   release: (v) => v !== undefined && releaseProblem(v) === null,
+  alpha: (v) => typeof v === 'boolean',
+  // a scoped npm name, by a stricter rule than npm's own: @scope/name, each part lower-case letters,
+  // digits, - . _ and starting with a letter, digit or -; at most 214 characters in all
+  package_name: (v) => typeof v === 'string' && v.length <= 214 && /^@[a-z0-9-][a-z0-9._-]*\/[a-z0-9-][a-z0-9._-]*$/.test(v),
   upstream_base: (v) => v === null || (typeof v === 'string' && /^v\d+\.\d+\.\d+$/.test(v)),
   main_branch: settingName, tmux_session: settingName, project: settingName,
   usage_sources: settingLines, ignored_checks: settingLines, split_files: settingLines, worktree_files: settingLines, worker_denied_commands: settingLines,
@@ -991,12 +1001,110 @@ function settingsAt(ref, { orNull = false } = {}) {
 // Whole keys as before, then the links registry entry by entry: an owner's class needs an
 // owner answer, a registry-edit the supervisor's act (merge checks both).
 function ownerSettingsChanged(base, head) {
-  const a = settingsAt(base), b = settingsAt(head);
+  let a = settingsAt(base), b = settingsAt(head);
   if (!a || !b) return null;
+  // Each side is what that side's kit runs (kit-978): settings.md over the defaults of the kit's
+  // scripts at that commit. Where a commit changes a kit script (a kit sync), an owner key
+  // settings.md leaves unset changes when its default does, and is the owner's to answer as an edit
+  // is; so is a key the head's kit makes the owner's. SETTINGS_DEFAULTS and OWNER_SETTINGS are read
+  // from whichever script under <kit>/scripts/ declares them (`const`, or `export const` in a module),
+  // as data, never run (read, below); a kit where either doesn't read so needs the owner's
+  // governance-edit answer. A commit that changes no kit script compares as it always has, and so
+  // does one where either side has no kit scripts at all.
+  let owner = OWNER_SETTINGS;
+  let drifted = () => null;
+  const unread = [];
+  const scripts = kitRel.startsWith('..') ? null : `${kitRel ? `${kitRel}/` : ''}scripts`;
+  // every path here is from the repo's top, wherever merge runs from (:(top), --full-tree, --full-name)
+  const mjs = `:(top)${scripts}/*.mjs`;
+  const touched = scripts && !!git(['diff', '--name-only', base, head, '--', mjs]);
+  const hasKit = (ref) => !!git(['ls-tree', '-r', '--full-tree', '--name-only', ref, '--', `${scripts}/`]);
+  if (touched && hasKit(base) && hasKit(head)) {
+    // a block that isn't an object (null, a list) sets nothing, as settingsAt reads it
+    const raw = (ref) => { const t = settingsBlockAt(ref); const j = t === null ? null : JSON.parse(t); return j && typeof j === 'object' && !Array.isArray(j) ? j : {}; };
+    const ra = raw(base), rb = raw(head);
+    const want = (ref, name, side) => { const r = read(ref, name); if (r?.v && typeof r.v === 'object' && !Array.isArray(r.v)) return r.v; unread.push({ key: `${name} in ${scripts}/ does not read at the ${side} as literal data, so the owner's defaults can't be compared`, cls: 'governance-edit' }); return null; };
+    const da = want(base, 'SETTINGS_DEFAULTS', 'base'), db = want(head, 'SETTINGS_DEFAULTS', 'head'), ob = want(head, 'OWNER_SETTINGS', 'head');
+    // unreadable: settings.md's own changes are still compared, over the running kit's defaults
+    if (!unread.length) {
+      owner = { ...ob, ...OWNER_SETTINGS };
+      a = { ...da, ...ra };
+      b = { ...db, ...rb };
+      const shown = (v) => { if (v === undefined) return 'none'; const s = canonical(v); return s.length > 120 ? `${s.slice(0, 119)}…` : s; };
+      drifted = (k) => (!Object.hasOwn(ra, k) && !Object.hasOwn(rb, k) && canonical(da[k]) !== canonical(db[k]) ? `${k}'s default changes from ${shown(da[k])} to ${shown(db[k])}, and settings.md leaves it unset` : null);
+    }
+  }
   // gates run in their order, one after another in one checkout, so their order is the owner's too:
   // compared as written (key order included), not canonically
   const differs = (k) => (k === 'gates' ? JSON.stringify(a[k]) !== JSON.stringify(b[k]) : canonical(a[k]) !== canonical(b[k]));
-  return [...Object.entries(OWNER_SETTINGS).filter(([k]) => differs(k)).map(([key, cls]) => ({ key, cls })), ...linkOwnerChanges(a.links, b.links)];
+  return [...unread, ...Object.entries(owner).filter(([k]) => differs(k)).map(([key, cls]) => ({ key: drifted(key) ?? key, cls })), ...linkOwnerChanges(a.links, b.links)];
+  // `const <name> = <value>` (or `export const`) at the start of a line, in exactly one .mjs
+  // under <kit>/scripts/ at ref, once, read as data: strings ('…' or "…", simple escapes), numbers,
+  // true, false, null, arrays and objects (comments and trailing commas allowed), and a bare name of
+  // another such const, one level deep. { v } or null: anything else (a call, an operator, a spread,
+  // a template string), a second declaration, or any line of a script, outside a // or * comment
+  // line, that writes into it (`<name>.x =`, `[k] ??=` and the other assignments, `++`, `delete`,
+  // Object.assign(<name>, …)) is unreadable. What this can't see is a default applied in code
+  // (`s.x ?? 'y'`) rather than in the const, or a write through another name for it.
+  function read(ref, name, depth = 0) {
+    const decl = `^(export )?const ${name} = `;
+    const files = (git(['grep', '-l', '--full-name', '-E', decl, ref, '--', mjs]) ?? '').split('\n').filter(Boolean);
+    if (files.length !== 1) return null;
+    const N = `(^|[^A-Za-z0-9_$.])${name}`, member = '(\\.[A-Za-z_$][A-Za-z0-9_$]*|\\[[^]]*\\])';
+    const writes = [
+      `${N}${member}[[:space:]]*(([-+*/%&|^]|\\*\\*|<<|>>>?|&&|\\|\\||\\?\\?)?=([^=]|$)|\\+\\+|--)`,
+      `(\\+\\+|--|delete[[:space:]]+)${name}${member}`,
+      `Object\\.(assign|defineProperty|defineProperties|setPrototypeOf)\\([[:space:]]*${name}([^A-Za-z0-9_$]|$)`,
+    ].join('|');
+    const hits = (git(['grep', '-h', '-E', writes, ref, '--', mjs]) ?? '').split('\n').filter((l) => l && !/^\s*(\/\/|\/?\*)/.test(l));
+    if (hits.length) return null;
+    const src = git(['show', files[0]]);
+    const at = [...(src ?? '').matchAll(new RegExp(decl, 'gm'))];
+    if (at.length !== 1) return null;
+    let i = at[0].index + at[0][0].length;
+    const fail = () => { throw new Error('unreadable'); };
+    const ws = () => { for (;;) { if (/\s/.test(src[i] ?? '')) i++; else if (src.startsWith('//', i)) { const e = src.indexOf('\n', i); i = e < 0 ? src.length : e; } else if (src.startsWith('/*', i)) { const e = src.indexOf('*/', i + 2); if (e < 0) fail(); i = e + 2; } else return; } };
+    const ESC = { n: '\n', t: '\t', r: '\r', '\\': '\\', "'": "'", '"': '"', '/': '/' };
+    const str = () => { const q = src[i++]; let s = ''; for (;;) { const c = src[i++]; if (c === undefined || c === '\n') fail(); if (c === q) return s; if (c !== '\\') { s += c; continue; } const e = src[i++]; if (e === 'u' && /^[0-9a-fA-F]{4}$/.test(src.slice(i, i + 4))) { s += String.fromCharCode(parseInt(src.slice(i, i + 4), 16)); i += 4; } else if (Object.hasOwn(ESC, e)) s += ESC[e]; else fail(); } };
+    const word = () => { const m = /^[A-Za-z_$][\w$]*/.exec(src.slice(i, i + 200)); if (!m) fail(); i += m[0].length; return m[0]; };
+    const value = () => {
+      ws();
+      const c = src[i];
+      if (c === '{' || c === '[') {
+        i++;
+        const obj = c === '{', out = obj ? {} : [];
+        for (;;) {
+          ws();
+          if (src[i] === (obj ? '}' : ']')) { i++; return out; }
+          if (obj) {
+            const k = src[i] === "'" || src[i] === '"' ? str() : word();
+            ws();
+            if (src[i++] !== ':') fail();
+            // defined, not assigned: a key "__proto__" is a key like any other
+            Object.defineProperty(out, k, { value: value(), enumerable: true, writable: true, configurable: true });
+          } else out.push(value());
+          ws();
+          if (src[i] === ',') i++;
+          else if (src[i] !== (obj ? '}' : ']')) fail();
+        }
+      }
+      if (c === "'" || c === '"') return str();
+      const n = /^-?(?:\d+(?:\.\d+)?)(?:[eE][+-]?\d+)?(?![\w$.])/.exec(src.slice(i, i + 40));
+      if (n) { i += n[0].length; return Number(n[0]); }
+      const w = word();
+      if (w === 'true' || w === 'false') return w === 'true';
+      if (w === 'null') return null;
+      const r = depth < 1 ? read(ref, w, depth + 1) : null;
+      if (!r) fail();
+      return r.v;
+    };
+    try {
+      const v = value();
+      ws();
+      if (src[i] !== ';' && src[i] !== undefined) fail();
+      return { v };
+    } catch { return null; }
+  }
 }
 // Adding a gate is the supervisor's call when it only adds (constitution.md §4: development-only
 // tools are the supervisor's): a new check makes merges stricter, never looser. A gate's command runs
@@ -2942,9 +3050,34 @@ const questionHash = (q) => crypto.createHash('sha256').update(canonical(Object.
 // (questionView's status "answered", bound to the question's hash), never a default or a line the
 // supervisor wrote, and the class is hashed, so setting it after the answer reopens the question.
 const isDoorQuestion = (v) => v?.kind === 'one-way-door' || v?.class === 'one-way-door';
-// A door answer approves a plan only as recommended: an owner who chose otherwise said no to the
-// plan built on the recommendation. A door asked with no recommendation is the owner's open choice.
+// A door answer approves the plan built on the recommendation only as recommended: an owner who
+// chose otherwise said no to that plan (their pick of a marked alternative approves the plan built on
+// it instead: doorPick). A door asked with no recommendation is the owner's open choice.
 const doorAgreed = (v) => !v.recommendation || v.matched === true;
+// The owner's own pick of another listed choice on a door, one the question marked "approves": true
+// when it was asked: the label, or null. Only the owner's own pick counts: their choice on the card
+// or answer --choice (a keyed choice, cli or dashboard, with no words beside it that could take it
+// back), never an answer the supervisor recorded from chat or a turn, nor words it read. Picking a
+// marked choice is the owner's yes to that choice, not a no to the plan; it approves the plan built
+// on it once the plan and its approving review name it (DOOR_PICK_LINE).
+const doorPick = (v) => {
+  if (v?.status !== 'answered' || doorAgreed(v)) return null;
+  if (v.in_words !== false || typeof v.choice !== 'string' || String(v.words ?? '').trim()) return null;
+  if (v.answered_by !== 'owner' || ['chat', 'thread'].includes(v.channel)) return null;
+  const c = (v.choices ?? []).find((x) => isObj(x) && String(x.label ?? '').trim().toLowerCase() === v.choice.trim().toLowerCase());
+  return c?.approves === true && !DECLINING_LABEL.test(String(c.label)) ? c.label : null;
+};
+// Only the owner's latest word on a door counts: a pick is undone once the same door was asked again
+// (the same ticket and goal, nearly the same question, as ask's re-ask check reads it), while that
+// re-ask is open, and once it is answered, whatever the answer; the re-ask is then the one to cite.
+const doorPickUndone = (v, all) => all.some((q) => q.id !== v.id && isDoorQuestion(q) && (q.ticket ?? null) === (v.ticket ?? null) && (q.goal ?? null) === (v.goal ?? null) && nearlySameQuestion(q.question, v.question) && String(q.asked_at ?? '') > String(v.asked_at ?? '') && (q.status === 'open' || q.status === 'answered'));
+// The line a plan, and the plan review that approves it, carry for a pick: exactly
+// "- One-way door <qid>: <choice>", the choice as labelled (case aside).
+const DOOR_PICK_LINE = /^-[ \t]*One-way door[ \t]+(q-\S+?):[ \t]*(.+?)[ \t]*$/gm;
+const doorPickNamed = (text, qid, pick) => [...String(text ?? '').matchAll(DOOR_PICK_LINE)].some((m) => m[1] === qid && m[2].trim().toLowerCase() === pick.trim().toLowerCase());
+// A choice that declines reads as one: never marked "approves".
+// A word list is never complete, so the plan reviewer checks too (quality.md §3); this catches the plain ones.
+const DECLINING_LABEL = /^\s*(no|nope|nah|not( now| yet)?|none|neither|don['’]?t|do not|do nothing|never|hold( off)?|wait|later|maybe( later)?|skip|decline|reject|cancel|stop|abort|revert|undo|pause|park( it)?|postpone|defer|delay|status quo|(keep|leave|stay)\b.*\b(as (it|they|things) (is|are|was|were|stand)|as is|unchanged|the same)|leave it)\b/i;
 
 // Folded questions in the shape the inbox uses.
 function questionView(q) {
@@ -6099,6 +6232,8 @@ function parseReview(file, text) {
   const dateRaw = text.match(/^-[ \t]*Date:[ \t]*(\d{4}-\d{2}-\d{2}(?:[T ][\d:.]+Z?)?)[ \t]*$/m)?.[1] ?? null;
   const dateMs = dateRaw ? Date.parse(dateRaw.length === 10 ? `${dateRaw}T00:00:00Z` : dateRaw.replace(' ', 'T').replace(/(\d)$/, '$1Z')) : NaN;
   const doors = [...text.matchAll(/^-[ \t]*Goal-level door:[ \t]*(q-\S+)[ \t]+covers this plan\.?[ \t]*$/gm)].map((d) => d[1]);
+  // and one built on the owner's pick of a door's marked alternative names it, as the plan does: "- One-way door <qid>: <choice>"
+  const doorPicks = [...text.matchAll(DOOR_PICK_LINE)].map((d) => ({ id: d[1], pick: d[2].trim() }));
   const findings = [];
   let dispIdx = -1;
   let sevIdx = 1;
@@ -6121,7 +6256,7 @@ function parseReview(file, text) {
   return {
     file, stage: m ? m[1] : file.replace(/\.md$/, ''), pass: m ? Number(m[2]) : 0, variant: m ? m[3] : '',
     verdict: verdict ? verdict[1] : null, sha: verdict ? verdict[2] : null, shaValid: verdict ? /^[0-9a-f]{40}$/.test(verdict[2]) : false,
-    reviewer: reviewerRaw && !reviewerRaw.startsWith('<') ? reviewerRaw : null, findings, doors,
+    reviewer: reviewerRaw && !reviewerRaw.startsWith('<') ? reviewerRaw : null, findings, doors, doorPicks,
     records: recordsRaw && /^[0-9a-f]{40}$/.test(recordsRaw) ? recordsRaw : null,
     // a date after now is author-asserted and would sit in last_7d forever: undated
     date: Number.isFinite(dateMs) && dateMs <= Date.now() + 5 * 60000 ? dateMs : null,
@@ -7893,7 +8028,8 @@ worldFileFails.actOf = (ref) => {
 // self@2's and exterior@2's reader (log.schema.json#self2, #exterior): test/fixtures/world2/check.mjs's
 // rules, rule for rule (its reading of lines, fences, code, comments and links; parts; the title;
 // checkSelf; selfHeld, the names rule's words; and, since kit-863, namesWhole, entries, capitalised,
-// hosts and checkExterior, exterior.md's contract and names rule), so the kit gives every case of
+// hosts and checkExterior, exterior.md's contract and names rule, which since kit-933 reads every
+// heading form, headed), so the kit gives every case of
 // test/fixtures/world2/cases.json the result it lists. One closure, so none of its names meets
 // another of this file's; it reads nothing but its arguments, path and URL (a test runs this region
 // alone).
@@ -8015,10 +8151,11 @@ const selfPlain = (() => {
   // 1 when a fence's info string is exactly self or exterior, else 2.
   const version = (text) => (scan(text).fences.some((f) => f.info === 'self' || f.info === 'exterior') ? 1 : 2);
 
-  const LIST = /^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]/;
+  const LIST = /^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]|^ {0,3}\[\^[^\]\s]{1,999}\]:/; // a list item, or a footnote definition
   const HEAD = /^ {0,3}#{1,6}(?:[ \t]|$)/;
   // Each line's text, or null where it is not read: on a fence, in indented code (four spaces or a tab
-  // in, after a blank line or more of the same, outside a list), or in a comment that opens a line.
+  // in, after a blank line or more of the same, outside a list or a footnote), or in a comment that
+  // opens a line.
   const readable = last((text) => {
     let prev = 'blank';
     let list = false;
@@ -8035,9 +8172,9 @@ const selfPlain = (() => {
       return l;
     });
   });
-  // Code spans and inline comments of one block, masked by as many spaces. A span is a run of backticks
-  // to the next run of the same length; \` opens none.
-  function mask(block) {
+  // Code spans and inline comments of one block, masked by as many spaces (code spans only, comments
+  // false). A span is a run of backticks to the next run of the same length; \` opens none.
+  function mask(block, comments = true) {
     const runs = [...block.matchAll(/`+/g)].map((m) => ({ i: m.index, n: m[0].length }));
     const later = new Map(); // a run's size to the nearest later run of it, from the end back
     for (let k = runs.length - 1; k >= 0; k -= 1) { runs[k].close = later.get(runs[k].n); later.set(runs[k].n, k); }
@@ -8056,6 +8193,7 @@ const selfPlain = (() => {
       at = end;
     }
     out += block.slice(at);
+    if (!comments) return out;
     let done = '';
     at = 0;
     for (let i = out.indexOf('<!--'); i >= 0; i = out.indexOf('<!--', at)) {
@@ -8066,6 +8204,62 @@ const selfPlain = (() => {
     }
     return done + out.slice(at);
   }
+  // One block's text with what a page keeps as text masked, read left to right as a page reads it: each
+  // code span (md, a markdown block) by spaces, each comment by \0. It stops at anything else that could
+  // open HTML or an autolink (a < then anything but a space), a comment holding -- or never ended, or an
+  // escaped run of backticks, so a span or comment counts only where nothing before it could take in its
+  // opener.
+  function kept(s, md) {
+    const runs = md ? [...s.matchAll(/`+/g)].map((m) => ({ i: m.index, n: m[0].length })) : [];
+    const later = new Map();
+    for (let k = runs.length - 1; k >= 0; k -= 1) { runs[k].close = later.get(runs[k].n); later.set(runs[k].n, k); }
+    const escaped = (i) => { let n = 0; while (s[i - 1 - n] === '\\') n += 1; return md && n % 2 === 1; };
+    let out = '';
+    let at = 0;
+    let r = 0;
+    const hide = (i, end, by) => { out += s.slice(at, i) + s.slice(i, end).replace(/[^\n]/g, by); at = end; return end; };
+    for (let i = 0; i < s.length;) {
+      if (s[i] === '`' && md) {
+        while (runs[r].i < i) r += 1;
+        if (escaped(i)) break;
+        const { n, close } = runs[r];
+        i = close === undefined ? i + n : hide(i, runs[close].i + n, ' ');
+      } else if (s[i] !== '<') i += 1;
+      else if (escaped(i) || [undefined, ' ', '\t', '\n'].includes(s[i + 1])) i += 1;
+      else if (!s.startsWith('<!--', i)) break;
+      else if (s[i + 4] === '>') i = hide(i, i + 5, '\0');
+      else if (s.startsWith('->', i + 4)) i = hide(i, i + 6, '\0');
+      else {
+        const k = s.indexOf('--', i + 4);
+        if (k < 0 || s[k + 2] !== '>') break;
+        i = hide(i, k + 3, '\0');
+      }
+    }
+    return out + s.slice(at);
+  }
+  // A line with each table cell (between |s not escaped) read by kept on its own.
+  function cells(s) {
+    let out = '';
+    let at = 0;
+    for (let i = 0; i <= s.length; i += 1) {
+      if (i < s.length && s[i] !== '|') continue;
+      let n = 0;
+      while (s[i - 1 - n] === '\\') n += 1;
+      if (i < s.length && n % 2) continue;
+      out += kept(s.slice(at, i), true) + (i < s.length ? '|' : '');
+      at = i + 1;
+    }
+    return out;
+  }
+  // An HTML block's first line (CommonMark's kinds 1 to 6), and what ends it: a blank line where none.
+  const HTMLBLOCK = [
+    [/^<(?:pre|script|style|textarea)(?=[\s>]|$)/i, /<\/(?:pre|script|style|textarea)>/i],
+    [/^<!--/, /-->/],
+    [/^<\?/, /\?>/],
+    [/^<![A-Za-z]/, />/],
+    [/^<!\[CDATA\[/, /\]\]>/],
+    [/^<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|source|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?=[\s/>]|$)/i, null],
+  ];
   // The text outside code and comments, line for line. A block (what a span or link stays inside) ends
   // at a blank or unread line, a heading, a list item or a table row.
   const plain = last((text) => {
@@ -8527,10 +8721,198 @@ const selfPlain = (() => {
     return [...out];
   }
 
+  // Every heading a page shows, in document order: [{ level, text, line }]. Outside code and comments,
+  // an ATX heading of any level, at any indent a readable line has (one too deep for a heading reads as
+  // one: refusing errs that way), and a setext one, the paragraph's lines above a line of = (level 1)
+  // or of - (level 2); each also inside a block quote or a list item, their markers read away (a quote's
+  // line goes on the paragraph above, a list item's or a footnote's starts its own). And an HTML <h1>-<h6>
+  // tag wherever it stands, in code or a comment too, since an HTML block, a stray backtick or a
+  // comment's tail can show one the reading above takes for code: its text up to the next heading tag
+  // (HTMLHEAD). Each text is read as a heading's words; a # or ## one's also as a page shows them (seen),
+  // with its link hosts, when unnamedHeading asks.
+  // Linear in the text: each marker, line and tag read once.
+  // The block-quote, list-item and footnote-definition markers that open a line (none matches empty).
+  const OPENERS = /^(?:[ \t]*>[ \t]?|[ \t]*(?:[-*+]|\d{1,9}[.)])(?:[ \t]+|$)|[ \t]*\[\^[^\]\s]{1,999}\]:[ \t]*)*/;
+  const UNDER = /^[ \t]*(=+|-+)[ \t]*$/;
+  // An HTML heading tag and what follows it up to the next heading tag or the end; its own attributes
+  // are dropped up to their first >, so a < in a value can't hide it (one > in a value leaves some in,
+  // which only refuses more). Each tag inside reads as its alt text, as a page shows an image's.
+  const HTMLHEAD = /<h([1-6])(?=[\s/>])([\s\S]*?)(?=<\/?h[1-6][\s/>]|$)/gi;
+  const ALT = /\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`=]+))/i;
+  // A # or ## heading's words as a page shows them (seen), judged beside its text as written: a comment
+  // and a processing instruction dropped (each read to its end), an autolink as its address, each tag a
+  // line break or a block (BLOCK) as a space, each other tag as its alt text (an image's; none else
+  // has one) with no space, as inline tags show; then each character reference decoded and each
+  // default-ignorable character (a soft hyphen, a zero-width space or joiner, a word joiner), shown as
+  // nothing, dropped. A tag's quoted value is read whole, up to the next <, so linearly. Its text as
+  // written stays what is refused.
+  const SHOWN = /<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*)>|<\/?[A-Za-z][A-Za-z0-9-]*(?:[\s/](?:"[^"<]*"|'[^'<]*'|[^<>"'])*)?>/g;
+  const BLOCK = /^<\/?(?:br|p|div|hr|li|ul|ol|dl|dt|dd|table|thead|tbody|tfoot|tr|td|th|blockquote|pre|section|article|header|footer|nav|aside|figure|figcaption|details|summary|address|h[1-6])(?![A-Za-z0-9-])/i;
+  const INVISIBLE = /\p{Default_Ignorable_Code_Point}|&(?:shy|zwj|zwnj|lrm|rlm|ZeroWidthSpace|Negative(?:VeryThin|Thin|Medium|Thick)Space|NoBreak|it|InvisibleTimes|ic|InvisibleComma|af|ApplyFunction);/gu;
+  const alt = (tag) => { const a = ALT.exec(tag); return a ? (a[1] ?? a[2] ?? a[3]) : ''; };
+  const shown = (tag) => ` ${alt(tag)} `;
+  // s with each run from open to the next close taken out (an unclosed one kept), read once.
+  const cut = (s, open, close) => { let out = ''; let at = 0; for (let i = s.indexOf(open); i >= 0; i = s.indexOf(open, at)) { const j = s.indexOf(close, i + open.length); if (j < 0) break; out += s.slice(at, i); at = j + close.length; } return out + s.slice(at); };
+  const seen = (s) => decode(cut(cut(words(s), '<!--', '-->'), '<?', '?>').replace(INVISIBLE, '').replace(SHOWN, (t, url) => (url ?? (BLOCK.test(t) ? ' ' : alt(t))))).replace(INVISIBLE, '').replace(/\s+/g, ' ').trim();
+  const headed = last((text) => {
+    const out = [];
+    const add = (level, s, line, text = words(s), kind = {}) => out.push({ level, text, line, raw: s, ...kind });
+    let para = []; // the paragraph's lines so far: [line, its text past its markers]
+    readable(text).forEach((l, i) => {
+      if (l === null || !l.trim()) { para = []; return; }
+      const at = OPENERS.exec(l)[0].length;
+      const inner = l.slice(at);
+      const atx = /^[ \t]*(#{1,6})(?:[ \t]+(.*))?$/s.exec(inner);
+      if (atx) { add(atx[1].length, trimST(atx[2] ?? '').replace(/(?:^|[ \t])#+$/, ''), i + 1); para = []; return; }
+      const under = para.length && (UNDER.exec(l) ?? UNDER.exec(inner));
+      if (under) { add(under[1][0] === '=' ? 1 : 2, para.map((p) => p[1]).join(' '), para[0][0]); para = []; return; }
+      if (!inner.trim() || BREAK.test(inner)) { para = []; return; }
+      if (/[^> \t]/.test(l.slice(0, at))) para = []; // a list item's line starts its own paragraph
+      para.push([i + 1, inner]);
+    });
+    const raw = String(text).replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+    const starts = [0];
+    for (let i = raw.indexOf('\n'); i >= 0; i = raw.indexOf('\n', i + 1)) starts.push(i + 1);
+    const lineOf = (o) => { let a = 0; let b = starts.length - 1; while (a < b) { const m = (a + b + 1) >> 1; if (starts[m] <= o) a = m; else b = m - 1; } return a + 1; };
+    // Where a page keeps an HTML heading tag as text (code), so the names rule judges it as before: in a
+    // fence or indented code outside an HTML block, or wholly inside a comment, or in a code span whose
+    // two marks its line and cell hold (ruling m-20261126-121428851). The lines are cut into blocks as a
+    // page cuts them: an HTML block (CommonMark's seven kinds; a fence that opens in one is read as HTML
+    // to its end), and a paragraph, which a blank line, a heading, a rule, an underline, a list item, a
+    // table row or an HTML block ends. Each block is read by kept, once.
+    const ls = lines(text);
+    const sc = scan(text).lines;
+    const rd = readable(text);
+    const kind = []; // each line's: code, html or md
+    const blocks = []; // { a, b, md, alone }: first and last line
+    let end = null; // what ends the open HTML block: its pattern, or '' for a blank line
+    let taken = false; // in a fence that opened in an HTML block
+    let rc = false; // readable's comment, to tell its unread lines from indented code
+    for (let l = 0; l < ls.length; l += 1) {
+      const s = ls[l];
+      let comment = false;
+      if (!sc[l].code) { comment = rc || /^ {0,3}<!--/.test(s); if (comment) rc = !s.includes('-->'); }
+      if (end === '' && !s.trim()) end = null;
+      taken = sc[l].code && (sc[l].opens ? end !== null : taken);
+      const code = sc[l].code || (rd[l] === null && !comment);
+      const last = blocks[blocks.length - 1];
+      const para = kind[l - 1] === 'md' && !!ls[l - 1].trim() && !last.alone;
+      let k = -1;
+      let seven = false;
+      if (end === null && !code) {
+        const xs = [s.replace(/^ {0,3}/, ''), s.slice(OPENERS.exec(s)[0].length).replace(/^[ \t]*/, '')];
+        k = HTMLBLOCK.findIndex(([o]) => xs.some((x) => o.test(x)));
+        seven = k < 0 && !para && xs.some((x) => /^<\/?[A-Za-z]/.test(x) && trimST(x).endsWith('>'));
+      }
+      if (k >= 0 || seven) {
+        kind.push('html');
+        blocks.push({ a: l, b: l, md: false });
+        end = k >= 0 && HTMLBLOCK[k][1] ? HTMLBLOCK[k][1] : '';
+      } else if (end !== null || taken) {
+        kind.push('html');
+        if (kind[l - 1] === 'html') last.b = l; else blocks.push({ a: l, b: l, md: false });
+      } else if (code) kind.push('code');
+      else {
+        kind.push('md');
+        const alone = HEAD.test(s) || BREAK.test(s) || UNDER.test(s) || /^ {0,3}\|/.test(s);
+        if (!s.trim()) continue;
+        if (para && !alone && !LIST.test(s)) last.b = l;
+        else blocks.push({ a: l, b: l, md: true, alone });
+      }
+      if (end && kind[l] === 'html' && end.test(s)) end = null;
+    }
+    const km = []; // each line as kept reads its block
+    const from = []; // where the comment a line's first character is in opened, when on a line before
+    const dirty = [0]; // how many lines before each hold a list, quote or footnote marker or a |, or are more than three spaces in
+    for (const { a, b, md } of blocks) { let l = a; for (const t of kept(ls.slice(a, b + 1).join('\n'), md).split('\n')) { km[l] = t; if (l > a && (t === '' || t[0] === '\0') && (km[l - 1] === '' ? from[l - 1] !== undefined : km[l - 1].endsWith('\0'))) from[l] = from[l - 1] !== undefined && !/[^\0]/.test(km[l - 1]) ? from[l - 1] : l - 1; l += 1; } }
+    for (let l = 0; l < ls.length; l += 1) dirty.push(dirty[l] + (OPENERS.exec(ls[l])[0].length || ls[l].includes('|') || indent(ls[l]) > 3 ? 1 : 0));
+    const own = new Map(); // each line read alone: an HTML block's by kept, a markdown one's cell by cell
+    // A tag is code where its block's reading and its own line's (and cell's) both keep it as text; or in
+    // a comment from a line before, when every line from the one it opened on is at most three spaces in
+    // and holds no marker or |, so no quote, table row, list item, heading, rule or code the cut above
+    // misses (one in a list item is more than three spaces in) can end the comment or hold its opener.
+    const inCode = (o) => {
+      const l = lineOf(o) - 1;
+      const c = o - starts[l];
+      if (kind[l] === 'code') return true;
+      const ch = km[l]?.[c];
+      if (ch !== ' ' && ch !== '\0') return false;
+      if (!own.has(l)) own.set(l, kind[l] === 'html' ? kept(ls[l], false) : cells(ls[l]));
+      if (own.get(l)[c] !== '<') return true;
+      const f = from[l];
+      return ch === '\0' && f !== undefined && dirty[l + 1] === dirty[f];
+    };
+    for (const m of raw.matchAll(HTMLHEAD)) { const body = m[2].replace(/^[^>]*>/, ''); add(Number(m[1]), body, lineOf(m.index), words(body.replace(/<[^<>]*>/g, shown)), (inCode(m.index) ? { code: true } : { html: true })); }
+    return out.filter((h) => h.text).sort((a, b) => a.line - b.line);
+  });
+  // A top-level heading must be plain text (ruling a-20261126-080419596): a # or ## heading, in any form,
+  // and an HTML <h1> to <h6> one, is refused when its text as written (a markdown one's code spans aside)
+  // holds raw HTML (< then a letter, /, ! or ?), a character reference (& then # or a letter), a
+  // character in \p{C} but a tab or a line's end, a mark left after NFC, a default-ignorable character,
+  // ~~, or a [ or ]. Plain text, code spans and * _ emphasis stay, read by the readings below. An HTML
+  // heading tag in code or a comment (code) is shown as text: the names rule judges it, as before.
+  const NOT_PLAIN = /<[A-Za-z\/!?]|&[#A-Za-z]|[^\P{C}\t\n]|\p{M}|\p{Default_Ignorable_Code_Point}|~~|[\[\]]/u;
+  const plainHeading = (h) => h.code || (h.level > 2 && !h.html) || !NOT_PLAIN.test((h.html ? h.raw : mask(h.raw, false)).normalize('NFC'));
+  // Whether the names rule refuses a heading: one that is not plain text; one of level 3 to 6 unless names holds it whole; a # or ##
+  // one (the title and the sections, in plain words) when it holds a capitalised word, Exterior aside
+  // (the document's own name), or a link host, that names doesn't hold whole, read as written, as
+  // shown or joined. Each later reading is made only when the one before finds nothing, so a refused heading
+  // costs one.
+  // A # or ## heading's joined reading, judged beside the two above: its markup taken out with no
+  // separator and the spaces typed kept, as a page joins a word a tag or a mark splits. Its spans are
+  // cut two ways (joined, joinedAtGt); only a line break or a paragraph (<br>, <p> and their end tags)
+  // reads as a space. What is left is squeezed (squeeze). Linear: a span ends at its quote or its >.
+  // SPAN: a tag (a quoted value read to its quote), end tag, declaration or autolink, as CommonMark reads it.
+  const SPAN = /<\/?[A-Za-z][A-Za-z0-9-]*(?:\s+[^\s"'<>\/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*\s*\/?>|<![A-Za-z][^<>]*>|<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*>/g;
+  const BREAKS = /^<\/?(?:br|p)(?![A-Za-z0-9-])/i;
+  // The text joined after its cuts: each character reference decoded, NFKC-normalised, each format,
+  // default-ignorable and combining mark left over dropped, read as words, a reference link's label after
+  // its ] taken out, and each ~ * _ ` [ ] mark taken out.
+  const squeeze = (t) => words(decode(t).normalize('NFKC').replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\p{Mn}]/gu, '')).replace(/\]\[[^[\]]{0,999}\]/g, ']').replace(/[~*_`[\]]/g, '');
+  // s with each span cut where a page ends it, at its first > (quotes ignored), read once; a comment at
+  // -->, --!> or at once; <br>, <p> and their end tags a space. An unclosed span stays as text. Each end
+  // looked for is kept until passed, so each is found once.
+  const atGt = (s) => {
+    let out = '';
+    let at = 0;
+    const next = {};
+    const find = (t, from) => { if (next[t] === undefined || (next[t] >= 0 && next[t] < from)) next[t] = s.indexOf(t, from); return next[t]; };
+    for (let i = s.indexOf('<'); i >= 0; i = s.indexOf('<', at)) {
+      out += s.slice(at, i);
+      if (s.startsWith('<!--', i)) { // a comment ends at once (<!-->, <!--->), or at --> or --!>
+        if (s[i + 4] === '>' || s.startsWith('->', i + 4)) { at = i + (s[i + 4] === '>' ? 5 : 6); continue; }
+        const ends = [['-->', 3], ['--!>', 4]].map(([t, n]) => [find(t, i + 4), n]).filter(([e]) => e >= 0);
+        if (!ends.length) { at = i; break; }
+        const [e, n] = ends.reduce((a, b) => (b[0] < a[0] ? b : a));
+        at = e + n;
+        continue;
+      }
+      if (!/[A-Za-z/!?]/.test(s[i + 1] ?? '')) { out += '<'; at = i + 1; continue; }
+      const e = find('>', i + 1);
+      if (e < 0) { at = i; break; }
+      if (BREAKS.test(s.slice(i, Math.min(e + 1, i + 6)))) out += ' ';
+      at = e + 1;
+    }
+    return out + s.slice(at);
+  };
+  // The joined reading, cut two ways (ruling m-20261126-071801827): as CommonMark reads its spans
+  // (SPAN, a quoted value to its quote), and as a page ends them (atGt). The invisible characters and
+  // their named references go first, before decode. The CDATA cut can't change a verdict (CDATA is
+  // upper case, so the reading as written refuses it): kept for the reading's sake.
+  const joined = (s) => squeeze(cut(cut(cut(s.replace(INVISIBLE, ''), '<!--', '-->'), '<?', '?>'), '<![CDATA[', ']]>').replace(SPAN, (t) => (BREAKS.test(t) ? ' ' : '')));
+  const joinedAtGt = (s) => squeeze(atGt(s.replace(INVISIBLE, '')));
+  const unnamedWord = (t, names) => [...t.matchAll(WORD)].some((m) => { const w = capWord(m[0]); return w !== null && w.toLowerCase() !== 'exterior' && !namesWhole(names, w); });
+  const unnamedHeading = (h, names) => !plainHeading(h) || (h.level > 2
+    ? !namesWhole(names, h.text)
+    : unnamedWord(h.text, names) || unnamedWord(seen(h.raw), names) || unnamedWord(joined(h.raw), names)
+      || unnamedWord(joinedAtGt(h.raw), names) || hosts(h.raw).some((x) => !namesWhole(names, x)));
+
+  // The text of each heading that is not plain text, in document order.
+  const notPlain = (text) => headed(text).filter((h) => !plainHeading(h)).map((h) => h.text);
   // exterior.md: { errors, warnings, refused, held, hosts }. On a repo known private nothing is refused
-  // or held; visibility 'public' or 'unknown' keeps the names rule. A ### heading is judged by
-  // allowed.names (origin main's strategy and dependency names); a word or host by allowed.words (the
-  // strategy and the dependency files whole).
+  // or held; visibility 'public' or 'unknown' keeps the names rule. Every heading, in any form (headed),
+  // is judged by allowed.names (origin main's strategy and dependency names) and refused as
+  // unnamedHeading says; a word or host by allowed.words (the strategy and the dependency files whole).
   function checkExterior(text, { today, visibility, allowed }) {
     const errors = docErrors(text, 'exterior');
     const all = errors.length ? [] : entries(text);
@@ -8540,13 +8922,13 @@ const selfPlain = (() => {
     return {
       errors,
       warnings: all.flatMap((e) => entryWarnings(e, today, refs)),
-      refused: unknown(headings(text).filter((h) => h.level === 3).map((h) => h.text), allowed.names),
+      refused: open ? [] : headed(text).filter((h) => unnamedHeading(h, allowed.names)).map((h) => h.text),
       held: unknown(capitalised(text), allowed.words),
       hosts: unknown(hosts(text), allowed.words),
     };
   }
 
-  return { version, checkSelf, selfHeld, scan, plain, headings, links, parts, namesWhole, entries, capitalised, hosts, checkExterior };
+  return { version, checkSelf, selfHeld, scan, plain, headings, links, parts, namesWhole, checkExterior, notPlain };
 })();
 // 1 when a fence's info string is exactly self or exterior (version 1), else 2.
 const selfPlainVersion = selfPlain.version;
@@ -8980,9 +9362,9 @@ function cmdSelf() {
 // project/exterior.md, what the project relates to: since kit-863 a plain document
 // (log.schema.json#exterior2), judged by the self-plain region's checkExterior, which follows
 // test/fixtures/world2/check.mjs rule for rule: one # title, ### entries, a dated source for each, and
-// on a repo not known to be private the names rule (a ### heading named whole in origin main's
-// strategy or dependency names, else refused; every capitalised word and every link host held until
-// named on the chore). A draft must be one. Version 1 (log.schema.json#exterior@1, one fenced
+// on a repo not known to be private the names rule (every heading, in any form: one of level 3 to 6
+// named whole in origin main's strategy or dependency names, a # or ## one each capitalised word in
+// it, else refused; every capitalised word and every link host held until named on the chore). A draft must be one. Version 1 (log.schema.json#exterior@1, one fenced
 // `exterior` block) still validates on main, by kit-135's rules below, and raises one exterior-drift.
 const EXTERIOR_REL = () => `${projectRel}/exterior.md`;
 const EXTERIOR_NOT_DRAFTED = 'exterior.md is not drafted yet: the supervisor drafts it from the strategy and self.md (supervisor.md, Monitoring)';
@@ -9017,17 +9399,12 @@ function exteriorDoc(text) {
   return { version, block: errors.length ? null : v, errors };
 }
 const exteriorTreeText = () => readText(path.join(projectDir, 'exterior.md'));
-// A version 1 file's checks past its contract, for validate. The head's strategy.md and self.md blobs
-// (null for no file): ref's, or with ref null the working tree's (git hash-object, so an uncommitted
-// draft counts), with the strategy's text when it was read from the tree.
-function headBlobs(ref, root = projectDir) {
-  const rels = { strategy: strategyRel, self: `${projectRel}/self.md` };
-  if (ref) {
-    const at = (rel) => git(['rev-parse', '--verify', '--quiet', `${ref}:${rel}`], mainRoot);
-    return { strategyBlob: at(rels.strategy), selfBlob: at(rels.self), strategyText: null };
-  }
-  const tree = (name) => { const f = path.join(root, name); return fs.existsSync(f) ? git(['hash-object', '--', f], mainRoot) : null; };
-  return { strategyBlob: tree('strategy.md'), selfBlob: tree('self.md'), strategyText: readText(path.join(root, 'strategy.md')) };
+// A version 1 file's checks past its contract, for validate: the working tree's strategy.md and
+// self.md blobs (git hash-object, so an uncommitted draft counts; null for no file) and the strategy's
+// text.
+function headBlobs() {
+  const tree = (name) => { const f = path.join(projectDir, name); return fs.existsSync(f) ? git(['hash-object', '--', f], mainRoot) : null; };
+  return { strategyBlob: tree('strategy.md'), selfBlob: tree('self.md'), strategyText: readText(path.join(projectDir, 'strategy.md')) };
 }
 // Whether validate is at the draft: main can be read and the working tree's exterior.md is not
 // main's (none on main counts as differing). With no main (a depth-1 CI checkout) it is not.
@@ -9083,7 +9460,7 @@ function dependencyNames(ref = mainRef()) {
   return { text: names.join('\n'), warnings };
 }
 // What the names rule allows at ref (origin main; the branch's own files never count): names, which
-// a ### heading must be named in whole (main's strategy.md and its dependency names), and words, which
+// judge every heading (main's strategy.md and its dependency names), and words, which
 // hold every other capitalised word and every link host (main's strategy.md and its dependency files'
 // whole text, namesAllowedText); warnings, the dependency files'.
 function exteriorAllowed(ref = mainRef()) {
@@ -9096,7 +9473,13 @@ function exteriorAllowed(ref = mainRef()) {
 function exteriorDraft(text, allowed) {
   return selfPlain.checkExterior(text, { today: exteriorToday(), visibility: 'public', allowed });
 }
-const exteriorRefusedLine = (name) => `"${name}" (a ### heading) is not named whole in origin main's strategy.md or its dependency names: on a repo not known to be private an entry is headed only by a name they give; head it as a group or a topic, or have the strategy name it first`;
+// A refused heading's line: a level-3 ATX heading of text's (an entry) as kit-863 words it; any other
+// form or level as a heading.
+const exteriorRefusedLine = (name, text) => (selfPlain.notPlain(text).includes(name)
+  ? `"${name}" (a heading) is not plain text: a top-level heading must be plain text; put options, placeholders and markup in backticks (outside a code span a # or ## heading, or an HTML <h1> to <h6> one, holds no raw HTML, character reference, control, format or invisible character, mark left after NFC, ~~, [ or ]; * or _ emphasis is fine)`
+  : selfPlain.headings(text).some((h) => h.level === 3 && h.text === name)
+  ? `"${name}" (a ### heading) is not named whole in origin main's strategy.md or its dependency names: on a repo not known to be private an entry is headed only by a name they give; head it as a group or a topic, or have the strategy name it first`
+  : `"${name}" (a heading) is not named in origin main's strategy.md or its dependency names: on a repo not known to be private a heading of level 3 to 6 is only a name they give whole, and a # or ## heading holds no capitalised word or link host they don't name; name it in the strategy first, or reword it (a # or ## heading may lower-case the word, or use one the strategy holds)`);
 const exteriorWordLine = (w) => `"${w.word}" (${w.where}) is in neither origin main's strategy.md nor its dependency files: on a repo not known to be private, the draft is public once its branch is pushed; reword it, or check it and name it on the chore (chore pr --names-checked)`;
 // The draft's history (every version is pushed): the contract and dated sources on head ({ text }, or
 // null when there is no exterior.md at the head), then the names rule on each version ([{ commit,
@@ -9113,7 +9496,7 @@ function exteriorVersionsScan(head, versions, allowed) {
   const seen = new Set();
   for (const { commit, text } of versions) {
     const d = judge(text);
-    for (const name of d.refused) if (!seen.has(`n:${name}`)) { seen.add(`n:${name}`); named.push({ name, line: exteriorRefusedLine(name), commit }); }
+    for (const name of d.refused) if (!seen.has(`n:${name}`)) { seen.add(`n:${name}`); named.push({ name, line: exteriorRefusedLine(name, text), commit }); }
     for (const [list, where] of [[d.held, 'word'], [d.hosts, 'link host']]) for (const word of list) if (!seen.has(`w:${word}`)) { seen.add(`w:${word}`); words.push({ word, where, commit }); }
   }
   warns.push(...allowed.warnings);
@@ -9242,7 +9625,7 @@ function exteriorBase(main, blob) {
 // metrics' exterior findings, read from main with no network call (none with no main), each keyed so
 // observeFindings keeps one observation per name or blob pair. A version 1 exterior.md: one
 // exterior-drift (key exterior@1) asking for the plain version, and no other. A plain one:
-// exterior-drift once per ### heading main's strategy.md and dependency names no longer name, only
+// exterior-drift once per heading the names rule refuses against main's strategy.md and dependency names, only
 // where the repo was last known public (a machine with no record says nothing); exterior-stale while
 // main's strategy.md or self.md blob isn't the one at its base (exteriorBase; unknown raises none);
 // both low. exterior-missing while main has self.md, a written strategy linking it, and no
@@ -9267,10 +9650,10 @@ function exteriorFindings(add) {
   if (lastRepoVisibility() === 'public') {
     const allowed = exteriorAllowed(main);
     const seen = new Set();
-    for (const h of selfPlain.headings(m.text)) {
-      if (h.level !== 3 || seen.has(h.text.toLowerCase()) || selfPlain.namesWhole(allowed.names, h.text)) continue;
-      seen.add(h.text.toLowerCase());
-      add('low', 'exterior-drift', 'exterior', `exterior.md's entry "${h.text}" is named in neither main's strategy.md nor its dependency names`, 'draft a new version of exterior.md that heads it as a group or a topic, or have the strategy name it; run exterior check before chore pr', { key: h.text.toLowerCase() });
+    for (const name of exteriorDraft(m.text, allowed).refused) {
+      if (seen.has(name.toLowerCase())) continue;
+      seen.add(name.toLowerCase());
+      add('low', 'exterior-drift', 'exterior', `exterior.md's heading "${name}" is named in neither main's strategy.md nor its dependency names`, 'draft a new version of exterior.md that heads it in plain words, as a group or a topic, or have the strategy name it; run exterior check before chore pr', { key: name.toLowerCase() });
     }
   }
   const base = exteriorBase(main, m.blob);
@@ -9294,7 +9677,7 @@ function exteriorCheckLines() {
     const v = repoVisibility();
     if (v !== 'private') {
       const tail = v === 'unknown' ? " (the repo's visibility is unknown, which counts as not private)" : '';
-      errors.push(...d.refused.map((n) => `${exteriorRefusedLine(n)}${tail}`));
+      errors.push(...[...new Set(d.refused)].map((n) => `${exteriorRefusedLine(n, text)}${tail}`)); // a heading written twice is one line
       warnings.push(...[...d.held.map((word) => ({ word, where: 'word' })), ...d.hosts.map((word) => ({ word, where: 'link host' }))].map(exteriorWordLine));
     }
   }
@@ -9314,7 +9697,7 @@ function exteriorValidateLines() {
   if (text === null) return { errors: [], warnings: [] };
   const { block, errors } = exteriorDoc(text);
   if (!block) return { errors, warnings: [] };
-  return exteriorBlobLines(block, { draft: exteriorAtDraft(), ...headBlobs(null) });
+  return exteriorBlobLines(block, { draft: exteriorAtDraft(), ...headBlobs() });
 }
 // dashboard-data's exterior block (log.schema.json#exterior@1 dashboard), for a version 1 file whose
 // block holds: file order, relation_word or null, each signal's score weight×value. kit-868 drops it.
@@ -10731,6 +11114,15 @@ function askLine({ thread, about } = {}) {
   if (def !== null && (kind === 'one-way-door' || reasons.includes('one-way-door'))) die('a one-way door has no --default: only the owner\'s answer goes through it');
   // a door's answer approves a plan only as recommended (doorAgreed), so a door says what it recommends
   if (kind === 'one-way-door' && !flagStr('recommendation')?.trim()) die('a one-way door needs --recommendation: the owner\'s yes to it is what approves the plan built on it');
+  // a door's other choices the owner may pick instead, each approving the plan built on it (doorPick):
+  // marked "approves": true; a choice that declines never is. Only a door's choices carry it
+  const approving = (jsonFlag('choices') ?? []).filter((c) => isObj(c) && Object.hasOwn(c, 'approves'));
+  if (approving.length && kind !== 'one-way-door' && cls !== 'one-way-door') die('"approves" goes on a one-way door\'s choices: the other choices the owner may pick, each approving the plan built on it');
+  for (const c of approving) {
+    if (c.approves !== true) die(`--choices "${c.label}": "approves" is true or left out (a choice that declines leaves it out)`);
+    if (DECLINING_LABEL.test(String(c.label ?? ''))) die(`--choices "${c.label}" reads as a no: a choice that declines never approves a plan, so it never carries "approves"`);
+    if (String(c.label ?? '').trim().toLowerCase() === String(flagStr('recommendation') ?? '').trim().toLowerCase()) die(`--choices "${c.label}" is the recommendation, which approves already: leave "approves" off it`);
+  }
   if (def !== null && (L.owner_only ?? []).includes(cls)) die(`${cls} is the owner's (constitution.md §1): no --default, only their answer approves it`);
   const blocks = asList(flags.blocks);
   for (const b of blocks) if (!tickets().has(b) && !isIncident(logGet(b)) && !(cls === 'production-remediation' && /^(remediation|release):\S+$/.test(b))) die(`--blocks ${b}: no such ticket (or incident)`);
@@ -14716,7 +15108,59 @@ function draftArtifacts(landed = landedArtifacts()) {
   save(treeFile, nextTrees, trees);
   return [...res, ...remote];
 }
-const allArtifacts = () => { const l = landedArtifacts(); return [...l, ...draftArtifacts(l)]; };
+// A landed entry whose log object says archived carries archived {at, by, goal} (kit-934): read from
+// the log on every call, never kept in the landed cache or in artifact.json. A draft never carries it.
+const allArtifacts = () => {
+  const l = landedArtifacts();
+  const rec = archiveRecords();
+  return [...l.map((a) => { const r = rec.get(a.slug); return r?.archived ? { ...a, archived: { at: r.at, by: r.by, goal: r.goal } } : a; }), ...draftArtifacts(l)];
+};
+// ----- archiving: a met goal's Library items leave the Library, and nothing is deleted (kit-934) -----
+// Each slug's artifact object (log type artifact, id artifact:<slug>), folded like any object: the
+// newest set of a field wins, unless a higher-ranked writer (the owner) set it. Only the owner and the
+// supervisor write the type (the schema's authority table, checked on every read). Per slug: whether it
+// is archived, who last set archived and when (its last applied update carrying it, else its creation),
+// and the goal it was archived for (or null).
+function archiveRecords() {
+  const m = new Map();
+  for (const o of logObjects('artifact')) {
+    if (typeof o.id !== 'string' || !o.id.startsWith('artifact:')) continue;
+    const u = [...(o.updates ?? [])].reverse().find((x) => 'archived' in x);
+    m.set(o.id.slice('artifact:'.length), { archived: o.archived === true, at: u?.at ?? o.created_at, by: u?.by ?? o.created_by, goal: o.goal ?? null });
+  }
+  return m;
+}
+// The landed artifacts kit-935 archives when goal g is met: landed by `at` (an ISO time; null
+// is now), every scope in their for a goal:, feature: or ticket: scope resolving to met goals, at
+// least one of them g. A feature resolves to the goals it serves when every one is met; a ticket
+// through its feature. An all, project, component: or link: scope, an unknown id, a running goal, a
+// draft and an empty for are never archivable. The one rule kit-935 and kit-936 read.
+function archivableArtifacts(goalId, at = null) {
+  const goals = new Map(logObjects('goal').map((g) => [g.id, g]));
+  const met = (id) => goals.get(id)?.status === 'met';
+  if (!met(goalId)) return [];
+  const served = (fid) => { const gs = features().get(fid)?.goals ?? []; return gs.length && gs.every(met) ? gs : null; };
+  const resolve = (s) => {
+    const i = String(s).indexOf(':');
+    const kind = i < 0 ? s : s.slice(0, i), id = i < 0 ? '' : s.slice(i + 1);
+    if (kind === 'goal') return met(id) ? [id] : null;
+    if (kind === 'feature') return served(id);
+    if (kind === 'ticket') { const t = tickets().get(id); return t ? served(t.feature) : null; }
+    return null;
+  };
+  let landed = landedArtifacts();
+  if (at) {
+    // main as it stood at `at`: its last first-parent commit by then, and the folders it held
+    const ref = mainRef();
+    const c = ref ? git(['rev-list', '-1', '--first-parent', `--before=${at}`, ref], mainRoot) : null;
+    const then = new Set(c ? (git(['ls-tree', '--name-only', `${c}:${ARTIFACTS_REL}`], mainRoot) ?? '').split('\n').filter(Boolean) : []);
+    landed = landed.filter((a) => then.has(a.slug));
+  }
+  return landed.filter((a) => {
+    const rs = (a.for ?? []).map(resolve);
+    return rs.length > 0 && rs.every(Boolean) && rs.flat().includes(goalId);
+  }).sort((a, b) => a.slug.localeCompare(b.slug));
+}
 // ----- publishing: the owner makes a landed artifact readable by anyone, from the cloud box -----
 // The gateway does the publishing (its confirm page, its own copy of the bytes); the kit says what
 // main has, and records the owner's word as an owner act (the public-artifacts design).
@@ -15013,14 +15457,57 @@ function cmdArtifact() {
     return sub === 'handoff' ? artifactHandoffCmd(slug, at) : artifactNotesCmd(slug, at);
   }
   if (sub === 'addressed') return artifactAddressedCmd(args[0]);
-  die('usage: artifact new <slug> --title t --summary s [--for json] [--kind mock|diagram|docs] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact versions <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner | artifact handoff <slug> [--at <where>] [--json] | artifact notes <slug> [--at <where>] [--json] | artifact addressed <t-id> --note "<what changed>" [--sha <commit>] [--draft <worktree>]');
+  // artifact archivable <goal> [--at <time>] [--json]: what kit-935 archives when that goal is met
+  // (archivableArtifacts), landed by --at; it writes nothing
+  if (sub === 'archivable') {
+    const gid = args[0] ?? die('usage: artifact archivable <goal-id> [--at <time>] [--json]');
+    if (logGet(gid)?.type !== 'goal') die(`no goal ${gid}`);
+    let at = null;
+    if (flags.at !== undefined) {
+      const ms = Date.parse(flagStr('at') ?? '');
+      if (!/^\d{4}-\d{2}-\d{2}T/.test(flagStr('at') ?? '') || Number.isNaN(ms)) die('--at is a time: 2026-11-26T09:00:00Z');
+      at = new Date(ms).toISOString();
+    }
+    const list = archivableArtifacts(gid, at);
+    if (flags.json) return json(list);
+    if (!list.length) return out(`nothing archivable for ${gid}${at ? ` as of ${at}` : ''}`);
+    for (const a of list) out(`${a.slug} ${a.error ? `(broken: ${a.error})` : quoteData(a.title)} for ${a.for.join(', ')}`);
+    return;
+  }
+  // artifact archive|restore <slug> [--reason "<why>"] [--owner]: set or clear the artifact's archived
+  // attribute (kit-934), the supervisor's or, with --owner, the owner's. One line in the log; its files
+  // never move. Once the owner has set it, only the owner changes it.
+  if (sub === 'archive' || sub === 'restore') {
+    const slugName = args[0];
+    if (!LINK_ID.test(slugName ?? '')) die(`usage: artifact ${sub} <slug> [--reason "<why>"] [--owner]`);
+    const by = flags.owner ? ownerWriter().by : (supervisorOnly(`artifact ${sub}`), 'supervisor');
+    const reason = flags.reason === undefined ? null : (flagStr('reason') ?? '').replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim() || null;
+    if (reason && Buffer.byteLength(reason) > 500) die(`--reason is at most 500 bytes; this one is ${Buffer.byteLength(reason)}`);
+    const landed = landedArtifacts();
+    if (!landed.some((a) => a.slug === slugName)) die(draftArtifacts(landed).some((a) => a.slug === slugName) ? `${slugName} is a draft; only a landed artifact is archived` : `${slugName}: no artifact by that name on main`);
+    const want = sub === 'archive';
+    const id = `artifact:${slugName}`;
+    // two writers at once write one line: the check and the line under one lock
+    fs.mkdirSync(runDir, { recursive: true });
+    const why = withLock(runPath('artifact-archive'), () => {
+      logCache = null;
+      const cur = archiveRecords().get(slugName);
+      if ((cur?.archived === true) === want) return want ? `${slugName} is already archived` : `${slugName} is not archived; there is nothing to restore`;
+      if (cur && by !== 'owner' && cur.by === 'owner') return `${slugName}: the owner ${cur.archived ? 'archived' : 'restored'} it (${cur.at}), so only the owner changes it now`;
+      appendLog({ type: 'artifact', ...(cur ? { op: 'set' } : {}), id, archived: want, goal: null, reason }, by);
+      return null;
+    });
+    if (why) die(why);
+    return out(want ? `archived ${slugName}: it leaves the Library; its files stay` : `restored ${slugName}: it is back in the Library`);
+  }
+  die('usage: artifact new <slug> --title t --summary s [--for json] [--kind mock|diagram|docs] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact versions <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner | artifact handoff <slug> [--at <where>] [--json] | artifact notes <slug> [--at <where>] [--json] | artifact addressed <t-id> --note "<what changed>" [--sha <commit>] [--draft <worktree>] | artifact archivable <goal-id> [--at <time>] [--json] | artifact archive|restore <slug> [--reason "<why>"] [--owner]');
 }
 function cmdArtifacts() {
   gitReadCache = new Map();
   const all = allArtifacts();
   if (flags.json) return json(all);
   if (!all.length) return out('no artifacts');
-  for (const a of all) out(`${a.slug} [${a.at === 'main' ? 'landed' : `draft in ${a.at}`}] ${a.error ? `(broken: ${a.error})` : quoteData(a.title)}${a.for.length ? ` for ${a.for.join(', ')}` : ''}`);
+  for (const a of all) out(`${a.slug} [${a.at === 'main' ? 'landed' : `draft in ${a.at}`}] ${a.archived ? '[archived] ' : ''}${a.error ? `(broken: ${a.error})` : quoteData(a.title)}${a.for.length ? ` for ${a.for.join(', ')}` : ''}`);
 }
 // The starter page: the dashboard's light and dark tokens copied inline, since an artifact can't
 // load the dashboard's files.
@@ -16475,10 +16962,16 @@ function cmdAct() {
     const t = tickets().get(refs[0]);
     const doors = t.one_way_doors ?? [];
     let goalDoor = null;
+    // door questions answered with a marked alternative: any one named in the plan and its review approves
+    let picks = [];
     if (doorCited) {
       if (!doors.length) die(`${t.id} lists no one-way doors; ${approved} has nothing to cover`);
       if (approval.status !== 'answered') die(`${approved} was not answered by the owner; a one-way door needs the owner's answer, never a default`);
-      if (!doorAgreed(approval)) die(`${approved} was answered "${String(approval.answer ?? '').slice(0, 80)}", not its recommendation ("${approval.recommendation}"): a plan built on the recommendation isn't what the owner said yes to; replan to their answer and ask about that`);
+      if (!doorAgreed(approval)) {
+        const pick = doorPick(approval) && !doorPickUndone(approval, questions()) ? doorPick(approval) : null;
+        if (!pick) die(`${approved} was answered "${String(approval.answer ?? '').slice(0, 80)}", not its recommendation ("${approval.recommendation}") nor a choice it marked "approves" that the owner picked themselves, with no later answer to the same door: a plan built on the recommendation isn't what the owner said yes to; replan to their answer and ask about that`);
+        picks.push({ id: approved, pick });
+      }
       if (approval.ticket !== t.id) {
         // a question asked for one ticket is that ticket's door, never a goal-level one for another
         if (approval.ticket) die(`${approved} was asked for ${approval.ticket}, not ${t.id}: a ticket's door answer covers that ticket only`);
@@ -16487,7 +16980,13 @@ function cmdAct() {
         if (!goals.includes(approval.goal)) die(`${approved} answered a one-way door for goal ${approval.goal}, but ${t.id}'s feature ${t.feature} serves ${goals.join(', ') || 'no goal'}; an answer for another goal never covers this plan`);
         goalDoor = approved;
       }
-    } else if (doors.length && !questions().some((q) => isDoorQuestion(q) && q.ticket === t.id && q.status === 'answered' && doorAgreed(q))) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved, or you cite the owner's answer to the goal's one-way-door question (--approved <qid>) and the plan review says it covers the plan (constitution.md §4)`);
+    } else if (doors.length && !questions().some((q) => isDoorQuestion(q) && q.ticket === t.id && q.status === 'answered' && doorAgreed(q))) {
+      // the owner picked a marked alternative: that answer approves the plan built on it, once the
+      // plan and its approving review name it (below); any one named pick approves, as any one agreed door does
+      const qs = questions();
+      picks = qs.filter((q) => isDoorQuestion(q) && q.ticket === t.id && doorPick(q) && !doorPickUndone(q, qs)).map((q) => ({ id: q.id, pick: doorPick(q) }));
+      if (!picks.length) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved, or you cite the owner's answer to the goal's one-way-door question (--approved <qid>) and the plan review says it covers the plan (constitution.md §4)`);
+    }
     // The plan opens with its TL;DR, so a low-risk plan can be approved from it (quality.md §6).
     // where the records are: home's ticket/<id> for records in home, else the ticket's repo (an act:
     // fails fast on a missing or wrong checkout)
@@ -16497,6 +16996,13 @@ function cmdAct() {
     if (plan === null) die(`no plan.md for ${t.id} on ticket/${t.id}; approve a plan once it is committed`);
     const tldr = tldrGap(plan);
     if (tldr) die(`${t.id}'s plan ${tldr}; send it back to the worker (quality.md §6)`);
+    // a plan on the owner's pick of a marked alternative says so, and the latest approving plan review
+    // says the same, so the approval is of the plan built on that pick (quality.md §3)
+    if (picks.length) {
+      const reviewsOk = latestPerTrack(ticketReviews(t.id, R.name === 'home' ? { ref } : { ref, repo: R }), 'plan').filter((r) => r.verdict === 'APPROVE');
+      const named = picks.find((p) => doorPickNamed(plan, p.id, p.pick) && reviewsOk.some((r) => (r.doorPicks ?? []).some((d) => d.id === p.id && d.pick.toLowerCase() === p.pick.trim().toLowerCase())));
+      if (!named) die(`${picks.map((p) => `${p.id} was answered "${p.pick}", a choice it marked "approves" but not its recommendation`).join('; ')}: the plan approves only when it is built on that pick and both the plan and its latest approving plan review say so, each on the line "- One-way door ${picks[0].id}: ${picks[0].pick}"; replan to it and have the plan reviewed`);
+    }
     // A goal-level answer covers the plan only when its reviewer says the plan stays inside it.
     if (goalDoor) {
       const latest = latestPerTrack(ticketReviews(t.id, R.name === 'home' ? { ref } : { ref, repo: R }), 'plan').filter((r) => r.verdict === 'APPROVE');
@@ -33416,6 +33922,130 @@ function cmdRecurring() {
   ].join('\n'));
 }
 
+// kit-install@1 (feature kit-package-dist): an instance pins the kit's npm package in two files, installs
+// it verified beside the copy it runs, and from layout 2 runs it. The rules every package, merge, chore,
+// dashboard and launcher step keeps:
+// - Settings. package_name (default @sanctuarycomputer/devteam) and alpha (default true) are owner
+//   settings. Every check reads package_name and upstream_repo from main's committed settings
+//   (settingsAt(main)), never from a PR's head or loadSettings().
+// - The pin pair. docs/devteam/package.json and docs/devteam/package-lock.json are packagePinPair's output
+//   for the registry's manifest of the version, byte for byte. layout is the manifest's devteam.layout (1
+//   or 2), read, never guessed: a manifest without one is refused, and so is one that disagrees with the
+//   tag's launcher marker (below). For a PR that changes either file the expected version is
+//   upstream_base at its head without the v; a pin naming another version is refused, and so is a PR
+//   that deletes the pair (the fix: restore main's pair, or package pin <tag>).
+// - npm. The calls are exactly npm view <name>@<version> [<field>] [--json], npm ci [--dry-run] and npm
+//   audit signatures, each with --registry=<the registry>, --ignore-scripts, --prefix=<the folder it runs
+//   in> and --workspaces=false, each once, and no other argument in any form (no second or scoped registry,
+//   no --reg or --registry <url>, no ignore-scripts negation, no other prefix or workspace flag, no
+//   --userconfig or --globalconfig). With the last two npm never walks up to a package.json, its workspaces,
+//   its lock or an .npmrc above that folder (a workspace root above .kit would otherwise install its own
+//   lock, bytes the pin never named), so a workspace root or an .npmrc above changes nothing and is not
+//   refused (C4 runs real npm to show it). Each runs with npm_config_userconfig and npm_config_globalconfig naming
+//   two different empty files (regular files; npm refuses one file for both), with no other variable whose
+//   name starts with npm_config_ in any letter case in its environment: those two names are lower-case,
+//   and NPM_CONFIG_USERCONFIG or any other spelling is another variable to drop (npm reads the prefix in
+//   any letter case: npm_config_*, NPM_CONFIG_* and a mixed spelling such as Npm_Config_* alike, a scoped
+//   npm_config_@scope:registry included), and in a folder the step made that holds no .npmrc: ci and
+//   audit in .kit/<version>-<hash>/, view in its own folder made outside the checkout (mkdtemp under
+//   os.tmpdir()) holding only a package.json the step writes ({}). An npm
+//   older than 9.5 can't verify attestations: a finding before layout 2, a refusal from it. A registry
+//   that can't be reached is not a refusal: a fetch or npm call that gets no answer in time, a network
+//   error, or any status but 200 and 404 (a 5xx, a 429), and an npm call that fails with a network code
+//   (ECONN*, ETIMEDOUT, EAI_AGAIN) or E5xx/E429, are unreachable, never a refusal. Unreachable is a finding
+//   before layout 2; from it the step stops, changes nothing (current, verified.json and the pair stay as
+//   they were, and nothing records the version as refused), and the next run tries again. An npm E404 for
+//   the version is unpublished: a finding before layout 2, a refusal from it. EINTEGRITY is a refusal.
+// - The registry is https://registry.npmjs.org/. DEVTEAM_NPM_REGISTRY, for tests, replaces it only when it
+//   is exactly http://127.0.0.1:<port>/ (port 1 to 65535, no leading zero, the final slash, nothing after
+//   it). Unset or empty, it is the public registry; any other value (localhost, [::1], https, a path) stops
+//   the command with exit 1 naming the
+//   variable, and is never used or passed over for the public one. Set, it is the --registry of every npm
+//   call and the base of the kit's own fetches, and package status names it. It adds no reach: whoever
+//   sets the kit's environment can already run code in it (NODE_OPTIONS, PATH). The kit's own fetches
+//   never follow a redirect (redirect: 'manual'): a 3xx is unreachable, so no answer comes from another
+//   host.
+// - Provenance. The bundle at <registry>-/npm/v1/attestations/<name>@<version> is fetched once (15 s, at
+//   most 1 MiB). Its guards, in order, each a refusal naming the first that fails: the fetch answers 200 or
+//   404 (else unreachable, as above); not a 404 (no attestation); JSON with an attestations list;
+//   exactly one entry whose predicateType is https://slsa.dev/provenance/v1; its bundle.dsseEnvelope.payload
+//   is base64 of a JSON in-toto statement; subject is exactly one entry, whose digest.sha512 (128 hex) is
+//   the integrity's sha512; predicate.buildDefinition.externalParameters.workflow has repository
+//   https://github.com/<upstream_repo>, path .github/workflows/release.yml and ref refs/tags/v<version>;
+//   predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit is the tag's commit in upstream_repo,
+//   on its default branch. npm audit signatures must then pass on the installed tree and report the
+//   package's attestation verified (its "has a verified attestation" line; passing on registry signatures
+//   alone is a refusal from layout 2, a finding before): it checks the signature, the kit the claims. The
+//   bundle the kit reads and the one npm verifies are fetched separately: a registry serving different
+//   bytes to each is a named limit.
+// - The install tree. docs/devteam/.kit/<version>-<first 12 hex of the integrity's sha512>/ holds the pair,
+//   node_modules/<name>/ (and whatever else npm writes there) and verified.json. Folders are made under
+//   withLock(.kit/.lock); current and the previous folder are kept, and a folder a live process holds open
+//   is never removed.
+// - current. docs/devteam/.kit/current is a relative symlink whose target is one folder's name, or, where
+//   the file system holds no symlink, a file of at most 64 bytes holding that name and one newline; every
+//   reader takes both, and switches it by an atomic rename. A name is <X.Y.Z>-<12 hex> and must be a
+//   real folder (not a symlink) directly beside current. Anything else (an absolute or ../ target, a / in
+//   the name, a missing folder, a folder that is a symlink, an empty file, a second line, a bigger file)
+//   is no current: never followed, read as nothing installed.
+// - Never committed. docs/devteam/.kit must be a real folder (lstat); a symlink or anything else there is
+//   read as nothing installed. Its ignore line is .kit, with no slash, so a symlink of that name is ignored
+//   too, and merge refuses a PR that adds or changes docs/devteam/.kit itself or any path under it, where
+//   each of a path's first three components is compared as git compares .git on any file system:
+//   case-insensitively, after Unicode NFC normalisation, with the code points HFS+ ignores removed (U+200C
+//   to U+200F, U+202A to U+202E, U+206A to U+206F, U+FEFF), with a trailing run of dots and spaces dropped,
+//   and a component that is the name's NTFS 8.3 short name (DEVTEA~<digit>, KIT~<digit>) matching too; a
+//   component is cut at its first ':' (an NTFS stream: .kit::$INDEX_ALLOCATION, .kit:x) and a '\' is read
+//   as a separator (.kit\x), as git's is_ntfs_dotgit does; so
+//   .KIT/, Docs/DevTeam/.kit/, .kit./ and KIT~1/ are .kit. An install is only ever made on the machine, by
+//   the step. The ignore line does not fold case on a case-sensitive file system; merge's refusal is what
+//   stops .KIT.
+// - verified.json: { v: 1, name, version, layout, integrity, integrity_ok, provenance_ok, provenance:
+//   { repo (owner/name), workflow, ref, commit }, at (UTC, toISOString) }, in that order, at most 4 KiB.
+//   The install step writes it last, by an atomic rename, only once both checks pass, so it never writes
+//   an _ok that is false. A reader takes a folder as verified only when its record parses, holds every
+//   field with its type, both _ok are true, and name, version, layout and integrity agree with the folder's
+//   name and its pair; anything else (no record, a false _ok, a field missing or of another type, a
+//   mismatch, too big) is unverified, and nothing runs or serves it.
+// - The hub tree. The install step, run for a verified layout-2 version newer than the hub's current, also
+//   installs it into ~/.devteam/hub/<version>-<hash>/ by the same step and checks, under
+//   withLock(~/.devteam/hub/.lock), with its own verified.json, then switches ~/.devteam/hub/current the
+//   same way. ~/.devteam/hub must be a real folder (lstat), and its current is read as .kit's is. The hub
+//   keeps current and the previous folder. A layout-1 install never touches it.
+// - The launcher. Its second line is exactly // devteam-launcher: kit-package@1. Merge's launcher-tag rule
+//   looks for it in a tag's docs/devteam/scripts/devteam.mjs (that tag is layout 2), and the launcher
+//   refuses to run a target that carries it.
+// - The command. devteam.mjs package pin <tag> | package install [--version v] [--into <dir>] (no project
+//   needed) | package status [--json].
+// The fakes: test/fixtures/kit-install/ (the trees, the pair, the registry's packages) and
+// test/lib/fake-registry.mjs (a loopback registry and an npm that keeps these rules or says which it saw
+// broken). packagePinPair is loaded alone by its test: it names nothing outside its body, and no line of
+// it is a bare closing brace but its last.
+function packagePinPair(pin) {
+  const no = (why) => { throw new Error(`packagePinPair: ${why}`); };
+  const KEYS = ['name', 'version', 'integrity', 'resolved', 'layout'];
+  if (!pin || typeof pin !== 'object' || Array.isArray(pin)) no('takes { name, version, integrity, resolved, layout }');
+  if (Object.keys(pin).some((k) => !KEYS.includes(k))) no('takes only name, version, integrity, resolved and layout');
+  const { name, version, integrity, resolved, layout } = pin;
+  if (typeof name !== 'string' || name.length > 214 || !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(name)) no('name is not an npm package name');
+  if (typeof version !== 'string' || !/^(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})$/.test(version)) no('version is not X.Y.Z');
+  if (typeof integrity !== 'string' || !/^sha512-[A-Za-z0-9+/]{86}==$/.test(integrity)) no('integrity is not one sha512');
+  if (resolved !== `https://registry.npmjs.org/${name}/-/${name.slice(name.indexOf('/') + 1)}-${version}.tgz`) no("resolved is not the public registry's tarball of name@version");
+  if (layout !== 1 && layout !== 2) no('layout is not 1 or 2');
+  const dependencies = { [name]: version };
+  const text = (o) => `${JSON.stringify(o, null, 2)}\n`;
+  return {
+    'package.json': text({ name: 'devteam-instance', private: true, dependencies, devteam: { layout } }),
+    'package-lock.json': text({ name: 'devteam-instance', lockfileVersion: 3, requires: true, packages: { '': { name: 'devteam-instance', dependencies }, [`node_modules/${name}`]: { version, resolved, integrity } } }),
+  };
+}
+// package pin|install|status (kit-install@1). Until each is built, it says so.
+function cmdPackage() {
+  const sub = positional[0];
+  if (['pin', 'install', 'status'].includes(sub)) die(`package ${sub}: not built yet`);
+  die('usage: package pin <tag> | package install [--version v] [--into <dir>] | package status [--json]');
+}
+
 // When a recurring job is next due (design C1), from its landings on main and its recorded results.
 // landings: [{ at, entry }] in any order, entry null when the job stopped; runs: [{ slot, at }], at the
 // run's start. An unanchored job's next slot is the last result's start plus every; an anchored one
@@ -40949,6 +41579,8 @@ const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   artifact notes <slug> [--at main|<worktree>|tree:<id>] [--json]   the notes on that copy not yet resolved: each one's state, the spot as data, the owner's words
   artifact addressed <t-id> --note "<what changed>" [--sha <commit>] [--draft <worktree>]   (the session a note was handed to, or the supervisor) mark it, with the kit's picture of the spot: look at it
   artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner   the owner's record that a landed artifact went public or came down (the gateway's confirm page runs these; by hand they record intent only)
+  artifact archivable <goal-id> [--at <time>] [--json]   the landed artifacts kit-935 archives when that goal is met (landed by --at); writes nothing
+  artifact archive|restore <slug> [--reason "<why>"] [--owner]   archive a landed artifact (out of the Library, nothing deleted) or bring it back: the supervisor's, or the owner's with --owner
   artifacts [--json]              landed artifacts, and drafts in session worktrees
   preview <port> [--label "<one line>"]   register a server you are running; prints the link for this machine (a name derived from project, session and label)
   preview --run "<command>" [--port <p>] [--label …]   the kit runs it in a tmux window beside yours; PORT is set, {port} in the command is filled in, a free port in 4400-4499 is picked without --port
@@ -40999,7 +41631,7 @@ const HELP_OBSERVE = `Observe and orient
   governance [--json]   the kit's governance and process files and the project's strategy, Self and exterior: title, last change, changed here
   self show [--json]   main's project/self.md, what the project is, printed as it is; --json is the dashboard's self block, null when not drafted or plain (self@2)
   self check   the working tree's self.md against self@2 (a plain document; a fenced self block is refused), each part link on disk, and the names rule; errors exit 1, warnings don't
-  exterior show [--json] | exterior check   show: main's project/exterior.md, what the project relates to, printed as it is (--json a version 1 block's dashboard data, else null); check: the working tree's draft against exterior@2 (a version 1 block refused), its dated sources, and on a repo not known to be private the names rule (a ### heading not named whole in origin main's strategy or dependency names refused; each other capitalised word and link host held until named on the chore); errors exit 1
+  exterior show [--json] | exterior check   show: main's project/exterior.md, what the project relates to, printed as it is (--json a version 1 block's dashboard data, else null); check: the working tree's draft against exterior@2 (a version 1 block refused), its dated sources, and on a repo not known to be private the names rule (a heading of any form refused: one of level 3 to 6 not named whole, or a # or ## one holding a capitalised word but Exterior, or a link host, not named whole, in origin main's strategy or dependency names, or a # or ## or HTML one holding raw HTML, a character reference, an invisible or control character, a lone mark, ~~, [ or ], since a top-level heading must be plain text; each other capitalised word and link host held until named on the chore); errors exit 1
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
   search "<words>" [--type <log type>|doc]… [--since <date>] [--limit n] [--json]   what the project already wrote about it, best first, quoted as data (supervisor.md §6)
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …`;
@@ -41061,7 +41693,7 @@ const COMMANDS_GRAPH = {
   feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, moves: cmdMoves, roadmap: cmdRoadmap,
 };
 const COMMANDS_CHECKS = {
-  'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
+  'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree, package: cmdPackage,
 };
 const COMMANDS_SESSIONS = {
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
