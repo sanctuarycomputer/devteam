@@ -30,6 +30,193 @@ if (Number(process.versions.node.split('.')[0]) < 18) {
   process.exit(1);
 }
 
+// bash-ok: a Claude Code PreToolUse hook on Bash in every Claude Code session the kit starts
+// (claudePolicy, supervisorPolicy). An inline rm or rmdir whose path is built from a variable, a
+// glob, a brace or $(…) is refused, with worker.md's "Scripts go in files" as the reason, before
+// Claude Code stops on its permission prompt ("Dangerous rm operation") in a window nobody
+// watches; a subagent's prompt stops its whole session behind it. The session reads the reason and
+// writes the script file instead. It runs here, before anything else: it needs no repo, settings or
+// log, and the hook runs on every command. It only ever refuses; anything it can't read goes through.
+//
+// It reads the line as a shell would, enough to find command words: quotes, comments, heredoc
+// bodies and redirections are not commands, so `rm` in a grep pattern, a commit message or a PR
+// body passes; a $(…) or `…` is read as its own command too. Separators: ; & | newlines ( ).
+// Wrappers it looks through: sudo, doas, env, timeout, nice, ionice, nohup, setsid, taskset,
+// flock, prlimit, stdbuf, command, builtin, exec, time and the shell's own then/do/else/!.
+// sh -c / bash -c and eval are read again. Not covered: xargs rm (its paths come on stdin) and
+// find -delete or -exec rm (no variable path in the line).
+if (process.argv[2] === 'bash-ok') {
+  const WHY = 'Run any multi-step shell command, heredoc, or `rm` of a variable, glob or `$(…)` as a script file you write with your file tool and then run, never inline: a permission prompt stops the whole session. In that file, delete only paths built with `${VAR:?}` on every part, under a directory the script made or names literally, and never a path read from a file or from `$(…)`.';
+  // the line as simple commands, each a list of words { text, expands }; subs: the text of each $(…) and `…`
+  const lex = (src) => {
+    const s = String(src ?? '');
+    const cmds = [];
+    const subs = [];
+    let words = [];
+    let w = null;
+    let redirect = false;
+    const heredocs = [];
+    const endWord = () => { if (w) { if (redirect) redirect = false; else words.push(w); } w = null; };
+    const endCmd = () => { endWord(); if (words.length) cmds.push(words); words = []; };
+    const cur = () => (w ??= { text: '', expands: false });
+    // the end of a heredoc body that starts on the line after i: the index after its delimiter line
+    const skipBody = (i, delim, tabs) => {
+      let j = i;
+      for (;;) {
+        if (j >= s.length) return s.length;
+        const nl = s.indexOf('\n', j);
+        const line = s.slice(j, nl < 0 ? s.length : nl);
+        j = nl < 0 ? s.length : nl + 1;
+        if ((tabs ? line.replace(/^\t+/, '') : line) === delim) return j;
+      }
+    };
+    const heredocAt = (j) => {
+      let k = j + 2;
+      const tabs = s[k] === '-';
+      if (tabs) k++;
+      while (s[k] === ' ' || s[k] === '\t') k++;
+      let d = '';
+      while (k < s.length && !/[\s;&|<>()]/.test(s[k])) { if (!`'"\\`.includes(s[k])) d += s[k]; k++; }
+      return { end: k, delim: d, tabs };
+    };
+    // $( … ) or ` … `: its end, with nesting, quotes and heredoc bodies inside it; its text is read as commands too
+    const skipSubst = (i, close) => {
+      let depth = 1;
+      const pending = [];
+      for (let j = i; j < s.length; j++) {
+        const c = s[j];
+        if (c === '\\') { j++; continue; }
+        if (c === '\n' && pending.length) { let k = j + 1; while (pending.length) { const h = pending.shift(); k = skipBody(k, h.delim, h.tabs); } j = k - 1; continue; }
+        if (close === ')' && c === '<' && s[j + 1] === '<' && s[j + 2] !== '<') { const h = heredocAt(j); if (h.delim) pending.push(h); j = h.end - 1; continue; }
+        if (close === ')' && c === "'") { const k = s.indexOf("'", j + 1); if (k < 0) return s.length; j = k; continue; }
+        if (close === ')' && c === '"') { let k = j + 1; while (k < s.length && s[k] !== '"') k += s[k] === '\\' ? 2 : 1; j = k; continue; }
+        if (close === ')' && c === '(') depth++;
+        if (c === close && --depth === 0) { subs.push(s.slice(i, j)); return j + 1; }
+      }
+      return s.length;
+    };
+    let i = 0;
+    while (i < s.length) {
+      const c = s[i];
+      if (c === '\n') {
+        endCmd();
+        i++;
+        while (heredocs.length) { const h = heredocs.shift(); i = skipBody(i, h.delim, h.tabs); }
+        continue;
+      }
+      if (c === ' ' || c === '\t') { endWord(); i++; continue; }
+      if (c === '\\') { if (s[i + 1] === '\n') { i += 2; continue; } cur().text += s[i + 1] ?? ''; i += 2; continue; }
+      if (c === '#' && !w) { const nl = s.indexOf('\n', i); i = nl < 0 ? s.length : nl; continue; }
+      if (c === ';' || c === '&' || c === '|' || c === '(' || c === ')') {
+        if (c === '&' && (s[i - 1] === '>' || s[i + 1] === '>')) { i++; continue; }
+        endCmd(); i++; continue;
+      }
+      if (c === '<' && s[i + 1] === '<' && s[i + 2] !== '<') { endWord(); const h = heredocAt(i); if (h.delim) heredocs.push(h); i = h.end; continue; }
+      if (c === '<' || c === '>') {
+        if (w && /^\d+$/.test(w.text) && !w.expands) w = null;
+        endWord();
+        let j = i;
+        while (s[j] === '<' || s[j] === '>' || s[j] === '&' || s[j] === '|') j++;
+        if (/^[0-9-]/.test(s[j] ?? '') && s[j - 1] === '&') { while (/[0-9-]/.test(s[j] ?? '')) j++; i = j; continue; }
+        redirect = true;
+        i = j;
+        continue;
+      }
+      if (c === "'") { const k = s.indexOf("'", i + 1); cur().text += s.slice(i + 1, k < 0 ? s.length : k); i = k < 0 ? s.length : k + 1; continue; }
+      if (c === '"') {
+        let j = i + 1;
+        while (j < s.length && s[j] !== '"') {
+          if (s[j] === '\\') { cur().text += s[j + 1] ?? ''; j += 2; continue; }
+          if (s[j] === '$' || s[j] === '`') {
+            cur().expands = true;
+            if (s[j] === '$' && s[j + 1] === '(') { const e = skipSubst(j + 2, ')'); cur().text += s.slice(j, e); j = e; continue; }
+            if (s[j] === '`') { const e = skipSubst(j + 1, '`'); cur().text += s.slice(j, e); j = e; continue; }
+          }
+          cur().text += s[j];
+          j++;
+        }
+        cur();
+        i = j + 1;
+        continue;
+      }
+      if (c === '$' || c === '`') {
+        cur().expands = true;
+        if (c === '$' && s[i + 1] === '(') { const e = skipSubst(i + 2, ')'); cur().text += s.slice(i, e); i = e; continue; }
+        if (c === '`') { const e = skipSubst(i + 1, '`'); cur().text += s.slice(i, e); i = e; continue; }
+        cur().text += c;
+        i++;
+        continue;
+      }
+      if ('*?[{'.includes(c)) cur().expands = true;
+      cur().text += c;
+      i++;
+    }
+    endCmd();
+    return { cmds, subs };
+  };
+  // wrappers looked through, and the pattern of their options that take a value
+  const WRAP = {
+    sudo: /^-[ugpCDhrtTUR]$/, doas: /^-[uC]$/, env: /^-[uSC]$/, timeout: /^-[sk]$/, nice: /^-n$/, ionice: /^-[cnpP]$/, stdbuf: /^-[ioe]$/,
+    taskset: null, flock: /^-[wEs]$/, prlimit: /^-p$/, setsid: null, nohup: null, command: null, builtin: null, exec: /^-a$/, time: null,
+    '!': null, then: null, do: null, else: null, elif: null, if: null, while: null, until: null, '{': null, '}': null,
+  };
+  const ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=/;
+  const risky = (command, depth = 0) => {
+    if (depth > 3) return null;
+    const { cmds, subs } = lex(command);
+    for (const sub of subs) { const hit = risky(sub, depth + 1); if (hit) return hit; }
+    for (const words of cmds) {
+      let i = 0;
+      for (;;) {
+        const t = words[i]?.text;
+        if (t === undefined) break;
+        if (ASSIGN.test(t)) { i++; continue; }
+        if (!Object.hasOwn(WRAP, t)) break;
+        const takes = WRAP[t];
+        i++;
+        while (words[i] && /^-/.test(words[i].text) && words[i].text !== '--') { if (takes?.test(words[i].text)) i++; i++; }
+        if (words[i]?.text === '--') i++;
+        if (t === 'env') while (words[i] && ASSIGN.test(words[i].text)) i++;
+        if (t === 'timeout' && words[i] && /^[\d.]+[smhd]?$/.test(words[i].text)) i++;
+        if (t === 'taskset' && words[i]) i++; // its mask or cpu list
+        if (t === 'flock' && words[i]) i++; // its lock file or fd
+      }
+      const cmd = words[i]?.text ?? '';
+      const rest = words.slice(i + 1);
+      if (/^(?:\S*\/)?(?:ba|z|da)?sh$/.test(cmd)) {
+        const k = rest.findIndex((x) => /^-\w*c\w*$/.test(x.text));
+        if (k >= 0 && rest[k + 1]) { const hit = risky(rest[k + 1].text, depth + 1); if (hit) return hit; }
+        continue;
+      }
+      if (cmd === 'eval') { const hit = risky(rest.map((x) => x.text).join(' '), depth + 1); if (hit) return hit; continue; }
+      if (!/^(?:\S*\/)?(?:rm|rmdir)$/.test(cmd)) continue;
+      let opts = true;
+      for (const a of rest) {
+        if (opts && a.text === '--') { opts = false; continue; }
+        if (opts && /^-/.test(a.text) && !a.expands) continue;
+        if (a.expands) return words.map((x) => x.text).join(' ');
+      }
+    }
+    return null;
+  };
+  // the hook's input, read to its end (a slow writer's stdin may come in parts); never waits long
+  const text = await new Promise((resolve) => {
+    let d = '';
+    const done = () => resolve(d);
+    const timer = setTimeout(done, 5000);
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (c) => { d += c; });
+    process.stdin.on('end', () => { clearTimeout(timer); done(); });
+    process.stdin.on('error', () => { clearTimeout(timer); done(); });
+  });
+  let input = null;
+  try { input = JSON.parse(text || 'null'); } catch {}
+  let hit = null;
+  try { hit = input?.tool_name && input.tool_name !== 'Bash' ? null : risky(input?.tool_input?.command); } catch { hit = null; }
+  if (hit) process.stdout.write(`${JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `devteam: refused before it could stop on a permission prompt nobody answers: \`${hit.slice(0, 160)}\` removes a path built from a variable, glob or $(…). ${WHY}` } })}\n`);
+  process.exit(0);
+}
+
 // A worktree's branch carries the kit as it was when the branch forked, but every session writes the
 // one live log and answers to the rules on main, so in a project the main checkout's copy runs: a
 // worker on an old branch otherwise gets old commands (an "unknown command" for one the docs name)
@@ -8264,50 +8451,78 @@ const selfPlain = (() => {
     w = w.slice(0, end);
     return /^\p{Lu}/u.test(w) && [...w].length >= 2 ? w : null;
   }
-  // self.md's capitalised words for the names rule, each once in order (kit-862). Every word counts but
-  // a prose sentence's first: prose is a paragraph's text outside code, comments and a link's words; a
-  // sentence starts a paragraph or follows . ! or ? and a space. A heading, a list item (its lines up to
-  // a blank one), a table row (a line holding | outside code), code (a fence, indented code, a span), a
-  // comment and a link's words count whole, their first word too: a part's name stands there.
+  // self.md's capitalised words for the names rule, each once in order (kit-862, kit-926). Every word
+  // counts but a bare prose sentence's first: prose is a paragraph's text outside code, comments and
+  // brackets; a sentence starts a paragraph or follows . ! or ? and a space. A heading (# or a setext
+  // one, every line over its = or - line), a list item (its lines up to a blank one), a quote (its
+  // lines up to a blank one, a list item inside it too), a table row (a line holding | outside code, and
+  // the lines after it up to a blank one), code (a fence, indented code, a span), a comment and the
+  // words inside [ ] (a link's, an image's alt text, a reference-style link's) count whole, their first
+  // word too: a part's name stands there. So does a first word with a mark just before it (bold,
+  // italic or a quote mark: ** _ " “ ').
   function selfHeld(text) {
     const src = lines(text);
     const read = readable(text);
     const pl = plain(text).split('\n');
     const at = [];
     pl.reduce((o, l, i) => { at[i] = o; return o + l.length + 1; }, 0);
+    const QUOTE = /^ {0,3}>/;
+    // a setext heading's lines: a paragraph's (from its first line, or the line after a heading), over
+    // a line of = or - alone at most three spaces in (- and a space is one, not a list item); a list
+    // item or a quote opens no heading's text
+    const setext = [];
+    let from = -1;
+    read.forEach((l, i) => {
+      if (l === null || !l.trim() || HEAD.test(l)) from = -1;
+      else if (from >= 0 && /^ {0,3}(?:=+|-+)[ \t]*$/.test(l)) { for (let j = from; j < i; j += 1) setext[j] = true; from = -1; }
+      else if (BREAK.test(l) || LIST.test(l) || QUOTE.test(l)) from = -1;
+      else if (from < 0) from = i;
+    });
     // the links' words, [ to ], sorted and apart (a link inside another's words is none), read by a
     // pointer that only moves on, as the words come in order: each word one look
     const spans = links(text).map((k) => [k.index, k.close]);
     let k = 0;
     const inLink = (o) => { while (k < spans.length && spans[k][1] <= o) k += 1; return k < spans.length && o > spans[k][0]; };
+    // how many [ are open after s, from d: \[ and \] are none, a ] closes one only when one is open
+    const brackets = (s, d) => { for (let j = 0; j < s.length; j += 1) { if (s[j] === '\\') j += 1; else if (s[j] === '[') d += 1; else if (s[j] === ']' && d) d -= 1; } return d; };
     const out = new Set();
     const add = (w) => { const c = capWord(w); if (c) out.add(c); };
     let item = false; // in a list item, until a blank line
+    let quote = false; // in a quote, until a blank line
+    let table = false; // after a table row, until a blank line
     let start = true; // the next prose word starts a sentence
     let gap = '';
+    let depth = 0; // the [ open in this paragraph
     src.forEach((s, i) => {
       const l = read[i];
-      if (l === null || !l.trim() || HEAD.test(l) || BREAK.test(l) || LIST.test(l) || item || pl[i].includes('|')) {
-        if (l !== null && !l.trim()) item = false;
+      if (l === null || !l.trim() || HEAD.test(l) || BREAK.test(l) || LIST.test(l) || item || pl[i].includes('|') || table || setext[i] || quote || QUOTE.test(l)) {
+        if (l !== null && !l.trim()) { item = false; quote = false; table = false; }
         else if (l !== null && LIST.test(l)) item = true;
-        else if (l !== null && (HEAD.test(l) || BREAK.test(l))) item = false;
+        else if (l !== null && (HEAD.test(l) || BREAK.test(l))) { item = false; quote = false; table = false; }
+        if (l !== null && QUOTE.test(l)) quote = true;
+        if (pl[i].includes('|')) table = true;
         for (const m of s.matchAll(WORD)) add(m[0]);
         start = true;
         gap = '';
+        depth = 0;
         return;
       }
       const p = pl[i];
       let prev = 0;
       for (const m of s.matchAll(WORD)) {
-        gap += p.slice(prev, m.index);
+        const before = p.slice(prev, m.index);
+        gap += before;
+        depth = brackets(before, depth);
         prev = m.index + m[0].length;
         const o = at[i] + m.index;
-        const whole = p.slice(m.index, prev) !== m[0] || inLink(o);
+        const whole = p.slice(m.index, prev) !== m[0] || inLink(o) || depth > 0 || (gap !== '' && !/\s$/.test(gap));
         if (whole || !(start || /[.!?]\s/.test(gap))) add(m[0]);
         start = false;
         gap = '';
       }
-      gap += `${p.slice(prev)}\n`;
+      const rest = p.slice(prev);
+      gap += `${rest}\n`;
+      depth = brackets(rest, depth);
     });
     return [...out];
   }
@@ -8841,15 +9056,24 @@ function partPath(p) {
   return String(p).split('/').filter((s) => s !== '' && s !== '.').join('/');
 }
 // Whether a normalised path is on disk under the repo root (the project folder, for a project outside
-// its repo: selfRoot), each segment matched by its exact case (as git reads it), so App/ is missing
-// beside app/ on a disk that folds case too.
+// its repo: selfRoot) where git's tree could hold it, as hasAt reads a commit (kit-926): each segment
+// matched by its exact case (as git reads it), so App/ is missing beside app/ on a disk that folds case
+// too; never through a symlink (a symlink is a file to git: one may be the last segment, never a
+// folder on the way); never into .git, in any case (git keeps no .git in a tree); and never at or
+// into a folder holding its own .git (a nested repo or a submodule, which the tree holds as a gitlink
+// at most). A file not committed yet is still found: self check reads a draft before its commit.
 function hasOnDisk(n) {
   let dir = projectInRepo ? projectRoot : projectDir;
-  for (const seg of n === '' ? [] : n.split('/')) {
+  const segs = n === '' ? [] : n.split('/');
+  for (const [i, seg] of segs.entries()) {
+    if (seg.toLowerCase() === '.git') return false;
     let names;
     try { names = fs.readdirSync(dir); } catch { return false; }
     if (!names.includes(seg)) return false;
     dir = path.join(dir, seg);
+    const st = fs.lstatSync(dir, { throwIfNoEntry: false });
+    if (!st || (st.isSymbolicLink() && i < segs.length - 1)) return false;
+    if (st.isDirectory() && fs.existsSync(path.join(dir, '.git'))) return false;
   }
   return true;
 }
@@ -22344,7 +22568,6 @@ function presenceChanged(dir, onChange) {
 }
 
 function startHub(log, { kit = null, image = false, standalone = false } = {}) {
-  const page = path.join(kitDir, 'dashboard', 'hub.html');
   // the hub alone runs its owner actions where it was started, as box-thread's run: on a box that is
   // where the image's kit is no checkout; a dashboard's run in its project
   const actionCwd = standalone ? process.cwd() : mainRoot;
@@ -22486,7 +22709,7 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
       const act = req.method === 'POST' && req.url.startsWith('/operator/') && Object.hasOwn(HUB_ACTIONS, req.url.slice(10)) ? HUB_ACTIONS[req.url.slice(10)] : null;
       if (act) return ownerPost(req, send, act);
       if (req.method !== 'GET') return send(405, 'text/plain; charset=utf-8', 'the hub only lists, and takes the owner\'s threads with the operator', { allow: 'GET' });
-      if (req.url === '/') return send(200, 'text/html; charset=utf-8', fs.readFileSync(page), { 'content-security-policy': `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src ${PORT_RANGE.map((p) => `http://127.0.0.1:${p}`).join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'` });
+      if (req.url === '/') return servePage(null, req, res, 'hub', `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src ${PORT_RANGE.map((p) => `http://127.0.0.1:${p}`).join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`, { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
       // The list is for the hub's own page: another site's page doesn't get to make the hub probe
       // the block (a browser always says where a request came from). The page itself opens from
       // anywhere, a link in a README included.
@@ -22516,6 +22739,7 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
         if (req.headers['if-none-match'] === tag) { res.writeHead(304, { etag: tag, 'cache-control': 'private, no-cache' }); return res.end(); }
         return send(200, 'application/json', body, { etag: tag, 'cache-control': 'private, no-cache' });
       }
+      if (servePageAsset(req, res, 'hub') !== DASH_NEXT) return;
       return send(404, 'text/plain; charset=utf-8', 'not found');
     }));
     current = hub;
@@ -28231,6 +28455,8 @@ const IMAGE_RUNS = {
     'cmdHub', 'cmdMachine', 'cmdOperatorThread', 'cmdRecover', 'cmdBoxPins',
     // what they are built from that serves only the image: the hub
     'probeHello', 'HUB_BODY_MAX', 'hubTurnOk', 'HUB_ACTIONS', 'startHub', 'hubLogger', 'imageHub',
+    // the seam the hub sends its page through, and asks before its 404 (page-seam@1, kit-983)
+    'servePage', 'servePageAsset',
     // recover --machine (a project's own recover runs from that project's kit, never the image's;
     // its recoverOne is listed below as a crossing, since it writes supervisor-up.json)
     'siblingOf', 'isAdopted', 'machineProjects', 'projectKit', 'projectJson', 'kitHasRecover', 'notedPaneOf', 'tmuxName', 'readUpList', 'recoverMachine', 'LEGACY_RECOVER_MESSAGE', 'legacyRecover',
@@ -29187,6 +29413,124 @@ function artifactRemoteRefs({ root, main, onMoved = () => {}, env = process.env 
     stop() { clearTimeout(timer); timer = null; if (child) try { process.kill(-child.pid, 'SIGTERM'); } catch {} },
   };
 }
+// page-seam@1 (kit-983): every page the CLI's servers send goes through servePage, pageVersion and
+// servePageAsset, and serveAppFiles is the one static server by alpha-build@1's rules. At main they
+// send today's pages (dashboard/index.html, hub.html, browser.html) exactly as before; the generated
+// tree overrides only these declarations to serve the apps (designs/kit-package-apps.md).
+// servePage sends one of today's pages: 'dashboard', 'hub' or 'browser', read from the kit's
+// dashboard folder on each request, as text/html with the caller's headers and policy, and no body
+// to a HEAD. A page it can't read is a 500. D.keep, when the caller gives one, holds the page's bytes
+// for the server's life (the browser view, whose page must match the daemon that serves it): called
+// with no res, at the server's creation, it only reads the page into D.keep, and throws when it
+// can't, so that server fails at start.
+function servePage(D, req, res, page, policy, headers = {}) {
+  const file = { dashboard: 'index.html', hub: 'hub.html', browser: 'browser.html' }[page];
+  if (!file) throw new Error(`servePage: no page ${page}`);
+  if (!res) { D.keep[page] = fs.readFileSync(path.join(kitDir, 'dashboard', file)); return; }
+  // 'in', not a read: the dashboard's D (dashContext) throws on a name it was not given
+  const keep = D && 'keep' in D ? D.keep : null;
+  let body = keep?.[page];
+  if (!body) {
+    try { body = fs.readFileSync(path.join(kitDir, 'dashboard', file)); } catch {
+      res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+      return res.end('this page could not be read\n');
+    }
+    if (keep) keep[page] = body;
+  }
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': body.length, ...headers, 'content-security-policy': policy });
+  return res.end(req.method === 'HEAD' ? undefined : body);
+}
+// The x-devteam-page value of a page: the first 16 hex of the sha256 of its file, or '' when it
+// can't be read. An open tab compares it with the one it first saw, and offers a reload.
+function pageVersion(page) {
+  const file = { dashboard: 'index.html', hub: 'hub.html', browser: 'browser.html' }[page];
+  if (!file) return '';
+  try { return sha256(fs.readFileSync(path.join(kitDir, 'dashboard', file))).slice(0, 16); } catch { return ''; }
+}
+// A page's own file, for a request no route of server ('dashboard', 'hub' or 'browser') took, or
+// DASH_NEXT, "not mine": the caller's own answer (its 404) follows. At main only the dashboard has
+// any: the review pages' helpers, /review/<seg>/devteam-ui.css and .js (dashRoutesReviewPage checks
+// <seg> first), to a GET, as before (a HEAD there is the dashboard's 404). Every other method, and
+// every other path, is DASH_NEXT; in the tree it may answer GET and HEAD, and nothing else.
+function servePageAsset(req, res, server) {
+  if (req.method !== 'GET') return DASH_NEXT;
+  const m = server === 'dashboard' ? /^\/review\/[^/]+\/(devteam-ui\.(?:css|js))$/.exec(new URL(req.url, 'http://x').pathname) : null;
+  if (!m) return DASH_NEXT;
+  res.writeHead(200, { 'content-type': m[1].endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+  return res.end(fs.readFileSync(path.join(kitDir, 'dashboard', m[1])));
+}
+// A static export served from folder at base, by alpha-build@1's rules and
+// test/fixtures/alpha-serving.json. A caller's mistake throws before any request is read: a base
+// that is not '' (the root) or '/<name>[/<name>…]' (no trailing slash, no empty, '?' or '#' part),
+// or a folder that is not a non-empty string. Then, in order: DASH_NEXT for a method but GET and
+// HEAD, or a path (the query cut off, and ignored from here on) that is neither base nor under
+// base/; inside it, it always answers. A 404 (text/plain, 'not found') for a request over 2048
+// bytes; a segment that does not decode (each is decoded once), an empty segment but the last, '.',
+// '..', or a decoded '/', '\' or NUL; a real path (symlinks followed) that is missing or outside the
+// folder's real path; a file asked for with a trailing slash; a folder's index.html whose real path
+// is missing or outside; anything not a regular file; a type not in the known list. A 301 for base
+// itself (to base/) and for a folder without its slash (to the path with one, no query). A folder
+// is its index.html. A 200 carries the type, content-length, cache-control: no-store and nosniff,
+// and no body to a HEAD. An .html file carries the policy policyFor(<route>) gives, <route> being
+// its folder as csp-hashes.json keys a route ('/', '/threads/one/'), so a page that is not a
+// route's index.html gets its folder's policy; policyFor is asked only for .html, and a policy that
+// is not a non-empty string, or a throw, is a 500. A folder that isn't there serves 404s.
+function serveAppFiles(folder, base, req, res, policyFor) {
+  if (typeof base !== 'string' || (base !== '' && !/^\/[^/?#]+(?:\/[^/?#]+)*$/.test(base))) throw new Error(`serveAppFiles: base ${JSON.stringify(base)} is not '' or /<name>`);
+  if (typeof folder !== 'string' || !folder) throw new Error('serveAppFiles: no folder');
+  const KNOWN = { html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', txt: 'text/plain; charset=utf-8', json: 'application/json', svg: 'image/svg+xml', png: 'image/png', ico: 'image/x-icon', webp: 'image/webp', woff2: 'font/woff2' };
+  if (req.method !== 'GET' && req.method !== 'HEAD') return DASH_NEXT;
+  const raw = String(req.url);
+  const p = raw.split('?')[0];
+  if (p !== base && !p.startsWith(`${base}/`)) return DASH_NEXT;
+  const answer = (code, headers, body) => { res.writeHead(code, { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...headers }); return res.end(req.method === 'HEAD' ? undefined : body); };
+  const none = () => answer(404, { 'content-type': 'text/plain; charset=utf-8' }, 'not found\n');
+  if (Buffer.byteLength(raw) > 2048) return none();
+  if (p === base) return answer(301, { location: `${base}/` });
+  const segs = p.slice(base.length + 1).split('/');
+  const parts = [];
+  for (const [i, s] of segs.entries()) {
+    let d;
+    try { d = decodeURIComponent(s); } catch { return none(); }
+    if (d === '') { if (i === segs.length - 1) continue; return none(); }
+    if (d === '.' || d === '..' || /[/\\\0]/.test(d)) return none();
+    parts.push(d);
+  }
+  let top, real, st;
+  try { top = fs.realpathSync(folder); real = fs.realpathSync(path.join(top, ...parts)); st = fs.statSync(real); } catch { return none(); }
+  const inside = (f) => f === top || f.startsWith(top + path.sep);
+  if (!inside(real)) return none();
+  if (!st.isDirectory() && parts.length && p.endsWith('/')) return none();
+  if (st.isDirectory()) {
+    if (!p.endsWith('/')) return answer(301, { location: `${p}/` });
+    try { real = fs.realpathSync(path.join(real, 'index.html')); st = fs.statSync(real); } catch { return none(); }
+    if (!inside(real)) return none();
+  }
+  if (!st.isFile()) return none();
+  const ext = path.extname(real).slice(1).toLowerCase();
+  const type = Object.hasOwn(KNOWN, ext) ? KNOWN[ext] : null;
+  if (!type) return none();
+  let body;
+  try { body = fs.readFileSync(real); } catch { return none(); }
+  const headers = { 'content-type': type, 'content-length': body.length };
+  if (ext === 'html') {
+    const rel = path.relative(top, path.dirname(real)).split(path.sep).join('/');
+    const route = rel ? `/${rel}/` : '/';
+    let policy;
+    try { policy = policyFor(route); } catch { policy = null; }
+    if (typeof policy !== 'string' || !policy) return answer(500, { 'content-type': 'text/plain; charset=utf-8' }, 'no policy for this page\n');
+    headers['content-security-policy'] = policy;
+  }
+  return answer(200, headers, body);
+}
+// The dashboard's route for a page's own file that no route group took (servePageAsset), GET and
+// HEAD only, before dashRoutesOwner, which answers every POST /api/<name> and the 404 for everything
+// else. A plain function, not an async dashRoutes* group, so it sits here with the seam, outside the
+// dashboardRoutes region; the route loop awaits what it returns all the same.
+function dashRoutesApp(D, req, res, q) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return DASH_NEXT;
+  return servePageAsset(req, res, 'dashboard');
+}
 /* cmdDashboard start */
 /* dashboardRoutes start */
 // What a route group returns when none of its routes matched the request.
@@ -29308,7 +29652,7 @@ async function dashRoutesPage(D, req, res, q) {
     const rest = body.slice(open + 1);
     return `{"${key}":${JSON.stringify(key === 'viewer' ? { level } : level)}${rest.trimStart().startsWith('}') ? '' : ','}${rest}`;
   };
-  const { page, pageCsp, send, helloBody, stageFrames, dashboardData, logWatch } = D;
+  const { pageCsp, send, helloBody, stageFrames, dashboardData, logWatch } = D;
   // hello carries it too, as level: the artifact and preview viewer reads no /api/data, and polls this already
   if (req.method === 'GET' && req.url === '/api/hello') return send(res, 200, 'application/json', withViewer(helloBody(), 'level'));
   // frame-src 'self': a frame of this page (a review page, an HTML mock) may navigate itself, and
@@ -29316,8 +29660,7 @@ async function dashRoutesPage(D, req, res, q) {
   if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
     // frame-ancestors: only this dashboard and the machine's hub may frame it, so another site
     // can't lay it under its own page and steer a click onto an owner action.
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': pageCsp(stageFrames()) });
-    return res.end(fs.readFileSync(page));
+    return servePage(D, req, res, 'dashboard', pageCsp(stageFrames()), { 'cache-control': 'no-store' });
   }
   if (req.method === 'GET' && req.url.startsWith('/api/data')) {
     // the log looked at now, so a change the watch hasn't delivered yet makes the kept build stale
@@ -29331,8 +29674,7 @@ async function dashRoutesPage(D, req, res, q) {
     if (!r.ok && !D.lastData) return send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
     // The page in use says which version of itself it is: an open tab keeps the code it loaded,
     // so after a kit update it compares this with the first one it saw and offers a reload.
-    let version = '';
-    try { version = sha256(fs.readFileSync(page)).slice(0, 16); } catch {}
+    const version = pageVersion('dashboard');
     // a run that failed or timed out serves the last good data, marked stale
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-devteam-page': version, ...(r.ok ? {} : { 'x-devteam-stale': 'true' }) });
     // a fresh run's or the kept last good data, with the viewer for a box's level (D.lastData untouched)
@@ -29343,7 +29685,7 @@ async function dashRoutesPage(D, req, res, q) {
 // /view/artifact/…, /view/preview/…, /api/artifact-fp, /api/view, /api/artifact-versions
 async function dashRoutesViewer(D, req, res, q) {
   const { u } = q;
-  const { page, pageCsp, run, describing, versioning, send, previewStage, remote } = D;
+  const { pageCsp, run, describing, versioning, send, previewStage, remote } = D;
   // The viewer (spec §7): this page in viewer mode, one artifact on its stage. Its frames are this
   // dashboard's own pages. It may be framed by itself and the machine's hub, by policy alone and
   // never X-Frame-Options: on a box the gateway adds the public name to frame-ancestors for its
@@ -29351,8 +29693,7 @@ async function dashRoutesViewer(D, req, res, q) {
   const vw = req.method === 'GET' ? /^\/view\/artifact\/([^/]+)$/.exec(u.pathname) : null;
   if (vw) {
     if (!LINK_ID.test(vw[1]) || !ARTIFACT_AT.test(u.searchParams.get('at') || 'main')) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': pageCsp() });
-    return res.end(fs.readFileSync(page));
+    return servePage(D, req, res, 'dashboard', pageCsp(), { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
   }
   // A preview's viewer: the same page, framing the preview's lens where it is served (previewStage):
   // frame-src names exactly that origin, the preview's own name on a box (the gateway rewrites no
@@ -29363,8 +29704,7 @@ async function dashRoutesViewer(D, req, res, q) {
     const rec = PREVIEW_NAME.test(vp[1]) ? readPreviews().find((r) => r.name === vp[1]) : null;
     if (!rec) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
     const { origin } = await previewStage(rec);
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': pageCsp(origin ? [origin] : []) });
-    return res.end(fs.readFileSync(page));
+    return servePage(D, req, res, 'dashboard', pageCsp(origin ? [origin] : []), { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
   }
   // A draft's fingerprint, for the viewer's 2 s draft poll (responder contract, artifact-fp@1): the
   // same fp artifact describe gives, from stat calls and the oid cache (diskOid hashes only a file
@@ -29710,10 +30050,7 @@ async function dashRoutesReviewPage(D, req, res, q) {
   if (rvm) {
     const [, seg, file] = rvm;
     if (seg !== 'preview' && !ID.test(seg)) return send(res, 404, 'text/plain', 'not found');
-    if (file === 'devteam-ui.css' || file === 'devteam-ui.js') {
-      res.writeHead(200, { 'content-type': file.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
-      return res.end(fs.readFileSync(path.join(kitDir, 'dashboard', file)));
-    }
+    if (file === 'devteam-ui.css' || file === 'devteam-ui.js') return servePageAsset(req, res, 'dashboard');
     if (file !== '') return send(res, 404, 'text/plain', 'not found');
     // Opened top-level it would be same-origin with the owner API; it is served only into a frame
     // of this page (and its policy makes its origin opaque even then).
@@ -29935,7 +30272,7 @@ async function dashRoutesOwner(D, req, res, q) {
   });
   return;
 }
-const DASHBOARD_ROUTES = [dashRoutesUpload, dashRoutesPage, dashRoutesViewer, dashRoutesThreads, dashRoutesReads, dashRoutesFiles, dashRoutesArtifacts, dashRoutesReviewPage, dashRoutesOwner];
+const DASHBOARD_ROUTES = [dashRoutesUpload, dashRoutesPage, dashRoutesViewer, dashRoutesThreads, dashRoutesReads, dashRoutesFiles, dashRoutesArtifacts, dashRoutesReviewPage, dashRoutesApp, dashRoutesOwner];
 /* dashboardRoutes end */
 async function cmdDashboard() {
   // the kit as this process loaded it, printed first, before any wait (kit-288): a sync landing
@@ -40205,7 +40542,9 @@ function browserViewInput(ctx, v, text) {
 // The view server: GET or HEAD / (Host one of the two loopback forms) is browser.html, read once here;
 // an upgrade passes five guards in order, each refusal a short HTTP answer and a FIN. One viewer.
 function browserViewServer(ctx) {
-  const page = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dashboard', 'browser.html'));
+  // its page, read now and kept for its life: browser.html must match this daemon's code
+  const D = { keep: {} };
+  servePage(D, null, null, 'browser');
   const plain = (code) => `${http.STATUS_CODES[code].toLowerCase()}\n`;
   const server = http.createServer((req, res) => {
     req.on('error', () => {});
@@ -40213,10 +40552,9 @@ function browserViewServer(ctx) {
     req.resume();
     const no = (code, extra = {}) => { res.writeHead(code, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', connection: 'close', ...extra }); res.end(plain(code)); };
     if (!browserViewHost(req, server.address()?.port)) return no(403);
-    if (String(req.url).split('?')[0] !== '/') return no(404);
+    if (String(req.url).split('?')[0] !== '/') return servePageAsset(req, res, 'browser') !== DASH_NEXT ? undefined : no(404);
     if (req.method !== 'GET' && req.method !== 'HEAD') return no(405, { allow: 'GET, HEAD' });
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': page.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': "frame-ancestors 'self'" });
-    res.end(req.method === 'HEAD' ? undefined : page);
+    servePage(D, req, res, 'browser', "frame-ancestors 'self'", { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' });
   });
   server.on('clientError', (e, s) => s.destroy());
   server.on('upgrade', (req, sock, head) => {
@@ -40767,14 +41105,18 @@ function responderDirty(wt, seeded) {
   for (const e of flags.stdout.split('\0').filter(Boolean)) if (e[0] !== 'H') hits.push(e.slice(2));
   return hits;
 }
+// The PreToolUse hook every Claude Code session the kit starts gets: bash-ok on Bash (see it at the
+// top of this file), which refuses an inline rm of a variable, glob or $(…) before Claude Code can
+// stop on its prompt (worker.md, "Scripts go in files"); a timeout so a stuck node never holds a command.
+const bashOkHook = () => [{ matcher: 'Bash', hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' bash-ok`, timeout: 10 }] }];
 // A Claude Code policy file for one session, passed with --settings: the owner's worker deny rules,
 // naming the main branch of the repo it works in. A worker or planner also gets the Stop hook
 // (stop-ok); the responder doesn't. Its path.
 function claudePolicy(name, s, mb, { stopHook = false } = {}) {
   const policy = path.join(runDir, 'agent', `${name}-claude.json`);
   fs.mkdirSync(path.dirname(policy), { recursive: true });
-  const hooks = stopHook ? { hooks: { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok` }] }] } } : {};
-  fs.writeFileSync(policy, `${JSON.stringify({ permissions: { deny: deniedFor(s.worker_denied_commands, mb).map((c) => `Bash(${c})`) }, ...hooks }, null, 2)}\n`);
+  const hooks = { PreToolUse: bashOkHook(), ...(stopHook ? { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok` }] }] } : {}) };
+  fs.writeFileSync(policy, `${JSON.stringify({ permissions: { deny: deniedFor(s.worker_denied_commands, mb).map((c) => `Bash(${c})`) }, hooks }, null, 2)}\n`);
   return policy;
 }
 // The supervisor's: only the Stop hook (stop-ok), which sends an ask of the owner that names no Inbox
@@ -40783,7 +41125,7 @@ const supervisorPolicyFile = () => path.join(runDir, 'agent', 'supervisor-claude
 function supervisorPolicy() {
   const policy = supervisorPolicyFile();
   fs.mkdirSync(path.dirname(policy), { recursive: true });
-  fs.writeFileSync(policy, `${JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok --supervisor` }] }] } }, null, 2)}\n`);
+  fs.writeFileSync(policy, `${JSON.stringify({ hooks: { PreToolUse: bashOkHook(), Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok --supervisor` }] }] } }, null, 2)}\n`);
   return policy;
 }
 // A Claude Code supervisor command with that policy: any other agent command as it is. Written only
