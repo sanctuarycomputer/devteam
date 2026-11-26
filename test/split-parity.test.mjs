@@ -526,3 +526,11 @@ test('C11: the header no longer says the workflow is never a pull_request check,
   assert.match(header, /test\/split\/, apps\/ or the root package\.json/);
   assert.match(header, /never required/i);
 });
+
+test('C38: parity-report never fails the run: the job and its report step carry continue-on-error, and the report artifact still uploads', () => {
+  const j = job('parity-report') ?? '';
+  assert.match(j, /^    continue-on-error: true$/m, 'the job carries continue-on-error');
+  const step = /^      - name: report\n((?: {8,}.*\n)+)/m.exec(j)?.[1] ?? '';
+  assert.match(step, /^        continue-on-error: true$/m, 'the report step carries continue-on-error, so the job\'s check is green while the step is red');
+  assert.match(j, /^      - if: always\(\)\n        uses: actions\/upload-artifact@v4\n        with:\n          name: parity-report$/m, 'the report artifact uploads after a red step');
+});
