@@ -1,0 +1,3534 @@
+{
+  "verifier": "dBjftJeZ4CVP-mJ92K27uhbUJU1p1r_wW1gFWFOEjXk",
+  "challenge": "ngF5GsXcbwljx6u133FFr3Xht9xooA_DuaX_3QwODtc",
+  "redirect": "http://127.0.0.1:53682/cb",
+  "people": [
+    {
+      "id": "p-owner",
+      "name": "Alex Rivera",
+      "role": "owner",
+      "level": "full"
+    },
+    {
+      "id": "p-sam",
+      "name": "Sam Lee",
+      "role": "member",
+      "level": "full"
+    },
+    {
+      "id": "p-vee",
+      "name": "Vee Park",
+      "role": "member",
+      "level": "view"
+    }
+  ],
+  "kit": [
+    [
+      "response_type",
+      "code"
+    ],
+    [
+      "client_id",
+      "devteam"
+    ],
+    [
+      "redirect_uri",
+      "$redirect"
+    ],
+    [
+      "code_challenge",
+      "$challenge"
+    ],
+    [
+      "code_challenge_method",
+      "S256"
+    ],
+    [
+      "state",
+      "s1"
+    ],
+    [
+      "resource",
+      "$root"
+    ],
+    [
+      "resource",
+      "$mcp"
+    ],
+    [
+      "scope",
+      "hub:read threads:write mcp"
+    ],
+    [
+      "label",
+      "Alex's MacBook"
+    ]
+  ],
+  "cases": [
+    {
+      "name": "the kit's client signs in: one token per audience, rotating refresh",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200,
+            "scope": "hub:read threads:write",
+            "expires_in": 3600,
+            "person": {
+              "id": "p-owner",
+              "name": "Alex Rivera"
+            }
+          },
+          "save": {
+            "refresh_token": "r1",
+            "access_token": "a1"
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 200,
+            "scope": "mcp"
+          },
+          "save": {
+            "refresh_token": "r2",
+            "access_token": "m1"
+          }
+        },
+        {
+          "mcp": {
+            "token": "$m1",
+            "body": {
+              "jsonrpc": "2.0",
+              "id": 1,
+              "method": "initialize",
+              "params": {
+                "protocolVersion": "2025-06-18"
+              }
+            }
+          },
+          "expect": {
+            "status": 200,
+            "result": {
+              "protocolVersion": "2025-06-18",
+              "capabilities": {
+                "tools": {
+                  "listChanged": false
+                }
+              },
+              "serverInfo": {
+                "name": "devteam"
+              }
+            }
+          }
+        },
+        {
+          "grants": {
+            "count": 1,
+            "hashesOnly": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "no verifier",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_request"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a wrong verifier",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a reused code",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r1"
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        },
+        {
+          "list": "p-owner",
+          "expect": {
+            "ended": [
+              "code reused"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "a code after 60 s",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "advance": 60000
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        }
+      ]
+    },
+    {
+      "name": "no resource named at the token, with two granted",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_request"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a widened scope on refresh",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "set": {
+              "scope": "hub:read mcp"
+            }
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200,
+            "scope": "hub:read"
+          },
+          "save": {
+            "refresh_token": "r1"
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$root"
+            ],
+            [
+              "scope",
+              "hub:read threads:write"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_scope"
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200,
+            "scope": "hub:read"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a narrowed scope on refresh",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r1"
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$root"
+            ],
+            [
+              "scope",
+              "hub:read"
+            ]
+          ],
+          "expect": {
+            "status": 200,
+            "scope": "hub:read"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a resource not granted, on refresh",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "drop": [
+              "resource"
+            ],
+            "add": [
+              [
+                "resource",
+                "$root"
+              ]
+            ],
+            "set": {
+              "scope": "hub:read"
+            }
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r1"
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_target"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a reused refresh token ends the grant",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r1"
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r2",
+            "access_token": "m1"
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r2"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        },
+        {
+          "mcp": {
+            "token": "$m1",
+            "body": {
+              "jsonrpc": "2.0",
+              "id": 1,
+              "method": "ping"
+            }
+          },
+          "expect": {
+            "status": 401
+          }
+        },
+        {
+          "list": "p-owner",
+          "expect": {
+            "ended": [
+              "refresh reused"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "an access token after 1 h",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "drop": [
+              "resource"
+            ],
+            "add": [
+              [
+                "resource",
+                "$mcp"
+              ]
+            ],
+            "set": {
+              "scope": "mcp"
+            }
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "access_token": "m1",
+            "refresh_token": "r1"
+          }
+        },
+        {
+          "advance": 3599999
+        },
+        {
+          "mcp": {
+            "token": "$m1",
+            "body": {
+              "jsonrpc": "2.0",
+              "id": 1,
+              "method": "ping"
+            }
+          },
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "advance": 1
+        },
+        {
+          "mcp": {
+            "token": "$m1",
+            "body": {
+              "jsonrpc": "2.0",
+              "id": 1,
+              "method": "ping"
+            }
+          },
+          "expect": {
+            "status": 401
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "a refresh token idle 30 days",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r1"
+          }
+        },
+        {
+          "advance": 2592000000
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a refresh token used within 30 days, 90 days after the grant",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r1"
+          }
+        },
+        {
+          "advance": 2505600000
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r2"
+          }
+        },
+        {
+          "advance": 2505600000
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r2"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r3"
+          }
+        },
+        {
+          "advance": 2505600000
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r3"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r4"
+          }
+        },
+        {
+          "advance": 259200000
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r4"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        }
+      ]
+    },
+    {
+      "name": "RFC 7009 revoke ends the grant",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r1",
+            "access_token": "m1"
+          }
+        },
+        {
+          "revoke": [
+            [
+              "token",
+              "$r1"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "mcp": {
+            "token": "$m1",
+            "body": {
+              "jsonrpc": "2.0",
+              "id": 1,
+              "method": "ping"
+            }
+          },
+          "expect": {
+            "status": 401
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        },
+        {
+          "revoke": [
+            [
+              "token",
+              "unknown-token"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "list": "p-owner",
+          "expect": {
+            "ended": [
+              "revoked"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "RFC 7009 revoke by an access token ends the grant",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r1",
+            "access_token": "m1"
+          }
+        },
+        {
+          "revoke": [
+            [
+              "token",
+              "$m1"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a repeated parameter at the token endpoint",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_request"
+          }
+        }
+      ]
+    },
+    {
+      "name": "an unknown scope at authorize",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "set": {
+              "scope": "hub:read hub:write"
+            }
+          },
+          "expect": {
+            "redirect": {
+              "error": "invalid_scope"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "the passkeys change: every grant is dead by its stamp",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r1"
+          }
+        },
+        {
+          "stamp": "stamp-2"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        }
+      ]
+    },
+    {
+      "name": "owner:act is refused for a member",
+      "steps": [
+        {
+          "as": "p-sam"
+        },
+        {
+          "authorize": {
+            "use": "kit",
+            "set": {
+              "scope": "hub:read owner:act"
+            }
+          },
+          "expect": {
+            "redirect": {
+              "error": "access_denied",
+              "state": "s1",
+              "iss": true
+            }
+          }
+        },
+        {
+          "authorize": {
+            "use": "kit",
+            "set": {
+              "scope": "hub:read bridge"
+            }
+          },
+          "expect": {
+            "redirect": {
+              "error": "access_denied"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "threads:write is left out for a View person",
+      "steps": [
+        {
+          "as": "p-vee"
+        },
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200,
+            "scope": "hub:read"
+          }
+        },
+        {
+          "authorize": {
+            "use": "kit",
+            "drop": [
+              "resource"
+            ],
+            "add": [
+              [
+                "resource",
+                "$root"
+              ]
+            ],
+            "set": {
+              "scope": "threads:write"
+            }
+          },
+          "expect": {
+            "redirect": {
+              "error": "access_denied"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "no scope asked: hub:read and mcp only",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "drop": [
+              "scope"
+            ]
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200,
+            "scope": "hub:read"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a person moved to View loses threads:write at the next refresh",
+      "steps": [
+        {
+          "as": "p-sam"
+        },
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200,
+            "scope": "hub:read threads:write"
+          },
+          "save": {
+            "refresh_token": "r1"
+          }
+        },
+        {
+          "people": [
+            {
+              "id": "p-owner",
+              "name": "Alex Rivera",
+              "role": "owner",
+              "level": "full"
+            },
+            {
+              "id": "p-sam",
+              "name": "Sam Lee",
+              "role": "member",
+              "level": "view"
+            },
+            {
+              "id": "p-vee",
+              "name": "Vee Park",
+              "role": "member",
+              "level": "view"
+            }
+          ]
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200,
+            "scope": "hub:read"
+          }
+        }
+      ]
+    },
+    {
+      "name": "the owner role moves: the old owner's grant loses owner:act and bridge",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "set": {
+              "scope": "hub:read threads:write mcp bridge owner:act"
+            }
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200,
+            "scope": "hub:read threads:write bridge owner:act"
+          },
+          "save": {
+            "refresh_token": "r1"
+          }
+        },
+        {
+          "people": [
+            {
+              "id": "p-owner",
+              "name": "Alex Rivera",
+              "role": "admin",
+              "level": "full"
+            },
+            {
+              "id": "p-sam",
+              "name": "Sam Lee",
+              "role": "owner",
+              "level": "full"
+            },
+            {
+              "id": "p-vee",
+              "name": "Vee Park",
+              "role": "member",
+              "level": "view"
+            }
+          ]
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200,
+            "scope": "hub:read threads:write"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a removed person's grant ends",
+      "steps": [
+        {
+          "as": "p-sam"
+        },
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r1"
+          }
+        },
+        {
+          "people": [
+            {
+              "id": "p-owner",
+              "name": "Alex Rivera",
+              "role": "owner",
+              "level": "full"
+            },
+            {
+              "id": "p-vee",
+              "name": "Vee Park",
+              "role": "member",
+              "level": "view"
+            }
+          ]
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a 21st live grant is refused",
+      "steps": [
+        {
+          "repeat": 20,
+          "steps": [
+            {
+              "authorize": {
+                "use": "kit"
+              },
+              "expect": {
+                "redirect": {
+                  "code": true,
+                  "state": "s1",
+                  "iss": true
+                }
+              },
+              "save": "c1"
+            },
+            {
+              "token": [
+                [
+                  "grant_type",
+                  "authorization_code"
+                ],
+                [
+                  "code",
+                  "$c1"
+                ],
+                [
+                  "code_verifier",
+                  "$verifier"
+                ],
+                [
+                  "client_id",
+                  "devteam"
+                ],
+                [
+                  "redirect_uri",
+                  "$redirect"
+                ],
+                [
+                  "resource",
+                  "$root"
+                ]
+              ],
+              "expect": {
+                "status": 200
+              }
+            }
+          ]
+        },
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "page": "revoke one on your People page"
+          }
+        }
+      ]
+    },
+    {
+      "name": "an app asks for the hub's own audience",
+      "redirect": "https://app.example.com/oauth/cb",
+      "steps": [
+        {
+          "metadata": "metadata/good.json"
+        },
+        {
+          "authorize": {
+            "use": "kit",
+            "drop": [
+              "label",
+              "resource"
+            ],
+            "add": [
+              [
+                "resource",
+                "$root"
+              ]
+            ],
+            "set": {
+              "client_id": "https://app.example.com/oauth/client.json",
+              "scope": "hub:read"
+            }
+          },
+          "expect": {
+            "redirect": {
+              "error": "invalid_target",
+              "state": "s1",
+              "iss": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "an app asks for owner:act",
+      "redirect": "https://app.example.com/oauth/cb",
+      "steps": [
+        {
+          "metadata": "metadata/good.json"
+        },
+        {
+          "authorize": {
+            "use": "kit",
+            "drop": [
+              "label",
+              "resource"
+            ],
+            "add": [
+              [
+                "resource",
+                "$mcp"
+              ]
+            ],
+            "set": {
+              "client_id": "https://app.example.com/oauth/client.json",
+              "scope": "mcp owner:act"
+            }
+          },
+          "expect": {
+            "redirect": {
+              "error": "invalid_scope"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "an app gets mcp",
+      "redirect": "https://app.example.com/oauth/cb",
+      "steps": [
+        {
+          "metadata": "metadata/good.json"
+        },
+        {
+          "authorize": {
+            "use": "kit",
+            "drop": [
+              "label",
+              "resource",
+              "scope"
+            ],
+            "add": [
+              [
+                "resource",
+                "$mcp"
+              ]
+            ],
+            "set": {
+              "client_id": "https://app.example.com/oauth/client.json"
+            }
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "https://app.example.com/oauth/client.json"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ]
+          ],
+          "expect": {
+            "status": 200,
+            "scope": "mcp"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a token request over 16 KB",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ],
+            [
+              "padding",
+              "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            ]
+          ],
+          "expect": {
+            "status": 413,
+            "error": "invalid_request"
+          }
+        }
+      ]
+    },
+    {
+      "name": "an unknown parameter is ignored",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "add": [
+              [
+                "prompt",
+                "consent"
+              ]
+            ]
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ],
+            [
+              "extra",
+              "1"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "an authorize query over 8 KB",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "add": [
+              [
+                "padding",
+                "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+              ]
+            ]
+          },
+          "expect": {
+            "page": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "a code traded by another client_id",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "https://app.example.com/oauth/client.json"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a code traded with another redirect_uri",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "http://127.0.0.1:53683/cb"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a refresh by another client_id",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r1"
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "https://app.example.com/oauth/client.json"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a state over 512 characters",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "set": {
+              "state": "sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss"
+            }
+          },
+          "expect": {
+            "redirect": {
+              "error": "invalid_request",
+              "no_state": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "the cap is checked again when a code is traded",
+      "steps": [
+        {
+          "repeat": 19,
+          "steps": [
+            {
+              "authorize": {
+                "use": "kit"
+              },
+              "expect": {
+                "redirect": {
+                  "code": true,
+                  "state": "s1",
+                  "iss": true
+                }
+              },
+              "save": "c1"
+            },
+            {
+              "token": [
+                [
+                  "grant_type",
+                  "authorization_code"
+                ],
+                [
+                  "code",
+                  "$c1"
+                ],
+                [
+                  "code_verifier",
+                  "$verifier"
+                ],
+                [
+                  "client_id",
+                  "devteam"
+                ],
+                [
+                  "redirect_uri",
+                  "$redirect"
+                ],
+                [
+                  "resource",
+                  "$root"
+                ]
+              ],
+              "expect": {
+                "status": 200
+              }
+            }
+          ]
+        },
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c2"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c2"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a token narrowed to leave out owner:act carries owner-act=0, and its dropped scope is refused",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "set": {
+              "scope": "hub:read mcp owner:act"
+            }
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r1",
+            "access_token": "m1"
+          }
+        },
+        {
+          "mark": "$m1",
+          "expect": {
+            "ownerAct": true
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ],
+            [
+              "scope",
+              "mcp"
+            ]
+          ],
+          "expect": {
+            "status": 200,
+            "scope": "mcp"
+          },
+          "save": {
+            "refresh_token": "r2",
+            "access_token": "m2"
+          }
+        },
+        {
+          "mark": "$m2",
+          "expect": {
+            "ownerAct": false
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r2"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ],
+            [
+              "scope",
+              "owner:act"
+            ]
+          ],
+          "expect": {
+            "status": 200,
+            "scope": "owner:act"
+          },
+          "save": {
+            "refresh_token": "r3",
+            "access_token": "m3"
+          }
+        },
+        {
+          "mcp": {
+            "token": "$m3",
+            "body": {
+              "jsonrpc": "2.0",
+              "id": 1,
+              "method": "ping"
+            }
+          },
+          "expect": {
+            "status": 403
+          }
+        },
+        {
+          "mark": "$m3",
+          "expect": {
+            "ownerAct": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "a narrowed scope with nothing of the resource named",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "set": {
+              "scope": "hub:read mcp"
+            }
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r1"
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ],
+            [
+              "scope",
+              "hub:read"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_scope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a code traded after the passkeys change",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "stamp": "stamp-2"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        },
+        {
+          "grants": {
+            "count": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "a code traded after its person was removed",
+      "steps": [
+        {
+          "as": "p-sam"
+        },
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "people": [
+            {
+              "id": "p-owner",
+              "name": "Alex Rivera",
+              "role": "owner",
+              "level": "full"
+            },
+            {
+              "id": "p-vee",
+              "name": "Vee Park",
+              "role": "member",
+              "level": "view"
+            }
+          ]
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        }
+      ]
+    },
+    {
+      "name": "an unknown parameter repeated is ignored",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "add": [
+              [
+                "prompt",
+                "a"
+              ],
+              [
+                "prompt",
+                "b"
+              ]
+            ]
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ],
+            [
+              "extra",
+              "1"
+            ],
+            [
+              "extra",
+              "2"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "RFC 7009 revoke by a spent refresh token ends the grant",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r1"
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r2",
+            "access_token": "m2"
+          }
+        },
+        {
+          "revoke": [
+            [
+              "token",
+              "$r1"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "mcp": {
+            "token": "$m2",
+            "body": {
+              "jsonrpc": "2.0",
+              "id": 1,
+              "method": "ping"
+            }
+          },
+          "expect": {
+            "status": 401
+          }
+        }
+      ]
+    },
+    {
+      "name": "a plain challenge method",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "set": {
+              "code_challenge_method": "plain"
+            }
+          },
+          "expect": {
+            "redirect": {
+              "error": "invalid_request",
+              "state": "s1",
+              "iss": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "no challenge",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "drop": [
+              "code_challenge"
+            ]
+          },
+          "expect": {
+            "redirect": {
+              "error": "invalid_request"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "no resource",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "drop": [
+              "resource"
+            ]
+          },
+          "expect": {
+            "redirect": {
+              "error": "invalid_request"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "an unknown resource",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "add": [
+              [
+                "resource",
+                "https://elsewhere.example/"
+              ]
+            ]
+          },
+          "expect": {
+            "redirect": {
+              "error": "invalid_target"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "the same resource twice",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "add": [
+              [
+                "resource",
+                "$root"
+              ]
+            ]
+          },
+          "expect": {
+            "redirect": {
+              "error": "invalid_target"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "a scope whose audience was not asked for",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "drop": [
+              "resource"
+            ],
+            "add": [
+              [
+                "resource",
+                "$root"
+              ]
+            ]
+          },
+          "expect": {
+            "redirect": {
+              "error": "invalid_scope"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "response_type token",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "set": {
+              "response_type": "token"
+            }
+          },
+          "expect": {
+            "redirect": {
+              "error": "unsupported_response_type"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "a repeated state",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "add": [
+              [
+                "state",
+                "s2"
+              ]
+            ]
+          },
+          "expect": {
+            "redirect": {
+              "error": "invalid_request"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "a bad client_id: an error page, no redirect",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "set": {
+              "client_id": "other"
+            }
+          },
+          "expect": {
+            "page": "couldn't read this app's details"
+          }
+        }
+      ]
+    },
+    {
+      "name": "javascript: redirect: an error page, no redirect",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "set": {
+              "redirect_uri": "javascript:alert(1)"
+            }
+          },
+          "expect": {
+            "page": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "devteam with no label: an error page",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "drop": [
+              "label"
+            ]
+          },
+          "expect": {
+            "page": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "a repeated redirect_uri: an error page",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "add": [
+              [
+                "redirect_uri",
+                "$redirect"
+              ]
+            ]
+          },
+          "expect": {
+            "page": true
+          }
+        }
+      ]
+    }
+  ]
+}

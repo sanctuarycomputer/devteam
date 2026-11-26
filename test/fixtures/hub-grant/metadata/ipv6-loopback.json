@@ -1,0 +1,7 @@
+{
+  "client_id": "https://app.example.com/oauth/client.json",
+  "client_name": "A Native App",
+  "redirect_uris": [
+    "http://[::1]:8000/cb"
+  ]
+}
