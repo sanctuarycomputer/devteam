@@ -492,6 +492,10 @@ test("G3 a live session's note is never moved: a standing worktree with no pane,
     for (const at of ['plan-pricing', 'x-01-y', 'main', 'plan-gone']) assert.equal(JSON.parse(ok(cli(handoff('--at', at, '--json')))).count, 0, at);
     assert.deepEqual([show(live).handed.to, show(tk).handed.to], ['plan-pricing', 'x-01-y']);
     assert.deepEqual([show(odd).with, show(odd).waiting], ['plan-elsewhere', 'session']);
+    // a worktree the kit can't look up (lstat fails with no ENOENT; here ENAMETOOLONG) is not gone either (final-1 F2)
+    const long = `plan-${'x'.repeat(300)}`;
+    const far = note('plan-pricing'); handed(far, long);
+    assert.deepEqual([show(far).handed.to, show(far).with, show(far).waiting], [long, long, 'session'], 'an lstat error other than ENOENT');
   } finally { fs.rmSync(link, { force: true }); }
 }));
 
@@ -704,7 +708,11 @@ test('C8 C9 C10b the docs say whose a note is, how it is worked, and what a mark
 
 test("G2b supervisor.md: a hand-over read in unread is worked as one typed, and nothing says to ack a note nobody will work", () => {
   const notesDoc = section(doc('supervisor.md'), '### Artifact notes');
-  has(notesDoc, 'typed to you or read in `unread`', "nobody's pane took", 'Hand over again', 'resume that session or mark the notes yourself, then ack', '`{to, typed, count, nobody}`');
+  has(notesDoc, 'A hand-over typed to you or read in `unread` that names another session\'s place', "nobody's pane took", 'Hand over again', 'resume that session or mark the notes yourself, then ack', '`{to, typed, count, nobody}`');
   assert.ok(!notesDoc.includes("Ack the hand-over's own owner lines too."), 'no bare ack of a hand-over');
   has(notesDoc, '`with` is `supervisor`');
+  // a returned note's wait: the gone session's own turn doesn't end it (final-1 F3)
+  has(notesDoc, "a turn by the gone session itself doesn't end it");
+  // how the supervisor tells a hand-over a pane took from one nobody's pane took (final-1b F2)
+  has(notesDoc, "at once when that session's window is up");
 });
