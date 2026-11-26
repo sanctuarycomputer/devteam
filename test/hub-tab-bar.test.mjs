@@ -313,4 +313,16 @@ test("terminal A18d: a frame's hub-route between a typed hash's popstate and its
   await p.until("beta's tab, from the typed hash", isOn('beta'));
   assert.match(await p.ev('location.hash'), /^#beta/, 'the typed hash opened, not overwritten by the route');
   assert.equal(await p.ev(`items.get('/srv/alpha').head`), '#board', "alpha's head kept from its route");
+  await until(() => F.loadsAt(`127.0.0.1:${PB}`) > 0, "beta's frame loaded");
+  await p.until("beta's first head", `location.hash === '#beta/overview'`);
+  // a typed hash naming no tab: its hashchange writes nothing, and the next route from the selected frame is followed
+  await p.ev(`location.hash = '#nosuch', true`);
+  await p.until('the typed #nosuch', `location.hash === '#nosuch'`);
+  await p.evIn(F.lo(PB), `location.hash = '#goals', true`);
+  await p.until("after a typed hash naming no tab, the address follows beta's route", `location.hash === '#beta/goals'`);
+  // a same-URL fragment navigation: a popstate with no hashchange after it; the address still follows the next route
+  await p.ev(`location.href = location.href, true`);
+  await pause(300);
+  await p.evIn(F.lo(PB), `location.hash = '#board', true`);
+  await p.until("after a same-URL navigation, the address follows beta's route", `location.hash === '#beta/board'`);
 });

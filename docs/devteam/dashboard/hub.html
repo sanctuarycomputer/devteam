@@ -1359,6 +1359,7 @@ window.addEventListener('hashchange', () => {
   // never a choice, and nothing to do for a Back or Forward step the popstate below took
   hubChoosing = false;
   hubTyped = null;
+  hubHashWas = location.hash;
   if (hubPopAt !== null) { const was = hubPopAt; hubPopAt = null; if (was === location.hash) return; }
   const { key, head, ot } = hubHead();
   if (key === 'overview') {
@@ -1418,6 +1419,8 @@ tabsEl.addEventListener('keydown', (e) => {
 let hubChoosing = false;
 // a hash typed, pasted or linked: its popstate comes before its hashchange, and a frame's hub-route may land between
 let hubTyped = null;
+// the hash the page last saw: a popstate onto the same hash (a same-URL navigation) has no hashchange to clear hubTyped
+let hubHashWas = location.hash;
 window.addEventListener('click', () => { hubChoosing = true; setTimeout(() => { hubChoosing = false; }); }, true);
 function hubChoose(root) {
   if (root === selected) return;
@@ -1431,12 +1434,15 @@ function hubAddr(url, mayPush = false) {
   const state = { hub: 1, key: String(url).replace(/^#/, '').split('/')[0].split('?')[0] };
   if (mayPush && hubChoosing && url !== location.hash) { hubChoosing = false; history.pushState(state, '', url); }
   else history.replaceState(state, '', url);
+  hubHashWas = location.hash;
 }
 // the hash a popstate this page took left: the hashchange that follows it has nothing to do
 let hubPopAt = null;
 window.addEventListener('popstate', (e) => {
   hubChoosing = false;
-  if (!hubMarked(e.state)) { hubTyped = location.hash; return; }
+  const was = hubHashWas;
+  hubHashWas = location.hash;
+  if (!hubMarked(e.state)) { if (location.hash !== was) hubTyped = location.hash; return; }
   let k;
   try { k = decodeURIComponent(e.state.key); } catch { return; }
   const it = k === 'overview' || k === 'settings' || k === 'terminal' ? null : hubFind(k);
