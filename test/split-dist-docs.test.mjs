@@ -35,6 +35,12 @@ const PRE = {
   [SUP]: { patch: 'supervisor-sync.patch', para: '- **Find.** ', sha256: '10c9fccea0e9fcc044fc6566e8c5d5b3e63801c8971d068d09fe75dd37378b48' },
   [CODE]: { patch: 'code-style-l-sec-6.patch', para: '- **Supply chain:** ', sha256: 'f96f72362469133f3ff76e50f3ce5395a271c35dbee1e72c1ad3a14f08e2d4d2' },
 };
+// the SHA-256 of each insertion as the tree has it (the run of text the doc's line gains): the approved
+// words, so any change to them, not only to the phrases checked below, is a reviewed change here too
+const TEXT = {
+  [SUP]: '2994d6ed9db3c983d07bd7cea4874f1072c58dd6bd56fd4375a8f0b4932b8726',
+  [CODE]: '8b4cae390e95747fef47ba36ecfc3f4a017fa7345f2afda89a70fa6c2e27891f',
+};
 const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(GIT_|DEVTEAM_)/.test(k)));
 const run = (cmd, args, o = {}) => spawnSync(cmd, args, { encoding: 'utf8', env, maxBuffer: 1 << 28, ...o });
 const sha256 = (t) => crypto.createHash('sha256').update(t).digest('hex');
@@ -67,7 +73,8 @@ function preImage(file) {
 // a doc whose pinned patch no longer applies because HEAD no longer has its pre-image: the reason its
 // checks skip. A patch that isn't the pinned one, or that fails against text HEAD still has, isn't drift.
 function drift(file) {
-  if (!report?.overlay?.stale?.some((x) => x.area === AREA && x.kind === 'patch' && x.name === PRE[file].patch)) return false;
+  // only a patch git read and couldn't apply ("no longer applies"); one it can't read is never drift
+  if (!report?.overlay?.stale?.some((x) => x.area === AREA && x.kind === 'patch' && x.name === PRE[file].patch && /^no longer applies/.test(x.why))) return false;
   const pre = preImage(file);
   if (sha256(pre) !== PRE[file].sha256) return false;
   if (`\n${atHead(file)}\n`.includes(`\n${pre}\n`)) return false;
@@ -123,6 +130,7 @@ test("D2: supervisor.md's sync steps gain the pin, and nothing else in superviso
   for (const w of ['A sync is the copy plus the pin', '`chore start devteam-sync-<tag>` writes it', '`devteam.mjs package pin <tag>`', 'replaced `docs/devteam/`', 'another tag', 'The pin is required', 'verified']) {
     assert.ok(added.includes(w), `the sync steps' insertion doesn't say ${w}: ${added}`);
   }
+  assert.equal(sha256(added), TEXT[SUP], `the sync steps' insertion is not the approved text: ${added}`);
 });
 
 test("D3: code-style.md's L-SEC-6 gains the kit's own package as its one exception, and nothing else in code-style.md changes", { skip: SPLIT_DRIFT || DRIFT[CODE] }, () => {
@@ -130,6 +138,7 @@ test("D3: code-style.md's L-SEC-6 gains the kit's own package as its one excepti
   for (const w of ['one exception', "the kit's own package", 'pinned by the devteam sync', 'verified by `merge`', "installed at the release's age"]) {
     assert.ok(added.includes(w), `L-SEC-6's insertion doesn't say ${w}: ${added}`);
   }
+  assert.equal(sha256(added), TEXT[CODE], `L-SEC-6's insertion is not the approved text: ${added}`);
 });
 
 test("D4: the area's README holds R's adoption message, in plain words: sync R, then confirm the dashboard serves the new app", () => {
