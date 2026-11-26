@@ -6,13 +6,14 @@
 //
 // Run from the root of a checkout of the release's commit. In order, refusing at the first problem:
 //  1. The tag is vX.Y.Z (each number at most 9 digits); --tree (default refs/tags/<tag>) names a commit;
-//     --out is a new or empty folder outside docs/devteam/; the npm on PATH is at least --min-npm.
+//     --out is a new or empty folder outside docs/devteam/ (a file is refused, as for --alpha); the npm on
+//     PATH is at least --min-npm.
 //  2. The alpha (alpha-build@1): --alpha holds one folder per app, each the build job's apps/<app>/out/.
 //     Its apps are exactly those with an apps/<app>/package.json in the tree (none, when the tree has
-//     none), and it holds only folders and regular files of the known types (KNOWN). They are copied to
+//     none; nothing else under apps/ is read), and it holds only folders and regular files of the known types (KNOWN). They are copied to
 //     docs/devteam/alpha/<app>/, which must not exist before. No apps: no alpha folder.
 //  3. package.json gets the tag's version (the number without its v), and nothing else changes in it.
-//  4. npm pack --dry-run --json lists the files, then npm pack writes <out>/package.tgz, each with
+//  4. npm pack --dry-run --json lists the files, then npm pack writes the tarball into <out>, each with
 //     --ignore-scripts, no user or global npm config and no npm_config_* variable.
 //  5. The tarball holds only regular files, all under package/, and exactly the dry run's list:
 //     - package.json is the tree's with the tag's version, and declares no dependency (dependencies is
@@ -22,8 +23,10 @@
 //     - every file under docs/devteam/alpha/ is one the alpha staged, byte for byte;
 //     - every staged alpha file is in it, and so is every file of the tree's docs/devteam/ but project/,
 //       run/ and dotfiles (npm leaves out .gitignore and .npmrc).
+//     Only a tarball that passed all of it is renamed <out>/package.tgz, the path the publish step reads.
 // It prints the packed files, one per line, writes them to <out>/files.txt and ends "ok: <name>@<version>,
-// <n> files, packed by npm <npm's version>"; exit 0. A refusal prints "package-check: refusing: <why>" on stderr and exits 1; bad usage, 2.
+// <n> files, packed by npm <npm's version>"; exit 0. A refusal prints "package-check: refusing: <why>" on
+// stderr and exits 1; bad usage, 2.
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -117,6 +120,7 @@ function treeFiles(root, commit, paths) {
 // The alpha's files, as "<app>/<path>" -> absolute source path, after its checks.
 function alphaFiles(dir, apps) {
   const files = new Map();
+  if (dir && fs.existsSync(dir) && !fs.lstatSync(dir).isDirectory()) refuse(`--alpha ${dir} isn't a folder`);
   const have = dir && fs.existsSync(dir) ? fs.readdirSync(dir).sort() : [];
   for (const app of have) {
     const st = fs.lstatSync(path.join(dir, app));
@@ -167,6 +171,7 @@ export function check(o, root = process.cwd()) {
   try { commit = git(root, ['rev-parse', '--verify', '-q', `${rev}^{commit}`]).toString('utf8').trim(); } catch { refuse(`${rev} isn't a commit here`); }
   const out = path.resolve(root, o.out);
   if (out === path.join(root, 'docs', 'devteam') || out.startsWith(path.join(root, 'docs', 'devteam') + path.sep)) refuse('--out is inside docs/devteam/');
+  if (fs.existsSync(out) && !fs.lstatSync(out).isDirectory()) refuse(`--out ${out} isn't a folder`);
   if (fs.existsSync(out) && fs.readdirSync(out).length) refuse(`--out ${out} isn't empty`);
   fs.mkdirSync(out, { recursive: true });
   fs.writeFileSync(path.join(out, '.npmrc-user'), '');
@@ -179,7 +184,9 @@ export function check(o, root = process.cwd()) {
   // 2. the alpha
   const tree = treeFiles(root, commit, ['package.json', 'README.md', 'docs/devteam']);
   if ([...tree.keys()].some((p) => p.startsWith('docs/devteam/alpha/'))) refuse('the tree already has docs/devteam/alpha/');
-  const apps = new Set([...treeFiles(root, commit, ['apps']).keys()].map((p) => /^apps\/([^/]+)\/package\.json$/.exec(p)?.[1]).filter(Boolean));
+  // the tree's apps: each apps/<app>/package.json; nothing else under apps/ is read
+  const appPaths = git(root, ['ls-tree', '-r', '-z', '--name-only', '--full-tree', commit, '--', 'apps']).toString('utf8').split('\0');
+  const apps = new Set(appPaths.map((p) => /^apps\/([^/]+)\/package\.json$/.exec(p)?.[1]).filter(Boolean));
   const alpha = alphaFiles(o.alpha ? path.resolve(o.alpha) : null, apps);
   const alphaDir = path.join(root, 'docs', 'devteam', 'alpha');
   if (fs.existsSync(alphaDir)) refuse('docs/devteam/alpha/ exists before the alpha is staged');
@@ -191,9 +198,11 @@ export function check(o, root = process.cwd()) {
 
   // 3. the version
   if (!tree.has('package.json')) refuse('the tree has no package.json');
-  const treePkg = JSON.parse(git(root, ['cat-file', 'blob', tree.get('package.json')]).toString('utf8'));
+  let treePkg;
+  try { treePkg = JSON.parse(git(root, ['cat-file', 'blob', tree.get('package.json')]).toString('utf8')); } catch { refuse(`${rev}'s package.json isn't JSON`); }
   const pkgPath = path.join(root, 'package.json');
-  const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+  let pkg;
+  try { pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')); } catch { refuse('the checkout\'s package.json is missing or isn\'t JSON'); }
   pkg.version = version;
   fs.writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
 
@@ -203,11 +212,10 @@ export function check(o, root = process.cwd()) {
   npm(['pack', '--pack-destination', out], out);
   const made = fs.readdirSync(out).filter((f) => f.endsWith('.tgz'));
   if (made.length !== 1) refuse(`npm pack left ${made.length} tarballs in --out`);
-  const tgz = path.join(out, 'package.tgz');
-  fs.renameSync(path.join(out, made[0]), tgz);
+  const packed = path.join(out, made[0]);
 
   // 5. the tarball
-  const entries = untar(fs.readFileSync(tgz));
+  const entries = untar(fs.readFileSync(packed));
   const names = [];
   for (const [name, bytes] of entries) {
     if (!name.startsWith('package/') || name.split('/').some((s) => s === '..' || s === '.' || s === '') || name.includes('\\')) refuse(`the tarball holds ${name}, outside package/`);
@@ -232,6 +240,9 @@ export function check(o, root = process.cwd()) {
   if (!isDeepStrictEqual(names, listed)) refuse(`npm pack --dry-run listed ${listed.length} files and the tarball holds ${names.length}: they differ`);
   const want = ['package.json', ...[...alpha.keys()].map((r) => `docs/devteam/alpha/${r}`), ...[...tree.keys()].filter((p) => p !== 'package.json' && !/^docs\/devteam\/(project|run)\//.test(p) && !path.posix.basename(p).startsWith('.'))];
   for (const w of want) if (!entries.has(`package/${w}`)) refuse(`the tarball is missing ${w}`);
+  // only a tarball that passed every check is at the path the publish step reads
+  const tgz = path.join(out, 'package.tgz');
+  fs.renameSync(packed, tgz);
   fs.writeFileSync(path.join(out, 'files.txt'), `${names.join('\n')}\n`);
   return { name: treePkg.name, version, files: names, tgz, npm: npm(['--version'], out).trim() };
 }

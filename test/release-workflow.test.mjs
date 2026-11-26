@@ -1,12 +1,13 @@
 // kit-954: the root package.json, .github/workflows/release.yml and test/release/package-check.mjs, the
 // check release.yml's publish job runs before it publishes the kit to npm. Checks are numbered as in the
-// ticket's spec (R1 to R12, and R7b).
+// ticket's spec (R1 to R15, and R7b).
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync, execFileSync } from 'node:child_process';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { untar, KNOWN } from './release/package-check.mjs';
 
@@ -179,14 +180,15 @@ test('R6 the newest Node 24 everywhere, no cache; no npm token or secret read an
 // ---- R7 to R12: package-check against fixtures ---------------------------------------------------
 // A fixture repo: this checkout's package.json, README.md and docs/devteam/ (the working tree's copies of
 // the tracked files), plus `apps` (an apps/<app>/package.json each) and `extra` files, committed and
-// tagged v1.2.3.
-function fixtureRepo(name, { apps = [], extra = {} } = {}) {
+// tagged v1.2.3; `before(repo)` runs just before the commit.
+function fixtureRepo(name, { apps = [], extra = {}, before } = {}) {
   const d = scratch(name);
   const repo = path.join(d, 'repo');
   const tracked = execFileSync('git', ['ls-files', '-z', '--', 'package.json', 'README.md', 'docs/devteam'], { cwd: REPO, encoding: 'utf8' }).split('\0').filter(Boolean);
   for (const f of tracked) { fs.mkdirSync(path.dirname(path.join(repo, f)), { recursive: true }); fs.copyFileSync(path.join(REPO, f), path.join(repo, f)); }
   for (const a of apps) extra[`apps/${a}/package.json`] = '{ "name": "app", "private": true }\n';
   for (const [f, text] of Object.entries(extra)) { fs.mkdirSync(path.dirname(path.join(repo, f)), { recursive: true }); fs.writeFileSync(path.join(repo, f), text); }
+  before?.(repo);
   const g = (...a) => execFileSync('git', a, { cwd: repo, stdio: 'pipe' });
   g('init', '-q', '-b', 'main');
   g('add', '-A');
@@ -196,10 +198,11 @@ function fixtureRepo(name, { apps = [], extra = {} } = {}) {
   fs.mkdirSync(home);
   return { d, repo, home };
 }
-// the alpha-build fixture's out/ folders as the build job stages them, without the unknown-type files
-function alphaDir(d, { keepUnknown = false } = {}) {
+// the alpha-build fixture's out/ folders (all, or `apps`) as the build job stages them, without the
+// unknown-type files
+function alphaDir(d, { keepUnknown = false, apps = fs.readdirSync(AB) } = {}) {
   const a = path.join(d, 'alpha');
-  for (const app of fs.readdirSync(AB)) fs.cpSync(path.join(AB, app, 'out'), path.join(a, app), { recursive: true });
+  for (const app of apps) fs.cpSync(path.join(AB, app, 'out'), path.join(a, app), { recursive: true });
   if (!keepUnknown) {
     const walk = (dir) => { for (const e of fs.readdirSync(dir, { withFileTypes: true })) { const f = path.join(dir, e.name); if (e.isDirectory()) walk(f); else if (!KNOWN.includes(path.extname(e.name).slice(1))) fs.rmSync(f); } };
     walk(a);
@@ -207,8 +210,8 @@ function alphaDir(d, { keepUnknown = false } = {}) {
   return a;
 }
 const env = (home) => ({ ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(npm_config_|DEVTEAM_)/i.test(k))), HOME: home });
-function check(fx, args) {
-  const r = spawnSync(process.execPath, [CHECK, '--tag', 'v1.2.3', '--out', path.join(fx.d, 'out'), ...args], { cwd: fx.repo, env: env(fx.home), encoding: 'utf8', timeout: 120_000 });
+function check(fx, args, { cwd = fx.repo, extraEnv = {}, out = path.join(fx.d, 'out') } = {}) {
+  const r = spawnSync(process.execPath, [CHECK, '--tag', 'v1.2.3', '--out', out, ...args], { cwd, env: { ...env(fx.home), ...extraEnv }, encoding: 'utf8', timeout: 120_000 });
   return { status: r.status, out: r.stdout, err: r.stderr };
 }
 const treeList = (fx) => execFileSync('git', ['ls-files', '--', 'README.md', 'docs/devteam'], { cwd: fx.repo, encoding: 'utf8' }).split('\n').filter((f) => f && !path.posix.basename(f).startsWith('.'));
@@ -257,6 +260,7 @@ test('R8 it refuses unless every docs/devteam/ file in the tarball but alpha/ is
     const r = check(fx, []);
     assert.equal(r.status, 1, `R8 ${what}: refused (${r.err})`);
     assert.match(r.err, says, `R8 ${what}: names the file`);
+    assert.ok(!fs.existsSync(path.join(fx.d, 'out', 'package.tgz')), `R8 ${what}: no tarball at the path the publish step reads`);
   }
 });
 
@@ -320,4 +324,130 @@ test('R12 it refuses a tag that isn\'t vX.Y.Z, an npm older than --min-npm, and 
   const r = check(fx, []);
   assert.equal(r.status, 1, `R12 a changed package.json: refused (${r.err})`);
   assert.match(r.err, /the packed package\.json isn't the tree's with the tag's version/, 'R12 says so');
+});
+
+// ---- R13 to R15: the tarball reader, package-check's own guards, and what the tarball may carry ------
+// A .tgz built by hand: entries { name, type ('0' a file), body, size (what the header says) }.
+function tgz(entries) {
+  const blocks = [];
+  for (const e of entries) {
+    const body = Buffer.from(e.body ?? '');
+    const h = Buffer.alloc(512);
+    h.write(e.name, 0, 100, 'utf8');
+    h.write('0000644\0', 100);
+    h.write(`${(e.size ?? body.length).toString(8).padStart(11, '0')}\0`, 124);
+    h.write(e.type ?? '0', 156);
+    h.write('ustar\0', 257);
+    h.write('00', 263);
+    blocks.push(h, body, Buffer.alloc((512 - (body.length % 512)) % 512));
+  }
+  return zlib.gzipSync(Buffer.concat([...blocks, Buffer.alloc(1024)]));
+}
+const refusal = (fn) => { try { fn(); } catch (e) { return e.message; } return null; };
+// a pax record "<len> <key>=<value>\n", its length counting itself
+const paxRecord = (k, v) => { const rec = ` ${k}=${v}\n`; let n = rec.length + 1; while (`${n}${rec}`.length !== n) n = `${n}${rec}`.length; return `${n}${rec}`; };
+
+test('R13 the tarball reader reads files and pax paths, and refuses links, duplicates, bad sizes and non-gzip', () => {
+  const ok = untar(tgz([{ name: 'package/a.txt', body: 'a' }, { name: 'PaxHeader', type: 'x', body: paxRecord('path', 'package/long/b.txt') }, { name: 'package/short', body: 'b' }]));
+  assert.deepEqual([...ok.keys()], ['package/a.txt', 'package/long/b.txt'], 'R13 a file, and a pax path');
+  assert.equal(ok.get('package/long/b.txt').toString(), 'b', 'R13 its bytes');
+  assert.match(refusal(() => untar(tgz([{ name: 'package/l', type: '2' }]))) ?? '', /the tarball holds package\/l, which isn't a regular file \(type 2\)/, 'R13 a link refuses');
+  assert.match(refusal(() => untar(tgz([{ name: 'package/a', body: '1' }, { name: 'package/a', body: '2' }]))) ?? '', /the tarball holds package\/a twice/, 'R13 a duplicate refuses');
+  assert.match(refusal(() => untar(tgz([{ name: 'package/a', body: 'a', size: 999999 }]))) ?? '', /the tarball is truncated or has a bad size field/, 'R13 a bad size refuses');
+  assert.match(refusal(() => untar(Buffer.from('not gzip'))) ?? '', /the tarball isn't gzip/, 'R13 non-gzip refuses');
+});
+
+test('R14 package-check refuses bad usage, a bad --out or --alpha, the wrong folder, a missing tree, a staged or committed alpha, a bad app folder, a tree symlink and a package.json that isn\'t JSON', () => {
+  const fx = fixtureRepo('guards', { apps: ['dashboard'] });
+  const usage = spawnSync(process.execPath, [CHECK, '--out', path.join(fx.d, 'o')], { cwd: fx.repo, env: env(fx.home), encoding: 'utf8' });
+  assert.equal(usage.status, 2, 'R14 no --tag: usage, exit 2');
+  const full = path.join(fx.d, 'full');
+  fs.mkdirSync(full);
+  fs.writeFileSync(path.join(full, 'x'), 'x');
+  const bad = path.join(fx.d, 'bad-alpha');
+  fs.mkdirSync(path.join(bad, 'Bad_Name'), { recursive: true });
+  const cases = [
+    ['a non-empty --out', [], { out: full }, /--out .* isn't empty/],
+    ['--out a file', [], { out: path.join(full, 'x') }, /--out .* isn't a folder/],
+    ['--out inside docs/devteam', [], { out: path.join(fx.repo, 'docs', 'devteam', 'o') }, /--out is inside docs\/devteam\//],
+    ['not the checkout\'s root', [], { cwd: path.join(fx.repo, 'docs') }, /run it from the checkout's root/],
+    ['a missing tree', ['--tree', 'no-such-ref'], {}, /no-such-ref isn't a commit here/],
+    ['--alpha a file', ['--alpha', path.join(full, 'x')], {}, /--alpha .* isn't a folder/],
+    ['a bad app folder', ['--alpha', bad], {}, /the alpha's Bad_Name isn't an app's folder/],
+  ];
+  for (const [i, [what, args, opts, says]] of cases.entries()) {
+    const r = check(fx, args, { out: path.join(fx.d, `out-${i}`), ...opts });
+    assert.equal(r.status, 1, `R14 ${what}: refused (${r.err})`);
+    assert.match(r.err, says, `R14 ${what}: says so`);
+  }
+  const staged = fixtureRepo('alpha-staged', { apps: ['dashboard'] });
+  fs.mkdirSync(path.join(staged.repo, 'docs', 'devteam', 'alpha'));
+  const r1 = check(staged, ['--alpha', alphaDir(staged.d, { apps: ['dashboard'] })]);
+  assert.equal(r1.status, 1, `R14 an alpha already staged: refused (${r1.err})`);
+  assert.match(r1.err, /docs\/devteam\/alpha\/ exists before the alpha is staged/, 'R14 an alpha already staged: says so');
+  const committed = fixtureRepo('alpha-committed', { extra: { 'docs/devteam/alpha/x/index.html': 'x' } });
+  const r2 = check(committed, []);
+  assert.equal(r2.status, 1, `R14 an alpha in the tree: refused (${r2.err})`);
+  assert.match(r2.err, /the tree already has docs\/devteam\/alpha\//, 'R14 an alpha in the tree: says so');
+  const link = fixtureRepo('tree-symlink', { before: (repo) => fs.symlinkSync('worker.md', path.join(repo, 'docs', 'devteam', 'process', 'link.md')) });
+  const r3 = check(link, []);
+  assert.equal(r3.status, 1, `R14 a symlink in the tree: refused (${r3.err})`);
+  assert.match(r3.err, /the tree's docs\/devteam\/process\/link\.md isn't a regular file \(mode 120000\)/, 'R14 a symlink in the tree: says so');
+  const notJson = fixtureRepo('tree-not-json', { extra: { 'package.json': '{ not json\n' } });
+  const r4 = check(notJson, []);
+  assert.equal(r4.status, 1, `R14 a tree package.json that isn't JSON: refused (${r4.err})`);
+  assert.match(r4.err, /^package-check: refusing: refs\/tags\/v1\.2\.3's package\.json isn't JSON$/m, 'R14 a tree package.json that isn\'t JSON: says so');
+  const gone = fixtureRepo('checkout-no-package');
+  fs.rmSync(path.join(gone.repo, 'package.json'));
+  const r5 = check(gone, []);
+  assert.equal(r5.status, 1, `R14 no package.json in the checkout: refused (${r5.err})`);
+  assert.match(r5.err, /^package-check: refusing: the checkout's package\.json is missing or isn't JSON$/m, 'R14 no package.json in the checkout: says so');
+  const other = fixtureRepo('apps-symlink', { apps: ['dashboard'], before: (repo) => fs.symlinkSync('package.json', path.join(repo, 'apps', 'dashboard', 'link.json')) });
+  const r6 = check(other, ['--alpha', alphaDir(other.d, { apps: ['dashboard'] })]);
+  assert.equal(r6.status, 0, `R14 a symlink elsewhere under apps/ doesn't block (${r6.err})`);
+});
+
+test('R15 package-check refuses a tarball carrying anything else or missing a kit file, and a dry run that differs; npm runs with no scripts and no config', () => {
+  const base = JSON.parse(read(path.join(REPO, 'package.json')));
+  const withTest = { ...base, files: [...base.files, 'test/'] };
+  const fx1 = fixtureRepo('carries-test', { extra: { 'package.json': `${JSON.stringify(withTest, null, 2)}\n`, 'test/x.txt': 'x' } });
+  const r1 = check(fx1, []);
+  assert.equal(r1.status, 1, `R15 a file outside what the package carries: refused (${r1.err})`);
+  assert.match(r1.err, /the tarball holds test\/x\.txt, outside what the package carries/, 'R15 says so');
+  assert.ok(!fs.existsSync(path.join(fx1.d, 'out', 'package.tgz')), 'R15 no tarball at the publish path');
+  const noProcess = { ...base, files: [...base.files, '!docs/devteam/process/'] };
+  const fx2 = fixtureRepo('missing-kit-file', { extra: { 'package.json': `${JSON.stringify(noProcess, null, 2)}\n` } });
+  const r2 = check(fx2, []);
+  assert.equal(r2.status, 1, `R15 a kit file left out: refused (${r2.err})`);
+  assert.match(r2.err, /the tarball is missing docs\/devteam\/process\//, 'R15 says so');
+  // a fake npm first on PATH: it logs each call's arguments and npm_config_* variables, runs the real npm,
+  // and with FAKE_NPM_DROP set leaves the last file out of a dry run's list
+  const fx3 = fixtureRepo('fake-npm');
+  const bin = path.join(fx3.d, 'bin');
+  fs.mkdirSync(bin);
+  const realNpm = execFileSync('sh', ['-c', 'command -v npm'], { encoding: 'utf8' }).trim();
+  const log = path.join(fx3.d, 'npm-log.jsonl');
+  fs.writeFileSync(path.join(bin, 'npm'), `#!${process.execPath}
+const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const a = process.argv.slice(2);
+const cfg = Object.fromEntries(Object.entries(process.env).filter(([k]) => /^npm_config_/i.test(k)));
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ a, cfg }) + '\\n');
+const r = spawnSync(${JSON.stringify(realNpm)}, a, { encoding: 'utf8', env: process.env });
+let out = r.stdout;
+if (process.env.FAKE_NPM_DROP && a.includes('--dry-run')) { const j = JSON.parse(out); j[0].files.pop(); out = JSON.stringify(j); }
+process.stdout.write(out); process.stderr.write(r.stderr); process.exit(r.status ?? 1);
+`, { mode: 0o755 });
+  const hostile = { PATH: `${bin}${path.delimiter}${process.env.PATH}`, npm_config_registry: 'http://127.0.0.1:9/', NPM_CONFIG_IGNORE_SCRIPTS: 'false' };
+  const r3 = check(fx3, [], { extraEnv: { ...hostile, FAKE_NPM_DROP: '1' } });
+  assert.equal(r3.status, 1, `R15 a dry run that differs: refused (${r3.err})`);
+  assert.match(r3.err, /npm pack --dry-run listed \d+ files and the tarball holds \d+: they differ/, 'R15 says so');
+  const calls = read(log).trim().split('\n').map((l) => JSON.parse(l));
+  assert.ok(calls.some((c) => c.a.includes('pack')), 'R15 npm pack ran through the fake');
+  for (const c of calls) {
+    assert.ok(c.a.includes('--ignore-scripts'), `R15 --ignore-scripts on npm ${c.a.join(' ')}`);
+    assert.deepEqual(Object.keys(c.cfg).sort(), ['npm_config_globalconfig', 'npm_config_userconfig'], `R15 no npm_config_* but the two empty files on npm ${c.a.join(' ')}`);
+    assert.notEqual(c.cfg.npm_config_userconfig, c.cfg.npm_config_globalconfig, 'R15 two files');
+    for (const f of Object.values(c.cfg)) assert.equal(read(f), '', `R15 ${f} is empty`);
+  }
 });
