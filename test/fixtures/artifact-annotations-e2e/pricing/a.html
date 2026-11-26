@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="copy" content="draft-1"><title>Pricing A</title>
+<style>
+  body { margin: 0; font: 16px/1.4 sans-serif; background: #fff; color: #111; }
+  /* at fixed places and sizes, so a click inside the frame lands where the test aims, and the ring the
+     kit's picture draws round an anchor sits where the test looks for it */
+  #to-tab2, #to-plain, #to-b, #plan-monthly, #annual-price { position: absolute; display: block; box-sizing: border-box; margin: 0; }
+  #to-tab2 { left: 40px; top: 40px; width: 160px; height: 32px; }
+  #to-plain { left: 220px; top: 40px; width: 160px; height: 32px; }
+  #to-b { left: 400px; top: 40px; width: 160px; height: 32px; }
+  #plan-monthly { left: 80px; top: 200px; width: 200px; height: 80px; background: #dde3f0; }
+  #annual-price { left: 80px; top: 200px; width: 200px; height: 80px; background: #1a7f37; color: #fff; }
+  /* the #tab2 view: the monthly plan hidden, the annual price shown (a tab with its own URL) */
+  body.tab2 #plan-monthly { display: none; }
+  body:not(.tab2) #annual-price { display: none; }
+</style></head>
+<body>
+<a id="to-tab2" href="#tab2">Annual</a>
+<a id="to-plain" href="a.html">Monthly</a>
+<a id="to-b" href="b.html">Questions</a>
+<div id="plan-monthly">Monthly plan</div>
+<div id="annual-price">Annual price</div>
+<script>
+// The view follows the hash.
+const view = () => document.body.classList.toggle('tab2', location.hash === '#tab2');
+view();
+// Where this page is, which copy it is, and where its elements are in its own viewport, told to the
+// dashboard's window (the frame's origin is opaque, so the test reads nothing in here itself): on load,
+// once drawn, on a resize and on a hash move.
+const IDS = ['to-tab2', 'to-plain', 'to-b', 'plan-monthly', 'annual-price'];
+const rects = () => Object.fromEntries(IDS.map((id) => { const r = document.getElementById(id).getBoundingClientRect(); return [id, { x: r.left, y: r.top, w: r.width, h: r.height }]; }));
+const copy = document.querySelector('meta[name=copy]').content;
+const say = () => parent.postMessage({ own: 'at', page: 'pricing/a.html', hash: location.hash, copy, rects: rects() }, '*');
+addEventListener('load', () => { say(); requestAnimationFrame(() => requestAnimationFrame(say)); });
+addEventListener('resize', say);
+addEventListener('hashchange', () => { view(); requestAnimationFrame(say); });
+</script>
+</body></html>

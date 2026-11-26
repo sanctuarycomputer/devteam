@@ -18,8 +18,8 @@ handoverFile();
 const mustRun = !!process.env.CI && Number(process.versions.node.split('.')[0]) >= 22;
 const skip = canDrive ? false : 'needs Chrome and Node 22+';
 // The checks run as four chains at once, one per project (each its own daemon), checks in order within
-// a chain: cA's (C23, C15, C20, W1, C21, RF3), cB's (C18, C19, PC1, PC4, PC5, RF4, T4-1, T4-3, PC3, T4-2), cC's (C24, T6-3, RF2, RL0, RL1, RL2, RL3)
-// and cD's (C12, C13, C14, C16, PC6). onA, onB, onC and onD add a check.
+// a chain: cA's (C23, C15, C20, W1, C21, RF3, KD2, KD5, KD3, KD4, KD9, KD10, KD11), cB's (C18, C19, PC1, PC4, PC5, RF4, T4-1, T4-3, KD6, PC3, T4-2),
+// cC's (C24, T6-3, RF2, RL0, RL1, RL2, KD8, KD8b, RL3) and cD's (C12, C13, C14, KD1, KD7, C16, PC6). onA, onB, onC and onD add a check.
 const cAChecks = [], cBChecks = [], cCChecks = [], cDChecks = [];
 const onA = (name, fn) => cAChecks.push([name, fn]);
 const onB = (name, fn) => cBChecks.push([name, fn]);
@@ -174,10 +174,23 @@ const signInPosts = () => { const p = site.posts().paths; return { login: p['/lo
 // the answer (close: the owner's Done or Can't right now, or the supervisor's withdraw); no secret in
 // any scan from 2 s after the answer on, and none after the first clean one, through wait and once
 // after. The answer's time is its log line's at. { w, ms }: wait's output, and answer to first clean.
-async function closeAndScan(P, q, close, label) {
+// v: the owner's view socket, still open. The close's steps are timed from the answer too, each as a
+// 50 ms poll (running from before the answer command) first saw it, so a miss names its slow step: the view's bye (the daemon took the close,
+// after its 500 ms watch), the old Chrome's exit (Browser.close until it is gone; the session files
+// are deleted only after), and the first clean scan (the process wait and the delete).
+async function closeAndScan(P, q, close, label, v, before) {
   await codeOnDisk(P, site.code);
+  const oldPid = readState(P)?.chrome_pid;
+  assert.ok(Number.isInteger(oldPid) && alive(oldPid), `${label}: a live Chrome before the answer (state.json's chrome_pid ${oldPid})`);
   const loop = scanLoop(P, [site.password, site.code]);
-  let w, answerAt, clean;
+  let w, answerAt, clean, byeAt = null, goneAt = null;
+  const mark = () => {
+    const now = Date.now();
+    if (byeAt === null && v.msgs.some((m) => m.t === 'bye')) byeAt = now;
+    if (goneAt === null && !alive(oldPid)) goneAt = now;
+  };
+  if (before) { try { await before(oldPid); } catch (e) { await loop.stop(); throw e; } } // kit-877: KD1 freezes Chrome's helpers here, with the scan running (stopped if that throws)
+  const tick = setInterval(mark, 50); // from before the answer command, so a bye or exit during it is seen
   try {
     await close();
     const l = logAt(P, q);
@@ -190,16 +203,70 @@ async function closeAndScan(P, q, close, label) {
     }
     clean = loop.firstCleanAfter(answerAt);
     w = await waitJson(P);
-  } finally { await loop.stop(); }
+  } finally { mark(); clearInterval(tick); await loop.stop(); }
   const ms = clean - answerAt;
   let load = '?';
   try { load = fs.readFileSync('/proc/loadavg', 'utf8').split(' ').slice(0, 3).join(' '); } catch {}
   const took = loop.scans.map((s) => s.ms);
   const first = loop.scans.find((s) => s.at === clean);
-  console.log(`# kit-67 ${label}: answer to first clean scan ${ms} ms (by its end ${clean + first.ms - answerAt} ms; ${loop.scans.length} scans, each ${Math.min(...took)}-${Math.max(...took)} ms; load ${load})`);
+  const since = (t) => (t === null ? 'not seen' : `${t - answerAt} ms`);
+  const steps = `from the answer: the view's bye ${since(byeAt)} (the daemon took the close), the old Chrome (pid ${oldPid}) gone ${since(goneAt)} (Browser.close until its exit), the first clean scan ${ms} ms (the process wait and the delete)`;
+  console.log(`# kit-67 ${label}: answer to first clean scan ${ms} ms (by its end ${clean + first.ms - answerAt} ms; ${loop.scans.length} scans, each ${Math.min(...took)}-${Math.max(...took)} ms; load ${load}); ${steps}`);
   const late = loop.scans.filter((s) => s.found.length && (s.at >= answerAt + 2000 || s.at >= clean));
-  assert.deepEqual(late.map((s) => ({ after: s.at - answerAt, found: s.found })), [], `${label}: a secret on disk 2 s after the answer, or after a clean scan`);
+  assert.deepEqual(late.map((s) => ({ after: s.at - answerAt, found: s.found })), [], `${label}: a secret on disk 2 s after the answer, or after a clean scan; ${steps}; load ${load}`);
   return { w, ms };
+}
+// kit-877: a Chrome too slow to close itself, made so on purpose. freezeHelpers SIGSTOPs every process
+// of Chrome's group (pgid chromePid) but Chrome itself and its network service (which answers the
+// cookie read), and returns their pids; thaw SIGKILLs those still alive and still in that group (a pid
+// that left it, or was reused, is left alone). Each check that freezes thaws in a finally and then
+// waits for every frozen pid to be gone, so no stopped process is left on the machine.
+const pgOf = (pid) => { try { const st = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[2]); } catch { return null; } };
+const cmdOf = (pid) => { try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8'); } catch { return ''; } };
+function freezeHelpers(chromePid) {
+  assert.ok(Number.isInteger(chromePid) && alive(chromePid), `a live Chrome to freeze the helpers of (${chromePid})`);
+  const pids = fs.readdirSync('/proc').filter((d) => /^\d+$/.test(d)).map(Number).filter((p) => p !== chromePid && pgOf(p) === chromePid && !cmdOf(p).includes('NetworkService'));
+  assert.ok(pids.length, "Chrome's helpers to freeze");
+  for (const p of pids) { try { process.kill(p, 'SIGSTOP'); } catch {} }
+  return pids;
+}
+const thaw = (pids, group) => { for (const p of pids) if (alive(p) && pgOf(p) === group) { try { process.kill(p, 'SIGKILL'); } catch {} } };
+const thawed = (pids, label) => until(() => pids.every((p) => !alive(p)), 5000, `${label}: every frozen helper gone`);
+// kit-877: the typed text on disk, then the daemon killed -9 (its Chrome left to the reaper, with its
+// helpers frozen first when freeze), and nothing else run: a scan clean within 8 s of the kill, and
+// none found after. Then the close is handled as any killed daemon's: a withdraw and the next start.
+// The login is on a site of its own (kdSite, allowed by this start only): cD's C12 and C13 count every
+// sign-in POST the shared site sees as a replay, and the chains run at once.
+let kdSite;
+before(async () => { kdSite = await startSites(); });
+after(async () => { await kdSite?.close(); });
+async function killedMidHandover(P, label, freeze) {
+  const S = kdSite;
+  await ok(P, ['stop']);
+  await ok(P, ['start'], { DEVTEAM_TEST_BROWSER_ALLOW: `${site.port},${S2.port},${S3.port},${S.port}` });
+  await ok(P, ['open', `${S.origin}/login`]);
+  const q = await askHandover(P);
+  const v = await ownerLogIn(P, { S, to: `${S.origin}/account` });
+  v.close();
+  await codeOnDisk(P, S.code);
+  const group = readState(P).chrome_pid;
+  let frozen = [];
+  const loop = scanLoop(P, [S.password, S.code]);
+  let killedAt;
+  try {
+    if (freeze) frozen = freezeHelpers(group);
+    await killDaemon(P);
+    killedAt = Date.now();
+    await until(() => loop.firstCleanAfter(killedAt) !== null, 8000, `${label}: a clean scan after the kill`);
+    await sleep(2000);
+  } finally { await loop.stop(); thaw(frozen, group); }
+  await thawed(frozen, label);
+  const clean = loop.firstCleanAfter(killedAt);
+  console.log(`# kit-877 ${label}: kill to first clean scan ${clean - killedAt} ms`);
+  assert.deepEqual(loop.scans.filter((x) => x.at >= clean && x.found.length).map((x) => ({ after: x.at - killedAt, found: x.found })), [], `${label}: a secret back on disk after a clean scan`);
+  await withdraw(P, q);
+  await ok(P, ['start']);
+  entryIs(P, q, 'withdrawn');
 }
 // The at of the line that closed question q: its answer (an owner line) or its status set line.
 const logAt = (P, q) => [...answerLines(P), ...closeLines(P)].filter((l) => l.id === q).map((l) => l.at).sort().pop();
@@ -214,7 +281,7 @@ onD('C12 a login over the view, then Done: the password and code leave the disk 
   await ok(P, ['open', `${site.origin}/login`]);
   const q = await askHandover(P);
   const v = await ownerLogIn(P, { to: `${site.origin}/account` });
-  const { w } = await closeAndScan(P, q, async () => { const a = await owner(P, ['answer', q, '--choice', 'Done']); assert.equal(a.status, 0, a.err || a.out); }, 'C12');
+  const { w } = await closeAndScan(P, q, async () => { const a = await owner(P, ['answer', q, '--choice', 'Done']); assert.equal(a.status, 0, a.err || a.out); }, 'C12', v);
   v.close();
   assert.deepEqual([w.qid, w.outcome, w.reopened], [q, 'done', [`${site.origin}/account`]]);
   const s = await ok(P, ['snapshot']);
@@ -234,7 +301,7 @@ onD('C13 the 200-page variant: the form page (/2fa?variant=•••) is the las
     posts = signInPosts();
     const a = await owner(P, ['answer', q, '--choice', 'Done']);
     assert.equal(a.status, 0, a.err || a.out);
-  }, 'C13');
+  }, 'C13', v);
   v.close();
   assert.deepEqual([w.qid, w.outcome, w.reopened], [q, 'done', [`${site.origin}/2fa?variant=•••`]]);
   assert.deepEqual(signInPosts(), posts, 'a POST was replayed');
@@ -253,7 +320,7 @@ onD('C14 declined and withdrawn after a login: the secrets leave the disk, no ta
     await ok(P, ['open', `${site.origin}/login`]);
     const q = await askHandover(P);
     const v = await ownerLogIn(P, { to: `${site.origin}/account` });
-    const { w } = await closeAndScan(P, q, close(q), label);
+    const { w } = await closeAndScan(P, q, close(q), label, v);
     v.close();
     assert.deepEqual([w.qid, w.outcome, w.reopened], [q, outcome, undefined], label);
     assert.deepEqual(await tabUrls(P), ['about:blank'], label);
@@ -262,6 +329,43 @@ onD('C14 declined and withdrawn after a login: the secrets leave the disk, no ta
     const s = await ok(P, ['snapshot']);
     assert.ok(s.out.includes(SIGNED), `${label}: the session was lost: ${s.out.slice(0, 300)}`);
   }
+});
+
+onD('KD1 a close with Chrome\'s helpers frozen (too slow to close itself): the password and code leave the disk within 2 s of Done, and the page reopens signed in', async () => {
+  const P = cD();
+  await ok(P, ['open', `${site.origin}/login`]);
+  const q = await askHandover(P);
+  const v = await ownerLogIn(P, { to: `${site.origin}/account` });
+  let frozen = [], group = null;
+  try {
+    const { w } = await closeAndScan(P, q, async () => { const a = await owner(P, ['answer', q, '--choice', 'Done']); assert.equal(a.status, 0, a.err || a.out); }, 'KD1', v, (oldPid) => { group = oldPid; frozen = freezeHelpers(oldPid); });
+    assert.deepEqual([w.qid, w.outcome, w.reopened], [q, 'done', [`${site.origin}/account`]]);
+    const s = await ok(P, ['snapshot']);
+    assert.ok(s.out.includes(SIGNED), `KD1: the page reopened isn't signed in: ${s.out.slice(0, 300)}`);
+  } finally { v.close(); thaw(frozen, group); }
+  await thawed(frozen, 'KD1');
+});
+
+onD('KD7 a late close (held past its deadline) with Chrome\'s helpers frozen: the cookies are still read first, and the page reopens signed in', async () => {
+  const P = cD();
+  await ok(P, ['stop']);
+  await ok(P, ['start'], { DEVTEAM_TEST_BROWSER_CLOSE_DELAY_MS: '1500' });
+  await ok(P, ['open', `${site.origin}/login`]);
+  const q = await askHandover(P);
+  const v = await ownerLogIn(P, { to: `${site.origin}/account` });
+  const group = readState(P).chrome_pid;
+  let frozen = [];
+  try {
+    frozen = freezeHelpers(group);
+    const a = await owner(P, ['answer', q, '--choice', 'Done']);
+    assert.equal(a.status, 0, a.err || a.out);
+    const w = await waitJson(P);
+    assert.deepEqual([w.qid, w.outcome], [q, 'done']);
+    const s = await ok(P, ['snapshot']);
+    assert.ok(s.out.includes(SIGNED), `KD7: the page reopened isn't signed in: ${s.out.slice(0, 300)}`);
+  } finally { v.close(); thaw(frozen, group); }
+  await thawed(frozen, 'KD7');
+  await ok(P, ['stop']);
 });
 
 onD('C16 a daemon killed mid-handover: wait brings it and the view back under the same name, and Done reopens the page by GET', async () => {
@@ -400,6 +504,100 @@ onA('RF3 a ledger entry dated ahead, and a close dated ahead of the clock: each 
   await sleep(1500);
   assert.equal(entriesFor(P, a.id).length, 2, 'a new daemon handled (a) again');
   assert.equal(entriesFor(P, b.id).length, 1, 'a new daemon handled (b) again');
+});
+
+onA('KD2 a daemon killed mid-handover: what was typed leaves the disk within 8 s of the kill, with nothing else run', () => killedMidHandover(cA(), 'KD2', false));
+
+onA('KD5 a daemon killed mid-handover with its Chrome\'s helpers frozen (its own shutdown stalls): what was typed leaves the disk within 8 s of the kill', () => killedMidHandover(cA(), 'KD5', true));
+
+// kit-877: a failed delete is said, never swallowed. Every delete fails (the hook); Chrome has written
+// its session files first.
+const DELETE_FAILS = { DEVTEAM_TEST_BROWSER_DELETE_FAILS: '1' };
+const LAST_DELETE = /^last error: \d{4}-\d\d-\d\dT\S+ browser: couldn't delete \S.* \(EACCES\): Chrome would bring its tabs back$/m;
+onA('KD3 a failed delete as the daemon shuts down (its Chrome killed -9; the reaper off) is said by the offline status', async () => {
+  const P = cA();
+  await ok(P, ['stop']);
+  await ok(P, ['start'], { ...DELETE_FAILS, DEVTEAM_TEST_BROWSER_REAP: '0' });
+  await ok(P, ['open', `${site.origin}/record`]);
+  const st = readState(P);
+  await until(() => fs.existsSync(path.join(P.profile, 'Default', 'Sessions')), 15000, "Chrome's session folder");
+  process.kill(-st.chrome_pid, 'SIGKILL');
+  await until(() => !alive(st.daemon_pid), 20000, 'the daemon gone');
+  const off = await ok(P, ['status']);
+  assert.match(off.out, LAST_DELETE, off.out);
+  await ok(P, ['start']);
+  await ok(P, ['stop']);
+});
+
+onA('KD4 a failed delete after the daemon is killed -9 is said by the offline status (the reaper)', async () => {
+  const P = cA();
+  await ok(P, ['stop']);
+  await ok(P, ['start'], DELETE_FAILS);
+  await ok(P, ['open', `${site.origin}/record`]);
+  await until(() => fs.existsSync(path.join(P.profile, 'Default', 'Sessions')), 15000, "Chrome's session folder");
+  await killDaemon(P);
+  const off = await until(async () => { const r = await ok(P, ['status']); return /last error/.test(r.out) ? r : null; }, 10000, 'KD4: the offline status says the failed delete');
+  assert.match(off.out, LAST_DELETE, off.out);
+  await ok(P, ['start']);
+  await ok(P, ['stop']);
+});
+
+// kit-877 (ruling m-20261125-103500671): a clean stop deleted the session files itself and told its
+// reaper so; nothing of the old daemon's touches what comes after it. A file in Default/Sessions
+// planted right after the stop (as a start's Chrome would write one) is still there 3 s later.
+onA('KD9 a clean stop: its reaper stands down, so a file written on the profile right after the stop is kept', async () => {
+  const P = cA();
+  await ok(P, ['start']);
+  await ok(P, ['open', `${site.origin}/record`]);
+  await until(() => fs.existsSync(path.join(P.profile, 'Default', 'Sessions')), 15000, "Chrome's session folder");
+  await ok(P, ['stop']);
+  const f = path.join(P.profile, 'Default', 'Sessions', 'kd9-kept');
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f, 'x');
+  try {
+    await sleep(3000); // a reaper that ran would have deleted it within about 1 s (a node start)
+    assert.ok(fs.existsSync(f), "KD9: the old daemon's reaper deleted a file written after a clean stop");
+  } finally { fs.rmSync(f, { force: true }); }
+});
+
+// kit-877 (m-20261125-140559755): the four chains, like two projects on one box, pick view ports blind
+// to each other; a start whose bind is taken retries on a random free port, up to four tries in all.
+// The hook fails the first three binds and lists their ports; the start comes up on the fourth. kit-923:
+// each try is a port of the view range that no earlier try lost (a lowest-free retry tries a lost one again).
+const lostPorts = (marker) => fs.readFileSync(marker, 'utf8').split('\n').filter(Boolean).map(Number);
+onA('KD10 a start whose first three binds are taken still comes up, each try on a port no earlier try lost', async () => {
+  const P = cA();
+  const marker = path.join(P.home, 'kd10-bind-fails');
+  fs.rmSync(marker, { force: true });
+  await ok(P, ['stop']);
+  try {
+    await ok(P, ['start'], { DEVTEAM_TEST_BROWSER_BIND_FAIL: marker, DEVTEAM_TEST_BROWSER_BIND_FAIL_N: '3' });
+    const tried = [...lostPorts(marker), readState(P).view_port];
+    assert.equal(tried.length, 4, `KD10: three binds failed first, then one came up: ${tried.join(', ')}`);
+    for (const p of tried) assert.ok(p >= 4400 && p <= 4499, `KD10: port ${p} is outside the view range 4400-4499: ${tried.join(', ')}`);
+    assert.equal(new Set(tried).size, 4, `KD10: a retry tried a port this start had lost: ${tried.join(', ')}`);
+    assert.ok(alive(readState(P).daemon_pid), 'KD10: the daemon is up');
+  } finally { fs.rmSync(marker, { force: true }); }
+  await ok(P, ['stop']);
+});
+
+// kit-923: with no port left to retry on but those this start lost, the start fails in words and never
+// tries a lost one again. The pool hook narrows the retries to 4498 and 4499; the first try and both of
+// theirs fail, so none is left.
+onA('KD11 a start that has lost every port it could retry on fails in words, never on a lost port again', async () => {
+  const P = cA();
+  const marker = path.join(P.home, 'kd11-bind-fails');
+  fs.rmSync(marker, { force: true });
+  await ok(P, ['stop']);
+  try {
+    const r = await browser(P, ['start'], { DEVTEAM_TEST_BROWSER_BIND_FAIL: marker, DEVTEAM_TEST_BROWSER_BIND_FAIL_N: '3', DEVTEAM_TEST_BROWSER_RETRY_POOL: '4498,4499' });
+    const lost = lostPorts(marker);
+    assert.notEqual(r.status, 0, `KD11: the start came up after losing ${lost.join(', ')}: ${r.out}`);
+    assert.match(r.err, /devteam: browser: no free view port left in 4400-4499 to retry on: this start lost \d+, 449[89], 449[89]\b/, r.err);
+    assert.deepEqual([...lost.slice(1)].sort(), [4498, 4499], `KD11: the retries were not the pool's two ports: ${lost.join(', ')}`);
+  } finally { fs.rmSync(marker, { force: true }); }
+  await ok(P, ['start']);
+  await ok(P, ['stop']);
 });
 
 // --- cB: DEVTEAM_TEST_BROWSER_WATCH_HANDLE=0, so a close is handled only by a verb's pre-verb read or
@@ -725,6 +923,7 @@ onB('T4-3 a close that fails shuts the daemon down, and the offline status says 
   await until(() => !alive(st.daemon_pid), 20000, 'the daemon gone');
   const off = await ok(P, ['status']);
   assert.match(off.out, /^last error: \d{4}-\d\d-\d\dT\S+ browser: couldn't delete \S.* \(EACCES\): Chrome would bring its tabs back$/m, off.out);
+  assert.equal(off.out.split("couldn't delete").length - 1, 1, `kit-877: the shutdown added to a reason that already said the delete failed: ${off.out}`);
   assert.equal(entriesFor(P, q).length, 0, 'a failed close wrote its entry');
   // the next start handles the close, and the old failure is no longer said
   await ok(P, ['start']);
@@ -734,6 +933,39 @@ onB('T4-3 a close that fails shuts the daemon down, and the offline status says 
   assert.doesNotMatch((await ok(P, ['status'])).out, /last error/);
   await ok(P, ['stop']);
   assert.doesNotMatch((await ok(P, ['status'])).out, /last error/);
+});
+
+// kit-877 KD6's site: /set writes a sign-in token to localStorage; any other path only reads it and says
+// whether it is there.
+let lsSite;
+before(async () => {
+  lsSite = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html', 'cache-control': 'no-store' });
+    if (req.url === '/set') return res.end('<!doctype html><title>set</title><script>localStorage.setItem("signin", "tok-kd6")</script><h1>token written</h1>');
+    res.end('<!doctype html><title>check</title><h1 id="h">?</h1><script>document.getElementById("h").textContent = localStorage.getItem("signin") === "tok-kd6" ? "token present" : "no token"</script>');
+  });
+  await new Promise((r) => lsSite.listen(0, '127.0.0.1', r));
+});
+after(async () => { lsSite?.closeAllConnections?.(); await new Promise((r) => (lsSite ? lsSite.close(r) : r())); });
+
+onB('KD6 a sign-in kept in localStorage, written 2 s before Done, is still there after the close', async () => {
+  const P = cB();
+  const ls = `http://127.0.0.1:${lsSite.address().port}`;
+  await ok(P, ['stop']);
+  await ok(P, ['start'], { DEVTEAM_TEST_BROWSER_ALLOW: `${site.port},${lsSite.address().port}` });
+  await ok(P, ['open', `${ls}/set`]);
+  const wrote = Date.now();
+  assert.ok((await ok(P, ['snapshot'])).out.includes('token written'));
+  await ok(P, ['open', `${ls}/home`]); // the reopen after Done must not write the token again
+  const q = await askHandover(P);
+  await sleep(Math.max(0, wrote + 2000 - Date.now()));
+  const a = await owner(P, ['answer', q, '--choice', 'Done']);
+  assert.equal(a.status, 0, a.err || a.out);
+  assert.equal((await waitJson(P)).outcome, 'done');
+  await ok(P, ['open', `${ls}/check`]);
+  const c = await ok(P, ['snapshot']);
+  assert.ok(c.out.includes('token present'), `KD6: the localStorage sign-in was lost: ${c.out.slice(0, 300)}`);
+  await ok(P, ['stop']);
 });
 
 onB('PC3 a close that never finishes (the daemon killed inside it): no socket is served meanwhile, and the next start ends it', async () => {
@@ -958,6 +1190,58 @@ onC('RL2 failed reads held to the limit: the daemon shuts down with its reason, 
   await withdraw(P, q);
   assert.equal((await waitJson(P)).outcome, 'withdrawn');
   await ok(P, ['stop']);
+});
+
+// kit-877: RL2's shutdown (the log unreadable during a handover) with every delete failing: the offline
+// status's last error starts with RL2's reason and also says the delete failed, once. KD8 with the
+// reaper off (the shutdown's own line); KD8b with it on, read once the reaper has ended (its done hook).
+async function unreadableAndUndeletable(P, label, hooks) {
+  const fails = path.join(P.home, 'view-read-fails');
+  await ok(P, ['stop']);
+  await ok(P, ['start'], READ(P, 1500, { DEVTEAM_TEST_BROWSER_DELETE_FAILS: '1', ...hooks }));
+  const st = readState(P);
+  await ok(P, ['open', `${site.origin}/record`]);
+  await sessionHolds(P, '/record');
+  const q = await askHandover(P);
+  const v = await nextViewer(P);
+  await v.waitFor((m) => m.t === 'held' && m.qid === q, 5000);
+  fs.writeFileSync(fails, '');
+  const m = await v.waitFor((o) => o.t === 'bye', 15000);
+  assert.match(m.why, UNREADABLE, m.why);
+  await until(() => !alive(st.daemon_pid), 20000, `${label}: the daemon gone`);
+  v.close();
+  fs.rmSync(fails, { force: true });
+  assert.deepEqual(profilePids(P), [], `${label}: a Chrome left on the profile`);
+  return q;
+}
+// the whole line: RL2's reason whole, the join once, the delete's message whole (task 6: a rewrite that cuts
+// the reason to fit, as a reaper joining twice would, is caught here, not by the count alone)
+const READ_THEN_DELETE = /^last error: \S+ browser: couldn't read the log during a handover, so the session was ended; the session files stay: browser: couldn't delete \S.* \(EACCES\): Chrome would bring its tabs back$/m; // a path may hold a space (Current Session)
+const closeAfter = async (P, q) => {
+  await ok(P, ['start']);
+  await freshViewer(P);
+  await withdraw(P, q);
+  assert.equal((await waitJson(P)).outcome, 'withdrawn');
+  await ok(P, ['stop']);
+};
+onC('KD8 a failed delete at a shutdown that has its own reason (RL2\'s, the reaper off) is said after that reason', async () => {
+  const P = cC();
+  const q = await unreadableAndUndeletable(P, 'KD8', { DEVTEAM_TEST_BROWSER_REAP: '0' });
+  const off = await ok(P, ['status']);
+  assert.match(off.out, READ_THEN_DELETE, off.out);
+  await closeAfter(P, q);
+});
+
+onC('KD8b the same with the reaper on: its own failed delete adds nothing, so the line says the delete once', async () => {
+  const P = cC();
+  const done = path.join(P.home, 'reap-done');
+  fs.rmSync(done, { force: true });
+  const q = await unreadableAndUndeletable(P, 'KD8b', { DEVTEAM_TEST_BROWSER_REAP_DONE: done });
+  await until(() => fs.existsSync(done) && fs.readFileSync(done, 'utf8').includes('done'), 15000, 'KD8b: the reaper done');
+  const off = await ok(P, ['status']);
+  assert.match(off.out, READ_THEN_DELETE, off.out);
+  assert.equal(off.out.split("couldn't delete").length - 1, 1, `KD8b: the delete said more than once: ${off.out}`);
+  await closeAfter(P, q);
 });
 
 onC('RL3 no handover known: an unreadable log changes nothing, frames keep coming and input lands', async () => {

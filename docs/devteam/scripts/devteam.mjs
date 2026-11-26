@@ -1069,19 +1069,48 @@ function loadSettings({ origin = false, until = null } = {}) {
     };
     // git's own words: its first fatal line (a missing remote's last line is only "and the repository exists.")
     const why = (r) => { const said = String(r.stderr ?? '').split('\n').map((l) => l.trim()).filter(Boolean); return r.status === 124 ? 'it did not answer in time' : (said.find((l) => /^fatal: /.test(l)) ?? said.at(-1) ?? `git exited ${r.status}`).replace(/^fatal: /, '').slice(0, 200); };
-    const ls = toOrigin(['ls-remote', '--symref', 'origin', 'HEAD']);
-    if (ls.status !== 0) no(why(ls));
-    const rows = String(ls.stdout ?? '').split('\n').map((l) => l.split('\t'));
-    const branch = rows.find(([a, b]) => b === 'HEAD' && a.startsWith('ref: refs/heads/'))?.[0].slice('ref: refs/heads/'.length);
-    const sha = rows.find(([a, b]) => b === 'HEAD' && /^[0-9a-f]{40,64}$/.test(a))?.[0];
-    if (!branch || !sha) no('it names no default branch');
-    // always fetched, into the tracking ref by name: a new worktree is based on origin/<main>, so it
-    // is put back where origin has it before anything reads it
-    const f = toOrigin(['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
-    if (f.status !== 0) no(why(f));
     // read here only, never fetched on the side (a partial clone's lazy fetch would run outside the deadline)
     const local = (args) => responderGit(args, mainRoot, { GIT_NO_LAZY_FETCH: '1' });
-    if (local(['cat-file', '-e', `${sha}^{commit}`]).status !== 0) no(`${sha.slice(0, 8)} did not arrive`);
+    let branch;
+    let sha;
+    for (let tries = 1; ; tries += 1) {
+      // the tracking refs before origin is read: which one is main's, origin says
+      const was = new Map(String(local(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/remotes/origin/']).stdout ?? '').split('\n').map((l) => l.split(' ')));
+      const ls = toOrigin(['ls-remote', '--symref', 'origin', 'HEAD']);
+      if (ls.status !== 0) no(why(ls));
+      const rows = String(ls.stdout ?? '').split('\n').map((l) => l.split('\t'));
+      branch = rows.find(([a, b]) => b === 'HEAD' && a.startsWith('ref: refs/heads/'))?.[0].slice('ref: refs/heads/'.length);
+      sha = rows.find(([a, b]) => b === 'HEAD' && /^[0-9a-f]{40,64}$/.test(a))?.[0];
+      if (!branch || !sha) no('it names no default branch');
+      // Always put where origin has it, before anything reads it. Into no ref: a fetch writes through a
+      // symbolic tracking ref. Then by sha, not following one, and only from what it was before origin
+      // was read: a push that moved it meanwhile isn't set back, and origin is read again (kit-856).
+      const f = toOrigin(['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--refmap=', 'origin', `refs/heads/${branch}`]);
+      if (f.status !== 0) no(why(f));
+      if (local(['cat-file', '-e', `${sha}^{commit}`]).status !== 0) no(`${sha.slice(0, 8)} did not arrive`);
+      const tracking = `refs/remotes/origin/${branch}`;
+      const isAt = () => { const now = local(['show-ref', '--verify', '--hash', tracking]); return now.status === 0 ? now.stdout.trim() : '0'.repeat(sha.length); };
+      if (isAt() === sha) break; // already right: a lock left on it stops nothing
+      const old = was.get(tracking) ?? '0'.repeat(sha.length);
+      // inside the deadline too: git waits on a lock left on the ref as long as core.filesRefLockTimeout says (final-1b F3)
+      // A ref lock another git process holds (two starts at once, each setting it: kit-910) goes in
+      // moments, but git gives up on it after 100 ms: while git says the lock file exists and the ref is
+      // still as it was, try again, for 5 s at most and never past a second before the deadline, so a
+      // lock no one lets go refuses in git's own words. Any other failure refuses on the first try. Git
+      // speaks C here (LC_ALL), so the lock's words are the same under any locale.
+      const lockedUntil = Math.min(Date.now() + 5000, end - 1000);
+      let set;
+      for (;;) {
+        const ms = Math.floor(end - Date.now());
+        set = ms < 100 ? { status: 124, stderr: '' } : spawnSync('git', [...RESPONDER_GIT, 'update-ref', '--no-deref', tracking, sha, old], { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: ms, env: { ...process.env, GIT_NO_LAZY_FETCH: '1', LC_ALL: 'C' } });
+        if (set.status === null) set.status = 124;
+        if (set.status === 0 || !/Unable to create '[^']*\.lock': File exists/.test(set.stderr ?? '') || Date.now() >= lockedUntil || isAt() !== old) break;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      }
+      if (set.status === 0) break;
+      if (isAt() === old) no(why(set));
+      if (tries === 3) no(`origin/${branch} here kept moving while it was read`);
+    }
     const ref = `origin's ${branch} (${sha.slice(0, 8)})`;
     // before settings.md first lands on main (adoption), the working tree is all there is, as below;
     // only a settings.md git says isn't there, never one git failed to read
@@ -2455,23 +2484,34 @@ function fetchLinkMain(R, refusing = 'refusing to judge against a stale main', {
     if (r.status !== 0) no(r.status === 124 ? 'it did not answer in time' : redactUrl(firstLine(r.stderr).replace(/^fatal: /, '')) || `exit ${r.status}`);
     return String(r.stdout ?? '');
   };
-  const at = {};
-  // ls-remote matches a pattern against the end of a ref's name, so only an exact name counts
-  for (const [sha, ref] of toOrigin(['ls-remote', 'origin', `refs/heads/${rb}`, `refs/heads/${start}`]).split('\n').map((l) => l.split('\t'))) {
-    for (const b of [rb, start]) if (/^[0-9a-f]{40,64}$/.test(sha) && ref === `refs/heads/${b}`) at[b] = sha;
+  // by its exact name: rev-parse would fall back to a branch called refs/remotes/origin/<b>
+  const tracked = (b) => { const r = responderGit(['show-ref', '--verify', '--hash', `refs/remotes/origin/${b}`], R.root); return r.status === 0 ? r.stdout.trim() : null; };
+  for (let tries = 1; ; tries += 1) {
+    // Read before origin is: a session here that pushes meanwhile moves its tracking ref after that,
+    // so setting it from this value refuses, and origin is read again (kit-856).
+    const was = { [rb]: tracked(rb), [start]: tracked(start) };
+    const at = {};
+    // ls-remote matches a pattern against the end of a ref's name, so only an exact name counts
+    for (const [sha, ref] of toOrigin(['ls-remote', 'origin', `refs/heads/${rb}`, `refs/heads/${start}`]).split('\n').map((l) => l.split('\t'))) {
+      for (const b of [rb, start]) if (/^[0-9a-f]{40,64}$/.test(sha) && ref === `refs/heads/${b}`) at[b] = sha;
+    }
+    if (!at[rb]) no(`origin has no ${rb}`);
+    const held = [rb, start].filter((b) => at[b]);
+    // Into no ref: a fetch writes through a symbolic tracking ref, moving the branch it names. The
+    // tracking refs are set below, by sha, without following one.
+    toOrigin(['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--refmap=', 'origin', ...held.map((b) => `refs/heads/${b}`)]);
+    for (const b of held) if (responderGit(['cat-file', '-e', `${at[b]}^{commit}`], R.root, { GIT_NO_LAZY_FETCH: '1' }).status !== 0) no(`${at[b].slice(0, 8)} did not arrive`);
+    const moved = held.find((b) => {
+      const set = responderGit(['update-ref', '--no-deref', `refs/remotes/origin/${b}`, at[b], was[b] ?? '0'.repeat(at[b].length)], R.root);
+      if (set.status !== 0 && tracked(b) === was[b]) no(redactUrl(firstLine(set.stderr).replace(/^fatal: /, '')) || `exit ${set.status}`);
+      return set.status !== 0;
+    });
+    if (!moved) {
+      R.resetCaches();
+      return { main: at[rb], branch: at[start] ?? null };
+    }
+    if (tries === 3) no(`origin/${moved} here kept moving while it was read`);
   }
-  if (!at[rb]) no(`origin has no ${rb}`);
-  const held = [rb, start].filter((b) => at[b]);
-  // Into no ref: a fetch writes through a symbolic tracking ref, moving the branch it names. The
-  // tracking refs are set below, by sha, without following one.
-  toOrigin(['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--refmap=', 'origin', ...held.map((b) => `refs/heads/${b}`)]);
-  for (const b of held) if (responderGit(['cat-file', '-e', `${at[b]}^{commit}`], R.root, { GIT_NO_LAZY_FETCH: '1' }).status !== 0) no(`${at[b].slice(0, 8)} did not arrive`);
-  for (const b of held) {
-    const set = responderGit(['update-ref', '--no-deref', `refs/remotes/origin/${b}`, at[b]], R.root);
-    if (set.status !== 0) no(redactUrl(firstLine(set.stderr).replace(/^fatal: /, '')) || `exit ${set.status}`);
-  }
-  R.resetCaches();
-  return { main: at[rb], branch: at[start] ?? null };
 }
 // In a read-only command, full ref names resolve from one for-each-ref listing (a dashboard
 // refresh asked git about each ticket branch separately: ~90 processes). Anything else, and every
@@ -3141,9 +3181,27 @@ function cmdLogSync() {
   // it, whether its PR is still open or was squash-merged and the branch kept. The extended branch
   // takes main in by a merge (still a fast-forward for the branch), so its PR is never behind and
   // carries only lines main doesn't have. A branch deleted on the forge leaves a stale
-  // origin/chore-log, dropped here, and the sync starts from main.
+  // origin/chore-log, dropped here, and the sync starts from main. Only origin saying so drops it
+  // (kit-884): a fetch that fails for any other reason (origin refused, a sibling's half-made
+  // worktree entry past fetchPastHalfMade's wait) keeps it, and the sync goes on from it while
+  // origin's chore-log is still that commit, or stops: started from main, its push would be refused.
   const main = loadSettings().main_branch;
-  if (!flags['dry-run'] && git(['fetch', '--quiet', 'origin', `+refs/heads/${LOG_BRANCH}:refs/remotes/origin/${LOG_BRANCH}`], wt) === null) git(['update-ref', '-d', `refs/remotes/origin/${LOG_BRANCH}`], wt);
+  if (!flags['dry-run']) {
+    const remote = `refs/remotes/origin/${LOG_BRANCH}`;
+    const f = fetchPastHalfMade(['fetch', '--quiet', 'origin', `+refs/heads/${LOG_BRANCH}:${remote}`]);
+    if (f.status !== 0) {
+      const why = firstLine(f.err) || `exit ${f.status}`;
+      // ls-remote matches a pattern against the end of a ref's name, so only the exact name counts
+      const ls = gitRun(['ls-remote', '--exit-code', 'origin', `refs/heads/${LOG_BRANCH}`]);
+      const theirs = ls.status === 0 ? ls.out.split('\n').map((l) => l.split('\t')).find(([, name]) => name === `refs/heads/${LOG_BRANCH}`)?.[0] ?? null : null;
+      const kept = resolveCommit(remote);
+      // origin answered without the branch (exit 2, or only a ref whose name ends in it): gone
+      if (ls.status === 2 || (ls.status === 0 && !theirs)) git(['update-ref', '-d', remote]);
+      else if (ls.status !== 0) die(`couldn't fetch ${LOG_BRANCH} from origin (${why}) or ask origin for it (${firstLine(ls.err) || `exit ${ls.status}`}): kept origin/${LOG_BRANCH} and synced nothing; run log-sync again`);
+      else if (theirs !== kept) die(`couldn't fetch ${LOG_BRANCH} from origin (${why}), and origin's is at ${theirs.slice(0, 12)}, ${kept ? `not ${kept.slice(0, 12)}` : 'with no copy here'}: kept origin/${LOG_BRANCH} and synced nothing; run log-sync again`);
+      else warn(`couldn't fetch ${LOG_BRANCH} from origin (${why}); origin's is still at ${kept.slice(0, 12)}, so this sync goes on from it`);
+    }
+  }
   // each checkout, merge and abort with -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
   if (resolveCommit(`origin/${LOG_BRANCH}`)) {
     gitOrDie(['-c', 'core.useReplaceRefs=false', 'checkout', '--quiet', '-B', LOG_BRANCH, `origin/${LOG_BRANCH}`], wt);
@@ -7124,6 +7182,52 @@ function seedWorktree(wt, { setup = true, repo: R = repo('home'), session = fals
     }
   }
 }
+// git dies on a sibling's .git/worktrees/<name>/commondir that is there and still empty: another
+// worktree add, between making the file and filling it. Every add and fetch reads them all. run
+// (which returns at least { ok, err }) is tried again once that file is filled or gone, for 5 s in all
+// (clock shares the 5 s between calls); any other failure is returned at once. A commondir that can't
+// be read is another failure, and so is one once the worktree (wt) is there: a hook's; so is one that
+// names this add's own entry, which its gitdir tells, or one that was never there. The path in git's
+// line is matched, not its words, which follow the locale. before() is called before each try and
+// after() once it failed; stop() says, after a wait, why not to try again. Returned: run's answer,
+// with waited (whether any wait was) and note (a line to add to git's words, or '').
+function pastHalfMade(run, { common, wt = null, clock = {}, before = () => {}, after = () => {}, stop = () => null }) {
+  const LIMIT_S = 5;
+  const dir = path.join(common, 'worktrees');
+  const half = (name) => { try { return fs.readFileSync(path.join(dir, name, 'commondir'), 'utf8') === ''; } catch (e) { return e.code === 'ENOENT' ? false : null; } };
+  const entries = () => { try { return fs.readdirSync(dir); } catch { return []; } };
+  const own = (name) => { if (!wt) return false; const at = path.join(dir, name); try { return realPathMade(path.resolve(at, fs.readFileSync(path.join(at, 'gitdir'), 'utf8').trim())) === realPathMade(path.join(wt, '.git')); } catch { return false; } };
+  for (let waited = false; ;) {
+    before();
+    const listed = entries();
+    const r = run();
+    if (r.ok) return { ...r, waited, note: '' };
+    after();
+    const name = /worktrees\/([^/\n]+)\/commondir/.exec(r.err ?? '')?.[1];
+    const seen = name !== undefined && (listed.includes(name) || entries().includes(name)) && !own(name);
+    if (!seen || (wt && fs.existsSync(wt)) || half(name) === null) return { ...r, waited, note: '' };
+    waited = true;
+    clock.end ??= performance.now() + LIMIT_S * 1000;
+    do Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50); while (half(name) && performance.now() < clock.end);
+    const why = stop();
+    if (performance.now() < clock.end && !why) continue;
+    return { ...r, waited, note: why ? `\n${why}` : half(name) ? `\nthe entry ${name} in ${dir} was still half made after ${LIMIT_S} s (its commondir is empty): another git may be making that worktree, or stopped while it did` : '' };
+  }
+}
+// git worktree add past a sibling's half-made entry, dying as gitOrDie does. args: the add's, or a
+// function that gives them anew for each try (a failed one can leave its branch).
+function worktreeAddOrDie(args, wt, { root, common }) {
+  let last;
+  const r = pastHalfMade(() => {
+    last = typeof args === 'function' ? args() : args;
+    try { execFileSync('git', last, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); return { ok: true }; } catch (e) { return { ok: false, err: e.stderr, words: (e.stderr || e.message).toString().trim() }; }
+  }, { common, wt });
+  if (!r.ok) die(`git ${last.join(' ')} failed: ${r.words}${r.note}`);
+}
+// a fetch past the same state, for a start that carries on when the fetch fails
+function fetchPastHalfMade(args, clock) {
+  return pastHalfMade(() => { const r = gitRun(args); return { ...r, ok: r.status === 0 }; }, { common: commonDir, clock });
+}
 // What a killed process left behind: its exit hook never ran (a restart, a timeout, a kill), so its
 // temp checkouts stay under home's .worktrees and pile up. Only ones that are ours: on git's own
 // list, directly under .worktrees, named tmp-<name>-<pid>, and that pid gone. A pid reused since
@@ -7148,7 +7252,7 @@ function detachedWorktree(sha, name, R = repo('home'), { seed = true } = {}) {
   if (!holder) sweepDeadTempWorktrees(R);
   const wt = holder ? path.join(holder, `tmp-${name}`) : path.join(mainRoot, '.worktrees', `tmp-${name}-${process.pid}`);
   // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
-  R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
+  worktreeAddOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--detach', wt, sha], wt, { root: R.root, common: R.commonDir });
   process.once('exit', () => {
     if (fs.existsSync(wt)) R.git(['worktree', 'remove', '--force', wt], R.root);
     // the empty holder only (rmdir refuses anything with files left in it)
@@ -7205,7 +7309,7 @@ function cmdReviewWorktree() {
   const wt = path.join(root, `review-${short}-${sha.slice(0, 8)}${suffix ? `-${suffix}` : ''}`);
   if (fs.existsSync(wt)) die(`${wt} exists; give this reviewer its own --name, or remove it: devteam.mjs review-worktree --remove ${wt}`);
   // both checkouts with -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
-  R.gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
+  worktreeAddOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--detach', wt, sha], wt, { root: R.root, common: R.commonDir });
   seedWorktree(wt, { repo: R });
   out(wt);
   // records in home: a detached checkout of home's ticket/<id> beside it, whose full sha the
@@ -7216,7 +7320,7 @@ function cmdReviewWorktree() {
     if (!rsha) warn(`no records for ${id} in home (home's ticket/${id}), so no records checkout was made`);
     else {
       const rwt = `${wt}-records`;
-      gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--detach', rwt, rsha], mainRoot);
+      worktreeAddOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--detach', rwt, rsha], rwt, { root: mainRoot, common: commonDir });
       out(`records: ${rwt} (${rsha})`);
     }
   }
@@ -7592,11 +7696,678 @@ worldFileFails.actOf = (ref) => {
   return b.startsWith('plan/') ? `plan-${b.slice(5)}` : b.startsWith('ticket/') && !b.startsWith('ticket/chore-') ? b.slice(7) : b;
 };
 /* self-model start */
-// project/self.md, what the project is (log.schema.json#self@1): a markdown file whose one fenced
-// `self` block holds the contract. The parser and the contract check follow
-// test/fixtures/world/check.mjs rule for rule, so the two refuse the same invalid/ cases; kit-135
-// reuses them for exterior.md.
-//
+// project/self.md, what the project is: since kit-862 a plain document (log.schema.json#self2),
+// read by the self-plain region below; a draft must be one. Version 1 (log.schema.json#self@1, one
+// fenced `self` block holding the contract) still validates on main, read by fencedBlocks and
+// worldDocErrors, which follow test/fixtures/world/check.mjs rule for rule; kit-135 reuses them for
+// exterior.md.
+
+/* self-plain start */
+// self@2's and exterior@2's reader (log.schema.json#self2, #exterior): test/fixtures/world2/check.mjs's
+// rules, rule for rule (its reading of lines, fences, code, comments and links; parts; the title;
+// checkSelf; selfHeld, the names rule's words; and, since kit-863, namesWhole, entries, capitalised,
+// hosts and checkExterior, exterior.md's contract and names rule), so the kit gives every case of
+// test/fixtures/world2/cases.json the result it lists. One closure, so none of its names meets
+// another of this file's; it reads nothing but its arguments, path and URL (a test runs this region
+// alone).
+const selfPlain = (() => {
+  // A line ends at LF, CR or CRLF, as markdown reads it.
+  const lines = (text) => String(text).replace(/^﻿/, '').split(/\r\n?|\n/);
+  // s without the spaces and tabs at its start and end, in one pass.
+  const trimST = (s) => { let a = 0; let b = s.length; while (a < b && (s[a] === ' ' || s[a] === '\t')) a += 1; while (b > a && (s[b - 1] === ' ' || s[b - 1] === '\t')) b -= 1; return s.slice(a, b); };
+  // How many columns a line's leading spaces and tabs fill, a tab to the next multiple of four.
+  const indent = (s) => { let n = 0; for (const c of s) { if (c === ' ') n += 1; else if (c === '\t') n += 4 - (n % 4); else break; } return n; };
+
+  // Each reading step keeps its last answer, as a checker reads one text several times.
+  function last(f) { let k = null; let v; return (t) => { const x = String(t); if (x !== k) { v = f(x); k = x; } return v; }; }
+  // Whether the line after the line break at i holds only spaces and tabs, and another break follows.
+  const blankAfter = (t, i) => { let j = i + 1; while (t[j] === ' ' || t[j] === '\t') j += 1; return t[j] === '\n'; };
+
+  // A thematic break (three or more *, - or _, spaces and tabs between): not a list item, and it ends one.
+  const BREAK = /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/;
+
+  // A document's lines, each { text, code }: code is true on a fence's own lines and inside it. A fence
+  // is three or more backticks or tildes, at most three spaces in, or after a list item's markers on
+  // its own line; a backtick fence's info string holds no backtick. Inside a list item (on the item's
+  // line, or on a later line indented at least as far as the item's text) the fence belongs to the
+  // item: it closes at a line of at least as many of the same mark and nothing else but spaces or
+  // tabs, at most three columns past the item's text, and ends before a line that is not blank and is
+  // indented less than the item's text. Outside a list it closes the same way at most three spaces in.
+  // One never closed runs to the end. The item is the last list item seen, until a line that is not
+  // blank, is indented less than its text and follows a blank line. Also the fences: [{ info, line }].
+  const MARKER = / {0,3}([-*+]|\d{1,9}[.)])/y;
+  const MARK = /^( {0,3})(`{3,}|~{3,})(.*)$/s;
+  // A fence line: [line, its list markers with the spaces after each, up to three spaces, the mark,
+  // the info string], or null. The markers are read left to right, each with a tab or up to four of
+  // the spaces after it, so the time is linear in the line. Also the first marker, as marks[0].
+  function FENCEOF(line) {
+    let i = 0;
+    const marks = [];
+    for (;;) {
+      MARKER.lastIndex = i;
+      const k = MARKER.exec(line);
+      if (!k) break;
+      let j = i + k[0].length;
+      if (line[j] === '\t') j += 1;
+      else { let n = 0; while (line[j + n] === ' ') n += 1; if (!n) break; j += Math.min(n, 4); }
+      marks.push(k[1]);
+      i = j;
+    }
+    const f = MARK.exec(i ? line.slice(i) : line);
+    if (!f) return null;
+    const m = [line, line.slice(0, i), f[1], f[2], f[3]];
+    m.marks = marks;
+    return m;
+  }
+  const FENCE = { exec: FENCEOF };
+  const ITEM = /^(?: {0,3}(?:[-*+]|\d{1,9}[.)])(?: {1,4}|\t|$))+/;
+  // The column where a list item's text starts, its markers read as spaces.
+  // The text column of each list item a line's markers open, outermost first: an empty item's is one
+  // past its marker.
+  const itemCols = (prefix) => {
+    const cols = [];
+    let col = 0;
+    for (const x of prefix.matchAll(/ {0,3}(?:[-*+]|\d{1,9}[.)])(?: {1,4}|\t|$)/g)) {
+      for (const c of x[0]) col += c === '\t' ? 4 - (col % 4) : 1;
+      cols.push(col + (/[-*+.)]$/.test(x[0]) ? 1 : 0));
+    }
+    return cols;
+  };
+  const itemCol = (prefix) => indent(prefix.replace(/[-*+]|\d{1,9}[.)]/g, (x) => ' '.repeat(x.length)));
+  const scan = last(function scanText(text) {
+    const out = [];
+    const fences = [];
+    let open = null;
+    let items = []; // the text columns of the list items this line may be in, outermost first
+    let item = 0; // the innermost one's, or 0
+    let blank = false;
+    let para = false; // the line before is paragraph text outside any list item
+    lines(text).forEach((line, i) => {
+      let m = FENCE.exec(line);
+      if (open && open.base && line.trim() && indent(line) < open.base) open = null;
+      if (!open) {
+        let li = !BREAK.test(line) && ITEM.exec(line);
+        // An ordered list that starts at a number other than 1, or an empty item, cannot interrupt a
+        // paragraph: the line is the paragraph's text.
+        if (li && para && !item && ((/^ *\d/.test(li[0]) && !/^ *0*1[.)]/.test(li[0])) || !line.slice(li[0].length).trim())) { li = null; if (m && m[1]) m = null; }
+        if (li) { const d = indent(line); while (items.length && items[items.length - 1] > d) items.pop(); for (const c of itemCols(li[0])) items.push(c); }
+        else if (line.trim() && blank) while (items.length && items[items.length - 1] > indent(line)) items.pop();
+        item = items.length ? items[items.length - 1] : 0;
+        blank = !line.trim();
+      }
+      if (open) {
+        out.push({ text: line, code: true });
+        const rest = open.base ? line.slice(line.length - line.replace(/^[ \t]*/, '').length) : null;
+        const close = open.base
+          ? indent(line) - open.base <= 3 && /^(`{3,}|~{3,})[ \t]*$/.exec(rest)
+          : m && !m[1] && /^(`{3,}|~{3,})[ \t]*$/.exec(m[3] + m[4]);
+        if (close && close[1][0] === open.mark && close[1].length >= open.size) open = null;
+        return;
+      }
+      const fence = (x) => x && !(x[3][0] === '`' && x[4].includes('`'));
+      let f = fence(m) ? m : null;
+      let base = f ? (f[1] ? itemCol(f[1]) : item && indent(line) >= item ? item : 0) : 0;
+      if (!f && item > 3 && /^ */.exec(line)[0].length >= item) {
+        const r = FENCE.exec(line.slice(item)); // in an item's text: up to three spaces past its column
+        if (fence(r) && !r[1]) { f = r; base = item; }
+      }
+      if (f) {
+        open = { mark: f[3][0], size: f[3].length, base };
+        fences.push({ info: trimST(f[4]), line: i + 1 });
+        out.push({ text: line, code: true, opens: true });
+        para = false;
+      } else {
+        out.push({ text: line, code: false });
+        // A paragraph goes on through any indent; a new one starts at most three spaces in.
+        para = !!line.trim() && !item && (para || indent(line) < 4) && !HEAD.test(line) && !BREAK.test(line);
+      }
+    });
+    return { lines: out, fences };
+  });
+
+  // 1 when a fence's info string is exactly self or exterior, else 2.
+  const version = (text) => (scan(text).fences.some((f) => f.info === 'self' || f.info === 'exterior') ? 1 : 2);
+
+  const LIST = /^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]/;
+  const HEAD = /^ {0,3}#{1,6}(?:[ \t]|$)/;
+  // Each line's text, or null where it is not read: on a fence, in indented code (four spaces or a tab
+  // in, after a blank line or more of the same, outside a list), or in a comment that opens a line.
+  const readable = last((text) => {
+    let prev = 'blank';
+    let list = false;
+    let comment = false;
+    return scan(text).lines.map(({ text: l, code, opens }) => {
+      if (code) { if (opens && LIST.test(l)) list = true; prev = 'blank'; return null; }
+      if (comment || /^ {0,3}<!--/.test(l)) { comment = !l.includes('-->'); prev = 'blank'; return null; }
+      if (!l.trim()) { if (prev !== 'code') prev = 'blank'; return l; }
+      if (/^(?: {4}| {0,3}\t)/.test(l) && !list && prev !== 'text') { prev = 'code'; return null; }
+      if (BREAK.test(l)) { if (/^\S/.test(l)) list = false; prev = 'blank'; return l; }
+      if (LIST.test(l)) list = true;
+      else if (/^\S/.test(l) && prev === 'blank') list = false;
+      prev = HEAD.test(l) ? 'blank' : 'text';
+      return l;
+    });
+  });
+  // Code spans and inline comments of one block, masked by as many spaces. A span is a run of backticks
+  // to the next run of the same length; \` opens none.
+  function mask(block) {
+    const runs = [...block.matchAll(/`+/g)].map((m) => ({ i: m.index, n: m[0].length }));
+    const later = new Map(); // a run's size to the nearest later run of it, from the end back
+    for (let k = runs.length - 1; k >= 0; k -= 1) { runs[k].close = later.get(runs[k].n); later.set(runs[k].n, k); }
+    let out = '';
+    let at = 0;
+    for (let k = 0; k < runs.length; k += 1) {
+      const { i, n } = runs[k];
+      if (i < at) continue;
+      let slashes = 0;
+      while (block[i - 1 - slashes] === '\\') slashes += 1;
+      if (slashes % 2) continue;
+      const { close } = runs[k];
+      if (close === undefined) continue;
+      const end = runs[close].i + n;
+      out += block.slice(at, i) + block.slice(i, end).replace(/[^\n]/g, ' ');
+      at = end;
+    }
+    out += block.slice(at);
+    let done = '';
+    at = 0;
+    for (let i = out.indexOf('<!--'); i >= 0; i = out.indexOf('<!--', at)) {
+      const end = out.indexOf('-->', i);
+      if (end < 0) break;
+      done += out.slice(at, i) + out.slice(i, end + 3).replace(/[^\n]/g, ' ');
+      at = end + 3;
+    }
+    return done + out.slice(at);
+  }
+  // The text outside code and comments, line for line. A block (what a span or link stays inside) ends
+  // at a blank or unread line, a heading, a list item or a table row.
+  const plain = last((text) => {
+    const out = [];
+    let block = [];
+    const flush = () => { if (block.length) for (const x of mask(block.join('\n')).split('\n')) out.push(x); block = []; };
+    for (const l of readable(text)) {
+      if (l === null || !l.trim()) { flush(); out.push(''); continue; }
+      const alone = HEAD.test(l) || BREAK.test(l) || /^ {0,3}\|/.test(l);
+      if (alone || LIST.test(l)) flush();
+      block.push(l);
+      if (alone) flush();
+    }
+    flush();
+    return out.join('\n');
+  });
+
+  // The headings, outside code and comments, that hold words: [{ level, text, line }]. At most three spaces in, one to six #, a space
+  // or tab; closing #s dropped; links, code marks and emphasis marks read as their words.
+  const headings = last((text) => {
+    const out = [];
+    readable(text).forEach((l, i) => {
+      const m = l === null ? null : /^ {0,3}(#{1,6})(?:[ \t]+(.*))?$/s.exec(l);
+      const t = m && words(trimST(m[2] ?? '').replace(/(?:^|[ \t])#+$/, ''));
+      if (t) out.push({ level: m[1].length, text: t, line: i + 1 });
+    });
+    return out;
+  });
+  // [words](target) read as its words, where dest reads the rest as a link's end and it is outside a
+  // code span (a span's text is kept as written); else kept as written.
+  function unlink(s) {
+    const masked = mask(s);
+    let out = '';
+    let at = 0;
+    for (const m of masked.matchAll(/!?\[([^[\]]*)\]\(/g)) {
+      if (m.index < at) continue;
+      const from = m.index + m[0].length;
+      const d = dest(s, from, true);
+      if (!d) continue; // read as written: a code span in its tail is no title, so no link
+      out += s.slice(at, m.index) + s.slice(m.index + m[0].length - m[1].length - 2, m.index + m[0].length - 2);
+      at = from + d.size;
+    }
+    return out + s.slice(at);
+  }
+  const words = (s) => unlink(s).replace(/[*`]|(?<![\p{L}\p{N}])_+|_+(?![\p{L}\p{N}])/gu, '').replace(/\s+/g, ' ').trim();
+
+  // The inline links of text outside code: [{ target, index, close }] (index its [, close its ]). [words](target "title"), brackets in the
+  // words and parentheses in the target balanced, the target with no space; what follows ]( is at most
+  // 500 characters. An image, an escaped [, a reference-style or an angle-bracket link is none, though
+  // a link's words may hold an image.
+  function links(text) {
+    const t = plain(text);
+    const out = [];
+    let stack = [];
+    let dead = 0; // stack[0 .. dead - 1] can no longer open a link
+    for (let i = 0; i < t.length; i += 1) {
+      const c = t[i];
+      if (c === '\\') i += 1;
+      else if (c === '\n' && blankAfter(t, i)) { stack = []; dead = 0; }
+      else if (c === '[') {
+        let k = i - 1;
+        let image = t[k] === '!';
+        if (image) { let n = 0; while (t[k - 1] === '\\') { n += 1; k -= 1; } image = n % 2 === 0; }
+        stack.push({ i, image });
+      } else if (c === ']') {
+        const o = stack.pop();
+        const gone = stack.length < dead;
+        if (gone) dead = stack.length;
+        const d = o && t[i + 1] === '(' ? dest(t, i + 2) : null;
+        if (!d) continue;
+        const close = i;
+        i += 1 + d.size;
+        if (o.image) while (out.length && out[out.length - 1].index > o.i) out.pop();
+        else if (!gone) { out.push({ target: d.target, index: o.i, close }); dead = stack.length; }
+      }
+    }
+    return out.sort((a, b) => a.index - b.index);
+  }
+  // What follows ](: its target and how many characters to its closing parenthesis, or null.
+  // Whether the character code k is ASCII punctuation (what a backslash escapes).
+  const punct = (k) => (k >= 33 && k <= 47) || (k >= 58 && k <= 64) || (k >= 91 && k <= 96) || (k >= 123 && k <= 126);
+  // What follows ]( in t from at (its first 501 characters, so a link's tail is at most 500 before its closing parenthesis): its target and how many characters to
+  // its closing parenthesis, or null.
+  function dest(t, at, angle = false) {
+    const n = Math.min(t.length, at + 501);
+    let i = at;
+    const space = () => { const from = i; while (i < n && (t[i] === ' ' || t[i] === '\t' || t[i] === '\n')) i += 1; return i > from && !/\n[ \t]*\n/.test(t.slice(from, i)); };
+    space();
+    let from = i;
+    let depth = 0;
+    // <target>: with angle (a heading's words) read as CommonMark does, no line break or unescaped < >
+    // inside; else none, as kit-861 has it for parts.
+    if (t[i] === '<') {
+      if (!angle) return null;
+      for (i += 1; i < n && t[i] !== '>'; i += 1) {
+        if (t[i] === '\n' || t[i] === '<') return null;
+        if (t[i] === '\\' && i + 1 < n) i += 1;
+      }
+      if (i >= n) return null;
+      from = i + 1;
+      i += 1;
+      const target = t.slice(from, i - 1);
+      return tailOf(t, at, i, n, target);
+    }
+    for (; i < n; i += 1) {
+      const k = t.charCodeAt(i);
+      if (k === 60 || k === 62 || k === 32 || (k >= 9 && k <= 13)) break; // < > ASCII white space
+      if (k === 92 && i + 1 < n && punct(t.charCodeAt(i + 1))) i += 1;
+      else if (k === 40) depth += 1;
+      else if (k === 41) { if (!depth) break; depth -= 1; }
+    }
+    if (depth) return null;
+    return tailOf(t, at, i, n, t.slice(from, i).replace(/\\([!-/:-@[-`{-~])/g, '$1'));
+  }
+  // The rest of a link after its target at i: an optional title, then ).
+  function tailOf(t, at, i0, n, target) {
+    let i = i0;
+    const space = () => { const from = i; while (i < n && (t[i] === ' ' || t[i] === '\t' || t[i] === '\n')) i += 1; return i > from && !/\n[ \t]*\n/.test(t.slice(from, i)); };
+    if (space() && i < n && t[i] in { '"': 1, "'": 1, '(': 1 }) {
+      const end = t[i] === '(' ? ')' : t[i];
+      i += 1;
+      while (i < n && t[i] !== end) {
+        if (end === ')' && t[i] === '(') return null;
+        i += t[i] === '\\' ? 2 : 1;
+      }
+      i += 1;
+      space();
+    }
+    return i < n && t[i] === ')' ? { target, size: i + 1 - at } : null;
+  }
+
+  // A self.md's part links, in order, each path once: [{ target, path }], path from the repo root ('' is
+  // the root), or null when it leaves the repo or can't be decoded. root is the file's folder.
+  function parts(text, root) {
+    const out = [];
+    const seen = new Set();
+    for (const { target } of links(text)) {
+      if (/^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith('/')) continue;
+      const cut = target.replace(/[#?].*$/, '');
+      if (!cut) continue;
+      let p;
+      try { p = decodeURIComponent(cut); } catch { out.push({ target, path: null, why: 'bad escape' }); continue; }
+      const full = path.posix.join(root, p).replace(/\/+$/, '').replace(/^\.$/, '');
+      if (full === '..' || full.startsWith('../')) { out.push({ target, path: null, why: 'outside' }); continue; }
+      if (/\.md$/i.test(full) && path.posix.dirname(full) === path.posix.normalize(root)) continue;
+      if (seen.has(full)) continue;
+      seen.add(full);
+      out.push({ target, path: full });
+    }
+    return out;
+  }
+
+  // The index of the first line holding more than white space, as lines() splits them, or -1.
+  const firstLine = (text) => { const t = String(text).replace(/^\uFEFF/, ''); const i = t.search(/\S/); return i < 0 ? -1 : (t.slice(0, i).match(/\r\n?|\n/g) || []).length; };
+  function docErrors(text, doc) {
+    const blocks = scan(text).fences.filter((f) => f.info === 'self' || f.info === 'exterior');
+    if (blocks.length) return blocks.map((b) => `${doc}.md holds a fenced ${b.info} block at line ${b.line}: a plain document has none`);
+    const h = headings(text);
+    const first = firstLine(text);
+    const errs = [];
+    if (!h.some((x) => x.level === 1 && x.text && x.line === first + 1)) errs.push('it does not open with a # title');
+    else if (h.filter((x) => x.level === 1).length > 1) errs.push('more than one # title');
+    return errs;
+  }
+
+  // self.md: { errors, parts } (parts the paths its links name, there or not). has(path) says whether a path is in the repo.
+  function checkSelf(text, { root, has }) {
+    const errors = docErrors(text, 'self');
+    const all = parts(text, root);
+    if (!errors.length) {
+      if (!all.length) errors.push('no part: link each part to its folder or file');
+      for (const p of all) {
+        if (p.why === 'outside') errors.push(`part link ${p.target} leaves the repo`);
+        else if (p.why || !has(p.path)) errors.push(`part link ${p.target} points to nothing`);
+      }
+    }
+    return { errors, parts: all.filter((p) => p.path !== null).map((p) => p.path) };
+  }
+
+  // A word: letters, digits, ' ’ and -, starting with a letter. A word as the names rule reads it: a
+  // trailing 's dropped (then any trailing ' ’ or -), upper-case first, two letters or more; else null.
+  const WORD = /\p{L}[\p{L}\p{N}'’-]*/gu;
+  function capWord(m) {
+    const c = m.codePointAt(0);
+    if (c < 128 ? c < 65 || c > 90 : !/^\p{Lu}/u.test(m)) return null; // upper case first, or no word
+    let w = m.replace(/['’]s$/, '');
+    let end = w.length;
+    while (end && "'’-".includes(w[end - 1])) end -= 1;
+    w = w.slice(0, end);
+    return /^\p{Lu}/u.test(w) && [...w].length >= 2 ? w : null;
+  }
+  // self.md's capitalised words for the names rule, each once in order (kit-862). Every word counts but
+  // a prose sentence's first: prose is a paragraph's text outside code, comments and a link's words; a
+  // sentence starts a paragraph or follows . ! or ? and a space. A heading, a list item (its lines up to
+  // a blank one), a table row (a line holding | outside code), code (a fence, indented code, a span), a
+  // comment and a link's words count whole, their first word too: a part's name stands there.
+  function selfHeld(text) {
+    const src = lines(text);
+    const read = readable(text);
+    const pl = plain(text).split('\n');
+    const at = [];
+    pl.reduce((o, l, i) => { at[i] = o; return o + l.length + 1; }, 0);
+    // the links' words, [ to ], sorted and apart (a link inside another's words is none), read by a
+    // pointer that only moves on, as the words come in order: each word one look
+    const spans = links(text).map((k) => [k.index, k.close]);
+    let k = 0;
+    const inLink = (o) => { while (k < spans.length && spans[k][1] <= o) k += 1; return k < spans.length && o > spans[k][0]; };
+    const out = new Set();
+    const add = (w) => { const c = capWord(w); if (c) out.add(c); };
+    let item = false; // in a list item, until a blank line
+    let start = true; // the next prose word starts a sentence
+    let gap = '';
+    src.forEach((s, i) => {
+      const l = read[i];
+      if (l === null || !l.trim() || HEAD.test(l) || BREAK.test(l) || LIST.test(l) || item || pl[i].includes('|')) {
+        if (l !== null && !l.trim()) item = false;
+        else if (l !== null && LIST.test(l)) item = true;
+        else if (l !== null && (HEAD.test(l) || BREAK.test(l))) item = false;
+        for (const m of s.matchAll(WORD)) add(m[0]);
+        start = true;
+        gap = '';
+        return;
+      }
+      const p = pl[i];
+      let prev = 0;
+      for (const m of s.matchAll(WORD)) {
+        gap += p.slice(prev, m.index);
+        prev = m.index + m[0].length;
+        const o = at[i] + m.index;
+        const whole = p.slice(m.index, prev) !== m[0] || inLink(o);
+        if (whole || !(start || /[.!?]\s/.test(gap))) add(m[0]);
+        start = false;
+        gap = '';
+      }
+      gap += `${p.slice(prev)}\n`;
+    });
+    return [...out];
+  }
+
+  // Whether text names name: as whole words (no letter or digit just before or after), ignoring case
+  // as a regular expression's i and u flags do (each code point by its simple case folding). The text
+  // is indexed once: each of its code points stands for the class of those equal to it ignoring case,
+  // so a name is a plain search and its two ends a look at the code points beside it.
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const LN = /[\p{L}\p{N}]/iu;
+  // The classes of a text's code points: each new code point's class is looked for first among those
+  // of its case bucket (its upper case's lower case, which almost always holds its class), then by one
+  // search of every class's first code point; none, and it starts one.
+  function classes() {
+    const reps = [];
+    let all = '';
+    const at = new Map(); // a class's offset in all to the class
+    const bucket = new Map();
+    const id = new Map();
+    const find = (c, add) => {
+      if (id.has(c)) return id.get(c);
+      const re = new RegExp(esc(c), 'iu');
+      const b = c.toUpperCase().toLowerCase();
+      let k = (bucket.get(b) ?? []).find((x) => re.test(reps[x]));
+      if (k === undefined) { const o = all.search(re); k = o < 0 ? -1 : at.get(o); }
+      if (k < 0 && add) { k = reps.length; reps.push(c); at.set(all.length, k); all += c; }
+      if (k >= 0) { if (!bucket.has(b)) bucket.set(b, []); if (!bucket.get(b).includes(k)) bucket.get(b).push(k); }
+      id.set(c, k);
+      return k;
+    };
+    return { find, count: () => reps.length };
+  }
+  const indexes = [];
+  function indexed(text) {
+    const had = indexes.find((x) => x.text === text);
+    if (had) return had;
+    const cps = Array.from(text);
+    const cl = classes();
+    for (const c of new Set(cps)) cl.find(c, true);
+    if (cl.count() >= 0xd700) return null; // more classes than keys: the caller asks the regular expression
+    const key = (k) => String.fromCharCode(0x100 + k);
+    const x = { text, cps, key, classOf: (c) => cl.find(c, false), keys: cps.map((c) => key(cl.find(c, false))).join('') };
+    indexes.unshift(x);
+    indexes.length = Math.min(indexes.length, 4);
+    return x;
+  }
+  function namesWhole(text, name) {
+    if (name.length > 500) return false;
+    if (!name) return new RegExp('(?<![\\p{L}\\p{N}])(?![\\p{L}\\p{N}])', 'iu').test(text);
+    const x = indexed(String(text));
+    if (!x) return new RegExp(`(?<![\\p{L}\\p{N}])${esc(name)}(?![\\p{L}\\p{N}])`, 'iu').test(text);
+    let want = '';
+    for (const c of name) { const k = x.classOf(c); if (k < 0) return false; want += x.key(k); }
+    const n = want.length;
+    for (let i = x.keys.indexOf(want); i >= 0; i = x.keys.indexOf(want, i + 1)) {
+      if (!(i > 0 && LN.test(x.cps[i - 1])) && !(i + n < x.cps.length && LN.test(x.cps[i + n]))) return true;
+    }
+    return false;
+  }
+
+  // The ### entries: [{ name, body }], body up to the next heading of level 3 or less.
+  function entries(text) {
+    const h = headings(text).filter((x) => x.level <= 3);
+    const all = plain(text).split('\n');
+    return h.flatMap((x, i) => (x.level === 3 ? [{ name: x.text, body: all.slice(x.line, (h[i + 1]?.line ?? all.length + 1) - 1).join('\n') }] : []));
+  }
+  const realDay = (d) => { const t = new Date(`${d}T00:00:00Z`); return !Number.isNaN(t.getTime()) && t.toISOString().slice(0, 10) === d; };
+  // A source is a web address, or a reference link whose definition (anywhere in the file) is one.
+  function entryWarnings({ name, body }, today, refs) {
+    const days = [...body.matchAll(/(?<![\p{L}\p{N}])read\s+(\d{4}-\d{2}-\d{2})(?!\d)/giu)].map((m) => m[1]).filter(realDay);
+    const web = /https?:\/\/[^\s/]/i.test(body) || [...body.matchAll(/\[([^[\]]+)\](?:\[([^[\]]*)\])?/g)].some((m) => refs.has((m[2] || m[1]).toLowerCase()));
+    const w = days.filter((d) => d > today).map((d) => `"${name}": read date ${d} is in the future`);
+    if (!web || !days.length) w.push(`"${name}" has no dated source`);
+    return w;
+  }
+  const webRefs = (text) => new Set([...plain(text).matchAll(/^ {0,3}\[([^[\]\n]+)\]:[ \t]*<?https?:\/\//gim)].map((m) => m[1].toLowerCase()));
+
+  // Every capitalised word of the whole text, no place skipped, each once in order: letters, digits,
+  // ' ’ and -, starting with a letter, a trailing 's dropped, upper-case first, two letters or more.
+  function capitalised(text) {
+    const out = new Set();
+    for (const m of String(text).matchAll(WORD)) {
+      const w = capWord(m[0]);
+      if (w) out.add(w);
+    }
+    return [...out];
+  }
+  // Character references as markdown and HTML read them, once: numeric ones, and the named ones whose
+  // value is one ASCII character. Any other is left as written.
+  const NAMED = { AMP: '&', DiacriticalGrave: '`', GT: '>', Hat: '^', LT: '<', NewLine: '\n', QUOT: '"', Tab: '\t', UnderBar: '_', VerticalLine: '|', amp: '&', apos: "'", ast: '*', bsol: '\\', colon: ':', comma: ',', commat: '@', dollar: '$', equals: '=', excl: '!', grave: '`', gt: '>', lbrace: '{', lbrack: '[', lcub: '{', lowbar: '_', lpar: '(', lsqb: '[', lt: '<', midast: '*', num: '#', percnt: '%', period: '.', plus: '+', quest: '?', quot: '"', rbrace: '}', rbrack: ']', rcub: '}', rpar: ')', rsqb: ']', semi: ';', sol: '/', verbar: '|', vert: '|' };
+  const numeric = (d, x) => { const c = d ? Number(d) : parseInt(x, 16); return String.fromCodePoint(c === 0 || c > 0x10ffff || (c >= 0xd800 && c <= 0xdfff) ? 0xfffd : c); };
+  // As markdown reads text: each backslash escape of ASCII punctuation and each character reference
+  // (with its ;) decoded, once.
+  const decode = (t, squeeze = false) => t.replace(/\\([!-/:-@[-`{-~])|&(?:#(\d{1,7})|#[xX]([0-9a-fA-F]{1,6})|([A-Za-z][A-Za-z0-9]{1,31}));/g, (all, p, d, x, n) => {
+    if (p) return squeeze && (p === '<' || p === '>') ? '' : p;
+    const v = n ? (Object.hasOwn(NAMED, n) ? NAMED[n] : all) : numeric(d, x);
+    return squeeze && /^[\s<>]$/u.test(v) ? '' : v;
+  });
+  // As a browser reads an HTML attribute's value (quoted or not, after = and any white space): its
+  // character references decoded, numeric ones and &amp; &lt; &gt; &quot; with or without the ;, then
+  // its tabs and line breaks taken out, as a URL is read.
+  const LEGACY = { amp: '&', AMP: '&', lt: '<', LT: '<', gt: '>', GT: '>', quot: '"', QUOT: '"' };
+  const attrs = (t, squeeze = false) => t.replace(/(=\s*)("[^"]*"|'[^']*'|[^\s"'=<>`]+)/g, (all, eq, v) => eq + v
+    .replace(/&(?:#(\d{1,7});?|#[xX]([0-9a-fA-F]{1,6});?|([A-Za-z][A-Za-z0-9]{1,31});|(amp|AMP|lt|LT|gt|GT|quot|QUOT)(?![A-Za-z0-9]))/g, (r, d, x, n, l) => (l ? LEGACY[l] : n ? (Object.hasOwn(NAMED, n) ? NAMED[n] : r) : numeric(d, x)))
+    .replace(squeeze ? /[\s<>]/gu : /[\t\r\n]/g, ''));
+  // The text with the white space inside each angle-bracket destination taken out ([x](<…>), [x]: <…>).
+  const angles = (t) => {
+    let out = '';
+    let at = 0;
+    for (let i = t.indexOf(']'); i >= 0; i = t.indexOf(']', i + 1)) {
+      if (i < at || (t[i + 1] !== '(' && t[i + 1] !== ':')) continue;
+      let j = i + 2;
+      while (t[j] === ' ' || t[j] === '\t') j += 1;
+      if (t[j] === '\n') { j += 1; while (t[j] === ' ' || t[j] === '\t' || t[j] === '>') j += 1; } // a quote's > markers too
+      if (t[j] !== '<') continue;
+      let k = j + 1;
+      while (k < t.length && t[k] !== '<' && t[k] !== '>' && t[k] !== '\n') k += 1;
+      if (t[k] !== '>') continue;
+      out += t.slice(at, j + 1) + t.slice(j + 1, k).replace(/\s/gu, '');
+      at = k;
+      i = k;
+    }
+    return out + t.slice(at);
+  };
+  // What follows a host to drop: anything not a letter or digit, from the end back.
+  const tail = (h) => { const c = Array.from(h); while (c.length && !/[\p{L}\p{N}]/u.test(c[c.length - 1])) c.pop(); return c.join(''); };
+  // One address's host from its authority: past the last @ (a user), else up to what ends a sentence
+  // or a link in prose (, ; ' " ` ( ) [ ] |); less a port and what follows the host.
+  const host = (a) => { const at = a.lastIndexOf('@'); const h = at >= 0 ? a.slice(at + 1) : a.replace(/[,;'"`()[\]|].*$/s, ''); return tail(h.replace(/:\d*$/, '')).toLowerCase(); };
+  // With no @, the authority whole as well, up to what a host may not hold ([ ] | ^ % :): a browser keeps
+  // , ; ' " ` ( ) in a host, so prose's ends are read both ways.
+  const whole = (a) => (a.includes('@') ? '' : tail(a.replace(/[[\]|^%:].*$/s, '')).toLowerCase());
+  // Every host in the whole text, lower case, each once: read as markdown decodes the text, then again
+  // with each HTML attribute's value read as a browser does. The authority after http: or https: and
+  // any slashes or backslashes (or ftp:, ws:, wss:, the browser's other schemes that read a host so),
+  // two or more slashes or backslashes not inside a word or path, up to a slash, backslash, ?, #,
+  // white space, < or >; another scheme's // up to a slash, ?, #, white space, < or > (a backslash
+  // is part of its authority); and where it holds ]( (a link's
+  // words ending in an address), each part of it on either side as well. Each address of a mailto:; an
+  // e-mail autolink <local@domain> (CommonMark's local-part characters); an e-mail address's host, as
+  // GitHub links a bare one (a letter, digit, . _ + or - before the @, a dot in the host); and a bare
+  // www. name.
+  const HOST = /<[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@([\p{L}\p{N}.-]+)>|(?:(?:https?|ftp|wss?):[/\\]*|(?<![\p{L}\p{N}/\\._-])[/\\]{2,})([^\s/\\?#<>]+)|mailto:([^\s/\\?#<>"`()[\]|]+)|(?<=[\p{L}\p{N}._+-])@([\p{L}\p{N}_-][\p{L}\p{N}._-]*)|(?<![\p{L}\p{N}/.@-])(www\.[^\s/\\?#<>]+)|(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/([^\s/?#<>]+)/giu;
+  // The third reading: the second, with the white space a URL keeps inside its user taken out, where
+  // markdown or HTML lets it stand inside an address (angle-bracket destinations, attribute values,
+  // references), the < and > a user may hold there too, and every white space but the ASCII ones.
+  // A plain link destination ([x](…), [x]: …, not <…>; after form feeds and vertical tabs, one line break and a quote's > markers
+  // too, as pandoc reads them), up to white space, with
+  // its < and > taken out: a browser encodes them inside a user.
+  const dests = (t) => t.replace(/(\]\(|\]:)([ \t\f\v]*(?:\n[ \t\f\v]*(?:>[ \t\f\v]*)*)?)(\S*)/g, (all, o, sp, v) => (v[0] === '<' ? all : o + sp + v.replace(/\\?[<>]/g, '')));
+  // Each quoted value after an = (and any white space), read on its own as ="…" or ='…', so a stray
+  // quote elsewhere cannot pair with an attribute's own and leave its value unread. Each value ends at
+  // the next quote of its kind, so the values of one kind do not overlap: linear.
+  const values = (t) => {
+    const out = [];
+    for (let i = t.indexOf('='); i >= 0; i = t.indexOf('=', i + 1)) {
+      let j = i + 1;
+      while (j < t.length && (t[j] === ' ' || t[j] === '\t' || t[j] === '\n' || t[j] === '\f' || t[j] === '\r')) j += 1;
+      const q = t[j];
+      if (q !== '"' && q !== "'") continue;
+      const k = t.indexOf(q, j + 1);
+      if (k > 0) out.push(`=${t.slice(j, k + 1)}`);
+    }
+    return out.join(' ');
+  };
+  // Every address as a browser reads it: a scheme (at a word's start, any length), a colon, and what
+  // follows up to white space, < or >, read by node's URL. Its host, percent-decoded (URL decodes a
+  // special scheme's; another's is decoded here); for mailto:, each address of its path and of its
+  // to, cc and bcc fields, decoded, past the last @. This closes the class the rules above spell out
+  // form by form: a host percent-encoded, behind punctuation a host keeps, or after a long scheme.
+  const ADDRESS = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:[^\s<>]*/giu;
+  // Each run of %xx decoded on its own, as a browser or a mail client does; a malformed one kept as written.
+  const pct = (s) => s.replace(/(?:%[0-9a-f]{2})+/gi, (r) => { try { return decodeURIComponent(r); } catch { return r.replace(/%([0-9a-f]{2})/gi, (x, h) => (parseInt(h, 16) < 128 ? String.fromCharCode(parseInt(h, 16)) : x)); } });
+  // An authority read again percent-decoded: whole, past its @, and by node's URL with an https base
+  // (so a scheme-relative //host, /\host or www. host is read as a browser on a web page reads it).
+  function decoded(a) {
+    if (!a.includes('%') && /^[\x20-\x7e]*$/.test(a)) return []; // nothing to decode: the readings above hold it
+    const d = pct(a);
+    const cut = a.replace(/[[\]|^"'`].*$/s, '');
+    const u = URL.canParse(`https://${cut}/`) ? new URL(`https://${cut}/`).hostname : '';
+    return [whole(d), host(d), tail(pct(u)).toLowerCase()];
+  }
+  // A mailto value's addresses: its path and its to, cc and bcc fields, each run of %xx decoded on its
+  // own, split at , and ;, the domain past each address's last @ up to what ends it in prose.
+  function mailHosts(v) {
+    const q = v.indexOf('?');
+    const fields = [q < 0 ? v : v.slice(0, q)];
+    if (q >= 0) for (const p of v.slice(q + 1).split('&')) { const e = p.indexOf('='); if (e > 0 && /^(?:to|cc|bcc)$/i.test(p.slice(0, e))) fields.push(p.slice(e + 1)); }
+    const out = [];
+    for (const f of fields) for (const a of pct(f).split(/[,;]/)) { const at = a.lastIndexOf('@'); if (at >= 0) out.push(a.slice(at + 1).replace(/[\s()[\]|^"'`<>].*$/s, '')); }
+    return out;
+  }
+  const MAILTO = /mailto:([^\s<>]*)/gi;
+  function urlHosts(s) {
+    if (/^mailto:/i.test(s)) return mailHosts(s.slice(7));
+    if (!URL.canParse(s)) return [];
+    const h = new URL(s).hostname;
+    return h ? [pct(h)] : [];
+  }
+  const third = (t) => decode(attrs(angles(dests(t)), true), true).replace(/[^\S\t\n\v\f\r ]/gu, '');
+  function hosts(text) {
+    const out = new Set();
+    const add = (h) => { if (h) out.add(h); };
+    const t = String(text).replace(/\r\n?/g, '\n'); // a line ends at LF, CR or CRLF
+    // A URL keeps white space inside its user (a browser encodes it), so a third reading takes out the
+    // white space inside angle-bracket destinations, attribute values, and what references decode to.
+    const v = values(t);
+    for (const each of new Set([decode(t), decode(attrs(t)), third(t), decode(attrs(v)), decode(attrs(v, true), true)])) { // each distinct reading once
+      for (const m of each.matchAll(HOST)) {
+        if (m[1] !== undefined) add(tail(m[1]).toLowerCase());
+        else if (m[2] !== undefined || m[6] !== undefined) {
+          const a = m[2] ?? m[6];
+          add(host(a)); add(whole(a));
+          for (const h of decoded(a)) add(h);
+          if (a.includes('](')) for (const b of a.split('](')) { add(host(b)); add(whole(b)); for (const h of decoded(b)) add(h); }
+        }
+        else if (m[3] !== undefined) { for (const a of m[3].split(/[,;]/)) if (a.includes('@')) add(host(a)); }
+        else if (m[4] !== undefined) { const h = tail(m[4]).toLowerCase(); if (h.includes('.')) add(h); }
+        else if (m[5] !== undefined) { add(host(m[5])); add(whole(m[5])); for (const h of decoded(m[5])) add(h); }
+      }
+      for (const m of each.matchAll(MAILTO)) for (const h of mailHosts(m[1])) add(tail(h).toLowerCase());
+      for (const u of each.matchAll(ADDRESS)) for (const h of urlHosts(u[0])) add(tail(h).toLowerCase());
+    }
+    return [...out];
+  }
+
+  // exterior.md: { errors, warnings, refused, held, hosts }. On a repo known private nothing is refused
+  // or held; visibility 'public' or 'unknown' keeps the names rule. A ### heading is judged by
+  // allowed.names (origin main's strategy and dependency names); a word or host by allowed.words (the
+  // strategy and the dependency files whole).
+  function checkExterior(text, { today, visibility, allowed }) {
+    const errors = docErrors(text, 'exterior');
+    const all = errors.length ? [] : entries(text);
+    const open = visibility === 'private';
+    const unknown = (list, by) => (open ? [] : list.filter((w) => !namesWhole(by, w)));
+    const refs = webRefs(text);
+    return {
+      errors,
+      warnings: all.flatMap((e) => entryWarnings(e, today, refs)),
+      refused: unknown(headings(text).filter((h) => h.level === 3).map((h) => h.text), allowed.names),
+      held: unknown(capitalised(text), allowed.words),
+      hosts: unknown(hosts(text), allowed.words),
+    };
+  }
+
+  return { version, checkSelf, selfHeld, scan, plain, headings, links, parts, namesWhole, entries, capitalised, hosts, checkExterior };
+})();
+// 1 when a fence's info string is exactly self or exterior (version 1), else 2.
+const selfPlainVersion = selfPlain.version;
+// self.md's errors and part paths: { errors, parts }. root is the file's folder from the repo root
+// ('' the root); has(path) says whether a path is in the repo, by exact case.
+const selfPlainCheck = selfPlain.checkSelf;
+/* self-plain end */
+
 // The fenced blocks of a markdown file. A fence is a line at column 0 of three or more backticks;
 // one opens a block when none is open, its info string the rest of the line, its spaces and tabs
 // trimmed (possibly empty). The block closes at the next line of at least as many backticks and
@@ -7657,33 +8428,41 @@ function worldDocErrors(text, doc) {
   }
   return errs;
 }
-// A self.md's text in: its parsed self block (null unless it holds) and its contract errors.
+// The folder a self.md's part links resolve from, from the repo root: the project folder's. A project
+// outside its repo has no repo for a part to be in, so its own folder stands in for one ('').
+const selfRoot = () => (projectInRepo ? projectRel : '');
+// A self.md's text in, as validate reads it: { version, block, errors }. Version 1 (a fenced self or
+// exterior block, selfPlainVersion) against self@1, its block parsed when it holds; one whose block
+// self@1's reader can't find (a ~~~ fence, one indented or in a list item) gets self@2's block error,
+// so validate and self check say the same. Version 2 against self@2's form, no repo needed: the
+// title, at least one part, none leaving the repo or with a bad escape. Whether each part is there
+// is the draft's check (selfDraftErrors); on main a part gone is self-drift.
 function selfDoc(text) {
+  const version = selfPlainVersion(text);
+  const plain = () => ({ version, block: null, errors: selfPlainCheck(text, { root: selfRoot(), has: () => true }).errors });
+  if (version === 2) return plain();
+  const b = fencedBlocks(text);
+  if (!b.unclosed && !b.blocks.some((x) => x.info === 'self' || x.info === 'exterior')) return plain();
   const errors = worldDocErrors(text, 'self');
-  if (errors.length) return { block: null, errors };
-  return { block: JSON.parse(fencedBlocks(text).blocks.find((x) => x.info === 'self').body), errors };
+  if (errors.length) return { version, block: null, errors };
+  return { version, block: JSON.parse(b.blocks.find((x) => x.info === 'self').body), errors };
+}
+// A draft self.md's errors (self@2, log.schema.json#self2): the one judgment self check, chore pr and
+// check-pr make. A version 1 block is refused, alone; else the title, then the parts, each part link
+// resolved from selfRoot() and looked for with has(path) (the disk, or a commit's tree).
+function selfDraftErrors(text, has) {
+  return selfPlainCheck(text, { root: selfRoot(), has }).errors;
 }
 // A part's code path as the disk and git checks both read it: split on /, empty and . segments
 // dropped, joined. '' is the repo root. (The schema refuses a leading / and any .. segment.)
 function partPath(p) {
   return String(p).split('/').filter((s) => s !== '' && s !== '.').join('/');
 }
-// The parts' code paths that has(partPath(p)) doesn't find: [{ part, path }], each path as written,
-// once, in file order.
-function selfPathsMissing(block, has) {
-  const missing = [];
-  const seen = new Set();
-  for (const p of block.parts) for (const c of p.code) {
-    if (seen.has(c)) continue;
-    seen.add(c);
-    if (!has(partPath(c))) missing.push({ part: p.id, path: c });
-  }
-  return missing;
-}
-// Whether a normalised path is on disk under the repo root, each segment matched by its exact case
-// (as git reads it), so App/ is missing beside app/ on a disk that folds case too.
+// Whether a normalised path is on disk under the repo root (the project folder, for a project outside
+// its repo: selfRoot), each segment matched by its exact case (as git reads it), so App/ is missing
+// beside app/ on a disk that folds case too.
 function hasOnDisk(n) {
-  let dir = projectRoot;
+  let dir = projectInRepo ? projectRoot : projectDir;
   for (const seg of n === '' ? [] : n.split('/')) {
     let names;
     try { names = fs.readdirSync(dir); } catch { return false; }
@@ -7701,7 +8480,8 @@ function selfMainText() {
   return projectInRepo && mainRef() ? git(['show', `${mainRef()}:${selfRel()}`]) : readText(path.join(projectDir, 'self.md'));
 }
 // dashboard-data's self block (log.schema.json#self@1 dashboard): main's self.md as check.mjs's
-// dashboardSelf gives it, or null when main has none or it breaks the contract.
+// dashboardSelf gives it, or null when main has none, breaks the contract or is plain (self@2: the
+// page reads the document; kit-868 drops the key).
 function selfDashboard() {
   const text = selfMainText();
   const b = text === null ? null : selfDoc(text).block;
@@ -7745,8 +8525,9 @@ function namesAllowedText(ref = mainRef()) {
   const at = (rel) => (projectInRepo && ref ? git(['show', `${ref}:${rel}`]) : readText(path.join(projectRoot, rel))) ?? '';
   return [strategyRel, 'package.json', 'Gemfile', 'requirements.txt'].map(at).join('\n');
 }
-// The capitalised words of pieces that allowed doesn't name (as a whole word, ignoring case). The
-// one names function: self check, chore pr and check-pr use it, and kit-135 for exterior.md.
+// The capitalised words of pieces that allowed doesn't name (as a whole word, ignoring case): self
+// check, chore pr and check-pr read a version 1 block's pieces with it (selfWords; a plain self.md's
+// words come from the self-plain region's selfHeld), and kit-135 exterior.md's.
 function unknownNames(pieces, allowed) {
   return capitalisedWords(pieces).filter((w) => !namesWhole(allowed, w.word));
 }
@@ -7754,9 +8535,8 @@ function unknownNames(pieces, allowed) {
 // every other fenced block is in it), then the block's what, makes and each part's what (with
 // sentences), each part's name, controls[i] and not[i] (every word). The ids are left out, and so is
 // each code path has(partPath(p)) finds: it names a file already in the repo. One it doesn't (an
-// earlier blob's) is read like any text. With no parsed block, the whole file is one prose piece.
+// earlier blob's) is read like any text.
 function selfPieces(text, block, has) {
-  if (!block) return [{ where: 'prose', text: String(text), sentences: true }];
   const lines = String(text).split(/\r?\n/);
   const b = fencedBlocks(text).blocks.find((x) => x.info === 'self');
   // the block's lines, opening fence to closing, become one blank line
@@ -7774,10 +8554,14 @@ function selfPieces(text, block, has) {
   block.not.forEach((c, i) => add(`not[${i}]`, c, false));
   return pieces;
 }
-// One self.md blob's unknown words: its pieces (the whole text as prose when the contract fails, so
-// a broken draft's words still count), less what allowed names.
+// One self.md blob's unknown words, less what allowed names: a version 1 block's pieces, or with no
+// parsed block (a plain document, or a draft whose contract fails, so its words still count) the
+// self-plain region's selfHeld, each word at 'prose': a heading, a list item, a table row, a link's
+// words, code and a comment read whole, a prose sentence's first word skipped (kit-862 final-1b F1).
 function selfWords(text, has, allowed) {
-  return unknownNames(selfPieces(text, selfDoc(text).block, has), allowed);
+  const { block } = selfDoc(text);
+  if (!block) return selfPlain.selfHeld(text).filter((word) => !namesWhole(allowed, word)).map((word) => ({ word, where: 'prose' }));
+  return unknownNames(selfPieces(text, block, has), allowed);
 }
 // Whether a strategy links self.md: in its prose (outside every fenced block), an inline link to
 // self.md or ./self.md (an optional #anchor and "title"), or a reference definition naming it.
@@ -7787,11 +8571,20 @@ function linksSelf(strategyText) {
 }
 // main's strategy.md, as strategyState reads it, or null when missing.
 const strategyMainText = () => (projectInRepo && mainRef() ? git(['show', `${mainRef()}:${strategyRel}`]) : readText(path.join(projectDir, 'strategy.md')));
+// How loud a missing Self or exterior is (kit-814): high, so wait keeps bringing it back, until the
+// owner has a draft of the next step it names; medium while a question of that step's class (cls) is
+// open. An answered one, approved or refined, counts for nothing: it is high again until the draft
+// lands or is asked again, as strategy-unwritten is.
+function worldMissingSeverity(cls) {
+  return questions().some((q) => q.status === 'open' && q.class === cls) ? 'medium' : 'high';
+}
 // metrics' self findings, read from main (none with no main, or the project outside the repo), each
-// keyed so observeFindings keeps one observation per path or strategy blob: self-drift once per part
-// path missing at main while main's self.md holds; self-unlinked while main has a self.md its
-// strategy doesn't link; self-missing while the strategy is written and main has no self.md, its
-// next step the strategy-change link first when the strategy doesn't link it. All low.
+// keyed so observeFindings keeps one observation per path or strategy blob: self-drift once while
+// main's self.md is version 1 (key self@1, asking for the plain version, and none per path), else
+// once per part link whose path main lacks (key the path from the repo root); self-unlinked while main has a self.md its
+// strategy doesn't link; both low. self-missing while the strategy is written and main has no
+// self.md, its next step the strategy-change link first when the strategy doesn't link it, then
+// self-change: high until that step is asked, medium while it is (worldMissingSeverity).
 function selfFindings(add) {
   const main = projectInRepo ? mainRef() : null;
   if (!main) return;
@@ -7800,12 +8593,15 @@ function selfFindings(add) {
   const strategyKey = git(['rev-parse', '--verify', '--quiet', `${main}:${strategyRel}`]) ?? undefined;
   const linked = linksSelf(strategy);
   if (text !== null) {
-    const { block } = selfDoc(text);
-    if (block) for (const m of selfPathsMissing(block, hasAt(main))) add('low', 'self-drift', 'self', `part ${m.part}'s path ${m.path} is not on main`, 'the code moved: draft a new self.md in a chore (self check, then chore pr and ask self-change; supervisor.md, Monitoring)', { key: m.path });
+    if (selfPlainVersion(text) === 1) add('low', 'self-drift', 'self', "main's self.md is version 1 (a fenced self block)", 'draft self.md as a plain document in a chore, each part a link to its folder or file (self check, then chore pr and ask self-change; supervisor.md, Monitoring)', { key: 'self@1' });
+    else {
+      const has = hasAt(main);
+      for (const p of selfPlain.parts(text, selfRoot())) if (p.path !== null && !has(p.path)) add('low', 'self-drift', 'self', `part link ${p.target} points to nothing on main`, 'the code moved: draft a new self.md in a chore (self check, then chore pr and ask self-change; supervisor.md, Monitoring)', { key: p.path });
+    }
     if (!linked) add('low', 'self-unlinked', 'self', 'main has self.md and its strategy.md does not link it', 'propose a strategy-change linking [self.md](./self.md) in place of any lines restating what the project is, in its own PR', { key: strategyKey });
   } else if (strategyState() === 'written') {
     const draft = 'draft self.md from the code and the strategy in a chore, run self check, and ask self-change (supervisor.md, Monitoring)';
-    add('low', 'self-missing', 'self', 'the strategy is written and main has no self.md', linked ? draft : `first propose a strategy-change linking [self.md](./self.md), in its own PR; then ${draft}`, { key: strategyKey });
+    add(worldMissingSeverity(linked ? 'self-change' : 'strategy-change'), 'self-missing', 'self', 'the strategy is written and main has no self.md', linked ? draft : `first propose a strategy-change linking [self.md](./self.md), in its own PR; then ${draft}`, { key: strategyKey });
   }
 }
 // The draft's history. Every self.md blob the branch carries since its merge base is pushed with it
@@ -7919,10 +8715,8 @@ function choreSelfHold(slug, base, head, named, exteriorChanged = false) {
   const rel = selfRel();
   if (!projectInRepo || !draftBlobs(base, head, rel).length) return named && !exteriorChanged ? 'chore pr: --names-checked is for a chore changing self.md or exterior.md' : null;
   if (git(['cat-file', '-e', `${head}:${rel}`], mainRoot) !== null) {
-    const { block, errors } = selfDoc(git(['show', `${head}:${rel}`], mainRoot) ?? '');
-    if (errors.length) return `chore pr: self.md breaks self@1: ${errors.join('; ')}; run self check`;
-    const missing = selfPathsMissing(block, hasAt(head));
-    if (missing.length) return missing.map((m) => `chore pr: part ${m.part}'s path ${m.path} is not at ${head.slice(0, 12)}`).join('\n');
+    const errors = selfDraftErrors(git(['show', `${head}:${rel}`], mainRoot) ?? '', hasAt(head));
+    if (errors.length) return [...errors.map((e) => `chore pr: self.md: ${e}`), `chore pr: self.md breaks self@2 at ${head.slice(0, 12)}; run self check`].join('\n');
   }
   const allowed = namesAllowedText();
   const words = draftWords(base, head, rel, (text, has) => selfWords(text, has, allowed));
@@ -7954,9 +8748,8 @@ function selfDraftLines(base, sha, branch) {
   if (!projectInRepo || !draftBlobs(base, sha, rel).length) return { fails: [], warns: [] };
   const fails = [];
   if (git(['cat-file', '-e', `${sha}:${rel}`], mainRoot) !== null) {
-    const { block, errors } = selfDoc(git(['show', `${sha}:${rel}`], mainRoot) ?? '');
-    fails.push(...errors.map((e) => `${rel} breaks self@1 at ${sha.slice(0, 12)}: ${e}`));
-    if (block) fails.push(...selfPathsMissing(block, hasAt(sha)).map((m) => `${rel}: part ${m.part}'s path ${m.path} is not at ${sha.slice(0, 12)}`));
+    const errors = selfDraftErrors(git(['show', `${sha}:${rel}`], mainRoot) ?? '', hasAt(sha));
+    fails.push(...errors.map((e) => `${rel} breaks self@2 at ${sha.slice(0, 12)}: ${e}`));
   }
   const allowed = namesAllowedText();
   const words = draftWords(base, sha, rel, (text, has) => selfWords(text, has, allowed));
@@ -7967,60 +8760,62 @@ function selfDraftLines(base, sha, branch) {
   return { fails: [...fails, ...names.fails], warns: names.warns };
 }
 const SELF_NOT_DRAFTED = 'self.md is not drafted yet: the supervisor drafts it from the code and the strategy (supervisor.md, Monitoring)';
-// self show [--json]: main's self.md. self check: the working tree's, the draft, against the
-// contract and each part's path on disk (errors, exit 1), then the names rule and whether main's
-// strategy links self.md (warnings, the exit unchanged).
+// self show [--json]: main's self.md, printed as it is, either version (--json: selfDashboard, a
+// version 1 block or null). self check: the working tree's, the draft, against self@2 with each part
+// link on disk (selfDraftErrors: errors, exit 1), then the names rule and whether main's strategy
+// links self.md (warnings, the exit unchanged).
 function cmdSelf() {
   const sub = positional[0];
   if (sub === 'show') {
     gitReadCache = new Map();
     const text = selfMainText();
     if (text === null) return flags.json ? json(null) : out(SELF_NOT_DRAFTED);
-    const { block: b, errors } = selfDoc(text);
-    if (errors.length) {
-      for (const e of errors) out(`error: self.md: ${e}`);
-      process.exit(1);
-    }
     if (flags.json) return json(selfDashboard());
-    const list = (xs) => (xs.length ? xs.join('; ') : 'nothing listed');
     out(`Self: ${selfRel()} ${projectInRepo && mainRef() ? 'on main' : 'in the working tree'}`);
-    out(`What it is: ${b.what}`);
-    out(`What it makes or does: ${b.makes}`);
-    out('Parts:');
-    for (const p of b.parts) out(`  ${p.id}  ${p.name}: ${p.what} (${p.code.join(', ')})`);
-    out(`Controls: ${list(b.controls)}`);
-    out(`Does not control: ${list(b.not)}`);
+    out('');
+    out(String(text).replace(/\s+$/, ''));
     return;
   }
   if (sub === 'check') {
     const text = readText(path.join(projectDir, 'self.md'));
     if (text === null) return out(SELF_NOT_DRAFTED);
-    const { block, errors } = selfDoc(text);
+    const errors = selfDraftErrors(text, hasOnDisk);
     for (const e of errors) out(`error: self.md: ${e}`);
-    const missing = block ? selfPathsMissing(block, hasOnDisk) : [];
-    for (const m of missing) out(`error: self.md: part ${m.part}'s path ${m.path} is not in the repo`);
     gitReadCache = new Map();
     for (const w of selfWords(text, hasOnDisk, namesAllowedText())) out(`warning: self.md: "${w.word}" (${w.where}) is in neither main's strategy.md nor its package.json, Gemfile or requirements.txt: on a repo not known to be private, the draft is public once its branch is pushed`);
     if (selfMainText() !== null && !linksSelf(strategyMainText())) out('warning: main\'s strategy.md does not link self.md: propose a strategy-change adding [self.md](./self.md), in its own PR');
-    process.exit(errors.length || missing.length ? 1 : 0);
+    process.exit(errors.length ? 1 : 0);
   }
   die('usage: self show [--json] | self check');
 }
 /* self-model end */
 /* world-model start */
-// project/exterior.md, what the project relates to (log.schema.json#exterior@1): a markdown file whose
-// one fenced `exterior` block holds the contract. Rules 1 to 7 are kit-139's worldDocErrors; 8 to 10
-// follow test/fixtures/world/check.mjs, so the two refuse the same invalid/ cases.
+// project/exterior.md, what the project relates to: since kit-863 a plain document
+// (log.schema.json#exterior2), judged by the self-plain region's checkExterior, which follows
+// test/fixtures/world2/check.mjs rule for rule: one # title, ### entries, a dated source for each, and
+// on a repo not known to be private the names rule (a ### heading named whole in origin main's
+// strategy or dependency names, else refused; every capitalised word and every link host held until
+// named on the chore). A draft must be one. Version 1 (log.schema.json#exterior@1, one fenced
+// `exterior` block) still validates on main, by kit-135's rules below, and raises one exterior-drift.
 const EXTERIOR_REL = () => `${projectRel}/exterior.md`;
 const EXTERIOR_NOT_DRAFTED = 'exterior.md is not drafted yet: the supervisor drafts it from the strategy and self.md (supervisor.md, Monitoring)';
-// An exterior.md's text in: its parsed block (null unless it holds) and its contract errors. Past the
-// schema: an id shared across entities and signals (8), relation_word only and always for other (9),
-// and the prose outside the block naming each entity, as whole words in any case (10).
+// The day a read date is judged against: today, in UTC.
+const exteriorToday = () => new Date().toISOString().slice(0, 10);
+// An exterior.md's text in, as validate reads it: { version, block, errors }. Version 2 (no fenced self
+// or exterior block, selfPlainVersion) against exterior@2's form: the title, and no block. Version 1
+// against exterior@1, its block parsed when it holds; one whose block exterior@1's reader can't find (a
+// ~~~ fence, one indented or in a list item) gets exterior@2's block error. Past exterior@1's schema:
+// an id shared across entities and signals (8), relation_word only and always for other (9), and the
+// prose outside the block naming each entity, as whole words in any case (10).
 function exteriorDoc(text) {
+  const version = selfPlainVersion(text);
+  const plain = () => ({ version, block: null, errors: selfPlain.checkExterior(text, { today: exteriorToday(), visibility: 'private', allowed: { names: '', words: '' } }).errors });
+  if (version === 2) return plain();
+  const fb = fencedBlocks(text);
+  if (!fb.unclosed && !fb.blocks.some((x) => x.info === 'self' || x.info === 'exterior')) return plain();
   const errors = worldDocErrors(text, 'exterior');
-  if (errors.length) return { block: null, errors };
-  const b = fencedBlocks(text);
-  const v = JSON.parse(b.blocks.find((x) => x.info === 'exterior').body);
+  if (errors.length) return { version, block: null, errors };
+  const v = JSON.parse(fb.blocks.find((x) => x.info === 'exterior').body);
   const seen = new Set();
   const ids = v.entities.flatMap((e, i) => [[`exterior.entities[${i}].id`, e.id], ...e.signals.map((x, j) => [`exterior.entities[${i}].signals[${j}].id`, x.id])]);
   for (const [where, id] of ids) {
@@ -8030,14 +8825,14 @@ function exteriorDoc(text) {
   v.entities.forEach((e, i) => {
     if (e.relation === 'other' && e.relation_word === undefined) errors.push(`exterior.entities[${i}].relation_word is required when relation is other`);
     if (e.relation !== 'other' && e.relation_word !== undefined) errors.push(`exterior.entities[${i}].relation_word is only for relation other`);
-    if (!namesWhole(b.prose, e.name)) errors.push(`exterior.entities[${i}] "${e.name}": the prose outside the block never names it`);
+    if (!namesWhole(fb.prose, e.name)) errors.push(`exterior.entities[${i}] "${e.name}": the prose outside the block never names it`);
   });
-  return { block: errors.length ? null : v, errors };
+  return { version, block: errors.length ? null : v, errors };
 }
 const exteriorTreeText = () => readText(path.join(projectDir, 'exterior.md'));
-// The head's strategy.md and self.md blobs (null for no file): ref's, or with ref null the working
-// tree's (git hash-object, so an uncommitted draft counts), with the strategy's text when it was read
-// from the tree (a blob hash-object didn't write can't be read back with cat-file).
+// A version 1 file's checks past its contract, for validate. The head's strategy.md and self.md blobs
+// (null for no file): ref's, or with ref null the working tree's (git hash-object, so an uncommitted
+// draft counts), with the strategy's text when it was read from the tree.
 function headBlobs(ref, root = projectDir) {
   const rels = { strategy: strategyRel, self: `${projectRel}/self.md` };
   if (ref) {
@@ -8048,17 +8843,16 @@ function headBlobs(ref, root = projectDir) {
   return { strategyBlob: tree('strategy.md'), selfBlob: tree('self.md'), strategyText: readText(path.join(root, 'strategy.md')) };
 }
 // Whether validate is at the draft: main can be read and the working tree's exterior.md is not
-// main's (none on main counts as differing). With no main (a depth-1 CI checkout) it is not: the
-// stale state never errors, and check-pr and merge --chore run the draft's checks (spec, The check).
+// main's (none on main counts as differing). With no main (a depth-1 CI checkout) it is not.
 function exteriorAtDraft() {
   if (!projectInRepo || !mainRef()) return false;
   const f = path.join(projectDir, 'exterior.md');
   if (!fs.existsSync(f)) return false;
   return git(['hash-object', '--', f], mainRoot) !== git(['rev-parse', '--verify', '--quiet', `${mainRef()}:${EXTERIOR_REL()}`], mainRoot);
 }
-// Steps 2 and 3 of the check (spec, The check). Each quote is a verbatim part of the strategy_blob
-// object's text, always; a strategy_blob the repo can't read is an error at the draft and a warning
-// otherwise. At the draft, strategy_blob and self_blob are the head's strategy.md and self.md.
+// A version 1 block's quotes, each a verbatim part of its strategy_blob's text; a strategy_blob the
+// repo can't read is an error at the draft and a warning otherwise. At the draft, strategy_blob and
+// self_blob are the head's strategy.md and self.md.
 function exteriorBlobLines(block, { draft, strategyBlob, selfBlob, strategyText = null }) {
   const errors = [];
   const warnings = [];
@@ -8101,84 +8895,53 @@ function dependencyNames(ref = mainRef()) {
   }
   return { text: names.join('\n'), warnings };
 }
-// The names rule (spec, The names rule): an organisation or work is allowed when origin main's
-// strategy.md names it as whole words in any case, or, for depends_on, its dependency names do. The
-// branch's own strategy never counts; with no ref, nothing allows it. A group is never checked here
-// (its words are, in exteriorWords). refused: [{ index, name, line }]; warnings: the dependency files'.
-function exteriorNameLines(block, ref = mainRef()) {
-  const strategy = fileAtRef(strategyRel, ref) ?? '';
+// What the names rule allows at ref (origin main; the branch's own files never count): names, which
+// a ### heading must be named in whole (main's strategy.md and its dependency names), and words, which
+// hold every other capitalised word and every link host (main's strategy.md and its dependency files'
+// whole text, namesAllowedText); warnings, the dependency files'.
+function exteriorAllowed(ref = mainRef()) {
   const deps = dependencyNames(ref);
-  const refused = [];
-  block.entities.forEach((e, i) => {
-    if (e.kind !== 'organisation' && e.kind !== 'work') return;
-    const dep = e.relation === 'depends_on';
-    if (namesWhole(strategy, e.name) || (dep && namesWhole(deps.text, e.name))) return;
-    refused.push({ index: i, name: e.name, line: `exterior.entities[${i}] "${e.name}" (${e.kind}) is not named in origin main's strategy.md${dep ? ', nor its dependency files' : ''}: name it as a group, or have the strategy name it first` });
-  });
-  return { refused, warnings: deps.warnings };
+  return { names: `${fileAtRef(strategyRel, ref) ?? ''}\n${deps.text}`, words: namesAllowedText(ref), warnings: deps.warnings };
 }
-// An exterior.md's pieces for kit-139's capitalised words: the text outside the exterior block
-// (sentences; every other fenced block is in it, as selfPieces reads self.md), each name (every word, so a group's first word counts), each matters, strategy quote and signal
-// what (sentences), and each relation_word. With no parsed block, the whole text as prose.
-function exteriorPieces(text, block) {
-  if (!block) return [{ where: 'prose', text: String(text), sentences: true }];
-  const lines = String(text).split(/\r?\n/);
-  const b = fencedBlocks(text).blocks.find((x) => x.info === 'exterior');
-  // the block's lines, opening fence to closing, become one blank line
-  lines.splice(b.line - 1, b.body.split('\n').length + 2, '');
-  const pieces = [{ where: 'prose', text: lines.join('\n'), sentences: true }];
-  const add = (where, t, sentences) => pieces.push({ where, text: t, sentences });
-  block.entities.forEach((e, i) => {
-    add(`entities[${i}].name`, e.name, false);
-    add(`entities[${i}].matters`, e.matters, true);
-    e.strategy.forEach((q, j) => add(`entities[${i}].strategy[${j}]`, q, true));
-    e.signals.forEach((x, j) => add(`entities[${i}].signals[${j}].what`, x.what, true));
-    if (e.relation_word !== undefined) add(`entities[${i}].relation_word`, e.relation_word, false);
-  });
-  return pieces;
+// The one judgment of an exterior.md draft (exterior@2): the self-plain region's checkExterior, as on a
+// repo not known to be private: { errors, warnings, refused, held, hosts }. A caller on a private repo
+// drops refused, held and hosts; a version 1 block is an error, alone.
+function exteriorDraft(text, allowed) {
+  return selfPlain.checkExterior(text, { today: exteriorToday(), visibility: 'public', allowed });
 }
-// One exterior.md text's words that origin main's strategy and dependency files don't name.
-function exteriorWords(text, block, ref = mainRef()) {
-  return unknownNames(exteriorPieces(text, block), `${namesAllowedText(ref)}\n${dependencyNames(ref).text}`);
-}
+const exteriorRefusedLine = (name) => `"${name}" (a ### heading) is not named whole in origin main's strategy.md or its dependency names: on a repo not known to be private an entry is headed only by a name they give; head it as a group or a topic, or have the strategy name it first`;
 const exteriorWordLine = (w) => `"${w.word}" (${w.where}) is in neither origin main's strategy.md nor its dependency files: on a repo not known to be private, the draft is public once its branch is pushed; reword it, or check it and name it on the chore (chore pr --names-checked)`;
-// The draft's history (spec, The check, every version): steps 1 to 3 on head ({ text, blobs }, or
-// null when there is no exterior.md at the head), then the names rule and the words on each version
-// ([{ commit, text }], commit null for the head's own, each name and word kept at its first version).
-// { errors, warns, named: [{ line, commit }], words: [{ word, where, commit }] }.
-function exteriorVersionsScan(head, versions) {
+// The draft's history (every version is pushed): the contract and dated sources on head ({ text }, or
+// null when there is no exterior.md at the head), then the names rule on each version ([{ commit,
+// text }], commit null for the head's own): each refused heading and each held word or link host kept
+// at its first version. { errors, warns, named: [{ name, line, commit }], words: [{ word, where, commit }] }.
+function exteriorVersionsScan(head, versions, allowed) {
+  const judged = new Map();
+  const judge = (t) => { if (!judged.has(t)) judged.set(t, exteriorDraft(t, allowed)); return judged.get(t); };
   const errors = [];
   const warns = [];
-  if (head) {
-    const { block, errors: e } = exteriorDoc(head.text);
-    errors.push(...e);
-    if (block) { const b = exteriorBlobLines(block, { draft: true, ...head.blobs }); errors.push(...b.errors); warns.push(...b.warnings); }
-  }
+  if (head) { const d = judge(head.text); errors.push(...d.errors); warns.push(...d.warnings); }
   const named = [];
   const words = [];
   const seen = new Set();
-  let depWarns = null;
   for (const { commit, text } of versions) {
-    const block = exteriorDoc(text).block;
-    if (block) {
-      const n = exteriorNameLines(block);
-      depWarns ??= n.warnings;
-      for (const r of n.refused) if (!seen.has(`n:${r.name}`)) { seen.add(`n:${r.name}`); named.push({ line: r.line, commit }); }
-    }
-    for (const w of exteriorWords(text, block)) if (!seen.has(`w:${w.word}`)) { seen.add(`w:${w.word}`); words.push({ ...w, commit }); }
+    const d = judge(text);
+    for (const name of d.refused) if (!seen.has(`n:${name}`)) { seen.add(`n:${name}`); named.push({ name, line: exteriorRefusedLine(name), commit }); }
+    for (const [list, where] of [[d.held, 'word'], [d.hosts, 'link host']]) for (const word of list) if (!seen.has(`w:${word}`)) { seen.add(`w:${word}`); words.push({ word, where, commit }); }
   }
-  warns.push(...(depWarns ?? []));
+  warns.push(...allowed.warnings);
   return { errors, warns, named, words };
 }
 // A line's tail naming the commit that carries it, for a version that isn't the head's own.
 const exteriorCarries = (commit) => (commit ? `; commit ${commit.slice(0, 12)} carries it: rewrite the branch (once pushed, chore drop <slug> --reason "…" first; then git reset --soft origin/main and chore pr again)` : '');
 const EXTERIOR_NO_BASE = "no merge base with main: exterior.md's drafts can't be checked";
-// check-pr's hold on a PR changing exterior.md (spec, Commands), for checkPr in home: with exterior.md
-// at sha and a commit in merge-base..sha changing it, steps 1 to 3 at sha, and the names rule (public a
-// fail, unknown a warning, private nothing) and namesHoldLines over every version. With no
-// exterior.md at sha, steps 1 to 3 are skipped (a deletion of main's is kit-138's gate) but every
-// version since the base is still read: one added then deleted would land in main's history (final-1
-// F2). With no main, one warning (merge, which has main, checks it). { fails, warns }.
+// check-pr's hold on a PR changing exterior.md, for checkPr in home: with exterior.md at sha and a
+// commit in merge-base..sha changing it, the contract at sha (a fail) and its dated sources (warnings),
+// and over every version since the base the names rule: a refused heading a fail on a public repo and
+// a warning on an unknown one, each held word or link host namesHoldLines' (public a fail, unknown a
+// warning, cleared by a names-checked act on the chore), a private repo nothing. With no exterior.md at
+// sha the contract is skipped (a deletion of main's is kit-138's gate) but every version is still read:
+// one added then deleted would land in main's history. With no main, one warning. { fails, warns }.
 function exteriorDraftLines(base, sha, branch) {
   const rel = EXTERIOR_REL();
   const none = { fails: [], warns: [] };
@@ -8190,11 +8953,10 @@ function exteriorDraftLines(base, sha, branch) {
   if (!blobs.length) return none;
   const read = (b) => git(['cat-file', 'blob', b], mainRoot) ?? '';
   const versions = [...(headBlob ? [{ commit: null, text: read(headBlob) }] : []), ...blobs.filter((b) => b.blob !== headBlob).map((b) => ({ commit: b.commit, text: read(b.blob) }))];
-  const x = exteriorVersionsScan(headBlob ? { text: read(headBlob), blobs: headBlobs(sha) } : null, versions);
+  const x = exteriorVersionsScan(headBlob ? { text: read(headBlob) } : null, versions, exteriorAllowed());
   let vis;
   const visibility = () => (vis ??= repoVisibility());
-  const contract = new Set(headBlob ? exteriorDoc(read(headBlob)).errors : []);
-  const fails = x.errors.map((e) => (contract.has(e) ? `${rel} breaks exterior@1 at ${sha.slice(0, 12)}: ${e}` : `${rel} at ${sha.slice(0, 12)}: ${e}`));
+  const fails = x.errors.map((e) => `${rel} breaks exterior@2 at ${sha.slice(0, 12)}: ${e}`);
   const warns = x.warns.map((w) => `${rel}: ${w}`);
   if (x.named.length) {
     const lines = x.named.map((n) => `${rel}: ${n.line}${exteriorCarries(n.commit)}`);
@@ -8207,14 +8969,15 @@ function exteriorDraftLines(base, sha, branch) {
   const h = namesHoldLines({ rel, words: x.words, act, checked: namesChecked(act, 'exterior', since), visibility });
   return { fails: [...fails, ...h.fails], warns: [...warns, ...h.warns] };
 }
-// chore pr's hold on an exterior.md draft (spec, Commands), every read in the chore's worktree wt.
-// phase 'tree', before git add: the working tree's exterior.md and every blob already committed
-// since base, so a name in a hand commit refuses before anything new is committed. phase 'range',
-// after the commit and before the push: every blob since base, the head's first. At the draft only:
-// the tree's file differs from main's, a commit since base changes it, or there is no origin main
-// (then only the tree and HEAD's blob are read). A refused name, or on a repo not known to be
-// private a word checkedWords doesn't name, fails; unknown visibility counts as not private.
-// { fails, warns, words (to log once named), changed }.
+// chore pr's hold on an exterior.md draft, every read in the chore's worktree wt. phase 'tree', before
+// git add: the working tree's exterior.md and every blob already committed since base, so a name in a
+// hand commit refuses before anything new is committed. phase 'range', after the commit and before the
+// push: every blob since base, the head's first. At the draft only: the tree's file differs from
+// main's, a commit since base changes it, or there is no origin main (then only the tree and HEAD's
+// blob are read). The contract at the head fails; on a repo not known to be private (unknown counts as
+// not private) a refused heading fails, whatever --names-checked says, and so does a held word or link
+// host checkedWords doesn't name. A private repo holds no name. { fails, warns (the dated sources and
+// the dependency files', printed once pushed), words (to log once named), changed }.
 function exteriorChoreLines(wt, phase, { base, checkedWords }) {
   const rel = EXTERIOR_REL();
   const none = { fails: [], warns: [], words: [], changed: false };
@@ -8230,18 +8993,17 @@ function exteriorChoreLines(wt, phase, { base, checkedWords }) {
   const treeDraft = treeText !== null && (!main || git(['hash-object', '--', treeFile], wt) !== at(main));
   if (!treeDraft && !blobs.length) return none;
   const read = (b) => git(['cat-file', 'blob', b], wt) ?? '';
-  const root = path.join(wt, projectRel);
   let versions;
   let headDoc;
   if (phase === 'tree') {
     versions = [...blobs.map((b) => ({ commit: b.commit, text: read(b.blob) })), ...(treeText !== null ? [{ commit: null, text: treeText }] : [])];
-    headDoc = treeText !== null ? { text: treeText, blobs: headBlobs(null, root) } : null;
+    headDoc = treeText !== null ? { text: treeText } : null;
   } else {
     versions = [...(headBlob ? [{ commit: null, text: read(headBlob) }] : []), ...blobs.filter((b) => b.blob !== headBlob).map((b) => ({ commit: b.commit, text: read(b.blob) }))];
-    headDoc = headBlob ? { text: read(headBlob), blobs: headBlobs(head) } : null;
+    headDoc = headBlob ? { text: read(headBlob) } : null;
   }
-  const x = exteriorVersionsScan(headDoc, versions);
-  const fails = [...x.errors];
+  const x = exteriorVersionsScan(headDoc, versions, exteriorAllowed());
+  const fails = x.errors.map((e) => `exterior.md: ${e}`);
   const warns = [...x.warns];
   let vis;
   const visibility = () => (vis ??= repoVisibility());
@@ -8249,54 +9011,15 @@ function exteriorChoreLines(wt, phase, { base, checkedWords }) {
   if (x.named.length && visibility() !== 'private') fails.push(...x.named.map((n) => `${n.line}${visibility() === 'unknown' ? ` (${unknown})` : ''}${exteriorCarries(n.commit)}`));
   const shown = (w) => `"${w.word}" (${w.where})${w.commit ? ` in ${w.commit.slice(0, 12)}` : ''}`;
   const open = x.words.filter((w) => !checkedWords?.has(w.word));
-  if (open.length && visibility() === 'private') warns.push(...open.map((w) => `${shown(w)} is in neither origin main's strategy.md nor its dependency files: the repo is private, so it may be pushed`));
-  else if (open.length) {
-    fails.push(`exterior.md names words origin main's strategy.md and dependency files don't, and ${visibility() === 'public' ? 'this repo is public' : unknown}, so the draft is public once pushed: ${open.map(shown).join(', ')}; reword them, or check each and name it: --names-checked ${x.words.map((w) => w.word).join(',')}`);
+  if (open.length && visibility() !== 'private') {
+    // --names-checked splits at commas, so a word or host holding one can't be named: only rewording clears it
+    const nameable = x.words.filter((w) => !w.word.includes(','));
+    const commas = open.filter((w) => w.word.includes(','));
+    fails.push(`exterior.md names words origin main's strategy.md and dependency files don't, and ${visibility() === 'public' ? 'this repo is public' : unknown}, so the draft is public once pushed: ${open.map(shown).join(', ')}; reword them, or check each and name it${nameable.length ? `: --names-checked ${nameable.map((w) => w.word).join(',')}` : ''}`);
+    if (commas.length) fails.push(`${commas.map(shown).join(', ')} ${commas.length > 1 ? 'hold' : 'holds'} a comma, which --names-checked can't name: reword ${commas.length > 1 ? 'them' : 'it'}`);
     for (const c of [...new Set(open.map((w) => w.commit).filter(Boolean))]) fails.push(`${c.slice(0, 12)} carries a word: rewrite the branch (once pushed, chore drop ${path.basename(wt).replace(/^chore-/, '')} --reason "…" first; then git reset --soft origin/main and chore pr again), or check and name the word`);
   }
   return { fails, warns, words: open.length ? [] : x.words.map((w) => w.word), changed: true };
-}
-// exterior check's lines for the working tree's exterior.md (null text: none): the contract, the
-// blobs as at the draft, then (at the draft) the names rule by the repo's visibility (public an
-// error, unknown a warning, private nothing; gh asked only when a name is refused) and the words.
-// errors exit 1; warnings leave the exit as it is.
-function exteriorCheckLines({ draft = true } = {}) {
-  const text = exteriorTreeText();
-  if (text === null) return { errors: [], warnings: [] };
-  const { block, errors } = exteriorDoc(text);
-  if (!block) return { errors, warnings: draft ? exteriorWords(text, null).map(exteriorWordLine) : [] };
-  const r = exteriorBlobLines(block, { draft, ...headBlobs(null) });
-  if (!draft) return r;
-  const names = exteriorNameLines(block);
-  r.warnings.push(...names.warnings);
-  if (names.refused.length) {
-    const v = repoVisibility();
-    if (v === 'public') r.errors.push(...names.refused.map((x) => x.line));
-    else if (v === 'unknown') r.warnings.push(...names.refused.map((x) => `${x.line} (the repo's visibility is unknown, which counts as not private)`));
-  }
-  r.warnings.push(...exteriorWords(text, block).map(exteriorWordLine));
-  return r;
-}
-// validate's lines for the working tree's exterior.md: the contract and the quotes, and the blobs at
-// the draft (exteriorAtDraft); none when there is no file. Never the names rule.
-function exteriorValidateLines() {
-  const text = exteriorTreeText();
-  if (text === null) return { errors: [], warnings: [] };
-  const { block, errors } = exteriorDoc(text);
-  if (!block) return { errors, warnings: [] };
-  return exteriorBlobLines(block, { draft: exteriorAtDraft(), ...headBlobs(null) });
-}
-// The contract's relations, in the order show and the dashboard group them by.
-const EXTERIOR_RELATIONS = ['serves', 'depends_on', 'builds_on_it', 'alternative', 'collaborates', 'governs', 'affects', 'other'];
-// dashboard-data's exterior block (log.schema.json#exterior@1 dashboard), as check.mjs's
-// dashboardExterior gives it: file order, relation_word or null, each signal's score weight×value.
-function exteriorDashboard(block) {
-  return {
-    entities: block.entities.map((e) => ({
-      entity: e.id, relation: e.relation, relation_word: e.relation_word ?? null, kind: e.kind, name: e.name, matters: e.matters, weight: e.weight,
-      signals: e.signals.map((x) => ({ signal: x.id, what: x.what, value: x.value, score: e.weight * x.value })),
-    })),
-  };
 }
 // main's exterior.md: { text, blob }, or null when main has none; with no main, or the project
 // outside the repo, the working tree's (as selfMainText reads self.md).
@@ -8308,71 +9031,133 @@ function exteriorOnMain() {
   const text = exteriorTreeText();
   return text === null ? null : { text, blob: null };
 }
-// exterior show's lines: the Self's what, then each relation that has entities, in the contract's
-// order; under it its entities in file order, each with why it matters and its signals by score,
-// high to low, ties in file order (a stable sort).
-function exteriorShowLines(block, selfWhat) {
-  const lines = [`Self: ${selfWhat ?? 'not drafted yet'}`];
-  if (!block.entities.length) return [...lines, 'no entity drawn yet'];
-  for (const rel of EXTERIOR_RELATIONS) {
-    const es = block.entities.filter((e) => e.relation === rel);
-    if (!es.length) continue;
-    lines.push('', rel);
-    for (const e of es) {
-      lines.push(`  ${e.name} (${e.kind}, weight ${e.weight})${e.relation === 'other' ? `: ${e.relation_word}` : ''}`, `    ${e.matters}`);
-      const sig = e.signals.map((x) => ({ score: e.weight * x.value, what: x.what })).sort((a, b) => b.score - a.score);
-      for (const x of sig) lines.push(`    ${x.score}  ${x.what}`);
-    }
+// The commit main's exterior.md (blob) was drawn at, whose strategy.md and self.md it stands on (the
+// design's Staleness, from git): 1. the pinned commit of the latest exterior-change question the owner
+// answered with its recommendation whose pinned blob is blob (a refused one never counts), when this
+// clone has that commit; 2. else the commit that last changed the file on main, unless it is a
+// shallow clone's boundary (whose change can't be read); 3. else unknown. { commit, from } or
+// { commit: null, why }.
+function exteriorBase(main, blob) {
+  const rel = EXTERIOR_REL();
+  const pins = questions().filter((v) => v.class === 'exterior-change' && v.status === 'answered' && v.answered_by === 'owner' && v.matched === true)
+    .map((v) => ({ id: v.id, at: String(v.answered_at ?? ''), pin: (v.links ?? []).find((l) => isObj(l) && l.path === rel && l.blob === blob && typeof l.ref === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(l.ref)) }))
+    .filter((x) => x.pin).sort((a, b) => a.at.localeCompare(b.at));
+  const last = pins.pop();
+  if (last && git(['cat-file', '-e', `${last.pin.ref}^{commit}`], mainRoot) !== null) return { commit: last.pin.ref, from: `${last.id}'s draft` };
+  const changed = git(['log', '-1', '--format=%H', main, '--', rel], mainRoot);
+  if (!changed) return { commit: null, why: 'no commit on main changes it' };
+  if (git(['rev-parse', '--is-shallow-repository'], mainRoot) === 'true') {
+    const shallow = readText(path.resolve(mainRoot, git(['rev-parse', '--git-path', 'shallow'], mainRoot) ?? '.git/shallow')) ?? '';
+    if (shallow.split('\n').includes(changed)) return { commit: null, why: `the last commit changing it, ${changed.slice(0, 12)}, is this shallow clone's boundary` };
   }
-  return lines;
+  return { commit: changed, from: 'the last commit changing it on main' };
 }
-// metrics' exterior findings, read from main with no network call (none with no main), each low and
-// keyed so observeFindings keeps one observation per name or blob pair (spec, Findings):
-// exterior-drift once per organisation or work the names rule no longer allows against main's files,
-// unless the visibility last recorded is private; exterior-stale while main's strategy.md or self.md
-// blob isn't the one exterior.md drew from; exterior-missing while main has self.md, a strategy
-// linking it, and no exterior.md. A main exterior.md breaking the contract raises none (validate
-// errors on it).
+// metrics' exterior findings, read from main with no network call (none with no main), each keyed so
+// observeFindings keeps one observation per name or blob pair. A version 1 exterior.md: one
+// exterior-drift (key exterior@1) asking for the plain version, and no other. A plain one:
+// exterior-drift once per ### heading main's strategy.md and dependency names no longer name, only
+// where the repo was last known public (a machine with no record says nothing); exterior-stale while
+// main's strategy.md or self.md blob isn't the one at its base (exteriorBase; unknown raises none);
+// both low. exterior-missing while main has self.md, a written strategy linking it, and no
+// exterior.md: high until an exterior-change question is asked, medium while it is open
+// (worldMissingSeverity, kit-814).
 function exteriorFindings(add) {
   const main = projectInRepo ? mainRef() : null;
   if (!main) return;
-  const blobAt = (rel) => git(['rev-parse', '--verify', '--quiet', `${main}:${rel}`], mainRoot);
-  const strategyBlob = blobAt(strategyRel);
-  const selfBlob = blobAt(selfRel());
+  const blobAt = (c, rel) => git(['rev-parse', '--verify', '--quiet', `${c}:${rel}`], mainRoot);
+  const strategyBlob = blobAt(main, strategyRel);
+  const selfBlob = blobAt(main, selfRel());
   const pair = `${strategyBlob}-${selfBlob}`;
   const m = exteriorOnMain();
   if (!m) {
-    if (selfBlob && linksSelf(strategyMainText())) add('low', 'exterior-missing', 'exterior', 'main has self.md and a strategy linking it, and no exterior.md', 'draft exterior.md from the strategy and self.md (supervisor.md, Monitoring) in a chore, run exterior check, and ask exterior-change', { key: pair });
+    if (selfBlob && strategyState() === 'written' && linksSelf(strategyMainText())) add(worldMissingSeverity('exterior-change'), 'exterior-missing', 'exterior', 'main has self.md and a strategy linking it, and no exterior.md', 'draft exterior.md from the strategy and self.md (supervisor.md, Monitoring) in a chore, run exterior check, and ask exterior-change', { key: pair });
     return;
   }
-  const { block } = exteriorDoc(m.text);
-  if (!block) return;
-  if (lastRepoVisibility() !== 'private') {
-    for (const r of exteriorNameLines(block, main).refused) add('low', 'exterior-drift', 'exterior', `exterior.md names "${r.name}", which main's strategy.md${block.entities[r.index].relation === 'depends_on' ? ' and dependency files' : ''} no longer name`, 'draft a new version of exterior.md that names it as a group, or have the strategy name it; run exterior check before chore pr', { key: r.name.toLowerCase() });
+  if (selfPlainVersion(m.text) === 1) {
+    add('low', 'exterior-drift', 'exterior', "main's exterior.md is version 1 (a fenced exterior block)", 'draft exterior.md as a plain document in a chore (exterior check, then chore pr and ask exterior-change; supervisor.md, Monitoring)', { key: 'exterior@1' });
+    return;
   }
-  if (block.strategy_blob !== strategyBlob || block.self_blob !== selfBlob) add('low', 'exterior-stale', 'exterior', `exterior.md drew from ${block.strategy_blob !== strategyBlob ? 'a strategy.md' : 'a self.md'} main has moved on from`, 're-read self.md first and draft a new one if it no longer holds; then draft a new version of exterior.md from the strategy and that self.md', { key: pair });
+  if (lastRepoVisibility() === 'public') {
+    const allowed = exteriorAllowed(main);
+    const seen = new Set();
+    for (const h of selfPlain.headings(m.text)) {
+      if (h.level !== 3 || seen.has(h.text.toLowerCase()) || selfPlain.namesWhole(allowed.names, h.text)) continue;
+      seen.add(h.text.toLowerCase());
+      add('low', 'exterior-drift', 'exterior', `exterior.md's entry "${h.text}" is named in neither main's strategy.md nor its dependency names`, 'draft a new version of exterior.md that heads it as a group or a topic, or have the strategy name it; run exterior check before chore pr', { key: h.text.toLowerCase() });
+    }
+  }
+  const base = exteriorBase(main, m.blob);
+  if (!base.commit) return;
+  const sb = blobAt(base.commit, strategyRel);
+  const fb = blobAt(base.commit, selfRel());
+  if (sb !== strategyBlob || fb !== selfBlob) add('low', 'exterior-stale', 'exterior', `exterior.md drew from ${sb !== strategyBlob ? 'a strategy.md' : 'a self.md'} main has moved on from (at ${base.commit.slice(0, 12)}, ${base.from})`, 're-read self.md first and draft a new one if it no longer holds; then draft a new version of exterior.md from the strategy and that self.md', { key: pair });
 }
-// exterior show [--json]: the working tree's exterior.md and self.md. exterior check: the working
-// tree's, the draft.
+// exterior check's lines for the working tree's exterior.md, the draft: the contract (errors) and its
+// dated sources (warnings); then, on a repo not known to be private (gh asked only when a name is
+// refused or held), each refused heading an error and each held word or link host a warning; and,
+// with a plain exterior.md on main whose base can't be read, a warning that its staleness is unknown.
+function exteriorCheckLines() {
+  const text = exteriorTreeText();
+  if (text === null) return { errors: [], warnings: [] };
+  const allowed = exteriorAllowed();
+  const d = exteriorDraft(text, allowed);
+  const errors = [...d.errors];
+  const warnings = [...d.warnings, ...allowed.warnings];
+  if (d.refused.length || d.held.length || d.hosts.length) {
+    const v = repoVisibility();
+    if (v !== 'private') {
+      const tail = v === 'unknown' ? " (the repo's visibility is unknown, which counts as not private)" : '';
+      errors.push(...d.refused.map((n) => `${exteriorRefusedLine(n)}${tail}`));
+      warnings.push(...[...d.held.map((word) => ({ word, where: 'word' })), ...d.hosts.map((word) => ({ word, where: 'link host' }))].map(exteriorWordLine));
+    }
+  }
+  const main = projectInRepo ? mainRef() : null;
+  const m = main ? exteriorOnMain() : null;
+  if (m && selfPlainVersion(m.text) === 2) {
+    const base = exteriorBase(main, m.blob);
+    if (!base.commit) warnings.push(`whether main's exterior.md is stale is unknown: ${base.why}, and no answered exterior-change question pins a commit this clone has`);
+  }
+  return { errors, warnings };
+}
+// validate's lines for the working tree's exterior.md: the contract (either version), and for a
+// version 1 file its quotes, and its blobs at the draft (exteriorAtDraft); none when there is no file.
+// Never the names rule, nor the dated sources.
+function exteriorValidateLines() {
+  const text = exteriorTreeText();
+  if (text === null) return { errors: [], warnings: [] };
+  const { block, errors } = exteriorDoc(text);
+  if (!block) return { errors, warnings: [] };
+  return exteriorBlobLines(block, { draft: exteriorAtDraft(), ...headBlobs(null) });
+}
+// dashboard-data's exterior block (log.schema.json#exterior@1 dashboard), for a version 1 file whose
+// block holds: file order, relation_word or null, each signal's score weight×value. kit-868 drops it.
+function exteriorDashboard(block) {
+  return {
+    entities: block.entities.map((e) => ({
+      entity: e.id, relation: e.relation, relation_word: e.relation_word ?? null, kind: e.kind, name: e.name, matters: e.matters, weight: e.weight,
+      signals: e.signals.map((x) => ({ signal: x.id, what: x.what, value: x.value, score: e.weight * x.value })),
+    })),
+  };
+}
+// exterior show [--json]: main's exterior.md, printed as it is, either version (--json: a version 1
+// block's dashboard data, else null). exterior check: the working tree's, the draft
+// (exteriorCheckLines: errors exit 1; warnings leave the exit as it is).
 function cmdExterior() {
   const sub = positional[0];
   if (sub === 'show') {
-    const text = exteriorTreeText();
-    if (text === null) return flags.json ? json(null) : out(EXTERIOR_NOT_DRAFTED);
-    const { block, errors } = exteriorDoc(text);
-    if (errors.length) {
-      for (const e of errors) out(`error: exterior.md: ${e}`);
-      process.exit(1);
-    }
-    if (flags.json) return json(exteriorDashboard(block));
-    const selfText = readText(path.join(projectDir, 'self.md'));
-    const self = selfText === null ? null : selfDoc(selfText).block;
-    return out(exteriorShowLines(block, self?.what ?? null).join('\n'));
+    gitReadCache = new Map();
+    const m = exteriorOnMain();
+    if (m === null) return flags.json ? json(null) : out(EXTERIOR_NOT_DRAFTED);
+    if (flags.json) { const d = exteriorDoc(m.text); return json(d.block ? exteriorDashboard(d.block) : null); }
+    out(`Exterior: ${EXTERIOR_REL()} ${projectInRepo && mainRef() ? 'on main' : 'in the working tree'}`);
+    out('');
+    out(String(m.text).replace(/\s+$/, ''));
+    return;
   }
   if (sub === 'check') {
     if (exteriorTreeText() === null) return out('no exterior.md: nothing to check');
     gitReadCache = new Map();
-    const { errors, warnings } = exteriorCheckLines({ draft: true });
+    const { errors, warnings } = exteriorCheckLines();
     for (const e of errors) out(`error: exterior.md: ${e}`);
     for (const w of warnings) out(`warn: exterior.md: ${w}`);
     process.exit(errors.length ? 1 : 0);
@@ -10597,6 +11382,9 @@ function threadLineProblems(o) {
     if (o.by === 'owner' && (o.re !== undefined || o.off_subject !== undefined)) errs.push("re and off_subject are on a reply, never the owner's turn");
     if (typeof o.off_subject === 'string' && UNSAFE_TEXT.test(o.off_subject)) errs.push('turn.off_subject is one line of plain text');
     over('off_subject', o.off_subject, OUTCOME_MAX);
+    if (o.by === 'owner' && o.no_ask !== undefined) errs.push("no_ask is on a reply, never the owner's turn");
+    if (typeof o.no_ask === 'string' && UNSAFE_TEXT.test(o.no_ask)) errs.push('turn.no_ask is one line of plain text');
+    over('no_ask', o.no_ask, OUTCOME_MAX);
   }
   return errs;
 }
@@ -11035,6 +11823,14 @@ function cmdThread() {
     if (Buffer.byteLength(why) > OUTCOME_MAX) die(`--off-subject is at most ${OUTCOME_MAX} bytes`);
     return why;
   };
+  // --no-ask "<why>": words that read as an ask of the owner and aren't one; the why is kept on the turn
+  const noAskFlag = () => {
+    if (flags['no-ask'] === undefined) return undefined;
+    const why = (flagStr('no-ask') ?? '').replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim();
+    if (!why) die('--no-ask "<why>": say why these words ask the owner nothing that needs an answer');
+    if (Buffer.byteLength(why) > OUTCOME_MAX) die(`--no-ask is at most ${OUTCOME_MAX} bytes`);
+    return why;
+  };
   const onSubject = (t, objects) => {
     const on = new Set();
     const s = t.subject;
@@ -11102,8 +11898,15 @@ function cmdThread() {
     if (had) die(`${had.id} is already open on this subject: say it there (thread reply ${had.id} "<words>" --refs ${subject.ref})`);
     const capped = supervisorThreadCap(views);
     if (capped) die(capped);
-    const line = { type: 'turn', thread: 't-00000000-000000000-supervisor', text: words, refs: [subject.ref] };
+    const noAsk = noAskFlag();
+    const line = { type: 'turn', thread: 't-00000000-000000000-supervisor', text: words, refs: [subject.ref], no_ask: noAsk };
     if (!lineFits(line, 'supervisor')) die('That first turn is too long with its link; shorten it.');
+    // its first words ask nothing no Inbox question holds, as a reply's (supervisor.md §6): a thread
+    // about a question shows that one
+    if (noAsk === undefined) {
+      const left = unfiledOwnerAsks(words, kind === 'question' && questions().find((q) => q.id === sid)?.status === 'open' ? [sid] : []);
+      if (left.length) die(`these first words ask the owner ${left.length === 1 ? 'something' : `${left.length} things`} no Inbox question holds, and ${UNFILED_ASKS_WHY}:\n${left.slice(0, 8).map((l) => `  - ${l}`).join('\n')}\nAsk it first (ask), then start the thread about that question (--subject '{"kind":"item","ref":"question:<q-id>"}'); or, when the words ask nothing the owner must answer, --no-ask "<why>"`);
+    }
     const t = appendLog({ type: 'thread', title, subject }, 'supervisor');
     appendLog({ ...line, thread: t.id }, 'supervisor');
     return out(t.id);
@@ -11177,7 +11980,7 @@ function cmdThread() {
   if (streamed && flags.part !== undefined) {
     const by = logWriter() === 'responder' ? 'responder' : (supervisorOnly('thread reply --part'), replyWriter());
     if (!by) die('thread reply --part: the supervisor or the responder (DEVTEAM_ROLE)');
-    for (const f of ['refs', 'pending', 're', 'off-subject', 'anyway', 'files']) if (flags[f] !== undefined) die(`--${f} goes on --after-parts, with the turn: a part is words only`);
+    for (const f of ['refs', 'pending', 're', 'off-subject', 'anyway', 'files', 'no-ask']) if (flags[f] !== undefined) die(`--${f} goes on --after-parts, with the turn: a part is words only`);
     const [nv, ...after] = asList(flags.part);
     if (!/^[1-9]\d{0,2}$/.test(String(nv ?? ''))) die('--part <n> "<words>": the part\'s number, from 1 (at most 999), then its words');
     const given = [after.join(' ').trim(), wordsFrom(2)].filter(Boolean);
@@ -11228,12 +12031,13 @@ function cmdThread() {
     const objects0 = by === 'owner' ? null : readLog().objects;
     const re = by === 'owner' ? undefined : reOf(t, by, objects0);
     const off = by === 'owner' ? undefined : offSubjectFlag();
+    const noAsk = by === 'supervisor' || by === 'responder' ? noAskFlag() : undefined;
     // words at the encoded cap fit a line alone, not always with eight links or ten files: the line
     // as appendLog will build it, checked here so the refusal says what to do about it
     // the owner's turn is routed before its line is written (kit-104), and the size check sees the route
     const route = by === 'owner' ? responderRoute(t) : null;
-    const line = { type: 'turn', thread: t.id, text: words, refs: refs.length ? refs : undefined, files, pending: by !== 'owner' && flags.pending ? true : undefined, ...(route ? routedFields(route) : {}), re, off_subject: off };
-    if ((refs.length || line.pending || re || off) && !lineFits(line, by)) die('That reply is too long with its links; shorten it.');
+    const line = { type: 'turn', thread: t.id, text: words, refs: refs.length ? refs : undefined, files, pending: by !== 'owner' && flags.pending ? true : undefined, ...(route ? routedFields(route) : {}), re, off_subject: off, no_ask: noAsk };
+    if ((refs.length || line.pending || re || off || noAsk) && !lineFits(line, by)) die('That reply is too long with its links; shorten it.');
     if (files && !lineFits(line, by)) die(FILES_TOO_LONG);
     // the owner's turn carries their name from a server (kit-252): a turn at the page's cap with a
     // long name is refused here, saying so, rather than at the log's line limit
@@ -11241,6 +12045,16 @@ function cmdThread() {
     if (by !== 'owner') {
       const objects = readLog().objects;
       if ((by === 'responder' || session) && !flags.anyway && supervisorAnswered(t.id, objects, by)) die(`the supervisor has answered this (thread show ${t.id}): reply only to add something new, with --anyway`);
+      // every ask of the owner is an Inbox question, linked to this thread (supervisor.md §6): a reply
+      // whose words ask the owner something no question holds is refused, saying what to do.
+      // --no-ask "<why>" lets through words that read as an ask and aren't one ("Anything else?")
+      if (by === 'supervisor' || by === 'responder') {
+        // a question shown covers an ask only while it is open, or when it was asked in this thread
+        const qs = new Map(questions().map((q) => [q.id, q]));
+        const shown = refs.filter((r) => r.startsWith('question:')).map((r) => r.slice('question:'.length)).filter((q) => qs.get(q)?.status === 'open' || qs.get(q)?.thread === t.id);
+        const left = noAsk ? [] : unfiledOwnerAsks(words, shown);
+        if (left.length) die(`this reply asks the owner ${left.length === 1 ? 'something' : `${left.length} things`} no Inbox question holds, and ${UNFILED_ASKS_WHY}:\n${left.slice(0, 8).map((l) => `  - ${l}`).join('\n')}\n${by === 'responder' ? `Hand ${left.length === 1 ? 'it' : 'them'} to the supervisor to ask here (send supervisor "…" --kind handoff --thread ${t.id}): only it asks the owner` : `Ask ${left.length === 1 ? 'it' : 'each'} here with thread ask ${t.id} --question "…" (an Inbox question that links back to this thread), or decide what is your call and say what you decided`}; show one already asked with --refs question:<q-id> or its q-… id in the line; or, when the words ask nothing the owner must answer, --no-ask "<why>"`);
+      }
       const implied = {};
       askedFor(t, by, objects, { refs, re, off, implied });
       // written as the follow-up it is, so show marks it and reOf sees the turn followed up (task-3-2 F2-1)
@@ -11466,7 +12280,7 @@ function cmdThread() {
     for (const u of v.turns) {
       // the responder's turns name it (the view keeps them on the supervisor's side); a pending one says so
       // an owner turn names its route (kit-104), so the responder can see which turns are the supervisor's
-      out(`${u.at} ${u.writer === 'responder' ? 'responder' : ['ticket', 'planner'].includes(writerClass(u.writer)) ? `${sessionWords(u.writer, lines)} (${u.writer})` : u.by} (${u.id})${lines.get(u.id)?.pending === true ? ' (pending)' : ''}${typeof lines.get(u.id)?.re === 'string' ? ` (following up ${lines.get(u.id).re})` : ''}${u.routed_to === 'session' && typeof u.routed_session === 'string' ? `, routed to ${sessionWords(u.routed_session, lines)} (${u.routed_session})` : u.routed_to ? `, routed to the ${u.routed_to}` : ''}${u.question ? `, asking ${u.question}` : ''}${typeof lines.get(u.id)?.off_subject === 'string' ? `, off subject: ${quoteData(lines.get(u.id).off_subject)}` : ''}:`);
+      out(`${u.at} ${u.writer === 'responder' ? 'responder' : ['ticket', 'planner'].includes(writerClass(u.writer)) ? `${sessionWords(u.writer, lines)} (${u.writer})` : u.by} (${u.id})${lines.get(u.id)?.pending === true ? ' (pending)' : ''}${typeof lines.get(u.id)?.re === 'string' ? ` (following up ${lines.get(u.id).re})` : ''}${u.routed_to === 'session' && typeof u.routed_session === 'string' ? `, routed to ${sessionWords(u.routed_session, lines)} (${u.routed_session})` : u.routed_to ? `, routed to the ${u.routed_to}` : ''}${u.question ? `, asking ${u.question}` : ''}${typeof lines.get(u.id)?.off_subject === 'string' ? `, off subject: ${quoteData(lines.get(u.id).off_subject)}` : ''}${typeof lines.get(u.id)?.no_ask === 'string' ? `, no ask: ${quoteData(lines.get(u.id).no_ask)}` : ''}:`);
       // its own line breaks, a tab as the space it stands for, and nothing else a terminal acts on
       // (an escape, a bidi override, a CR)
       out(u.text.replace(/\t/g, ' ').replace(UNSAFE_TEXT_ALL, (c) => (c === '\n' ? c : '')).split('\n').map((l) => `  ${l}`).join('\n'));
@@ -11518,7 +12332,7 @@ function cmdThread() {
     for (const x of vs) out(row(x, x.status === 'open' ? (x.waiting === 'session' ? `with ${x.with}` : waitingWords(x)) : '') + where(x));
     return;
   }
-  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread new --subject \'{"kind":"item","ref":"question:q-…"}\' [--title "<line>"] -- "<words>"   (the supervisor\'s own, about a question or goal)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--re <u-id>] [--off-subject "<why>"] [--anyway]   (the supervisor\'s or the responder\'s; --anyway the responder\'s)   |   thread reply <t-id> --part <n> "<words>"   then   thread reply <t-id> --after-parts ["<last words>"] [reply\'s flags]   (a reply a paragraph at a time, from the replying session)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" [--off-subject "<why>"] <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>] | --accept-addressed --at <when it was marked>]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting [--responder] | --with <session> | --open | --all] [--json]   (words may also follow --)');
+  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread new --subject \'{"kind":"item","ref":"question:q-…"}\' [--title "<line>"] [--no-ask "<why>"] -- "<words>"   (the supervisor\'s own, about a question or goal)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--re <u-id>] [--off-subject "<why>"] [--no-ask "<why>"] [--anyway]   (the supervisor\'s or the responder\'s; --anyway the responder\'s)   |   thread reply <t-id> --part <n> "<words>"   then   thread reply <t-id> --after-parts ["<last words>"] [reply\'s flags]   (a reply a paragraph at a time, from the replying session)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" [--off-subject "<why>"] <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>] | --accept-addressed --at <when it was marked>]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting [--responder] | --with <session> | --open | --all] [--json]   (words may also follow --)');
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
@@ -12976,8 +13790,10 @@ async function shotLaunch({ noSandbox = false, extraArgs = [], cap }) {
   const child = launch.child = spawn(bin, [
     '--headless=new', '--remote-debugging-pipe', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync', '--hide-scrollbars',
-    // the artifact's frame in its page's own process, laid out and asked with it
-    '--disable-features=IsolateSandboxedIframes',
+    // the artifact's frame in its page's own process, laid out and asked with it; and a page's WebRTC
+    // joins no mDNS group and asks the network for no .local name (kit-813, as the browser's kit-805);
+    // and no Cast or DIAL discovery (kit-912). One list: of two --disable-features Chrome keeps only the last.
+    '--disable-features=IsolateSandboxedIframes,WebRtcHideLocalIpsWithMdns,MediaRouter',
     // no dump of a page that crashed is kept
     '--disable-breakpad', '--disable-crash-reporter',
     '--renderer-process-limit=2', '--js-flags=--max-old-space-size=256', ...['', 'force-'].map((f) => `--${f}webrtc-ip-handling-policy=disable_non_proxied_udp`), '--disable-quic',
@@ -13396,33 +14212,87 @@ function shotSweep(id, now) {
   }
 }
 /* note-shots end */
-// An artifact's versions, newest first: its drafts (a worktree's copy that differs from main's), then
-// main's version (landed) and the ones before it (earlier), from the walk artifactTreeOk makes, so
-// every tree listed is one /artifact/tree/ serves. Only trees with an artifact.json, each once at its
-// newest commit; main's capped at ARTIFACT_VERSIONS_MAX versions, counted after those filters. Null
-// when there is nothing at all.
+// A tree's fingerprint, the one describeArtifact gives the same files (kit-947): fingerprint() over
+// git ls-tree -r's paths and blob ids. Kept in run/cache by tree id (a tree id's files never change),
+// the newest 20,000, written once as the process ends; null, and nothing kept, when git can't read it.
+function treeFingerprint(tree) {
+  const file = path.join(runDir, 'cache', 'artifact-tree-fps.json');
+  const kept = treeFingerprint.kept ??= (() => {
+    const k = { data: {}, dirty: false };
+    try { const d = JSON.parse(fs.readFileSync(file, 'utf8')); if (isObj(d)) k.data = d; } catch {}
+    process.on('exit', () => {
+      if (!k.dirty) return;
+      const ids = Object.keys(k.data);
+      for (const id of ids.slice(0, Math.max(0, ids.length - 20000))) delete k.data[id];
+      try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(k.data)); } catch {}
+    });
+    return k;
+  })();
+  if (typeof kept.data[tree] === 'string') return kept.data[tree];
+  const raw = /^[0-9a-f]{40,64}$/.test(tree ?? '') ? git(['ls-tree', '-r', '-z', tree], mainRoot) : null;
+  if (raw === null) return null;
+  const entries = raw.split('\0').filter(Boolean).map((l) => { const tab = l.indexOf('\t'); return { path: l.slice(tab + 1), oid: l.slice(0, tab).split(' ')[2] }; });
+  kept.data[tree] = fingerprint(entries);
+  kept.dirty = true;
+  return kept.data[tree];
+}
+// When a draft's page last changed, ISO (kit-947), never its branch's head: a branch from another
+// machine, its folder's last commit up to the tip; a worktree that is its own checkout, its files'
+// newest time while it has changes there (git status, taking no lock in another session's checkout),
+// otherwise its folder's last commit up to HEAD; a plain folder, its files' newest time. A commit's
+// time is kept in run/cache by the tip or HEAD and the slug (the newest 2,000), written once as the
+// process ends; with no commit, or git failing, the files' time.
+function draftChangedAt(row) {
+  const file = path.join(runDir, 'cache', 'artifact-draft-times.json');
+  const kept = draftChangedAt.kept ??= (() => {
+    const k = { data: {}, dirty: false };
+    try { const d = JSON.parse(fs.readFileSync(file, 'utf8')); if (isObj(d)) k.data = d; } catch {}
+    process.on('exit', () => {
+      if (!k.dirty) return;
+      const keys = Object.keys(k.data);
+      for (const key of keys.slice(0, Math.max(0, keys.length - 2000))) delete k.data[key];
+      try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(k.data)); } catch {}
+    });
+    return k;
+  })();
+  const files = row.updated_at ?? null;
+  const lastCommit = (sha, cwd, folder) => {
+    if (!/^[0-9a-f]{40,64}$/.test(sha ?? '')) return files;
+    const key = `${sha} ${row.slug}`;
+    if (typeof kept.data[key] === 'string') return kept.data[key];
+    const t = git(['log', '-1', '--format=%cI', sha, '--', folder], cwd);
+    if (!t || Number.isNaN(Date.parse(t))) return files;
+    kept.data[key] = new Date(t).toISOString();
+    kept.dirty = true;
+    return kept.data[key];
+  };
+  if (row.remote) return lastCommit(row.commit, mainRoot, `${ARTIFACTS_REL}/${row.slug}`);
+  const root = draftWorktree(row.at);
+  if (!root) return files;
+  // a plain folder under .worktrees/ has no checkout of its own: git would walk up to main's
+  const top = git(['rev-parse', '--show-toplevel'], root);
+  try { if (!top || fs.realpathSync(top) !== root) return files; } catch { return files; }
+  const folder = path.join(root, ARTIFACTS_REL, row.slug);
+  const st = git(['--no-optional-locks', 'status', '--porcelain', '-z', '--untracked-files=all', '--', folder], root);
+  if (st === null || st !== '') return files;
+  return lastCommit(git(['rev-parse', 'HEAD'], root), root, folder);
+}
+// An artifact's versions in one list, newest first by time: main's distinct contents (each at the
+// first commit that made it; landed is the one main holds now) and the drafts with content of their
+// own (dated by their page's last change), keyed by fingerprint, so a copy is never its own entry.
+// Only servable trees (with an artifact.json), from the walk artifactTreeOk makes, so every tree
+// listed is one /artifact/tree/ serves. The whole list is capped at ARTIFACT_VERSIONS_MAX, never
+// cutting landed. Null when there is nothing at all.
 const ARTIFACT_VERSIONS_MAX = 200;
 function artifactVersions(slug) {
-  const drafts = draftArtifacts().filter((a) => a.slug === slug)
-    .sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))
-    .map((a) => {
-      const root = draftWorktree(a.at);
-      // a plain folder under .worktrees/ has no checkout of its own: git would walk up to main's
-      const top = root ? git(['rev-parse', '--show-toplevel'], root) : null;
-      let commit = null;
-      try { commit = top && fs.realpathSync(top) === root ? git(['rev-parse', 'HEAD'], root) : null; } catch {}
-      if (a.remote) return { kind: 'draft', at: a.at, worktree: a.at, branch: a.branch, commit: a.commit, time: a.updated_at, fp: a.fp, url: `/artifact/origin/${encodeURIComponent(a.branch)}/${slug}/` };
-      return { kind: 'draft', at: a.at, worktree: a.at, commit, time: a.updated_at, fp: a.fp, url: `/artifact/wt/${a.at}/${slug}/` };
-    });
   const ref = mainRef();
   let main = [];
-  let truncated = false;
   if (ref) {
     const folder = `${ARTIFACTS_REL}/${slug}`;
     const raw = git(['log', '--format=%x01%H %cI', '--raw', '--no-abbrev', '-t', '-m', '--first-parent', '--no-renames', ref, '--', folder], mainRoot);
     // a failed read is a failure (exit 1), never an empty history (exit 3)
     if (raw === null) die(`${slug}: could not read main's history`);
-    const seen = new Set();
+    // every commit that made a tree, newest first; a revert's tree is kept here and collapsed below
     for (const chunk of raw.split('\x01').slice(1)) {
       const [head, ...lines] = chunk.split('\n');
       const [commit, time] = head.split(' ');
@@ -13431,8 +14301,7 @@ function artifactVersions(slug) {
         const m = /^:(\d+) (\d+) ([0-9a-f]+) ([0-9a-f]+) \S+\t(.*)$/.exec(l);
         if (m && m[5] === folder && m[2] === '040000') { tree = m[4]; break; }
       }
-      if (!tree || /^0+$/.test(tree) || seen.has(tree)) continue;
-      seen.add(tree);
+      if (!tree || /^0+$/.test(tree)) continue;
       main.push({ tree, commit, time });
     }
     // only servable: a tree without artifact.json at its top (from before the manifest) is left out
@@ -13447,12 +14316,51 @@ function artifactVersions(slug) {
     // a folder missing on main is an empty answer (""), not a failure: only null is
     if (nowLs === null) die(`${slug}: could not read main's history`);
     const nowTree = treeNow(nowLs);
-    main = main.map((e) => ({ kind: e.tree === nowTree ? 'landed' : 'earlier', at: `tree:${e.tree}`, tree: e.tree, commit: e.commit, time: e.time, url: `/artifact/tree/${e.tree}/${slug}/` }));
-    truncated = main.length > ARTIFACT_VERSIONS_MAX;
-    main = main.slice(0, ARTIFACT_VERSIONS_MAX);
+    const nowFp = nowTree ? treeFingerprint(nowTree) : null;
+    // one entry per content, at the first commit that made it: walked oldest first, the first of each
+    // fingerprint kept (a tree git can't fingerprint stands alone, by its id), then newest first again,
+    // so each sits at its earliest commit's place in the walk
+    const firsts = new Map();
+    for (const e of [...main].reverse()) {
+      const fp = treeFingerprint(e.tree);
+      const key = fp ?? `tree:${e.tree}`;
+      if (!firsts.has(key)) firsts.set(key, { ...e, fp });
+    }
+    main = [...firsts.values()].reverse().map((e) => {
+      const landed = !!nowTree && (e.fp ? e.fp === nowFp : e.tree === nowTree);
+      const tree = landed ? nowTree : e.tree;
+      return { kind: landed ? 'landed' : 'earlier', at: `tree:${tree}`, tree, commit: e.commit, time: e.time, fp: e.fp, url: `/artifact/tree/${tree}/${slug}/` };
+    });
   }
-  if (!drafts.length && !main.length) return null;
-  return { slug, versions: [...drafts, ...main], truncated };
+  // the drafts with content of their own: a copy of any of main's is none, and copies of one page are
+  // one entry, the copy made first (on a tie, the first listed), each dated by its page's last change
+  const onMain = new Set(main.map((e) => e.fp).filter(Boolean));
+  const byFp = new Map();
+  for (const a of draftArtifacts().filter((d) => d.slug === slug && !onMain.has(d.fp))) {
+    const time = draftChangedAt(a);
+    let v;
+    if (a.remote) v = { kind: 'draft', at: a.at, worktree: a.at, branch: a.branch, commit: a.commit, time, fp: a.fp, url: `/artifact/origin/${encodeURIComponent(a.branch)}/${slug}/` };
+    else {
+      const root = draftWorktree(a.at);
+      // a plain folder under .worktrees/ has no checkout of its own: git would walk up to main's
+      const top = root ? git(['rev-parse', '--show-toplevel'], root) : null;
+      let commit = null;
+      try { commit = top && fs.realpathSync(top) === root ? git(['rev-parse', 'HEAD'], root) : null; } catch {}
+      v = { kind: 'draft', at: a.at, worktree: a.at, commit, time, fp: a.fp, url: `/artifact/wt/${a.at}/${slug}/` };
+    }
+    const was = byFp.get(a.fp);
+    if (!was || Date.parse(time) < Date.parse(was.time)) byFp.set(a.fp, v);
+  }
+  // one list by instant (main's times keep git's offset, drafts' are UTC), newest first; the sort is
+  // stable, so a tie keeps drafts first and main's in walk order
+  const at = (v) => { const t = Date.parse(v.time); return Number.isNaN(t) ? -Infinity : t; };
+  let list = [...byFp.values(), ...main].sort((a, b) => at(b) - at(a));
+  if (!list.length) return null;
+  const truncated = list.length > ARTIFACT_VERSIONS_MAX;
+  // the cap never cuts landed: past it, landed takes the last place, which keeps the order
+  const li = list.findIndex((v) => v.kind === 'landed');
+  list = li >= ARTIFACT_VERSIONS_MAX ? [...list.slice(0, ARTIFACT_VERSIONS_MAX - 1), list[li]] : list.slice(0, ARTIFACT_VERSIONS_MAX);
+  return { slug, versions: list, truncated };
 }
 // A broken manifest is listed by its slug and error, never its unvalidated title.
 function describeArtifact(slug, at, src) {
@@ -13489,6 +14397,37 @@ function landedArtifacts() {
 // removed shows nothing.
 function draftArtifacts(landed = landedArtifacts()) {
   const fpOf = new Map(landed.map((a) => [a.slug, a.fp]));
+  const msha = mainSha();
+  // A copy of any version main has had is no draft either (kit-947): the fingerprints of every tree
+  // in main's history of a slug, asked only for a slug with a copy that differs from landed, kept in
+  // run/cache by main's sha (a new sha starts afresh) and slug, written once as the process ends.
+  // With no main, or git failing, nothing is kept and nothing more is dropped.
+  const mf = draftArtifacts.mainFps ??= (() => {
+    const file = path.join(runDir, 'cache', 'artifacts-main-fps.json');
+    const k = { data: { sha: null, slugs: {} }, dirty: false };
+    try { const d = JSON.parse(fs.readFileSync(file, 'utf8')); if (isObj(d) && typeof d.sha === 'string' && isObj(d.slugs)) k.data = d; } catch {}
+    process.on('exit', () => { if (k.dirty) try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(k.data)); } catch {} });
+    return k;
+  })();
+  if (msha && mf.data.sha !== msha) { mf.data = { sha: msha, slugs: {} }; mf.dirty = true; }
+  const mainFps = (slug) => {
+    const have = msha ? mf.data.slugs[slug] : null;
+    if (Array.isArray(have)) return new Set(have);
+    if (!msha) return new Set();
+    const a = treeFolderArgs(msha, slug);
+    const log = git(a.log, mainRoot), now = git(a.now, mainRoot);
+    if (log === null || now === null) return new Set();
+    const trees = new Set();
+    for (const l of log.split('\n')) {
+      const m = /^:\d+ \d+ [0-9a-f]+ ([0-9a-f]+) \S+\t(.*)$/.exec(l);
+      if (m && m[2] === `${ARTIFACTS_REL}/${slug}` && !/^0+$/.test(m[1])) trees.add(m[1]);
+    }
+    if (treeNow(now)) trees.add(treeNow(now));
+    const fps = [...trees].map(treeFingerprint);
+    // one tree git couldn't read: this answer is used, never kept
+    if (fps.every(Boolean)) { mf.data.slugs[slug] = fps; mf.dirty = true; }
+    return new Set(fps.filter(Boolean));
+  };
   const res = [];
   let names = [];
   // no .worktrees/ is no worktree drafts; drafts from other machines are still listed below
@@ -13501,7 +14440,7 @@ function draftArtifacts(landed = landedArtifacts()) {
       const src = artifactSource(w, s);
       if (!src) continue;
       const d = describeArtifact(s, w, src);
-      if (fpOf.get(s) !== d.fp) res.push(d);
+      if (fpOf.get(s) !== d.fp && !mainFps(s).has(d.fp)) res.push(d);
     }
   }
   // Drafts from other machines (kit-750): each branch the dashboard fetched into refs/devteam-remote/
@@ -13511,7 +14450,7 @@ function draftArtifacts(landed = landedArtifacts()) {
   // kept on origin shows nothing. A branch's slugs are kept by its tip and main's (artifacts-remote),
   // a description by tree id (artifacts-remote-trees). A worktree draft of the same slug wins, and
   // names the branches it hides (remote_branches).
-  const ref = mainRef(), msha = mainSha(), mainB = loadSettings().main_branch;
+  const ref = mainRef(), mainB = loadSettings().main_branch;
   const refs = ref ? git(['for-each-ref', '--sort=-committerdate', '--format=%(refname) %(objectname) %(committerdate:iso-strict)', 'refs/devteam-remote/'], mainRoot) : null;
   if (!refs) return res;
   // a branch this machine has too (refs/heads/<b>: its own pushed work) is not from another machine
@@ -13556,7 +14495,7 @@ function draftArtifacts(landed = landedArtifacts()) {
         }
         for (const slug of [...new Set(slugs)].filter((x) => LINK_ID.test(x ?? '')).sort()) {
           const tree = treeNow(git(['ls-tree', sha, '--', `${ARTIFACTS_REL}/${slug}`], mainRoot));
-          if (tree && !mainHas(slug, tree)) kept.push([slug, tree]);
+          if (tree && !mainHas(slug, tree) && !mainFps(slug).has(treeFingerprint(tree))) kept.push([slug, tree]);
         }
       }
     }
@@ -17017,7 +17956,7 @@ function runMeasureCheck(g) {
   let sha = null;
   const R = repo(m.source === 'repo' ? m.link ?? 'home' : 'home'); // an act: fails fast on a missing checkout
   if (m.source === 'repo') {
-    if (R.name === 'home') { R.git(['fetch', '--quiet', 'origin'], R.root); mainRefCache = undefined; } else fetchLinkMain(R, 'refusing to read the measure on a stale main');
+    if (R.name === 'home') { fetchPastHalfMade(['fetch', '--quiet', 'origin']); mainRefCache = undefined; } else fetchLinkMain(R, 'refusing to read the measure on a stale main');
     sha = R.git(['rev-parse', `${R.mainRef() ?? die(`no main branch${R.name === 'home' ? '' : ` in ${R.name}`} to read the measure on`)}^{commit}`], R.root) ?? die('cannot resolve main');
     cwd = detachedWorktree(sha, 'reading', R);
   }
@@ -17582,52 +18521,35 @@ function choreWorktree(slugName, { reset = false, setup = false, responder = fal
   if (repoRoot !== mainRoot && !(responder && logWriter() === 'responder' && [undefined, '', 'responder'].includes(process.env.DEVTEAM_ROLE))) die(`run this from the main checkout (${mainRoot})`);
   const wt = path.join(mainRoot, '.worktrees', `chore-${slugName}`);
   const main = loadSettings().main_branch;
-  if (!flags['dry-run']) git(['fetch', '--quiet', 'origin', main]);
+  if (!flags['dry-run']) fetchPastHalfMade(['fetch', '--quiet', 'origin', main]);
   const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
   const existed = fs.existsSync(wt);
   // add and reset with -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
   if (!existed) {
     const add = ['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, start ?? base];
-    // git dies on a sibling's .git/worktrees/<name>/commondir that is there and still empty: another
-    // worktree add, between making the file and filling it. Waited for and tried again, for 5 s in
-    // all; any other failure dies at once (a commondir that can't be read is another, and so is a
-    // failure once the worktree is there: a hook's; so is one that names this add's own entry, which
-    // its gitdir tells, or one that was never there). The path in git's line is matched, not its
-    // words, which follow the locale.
-    const LIMIT_S = 5;
     const ref = `refs/heads/chore-${slugName}`;
     const branchConfig = () => git(['config', '--local', '--get-regexp', `^branch\\.chore-${slugName.replaceAll('.', '\\.')}\\.[^.]+$`], mainRoot);
     const was = { tip: resolveCommit(ref), config: branchConfig() };
-    const half = (name) => { try { return fs.readFileSync(path.join(commonDir, 'worktrees', name, 'commondir'), 'utf8') === ''; } catch (e) { return e.code === 'ENOENT' ? false : null; } };
-    const entries = () => { try { return fs.readdirSync(path.join(commonDir, 'worktrees')); } catch { return []; } };
-    const own = (name) => { const dir = path.join(commonDir, 'worktrees', name); try { return realPathMade(path.resolve(dir, fs.readFileSync(path.join(dir, 'gitdir'), 'utf8').trim())) === realPathMade(path.join(wt, '.git')); } catch { return false; } };
-    for (let end = null, set = null; ;) {
-      let words, name;
-      const before = resolveCommit(ref), from = resolveCommit(start ?? base), listed = entries();
-      try { execFileSync('git', add, { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); break; }
-      catch (e) { words = (e.stderr || e.message).toString().trim(); name = /worktrees\/([^/\n]+)\/commondir/.exec(e.stderr ?? '')?.[1]; }
+    let set = null, tip, from;
+    const r = pastHalfMade(() => {
+      try { execFileSync('git', add, { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); return { ok: true }; } catch (e) { return { ok: false, err: e.stderr, words: (e.stderr || e.message).toString().trim() }; }
+    }, {
+      common: commonDir, wt,
+      before: () => { tip = resolveCommit(ref); from = resolveCommit(start ?? base); },
       // where this try moved the branch, read now: origin's main can move during the wait. Only to
       // the commit this start asked for: any other move is another hand's
-      const after = resolveCommit(ref);
-      if (after !== before && (after === from || after === resolveCommit(start ?? base))) set = after;
-      const seen = name !== undefined && (listed.includes(name) || entries().includes(name)) && !own(name);
-      const state = !seen || fs.existsSync(wt) ? null : half(name);
-      if (state !== null) {
-        end ??= performance.now() + LIMIT_S * 1000;
-        do Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50); while (half(name) && performance.now() < end);
-        // -B would set a branch another hand moved meanwhile back to where this start began
-        const moved = resolveCommit(ref) !== (set ?? was.tip);
-        if (performance.now() < end && !moved) continue;
-        if (moved) words += `\nchore-${slugName} moved meanwhile and is left where it is: start it again`;
-        else if (half(name)) words += `\nthe entry ${name} in ${path.join(commonDir, 'worktrees')} was still half made after ${LIMIT_S} s (its commondir is empty): another git may be making that worktree, or stopped while it did`;
-      }
+      after: () => { const now = resolveCommit(ref); if (now !== tip && (now === from || now === resolveCommit(start ?? base))) set = now; },
+      // -B would set a branch another hand moved meanwhile back to where this start began
+      stop: () => (resolveCommit(ref) !== (set ?? was.tip) ? `chore-${slugName} moved meanwhile and is left where it is: start it again` : null),
+    });
+    if (!r.ok) {
       // -B sets the branch before it checks out, so a try that met a half-made entry can leave it:
       // put back, unless it moved since, or the worktree or its entry is there now (another start's)
-      if (end !== null && !fs.existsSync(wt) && !fs.existsSync(path.join(commonDir, 'worktrees', `chore-${slugName}`))) {
+      if (r.waited && !fs.existsSync(wt) && !fs.existsSync(path.join(commonDir, 'worktrees', `chore-${slugName}`))) {
         if (set && set !== was.tip) git(['update-ref', ...(was.tip ? [ref, was.tip, set] : ['-d', ref, set])], mainRoot);
         if (!was.tip && !was.config && branchConfig() && !resolveCommit(ref)) git(['config', '--local', '--remove-section', `branch.chore-${slugName}`], mainRoot);
       }
-      die(`git ${add.join(' ')} failed: ${words}`);
+      die(`git ${add.join(' ')} failed: ${r.words}${r.note}`);
     }
     seedWorktree(wt, { setup, session: true });
   }
@@ -17659,7 +18581,7 @@ function choreBranch(slugName) {
   if (!flags['dry-run'] && git(['config', '--get', 'remote.origin.url']) !== null) {
     const ls = gitRun(['ls-remote', '--exit-code', 'origin', `refs/heads/${ref}`]);
     if (ls.status === 0) {
-      const f = gitRun(['fetch', '--quiet', 'origin', `+refs/heads/${ref}:${remote}`]);
+      const f = fetchPastHalfMade(['fetch', '--quiet', 'origin', `+refs/heads/${ref}:${remote}`]);
       if (f.status !== 0) warn(`couldn't fetch ${ref} from origin (${firstLine(f.err) || `exit ${f.status}`}); reading the refs as they are`);
     } else if (ls.status === 2) gone = true; // not on origin: a stale copy of it says nothing (and stays)
     else warn(`couldn't ask origin for ${ref} (${firstLine(ls.err) || `exit ${ls.status}`}); reading the refs as they are`);
@@ -20929,7 +21851,7 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
   // when the hub is closed for good
   const recorder = memoryRecorder(log, scan);
   // its live health, a sample every 5 s in this process's memory (kit-836), started and stopped with it
-  const health = boxHealth(log, scan);
+  const health = boxHealth(log, scan, { kit });
   // What holds the hub port: 'hub', 'other' (a clean answer that isn't a hub), or 'unsure' (slow,
   // or gone between the bind and the ask), which is no reason to stop trying.
   const holder = () => new Promise((resolve) => {
@@ -21723,7 +22645,9 @@ function supervisorRecovery(id) {
   const cmd = supervisorResumeCommand(id) ?? loadSettings().resume_command.replace(/^claude(?=\s|$)/, `claude --resume ${id}`);
   const { target } = resolvePane(supervisorTarget());
   const agent = target ? paneAgentProcess(target) : null;
-  return `DEVTEAM_ROLE=supervisor ${isSupervisorProcess(agent) && startedSkippingPermissions(agent.args) ? cmd : withoutSkipPermissions(cmd)}`;
+  // with its Stop hook once a start (recover, the restart after a limit) has written it (supervisor.md
+  // §6, Every ask is an Inbox question); printed only, so it writes nothing
+  return `DEVTEAM_ROLE=supervisor ${withSupervisorPolicy(isSupervisorProcess(agent) && startedSkippingPermissions(agent.args) ? cmd : withoutSkipPermissions(cmd), { write: false })}`;
 }
 // A supervisor in tmux stopped at a limit, on its exact conversation: claude --resume <id> from
 // resume_command, in place of the pane's process, after the same refusals as a worker. Claude Code
@@ -21773,7 +22697,9 @@ function restartSupervisor(budget) {
   }
   const found = supervisorToRestart(until);
   if (!found || found.refused) return found;
-  const { target, id, cmd } = found;
+  const { target, id } = found;
+  // its Stop hook, as recover's start has it: --settings does not outlive the process it was given to
+  const cmd = withSupervisorPolicy(found.cmd);
   const now = Date.now();
   const verdict = claimRestart('supervisor', budget, now);
   if (verdict !== 'go') return verdict;
@@ -22017,6 +22943,9 @@ function recoverOne() {
   const hc = hostCheck({ start: true, write: false });
   if (hc.refused) return { say: `NOT started (${hc.refused})` };
   if (dry) return { say: `would ${how}${tail}` };
+  // its Stop hook: an ask of the owner left in its window with no Inbox question goes back to it.
+  // Written before the start is claimed, so a failed write leaves no claim behind
+  cmd = withSupervisorPolicy(cmd);
   // Claimed before a window opens: a shell pane says nothing, so anyone who gets past the lock must
   // find this. Taken back on any exit that started nothing, so the next try doesn't wait it out.
   writeJson(SUPERVISOR_UP_FILE, { ...(rec ?? {}), starting: Date.now() });
@@ -24328,6 +25257,7 @@ function poolProblem(input) {
 //   stopped()       true once the hub has closed: slow work that finds it so ends
 //   say(words)      in the hub's log, under the part's name: each line once, 20 lines a part at most.
 //                   The words are the part's own, never text it read
+//   kit             the release serving the hub (startHub's kit, as /instances.json gives it), or null
 // With DEVTEAM_BOX_HEALTH_FAST=<n> (1 to 3600, tests; read only when DEVTEAM_BOX_HEALTH is on) now()
 // and its intervals run n times as fast. real() and timeout() never do.
 const BOX_HEALTH_EVERY_MS = 5000, BOX_HEALTH_WINDOW_MS = 3600000, BOX_HEALTH_SAMPLES = 720;
@@ -24340,6 +25270,9 @@ const boxHealthParts = () => [
 // What a section needs before it is in the answer at all, and stands in for while a part's own fields
 // are checked alone.
 const BOX_HEALTH_BASE = { headroom: {}, pool: { projects: [], allocated: [], recent: [] }, claude: { accounts: [] }, box: {} };
+// the engine's own then, and the call that applies it, taken once as the region loads: it attaches to a
+// native promise whatever that promise's own then is, and nothing patched later changes it
+const boxHealthThen = Promise.prototype.then, boxHealthApply = Reflect.apply;
 const boxHealthIso = (ms) => new Date(ms).toISOString();
 // A kernel file's text, or null: missing, unreadable, or pressure that is compiled in and off (its
 // read fails).
@@ -24411,8 +25344,8 @@ function boxHealthMemory(ctx, boxed) {
   out.some60 = boxHealthPressure(boxed ? boxHealthRead(ctx.cgroup, 'memory.pressure') : boxHealthRead(ctx.proc, 'pressure', 'memory')).some60;
   return boxHealthPresent(out);
 }
-// The sampler: { on, start, stop, serve, fail, tick }. parts and real are the tests' own.
-function boxHealth(log, scan, { parts = boxHealthParts(), real = () => Date.now() } = {}) {
+// The sampler: { on, start, stop, serve, fail, tick }. kit is startHub's; parts and real are the tests' own.
+function boxHealth(log, scan, { kit = null, parts = boxHealthParts(), real = () => Date.now() } = {}) {
   // what was said, by its key: one line each, so a value that changes in it adds none
   const said = new Set();
   const say = (key, words) => { if (!said.has(key)) { said.add(key); log(`hub: box health: ${words}`); } };
@@ -24466,7 +25399,7 @@ function boxHealth(log, scan, { parts = boxHealthParts(), real = () => Date.now(
   const ctxFor = (who) => {
     const once = (ms, fn) => { const end = timer(setTimeout, clearTimeout, ms, () => { end(); guarded(who, 'a timer', fn)(); }); return end; };
     return Object.freeze({
-      now, real,
+      now, real, kit,
       every: (ms, fn) => {
         let busy = false;
         const run = guarded(who, 'a timer', fn);
@@ -24545,8 +25478,19 @@ function boxHealth(log, scan, { parts = boxHealthParts(), real = () => Date.now(
     }
     return places.get(what);
   };
-  // a promise a part returned: its rejection is said, and never the process's end
-  const swallow = (p, doing, got, then = () => {}) => { if (typeof got?.then === 'function') Promise.resolve(got).catch((e) => { fail(p.name, doing, e); then(); }); };
+  // a promise a part returned: its rejection is said, and never the process's end. True when got is
+  // one. A native promise is held by the engine's own then, never its own (which a part may have
+  // replaced: kit-888), and any other thenable through Promise.resolve. Not defended: a native one
+  // whose constructor was replaced too, so that no then can be attached to it at all, and a Proxy
+  // around one, whose then is called on the Proxy and so never reaches the promise.
+  const swallow = (p, doing, got, then = () => {}) => {
+    const caught = (e) => { fail(p.name, doing, e); then(); };
+    // throws at once, reading nothing, for anything that isn't a native promise
+    try { boxHealthApply(boxHealthThen, got, [undefined, caught]); return true; } catch {}
+    if (typeof got?.then !== 'function') return false;
+    Promise.resolve(got).catch(caught);
+    return true;
+  };
   const tick = async () => {
     if (ticking || stopped) return;
     ticking = true;
@@ -24584,7 +25528,7 @@ function boxHealth(log, scan, { parts = boxHealthParts(), real = () => Date.now(
         try {
           const got = p.part.part(p.ctx, { now: structuredClone(reading), sample: { ...entry.sample }, samples: [...ring.map((r) => r.sample), { ...entry.sample }], ...results });
           if (got === undefined || got === null) continue;
-          if (!memoryIsMap(got) || typeof got.then === 'function') { swallow(p, 'part', got); say(`${p.name} shape`, `${p.name}: part gave something other than an object, left out`); continue; }
+          if (swallow(p, 'part', got) || !memoryIsMap(got)) { say(`${p.name} shape`, `${p.name}: part gave something other than an object, left out`); continue; }
           const sections = {};
           for (const [k, fields] of Object.entries(got.answer ?? {})) {
             if (!Object.hasOwn(BOX_HEALTH_BASE, k)) { say(`${p.name} section`, `${p.name}: a section box-health@1 does not have, left out`); continue; }
@@ -24621,9 +25565,13 @@ function boxHealth(log, scan, { parts = boxHealthParts(), real = () => Date.now(
       if (!on || started || stopped) return;
       started = true;
       for (const p of running) { try { p.up = true; swallow(p, 'start', p.part.start(p.ctx), () => { p.up = false; }); } catch (e) { p.up = false; fail(p.name, 'start', e); } }
-      ctx.every(BOX_HEALTH_EVERY_MS, tick);
+      // the first sample waits for the roots' first read, which under FAST can outlast a tick; a read
+      // that hangs holds it fast ticks of the interval, 5 s, as the first tick at FAST=1 is (kit-888)
+      let rooted = false, waited = 0;
+      ctx.every(BOX_HEALTH_EVERY_MS, () => (rooted || ++waited >= fast ? tick() : undefined));
       ctx.every(BOX_HEALTH_ROOTS_MS * fast, readRoots);
       await guarded('sampler', 'the roots', readRoots)();
+      rooted = true;
       await tick();
     },
     stop() {
@@ -24655,32 +25603,1416 @@ function boxHealth(log, scan, { parts = boxHealthParts(), real = () => Date.now(
 }
 /* box-health-sampler end */
 /* box-health-processes start */
-// CPU and memory by worktree, and strays (kit-837's).
-const boxHealthProcesses = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+// CPU and memory by worktree, test runs apart, and what was left behind (kit-837): a walk of
+// ctx.proc every 15 s of now(), the first 15 s after start (by then the sampler has read the roots
+// once), its last whole result given to the parts after it. Linux only:
+// where ctx.proc can't be listed it gives nothing, and the parts after it leave CPU, memory, test
+// runs, strays, others and agent absent.
+//
+// The walk, never two at once, stopped at 2 s of real():
+//   0. pids   when ctx.roots() gives a new list (the sampler reads them every minute), the pids each
+//             root's run/ records (below), read async before the 2 s begin, for at most 2 s; one
+//             still out when that ends goes on alone, the last pids are kept meanwhile, and no
+//             second read starts while it is out (final-1 F2)
+//   1. stat   one read of <proc>/<pid>/stat a process, synchronous, in batches of 100 with a turn of
+//             the event loop between (ctx.turn): its own and its reaped children's CPU ticks, resident
+//             pages, parent, start time and comm. Then <proc>/uptime and <cgroup>/cpu.stat.
+//   2. info   for a (pid, start time) not seen before, or last read 5 minutes of real() ago or more:
+//             its cmdline (at most 64 KB) and cwd, read async, classified at once and the words
+//             dropped. At most two processes' reads are ever out, across walks, and never two for
+//             one process, so a read that hangs (a process whose memory is locked) holds at most
+//             one of the threads every file read shares, and only while it hangs (final-1 F1).
+//             What is left of the 2 s ends the reading, not the walk: a process not read yet
+//             counts as unknown (outside, never a stray) until its read settles. Only the kind, whether it starts a test run, whether it is devteam's or tmux,
+//             and its cwd are kept, and only in this region. One whose cmdline can't be read is
+//             known as nothing (outside, never a stray) until it is read again. environ is never read.
+// A walk whose stat reads are cut off at 2 s gives nothing: the part gives undefined until two whole walks have run
+// again, since a change is worked out only between two whole walks one after the other.
+//
+// Where a process counts: the longest known root (ctx.roots()) holding its cwd, then the worktree
+// under it (<root>/.worktrees/<name>); a cwd in no root, or one that can't be read, is outside. A
+// deleted cwd ("… (deleted)") counts where it was.
+// CPU between two whole walks, in cores over real() between them: its own ticks' change, plus the
+// rise in its reaped children's ticks less the whole time (own plus reaped) that its children which
+// have since gone, and their gone descendants, had at the first walk; each part never below zero, so
+// a child that came and went between walks counts for its parent and nothing counts twice. The
+// rise in pid 1's reaped time, and a systemd's, init's or tini's (by comm), is left out: a child
+// re-parented there is lost to unattributed, and a child reaped by no one (its parent ignores
+// SIGCHLD) adds nothing to its parent's reaped time, so its time since the first walk is lost too.
+// A new process counts all its time.
+// A test run is a process whose cmdline is devteam.mjs gate, node with --test before its script,
+// one of PROC_TESTS by its executable's or its script's name (a .js, .mjs, .cjs, .py or .rb
+// extension aside, or a script under node_modules/<name>/ or node_modules/@playwright/test/),
+// python -m pytest, or go test or cargo test; its tree is the processes under it, itself included,
+// and its top the highest of them.
+//
+// part(ctx, parts) gives undefined, or the last whole walk's result (a new object each walk):
+//   at            now() when the walk ended
+//   over_s        seconds of real() between the two walks CPU is from; absent with no CPU yet
+//   places        one a (root, worktree or none) holding a process, in the order first seen:
+//                 { root, project (the root's name), worktree (its folder's name; absent for the
+//                 root itself), n (processes), agents (claude, codex, opencode), cpu (cores; absent
+//                 with no CPU yet), rss (bytes), tests: { n (test runs whose top is here), cpu, rss },
+//                 own: { n, cpu, rss } (devteam's own commands and tmux, below) }
+//   outside       { n, agents, cpu, rss }: in no root, or cwd unreadable
+//   unattributed  { cpu }: the cgroup's CPU over the same time (cpu.stat usage_usec) less every
+//                 process's above, never below zero; absent with no cpu.stat or no CPU yet
+//   strays        box-health@1's strays: at most 40 groups by project, kind and why, most memory first
+// Strays, processes over 10 minutes old (from their start time and uptime) of kind agent, browser
+// (memoryClassify's, and chrome-headless-shell and chromium-browser), node (memoryClassify's) or
+// test (in a test run's tree), the first that holds of:
+//   folder-gone   its cwd is deleted
+//   parent-gone   kind browser, node or test, and its parent is pid 1 or a process whose comm is
+//                 systemd, init or tini; left out: devteam's own commands (node running devteam.mjs
+//                 or gateway.mjs), tmux, the pids a known root's run/ records (browser/state.json's
+//                 daemon_pid and chrome_pid, supervisor-up.json's pid, sensors/<name>/stream.pid,
+//                 each at most 64 KB), and any process under one of those
+//   long-test     kind test, and its run's top is over 60 minutes old
+// A stray whose cwd is in no root has no project. Nothing is killed, signalled or started here.
+const PROC_EVERY_MS = 15000, PROC_BUDGET_MS = 2000, PROC_BATCH = 100, PROC_INFO_MS = 300000;
+const PROC_READS = 2, PROC_HZ = 100, PROC_STRAY_S = 600, PROC_LONG_TEST_S = 3600, PROC_STRAYS = 40, PROC_FILE_MAX = 65536;
+const PROC_REAPERS = ['systemd', 'init', 'tini'];
+const PROC_TESTS = ['vitest', 'jest', 'mocha', 'rspec', 'pytest', 'playwright'];
+const PROC_BROWSERS = ['chrome-headless-shell', 'chromium-browser'];
+// /proc/<pid>/stat's text: { ppid, comm, cpu, reaped, start, pages }, or null. comm may hold spaces
+// and parentheses, so the fields are counted from its last ")".
+function procStat(text) {
+  const open = text.indexOf('('), close = text.lastIndexOf(')');
+  if (open < 0 || close < open) return null;
+  const f = text.slice(close + 2).split(' ');
+  const n = (i) => (/^-?\d+$/.test(f[i] ?? '') ? Number(f[i]) : NaN);
+  const [ppid, ut, st, cut, cst, start, pages] = [1, 11, 12, 13, 14, 19, 21].map(n);
+  if (![ppid, ut, st, cut, cst, start, pages].every(Number.isSafeInteger) || ppid < 0 || start < 0) return null;
+  return { ppid, comm: text.slice(open + 1, close), cpu: Math.max(0, ut + st), reaped: Math.max(0, cut + cst), start, pages: Math.max(0, pages) };
+}
+// A cmdline's words: what of it is kept, { kind, test, own }. kind is agent, browser, node or null.
+function procClassify(words) {
+  if (!words.length) return { kind: null, test: false, own: false };
+  const exe = memoryBase(words[0]);
+  const bare = (w) => memoryBase(w).replace(/\.(?:m?js|cjs|py|rb)$/, '');
+  const tool = (w) => PROC_TESTS.includes(bare(w)) || PROC_TESTS.some((t) => w.includes(`/node_modules/${t}/`)) || w.includes('/node_modules/@playwright/test/');
+  const { kind } = memoryClassify(words, new Set());
+  const script = words.findIndex((w, j) => j > 0 && !w.startsWith('-'));
+  let test = PROC_TESTS.includes(bare(words[0])) || ((exe === 'go' || exe === 'cargo') && words[1] === 'test');
+  if (exe === 'node') {
+    test = words.slice(1, script < 0 ? undefined : script).includes('--test')
+      || (script > 0 && (memoryBase(words[script]) === 'devteam.mjs' ? words[script + 1] === 'gate' : tool(words[script])));
+  } else if (/^python[\d.]*$/.test(exe)) test = test || (words[1] === '-m' && words[2] === 'pytest') || (script > 0 && tool(words[script]));
+  else if (exe === 'ruby' && script > 0) test = test || tool(words[script]);
+  const own = kind === 'devteam' || exe === 'tmux' || (exe === 'node' && script > 0 && memoryBase(words[script]) === 'gateway.mjs');
+  const named = kind === 'agent' || kind === 'browser' || kind === 'node' ? kind : PROC_BROWSERS.includes(exe) ? 'browser' : null;
+  return { kind: named, test, own };
+}
+// Where a cwd counts: { root, project, worktree? } by the longest root holding it, or null.
+function procPlace(cwd, roots) {
+  if (typeof cwd !== 'string') return null;
+  const dir = cwd.endsWith(' (deleted)') ? cwd.slice(0, -' (deleted)'.length) : cwd;
+  let best = null;
+  for (const r of roots) if ((dir === r.root || dir.startsWith(`${r.root}/`)) && (!best || r.root.length > best.root.length)) best = r;
+  if (!best) return null;
+  const m = /^\.worktrees\/([^/]+)/.exec(dir.slice(best.root.length + 1));
+  return m ? { root: best.root, project: best.name, worktree: m[1] } : { root: best.root, project: best.name };
+}
+const boxHealthProcesses = (() => {
+  let run = null;
+  const read = (...p) => { try { return fs.readFileSync(path.join(...p), 'utf8'); } catch { return null; } };
+  // a small file's text, async, or null
+  const readSmall = async (file) => {
+    let fh = null;
+    try {
+      fh = await fs.promises.open(file, fs.constants.O_RDONLY);
+      const buf = Buffer.alloc(PROC_FILE_MAX);
+      const { bytesRead } = await fh.read(buf, 0, PROC_FILE_MAX, 0);
+      return buf.toString('utf8', 0, bytesRead);
+    } catch { return null; } finally { await fh?.close().catch(() => {}); }
+  };
+  // the pids the known roots' run/ folders record
+  const readPids = async (ctx, r, roots) => {
+    const pids = new Set();
+    const add = (v) => { if (Number.isSafeInteger(v) && v > 1) pids.add(v); };
+    const json = async (f) => { try { const o = JSON.parse(await readSmall(f) ?? 'null'); return memoryIsMap(o) ? o : null; } catch { return null; } };
+    for (const { root } of roots) {
+      const dir = path.join(root, 'docs', 'devteam', 'run');
+      const b = await json(path.join(dir, 'browser', 'state.json'));
+      add(b?.daemon_pid); add(b?.chrome_pid);
+      add((await json(path.join(dir, 'supervisor-up.json')))?.pid);
+      let sensors = [];
+      try { sensors = await fs.promises.readdir(path.join(dir, 'sensors')); } catch { sensors = []; }
+      for (const s of sensors) { const t = (await readSmall(path.join(dir, 'sensors', s, 'stream.pid')))?.trim(); if (/^\d+$/.test(t ?? '')) add(Number(t)); }
+    }
+    if (run === r) { r.pids = pids; r.pidsOf = roots; }
+  };
+  // readPids, one at a time, waited for at most 2 s; a late one sets the pids when it ends
+  const pidsFor = async (ctx, r, roots) => {
+    if (!r.pidsOut) r.pidsOut = readPids(ctx, r, roots).finally(() => { r.pidsOut = null; });
+    let end = () => {};
+    const late = new Promise((res) => { end = ctx.timeout(PROC_BUDGET_MS, () => res(true)); });
+    const was = await Promise.race([r.pidsOut.then(() => false), late]);
+    end();
+    if (was) ctx.say("a root's run/ files did not answer within 2 s: the last pids are kept");
+  };
+  // a process's info: { cwd, kind, test, own }; one whose cmdline can't be read is known as nothing
+  const readInfo = async (ctx, pid) => {
+    const dir = path.join(ctx.proc, String(pid));
+    const text = await readSmall(path.join(dir, 'cmdline'));
+    if (text === null) return { cwd: null, kind: null, test: false, own: false, none: true };
+    const cwd = await fs.promises.readlink(path.join(dir, 'cwd')).catch(() => null);
+    return { cwd, ...procClassify(memoryWords(text)) };
+  };
+  const walk = async (ctx, r) => {
+    const roots = ctx.roots();
+    if (r.pidsOf !== roots && !r.pidsOut) { await pidsFor(ctx, r, roots); if (ctx.stopped() || run !== r) return; }
+    const began = ctx.real();
+    let names = null;
+    try { names = fs.readdirSync(ctx.proc); } catch { names = null; }
+    if (names === null) { ctx.say("the processes can't be listed: no CPU or memory by worktree"); r.base = null; r.result = undefined; return; }
+    const pids = names.filter((n) => /^\d+$/.test(n));
+    const procs = new Map();
+    let cut = false;
+    for (let i = 0; i < pids.length && !cut; i += PROC_BATCH) {
+      if (i > 0) { await ctx.turn(); if (ctx.stopped() || run !== r) return; if (ctx.real() - began >= PROC_BUDGET_MS) { cut = true; break; } }
+      for (const pid of pids.slice(i, i + PROC_BATCH)) {
+        const text = read(ctx.proc, pid, 'stat');
+        const s = text === null ? null : procStat(text);
+        if (s) procs.set(Number(pid), s);
+      }
+    }
+    const t = ctx.real();
+    const uptime = Number((read(ctx.proc, 'uptime') ?? '').split(' ')[0]);
+    const usage = boxHealthField(read(ctx.cgroup, 'cpu.stat'), 'usage_usec');
+    // the processes whose info is new or old and has no read out, read at most PROC_READS at once,
+    // within what is left of the 2 s; a read still out then goes on alone and keeps its slot
+    const keyOf = (pid, s) => `${pid}:${s.start}`;
+    if (!cut) {
+      const need = [...procs].filter(([pid, s]) => { const k = keyOf(pid, s), i = r.info.get(k); return !r.out.has(k) && (!i || ctx.real() - i.at >= PROC_INFO_MS); });
+      let over = false;
+      const worker = async () => {
+        while (need.length && !over && run === r && !ctx.stopped()) {
+          const [pid, s] = need.shift(), k = keyOf(pid, s);
+          r.out.add(k);
+          try {
+            const info = await readInfo(ctx, pid);
+            if (run === r) r.info.set(k, { at: ctx.real(), ...info });
+          } finally { r.out.delete(k); }
+        }
+      };
+      const left = PROC_BUDGET_MS - (ctx.real() - began);
+      if (left > 0 && need.length) {
+        let end = () => {};
+        const late = new Promise((res) => { end = ctx.timeout(left, () => { over = true; res(); }); });
+        await Promise.race([Promise.all(Array.from({ length: Math.max(0, PROC_READS - r.out.size) }, worker)), late]);
+        end();
+        over = true;
+        if (ctx.stopped() || run !== r) return;
+      }
+      if (r.out.size && !r.slow) ctx.say('a process did not answer within 2 s: it counts outside until it does');
+      r.slow = r.out.size > 0;
+    }
+    if (cut) { ctx.say('a walk was cut off at 2 s: no CPU until two whole walks have run'); r.base = null; r.result = undefined; return; }
+    // forget what is gone
+    const live = new Set([...procs].map(([pid, s]) => keyOf(pid, s)));
+    for (const k of r.info.keys()) if (!live.has(k)) r.info.delete(k);
+    const me = procs.get(process.pid);
+    const page = memoryPageSize(me?.pages, process.memoryUsage.rss());
+    const infoOf = (pid) => { const s = procs.get(pid); return s ? r.info.get(keyOf(pid, s)) : undefined; };
+    // each process's chain, memoised: its test run's top, and whether it is under one of devteam's own
+    const top = new Map(), kept = new Map();
+    const topOf = (pid, seen = new Set()) => {
+      if (top.has(pid)) return top.get(pid);
+      const s = procs.get(pid);
+      if (!s || seen.has(pid)) return null;
+      seen.add(pid);
+      const up = s.ppid > 0 && s.ppid !== pid ? topOf(s.ppid, seen) : null;
+      const got = up ?? (infoOf(pid)?.test ? pid : null);
+      top.set(pid, got);
+      return got;
+    };
+    const ownOf = (pid, seen = new Set()) => {
+      if (kept.has(pid)) return kept.get(pid);
+      const s = procs.get(pid);
+      if (!s || seen.has(pid)) return false;
+      seen.add(pid);
+      const got = !!infoOf(pid)?.own || r.pids.has(pid) || (s.ppid > 0 && s.ppid !== pid && ownOf(s.ppid, seen));
+      kept.set(pid, got);
+      return got;
+    };
+    // CPU: only between two whole walks one after the other
+    const base = r.base;
+    const over = base ? (t - base.t) / 1000 : 0;
+    const cpuOf = new Map();
+    if (base && over > 0) {
+      // the whole time of each gone process at the first walk, given to the nearest of its ancestors
+      // still here (through gone ones only)
+      const gone = new Map();
+      for (const [pid, s] of base.procs) {
+        const now = procs.get(pid);
+        if (now && now.start === s.start) continue;
+        let up = base.procs.get(s.ppid), hops = 0;
+        while (up && hops++ < 4096) {
+          const here = procs.get(up.pid);
+          if (here && here.start === up.start) { gone.set(up.pid, (gone.get(up.pid) ?? 0) + s.cpu + s.reaped); break; }
+          up = base.procs.get(up.ppid);
+        }
+      }
+      for (const [pid, s] of procs) {
+        const was = base.procs.get(pid);
+        const same = was && was.start === s.start;
+        const own = Math.max(0, s.cpu - (same ? was.cpu : 0));
+        const reaper = pid === 1 || PROC_REAPERS.includes(s.comm);
+        const reaped = reaper ? 0 : Math.max(0, s.reaped - (same ? was.reaped : 0) - (same ? gone.get(pid) ?? 0 : 0));
+        cpuOf.set(pid, (own + reaped) / PROC_HZ / over);
+      }
+    }
+    const hasCpu = !!base && over > 0;
+    const places = new Map(), outside = { n: 0, agents: 0, rss: 0 };
+    if (hasCpu) outside.cpu = 0;
+    const tops = new Map();
+    let attributed = 0;
+    for (const [pid, s] of procs) {
+      const info = infoOf(pid);
+      const place = info && !info.none ? procPlace(info.cwd, roots) : null;
+      let into = outside;
+      if (place) {
+        const k = `${place.root}\0${place.worktree ?? ''}`;
+        if (!places.has(k)) places.set(k, { ...place, n: 0, agents: 0, ...(hasCpu ? { cpu: 0 } : {}), rss: 0, tests: { n: 0, ...(hasCpu ? { cpu: 0 } : {}), rss: 0 }, own: { n: 0, ...(hasCpu ? { cpu: 0 } : {}), rss: 0 } });
+        into = places.get(k);
+      }
+      const rss = s.pages * page, cpu = cpuOf.get(pid) ?? 0;
+      into.n++; into.rss += rss;
+      if (info?.kind === 'agent') into.agents++;
+      if (hasCpu) { into.cpu += cpu; attributed += cpu; }
+      if (info?.own && into.own) { into.own.n++; into.own.rss += rss; if (hasCpu) into.own.cpu += cpu; }
+      const t0 = topOf(pid);
+      if (t0 !== null && into.tests) {
+        into.tests.rss += rss;
+        if (hasCpu) into.tests.cpu += cpu;
+        if (t0 === pid) into.tests.n++;
+      }
+      if (t0 !== null) tops.set(pid, t0);
+    }
+    // strays
+    const groups = new Map();
+    if (Number.isFinite(uptime) && uptime > 0) {
+      const age = (s) => Math.max(0, uptime - s.start / PROC_HZ);
+      for (const [pid, s] of procs) {
+        const info = infoOf(pid);
+        if (!info || info.none || age(s) <= PROC_STRAY_S) continue;
+        const t0 = tops.get(pid);
+        const kind = t0 !== undefined ? 'test' : info.kind;
+        if (!kind) continue;
+        const parent = procs.get(s.ppid);
+        const orphan = s.ppid === 1 || (parent && PROC_REAPERS.includes(parent.comm));
+        const why = info.cwd?.endsWith(' (deleted)') ? 'folder-gone'
+          : kind !== 'agent' && orphan && !ownOf(pid) ? 'parent-gone'
+          : kind === 'test' && age(procs.get(t0)) > PROC_LONG_TEST_S ? 'long-test' : null;
+        if (!why) continue;
+        const project = procPlace(info.cwd, roots)?.project;
+        const k = `${project ?? ''}\0${kind}\0${why}`;
+        const g = groups.get(k) ?? groups.set(k, { ...(project === undefined ? {} : { project }), kind, why, n: 0, oldest_s: 0, rss: 0, ...(hasCpu ? { cpu: 0 } : {}) }).get(k);
+        g.n++;
+        g.oldest_s = Math.max(g.oldest_s, Math.floor(age(s)));
+        g.rss += s.pages * page;
+        if (hasCpu) g.cpu += cpuOf.get(pid) ?? 0;
+      }
+    }
+    const result = { at: ctx.now() };
+    if (hasCpu) result.over_s = over;
+    result.places = [...places.values()];
+    result.outside = outside;
+    if (hasCpu && Number.isFinite(usage) && Number.isFinite(base.usage) && usage >= base.usage) result.unattributed = { cpu: Math.max(0, (usage - base.usage) / 1e6 / over - attributed) };
+    result.strays = [...groups.values()].sort((a, b) => b.rss - a.rss || b.n - a.n).slice(0, PROC_STRAYS);
+    r.base = { t, procs: new Map([...procs].map(([pid, s]) => [pid, { pid, ...s }])), usage };
+    r.result = result;
+  };
+  return {
+    start(ctx) {
+      const r = { base: null, result: undefined, info: new Map(), out: new Set(), slow: false, pids: new Set(), pidsOf: null, pidsOut: null, walking: false };
+      run = r;
+      const once = async () => {
+        if (r.walking || run !== r) return;
+        r.walking = true;
+        try { await walk(ctx, r); } finally { r.walking = false; }
+      };
+      r.walk = once;
+      ctx.every(PROC_EVERY_MS, once);
+    },
+    part(ctx, parts) { return run?.result; },
+    stop() { run = null; },
+  };
+})();
 /* box-health-processes end */
 /* box-health-disk start */
-// Each worktree's disk (kit-838's).
-const boxHealthDisk = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+// Each worktree's disk (kit-838): every minute of now() it lists <root>/.worktrees/ under each known
+// root (ctx.roots()), folders only, and reads, one after the other, every worktree whose last read
+// began 15 minutes of now() ago or more (or never), with `nice -n 19 du -skx <worktree>`: the lowest
+// CPU priority, and with no I/O class set Linux takes the I/O priority from it (the lowest of the
+// best-effort class); -x stays on the worktree's own volume. One du at a time, never two looks at
+// once; a du still running at 60 s of real() is killed. Nothing of its output but the number is kept.
+// A killed du stuck in the kernel stays alive until it closes: while one is, its worktree gets no
+// second du (its row stays), and while two are, no du starts at all (every row stays). The
+// .worktrees/ folders are listed one at a time inside the one look, so a volume that hangs holds at
+// most one of the threads every file read shares, and no look starts until it answers.
+//
+// part(ctx, parts) gives undefined until a read has ended, then (a new object after each read):
+//   worktrees   [{ root, worktree, disk, disk_at }], in the order the roots and their folders were
+//               listed: root as ctx.roots() gives it, worktree the folder's name under .worktrees/
+//               (as box-health-processes names it), disk in bytes (du's KiB × 1024), disk_at the ISO
+//               time of now() when that read ended. disk is absent when that read failed (du exited
+//               other than 0, gave no number, or couldn't be run) or was stopped at 60 s, until a
+//               later one ends with a number; a worktree not read yet has no row. A worktree gone
+//               from its .worktrees/ is forgotten at the next look; a .worktrees/ that is missing has
+//               none, and one that can't be listed otherwise keeps its root's rows as they are. With no
+//               row left, part gives undefined, not an empty list.
+// stop() kills a du still running, as the sampler asks (its limit goes with the run's timers).
+const DISK_LOOK_MS = 60000, DISK_EVERY_MS = 900000, DISK_LIMIT_MS = 60000, DISK_OUT_MAX = 4096, DISK_ALIVE = 2;
+const boxHealthDisk = (() => {
+  let run = null;
+  // one du: bytes, or undefined. Its output is read for the first number only, at most 4 KB
+  const du = (ctx, dir, kids, key) => new Promise((resolve) => {
+    let out = '', done = false, end = () => {}, child;
+    const finish = (v) => { if (done) return; done = true; end(); resolve(v); };
+    try {
+      child = spawn('nice', ['-n', '19', 'du', '-skx', dir], { stdio: ['ignore', 'pipe', 'ignore'], env: process.env });
+    } catch { ctx.say("du can't be run: no disk by worktree"); finish(undefined); return; }
+    // alive until it closes, which a du stuck in the kernel may not do for a long time after its kill
+    kids.set(child, key);
+    const gone = () => kids.delete(child);
+    const kill = () => { try { child.kill('SIGKILL'); } catch {} };
+    end = ctx.timeout(DISK_LIMIT_MS, () => { kill(); ctx.say("a worktree's du ran 60 s and was stopped: its disk is absent until a read ends"); finish(undefined); });
+    child.on('error', () => { gone(); ctx.say("du can't be run: no disk by worktree"); finish(undefined); });
+    child.stdout.on('data', (c) => { out += c; if (out.length > DISK_OUT_MAX) { kill(); finish(undefined); } });
+    child.on('close', (code) => {
+      gone();
+      const m = /^(\d+)\s/.exec(out);
+      const bytes = m ? Number(m[1]) * 1024 : NaN;
+      finish(code === 0 && Number.isSafeInteger(bytes) ? bytes : undefined);
+    });
+  });
+  const keyOf = (w) => `${w.root}\0${w.worktree}`;
+  const look = async (ctx, r) => {
+    const found = [], order = [];
+    for (const { root } of ctx.roots()) {
+      let list = [];
+      try { list = await fs.promises.readdir(path.join(root, '.worktrees'), { withFileTypes: true }); } catch (e) {
+        // missing: no worktrees; unreadable (EACCES, EIO): its rows stay as they are, none read again
+        if (e?.code !== 'ENOENT') for (const k of r.order) if (k.startsWith(`${root}\0`)) order.push(k);
+        continue;
+      }
+      for (const d of list) if (d.isDirectory()) { found.push({ root, worktree: d.name }); order.push(keyOf({ root, worktree: d.name })); }
+    }
+    if (ctx.stopped() || run !== r) return;
+    r.order = order;
+    const live = new Set(r.order);
+    let changed = false;
+    for (const k of [...r.seen.keys()]) if (!live.has(k)) { r.seen.delete(k); changed = true; }
+    const publish = () => { const rows = r.order.flatMap((k) => (r.seen.get(k)?.row ? [r.seen.get(k).row] : [])); r.result = rows.length ? { worktrees: rows } : undefined; };
+    if (changed) publish();
+    for (const w of found) {
+      const k = keyOf(w), was = r.seen.get(k);
+      if (was && ctx.now() - was.began < DISK_EVERY_MS) continue;
+      // its last du still alive (killed, not yet ended): not a second for it, and its row stays
+      if ([...r.kids.values()].includes(k)) continue;
+      // two alive at once: none more until one ends, and every row stays
+      if (r.kids.size >= DISK_ALIVE) { ctx.say('two du are still alive after their kill: no more until one ends'); break; }
+      const began = ctx.now();
+      r.seen.set(k, { began, row: was?.row });
+      const disk = await du(ctx, path.join(w.root, '.worktrees', w.worktree), r.kids, k);
+      if (ctx.stopped() || run !== r) return;
+      r.seen.set(k, { began, row: { root: w.root, worktree: w.worktree, ...(disk === undefined ? {} : { disk }), disk_at: boxHealthIso(ctx.now()) } });
+      publish();
+    }
+  };
+  return {
+    start(ctx) {
+      const r = { seen: new Map(), order: [], result: undefined, looking: false, kids: new Map() };
+      run = r;
+      ctx.every(DISK_LOOK_MS, async () => {
+        if (r.looking || run !== r) return;
+        r.looking = true;
+        try { await look(ctx, r); } finally { r.looking = false; }
+      });
+    },
+    part(ctx, parts) { return run?.result; },
+    // a child still running is killed: its limit goes with the run's timers
+    stop() { for (const c of run?.kids?.keys() ?? []) { try { c.kill('SIGKILL'); } catch {} } run = null; },
+  };
+})();
 /* box-health-disk end */
 /* box-health-state start */
-// answer.box: the last restart, OOM kills, GitHub, the kit's release (kit-838's).
-const boxHealthState = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+// answer.box (kit-838): the box's last start, its OOM kills since, GitHub's allowance, and the kit's
+// release against the newest one.
+//   started_at  pid 1's start: <proc>/stat's btime plus <proc>/1/stat's start time (ticks, 100 a
+//               second). In a container that is the container's start; on a machine, where pid 1
+//               starts with it, the boot. Read once a run, at the first tick that can.
+//   oom_kills   each tick, oom_kill in <cgroup>/memory.events (the box's, since its cgroup began with
+//               it); where there is no cgroup of the box (no cpu.max, no memory.current), /proc's
+//               vmstat oom_kill (the machine's, since boot). A box whose memory.events can't be read
+//               has none: the host's is never given for it.
+//   github      `gh api rate_limit` every 5 minutes of now(), the first at start: resources.core's
+//               remaining (left), limit and reset (resets_at)
+//   latest      `gh api repos/<KIT_UPSTREAM>/releases/latest --jq .tag_name` every hour of now(), the
+//               first at start, when it is vX.Y.Z
+//   kit         ctx.kit, the release serving the hub (startHub's kit), when there is one
+// Each gh is one async child, never two of a kind alive at once (a killed one that hasn't closed
+// keeps the next of its kind from starting, and its field as it is), killed at 30 s of real(). Its stderr is
+// never read, its stdout only parsed, and nothing of either is said or kept: a missing or failing
+// gh, or one whose output doesn't parse, leaves its field out until a later one answers. The
+// sampler starts this part only when it is on, so no gh child starts unless it is; stop() kills one
+// still running.
+const STATE_GITHUB_MS = 300000, STATE_LATEST_MS = 3600000, STATE_GH_MS = 30000, STATE_OUT_MAX = 65536;
+const boxHealthState = (() => {
+  let run = null;
+  const read = (...p) => { try { return fs.readFileSync(path.join(...p), 'utf8'); } catch { return null; } };
+  // one gh: its stdout, or null when it failed, ran out of time or said too much
+  const gh = (ctx, args, kids, kind) => new Promise((resolve) => {
+    let out = '', done = false, end = () => {}, child;
+    const finish = (v) => { if (done) return; done = true; end(); resolve(v); };
+    try {
+      child = spawn('gh', args, { stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, GH_PROMPT_DISABLED: '1', NO_COLOR: '1' } });
+    } catch { ctx.say("gh can't be run: GitHub's allowance and the newest release are left out"); finish(null); return; }
+    // alive until it closes: no second of its kind starts before that
+    kids.set(child, kind);
+    const gone = () => kids.delete(child);
+    const kill = () => { try { child.kill('SIGKILL'); } catch {} };
+    end = ctx.timeout(STATE_GH_MS, () => { kill(); ctx.say('a gh ran 30 s and was stopped'); finish(null); });
+    child.on('error', () => { gone(); ctx.say("gh can't be run: GitHub's allowance and the newest release are left out"); finish(null); });
+    child.stdout.on('data', (c) => { out += c; if (out.length > STATE_OUT_MAX) { kill(); finish(null); } });
+    child.on('close', (code) => { gone(); finish(code === 0 ? out : null); });
+  });
+  const rate = (text) => {
+    let core = null;
+    try { core = JSON.parse(text ?? 'null')?.resources?.core; } catch { core = null; }
+    const whole = (n) => Number.isSafeInteger(n) && n >= 0;
+    if (!core || !whole(core.remaining) || !whole(core.limit)) return undefined;
+    const resets = whole(core.reset) && core.reset > 0 ? time(core.reset * 1000) : undefined;
+    const at = resets ? { resets_at: resets } : {};
+    return { left: core.remaining, limit: core.limit, ...at };
+  };
+  // a time Date can hold (spec-1 F2): past it toISOString throws, so the field is left out
+  const time = (ms) => (Number.isSafeInteger(ms) && ms >= 0 && ms <= 8.64e15 ? boxHealthIso(ms) : undefined);
+  const tag = (text) => { const t = (text ?? '').trim(); return /^v\d+\.\d+\.\d+$/.test(t) ? t : undefined; };
+  const startedAt = (ctx) => {
+    const btime = /^btime (\d+)$/m.exec(read(ctx.proc, 'stat') ?? '');
+    const one = procStat(read(ctx.proc, '1', 'stat') ?? '');
+    if (!btime || !one) return undefined;
+    const ms = Number(btime[1]) * 1000 + one.start * 1000 / PROC_HZ;
+    return time(Math.round(ms));
+  };
+  const ooms = (ctx) => {
+    const events = read(ctx.cgroup, 'memory.events');
+    if (events !== null) return boxHealthField(events, 'oom_kill');
+    const boxed = read(ctx.cgroup, 'cpu.max') !== null || read(ctx.cgroup, 'memory.current') !== null;
+    return boxed ? undefined : boxHealthField(read(ctx.proc, 'vmstat'), 'oom_kill');
+  };
+  // every ms of now(), the first now; one of a kind alive at a time
+  const each = (ctx, r, ms, args, take, field) => {
+    const ask = async () => {
+      // one of its kind still alive (running, or killed and not yet ended): none started, and the
+      // field stays as it is
+      if (run !== r || [...r.kids.values()].includes(field)) return;
+      const got = take(await gh(ctx, args, r.kids, field));
+      if (run === r) r[field] = got;
+    };
+    ctx.after(0, ask);
+    ctx.every(ms, ask);
+  };
+  return {
+    start(ctx) {
+      const r = { started: undefined, github: undefined, latest: undefined, last: null, key: '', kids: new Map() };
+      run = r;
+      each(ctx, r, STATE_GITHUB_MS, ['api', 'rate_limit'], rate, 'github');
+      each(ctx, r, STATE_LATEST_MS, ['api', `repos/${KIT_UPSTREAM}/releases/latest`, '--jq', '.tag_name'], tag, 'latest');
+    },
+    part(ctx, parts) {
+      const r = run;
+      if (!r) return undefined;
+      r.started ??= startedAt(ctx);
+      const kit = typeof ctx.kit === 'string' && ctx.kit ? ctx.kit : undefined;
+      const box = boxHealthPresent({ started_at: r.started, oom_kills: ooms(ctx), github: r.github, kit, latest: r.latest });
+      const key = JSON.stringify(box);
+      // the same object while nothing changed, so the sampler checks it once
+      if (key !== r.key) { r.key = key; r.last = { answer: { box } }; }
+      return r.last;
+    },
+    // a child still running is killed: its limit goes with the run's timers
+    stop() { for (const c of run?.kids?.keys() ?? []) { try { c.kill('SIGKILL'); } catch {} } run = null; },
+  };
+})();
 /* box-health-state end */
 /* box-health-pool start */
-// answer.pool: the workers holding a slot (kit-842's).
-const boxHealthPool = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+// answer.pool (kit-842): every project's worker pool, read from its supervisor's
+// run/cache/pool.json (pool@1), with each worker's CPU, memory and disk joined to it.
+//
+// Every 15 s of now() it reads again when a minute of now() has passed since the last read, or when
+// ctx.roots() gives a new list (the first read follows the sampler's first read of the roots). A read,
+// never two at once: ctx.scan() for the dashboards' hellos, then for each known root, one at a time,
+// <root>/docs/devteam/run/cache/pool.json (at most 256 KB + 1 read; poolProblem judges it) and, for
+// a root no hello answers for, whether its dashboard is slow or gone (below). Each file read is raced
+// with 2 s of real(): one that hasn't answered keeps that root's last read (its at still ages it), and
+// isn't asked again until it settles. At most two reads are out at once, across every project: while
+// two are, a root whose read can't start keeps its last read too, so hung files never hold more than
+// two of the hub's file threads.
+//
+// A project's dashboard, from the hub's scan (which can't tell a refused port from a slow one):
+//   up     a hello names the root: its port and its fleet's mode are the hello's
+//   slow   no hello, but its port (the last hello's for the root, else its run/dashboard-port, or
+//          while that read is late the port its last read had) takes a TCP connection, or doesn't
+//          answer the connection within 1 s of real(): still counted, with that port and the last
+//          hello's mode
+//   none   no port known, the port refuses the connection, or another root's hello holds it: not
+//          counted, and its rows have no port
+// A project's ready, for answer.headroom and the parts after it:
+//   not counted   dashboard none
+//   0             its fleet is parked or drained (the hello's fleet.mode park or drain), whatever its
+//                 file's age
+//   unknown       no file, a file poolProblem refuses, or one whose at is over 15 minutes of real()
+//                 old: its name is in ready_unknown, and its ready counts for nothing. A stale
+//                 file's rows stay, marked by the project's at; a refused file gives none
+//   its file's    otherwise
+//
+// part(ctx, parts) joins the last read with parts.processes (kit-837's result: places by root and
+// worktree, outside, unattributed, strays; undefined without /proc or before two whole walks) and
+// parts.disk ({ worktrees: [{ root, worktree, disk?, disk_at }] }, kit-838's), and gives, as the same
+// object while none of them changed:
+//   answer.pool       box-health@1's projects, allocated, recent, others and strays. A project's cpu
+//                     and rss are every place under its root (worktrees, planners, its supervisor).
+//                     A worker is the place <root>/.worktrees/<its name>: agent is whether the walk
+//                     saw an agent there (false with no process there). others: planners are the
+//                     .worktrees/plan-* places, supervisors the roots' own places, outside and
+//                     unattributed the walk's. Without parts.processes: no cpu, rss, tests, agent,
+//                     others or strays. tokens are pool@1's, its new_hour as per_hour, its prices left
+//                     out. Each allocated worker keeps one point a minute of now() for an hour (at
+//                     most 60: cpu, rss, disk, those known; none is added when no worker has any, so the
+//                     object stays the same); recent rows have last: the CPU and memory of its
+//                     worktree's processes when the walk last saw any there, and the disk when a du
+//                     last gave one, while it held its slot (absent when this run saw none, as after
+//                     a restart or a stop and start). allocated: most CPU first, at most 60; recent: newest first, those
+//                     left in 24 hours of real(), at most 20
+//   answer.headroom   ready (over the projects counted and known), ready_unknown (their names)
+//   projects          [{ root, name, port?, dashboard, mode, fresh, ready?, pool }] for the parts
+//                     after it: pool is the file as read (pool@1), null when missing or refused
+//   ready, ready_unknown   as in answer.headroom
+// A process whose cmdline or cwd isn't read yet counts outside (kit-837), so a worker's figures can be
+// low and outside high for a walk or two after the hub starts.
+const POOL_EVERY_MS = 15000, POOL_READ_MS = 60000, POOL_STALE_MS = 900000, POOL_KNOCK_MS = 1000, POOL_FILE_MS = 2000;
+const POOL_POINT_MS = 60000, POOL_POINTS = 60, POOL_HOUR_MS = 3600000, POOL_DAY_MS = 86400000;
+const POOL_ALLOCATED = 60, POOL_RECENT = 20, POOL_READS = 2;
+const boxHealthPool = (() => {
+  let run = null;
+  // a file's text, at most max bytes and one more (so poolProblem sees one over its size), or null
+  const readCapped = async (file, max) => {
+    let fh = null;
+    try {
+      fh = await fs.promises.open(file, fs.constants.O_RDONLY);
+      const buf = Buffer.alloc(max + 1);
+      const { bytesRead } = await fh.read(buf, 0, max + 1, 0);
+      return buf.toString('utf8', 0, bytesRead);
+    } catch { return null; } finally { await fh?.close().catch(() => {}); }
+  };
+  // a file read raced with 2 s of real(): its text, null, or late. At most two reads are ever out,
+  // across every project and read (final-1 F1): a read still out goes on alone and keeps its place,
+  // and one that can't start (its own still out, or two out) is late at once. So hung files hold at
+  // most two of the threads every file read in the hub shares, as the sampler's volumes and the
+  // processes walk do.
+  const LATE = Symbol('late');
+  const settled = (ctx, r, file, max) => {
+    if (r.out.has(file) || r.out.size >= POOL_READS) { ctx.say("two file reads are out: a project whose read can't start keeps its last read"); return Promise.resolve(LATE); }
+    r.out.add(file);
+    const p = readCapped(file, max).finally(() => r.out.delete(file));
+    let end = () => {};
+    const late = new Promise((res) => { end = ctx.timeout(POOL_FILE_MS, () => res(LATE)); });
+    return Promise.race([p, late]).finally(() => end());
+  };
+  // open (it takes a connection), slow (no answer in 1 s) or refused (anything else)
+  const knock = (ctx, r, port) => new Promise((res) => {
+    let done = false, end = () => {};
+    const s = net.connect({ port, host: '127.0.0.1' });
+    r.sockets.add(s);
+    const settle = (v) => { if (done) return; done = true; end(); r.sockets.delete(s); s.destroy(); res(v); };
+    end = ctx.timeout(POOL_KNOCK_MS, () => settle('slow'));
+    s.once('connect', () => settle('open'));
+    s.once('error', () => settle('refused'));
+  });
+  const portOf = (v) => (Number.isSafeInteger(v) && v >= 1 && v <= 65535 ? v : undefined);
+  const modeOf = (h) => (h?.fleet?.mode === 'park' || h?.fleet?.mode === 'drain' ? h.fleet.mode : 'run');
+  const read = async (ctx, r) => {
+    const roots = ctx.roots();
+    r.readAt = ctx.now(); r.rootsOf = roots;
+    let list = [];
+    try { list = await ctx.scan(); } catch { list = []; }
+    if (run !== r || ctx.stopped()) return;
+    const hellos = new Map();
+    for (const h of Array.isArray(list) ? list : []) if (memoryIsMap(h) && typeof h.root === 'string' && portOf(h.port) && !hellos.has(h.root.replace(/\/+$/, ''))) hellos.set(h.root.replace(/\/+$/, ''), h);
+    for (const [root, h] of hellos) r.hellos.set(root, { port: h.port, mode: modeOf(h) });
+    const held = new Map([...hellos].map(([root, h]) => [h.port, root]));
+    const files = [];
+    for (const { root, name } of roots) {
+      const run_ = path.join(root, 'docs', 'devteam', 'run');
+      const text = await settled(ctx, r, path.join(run_, 'cache', 'pool.json'), POOL_MAX_BYTES);
+      if (run !== r || ctx.stopped()) return;
+      // this root's last read: kept by a read that is late
+      const was = r.files.find((x) => x.root === root);
+      let f;
+      if (text === LATE) {
+        // its last read stands (its at still ages it), or none
+        f = { root, name, pool: was?.pool ?? null, refused: !!was?.refused };
+        ctx.say("a project's pool.json did not answer within 2 s: its last read is kept");
+      } else {
+        const pool = text === null || poolProblem(text) ? null : JSON.parse(text);
+        f = { root, name, pool, refused: text !== null && !pool };
+      }
+      const h = hellos.get(root);
+      if (h) Object.assign(f, { dashboard: 'up', port: h.port, mode: modeOf(h) });
+      else {
+        const last = r.hellos.get(root);
+        let saved;
+        if (last?.port === undefined) { const t = await settled(ctx, r, path.join(run_, 'dashboard-port'), 16); saved = t === LATE ? was?.port : portOf(Number(t?.trim())); }
+        const port = last?.port ?? saved;
+        const how = port === undefined || (held.has(port) && held.get(port) !== root) ? 'refused' : await knock(ctx, r, port);
+        if (run !== r || ctx.stopped()) return;
+        Object.assign(f, how === 'refused' ? { dashboard: 'none', mode: last?.mode ?? 'run' } : { dashboard: 'slow', port, mode: last?.mode ?? 'run' });
+      }
+      files.push(f);
+    }
+    r.files = files;
+    r.version++;
+  };
+  // pool@1's tokens as box-health@1's: new_hour is per_hour, prices and review hours are left out
+  const tokensOf = (t) => {
+    const out = { state: t.state };
+    for (const k of ['reason', 'new', 'cached', 'points', 'reviews_new']) if (t[k] !== undefined) out[k] = t[k];
+    if (t.state === 'measured' && t.new_hour !== undefined) out.per_hour = t.new_hour;
+    return out;
+  };
+  const keyOf = (root, name) => `${root}\0${name}`;
+  const build = (ctx, r, procs, disk) => {
+    const real = ctx.real();
+    const places = procs ? procs.places : [];
+    const hasCpu = !!procs && procs.over_s !== undefined;
+    const sum = (list) => {
+      const out = { n: list.length, rss: list.reduce((a, p) => a + p.rss, 0) };
+      if (hasCpu) out.cpu = list.reduce((a, p) => a + (p.cpu ?? 0), 0);
+      return out;
+    };
+    const diskOf = (root, name) => (Array.isArray(disk?.worktrees) ? disk.worktrees.find((d) => d?.root === root && d?.worktree === name) : undefined);
+    const projects = [], allocated = [], recent = [], forParts = [];
+    let ready = 0;
+    const unknown = [];
+    for (const f of r.files) {
+      const fresh = !!f.pool && real - Date.parse(f.pool.at) <= POOL_STALE_MS;
+      const counted = f.dashboard !== 'none';
+      const parked = f.mode === 'park' || f.mode === 'drain';
+      const known = parked || fresh;
+      const own = procs ? sum(places.filter((p) => p.root === f.root)) : null;
+      const row = { name: f.name };
+      if (f.port !== undefined) row.port = f.port;
+      if (f.pool) {
+        row.at = f.pool.at; row.workers = f.pool.workers.length; row.planners = f.pool.planners;
+        if (f.pool.cap !== undefined) row.cap = f.pool.cap;
+      }
+      let mine;
+      if (counted && known) { mine = parked ? 0 : f.pool.ready; row.ready = mine; ready += mine; } else if (counted) unknown.push(f.name);
+      if (own) { if (hasCpu) row.cpu = own.cpu; row.rss = own.rss; }
+      projects.push(row);
+      forParts.push({ root: f.root, name: f.name, ...(f.port !== undefined ? { port: f.port } : {}), dashboard: f.dashboard, mode: f.mode, fresh, ...(mine !== undefined ? { ready: mine } : {}), pool: f.pool });
+      if (!f.pool) continue;
+      const at = f.port !== undefined ? { port: f.port } : {};
+      for (const w of f.pool.workers) {
+        const a = { project: f.name, ...at, name: w.name };
+        for (const k of ['title', 'phase', 'since']) if (w[k] !== undefined) a[k] = w[k];
+        // what the walk and the du saw of it, for recent's last: a worktree with no process gives none
+        const seen = {};
+        if (procs) {
+          const p = places.find((x) => x.root === f.root && x.worktree === w.name);
+          if (p) { if (p.cpu !== undefined) seen.cpu = p.cpu; seen.rss = p.rss; }
+          a.agent = (p?.agents ?? 0) > 0;
+          if (hasCpu) a.cpu = p?.cpu ?? 0;
+          a.rss = p?.rss ?? 0;
+          a.tests = { n: p?.tests.n ?? 0, ...(hasCpu ? { cpu: p?.tests.cpu ?? 0 } : {}), rss: p?.tests.rss ?? 0 };
+        }
+        const d = diskOf(f.root, w.name);
+        if (Number.isSafeInteger(d?.disk) && d.disk >= 0) a.disk = seen.disk = d.disk;
+        if (d && memoryAtOk(d.disk_at)) a.disk_at = d.disk_at;
+        a.tokens = tokensOf(w.tokens);
+        const k = keyOf(f.root, w.name);
+        const pts = r.points.get(k);
+        if (pts?.length) a.points = pts.map((x) => ({ ...x }));
+        allocated.push({ k, a, seen });
+      }
+      for (const w of f.pool.recent) {
+        if (!(real - Date.parse(w.left_at) <= POOL_DAY_MS)) continue;
+        const x = { project: f.name, ...at, name: w.name };
+        if (w.title !== undefined) x.title = w.title;
+        Object.assign(x, { left_at: w.left_at, why: w.why, tokens: tokensOf(w.tokens) });
+        const last = r.last.get(keyOf(f.root, w.name));
+        if (last) x.last = { ...last.use };
+        recent.push(x);
+      }
+    }
+    allocated.sort((x, y) => (y.a.cpu ?? -1) - (x.a.cpu ?? -1) || x.a.project.localeCompare(y.a.project) || x.a.name.localeCompare(y.a.name));
+    recent.sort((x, y) => Date.parse(y.left_at) - Date.parse(x.left_at));
+    const pool = { projects, allocated: allocated.slice(0, POOL_ALLOCATED).map((x) => x.a), recent: recent.slice(0, POOL_RECENT) };
+    if (procs) {
+      const others = {
+        planners: sum(places.filter((p) => p.worktree?.startsWith('plan-'))),
+        supervisors: sum(places.filter((p) => p.worktree === undefined)),
+        outside: { n: procs.outside.n, ...(hasCpu ? { cpu: procs.outside.cpu ?? 0 } : {}), rss: procs.outside.rss },
+      };
+      if (procs.unattributed) others.unattributed = { cpu: procs.unattributed.cpu };
+      pool.others = others;
+      pool.strays = procs.strays;
+    }
+    const headroom = { ready, ...(unknown.length ? { ready_unknown: unknown } : {}) };
+    return { answer: { pool, headroom }, projects: forParts, ready, ready_unknown: unknown, use: allocated };
+  };
+  return {
+    start(ctx) {
+      const r = { files: [], version: 0, readAt: -Infinity, rootsOf: null, reading: false, out: new Set(), hellos: new Map(), sockets: new Set(), points: new Map(), last: new Map(), pointAt: -Infinity, memo: null, given: undefined };
+      run = r;
+      ctx.every(POOL_EVERY_MS, async () => {
+        if (r.reading || run !== r) return;
+        if (ctx.roots() === r.rootsOf && ctx.now() - r.readAt < POOL_READ_MS) return;
+        r.reading = true;
+        try { await read(ctx, r); } finally { r.reading = false; }
+      });
+    },
+    part(ctx, parts) {
+      const r = run;
+      if (!r || !r.files.length) return undefined;
+      const procs = memoryIsMap(parts.processes) && Array.isArray(parts.processes.places) ? parts.processes : undefined;
+      const disk = parts.disk;
+      const now = ctx.now(), real = ctx.real();
+      // a file turns stale with time alone: its freshness is part of what the answer is built from
+      const stale = r.files.map((f) => (f.pool && real - Date.parse(f.pool.at) <= POOL_STALE_MS ? 1 : 0)).join('');
+      const due = now - r.pointAt >= POOL_POINT_MS;
+      const m = r.memo;
+      const same = !!m && m.version === r.version && m.procs === procs && m.disk === disk && m.stale === stale;
+      if (same && !due) return r.given;
+      let got = build(ctx, r, procs, disk);
+      // what was seen of each allocated worker: its last use, for recent, and a point a minute
+      const live = new Set();
+      let added = false;
+      for (const { k, a, seen } of got.use) {
+        live.add(k);
+        const use = {};
+        for (const f of ['cpu', 'rss', 'disk']) if (a[f] !== undefined) use[f] = a[f];
+        if (Object.keys(seen).length) r.last.set(k, { at: real, use: { ...r.last.get(k)?.use, ...seen } });
+        if (due && Object.keys(use).length) {
+          added = true;
+          const list = (r.points.get(k) ?? []).filter((x) => Date.parse(x.at) > now - POOL_HOUR_MS);
+          list.push({ at: boxHealthIso(now), ...use });
+          r.points.set(k, list.slice(-POOL_POINTS));
+        }
+      }
+      for (const k of r.points.keys()) if (!live.has(k)) r.points.delete(k);
+      for (const [k, v] of r.last) if (real - v.at > POOL_DAY_MS) r.last.delete(k);
+      if (due) r.pointAt = now;
+      // a minute with no point to add, and nothing else changed: the same object
+      if (same && !added) return r.given;
+      if (added) got = build(ctx, r, procs, disk);
+      delete got.use;
+      r.memo = { version: r.version, procs, disk, stale };
+      r.given = got;
+      return got;
+    },
+    stop() {
+      if (run) for (const s of run.sockets) s.destroy();
+      run = null;
+    },
+  };
+})();
 /* box-health-pool end */
 /* box-health-claude start */
-// answer.claude: the accounts, the burn rate and the projection (kit-840's).
-const boxHealthClaude = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+// answer.claude (kit-840): the cswap accounts, the burn rate over six hours, and whether the room
+// lasts to the resets. Nothing is written, and cswap is never run here: accounts-tick's record is read.
+//
+// Every 15 s of now() it reads again once a minute of now() has passed since the last read (the first
+// read follows the sampler's first read of the roots). A read: for each known root, one at a time,
+// <root>/docs/devteam/run/accounts.json (at most 256 KB + 1), raced with 2 s of real(). At most two
+// reads are out at once, never two of one file: a read that can't start, or hasn't answered in 2 s,
+// keeps that file's last read. The record used is the freshest (by its at) whose capacity.list is a
+// list, among those within 5 minutes of real() (one older, or ahead: a wrong clock, is dropped); with none, claude is absent (no cswap,
+// an older kit's record, or a stopped tick). Each read that finds one adds a reading to the ring.
+//
+// A row is copied by named fields only (claudeRows), so no email or token can leave with it: a label
+// with an @ (in any width), a control character or over 40 characters is "Account n".
+//
+// The ring holds the readings of the last six hours of now(), one a read. Burn (claudeBurn) is, per
+// account, the sum of rises of its weekly percent over the highest reading so far of the same window,
+// in points of one account-week. A window is new only when the reset time moves forward by more than
+// an hour: cswap's times shift by a fraction of a second at each fetch, across a minute or an hour. A
+// drop inside a window adds nothing; an absent reset time keeps the last seen; with none ever seen
+// every rise counts. Accounts weigh equally unless every enabled account names a tier multiplier;
+// then each weighs its tier over the mean tier, so "an account" stays the average one. The rate is the
+// weighted burn over the hours the ring covers; under 30 minutes of readings it is measuring (no rate,
+// no projection).
+//
+// projectClaude(accounts, rate, now) is the projection, for this part and the parts after it (park,
+// room): capacity.list rows, points of an account-week an hour, and ms. It steps every 15 minutes to
+// the last known reset, spending accounts as cswap's default best strategy does: the active one until
+// 90%, then the one with the most room (100 less its higher window; on a tie, the sooner reset of
+// that window, then the earliest slot), and
+// the last tenth of each only when none is under 90%. An account is restored at its weekly reset (the
+// next one a week on) and at its five-hour reset; one with a full per-model window, or a full
+// five-hour window now, has no room until that resets (never, with no reset time). Disabled accounts
+// and those that can't be read (no weekly percent, or a status that isn't ok) are left out: at_least
+// is then true. It gives { lasts, runs_out_at, paused_until (the first step after running out with
+// room again), next_reset_at (the earliest weekly reset after now), points [{ at, room }] (room in
+// accounts' worth: the weekly room left of accounts that have room; at most 400: every change of
+// direction, then evenly), switches [{ at, n }] (the account spent from, first the one it starts on, then
+// each change), at_least }, or null with no reset ahead, or a rate that isn't 0 to 1e9. It looks at most
+// 8 days ahead (a weekly reset is never further): a reset time past that, which only a garbled record
+// gives, ends the steps at 8 days and doesn't come within them (task-3 F1).
+// claudeSafeRate(accounts, now) is the highest rate, to 0.1, at which it lasts, or undefined when not
+// even 0.1 does.
+//
+// part(ctx, parts) gives, as the same object until the next read:
+//   answer.claude   accounts (enabled ones, at most 40: n, label, active, week_left, five_left,
+//                   week_resets_at, five_resets_at, status), rate (absent while measuring),
+//                   rate_hours, points (one a reading: at, room), projection (lasts, runs_out_at,
+//                   next_reset_at, safe_rate, points; absent while measuring or with no reset ahead)
+//   rows            the record's rows (claudeRows), rate, measuring, projection (projectClaude's),
+//                   safe_rate (claudeSafeRate's), has_room (an account has room now)
+const CLAUDE_EVERY_MS = 15000, CLAUDE_READ_MS = 60000, CLAUDE_FRESH_MS = 300000, CLAUDE_FILE_MS = 2000, CLAUDE_READS = 2;
+const CLAUDE_MAX_BYTES = 262144, CLAUDE_RING_MS = 6 * 3600000, CLAUDE_MEASURING_MS = 1800000, CLAUDE_JUMP_MS = 3600000;
+const CLAUDE_STEP_MS = 900000, CLAUDE_POINTS = 400, CLAUDE_ACCOUNTS = 40, CLAUDE_LINE = 90;
+const CLAUDE_WEEK_MS = 7 * 86400000, CLAUDE_FIVE_MS = 5 * 3600000, CLAUDE_HOUR_MS = 3600000;
+const CLAUDE_AHEAD_MS = 8 * 86400000, CLAUDE_RATE_MAX = 1e9;
+// capacity.list's rows, each built again from its named fields; null when it isn't a list
+function claudeRows(list) {
+  if (!Array.isArray(list)) return null;
+  const pct = (v) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100 ? v : undefined);
+  const at = (t) => (memoryAtOk(t) ? t : undefined);
+  const out = [], seen = new Set();
+  for (const a of list) {
+    if (!memoryIsMap(a) || !Number.isSafeInteger(a.n) || a.n < 1 || seen.has(a.n)) continue;
+    seen.add(a.n);
+    const label = typeof a.label === 'string' && a.label.trim() && a.label.length <= 40 && !/[@\p{C}]/u.test(a.label.normalize('NFKC')) ? a.label : `Account ${a.n}`;
+    out.push(boxHealthPresent({
+      n: a.n, label, active: a.active === true, disabled: a.disabled === true,
+      status: typeof a.status === 'string' && /^[a-z][a-z0-9_-]{0,39}$/.test(a.status) ? a.status : undefined,
+      week_pct: pct(a.week_pct), week_resets_at: at(a.week_resets_at),
+      five_pct: pct(a.five_pct), five_resets_at: at(a.five_resets_at),
+      models_full: Array.isArray(a.models_full) ? a.models_full.filter(memoryIsMap).map((m) => boxHealthPresent({ resets_at: at(m.resets_at) })) : [],
+      tier: Number.isSafeInteger(a.tier) && a.tier > 0 && a.tier < 1000 ? a.tier : undefined,
+    }));
+  }
+  return out;
+}
+// each account's weight: 1, or its tier over the mean tier when every enabled account names one
+function claudeWeights(rows) {
+  const live = rows.filter((a) => !a.disabled);
+  if (!live.length || !live.every((a) => a.tier)) return () => 1;
+  const mean = live.reduce((s, a) => s + a.tier, 0) / live.length;
+  return (a) => (a.tier ? a.tier / mean : 1);
+}
+// the burn in the ring, weighted, for the accounts of the latest rows
+function claudeBurn(ring, rows) {
+  const w = claudeWeights(rows);
+  let burn = 0;
+  for (const a of rows) {
+    if (a.disabled) continue;
+    let hi, reset;
+    for (const x of ring) {
+      const r = x.rows.find((y) => y.n === a.n);
+      if (r?.week_pct === undefined) continue;
+      const at = r.week_resets_at === undefined ? reset : Date.parse(r.week_resets_at);
+      if (hi === undefined || (at !== undefined && reset !== undefined && at - reset > CLAUDE_JUMP_MS)) hi = r.week_pct;
+      else if (r.week_pct > hi) { burn += (r.week_pct - hi) * w(a); hi = r.week_pct; }
+      reset = at;
+    }
+  }
+  return burn;
+}
+// the accounts as the projection spends them: readable, enabled, with ok usage
+function claudeState(rows, now) {
+  const w = claudeWeights(rows);
+  const t = (s) => (s === undefined ? undefined : Date.parse(s));
+  const live = rows.filter((a) => !a.disabled);
+  const known = live.filter((a) => a.status === 'ok' && a.week_pct !== undefined);
+  const acc = known.map((a) => {
+    const x = { n: a.n, w: w(a), active: a.active, week: a.week_pct, weekAt: t(a.week_resets_at), five: a.five_pct ?? 0, fiveAt: t(a.five_resets_at) };
+    if (a.models_full.length) x.models = a.models_full.every((m) => m.resets_at) ? Math.max(...a.models_full.map((m) => t(m.resets_at))) : Infinity;
+    // a reset already past has happened: restored now, the next one a period on
+    claudeRestore(x, now);
+    return x;
+  });
+  return { acc, at_least: known.length < live.length };
+}
+// the next reset after now, a whole number of periods on, in one step however far back a garbled time
+// is (final-1 F1)
+const claudeRoll = (at, period, now) => at + Math.ceil((now - at + 1) / period) * period;
+function claudeRestore(x, now) {
+  if (x.weekAt !== undefined && x.weekAt <= now) { x.week = 0; x.weekAt = claudeRoll(x.weekAt, CLAUDE_WEEK_MS, now); }
+  if (x.fiveAt !== undefined && x.fiveAt <= now) { x.five = 0; x.fiveAt = claudeRoll(x.fiveAt, CLAUDE_FIVE_MS, now); }
+  if (x.models !== undefined && x.models <= now) delete x.models;
+}
+const claudeHasRoom = (x) => x.week < 100 && x.five < 100 && x.models === undefined;
+const claudeRawRoom = (acc) => acc.reduce((s, x) => s + (claudeHasRoom(x) ? (x.w * (100 - x.week)) / 100 : 0), 0);
+const claudeRound = (n) => Number(n.toFixed(3));
+// the room of a reading, in accounts' worth
+const claudeRoom = (rows, now) => claudeRound(claudeRawRoom(claudeState(rows, now).acc));
+// at most CLAUDE_POINTS of the projection's points: the first, the last and every change of direction
+// (on the room unrounded, so rounding is no turn), then evenly; room is rounded as they are sent
+function claudeThin(points) {
+  const sent = (list) => list.map((p) => ({ at: p.at, room: claudeRound(p.room) }));
+  if (points.length <= CLAUDE_POINTS) return sent(points);
+  const sign = (i) => { const d = points[i + 1].room - points[i].room; return Math.abs(d) < 1e-9 ? 0 : Math.sign(d); };
+  const keep = new Set([0, points.length - 1]);
+  for (let i = 1; i < points.length - 1; i++) if (sign(i - 1) !== sign(i)) keep.add(i);
+  const even = (list, n) => (n <= 0 || !list.length ? [] : n === 1 ? [list[Math.floor((list.length - 1) / 2)]] : Array.from({ length: n }, (_, j) => list[Math.round((j * (list.length - 1)) / (n - 1))]));
+  let idx = [...keep].sort((a, b) => a - b);
+  if (idx.length > CLAUDE_POINTS) idx = even(idx, CLAUDE_POINTS);
+  else {
+    const rest = points.map((_, i) => i).filter((i) => !keep.has(i));
+    idx = [...idx, ...even(rest, CLAUDE_POINTS - idx.length)].sort((a, b) => a - b);
+  }
+  return sent([...new Set(idx)].map((i) => points[i]));
+}
+function projectClaude(accounts, rate, now) {
+  const rows = claudeRows(accounts);
+  if (!rows || !(typeof rate === 'number' && rate >= 0 && rate <= CLAUDE_RATE_MAX) || !Number.isFinite(now)) return null;
+  return claudeProject(rows, rate, now, false);
+}
+// the steps of projectClaude over rows already rebuilt; quick (claudeSafeRate's trials) keeps no points
+// or switches and stops at the first shortfall, giving only { lasts } (final-1 F4)
+function claudeProject(rows, rate, now, quick) {
+  const { acc, at_least } = claudeState(rows, now);
+  const ahead = acc.flatMap((x) => [x.weekAt, x.fiveAt, x.models]).filter((t) => Number.isFinite(t) && t > now);
+  if (!ahead.length) return null;
+  const end = Math.min(Math.max(...ahead), now + CLAUDE_AHEAD_MS);
+  const weekly = acc.map((x) => x.weekAt).filter((t) => t !== undefined && t > now);
+  const iso = boxHealthIso;
+  const binding = (x) => Math.max(x.week, x.five);
+  const recovers = (x) => (x.five > x.week ? x.fiveAt : x.weekAt) ?? Infinity;
+  const before = (x, b) => binding(x) < binding(b) || (binding(x) === binding(b) && (recovers(x) < recovers(b) || (recovers(x) === recovers(b) && x.n < b.n)));
+  const best = (list) => list.reduce((b, x) => (!b || before(x, b) ? x : b), null);
+  const pick = (cur) => {
+    if (cur && claudeHasRoom(cur) && binding(cur) < CLAUDE_LINE) return cur;
+    const room = acc.filter(claudeHasRoom);
+    const under = room.filter((x) => binding(x) < CLAUDE_LINE);
+    if (under.length) return best(under);
+    if (cur && claudeHasRoom(cur)) return cur;
+    return best(room);
+  };
+  const points = [], switches = [];
+  let cur = acc.find((x) => x.active), lasts = true, runsOut, pausedUntil, was = null;
+  for (let ts = now; ; ts = Math.min(ts + CLAUDE_STEP_MS, end)) {
+    for (const x of acc) claudeRestore(x, ts);
+    if (!quick) points.push({ at: iso(ts), room: claudeRawRoom(acc) });
+    if (!lasts && pausedUntil === undefined && acc.some(claudeHasRoom)) pausedUntil = ts;
+    if (ts >= end) break;
+    const step = Math.min(CLAUDE_STEP_MS, end - ts);
+    const need0 = (rate * step) / CLAUDE_HOUR_MS;
+    let need = need0;
+    for (let guard = 0; need > 1e-9 && guard < 2 * acc.length + 2; guard++) {
+      cur = pick(cur);
+      if (!cur) break;
+      if (cur !== was && !quick) { switches.push({ at: iso(ts), n: cur.n }); was = cur; }
+      const line = binding(cur) < CLAUDE_LINE ? CLAUDE_LINE : 100;
+      const take = Math.min(need, (line - cur.week) * cur.w);
+      if (take <= 0) { cur = null; continue; }
+      cur.week = Math.min(line, cur.week + take / cur.w);
+      need -= take;
+    }
+    if (need > 1e-9 && lasts) { lasts = false; runsOut = ts + Math.round(step * (1 - need / need0)); }
+    if (quick && !lasts) return { lasts };
+  }
+  if (quick) return { lasts };
+  return boxHealthPresent({
+    lasts, runs_out_at: lasts ? undefined : iso(runsOut), paused_until: pausedUntil === undefined ? undefined : iso(pausedUntil),
+    next_reset_at: weekly.length ? iso(Math.min(...weekly)) : undefined, points: claudeThin(points), switches, at_least,
+  });
+}
+function claudeSafeRate(accounts, now) {
+  const rows = claudeRows(accounts);
+  if (!rows || !Number.isFinite(now)) return undefined;
+  const lasts = (tenths) => claudeProject(rows, tenths / 10, now, true)?.lasts === true;
+  if (!lasts(1)) return undefined;
+  let lo = 1, hi = 2;
+  while (lasts(hi)) { lo = hi; hi *= 2; if (hi > 1e7) return lo / 10; }
+  while (hi - lo > 1) { const m = Math.floor((lo + hi) / 2); if (lasts(m)) lo = m; else hi = m; }
+  return lo / 10;
+}
+const boxHealthClaude = (() => {
+  let run = null;
+  const LATE = Symbol('late');
+  // a file's text, at most max bytes and one more, or null
+  const readCapped = async (file, max) => {
+    let fh = null;
+    try {
+      fh = await fs.promises.open(file, fs.constants.O_RDONLY);
+      const buf = Buffer.alloc(max + 1);
+      const { bytesRead } = await fh.read(buf, 0, max + 1, 0);
+      return buf.toString('utf8', 0, bytesRead);
+    } catch { return null; } finally { await fh?.close().catch(() => {}); }
+  };
+  // raced with 2 s of real(); at most two out, never two of one file: one that can't start is late
+  const settled = (ctx, r, file) => {
+    if (r.out.has(file) || r.out.size >= CLAUDE_READS) { ctx.say("two file reads are out: a project whose accounts.json read can't start keeps its last read"); return Promise.resolve(LATE); }
+    r.out.add(file);
+    const p = readCapped(file, CLAUDE_MAX_BYTES).finally(() => r.out.delete(file));
+    let end = () => {};
+    const late = new Promise((res) => { end = ctx.timeout(CLAUDE_FILE_MS, () => res(LATE)); });
+    return Promise.race([p, late]).finally(() => end());
+  };
+  // a record with a list: { at, rows }, else null
+  const recordOf = (text) => {
+    if (typeof text !== 'string' || text.length > CLAUDE_MAX_BYTES) return null;
+    let o;
+    try { o = JSON.parse(text); } catch { return null; }
+    const rows = memoryIsMap(o) && memoryAtOk(o.at) && memoryIsMap(o.capacity) ? claudeRows(o.capacity.list) : null;
+    return rows ? { at: o.at, rows } : null;
+  };
+  const build = (ctx, r, rec) => {
+    const now = ctx.now();
+    const ring = r.ring;
+    const span = ring.length ? ring.at(-1).t - ring[0].t : 0;
+    const accounts = rec.rows.filter((a) => !a.disabled).slice(0, CLAUDE_ACCOUNTS).map((a) => boxHealthPresent({
+      n: a.n, label: a.label, active: a.active,
+      week_left: a.week_pct === undefined ? undefined : 100 - a.week_pct, five_left: a.five_pct === undefined ? undefined : 100 - a.five_pct,
+      week_resets_at: a.week_resets_at, five_resets_at: a.five_resets_at, status: a.status,
+    }));
+    const claude = { accounts, rate_hours: Number((span / CLAUDE_HOUR_MS).toFixed(2)), points: ring.map((x) => ({ at: boxHealthIso(x.t), room: x.room })) };
+    const measuring = span < CLAUDE_MEASURING_MS;
+    let rate, projection, safe;
+    if (!measuring) {
+      rate = Number((claudeBurn(ring, rec.rows) / (span / CLAUDE_HOUR_MS)).toFixed(2));
+      claude.rate = rate;
+      projection = projectClaude(rec.rows, rate, now);
+      if (projection) {
+        safe = claudeSafeRate(rec.rows, now);
+        claude.projection = boxHealthPresent({ lasts: projection.lasts, runs_out_at: projection.runs_out_at, next_reset_at: projection.next_reset_at, safe_rate: safe, points: projection.points });
+      }
+    }
+    return { answer: { claude }, rows: rec.rows, rate, measuring, projection: projection ?? undefined, safe_rate: safe, has_room: claudeState(rec.rows, now).acc.some(claudeHasRoom) };
+  };
+  const read = async (ctx, r) => {
+    r.readAt = ctx.now();
+    let best = null;
+    const files = new Set();
+    for (const { root } of ctx.roots()) {
+      const file = path.join(root, 'docs', 'devteam', 'run', 'accounts.json');
+      files.add(file);
+      const text = await settled(ctx, r, file);
+      if (run !== r || ctx.stopped()) return;
+      let rec;
+      if (text === LATE) rec = r.files.get(file) ?? null;
+      else { rec = recordOf(text); r.files.set(file, rec); }
+      if (rec && Math.abs(ctx.real() - Date.parse(rec.at)) <= CLAUDE_FRESH_MS && (!best || Date.parse(rec.at) > Date.parse(best.at))) best = rec;
+    }
+    for (const f of r.files.keys()) if (!files.has(f)) r.files.delete(f);
+    const now = ctx.now();
+    r.ring = r.ring.filter((x) => x.t >= now - CLAUDE_RING_MS);
+    if (!best) { r.given = undefined; return; }
+    r.ring.push({ t: now, rows: best.rows, room: claudeRoom(best.rows, now) });
+    r.given = build(ctx, r, best);
+  };
+  return {
+    start(ctx) {
+      const r = { files: new Map(), out: new Set(), ring: [], readAt: -Infinity, reading: false, given: undefined };
+      run = r;
+      ctx.every(CLAUDE_EVERY_MS, async () => {
+        if (r.reading || run !== r || ctx.now() - r.readAt < CLAUDE_READ_MS) return;
+        // before the sampler's first read of the roots there is nothing to read yet; after it, none is no record
+        if (!ctx.roots().length && r.readAt === -Infinity) return;
+        r.reading = true;
+        try { await read(ctx, r); } finally { r.reading = false; }
+      });
+    },
+    part() { return run?.given; },
+    stop() { run = null; },
+  };
+})();
 /* box-health-claude end */
 /* box-health-park start */
-// answer.claude.park: what to park (kit-843's).
-const boxHealthPark = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+// answer.claude.park (kit-843): when Claude would run out, each project's goals whose parking would
+// make it last. Nothing is read or written here and no timer is set: part() works from what the
+// claude and pool parts gave this tick, and gives the same object while neither changed.
+//
+// parts.claude needs a rate (not measuring) and a projection; else park is absent. A projection that
+// lasts has nothing to park: park is []. One that runs out with no safe_rate (no rate lasts) has park
+// absent: no parking would make it last. One that runs out with a safe_rate has the rows below.
+//
+// The projects are parts.pool's with a pool.json (pool@1). Only one whose file is fresh (at most 15
+// minutes old) gets a row: parking an unknown can't be promised. A stale file's hours, as of its
+// file, are still in the total (spec-1 F5): that project's sessions are using the machine, and leaving
+// them out would raise every share, so a row could read as enough when it isn't.
+//   weight   each hour is usd_hour when every project with a file has every price (no usd_hour,
+//            reviews_usd_hour or other.usd_hour is null), else new_hour. Both count Claude models
+//            only (pool@1).
+//   total    the hour every session used: over every project with a file, each worker's own hour, its reviewers'
+//            hour, and other (supervisors, planners, the responder, ended sessions), each once. A
+//            goal's hour is a second view of that use and isn't added (pool@1). Work that isn't
+//            measured has no hour and is in no share.
+//   share    a goal's hour over the total. A goal's hour is its workers', their reviewers', its
+//            planners' and its ended sessions': its project's supervisor time is in other, so it is
+//            in the total and in no goal's share (F3-3).
+// A goal is offered when a worker holding a slot names it (something of it runs now) and its share
+// is over 0 (parking it would slow the burn). Each project's row takes its goals lowest priority first
+// (the highest priority number first; one with no priority before any with one; then the larger
+// share, then the id) until the burn left, rate × (1 − the row's share), is at or under safe_rate:
+// enough. A row that never gets there holds every goal offered, and is not enough. A project with no
+// goal offered has no row. Rows that are enough come first, fewest goals first (then the larger
+// share); then the rest, larger share first; ties by name, then port. Each row carries its project's
+// port (absent with no dashboard), so two projects of one name keep a row each.
+// It gives { answer: { claude: { park } } } (park [] too when it would run out and no goal can be
+// offered: no fresh project, nothing running, or no measured use), or undefined.
+const boxHealthPark = (() => {
+  let memo = null;
+  const isNum = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  const rows = (claude, pool) => {
+    const known = (Array.isArray(pool?.projects) ? pool.projects : []).filter((p) => memoryIsMap(p) && memoryIsMap(p.pool));
+    const projects = known.filter((p) => p.fresh === true);
+    const priced = known.every(({ pool: f }) => f.other.usd_hour !== null && f.goals.every((g) => g.usd_hour !== null)
+      && f.workers.every((w) => w.tokens.usd_hour !== null && w.tokens.reviews_usd_hour !== null));
+    const k = priced ? 'usd_hour' : 'new_hour', rk = priced ? 'reviews_usd_hour' : 'reviews_new_hour';
+    const hour = (v) => (isNum(v) ? v : 0);
+    let total = 0;
+    for (const { pool: f } of known) {
+      total += hour(f.other[k]);
+      for (const w of f.workers) total += hour(w.tokens[k]) + hour(w.tokens[rk]);
+    }
+    if (!(total > 0)) return [];
+    const { rate, safe_rate: safe } = claude;
+    const out = [];
+    for (const p of projects) {
+      const f = p.pool;
+      const running = new Set(f.workers.map((w) => w.goal).filter((i) => i !== undefined));
+      const rank = (g) => (Number.isSafeInteger(g.priority) ? g.priority : Infinity);
+      const offered = f.goals.map((g, i) => ({ g, i, share: hour(g[k]) / total }))
+        .filter((x) => running.has(x.i) && x.share > 0)
+        .sort((a, b) => (rank(a.g) === rank(b.g) ? 0 : rank(b.g) > rank(a.g) ? 1 : -1) || b.share - a.share || (a.g.id < b.g.id ? -1 : a.g.id > b.g.id ? 1 : 0));
+      if (!offered.length) continue;
+      const goals = [];
+      let share = 0, enough = false;
+      for (const x of offered) {
+        goals.push({ id: x.g.id, title: x.g.title });
+        share += x.share;
+        if (rate * (1 - share) <= safe + 1e-9) { enough = true; break; }
+      }
+      out.push({ fleet: p.name, ...(p.port !== undefined ? { port: p.port } : {}), goals, share: Number(boxHealthShare(share).toFixed(4)), enough, raw: share });
+    }
+    const byName = (a, b) => (a.fleet < b.fleet ? -1 : a.fleet > b.fleet ? 1 : 0) || (a.port ?? 0) - (b.port ?? 0);
+    out.sort((a, b) => (a.enough === b.enough ? 0 : a.enough ? -1 : 1)
+      || (a.enough ? a.goals.length - b.goals.length : 0) || b.raw - a.raw || byName(a, b));
+    return out.map(({ raw, ...r }) => r);
+  };
+  const build = (claude, pool) => {
+    if (!memoryIsMap(claude) || claude.measuring || !isNum(claude.rate) || !memoryIsMap(claude.projection)) return undefined;
+    if (claude.projection.lasts === true) return { answer: { claude: { park: [] } } };
+    if (claude.projection.lasts !== false || !isNum(claude.safe_rate)) return undefined;
+    return { answer: { claude: { park: rows(claude, pool) } } };
+  };
+  return {
+    start() { memo = null; },
+    part(ctx, parts) {
+      const claude = parts.claude, pool = parts.pool;
+      if (memo && memo.claude === claude && memo.pool === pool) return memo.given;
+      const given = build(claude, pool);
+      memo = { claude, pool, given };
+      return given;
+    },
+    stop() { memo = null; },
+  };
+})();
 /* box-health-park end */
 /* box-health-room start */
-// answer.headroom, answer.pool.what_if and each sample's room (kit-844's).
-const boxHealthRoom = { start(ctx) {}, part(ctx, parts) {}, stop() {} };
+// answer.headroom, answer.pool.what_if and each sample's room (kit-844): how many more workers the box
+// could hold and what limits it, and what if the pool were 0 to 20 more than it is. Nothing is read,
+// written, stored or sent here, and no timer is set: part() works from what the sampler and the parts
+// before it gave this tick, and every time is ctx.now()'s.
+//
+// Sessions. From the processes part's walks of the last five minutes of now() (each new result object is
+// one walk): a session is a worktree place (<root>/.worktrees/<name>, planners' too) with an agent in it.
+// What one holds is the 75th percentile (nearest rank) of its resident memory over every session of
+// every walk kept, and its CPU the mean over those with CPU, times total over attributed: the walks'
+// CPU of every place and outside, plus unattributed, over the first (1 when nothing is attributed), so
+// work nobody's process shows isn't free. Until the first walk kept is five minutes of now() old, or
+// with no session in the walks kept (or no /proc: no walks), memory and cpu are absent: there is
+// nothing to measure from.
+//   memory   (ceiling × max − used) ÷ what one holds, of the sampler's now.memory, whole, never below 0
+//   cpu      0 when now.cpu.some60 is 40 or more; else (90% of now.cpu.limit − the mean of the samples'
+//            cpu over the last minute) ÷ a session's CPU, whole, never below 0
+// The token forecast, worked out again only when parts.claude is a new object (once a minute, at its
+// read) or the hours it is built from change (the pool part gives a new object every walk, so its
+// object alone is not a change), with the time then:
+//   the hour   over every project with a pool.json (fresh or stale, as park's total): each hour is
+//              usd_hour when every one has every price, else new_hour, as park weighs them. now is
+//              their workers holding a slot; measured those whose tokens are measured. m is the mean of
+//              a measured worker's hour and its reviewers' (another provider's worker is measured at
+//              0 and counts); o is every file's other. An unmeasured worker is taken as average, and its
+//              reviewers' hours count in neither. The whole hour (for no-claude-use) is o and every
+//              worker's own and reviewers' hours.
+//   burn(W)    R × (o + m·W) ÷ (o + m·now), R the claude part's rate; R itself at W = now
+//   steps      W from 0 to now + 20, each projectClaude(rows, burn(W), the time) as lasts, runs_out_at
+//              and paused_until; most_that_lasts the most workers whose step lasts
+//   why        no forecast: the first that holds of no-cswap (no parts.claude), measuring,
+//              no-projection (no projection, or a step that has none), too-many (now over 60),
+//              no-claude-use (the whole hour is 0), none-measured, none-by-workers (m is 0)
+// headroom.claude, one rule with the steps (claude_why whenever it is absent):
+//   no parts.claude: absent, no-cswap. No account with room now: 0. With a forecast: absent (lasts)
+//   when the top step lasts, 0 when none does, else most_that_lasts − now, never below 0. With none:
+//   absent with why when why is no-cswap or measuring, or with no-projection when the claude part has
+//   no projection; absent with no-claude-use when
+//   the hour has no Claude use, or with none-by-workers when workers are measured and none used any
+//   (even with too-many); else 0 when the claude part's projection runs out, absent (lasts) when it
+//   lasts.
+// headroom.room is the least of memory, cpu and claude (absent when none is there); binds is ready when
+// every fleet is known (parts.pool gave ready and no ready_unknown) and ready is under room, else the
+// first of memory, cpu, claude that is the least; starts the least of room and ready, only when every
+// fleet is known. With no room figure, neither starts nor binds: there is nothing to compare ready to. sample.room is room. pool.what_if, once the first walk kept is five minutes old and
+// parts.pool is there: now, measured, steps (each with the forecast's fields when there is one; none
+// over 60 workers), most_that_lasts, memory_full_at and cpu_full_at (now + that room + 1), why. It gives
+// the same object while nothing in it changed.
+const ROOM_WALKS_MS = 300000, ROOM_CPU_MS = 60000, ROOM_PRESSURE = 40, ROOM_CPU_SHARE = 0.9, ROOM_MORE = 20, ROOM_POOL_MAX = 60;
+const boxHealthRoom = (() => {
+  let run = null;
+  const num = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  const whole = (n) => Math.max(0, Math.floor(n + 1e-9));
+  // one walk, as what is kept of it
+  const digest = (procs) => {
+    const sessions = [];
+    let attributed = 0;
+    for (const p of procs.places) {
+      if (!memoryIsMap(p)) continue;
+      if (num(p.cpu)) attributed += p.cpu;
+      if (p.worktree !== undefined && p.agents > 0 && num(p.rss)) sessions.push({ rss: p.rss, cpu: num(p.cpu) ? p.cpu : undefined });
+    }
+    if (num(procs.outside?.cpu)) attributed += procs.outside.cpu;
+    const un = procs.unattributed?.cpu;
+    return { at: procs.at, sessions, attributed: procs.over_s === undefined ? undefined : attributed, unattributed: num(un) ? un : undefined };
+  };
+  // what one session holds and uses, from the walks kept, or null
+  const perSession = (walks) => {
+    const rss = walks.flatMap((w) => w.sessions.map((s) => s.rss)).sort((a, b) => a - b);
+    if (!rss.length) return null;
+    const mem = rss[Math.ceil(0.75 * rss.length) - 1];
+    const cpus = walks.flatMap((w) => w.sessions.map((s) => s.cpu)).filter(num);
+    let attr = 0, all = 0;
+    for (const w of walks) if (w.attributed !== undefined && w.unattributed !== undefined) { attr += w.attributed; all += w.attributed + w.unattributed; }
+    const scale = attr > 0 ? all / attr : 1;
+    return { mem, cpu: cpus.length ? (cpus.reduce((a, b) => a + b, 0) / cpus.length) * scale : undefined };
+  };
+  const memoryRoom = (now, one) => {
+    const m = now?.memory;
+    if (!one || !(one.mem > 0) || !memoryIsMap(m) || !num(m.ceiling) || !num(m.max) || !num(m.used)) return undefined;
+    return whole((m.ceiling * m.max - m.used) / one.mem);
+  };
+  const cpuRoom = (ctx, now, samples, one) => {
+    const c = now?.cpu;
+    if (!one || !memoryIsMap(c)) return undefined;
+    if (num(c.some60) && c.some60 >= ROOM_PRESSURE) return 0;
+    if (!(one.cpu > 0) || !num(c.limit)) return undefined;
+    const t = ctx.now();
+    const last = (Array.isArray(samples) ? samples : []).filter((s) => memoryIsMap(s) && num(s.cpu) && t - Date.parse(s.at) < ROOM_CPU_MS).map((s) => s.cpu);
+    if (!last.length) return undefined;
+    return whole((ROOM_CPU_SHARE * c.limit - last.reduce((a, b) => a + b, 0) / last.length) / one.cpu);
+  };
+  const knownOf = (pool) => (Array.isArray(pool?.projects) ? pool.projects : []).filter((p) => memoryIsMap(p) && memoryIsMap(p.pool));
+  // what the forecast is built from, of the pool: its counts, states and hours
+  const hoursOf = (pool) => JSON.stringify(knownOf(pool).map(({ pool: f }) => [f.other, f.goals.map((g) => g.usd_hour === null),
+    f.workers.map((w) => [w.tokens.state, w.tokens.usd_hour, w.tokens.new_hour, w.tokens.reviews_usd_hour, w.tokens.reviews_new_hour])]));
+  // the token forecast: { now, measured, steps?, most?, why?, noUse, noneByWorkers }
+  const forecast = (ctx, claude, pool) => {
+    const known = knownOf(pool);
+    const priced = known.every(({ pool: f }) => f.other.usd_hour !== null && f.goals.every((g) => g.usd_hour !== null)
+      && f.workers.every((w) => w.tokens.usd_hour !== null && w.tokens.reviews_usd_hour !== null));
+    const k = priced ? 'usd_hour' : 'new_hour', rk = priced ? 'reviews_usd_hour' : 'reviews_new_hour';
+    const hour = (v) => (num(v) ? v : 0);
+    let now = 0, measured = 0, mine = 0, o = 0, all = 0;
+    for (const { pool: f } of known) {
+      o += hour(f.other[k]);
+      for (const w of f.workers) {
+        now++;
+        const h = hour(w.tokens[k]) + hour(w.tokens[rk]);
+        all += h;
+        if (w.tokens.state === 'measured') { measured++; mine += h; }
+      }
+    }
+    all += o;
+    const m = measured ? mine / measured : 0;
+    const out = { now, measured, noUse: !(all > 0), noneByWorkers: measured > 0 && !(m > 0) };
+    const why = !memoryIsMap(claude) ? 'no-cswap' : claude.measuring || !num(claude.rate) ? 'measuring' : !memoryIsMap(claude.projection) ? 'no-projection'
+      : now > ROOM_POOL_MAX ? 'too-many' : out.noUse ? 'no-claude-use' : !measured ? 'none-measured' : out.noneByWorkers ? 'none-by-workers' : null;
+    if (why) return { ...out, why };
+    const t = ctx.now(), R = claude.rate, steps = [];
+    for (let W = 0; W <= now + ROOM_MORE; W++) {
+      const burn = W === now ? R : (R * (o + m * W)) / (o + m * now);
+      const p = projectClaude(claude.rows, burn, t);
+      if (!p) return { ...out, why: 'no-projection' };
+      steps.push(boxHealthPresent({ workers: W, lasts: p.lasts, runs_out_at: p.runs_out_at, paused_until: p.paused_until }));
+    }
+    const lasting = steps.filter((s) => s.lasts);
+    return { ...out, steps, ...(lasting.length ? { most: lasting.at(-1).workers } : {}) };
+  };
+  const claudeLimit = (claude, f) => {
+    if (!memoryIsMap(claude)) return { why: 'no-cswap' };
+    if (claude.has_room === false) return { n: 0 };
+    if (f.steps) {
+      if (f.steps.at(-1).lasts) return { why: 'lasts' };
+      return { n: f.most === undefined ? 0 : Math.max(0, f.most - f.now) };
+    }
+    if (f.why === 'no-cswap' || f.why === 'measuring' || !memoryIsMap(claude.projection)) return { why: f.why };
+    if (f.noUse) return { why: 'no-claude-use' };
+    if (f.noneByWorkers) return { why: 'none-by-workers' };
+    return claude.projection.lasts === false ? { n: 0 } : { why: 'lasts' };
+  };
+  return {
+    start() { run = { walks: [], first: undefined, procs: undefined, memo: null, given: undefined, key: undefined }; },
+    part(ctx, parts) {
+      const r = run;
+      if (!r) return undefined;
+      const t = ctx.now();
+      const procs = memoryIsMap(parts.processes) && Array.isArray(parts.processes.places) ? parts.processes : undefined;
+      if (procs && procs !== r.procs && num(procs.at)) {
+        r.procs = procs;
+        r.walks.push(digest(procs));
+        if (r.first === undefined) r.first = procs.at;
+      }
+      r.walks = r.walks.filter((w) => w.at > t - ROOM_WALKS_MS);
+      const ready = r.first !== undefined && t - r.first >= ROOM_WALKS_MS;
+      const one = ready ? perSession(r.walks) : null;
+      const memory = memoryRoom(parts.now, one), cpu = cpuRoom(ctx, parts.now, parts.samples, one);
+      const claude = memoryIsMap(parts.claude) ? parts.claude : undefined, pool = memoryIsMap(parts.pool) ? parts.pool : undefined;
+      const hours = hoursOf(pool);
+      if (!r.memo || r.memo.claude !== claude || r.memo.hours !== hours) r.memo = { claude, hours, f: forecast(ctx, claude, pool) };
+      const f = r.memo.f;
+      const lim = claudeLimit(claude, f);
+      const headroom = {};
+      const limits = [['memory', memory], ['cpu', cpu], ['claude', lim.n]].filter(([, v]) => v !== undefined);
+      const fleetsKnown = !!pool && num(pool.ready) && !(Array.isArray(pool.ready_unknown) && pool.ready_unknown.length);
+      if (limits.length) {
+        const room = Math.min(...limits.map(([, v]) => v));
+        headroom.room = room;
+        if (fleetsKnown) headroom.starts = Math.min(room, pool.ready);
+        headroom.binds = fleetsKnown && pool.ready < room ? 'ready' : limits.find(([, v]) => v === room)[0];
+      }
+      if (memory !== undefined) headroom.memory = memory;
+      if (cpu !== undefined) headroom.cpu = cpu;
+      if (lim.n !== undefined) headroom.claude = lim.n; else headroom.claude_why = lim.why;
+      const answer = { headroom };
+      if (ready && pool) {
+        const w = { now: f.now, measured: f.measured };
+        if (f.now <= ROOM_POOL_MAX) {
+          w.steps = f.steps ? f.steps.map((s) => ({ ...s })) : Array.from({ length: f.now + ROOM_MORE + 1 }, (_, i) => ({ workers: i }));
+        }
+        if (f.most !== undefined) w.most_that_lasts = f.most;
+        if (memory !== undefined) w.memory_full_at = f.now + memory + 1;
+        if (cpu !== undefined) w.cpu_full_at = f.now + cpu + 1;
+        if (!f.steps) w.why = f.why;
+        answer.pool = { what_if: w };
+      }
+      const given = { answer, ...(headroom.room !== undefined ? { sample: { room: headroom.room } } : {}) };
+      const key = JSON.stringify(given);
+      if (key === r.key) return r.given;
+      r.key = key;
+      r.given = given;
+      return given;
+    },
+    stop() { run = null; },
+  };
+})();
 /* box-health-room end */
 // The machine's own caps, not the host's: a platform caps CPU and memory in the cgroup, while
 // /proc/meminfo and the CPU count say what the whole host has (a 4-CPU, 16 GB box reads 32 CPUs, 123 GB).
@@ -28281,8 +30613,78 @@ function gateAll() {
   if (bad.length) { out(`\n${bad.length} enforced gate(s) fail here: fix the toolchain, set "mode": "ratchet", or open a chore ticket for each`); process.exit(1); }
 }
 
-// For an agent's stop hook: exit 2 while the worker's last commit is newer than its last phase line.
+// --- every ask of the owner is an Inbox question ---
+//
+// The owner looks at the Inbox, not at a pane or a thread's scrollback: an ask that lives only in
+// words gets forgotten. ownerAsks(text) reads words written to the owner (a reply in a thread, the
+// supervisor's own message in its window) for the things they ask: a line that ends in a question
+// mark, and each item listed under a lead line such as "Waiting on you:" or "Open questions for
+// you:". Code blocks and quoted lines are left out. An ask that names a q-… id of a question in the
+// log is filed: it points at its Inbox question. On a line ending in a question mark the ask is its
+// last sentence, so an id earlier in the line files nothing after it. What's left are asks only the
+// words hold.
+const OWNER_ASK_QID = /\bq-\d{8}-\d{6,9}(-[a-z0-9]+)*\b/g;
+// an id as written may run on into its writer's name (q-…-supervisor) or not: the longest that is one
+const isLoggedQuestion = (id) => { for (let p = id.split('-'); p.length >= 3; p.pop()) if (logGet(p.join('-'))?.type === 'question') return true; return false; };
+const OWNER_ASK_LEAD = /\b(waiting on you|(open |pending )?questions? for you|for you to (decide|answer|do|check)|needs? (from )?you|from you:|your (call|answer|decision)s?)\b/i;
+function ownerAsks(text, isQuestion = isLoggedQuestion) {
+  const asks = [];
+  let fence = false;
+  let listed = false;
+  for (const raw of String(text ?? '').split('\n')) {
+    const line = raw.trim();
+    if (/^(```|~~~)/.test(line)) { fence = !fence; continue; }
+    if (fence || line.startsWith('>')) continue;
+    if (!line) { listed = false; continue; }
+    const item = /^([-*•]|\d+[.)])\s+/.test(line);
+    if (!item) listed = OWNER_ASK_LEAD.test(line) && /:\s*$/.test(line);
+    const words = line.replace(/^([-*•]|\d+[.)])\s+/, '');
+    const asked = /\?[\s"'”’)*_\]]*$/.test(words);
+    const asking = asked || (item && listed);
+    const ask = asked ? words.split(/(?<=[.!?])\s+(?=\S)/).pop() : words;
+    if (asking && !(OWNER_ASK_LEAD.test(line) && /:\s*$/.test(line))) asks.push({ line: words, filed: (ask.match(OWNER_ASK_QID) ?? []).some((id) => isQuestion(id)) });
+  }
+  return asks;
+}
+// The asks in text that point at no Inbox question. A reply that shows questions (--refs
+// question:<id>, ids its words don't already name) covers that many of them, in order: "Ship it?"
+// with --refs question:q-… is that question asked in the thread.
+function unfiledOwnerAsks(text, shown = []) {
+  const named = shown.filter((q) => !String(text ?? '').includes(q));
+  return ownerAsks(text).filter((a) => !a.filed).slice(named.length).map((a) => a.line);
+}
+const UNFILED_ASKS_WHY = 'the owner answers in the Inbox and can lose an ask that lives only in words (supervisor.md §6, Every ask is an Inbox question)';
+// The last thing the session said, from a Stop hook's input: last_assistant_message where Claude Code
+// gives it, else the newest assistant entry with text in the transcript.
+function stopHookLastWords(input) {
+  if (typeof input?.last_assistant_message === 'string') return input.last_assistant_message;
+  const lines = (readText(String(input?.transcript_path ?? '')) ?? '').split('\n').filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let e;
+    try { e = JSON.parse(lines[i]); } catch { continue; }
+    const content = e?.type === 'assistant' ? e.message?.content : null;
+    const text = Array.isArray(content) ? content.filter((c) => c?.type === 'text').map((c) => c.text).join('\n') : typeof content === 'string' ? content : '';
+    if (text.trim()) return text;
+  }
+  return '';
+}
+// For an agent's stop hook: exit 2 while the worker's last commit is newer than its last phase line;
+// for the supervisor's, while its last words ask the owner something no Inbox question holds.
 function cmdStopOk() {
+  // what Claude Code hands a Stop hook (never read from a terminal). stop_hook_active is its "this hook
+  // already sent it back": the second stop always goes through, so no stop is blocked twice
+  let input = null;
+  if (!process.stdin.isTTY) try { input = JSON.parse(fs.readFileSync(0, 'utf8') || 'null'); } catch {}
+  if (input?.stop_hook_active) process.exit(0);
+  // the supervisor's own window (its Stop hook, supervisorPolicy, says --supervisor), by its role and
+  // never its folder: it cds into a ticket's worktree to review or merge, and stays the supervisor.
+  // Once per stop, an ask of the owner that names no Inbox question sends it back to ask it there.
+  if (flags.supervisor || process.env.DEVTEAM_ROLE === 'supervisor') {
+    const left = unfiledOwnerAsks(stopHookLastWords(input));
+    if (!left.length) process.exit(0);
+    process.stderr.write(`devteam: you asked the owner ${left.length === 1 ? 'something' : `${left.length} things`} in your window with no Inbox question, and ${UNFILED_ASKS_WHY}:\n${left.slice(0, 12).map((l) => `  - ${l}`).join('\n')}\nFor each: ask it in the Inbox (ask, or thread ask <t-id> when it came up in a thread, so the question and the thread link to each other), give it a --default where §6 allows one, or decide it yourself and log it when it is your call; one already asked, cite it by its q-… id. Then say it again with each q-… id beside its line.\n`);
+    process.exit(2);
+  }
   const id = currentTicketId();
   if (!id) process.exit(0);
   const last = logObjects('phase').filter((p) => p.created_by === id).sort(byTime).pop();
@@ -28350,12 +30752,15 @@ function ensureRecordsWorktree(id) {
   if (fs.existsSync(rw)) return rw;
   const branch = `ticket/${id}`;
   const mb = loadSettings().main_branch;
-  git(['fetch', '--quiet', 'origin', mb]);
-  git(['fetch', '--quiet', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
+  const clock = {}; // one 5 s for both fetches
+  fetchPastHalfMade(['fetch', '--quiet', 'origin', mb], clock);
+  fetchPastHalfMade(['fetch', '--quiet', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`], clock);
   // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
-  if (resolveCommit(`refs/heads/${branch}`)) gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', rw, branch], mainRoot);
-  else if (resolveCommit(`refs/remotes/origin/${branch}`)) gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--track', '-b', branch, rw, `origin/${branch}`], mainRoot);
-  else gitOrDie(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '-b', branch, rw, resolveCommit(`origin/${mb}`) ? `origin/${mb}` : mb], mainRoot);
+  const add = ['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet'];
+  // asked anew for each try: a failed one leaves the branch it made
+  worktreeAddOrDie(() => (resolveCommit(`refs/heads/${branch}`) ? [...add, rw, branch]
+    : resolveCommit(`refs/remotes/origin/${branch}`) ? [...add, '--track', '-b', branch, rw, `origin/${branch}`]
+      : [...add, '-b', branch, rw, resolveCommit(`origin/${mb}`) ? `origin/${mb}` : mb]), rw, { root: mainRoot, common: commonDir });
   return rw;
 }
 function removeWorkerWorktree(id) {
@@ -28607,7 +31012,74 @@ function makeSession(role) {
   // a planner's is home's. s stays home's for the session, the agent and its policy.
   const R = role === 'worker' ? repoOfTicket(tickets().get(id)) : repo('home');
   const mb = R.settings.main_branch;
-  if (!fs.existsSync(wt)) {
+  // A start makes its worktree locked, with this reason, and unlocks it once it is whole: one that is
+  // still locked was left by a start that stopped, or is being made now (kit-856).
+  const making = `devteam: a start of ${name} is making this worktree`;
+  // this start's own: those words and a token, so no start takes another's lock for its own (final-1 F1)
+  const mine = `${making} (${process.pid}.${Date.now().toString(36)}.${crypto.randomBytes(3).toString('hex')})`;
+  // the reason wt is locked with ('' for none), or null when it isn't locked. From git's list, so a
+  // folder that is empty or gone counts too.
+  const lockOf = () => {
+    const at = path.join(realPath(path.dirname(wt)), path.basename(wt));
+    const list = R.git(['worktree', 'list', '--porcelain'], R.root);
+    // another worktree's broken record fails the list: then this one's own says
+    if (list === null) return readText(path.join(/^gitdir: (.*)$/m.exec(readText(path.join(wt, '.git')) ?? '')?.[1] ?? wt, 'locked'))?.trim() ?? null;
+    const l = list.split('\n\n').map((b) => b.split('\n')).find((ls) => ls.includes(`worktree ${at}`))?.find((x) => x === 'locked' || x.startsWith('locked '));
+    return l === undefined ? null : l.slice('locked '.length);
+  };
+  // A start that moves the branch under a worktree marks it, in the worktree's own git folder, until its
+  // files are the new commit's: an undo that must leave the worktree (its lock not this start's) leaves
+  // the mark, and a retry refuses it rather than resume with the older commit's files read as changes (kit-886).
+  const markOf = () => { const g = responderGit(['rev-parse', '--absolute-git-dir'], wt); return g.status === 0 && g.stdout.trim() ? path.join(g.stdout.trim(), 'devteam-start-filling') : null; };
+  const filling = () => {
+    const mark = markOf();
+    const said = mark && readText(mark);
+    if (said === null || said === undefined) return null;
+    const [from, to] = said.trim().split(' ');
+    const head = responderGit(['rev-parse', '--verify', '--quiet', 'HEAD'], wt);
+    const at = head.status === 0 ? head.stdout.trim() : null;
+    const was = (from ?? '').slice(0, 8) || 'another commit';
+    const look = `look in it (git -C ${shq(wt)} status), keep what it holds, and remove ${shq(mark)}`;
+    // at the commit the start moved to, with no change git sees to its files: the start stopped after
+    // it filled them and before it took the mark off (kit-886 final-1 F3). Read without git's index lock.
+    const st = at && at === to ? responderGit(['--no-optional-locks', 'status', '--porcelain', '--untracked-files=no'], wt) : null;
+    if (st && st.status === 0 && st.stdout === '') return `the worktree ${wt} is at ${at.slice(0, 8)} and its files are in place, but a start that moved its branch there from ${was} stopped before it took its mark off: ${look}`;
+    return `the worktree ${wt} is at ${at ? at.slice(0, 8) : 'no commit git can read'}, but a start was moving its branch from ${was}${to ? ` to ${to.slice(0, 8)}` : ''} and may not have checked out its files, so they may be another commit's, read as changes: ${look}`;
+  };
+  // locked by a start, this one or another
+  const startsLock = (why) => why === making || (why ?? '').startsWith(`${making} (`);
+  const unfinished = () => startsLock(lockOf());
+  // git's record of a worktree a start is adding now: git writes its lock before the folder, and its
+  // gitdir (what the list reads) after, so in between only the record says (final-1 F3)
+  const beingMade = () => {
+    const dir = path.join(R.git(['rev-parse', '--path-format=absolute', '--git-common-dir'], R.root) ?? path.join(R.root, '.git'), 'worktrees');
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch {}
+    return names.map((n) => path.join(dir, n)).find((d) => !fs.existsSync(path.join(d, 'gitdir')) && startsLock(readText(path.join(d, 'locked'))?.trim() ?? null)) ?? null;
+  };
+  // what is at wt, in words, or null when it is a worktree of its own, or nothing. The commands clear
+  // only a locked one: unlock refuses on a worktree a start has finished since (kit-856).
+  const inRepo = `git -C ${shq(R.root)} worktree`;
+  const leftAt = () => {
+    const there = fs.existsSync(wt);
+    if (there && !fs.statSync(wt).isDirectory()) return `${wt} is a file, where the worktree goes: move it away`;
+    const rec = beingMade();
+    if (rec) return `git is making a worktree for ${wt} (its record ${rec} has no gitdir yet): if no other start is making it, remove that record`;
+    const locked = unfinished();
+    if (!there) return locked ? `git still holds a worktree for ${wt}, whose folder is gone: if no other start is making it, clear it (${inRepo} unlock ${shq(wt)} && ${inRepo} remove --force ${shq(wt)})` : null;
+    if (!locked && !fs.readdirSync(wt).length) return null;
+    const top = responderGit(['rev-parse', '--show-toplevel'], wt);
+    if (top.status !== 0 && fs.existsSync(path.join(wt, '.git'))) return `git can't read ${wt} as a worktree (${firstLine(top.stderr).replace(/^fatal: /, '') || `exit ${top.status}`}), and it may hold work: ${inRepo} repair ${shq(wt)} mends one that moved; if it holds nothing to keep, move it away`;
+    if (top.status !== 0 || realPath(top.stdout.trim()) !== realPath(wt)) return `${wt} is no worktree git knows: look in it, then move it away`;
+    if (!locked) return filling();
+    const head = responderGit(['rev-parse', '--verify', '--quiet', 'HEAD'], wt);
+    return `the worktree ${wt} is there, ${head.status === 0 ? `at ${head.stdout.trim().slice(0, 8)}` : 'with no commit git can read'}: if no other start is making it and it holds nothing to keep, remove it (${inRepo} unlock ${shq(wt)} && ${inRepo} remove --force ${shq(wt)})`;
+  };
+  // read before the look: a worktree another start adds after this fails the add below, never a resume
+  const there = fs.existsSync(wt);
+  const leftBefore = leftAt();
+  if (leftBefore) die(`${name}'s start isn't finished, so nothing was started: ${leftBefore}, then start it again`);
+  if (!there) {
     // what origin holds, by sha: main, and the branch if it was pushed (a moved fleet continues from
     // it, never from main). Every local ref is any session's to write without a push (kit-790).
     const at = fetchLinkMain(R, 'refusing to start a ticket on a stale main', { start: branch });
@@ -28649,22 +31121,26 @@ function makeSession(role) {
     // its commits are in the start, or under a ref of their own. A symbolic one holds none.
     const tracking = `refs/remotes/origin/${branch}`;
     const keptAt = `refs/devteam/kept/${branch}/`;
-    const raw = at.branch ? null : R.git(['rev-parse', '--verify', '--quiet', tracking], R.root); // read once: a tag's own object too
+    const exact = at.branch ? null : responderGit(['show-ref', '--verify', '--hash', tracking], R.root);
+    const raw = exact?.status === 0 ? exact.stdout.trim() : null; // read once: a tag's own object too
     const peeled = raw && responderGit(['rev-parse', '--verify', '--quiet', `${raw}^{commit}`], R.root);
     const stale = peeled && peeled.status === 0 ? peeled.stdout.trim() : null;
     let keptNow = null;
+    let keptUntil = null; // this start's own kept ref for commits the new worktree will hold
     if (stale) {
       const symbolic = R.git(['symbolic-ref', '--quiet', tracking], R.root) !== null;
-      const keep = !symbolic && !anc(stale, sha);
+      // the branch can be moved back before the checkout: only origin's main holds them whatever happens
+      const keep = !symbolic && !anc(stale, at.main);
       if (keep) keptNow = `${keptAt}${stale}`;
+      if (keep && anc(stale, sha) && responderGit(['show-ref', '--verify', '--quiet', keptNow], R.root).status !== 0) keptUntil = keptNow;
       if (keep) write(['update-ref', '--no-deref', `${keptAt}${stale}`, stale], `keep ${stale} under ${keptAt}`);
-      warn(`origin has no ${branch}: its tracking ref here (${short(stale)}) is ignored and removed${keep ? `, its commits kept at ${keptAt}${stale}` : ''}${sha === at.main ? `, and the branch starts from origin's ${mb} (${short(at.main)})` : ''}`);
+      warn(`origin has no ${branch}: its tracking ref here (${short(stale)}) is ignored and removed${keep ? `, its commits kept at ${keptAt}${stale}${keptUntil ? ' until the worktree holds them' : ''}` : ''}${sha === at.main ? `, and the branch starts from origin's ${mb} (${short(at.main)})` : ''}`);
       write(['update-ref', '--no-deref', '-d', tracking, raw], `remove ${tracking}`);
     }
     // read back, so a retry's act names what a stopped launch kept
     const found = (R.git(['for-each-ref', '--format=%(refname)', keptAt], R.root) ?? '').split('\n').filter((r) => r.startsWith(keptAt) && /^[0-9a-f]{40,64}$/.test(r.slice(keptAt.length)));
-    const keptRefs = [...new Set([...(keptNow ? [keptNow] : []), ...found])];
-    if (keptRefs.length) keptWords += `; commits kept at ${keptRefs.slice(0, 3).join(', ')}${keptRefs.length > 3 ? ` and ${keptRefs.length - 3} more` : ''}`;
+    let keptRefs = [...new Set([...(keptNow ? [keptNow] : []), ...found])];
+    const sayKept = () => { if (keptRefs.length) keptWords += `; commits kept at ${keptRefs.slice(0, 3).join(', ')}${keptRefs.length > 3 ? ` and ${keptRefs.length - 3} more` : ''}`; };
     // set by config: --track fails where the checkout's fetch refspec is blank
     // set again when it is main's and origin holds the branch now: a launch refused below leaves it written
     const merge = R.git(['config', '--get', `branch.${branch}.merge`], R.root);
@@ -28681,15 +31157,26 @@ function makeSession(role) {
       if (made.status !== 0) die(`could not make ${branch}: ${redactUrl(firstLine(made.stderr).replace(/^fatal: /, '')) || `exit ${made.status}`}; nothing was started`);
     }
     // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
-    const added = gitRun(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--no-guess-remote', wt, branch], R.root);
-    if (added.status !== 0) die(`git worktree add ${branch} failed: ${redactUrl(firstLine(added.err.split('\n').find((l) => /^fatal: /.test(l)) ?? added.err).replace(/^fatal: /, '')) || `exit ${added.status}`}; nothing was started`);
+    const headOf = () => { const h = responderGit(['rev-parse', '--verify', '--quiet', 'HEAD'], wt); return h.status === 0 ? short(h.stdout.trim()) : 'no commit'; };
+    const leftWords = (left) => (left ? `, but ${left}${unfinished() ? '. If git gave no reason above, a post-checkout hook may have failed: mend it first' : ''}` : fs.existsSync(wt) && fs.readdirSync(wt).length ? `; ${wt} is there, made by another start or left by this one (a post-checkout hook that unlocked it), at ${headOf()}: look at its commit before resuming it` : '');
+    const added = pastHalfMade(() => { const r = gitRun(['-c', 'core.useReplaceRefs=false', 'worktree', 'add', '--quiet', '--no-guess-remote', '--lock', '--reason', mine, wt, branch], R.root); return { ...r, ok: r.status === 0 }; }, { common: R.commonDir, wt });
+    if (added.status !== 0) die(`git worktree add ${branch} failed: ${redactUrl(firstLine(added.err.split('\n').find((l) => /^fatal: /.test(l)) ?? added.err).replace(/^fatal: /, '')) || `exit ${added.status}`}; nothing was started${leftWords(leftAt())}${/is already locked/.test(added.err) ? '; a post-checkout hook may not lock the worktree while a start makes it' : ''}${added.note}`);
     // The add checks the branch out by name, so a session moving it meanwhile would win: what landed is
     // read back, and the worktree undone if it isn't the sha expected, on the branch (its full name: a
     // tag of the same name makes git print a longer short one). A branch still where this launch put it
     // goes back; one that moved keeps what landed on it.
     const read = (args, cwd) => { const r = responderGit(args, cwd); return r.status === 0 ? r.stdout.trim() : null; };
     const undo = (why) => {
-      R.git(['worktree', 'remove', '--force', wt], R.root);
+      // only while the lock is this start's own: one locked, unlocked or made again by anything else
+      // since is theirs, and the branch stays where it is (final-1 F1, final-1b F1)
+      const now = lockOf();
+      if (now !== mine) die(`${why}, so nothing was started; ${!fs.existsSync(wt) && now === null ? `${wt} went` : `something else ${now === null ? 'unlocked' : 'locked'} ${wt}`} while it was made, so the undo left it, and ${branch} at ${short(read(['rev-parse', '--verify', '--quiet', ref], R.root) ?? 'no commit')}: look in it before resuming it, since it may hold an older commit's files, then start it again`);
+      gitRun(['worktree', 'remove', '--force', '--force', wt], R.root); // forced twice: this start's own lock
+      // the branch stays under a worktree that is still there, or its files would read as changes to it
+      // an empty folder would be taken as a session's: with a file in it, it is refused
+      if (fs.existsSync(wt) && !fs.readdirSync(wt).length) { try { fs.writeFileSync(path.join(wt, 'start-unfinished.txt'), 'A start that failed could not remove this folder.\n'); } catch {} }
+      const left = leftAt() ?? (fs.existsSync(wt) ? `${wt} is still there, unlocked: look in it, then move it away` : null);
+      if (left) die(`${why}, so nothing was started; the undo couldn't remove it all, and ${branch} stays at ${short(read(['rev-parse', '--verify', '--quiet', ref], R.root) ?? 'no commit')}: ${left}, then start it again`);
       if (local !== sha) responderGit(['update-ref', '--no-deref', ...(local ? [ref, local, sha] : ['-d', ref, sha])], R.root);
       die(`${why}, so nothing was started; try again`);
     };
@@ -28700,15 +31187,36 @@ function makeSession(role) {
     };
     landed(local ?? sha);
     if (local && local !== sha) {
+      const mark = markOf();
+      try { if (!mark) throw new Error('git found no git folder for it'); fs.writeFileSync(mark, `${local} ${sha}\n`); } catch (e) { undo(`could not mark ${wt} as being filled: ${e.message}`); }
+      // the branch isn't moved yet, so its files are still its own: off with the mark, then undo
+      const unmarked = (why) => { try { fs.rmSync(mark, { force: true }); } catch {} undo(why); };
+      // read again once the mark is there: a lock taken off or replaced before it was there let another
+      // start resume in this worktree, so the branch isn't moved under it (plan-1 P1-1)
+      if (lockOf() !== mine) unmarked('the new worktree\'s lock changed while it was made');
       const moved = responderGit(['update-ref', '--no-deref', ref, sha, local], R.root);
+      // a move that fails keeps the mark: most often something else moved the branch, and HEAD with it, off these files
       if (moved.status !== 0) undo(`could not move ${branch} to ${short(sha)}: something moved it while it was checked out`);
       // as worktree add fills one: no time limit (a filter or a lazy fetch can be slow), no submodules
       const filled = gitRun([...RESPONDER_GIT, 'read-tree', '--reset', '-u', '--no-recurse-submodules', sha], wt);
       if (filled.status !== 0) undo(`could not check out ${short(sha)}: ${redactUrl(firstLine(filled.err).replace(/^(fatal|error): /, '')) || `exit ${filled.status}`}`);
       landed(sha);
+      try { fs.rmSync(mark); } catch (e) { undo(`could not remove ${mark}: ${e.message}`); }
     }
+    // only its own lock: one a hook or a person put on it in its place is theirs, and stays (final-1 F2, final-1b F4)
+    const lockNow = lockOf();
+    // unlocked by something else, or locked by another start, so another start may be in it: the undo leaves it
+    if (lockNow === null || (lockNow !== mine && startsLock(lockNow))) undo(`the new worktree was ${lockNow === null ? 'unlocked' : 'locked by another start'} while it was made`);
+    const unlocked = lockNow === mine ? responderGit(['worktree', 'unlock', wt], R.root) : { status: 0 };
+    if (unlocked.status !== 0) undo(`could not unlock the new worktree: ${redactUrl(firstLine(unlocked.stderr).replace(/^(fatal|error): /, '')) || `exit ${unlocked.status}`}`);
+    // the worktree's branch holds them now
+    if (keptUntil && responderGit(['update-ref', '--no-deref', '-d', keptUntil, stale], R.root).status === 0) keptRefs = keptRefs.filter((r) => r !== keptUntil);
+    sayKept();
     madeWorktree = true;
   }
+  // looked at again before anything is written there: another start's add into a folder that was
+  // there, empty, may have locked it since the look (final-1 F3), or marked it as being filled (kit-921)
+  if (there && (beingMade() || unfinished() || filling())) die(`${name}'s start isn't finished, so nothing was started: ${leftAt() ?? `another start is making ${wt}`}, then start it again`);
   // A harness keeps its sessions by directory on its own machine: a worktree made just now has no
   // session to continue (a new machine, or the worktree was removed), so start fresh, with the
   // handoff note if there is one, and say so.
@@ -30909,12 +33417,12 @@ const recurringRunDue = Object.freeze({
     if (hook) fs.writeFileSync(wt, 'kit-163 test hook\n');
     // no hook runs there: a tracked core.hooksPath (husky) would run a command no entry names (final-2 F3)
     // -c core.useReplaceRefs=false (kit-778): a replace ref or core.useReplaceRefs any session can set would otherwise swap the tree checked out
-    const add = recurringRegistry.git(['-c', 'core.useReplaceRefs=false', '-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '--quiet', '--detach', wt, sha], { cwd: mainRoot });
+    const add = pastHalfMade(() => recurringRegistry.git(['-c', 'core.useReplaceRefs=false', '-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '--quiet', '--detach', wt, sha], { cwd: mainRoot }), { common: commonDir, wt });
     if (hook) try { fs.unlinkSync(wt); } catch {}
     if (!add.ok) {
       // git's first error line, with the checkout's path made short so the excerpt keeps all of it
       const first = (add.err.split('\n').find((l) => l.trim()) ?? recurringRegistry.why(add)).trim().split(wt).join(path.relative(mainRoot, wt));
-      const tail = R.scrub(`the checkout could not be made: ${first}`, false);
+      const tail = R.scrub(`the checkout could not be made: ${first}${add.note && '; still half made at the limit'}`, false);
       return { status: 'error', seconds: seconds(), noCheckout: true, excerpt: R.excerpt(tail), tail };
     }
     R.state.current = { wt };
@@ -35279,6 +37787,19 @@ function browserRenew(ctx, port) {
 }
 // This checkout's browser preview record (label browser), or undefined.
 const browserPreviewRec = () => readPreviews().find((r) => r.project === previewProject() && r.session === logWriter() && r.label === 'browser');
+// A retry's view port (kit-877): a random one of PREVIEW_PICK that no other record of this project
+// holds, that previewPortOk allows and that is free now, never one this start has lost (lost, a Set);
+// with none left, a refusal in words, never a lost port again (kit-923).
+// DEVTEAM_TEST_BROWSER_RETRY_POOL=<port,port,...> narrows the retries to those ports of the range in tests.
+async function browserRetryPort(name, lost) {
+  const held = new Set(readPreviews().filter((r) => r.name !== name).map((r) => r.port));
+  const pool = browserTestEnv('DEVTEAM_TEST_BROWSER_RETRY_POOL')?.split(',').map(Number).filter((p) => PREVIEW_PICK.includes(p)) ?? PREVIEW_PICK;
+  const left = pool.filter((p) => !lost.has(p) && !held.has(p) && previewPortOk(p) === true);
+  for (let i = left.length - 1; i > 0; i--) { const j = crypto.randomInt(i + 1); [left[i], left[j]] = [left[j], left[i]]; }
+  for (const p of left) if (await portFree(p)) return p;
+  removePreview(name); // kit-917: the last try's record goes with it, never left naming a lost port
+  die(`browser: no free view port left in ${PREVIEW_PICK[0]}-${PREVIEW_PICK.at(-1)} to retry on: this start lost ${[...lost].join(', ')} to other servers' binds; try again once one is free`);
+}
 // A live daemon, or one started: in the browser preview's window, under the start lock, the memory
 // check and the profile first (so a refused start claims nothing).
 async function browserEnsure({ headed = false } = {}) {
@@ -35297,7 +37818,9 @@ async function browserEnsure({ headed = false } = {}) {
     const cmd = `${shq(process.execPath)} ${shq(fileURLToPath(import.meta.url))} browser serve`;
     const end = Date.now() + 45000;
     // Another project's preview can take the picked view port before the daemon binds it (the picker
-    // sees only this project's records): then a fresh port, up to twice.
+    // sees only this project's records): then a fresh port, random in the same range (kit-877: a lowest-
+    // free retry races the same starters again) and never one this start lost (kit-923), up to four tries in all.
+    const lost = new Set();
     launch: for (let tries = 0; ; tries++) {
       const rec = launchPreviewWindow(previewFresh({ v: 1, name, project: previewProject(), session, label: 'browser', port, cwd: mainRoot, run: { cmd, window: null, env: browserRunEnv({ headed }) } }));
       if (!rec) die('browser: could not open a tmux window for its daemon (is tmux installed?)');
@@ -35305,7 +37828,7 @@ async function browserEnsure({ headed = false } = {}) {
         const s = browserState();
         if (s?.preview === name && (await browserLive())) return s;
         const text = sh('tmux', ['capture-pane', '-p', '-J', '-t', rec.run.window]);
-        if (text?.includes(PREVIEW_EXITED) && tries < 2 && /EADDRINUSE/.test(text)) { killPreviewWindow(rec); port = await previewPickPort(name); continue launch; }
+        if (text?.includes(PREVIEW_EXITED) && tries < 3 && /EADDRINUSE/.test(text)) { killPreviewWindow(rec); lost.add(port); port = await browserRetryPort(name, lost); continue launch; }
         if (text === null || text.includes(PREVIEW_EXITED)) {
           const tail = (text ?? '').split('\n').filter((l) => !l.includes(PREVIEW_EXITED)).join('\n').trimEnd().split('\n').slice(-20).join('\n');
           process.stderr.write(`devteam: browser: the daemon stopped before it was up:\n${tail}\n`);
@@ -36017,6 +38540,49 @@ async function browserEndChrome(cdp, pid) {
   if (pid) { try { process.kill(-pid, 'SIGKILL'); } catch {} } // its helpers, if any outlived it
   cdp?.close();
 }
+// kit-877: a close ends Chrome by a deadline, so its cookies are carried across in memory. The jar:
+// Storage.getCookies on the browser target, raced against 500 ms of its own; the cookies or null, an
+// error dropped. Never written, logged or printed.
+async function browserCookieJar(cdp) {
+  if (!cdp) return null;
+  let t;
+  const r = await Promise.race([cdp.send('Storage.getCookies').then((x) => x?.cookies ?? null, () => null), new Promise((res) => { t = setTimeout(() => res(null), 500); })]);
+  clearTimeout(t);
+  return Array.isArray(r) ? r : null;
+}
+// A Cookie as the CookieParam that sets it again: a host-only cookie by url (its scheme from secure),
+// a domain cookie (leading dot) by domain; expires only for a cookie that isn't a session one.
+function browserCookieParam(c) {
+  const p = { name: c.name, value: c.value, path: c.path, secure: !!c.secure, httpOnly: !!c.httpOnly };
+  if (typeof c.domain === 'string' && c.domain.startsWith('.')) p.domain = c.domain;
+  else p.url = `${c.secure ? 'https' : 'http'}://${c.domain}${c.path || '/'}`;
+  if (!c.session && typeof c.expires === 'number' && c.expires > 0) p.expires = c.expires;
+  for (const k of ['sameSite', 'priority', 'sourceScheme', 'sourcePort', 'partitionKey']) if (c[k] !== undefined) p[k] = c[k];
+  return p;
+}
+// The jar set on the fresh Chrome: one Storage.setCookies with all of it; refused, one call per cookie,
+// skipping the refused ones. Nothing cleared first; every error dropped (never in last-error). The
+// hook DEVTEAM_TEST_BROWSER_COOKIES_BULK_FAILS=1 (tests) treats the one call as refused.
+async function browserCookiesBack(cdp, jar) {
+  if (!cdp || !jar?.length) return;
+  let cookies;
+  try { cookies = jar.map(browserCookieParam); } catch { return; } // a malformed jar sets nothing
+  try {
+    if (browserTestEnv('DEVTEAM_TEST_BROWSER_COOKIES_BULK_FAILS') === '1') throw new Error('refused (the test hook)');
+    await cdp.send('Storage.setCookies', { cookies });
+    return;
+  } catch {}
+  for (const c of cookies) { try { await cdp.send('Storage.setCookies', { cookies: [c] }); } catch {} }
+}
+// A close's kill: SIGKILL to Chrome's group, then to each process proven on the profile (this uid,
+// --user-data-dir the profile); up to 2 s for Chrome gone; its pipe closed. (browserKillChrome is
+// the start and stop path's.)
+async function browserKillProfile(ctx, cdp, pid) {
+  if (pid) { try { process.kill(-pid, 'SIGKILL'); } catch {} }
+  for (const p of browserProcsOn(ctx.profile) ?? []) { try { process.kill(p, 'SIGKILL'); } catch {} }
+  if (pid) await browserGone(pid, 2000);
+  cdp?.close();
+}
 // A Chrome and its pipe watched: its exit or its pipe closing stops the daemon only while it is the
 // current Chrome and not retired by a forget (whose old Chrome's end is expected). The view's
 // screencast frames are taken on this pipe.
@@ -36035,14 +38601,25 @@ function browserWatchChrome(ctx, chrome, cdp) {
 // meanwhile wins: after each await, ctx.stopping ends it (browserShutdown kills ctx.chrome, whichever
 // it is). Processes that can't be listed, or one left, and any failure stop the daemon (the next start
 // cleans up). True once the fresh Chrome is up; false when it ended.
-async function browserRelaunch(ctx, { wipe }) {
+async function browserRelaunch(ctx, { wipe, deadline }) {
   try {
     const old = ctx.chrome;
     old.retired = true; // before Browser.close: its exit and pipe close never stop the daemon
-    await browserEndChrome(ctx.cdp, old.pid);
+    let jar = null;
+    if (wipe) await browserEndChrome(ctx.cdp, old.pid);
+    else {
+      // a close (kit-877): the cookies read first, then Chrome's own close until the deadline, then a kill
+      jar = await browserCookieJar(ctx.cdp);
+      if (old.pid && browserAlive(old.pid)) {
+        ctx.cdp?.send('Browser.close').catch(() => {});
+        await browserGone(old.pid, Math.max(0, (deadline ?? Date.now() + 1000) - Date.now()));
+      }
+      await browserKillProfile(ctx, ctx.cdp, old.pid);
+    }
     if (ctx.stopping) return false;
+    const killLeft = (pids) => { if (!wipe) for (const p of pids ?? []) { try { process.kill(p, 'SIGKILL'); } catch {} } }; // a close's wait kills what it still sees
     let procs = browserProcsOn(ctx.profile);
-    for (const end = Date.now() + 5000; procs?.length && Date.now() < end && !ctx.stopping; procs = browserProcsOn(ctx.profile)) await browserSleep(25);
+    for (const end = Date.now() + 5000; procs?.length && Date.now() < end && !ctx.stopping; procs = browserProcsOn(ctx.profile)) { killLeft(procs); await browserSleep(25); }
     if (ctx.stopping) return false;
     if (procs === null || procs.length) { browserShutdown(ctx, 'error', procs === null ? "couldn't list this machine's processes after stopping Chrome" : `a process (pid ${procs[0]}) still carried the profile 5 s after Chrome's stop`); return false; } // nothing removed on a guess
     // the session files go the moment no process holds the profile (a close's secrets leave the disk
@@ -36058,6 +38635,8 @@ async function browserRelaunch(ctx, { wipe }) {
     if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return false; } // launched while it stopped
     ctx.cdp = cdp;
     browserWatchChrome(ctx, ctx.chrome, cdp);
+    if (jar) { await browserCookiesBack(cdp, jar); jar = null; } // before any page is reopened
+    if (ctx.stopping) return false;
     ctx.tabs = [];
     ctx.active = null;
     await browserWatchTabs(ctx);
@@ -36095,6 +38674,10 @@ async function browserForgetRestart(ctx) {
 const BROWSER_BACK = 'The supervisor has the browser again.';
 async function browserCloseRestart(ctx, closes) {
   if (ctx.stopping || !closes.length) return;
+  // kit-877: Chrome gets until 1 s after the earliest close (its answer's time; none parsing reads as
+  // now), held to between now and now + 1 s, fixed here, before the test hold, so a late close is cut short
+  const now = Date.now(), at = closes.map((h) => Date.parse(h.closeAt)).filter(Number.isFinite);
+  const deadline = Math.min(now + 1000, Math.max(now, (at.length ? Math.min(...at) : now) + 1000));
   try {
     ctx.closing = true; // until it ends: a socket opened meanwhile is refused with bye
     ctx.ready = false;
@@ -36107,7 +38690,7 @@ async function browserCloseRestart(ctx, closes) {
     const hold = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_CLOSE_DELAY_MS')); // tests: a close held open
     if (hold > 0) { await browserSleep(hold); if (ctx.stopping) return; }
     const reopen = closes.length === 1 && closes[0].outcome === 'done' ? browserNotePages(ctx) : []; // only one done reopens
-    if (!(await browserRelaunch(ctx, { wipe: false }))) return;
+    if (!(await browserRelaunch(ctx, { wipe: false, deadline }))) return;
     const reopened = reopen.length ? await browserReopen(ctx, reopen) : [];
     if (ctx.stopping) return;
     browserRecordCloses(ctx, closes, reopened);
@@ -36290,7 +38873,7 @@ function browserStartGate(ctx) {
   const closes = browserUnhandled(ctx, hs);
   if (closes.length) browserRecordCloses(ctx, closes, []);
 }
-// The watch, from start to stop: every 500 ms a fresh fold (browserFresh keys it cheaply), ctx.held
+// The watch, from start to stop: every 250 ms (kit-877) a fresh fold (browserFresh keys it cheaply), ctx.held
 // kept, and a close not yet handled queued once on the verbs' queue (ctx.gateQueued, set when queued
 // and cleared when the job ends, so a close queued or running isn't queued again); the owner's dialogs
 // (kit-770) end as that close is seen, off the queue. With
@@ -36305,7 +38888,7 @@ function browserWatch(ctx) {
     browserOwnerDialogsEnd(ctx); // off the queue: a verb waiting behind one never holds the close up
     ctx.gateQueued = true;
     ctx.serial(() => browserGate(ctx)).finally(() => { ctx.gateQueued = false; });
-  }, Number(browserTestEnv('DEVTEAM_TEST_BROWSER_WATCH_MS')) || 500); // the hook: tests, a slowed watch
+  }, Number(browserTestEnv('DEVTEAM_TEST_BROWSER_WATCH_MS')) || 250); // the hook: tests, a slowed watch (kit-877: 250, so a close starts soon after Done)
   t.unref();
   return t;
 }
@@ -36313,9 +38896,9 @@ function browserWatch(ctx) {
 // restart, one line, for the offline status's plain text (browser@1's status JSON is unchanged). A
 // daemon that comes up removes it. Control characters dropped, 300 characters at most.
 const browserErrorFile = () => path.join(BROWSER_DIR(), 'last-error');
-function browserLastError(detail) {
+function browserLastError(detail, { make = true } = {}) {
   try {
-    browserDirMade();
+    if (make) browserDirMade(); // the reaper's: none made (kit-877), a folder gone meanwhile fails the write
     const tmp = path.join(BROWSER_DIR(), `last-error.${process.pid}.tmp`);
     fs.rmSync(tmp, { force: true });
     fs.writeFileSync(tmp, `${new Date().toISOString()} ${String(detail).replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, 300)}\n`, { mode: 0o600, flag: 'wx' });
@@ -36323,8 +38906,112 @@ function browserLastError(detail) {
   } catch {}
 }
 const browserReadLastError = () => { try { return fs.readFileSync(browserErrorFile(), 'utf8').split('\n')[0].replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, 330) || null; } catch { return null; } };
+// kit-877: a failed delete of the session files said, never swallowed, by one rule for the shutdown and
+// the reaper. reason: why the daemon ended, as last-error already says it (or null). No reason: msg
+// alone. A reason that already says the delete failed: nothing added. Else the reason, cut to fit, and
+// the delete's message whole, within last-error's 300 characters; a message too long to leave the
+// reason 20 of them goes alone (cut at 300 only if it is longer itself). opts: browserLastError's.
+function browserReportDelete(reason, msg, opts) {
+  if (!reason) return browserLastError(msg, opts);
+  if (reason.includes("couldn't delete")) return;
+  const join = "; the session files stay: ", room = 300 - join.length - msg.length;
+  browserLastError(room < 20 ? msg : `${reason.slice(0, room)}${join}${msg}`, opts);
+}
+// kit-877, the reaper: once Chrome is up the daemon starts sh blocked reading a pipe only the daemon
+// holds; when the daemon ends, however it ends (kill -9 too), the pipe closes and sh runs browser reap,
+// unless the daemon's own shutdown deleted the session files, with no process left on the profile,
+// and said "done" on the pipe first (a clean stop leaves the reaper nothing to do, and a start right
+// after it nothing to race). Detached, so it outlives the daemon's window. DEVTEAM_TEST_BROWSER_REAP=0 (tests) starts none.
+function browserReaper(ctx) {
+  if (browserTestEnv('DEVTEAM_TEST_BROWSER_REAP') === '0') return;
+  try {
+    const r = spawn('sh', ['-c', 'read -r x; [ "$x" = done ] || exec "$0" "$1" browser reap', process.execPath, fileURLToPath(import.meta.url)], { stdio: ['pipe', 'ignore', 'ignore'], detached: true, cwd: process.cwd(), env: process.env });
+    r.on('error', () => {});
+    r.stdin.on('error', () => {});
+    r.unref();
+    r.stdin.unref?.();
+    ctx.reaper = r; // written to once, "done", by a shutdown that deleted the session files itself; else only its close matters
+  } catch {}
+}
+const browserCmdlineOf = (pid) => {
+  try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').join(' '); } catch {}
+  if (fs.existsSync('/proc/self/cmdline')) return '';
+  const r = spawnSync('ps', ['-ww', '-o', 'command=', '-p', String(pid)], { encoding: 'utf8' });
+  return r.status === 0 ? r.stdout.trim() : '';
+};
+const browserPgidOf = (pid) => {
+  try { const st = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[2]); } catch {}
+  if (fs.existsSync('/proc/self/stat')) return null;
+  const r = spawnSync('ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf8' });
+  return r.status === 0 ? Number(r.stdout.trim()) || null : null;
+};
+// browser reap (internal): the dead daemon's Chrome given 3 s to end, then killed (its group, and each
+// process on the profile in that group); the session files deleted once no process holds the profile,
+// or the failure said in last-error; once no session file is left, a last-error line that says they
+// stay is made true (kit-917): a shutdown's reason, or a failed delete's own words, kept and ended with
+// "the session files were deleted after the daemon ended"; a report of its own about them removed. It stands down, on any pass, when the profile is gone, a live
+// daemon runs (state.json's daemon_pid, a browser serve), or a start holds the start lock. It makes no
+// folder. DEVTEAM_TEST_BROWSER_REAP_DONE=<file> (tests): "done <exit code>" appended as it ends.
+async function browserReap() {
+  let code = 1;
+  try { code = await browserReapRun(); } catch {}
+  const done = browserTestEnv('DEVTEAM_TEST_BROWSER_REAP_DONE');
+  if (done) { try { fs.appendFileSync(done, `done ${code}\n`); } catch {} }
+  process.exit(code);
+}
+async function browserReapRun() {
+  const profile = path.join(browserHome(), browserKey());
+  const owner = path.join(BROWSER_DIR(), 'start.lock', 'owner');
+  const standDown = () => {
+    if (!fs.existsSync(profile)) return true;
+    const st = browserRawState();
+    if (st && browserAlive(st.daemon_pid) && browserCmdlineOf(st.daemon_pid).includes('browser serve')) return true;
+    let t = null;
+    try { t = fs.readFileSync(owner, 'utf8'); } catch {}
+    const p = /^([1-9]\d*)-/.exec(t ?? '')?.[1];
+    return !!p && browserAlive(Number(p));
+  };
+  // a file that can't even be looked at (EACCES, EIO) counts as left, so its failed delete is still said
+  const left = () => browserSessionFiles(profile).some((f) => { try { return !!fs.lstatSync(f, { throwIfNoEntry: false }); } catch { return true; } });
+  const gone = () => {
+    if (standDown()) return 0;
+    const text = browserReadLastError()?.replace(/^\S+ /, '') ?? '';
+    const i = text.indexOf('; the session files stay: '), done = '; the session files were deleted after the daemon ended';
+    const keep = i > 0 ? text.slice(0, i) : text.startsWith("browser: couldn't delete ") ? text : null; // a reason, or a failed delete's own words
+    if (keep !== null) browserLastError(`${keep.slice(0, 300 - done.length)}${done}`, { make: false });
+    else if (text.includes('session files stay')) { try { fs.rmSync(browserErrorFile(), { force: true }); } catch {} } // the reaper's own report
+    return 0;
+  };
+  const report = (msg) => {
+    if (standDown()) return 0;
+    if (!left()) return gone(); // kit-917: nothing stays, so nothing says it does
+    if (!fs.existsSync(BROWSER_DIR())) return 1;
+    browserReportDelete(browserReadLastError()?.replace(/^\S+ /, '') ?? null, msg, { make: false });
+    return 1;
+  };
+  if (standDown()) return 0;
+  const cp = browserRawState()?.chrome_pid;
+  if (Number.isInteger(cp) && cp > 0) {
+    if (browserAlive(cp) && browserProofPid(cp, profile)) {
+      await browserGone(cp, 3000);
+      if (standDown()) return 0;
+      if (browserAlive(cp) && browserProofPid(cp, profile)) { try { process.kill(-cp, 'SIGKILL'); } catch {} }
+    }
+    for (const p of browserProcsOn(profile) ?? []) if (browserPgidOf(p) === cp) { try { process.kill(p, 'SIGKILL'); } catch {} }
+  }
+  for (const end = Date.now() + 5000; ; await browserSleep(50)) {
+    if (standDown()) return 0;
+    const procs = browserProcsOn(profile);
+    if (procs === null) return report("browser: couldn't list this machine's processes after the daemon ended, so the session files stay");
+    if (!procs.length) {
+      try { browserDeleteSession(profile); return gone(); } catch (e) { return report(String(e?.message ?? e)); }
+    }
+    if (Date.now() > end) return report(`browser: the daemon ended and a process (pid ${procs[0]}) still had the profile 5 s later; its session files stay until browser stop or the next start`);
+  }
+}
 // The stop path: Browser.close, then the group signalled (SIGTERM, SIGKILL 2 s later) if Chrome
-// hasn't gone in 5 s; the session files deleted; state.json removed when it is this daemon's; the
+// hasn't gone in 5 s; the session files deleted (a failure said in last-error by browserReportDelete;
+// once they are gone and no process is on the profile, within 500 ms, the reaper told done); state.json removed when it is this daemon's; the
 // guard and servers closed; exit. Once a signal came, a dead pty can't end it early.
 function browserShutdown(ctx, why, detail) {
   if (ctx.stopping) return ctx.stopping;
@@ -36337,7 +39024,11 @@ function browserShutdown(ctx, why, detail) {
     browserOwnerDialogsEnd(ctx);
     try { ctx.viewer?.ws.close(1001); } catch {} // the view's socket closes with the daemon (no bye)
     await browserEndChrome(ctx.cdp, ctx.chrome?.pid);
-    try { browserDeleteSession(ctx.profile); } catch {}
+    let deleted = false;
+    try { browserDeleteSession(ctx.profile); deleted = true; } catch (e) { browserReportDelete(why === 'error' && detail ? String(detail) : null, String(e?.message ?? e)); } // kit-877: said, never swallowed
+    let free = false;
+    if (deleted && ctx.reaper) { try { for (const end = Date.now() + 500; !(free = browserProcsOn(ctx.profile)?.length === 0) && Date.now() < end; ) await browserSleep(25); } catch {} }
+    if (free) await Promise.race([new Promise((r) => { try { ctx.reaper.stdin.write('done\n', () => r()); } catch { r(); } }), browserSleep(500)]); // kit-877: the reaper stands down
     if (browserRawState()?.daemon_pid === process.pid) fs.rmSync(browserStateFile(), { force: true });
     for (const s of [ctx.control, ctx.view]) { try { s?.closeAllConnections?.(); s?.close(); } catch {} }
     await Promise.race([ctx.guard?.close(), browserSleep(2000)]).catch(() => {});
@@ -36841,9 +39532,16 @@ async function browserServe({ chrome: bin }) {
   ctx.profile = browserProfile();
   try {
     ctx.view = browserViewServer(ctx);
-    // test hook: the first daemon to find this file missing makes it and fails its bind (T4-1)
+    // test hook: the first daemon to find this file missing makes it and fails its bind (T4-1); with
+    // DEVTEAM_TEST_BROWSER_BIND_FAIL_N=<n> (kit-877) the first n binds fail, and the file lists their
+    // ports, one a line (kit-923)
     const failOnce = browserTestEnv('DEVTEAM_TEST_BROWSER_BIND_FAIL');
-    if (failOnce) { try { fs.writeFileSync(failOnce, '', { flag: 'wx' }); throw Object.assign(new Error(`listen EADDRINUSE: address already in use 127.0.0.1:${viewPort}`), { code: 'EADDRINUSE' }); } catch (e) { if (e.code !== 'EEXIST') throw e; } }
+    const failN = Number(browserTestEnv('DEVTEAM_TEST_BROWSER_BIND_FAIL_N'));
+    if (failOnce && failN > 1) {
+      let n = 0;
+      try { n = fs.readFileSync(failOnce, 'utf8').split('\n').filter(Boolean).length; } catch {}
+      if (n < failN) { fs.appendFileSync(failOnce, `${viewPort}\n`); throw Object.assign(new Error(`listen EADDRINUSE: address already in use 127.0.0.1:${viewPort}`), { code: 'EADDRINUSE' }); }
+    } else if (failOnce) { try { fs.writeFileSync(failOnce, '', { flag: 'wx' }); throw Object.assign(new Error(`listen EADDRINUSE: address already in use 127.0.0.1:${viewPort}`), { code: 'EADDRINUSE' }); } catch (e) { if (e.code !== 'EEXIST') throw e; } }
     await browserListen(ctx.view, viewPort);
     ctx.restarted = (await browserPrepareProfile(ctx.profile, ctx.notes)).restarted;
     ctx.guard = await startBrowserGuard();
@@ -36855,6 +39553,7 @@ async function browserServe({ chrome: bin }) {
     const { cdp } = await browserLaunchChrome(ctx, { headed: process.env.DEVTEAM_BROWSER_HEADED === '1' });
     if (ctx.stopping) { try { process.kill(-ctx.chrome.pid, 'SIGKILL'); } catch {} return; } // a signal came while it launched
     ctx.cdp = cdp;
+    browserReaper(ctx); // kit-877: the session files deleted after this daemon, however it ends
     browserWatchChrome(ctx, ctx.chrome, cdp);
     await browserWatchTabs(ctx);
     for (let i = 0; i < 100 && !ctx.tabs.some((t) => t.sessionId); i++) await browserSleep(100);
@@ -37041,12 +39740,13 @@ async function browserWait() {
 // Which gates each verb runs: status, profiles and stop skip Chrome; the memory check is browserEnsure's.
 const BROWSER_VERBS = {
   ...Object.fromEntries(['start', 'open', 'snapshot', 'click', 'type', 'press', 'scroll', 'back', 'tabs', 'tab', 'screenshot', 'forget', 'serve', 'handover', 'wait'].map((v) => [v, { chrome: true }])),
-  status: { chrome: false }, stop: { chrome: false }, profiles: { chrome: false },
+  status: { chrome: false }, stop: { chrome: false }, profiles: { chrome: false }, reap: { chrome: false },
 };
 async function cmdBrowser() {
   const verb = positional[0];
   if (!Object.hasOwn(BROWSER_VERBS, verb ?? '')) die(`usage: ${BROWSER_USAGE}`);
   if (verb === 'serve' && process.env.DEVTEAM_BROWSER_SERVE !== '1') die('browser serve is internal: browser start runs it in its own window');
+  if (verb === 'reap' && process.env.DEVTEAM_BROWSER_SERVE !== '1') die('browser reap is internal: the daemon runs it when it ends');
   const { chrome } = browserGates(BROWSER_VERBS[verb]);
   // the hold, before anything starts: no daemon touched, no stdin read, no profile removed
   if (BROWSER_HELD_VERBS.includes(verb)) {
@@ -37063,6 +39763,7 @@ async function cmdBrowser() {
     return browserForgetOther(browserKey());
   }
   if (verb === 'serve') return browserServe({ chrome });
+  if (verb === 'reap') return browserReap();
   if (verb === 'status') return browserStatus();
   if (verb === 'stop') return browserStop();
   if (verb === 'start') { const s = await browserEnsure({ headed: !!flags.headed }); return out(`browser running (preview ${s.preview}, profile ${browserKey()})`); }
@@ -37335,6 +40036,20 @@ function claudePolicy(name, s, mb, { stopHook = false } = {}) {
   fs.writeFileSync(policy, `${JSON.stringify({ permissions: { deny: deniedFor(s.worker_denied_commands, mb).map((c) => `Bash(${c})`) }, ...hooks }, null, 2)}\n`);
   return policy;
 }
+// The supervisor's: only the Stop hook (stop-ok), which sends an ask of the owner that names no Inbox
+// question back to be asked there. No deny rules: the worker's are not the supervisor's. Its path.
+const supervisorPolicyFile = () => path.join(runDir, 'agent', 'supervisor-claude.json');
+function supervisorPolicy() {
+  const policy = supervisorPolicyFile();
+  fs.mkdirSync(path.dirname(policy), { recursive: true });
+  fs.writeFileSync(policy, `${JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok --supervisor` }] }] } }, null, 2)}\n`);
+  return policy;
+}
+// A Claude Code supervisor command with that policy: any other agent command as it is. Written only
+// where a supervisor is started (recover, restartSupervisor); a command that is only printed (the
+// by-hand line, which a read such as fleet status shows) writes nothing, and names the file only once
+// a start has written it.
+const withSupervisorPolicy = (cmd, { write = true } = {}) => (/^claude(\s|$)/.test(cmd ?? '') && !/\s--settings\s/.test(` ${cmd} `) && (write || fs.existsSync(supervisorPolicyFile())) ? cmd.replace(/^claude/, `claude --settings '${write ? supervisorPolicy() : supervisorPolicyFile()}'`) : cmd);
 // The agent's trust in its folder, before it starts (agent_trust_command); a dialog left up is a finding.
 function trustWorktree(wt, s, R) {
   if (s.agent_trust_command && typeof s.agent_trust_command !== 'string') warn('agent_trust_command is not a string (a shell command), so it was not run');
@@ -37697,8 +40412,8 @@ function cmdResponder() {
   if (!found) {
     // removed by hand: git's record of it goes first (final-1b F4)
     responderGit(['worktree', 'prune']);
-    const add = responderGit(['worktree', 'add', '--quiet', '--detach', wt, sha]);
-    if (add.status !== 0) die(`${wt}: could not add it at ${sha.slice(0, 8)}: ${String(add.stderr ?? '').trim() || `exit ${add.status}`}`);
+    const add = pastHalfMade(() => { const r = responderGit(['worktree', 'add', '--quiet', '--detach', wt, sha]); return { ...r, ok: r.status === 0, err: r.stderr }; }, { common: commonDir, wt });
+    if (add.status !== 0) die(`${wt}: could not add it at ${sha.slice(0, 8)}: ${String(add.stderr ?? '').trim() || `exit ${add.status}`}${add.note}`);
   } else {
     const bad = responderWorktreeProblem(wt);
     if (bad) die(bad);
@@ -37954,11 +40669,11 @@ const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
   answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> --said "<whole clauses>" [--at <n>] [--seen-turn <u-id>]   (a question asked with thread ask --turn) | answer <qid> --defaulted   (supervisor)
   thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>] | --accept-addressed --at <when it was marked>] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --; refused in the supervisor's own pane
-  thread new --subject '{"kind":"item","ref":"question:q-…"}' [--title "<line>"] -- "<words>"   (supervisor)   your own thread about a question or goal (or goal:g-…), for what belongs to no open thread; at most 20 open; nothing is typed anywhere, the owner sees it as from you
+  thread new --subject '{"kind":"item","ref":"question:q-…"}' [--title "<line>"] [--no-ask "<why>"] -- "<words>"   (supervisor)   your own thread about a question or goal (or goal:g-…), for what belongs to no open thread; at most 20 open; nothing is typed anywhere, the owner sees it as from you
   settings set <key> <1..20|none> [--for <act-id>]   (the supervisor sets max_active_tickets or max_active_per_component in its settings chore, .worktrees/chore-settings; none is no limit; --for names the owner's owner-setting act it lands, which must be the latest for the key with this value. It applies once merge --chore settings lands it)
   owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor's own settings, max_active_tickets or max_active_per_component; none is no limit. The dashboard's Settings page runs it on Save; the supervisor lands it with settings set in its settings chore)
   pane question [--json]   (what the supervisor's terminal is asking; the owner answers it on the dashboard's card, which sends that option's digit key and nothing else: no command answers it)
-  thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--re <u-id>] [--off-subject "<why>"] [--anyway] | thread reply <t-id> --part <n> "<words>", then thread reply <t-id> --after-parts ["<last words>"] [reply's flags] | thread ask <t-id> --question "…" [--off-subject "<why>"] <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>" | thread unready <t-id> --reason "<line>"   (supervisor; the responder replies too)   reply, ask an Inbox question in it, propose resolving it (on an artifact note it takes a picture of the spot: look at it), withdraw a proposal or a session's mark; a turn nothing waits on (no owner turn owed, no open handoff) names its --refs on the thread's subject, or follows up your --pending turn with --re <that turn>, or says --off-subject "<why>"
+  thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--re <u-id>] [--off-subject "<why>"] [--no-ask "<why>"] [--anyway] | thread reply <t-id> --part <n> "<words>", then thread reply <t-id> --after-parts ["<last words>"] [reply's flags] | thread ask <t-id> --question "…" [--off-subject "<why>"] <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>" | thread unready <t-id> --reason "<line>"   (supervisor; the responder replies too)   reply, ask an Inbox question in it, propose resolving it (on an artifact note it takes a picture of the spot: look at it), withdraw a proposal or a session's mark; a turn nothing waits on (no owner turn owed, no open handoff) names its --refs on the thread's subject, or follows up your --pending turn with --re <that turn>, or says --off-subject "<why>"
   thread working <t-id> [--done]   (the session holding the owner's turn: the card shows it is responding until you reply)
   thread show <t-id> [--json] | thread list [--waiting [--responder] | --with <session> | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply; --waiting --responder: the owner's turns owed and routed to the responder, oldest first; --with: the artifact notes handed to that session, not yet marked
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]   questions print in Inbox order: the most valuable first
@@ -37980,9 +40695,9 @@ const HELP_OBSERVE = `Observe and orient
   ack <finding-kind> <subject> --reason r [--owner]   set a finding aside for finding_ack_hours (a merge commit: for good)
   timeline <ticket-id> [--json]   the ticket and every log line, review and file that bears on it
   governance [--json]   the kit's governance and process files and the project's strategy, Self and exterior: title, last change, changed here
-  self show [--json]   main's project/self.md, what the project is: what it is, makes, its parts with their paths, what it controls and what not; --json is the dashboard's self block, null when not drafted
-  self check   the working tree's self.md against self@1, each part's path on disk, and the names rule; errors exit 1, warnings don't
-  exterior show [--json] | exterior check   the working tree's project/exterior.md, what the project relates to, by relation, with each entity's signals and scores (--json the dashboard's exterior block, null when not drafted); check: the working tree's against exterior@1, its blobs and quotes at the draft, and the names rule; errors exit 1
+  self show [--json]   main's project/self.md, what the project is, printed as it is; --json is the dashboard's self block, null when not drafted or plain (self@2)
+  self check   the working tree's self.md against self@2 (a plain document; a fenced self block is refused), each part link on disk, and the names rule; errors exit 1, warnings don't
+  exterior show [--json] | exterior check   show: main's project/exterior.md, what the project relates to, printed as it is (--json a version 1 block's dashboard data, else null); check: the working tree's draft against exterior@2 (a version 1 block refused), its dated sources, and on a repo not known to be private the names rule (a ### heading not named whole in origin main's strategy or dependency names refused; each other capitalised word and link host held until named on the chore); errors exit 1
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
   search "<words>" [--type <log type>|doc]… [--since <date>] [--limit n] [--json]   what the project already wrote about it, best first, quoted as data (supervisor.md §6)
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …`;

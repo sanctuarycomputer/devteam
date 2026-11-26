@@ -509,7 +509,7 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
   });
 
   await sub('A23: an open note whose newest turn is the owner\'s is kept with it, whatever the send said; the rest as today', async () => {
-    const KEPT = 'Kept with the note: Hand over sends it to the session drawing it.';
+    const KEPT = 'Not handed over yet. Hand over sends it to the supervisor.';
     const ago = (m) => new Date(Date.now() - m * 60000).toISOString();
     const own = (m, o = {}) => ({ id: 'u-20261120-100000000-owner', by: 'owner', at: ago(m), text: 'Make it primary', refs: [], question: null, files: [], ...o });
     const sup = (m) => ({ ...own(m), id: 'u-20261120-110000000-supervisor', by: 'supervisor', text: 'Why?' });
@@ -539,8 +539,8 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     ]) before.push([what, await says(row)]);
     for (const [what, said] of before) assert.notEqual(said, KEPT, what);
     const of = Object.fromEntries(before);
-    assert.match(of['a note handed over'], /supervisor/, 'handed over: as today');
-    assert.match(of['a note to check'], /supervisor/, 'to check: as today');
+    assert.equal(of['a note handed over'], 'With plan-pricing.', 'handed over: With plan-pricing.');
+    assert.equal(of['a note to check'], '', 'to check: no line');
     assert.match(of['a turn a session has'], /the agent on|kit-9-x/i, "a session's: as today");
     assert.equal(of["the supervisor's reply"], '', 'a reply: nothing, as today');
     assert.match(of['a resolved note'], /^Resolved/, 'resolved: as today');
@@ -767,5 +767,137 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     assert.deepEqual(await V.p.ev(`[${mw('#tl-card .tl-wd .tx')}, ${mw('#tl-card .tl-nview')}]`), ['560px', '560px'], 'the withdrawn mark and the view line');
     assert.deepEqual(await V.p.ev(`['#av-step', '#av-next', '#tl-card .badge', '.tl-pin'].map((q) => getComputedStyle(document.querySelector(q)).maxWidth)`), ['none', 'none', 'none', 'none'], 'the controls uncapped');
     assert.deepEqual(await V.p.ev(`[${mw('#av-notes')}, ${mw('#av-handover')}, ${mw('#tl-c-title')}, ${mw('#artifact-view')}]`), ['none', 'none', 'none', 'none'], 'the bar and the viewer uncapped');
+  });
+});
+
+test('the viewer: the to-check card in a short window (kit-882)', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
+  const X = await notes(t, 'artifact-notes-short');
+  const { sub, N, plant, tabOf, cardOf, holdPoll, openAt, spot, AV_MAIN } = X;
+  // kit-882: a to-check card in a short window. One tab, the note on main, its poll held; each case drawn as A26 draws
+  // it in three places: hung from the stage's corner (a step onto a note this view doesn't show), beside its spot on
+  // screen (tPlace; the page says where the spot is), and with no spot on screen (the dock; the sheet under 640 wide)
+  let SHORT = null;
+  const shortCard = async () => (SHORT ??= await shortTab());
+  async function shortTab() {
+    const long = 'The trial button says what it does now, and the price under it reads as the plan page has it. '.repeat(4).slice(0, 300);
+    const said = (n) => Array.from({ length: n }, (_, i) => ({ id: `u-${i}`, by: i % 2 ? 'supervisor' : 'owner', at: V_C12.addressed.at, refs: [], text: 'What is said here of the note is about as long as people write, some hundred and sixty characters of it, over a few lines of the card at its width, or so.' }));
+    plant(N.onMain, V_C11.shot.stamp);
+    const note = (turns, o = {}) => ({ ...ROW.C12({ addressed: ADDR({ note: long }), shot: SHOT({ anchor: 'hidden' }), ...o }), turns: said(turns) });
+    const short = { addressed: ADDR({ note: 'Done.' }), shot: null, noshot: 'no-change' };
+    const V = await tabOf({ [N.onMain]: note(2) });
+    await openAt(V, AV_MAIN, 'main');
+    await cardOf(V, N.onMain);
+    await holdPoll(V);
+    // the terminal's ask as a read of the threads gives it: window.__ask, whatever the stubbed read says
+    await V.p.ev(`(window.__ask = null, window.__askSet = askSet, askSet = () => window.__askSet(window.__ask), true)`);
+    // a session at work on the note as a read gives it (TL.working): window.__working, whatever the stubbed read says
+    await V.p.ev(`(window.__working = null, Object.defineProperty(TL, 'working', { get: () => window.__working ?? {}, set() {}, configurable: true }), true)`);
+    const Q = { kind: 'menu', digest: 'd-28', token: 'tok', question: 'Which of the three should it be, with the words the terminal shows over several lines of it?', options: [1, 2, 3].map((n) => ({ n, label: `Option ${n}, said at some length` })), hint: 'Enter to confirm' };
+    // [its name, its row, { the terminal's ask, the context open, the tall picture, the box focused when the ask comes,
+    //   who is responding on its newest owner turn (the state line: one line for the supervisor, two for a session) }]
+    const CASES = [
+      ['all of it', note(2), { ask: true, ctx: true, pic: true }],
+      ['a conversation', note(16), { ask: true, ctx: true, pic: true }],
+      ['a conversation alone', note(16), { pic: true }],
+      ['a short mark, one turn, the ask', note(1, short), { ask: true }],
+      ['all of it, the ask coming while the box has the focus', note(2), { ask: true, ctx: true, pic: true, focus: true }],
+      ['a short mark, the ask coming while the box has the focus', note(1, short), { ask: true, focus: true }],
+      ['a short mark, sixteen turns', note(16, short), {}],
+      ['the mark, two turns', note(2), {}],
+      ['all of it, the supervisor responding', note(2), { ask: true, ctx: true, pic: true, work: 'supervisor' }],
+      ['all of it, a session responding', note(2), { ask: true, ctx: true, pic: true, work: 'kit-882-to-check-card-short-window' }],
+      ['a short mark, the ask, a session responding', note(1, short), { ask: true, work: 'kit-882-to-check-card-short-window' }],
+      ['all of it, the ask coming while the box has the focus, a session responding', note(2), { ask: true, ctx: true, pic: true, focus: true, work: 'kit-882-to-check-card-short-window' }],
+    ];
+    // each case at w x h, in each place; what each gives back, by its name
+    const PLACES = { corner: 'the corner', spot: 'beside its spot', none: 'no spot on screen' };
+    const each = async (w, h, look) => {
+      await V.size(w, h);
+      const out = [];
+      for (const where of Object.keys(PLACES)) for (const [name, row, o] of CASES) {
+        const corner = where === 'corner';
+        // (no focus left from the case before: the card would stay where that one put it)
+        await V.p.ev('(window.__ask = null, document.activeElement?.blur?.(), true)');
+        // the session's record: for the newest owner turn, begun after every turn (or none)
+        const lo = row.turns.findLast((x) => x.by === 'owner')?.id;
+        await V.p.ev(`(window.__working = ${o.work ? J({ [N.onMain]: { stage: 'responding', by: o.work, turn: lo, at: new Date(Date.now() + 3600e3).toISOString() } }) : 'null'}, true)`);
+        await V.rows({ [N.onMain]: row });
+        await V.p.ev(`(() => {
+          avStep.unseen = () => ${corner}; avStep.off = ${corner ? '{ id: TL.open, av: AV, gone: true }' : 'null'};
+          tlDraw();
+          const d = document.querySelector('#tl-c-ctx details'); if (d) d.open = ${!!o.ctx};
+          document.getElementById('zz-ctx')?.remove();
+          if (d && ${!!o.ctx}) d.insertAdjacentHTML('beforeend', '<div id="zz-ctx" style="height:220px">long</div>');
+          const i = document.querySelector('#tl-card .tl-shot img');
+          if (i) i.src = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="390" height="700"><rect width="390" height="700" fill="red"/></svg>');
+          return true; })()`);
+        if (o.pic) await V.soon(`document.querySelector('#tl-card .tl-shot img')?.naturalHeight === 700`, `setup: a tall picture (${name})`);
+        // the spot at the stage's top left as the page says it; or none, as when the lens can't find it on this view
+        if (where === 'spot') await spot(V, N.onMain, { x: 24, y: 12, w: 80, h: 20 });
+        else await V.p.ev(`(TS.rects.delete(TS.keyOf.get(tKey(TL.threads.find((t) => t.id === ${J(N.onMain)}).subject))), tlDraw(), true)`);
+        await V.p.ev(FRAMES);
+        await V.p.ev(FRAMES);
+        // the terminal's ask comes once the card is placed, drawn as the page draws it (tlDraw: the card placed, then the ask),
+        // with the box focused first in the focus cases; looked at once the frames after it have run
+        if (o.focus) await V.p.ev(`(document.getElementById('tl-c-text').focus(), document.activeElement.id)`);
+        if (o.ask) { await V.p.ev(`(window.__ask = ${J(Q)}, true)`); await V.rows({ [N.onMain]: row }); }
+        await V.p.ev(FRAMES);
+        await V.p.ev(FRAMES);
+        const ask = `if (${!!o.focus} && document.activeElement?.id !== 'tl-c-text') return ['setup: the box lost the focus'];`;
+        // (each place as it should be: hung for the corner and the spot, the dock or the sheet for none)
+        const placed = `(() => { const c = document.getElementById('tl-card').classList, m = c.contains('sheet') ? 'sheet' : c.contains('in-dock') ? 'dock' : 'hung';
+          const want = innerWidth < 640 ? 'sheet' : ${J(where)} === 'none' ? 'dock' : 'hung'; return m === want ? [] : ['setup: the card is ' + m + ', not ' + want]; })()`;
+        for (const x of await V.p.ev(`(() => { ${ask} return [...${placed}, ...${look(corner, o)}]; })()`)) out.push(`${w}x${h}, ${PLACES[where]}, ${name}: ${x}`);
+      }
+      return out;
+    };
+    return { V, each };
+  }
+
+  for (const [w, h] of [[844, 390], [667, 375], [430, 360], [1280, 360]]) await sub(`A28: at ${w}x${h} every control of the to-check card is inside the window and under nothing`, async () => {
+    const { each } = await shortCard();
+    const bad = [];
+    {
+      bad.push(...await each(w, h, (corner, o) => `(() => {
+        const card = document.getElementById('tl-card'), out = [], $ = (s) => card.querySelector(s);
+        if (card.querySelectorAll('[data-ask-option]').length !== ${o.ask ? 3 : 0}) out.push('setup: the ask');
+        if (!!$('#tl-c-ctx details')?.open !== ${!!o.ctx}) out.push('setup: the context');
+        // (a held Resolve is see-through: asked as it is once settled)
+        $('[data-tl-accept]')?.classList.remove('waiting');
+        for (const s of ['.tl-addr [data-tl-show]', '.tl-addr [data-tl-accept]', '#tl-c-text', '[data-tl-send]']) {
+          const e = $(s), r = e?.getBoundingClientRect();
+          if (!r || !(r.width > 10 && r.height > 10) || r.top < 0 || r.left < 0 || r.right > innerWidth || r.bottom > innerHeight) { out.push(s + ' is at ' + (r ? [r.left, r.top, r.right, r.bottom].map(Math.round) : 'none') + ' in ' + innerWidth + 'x' + innerHeight); continue; }
+          for (const f of [0.15, 0.5, 0.85]) { const hit = document.elementFromPoint(r.left + r.width * f, r.top + r.height * f); if (!e.contains(hit)) { out.push(s + ' is under ' + (hit ? hit.id || hit.className || hit.tagName : 'nothing')); break; } }
+        }
+        // the state line as the case means it: '… is responding…' over one line (the supervisor) or two (a session; one
+        // in the sheet, as wide as the window), its height against one line's, measured with one word in it
+        if (${!!o.work}) {
+          const st = document.getElementById('tl-c-state'), box = st.parentElement, words = st.textContent, lines = ${o.work === 'supervisor' ? 1 : 2} === 2 && !card.classList.contains('sheet') ? 2 : 1;
+          const h = box.getBoundingClientRect().height; st.textContent = 'x'; const one = box.getBoundingClientRect().height; st.textContent = words;
+          if (!/ is responding…$/.test(words) || Math.abs(h - lines * one) > 1) out.push('setup: the state line ' + JSON.stringify(words) + ' is ' + Math.round(h) + 'px, ' + lines + ' line(s) of ' + Math.round(one) + 'px');
+        }
+        return out; })()`));
+    }
+    assert.deepEqual(bad, [], 'every control in reach');
+  });
+
+  await sub('A29: at 1280x800 the card keeps its place, its cap and its floors, and the bar is its own', async () => {
+    const { each } = await shortCard();
+    const bad = await each(1280, 800, (corner) => `(() => {
+      const card = document.getElementById('tl-card'), c = card.getBoundingClientRect(), out = [], $ = (s) => card.querySelector(s);
+      if (card.style.maxHeight !== '' || getComputedStyle(card).maxHeight !== '560px') out.push('the cap is ' + (card.style.maxHeight || getComputedStyle(card).maxHeight));
+      // where its rule puts it: the stage's corner, or tPlace beside its subject (the dock when it has none on screen)
+      const st = document.getElementById('av-stage').getBoundingClientRect(), r = tlTargetRect(TL.threads.find((x) => x.id === TL.open).subject);
+      const want = ${corner} ? st.top + 8 : r ? tPlace(r, card.offsetWidth, card.offsetHeight, innerWidth, innerHeight).top : innerHeight - 16 - c.height;
+      if (Math.abs(c.top - want) > 0.5) out.push('its top is ' + c.top + ', its rule says ' + want);
+      if ($('#tl-c-text').getBoundingClientRect().height !== 56 || getComputedStyle($('.tl-words')).minHeight !== '61px') out.push('the floors: the box ' + $('#tl-c-text').getBoundingClientRect().height + ', the words ' + getComputedStyle($('.tl-words')).minHeight);
+      for (const id of ['av-prev', 'av-next', 'av-filter', 'av-ver', 'av-reload', 'av-tab', 'av-close']) {
+        const e = document.getElementById(id), b = e?.getBoundingClientRect();
+        if (!b || !b.width) continue;
+        const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+        if (!e.contains(hit)) out.push(id + ' is under ' + (hit ? hit.id || hit.className || hit.tagName : 'nothing'));
+      }
+      return out; })()`);
+    assert.deepEqual(bad, [], 'nothing moves at 1280x800');
   });
 });

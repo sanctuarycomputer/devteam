@@ -139,7 +139,7 @@ test('artifact remote drafts: an origin branch that changes an artifact shows as
   const tip = F.g(['rev-parse', 'origin/ticket/far-01'], other.dir);
   const vers = await getJson(B, '/api/artifact-versions?slug=far-mock');
   assert.equal(vers.status, 200, 'D1: its versions');
-  assert.deepEqual(vers.body.versions.find((v) => v.at === 'origin:ticket/far-01'), { kind: 'draft', at: 'origin:ticket/far-01', worktree: 'origin:ticket/far-01', branch: 'ticket/far-01', commit: tip, time: r1.updated_at, fp: r1.fp, url: '/artifact/origin/ticket%2Ffar-01/far-mock/' }, 'D1: the remote version');
+  assert.deepEqual(vers.body.versions.find((v) => v.at === 'origin:ticket/far-01'), { kind: 'draft', at: 'origin:ticket/far-01', worktree: 'origin:ticket/far-01', branch: 'ticket/far-01', commit: tip, time: new Date(F.g(['log', '-1', '--format=%cI', tip, '--', 'docs/devteam/project/artifacts/far-mock'], F.old)).toISOString(), fp: r1.fp, url: '/artifact/origin/ticket%2Ffar-01/far-mock/' }, 'D1: the remote version');
   const fpAt = (at) => getJson(B, `/api/artifact-fp?${new URLSearchParams({ slug: 'far-mock', at })}`);
   assert.deepEqual(await fpAt('origin:ticket/far-01'), { status: 200, body: { fp: r1.fp, at: 'origin:ticket/far-01' } }, "D1: its fp, the listing's");
   assert.equal((await fpAt('origin:ticket/none')).status, 404, 'D1: no such branch is gone, not a failure');

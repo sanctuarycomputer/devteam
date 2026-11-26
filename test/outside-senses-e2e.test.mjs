@@ -90,7 +90,21 @@ test('Tillstack draws self.md, then exterior.md, each landed only with the owner
       const f = W.findings('self-missing');
       assert.equal(f.length, 1, `E1 one self-missing\n${JSON.stringify(f)}`);
       assert.equal(f[0].key, W.blob(STRAT), 'E1 keyed by the strategy\'s blob');
+      assert.equal(f[0].severity, 'high', 'K1 self-missing is high until the owner is asked about a draft');
       assert.deepEqual(W.findings('exterior-missing'), [], 'E1 no exterior-missing without self.md');
+    });
+
+    // kit-814: what the owner has been asked sets self-missing's and exterior-missing's severity
+    const severity = (kind) => W.findings(kind).map((f) => f.severity);
+    let q0 = null;
+    await check('K2 self-missing is medium while a self-change question is open', () => {
+      W.chore('self-0', (w) => write(path.join(w, SELF), SELF_MD));
+      q0 = W.ask('self-change', SELF, 'The Self', 'self-0');
+      assert.deepEqual(severity('self-missing'), ['medium'], 'K2 medium while the owner reads the draft');
+    });
+    await check('K2b self-missing is high again after the owner refines it', () => {
+      W.owner(['answer', q0, 'No: say what it makes first']);
+      assert.deepEqual(severity('self-missing'), ['high'], 'K2b high again once the owner refines it');
     });
 
     let selfQ = null;
@@ -111,7 +125,21 @@ test('Tillstack draws self.md, then exterior.md, each landed only with the owner
       assert.deepEqual(W.findings('self-missing'), [], 'E2 self-missing gone');
     });
 
-    const EXTERIOR_MD = FIX('exterior.md').replace('STRATEGY_BLOB', W.blob(STRAT)).replace('"SELF_BLOB"', JSON.stringify(W.blob(SELF)));
+    const EXTERIOR_MD = FIX('exterior.md');
+    await check('K3a exterior-missing is high until the owner is asked about a draft', () => {
+      assert.deepEqual(severity('exterior-missing'), ['high'], 'K3a high until the owner is asked about a draft');
+    });
+    let q1 = null;
+    await check('K3 exterior-missing is medium while an exterior-change question is open', () => {
+      W.chore('exterior-0', (w) => write(path.join(w, EXT), EXTERIOR_MD));
+      q1 = W.ask('exterior-change', EXT, 'The exterior', 'exterior-0');
+      assert.deepEqual(severity('exterior-missing'), ['medium'], 'K3 medium while the owner reads the draft');
+    });
+    await check('K3b exterior-missing is high again after the owner refines it', () => {
+      W.owner(['answer', q1, 'No: name the shops first']);
+      assert.deepEqual(severity('exterior-missing'), ['high'], 'K3b high again once the owner refines it');
+    });
+
     let extQ = null;
     await check('E3 exterior.md drawn from both: exterior-missing until then; refused until an exterior-change answer pins it, then lands', () => {
       assert.equal(W.findings('exterior-missing').length, 1, 'E3 exterior-missing once main has self.md and a linking strategy');
@@ -129,11 +157,10 @@ test('Tillstack draws self.md, then exterior.md, each landed only with the owner
     });
 
     await check('E4 one PR changing both under one --approved is refused, whichever answer it cites', () => {
-      // a new self.md and an exterior.md drawn from it (chore pr holds one drawn from another self.md)
+      // a new self.md and a new exterior.md in one chore
       const sha = W.chore('both', (w) => {
         write(path.join(w, SELF), `${SELF_MD}\nIt also prints receipts.\n`);
-        const selfBlob = W.g(['hash-object', SELF], w);
-        write(path.join(w, EXT), `${EXTERIOR_MD.replace(W.blob(SELF), selfBlob)}\nShops print their receipts.\n`);
+        write(path.join(w, EXT), `${EXTERIOR_MD}\nShops print their receipts.\n`);
       });
       const bySelf = W.answered('self-change', SELF, 'The Self', 'both');
       refused(W.merge('both', bySelf), new RegExp(`is a self-change question; changing ${re(EXT)} needs an answered exterior-change question`), 'E4 under the self-change answer, merge');
@@ -145,16 +172,13 @@ test('Tillstack draws self.md, then exterior.md, each landed only with the owner
 
     await check('E5 both on main: self show, exterior show and dashboard-data carry them', () => {
       const self = W.ok(['self', 'show']);
-      assert.match(self, /A checkout for independent shops that sell online and in person\./, 'E5 self show prints the Self');
-      assert.match(self, /Payments service/, 'E5 self show prints its parts');
-      const ext = W.ok(['exterior', 'show']);
-      assert.match(ext, /^Self: A checkout for independent shops/m, 'E5 exterior show opens with the Self');
-      for (const [rel, name] of [['serves', 'Independent shops'], ['depends_on', 'Stripe'], ['alternative', 'Cartwell']]) assert.match(ext, new RegExp(`^${rel}\\n {2}${name} \\(`, 'm'), `E5 exterior show lists ${name} under ${rel}`);
+      assert.ok(self.includes(SELF_MD.trim()), `E5 self show prints the Self, a plain document (kit-862)\n${self}`);
+      assert.equal(W.ok(['exterior', 'show']), `Exterior: ${EXT} on main\n\n${EXTERIOR_MD.trimEnd()}`, 'E5 exterior show prints the exterior, a plain document (kit-863)');
       const d = json(W.ok(['dashboard-data']));
-      assert.deepEqual(d.self, json(W.ok(['self', 'show', '--json'])), 'E5 dashboard-data carries main\'s self block');
-      assert.equal(d.self?.what, 'A checkout for independent shops that sell online and in person.', 'E5 dashboard-data\'s self is Tillstack\'s');
-      assert.deepEqual(d.exterior, json(W.ok(['exterior', 'show', '--json'])), 'E5 dashboard-data carries main\'s exterior block');
-      assert.deepEqual(d.exterior?.entities.map((e) => [e.entity, e.relation, e.name]), [['shops', 'serves', 'Independent shops'], ['stripe', 'depends_on', 'Stripe'], ['cartwell', 'alternative', 'Cartwell']], 'E5 dashboard-data\'s exterior is Tillstack\'s three entities');
+      assert.deepEqual(d.self, json(W.ok(['self', 'show', '--json'])), 'E5 dashboard-data\'s self is self show --json\'s');
+      assert.equal(d.self, null, 'E5 dashboard-data\'s self is null for a plain self.md (the page reads the document)');
+      assert.deepEqual(d.exterior, json(W.ok(['exterior', 'show', '--json'])), 'E5 dashboard-data\'s exterior is exterior show --json\'s');
+      assert.equal(d.exterior, null, 'E5 dashboard-data\'s exterior is null for a plain exterior.md (the page reads the document)');
     });
 
     await check('E6 a strategy.md change raises exterior-stale; put back, it clears', () => {

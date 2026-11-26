@@ -1,11 +1,13 @@
-// The dashboard shell (dashboard-shell@1, test/contracts/shell.md): its two blocks are
+// The dashboard shell (dashboard-shell@2, test/contracts/shell.md): its two blocks are
 // byte-identical in index.html and hub.html, scoped so today's pages can't change, and their
 // builders, binders and URL rules do what the contract says (run in vm, over a tiny DOM of their
-// own HTML); and the measure check (test/lib/measure.mjs) passes on the fixture page built only from
-// the blocks, at three sizes, and fails, check by check, on broken copies (headless Chrome).
+// own HTML); the measure check (test/lib/measure.mjs) passes on the fixture page built only from
+// the blocks, at three sizes, and fails, check by check, on broken copies; and the hub frame's two
+// fakes talk as §10 says, on two loopback origins (both headless Chrome).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
@@ -83,14 +85,27 @@ const rootWith = (html) => { const r = new El('div'); r.innerHTML = html; return
 // the JS block (and the router's table) in a context of its own
 const load = (ctx = {}) => {
   const c = vm.createContext({ URLSearchParams, ...ctx });
-  vm.runInContext(`${JS}\n${ROUTES_SRC}\n;globalThis.S = { withPage, escHtml, tabBar, tabStep, bindTabBar, dbTable, sortRows, nextSort, bindDbTable, props, goalSteps, heartbeat, PULSE_STATES, statusPill, fleetSwitch, bindFleetSwitch, registerPage, shellPages, threadsTabs, STATE_KEYS, parseHead, headFor, stampFor, closeTarget, REMEMBERED, rememberedFilters, saveFilters, SHELL_ROUTES };`, c);
+  vm.runInContext(`${JS}\n${ROUTES_SRC}\n;globalThis.S = { withPage, escHtml, tabBar, tabPanel, tabSelected, tabStep, bindTabBar, dbTable, sortRows, nextSort, bindDbTable, props, goalSteps, heartbeat, PULSE_STATES, statusPill, fleetSwitch, bindFleetSwitch, registerPage, shellPages, threadsTabs, STATE_KEYS, parseHead, headFor, stampFor, closeTarget, REMEMBERED, rememberedFilters, saveFilters, SHELL_ROUTES };`, c);
   return c.S;
 };
 const S = load();
 const R = S.SHELL_ROUTES;
 
-test('shell.md says @1 and defines what the design lists', () => {
-  assert.match(SHELL_MD, /dashboard-shell@1/);
+test('shell.md says @3 and defines what the design lists', () => {
+  assert.match(SHELL_MD, /^Contract `dashboard-shell@3`\./m, 'shell.md is headed dashboard-shell@3');
+  assert.match(SHELL_MD, /^- \*\*@2\*\* \(`kit-267`\): /m, 'a @2 line in its History');
+  assert.match(SHELL_MD, /^- \*\*@3\*\* \(`kit-611`\): /m, 'a @3 line in its History');
+  // @3 (kit-611): the tab bar's panels and sub size, the terminal th values, a file peek's view, tab choices as history, §10 amended.
+  // Read with the History section cut off, so a rule deleted from its section goes red even though the @3 line names it
+  const body = SHELL_MD.split(/^## History$/m)[0];
+  assert.ok(body.length < SHELL_MD.length, 'shell.md has a History section');
+  for (const n of ['aria-controls', 'aria-labelledby', 'role=tabpanel', "size: 'sub'", 'tabPanel', 'tabSelected', 'th=supervisor', 'th=shell', 'view=raw', "Every tab set's choice is a state key", 'it is a history entry', 'while a peek is open replaces the entry', 'history.state = { hub: 1, key }', 'only selects the tab', 'no `openAt`', "After a reload the marker isn't enough", '**`hub-route` still replaces**', "{ devteam: 'hub-visible', visible }", '**A file peek\'s view** is in its query', '`inbox`, `open`, `resolved`, `supervisor`, `shell`']) assert.ok(body.includes(n), `shell.md @3 says ${n} outside its History`);
+  assert.match(SHELL_MD, /^## 10\. The hub frame$/m, 'a §10');
+  // §6, §7, §8 and §10 name what the design's 'Contract dashboard-shell@2' section says
+  for (const n of ['`p=q/<id>`', '`i`', '`u`', 'SHELL_ROUTES.peeks', 'peekHead', 'legacy: true', '`tree/<id>`', '`wt/<worktree>`', '`path`', '`route`', '`talk/<t-id>?u=<u-id>`', 'th=inbox&i=', 'URLSearchParams', 'artifactPathOk', 'reads its page from the head', '`hub-route`', '`hub-base`', '2,048', '`null`', 'postHead()', '`box: 2`', '#<key>/<head>', '`#overview?ot=<id>`', 'test/fixtures/hub-frame-fake.html', 'test/fixtures/dashboard-frame-fake.html', 'An empty value is a value']) assert.ok(SHELL_MD.includes(n), `shell.md says ${n}`);
+  assert.match(SHELL_MD, /`box: 2`\) it is the project's own host, `https:\/\/<project>\.<box>\/#`/, "hub-base's base on a box: 2 box");
+  assert.match(SHELL_MD, /under `box: 1`, and on a laptop, it is the hub's own address/, "hub-base's base under box: 1 and on a laptop");
+  assert.match(SHELL_MD, /§8 governs freshness/);
   for (const t of ['--page-max', '--page-top', '--page-pad', '--header-pad', '--panel-pad', '--head-h', '--backdrop', '--gap', '--ease', '--dur', '--threads-w', '--bar-h', '--measure']) {
     assert.ok(SHELL_MD.includes(`\`${t}\``), `shell.md defines ${t}`);
     assert.match(LAYOUT, new RegExp(`${t}:`), `the layout block sets ${t}`);
@@ -217,6 +232,53 @@ test('tabBar: counts, disabled tabs, roving tabindex; arrows, Home and End skip 
   assert.equal(said.length, 6, 'a disabled tab and another key select nothing');
   fire(root, 'click', tab('a').children.length ? tab('a').children[0] : tab('a'));
   assert.equal(said.at(-1), 'a', 'a click on an enabled tab (or inside it) selects it');
+});
+
+test('terminal A2: the tab bar', () => {
+  const tabs = [{ id: 'open', label: 'Open', count: 2 }, { id: 'x', label: 'X', disabled: true }];
+  // A2a: panel and size add the tablist's size class and each tab's id and aria-controls
+  const sub = S.tabBar({ tabs, selected: 'open', panel: 'th-list', size: 'sub' });
+  assert.ok(sub.includes('<div class="tabbar sub" role="tablist">'), sub);
+  assert.ok(sub.includes('data-tab="open" id="tab-th-list-open" aria-controls="th-list"'), sub);
+  assert.ok(sub.includes('data-tab="x" id="tab-th-list-x" aria-controls="th-list"'), sub);
+  // A2b: tabPanel is labelled by the tab tabBar selects
+  assert.equal(S.tabPanel({ panel: 'th-list', tabs, selected: 'open' }, '<p>x</p>'), '<div role="tabpanel" id="th-list" aria-labelledby="tab-th-list-open"><p>x</p></div>');
+  assert.equal(S.tabPanel({ panel: 'th-list', tabs, selected: 'x' }, '<p>x</p>'), '<div role="tabpanel" id="th-list" aria-labelledby="tab-th-list-open"><p>x</p></div>', 'a disabled selection labels by the first enabled tab');
+  assert.equal(S.tabPanel({ panel: 'A b', tabs, selected: 'open' }, '<p>x</p>'), '<p>x</p>');
+  assert.equal(S.tabPanel({ panel: '', tabs, selected: 'open' }, '<p>x</p>'), '<p>x</p>');
+  assert.equal(S.tabPanel({ panel: 'th-list', tabs, selected: 'open' }, null), '<div role="tabpanel" id="th-list" aria-labelledby="tab-th-list-open"></div>');
+  const odd = [{ id: 'a b', label: 'A' }];
+  const oddBar = S.tabBar({ tabs: odd, selected: 'a b', panel: 'th-list' });
+  assert.ok(!oddBar.includes(' id="tab-') && !oddBar.includes('aria-controls'), oddBar);
+  assert.equal(S.tabPanel({ panel: 'th-list', tabs: odd, selected: 'a b' }, 'h'), '<div role="tabpanel" id="th-list">h</div>');
+  assert.equal(S.tabPanel({ panel: 'th-list', tabs: [{ id: 'x', label: 'X', disabled: true }] }, 'h'), '<div role="tabpanel" id="th-list">h</div>', 'no enabled tab: no aria-labelledby');
+  // A2e: without panel (and with a bad panel and size) it is today's output, a literal pasted from the unchanged builder
+  const today = '<div class="tabbar" role="tablist"><button type="button" role="tab" data-tab="open" aria-selected="true" tabindex="0">Open <span class="n">2</span></button><button type="button" role="tab" data-tab="x" aria-selected="false" tabindex="-1" aria-disabled="true">X</button></div>';
+  assert.equal(S.tabBar({ tabs, selected: 'open' }), today);
+  assert.equal(S.tabBar({ tabs, selected: 'open', panel: 'A b', size: 'big' }), today);
+});
+
+test('terminal A2: the URL', () => {
+  // A2c: the side panel's Supervisor and Shell tabs (th=supervisor, th=shell) are kept and written back
+  for (const h of ['#overview?th=supervisor', '#board?goal=g-1&th=shell']) assert.equal(S.headFor(S.parseHead(h, R)), h, h);
+  // A2d: a file peek's view: the first value decides, raw or rendered only, written last
+  const fp = (q) => '#library?p=' + encodeURIComponent('file?' + q);
+  const raw = '#library?p=file%3Fpath%3Ddocs%252Fa.md%26ref%3Dmain%26view%3Draw';
+  const rendered = '#library?p=file%3Fpath%3Ddocs%252Fa.md%26ref%3Dmain%26view%3Drendered';
+  const noView = '#library?p=file%3Fpath%3Ddocs%252Fa.md%26ref%3Dmain';
+  assert.equal(S.parseHead(raw, R).state.p, 'file?path=docs%2Fa.md&ref=main&view=raw');
+  assert.equal(S.headFor(S.parseHead(fp('path=docs/a.md&ref=main&view=raw'), R)), raw);
+  assert.equal(S.headFor(S.parseHead(raw, R)), raw);
+  assert.equal(S.headFor(S.parseHead(fp('path=docs/a.md&ref=main&view=rendered'), R)), rendered);
+  assert.equal(S.headFor(S.parseHead(fp('path=docs/a.md&ref=main&view=wide'), R)), noView, 'a bad view is dropped');
+  assert.equal(S.headFor(S.parseHead(fp('path=docs/a.md&ref=main&view=Raw'), R)), noView, 'view is case-exact');
+  assert.equal(S.headFor(S.parseHead(fp('path=docs/a.md&ref=main&view=raw&view=wide'), R)), raw, 'the first value decides, one view');
+  assert.equal(S.headFor(S.parseHead(fp('path=docs/a.md&ref=main&view=wide&view=raw'), R)), noView, 'the first bad value decides');
+  assert.equal(S.headFor(S.parseHead(fp('path=docs/a.md&view=raw&ref=main'), R)), raw, 'view is written last');
+  // another kind: view is not read, so a ticket head keeps whatever it carries
+  const tk = '#board?p=' + encodeURIComponent('ticket/kit-1?view=wide');
+  assert.equal(S.parseHead(tk, R).state.p, 'ticket/kit-1?view=wide');
+  assert.equal(S.headFor(S.parseHead(tk, R)), tk);
 });
 
 test('dbTable: numeric sort, a second press reverses, None when empty; onOpen gets the index as passed', () => {
@@ -410,17 +472,26 @@ test("the router's table: page ids and link kinds disjoint, and every legacy hea
   assert.ok(kinds.size >= 20, 'the kinds were read');
   for (const k of kinds) assert.ok(Object.hasOwn(R.links, k), `the table has ${k}`);
   const HOME = { ticket: 'board', feature: 'board', story: 'board', release: 'board', wave: 'board', milestone: 'board', planner: 'board', thread: 'board', goal: 'goals', q: 'overview', act: 'loop', decision: 'loop', lesson: 'loop', problem: 'loop', signal: 'loop', learning: 'loop', observation: 'loop', sensor: 'sensors', retro: 'retros', artifact: 'library', preview: 'library', review: 'library', 'review-preview': 'library', talk: 'overview' };
+  // what p may open (@2): every peek kind the dashboard draws (TYPE_META's) and the two viewers, all link kinds
+  const meta = INDEX.slice(INDEX.indexOf('const TYPE_META = {'), INDEX.indexOf('\n};', INDEX.indexOf('const TYPE_META = {')));
+  const metaKinds = [...meta.matchAll(/(?:^|[{,\s])([a-z]+): \[/g)].map((m) => m[1]);
+  assert.ok(metaKinds.length >= 20, 'the peek kinds were read');
+  assert.deepEqual([...(R.peeks || [])].sort(), [...metaKinds, 'artifact', 'preview'].sort(), 'SHELL_ROUTES.peeks: every TYPE_META kind and the two viewers');
+  for (const k of R.peeks) assert.ok(Object.hasOwn(R.links, k), `a peek kind ${k} has a home`);
+  for (const k of ['talk', 'review', 'review-preview']) assert.ok(!R.peeks.includes(k), `${k} stays a link head`);
   for (const [k, home] of Object.entries(HOME)) {
     const p = S.parseHead(k === 'review-preview' ? '#review-preview?path=x' : `#${k}/some-id`, R);
+    if (R.peeks.includes(k)) { assert.equal(p.page, home, `${k} opens over ${home}`); assert.equal(p.legacy, true); continue; }
     assert.equal(p.kind, k);
     assert.equal(p.home, home, `${k} opens over ${home}`);
   }
-  assert.equal(S.parseHead('#artifact/main/the-mock', R).link, 'artifact/main/the-mock', 'the rest of a link is kept');
-  assert.equal(S.parseHead('#file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md&title=Quality', R).home, 'governance');
-  assert.equal(S.parseHead('#file?path=docs%2Fdevteam%2Fprocess%2Fworker.md', R).home, 'governance');
-  assert.equal(S.parseHead('#file?path=docs%2Fdevteam%2Fproject%2Fstrategy.md&title=Strategy', R).home, 'governance');
-  assert.equal(S.parseHead('#file?path=docs%2Fdevteam%2Fproject%2Fdesigns%2Fx.md', R).home, 'library');
+  assert.equal(S.parseHead('#talk/t-1?u=u-1', R).link, 'talk/t-1?u=u-1', 'the rest of a link is kept');
+  assert.equal(S.parseHead('#file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md&title=Quality', R).page, 'governance');
+  assert.equal(S.parseHead('#file?path=docs%2Fdevteam%2Fprocess%2Fworker.md', R).page, 'governance');
+  assert.equal(S.parseHead('#file?path=docs%2Fdevteam%2Fproject%2Fstrategy.md&title=Strategy', R).page, 'governance');
+  assert.equal(S.parseHead('#file?path=docs%2Fdevteam%2Fproject%2Fdesigns%2Fx.md', R).page, 'library');
   assert.equal(S.parseHead('#nothing-here/x', R).home, 'overview', 'anything else over overview');
+  assert.equal(S.parseHead('#nothing-here/x', R).link, 'nothing-here/x', 'a head of no kind stays a link head');
   // today's section anchors are page heads, and the two that move redirect
   for (const s of ['overview', 'goals', 'progress', 'board', 'library', 'loop', 'trust', 'retros']) assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead(`#${s}`, R))), { page: s, state: {} });
   assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#monitoring', R))), { page: 'sensors', state: {}, redirected: true });
@@ -444,8 +515,9 @@ test("the router's table: page ids and link kinds disjoint, and every legacy hea
 test('parseHead and headFor round-trip every page head and link head', () => {
   const heads = ['#overview', '#overview?th=open&t=t-1', '#board?goal=g-1&feat=f&repo=kit&att=1&th=resolved', '#progress?goal=g-1&narrow=features&show=all', '#library?kind=Mock&goal=g-2', '#goals?gt=met', '#goals?gt=letgo', '#sensors?st=fleet', '#loop?lt=orient&kind=lesson&orient=1', '#trust', '#retros', '#settings', '#overview?th=inbox', '#board?goal=g-1&th=inbox'];
   for (const p of R.pages) heads.push(`#${p}`, `#${p}?th=open&t=t-20261115-1`);
-  for (const k of Object.keys(R.links)) heads.push(k === 'review-preview' ? '#review-preview?path=a.html&ref=ticket%2Fx' : `#${k}/an-id`);
-  heads.push('#file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md&title=Quality&ref=main', '#artifact/main/slug', '#talk/t-1');
+  // the link heads that stay link heads (@2): talk/ (with a turn too), review/ and review-preview
+  for (const k of Object.keys(R.links).filter((k) => !(R.peeks || []).includes(k))) heads.push(k === 'review-preview' ? '#review-preview?path=a.html&ref=ticket%2Fx' : `#${k}/an-id`);
+  heads.push('#talk/t-1', '#talk/t-1?u=u-1');
   for (const h of heads) assert.equal(S.headFor(S.parseHead(h, R)), h, h);
   // parseHead keeps only the page's own keys; headFor writes them in STATE_KEYS order, whatever order it is given
   assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#goals?goal=g&gt=met&lt=act', R))), { page: 'goals', state: { gt: 'met' } });
@@ -454,6 +526,113 @@ test('parseHead and headFor round-trip every page head and link head', () => {
   assert.equal(S.headFor(S.parseHead('#board?t=x&repo=r&gt=met&goal=g', R)), '#board?goal=g&repo=r&t=x');
   assert.equal(S.headFor({ page: 'board', state: { goal: 'a b&c' } }), '#board?goal=a+b%26c');
   assert.equal(S.parseHead(S.headFor({ page: 'board', state: { goal: 'a b&c' } }), R).state.goal, 'a b&c');
+});
+
+// ---- dashboard-shell@2 (§6-§8): p, i and u ----
+const plain2 = (o) => JSON.parse(JSON.stringify(o));
+const pq = (v) => new URLSearchParams({ p: v }).toString();
+const HEX40 = 'a'.repeat(40), HEX64 = 'b'.repeat(64);
+// one canonical head per peek kind: a file by its path, an artifact and a preview by their own grammar
+const PEEK_HEAD = (k) => (k === 'file' ? 'file?path=docs%2Fx.md&ref=main' : k === 'artifact' ? 'artifact/main/the-mock' : k === 'preview' ? 'preview/bold-otter' : `${k}/an-id`);
+const PEEK_HOME = (k) => (k === 'file' ? 'library' : R.links[k]);
+
+test('@2 round-trip: p of every peek kind on every page, t with u, th=inbox with i, the viewers, a turn in talk/, a pinned head with empty values', () => {
+  const heads = [];
+  for (const page of R.pages) {
+    for (const k of R.peeks || ['ticket']) heads.push(`#${page}?${pq(PEEK_HEAD(k))}`);
+    heads.push(`#${page}?th=open&t=t-1&u=u-1`, `#${page}?th=inbox&i=q-1`, `#${page}?th=inbox&i=k-1`);
+  }
+  heads.push('#board?goal=g-1&th=open&t=t-1&u=u-1&p=ticket%2Fkit-1', '#overview?th=open&t=t-1&u=u-1', '#overview?th=inbox&i=q-1', '#goals?th=inbox&i=k-1&p=lesson%2Fk-1');
+  heads.push(`#library?${pq('artifact/main/the-mock')}`, `#library?${pq('artifact/wt/kit-267-shell-url-contract/the-mock')}`, `#progress?goal=g-1&${pq(`artifact/tree/${HEX40}/the-mock?path=b.html`)}`, `#library?${pq(`artifact/tree/${HEX64}/the-mock?path=docs%2Fb.html`)}`, `#library?${pq('preview/bold-otter?route=%2Fsettings%3Ftab%3D2')}`);
+  heads.push('#talk/t-1?u=u-1', '#board?goal=&feat=&repo=&att=&th=&p=ticket%2Fkit-1');
+  // the pinned head's parse first, so its own line is what a dropped empty value fails on
+  assert.deepEqual(plain2(S.parseHead('#board?goal=&feat=&repo=&att=&th=&p=ticket%2Fkit-1', R)), { page: 'board', state: { goal: '', feat: '', repo: '', att: '', th: '', p: 'ticket/kit-1' } }, 'each empty key kept, present with the value ""');
+  for (const h of heads) assert.equal(S.headFor(S.parseHead(h, R)), h, h);
+});
+
+// until the router adopts p (kit-268), it routes a legacy head exactly as @1 routed its link head: every test of a
+// parse result's link outside the block reads legacy too, so a legacy head is never taken for a page head
+test('@2 the router reads legacy wherever it reads link', () => {
+  const lines = without(INDEX, 'devteam-shell-js').split('\n').filter((l) => /\.link [!=]== undefined/.test(l));
+  assert.ok(lines.length >= 15, `the router's link tests were read: ${lines.length}`);
+  for (const l of lines) assert.match(l, /\.legacy\b/, `reads legacy: ${l.trim()}`);
+});
+
+test('@2 legacy heads: every peek kind and the two viewers open over their home with themselves as p', () => {
+  for (const k of R.peeks || ['ticket']) {
+    const h = `#${PEEK_HEAD(k)}`;
+    assert.deepEqual(plain2(S.parseHead(h, R)), { page: PEEK_HOME(k), state: { p: PEEK_HEAD(k) }, legacy: true }, h);
+    assert.equal(S.headFor(S.parseHead(h, R)), `#${PEEK_HOME(k)}?${pq(PEEK_HEAD(k))}`, `${h} canonical`);
+  }
+  for (const v of ['artifact/main/the-mock', 'artifact/wt/kit-1/the-mock', 'preview/bold-otter']) assert.deepEqual(plain2(S.parseHead(`#${v}`, R)), { page: 'library', state: { p: v }, legacy: true }, v);
+  assert.deepEqual(plain2(S.parseHead('#file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md&title=Quality', R)), { page: 'governance', state: { p: 'file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md&title=Quality' }, legacy: true }, 'a file by its path');
+});
+
+test('@2 p of an unknown kind, or an artifact with a bad slug, is dropped', () => {
+  for (const v of ['nothing/x', 'talk/t-1', 'review/q-1', 'review-preview?path=a.html', 'ticket', 'ticket/', 'file?title=x', 'file/x', 'file/x?path=a.md', 'artifact/main/Bad_Slug', 'artifact/main/', 'artifact/tree/' + HEX40 + '/-x', 'preview/a/b']) {
+    assert.deepEqual(plain2(S.parseHead(`#board?goal=g-1&${pq(v)}`, R)), { page: 'board', state: { goal: 'g-1' } }, v);
+  }
+  assert.deepEqual(plain2(S.parseHead('#artifact/main/Bad_Slug', R)), { page: 'library', state: {}, legacy: true }, 'a legacy viewer head naming no artifact: its home, no p');
+  // a file is file?<query> with a path (§6), never file/<anything>
+  assert.deepEqual(plain2(S.parseHead('#file/x', R)), { page: 'library', state: {}, legacy: true }, 'a legacy file/ head names no file: its home, no p');
+});
+
+test('@2 i is kept only with th=inbox', () => {
+  assert.deepEqual(plain2(S.parseHead('#board?th=open&i=q-1', R)), { page: 'board', state: { th: 'open' } });
+  assert.deepEqual(plain2(S.parseHead('#board?i=q-1', R)), { page: 'board', state: {} });
+  assert.deepEqual(plain2(S.parseHead('#board?th=inbox&i=q-1', R)), { page: 'board', state: { th: 'inbox', i: 'q-1' } });
+});
+
+test("@2 an artifact's version: tree/<id> only with 40 or 64 lower-case hex, anything else but main and wt/<w> is main", () => {
+  const got = (v) => S.parseHead(`#library?${pq(v)}`, R).state.p;
+  for (const at of [`tree/${'a'.repeat(39)}`, `tree/${'A'.repeat(40)}`, 'tree/', 'tree', `tree/${HEX40}x`, 'origin/main', 'wt', 'wt/.x', 'wt/a/b', 'draft']) {
+    assert.equal(got(`artifact/${at}/the-mock?path=b.html`), 'artifact/main/the-mock?path=b.html', at);
+  }
+  assert.equal(got(`artifact/tree/${HEX40}/the-mock`), `artifact/tree/${HEX40}/the-mock`);
+  assert.equal(got('artifact/wt/kit-1.x_y/the-mock'), 'artifact/wt/kit-1.x_y/the-mock');
+  assert.equal(S.headFor(S.parseHead(`#library?${pq(`artifact/tree/${'a'.repeat(39)}/the-mock`)}`, R)), `#library?${pq('artifact/main/the-mock')}`, 'headFor writes the normalised head');
+});
+
+test("@2 p's own query is read with URLSearchParams: a preview's route holding ? & = # round-trips", () => {
+  const h = `#library?p=${encodeURIComponent(`preview/app?route=${encodeURIComponent('/a?b=1&c=2#d')}`)}`;
+  const p = S.parseHead(h, R).state.p;
+  assert.equal(new URLSearchParams(String(p).slice(String(p).indexOf('?') + 1)).get('route'), '/a?b=1&c=2#d');
+  assert.equal(S.headFor(S.parseHead(h, R)), h);
+  assert.equal(S.parseHead(`#library?${pq('preview/app?route=%2F')}`, R).state.p, 'preview/app', "the route '/' is the default, left out");
+});
+
+test("@2 an artifact's page: kept when the server can serve it, else dropped with the version kept", () => {
+  const v = (page) => `artifact/tree/${HEX40}/the-mock?${new URLSearchParams({ path: page })}`;
+  assert.equal(S.parseHead(`#library?${pq(v('docs/b.html'))}`, R).state.p, `artifact/tree/${HEX40}/the-mock?path=docs%2Fb.html`, 'docs/b.html is kept');
+  for (const bad of ['..', '.x/y.html', 'a//b', 'b c.html', '%2e%2e/x.html', 'a\\b', '/abs.html', 'a/', 'index.html']) {
+    const h = `#library?${pq(v(bad))}`;
+    assert.equal(S.parseHead(h, R).state.p, `artifact/tree/${HEX40}/the-mock`, `${bad}: dropped, the version kept`);
+    assert.equal(S.headFor(S.parseHead(h, R)), `#library?${pq(`artifact/tree/${HEX40}/the-mock`)}`, `${bad}: the normalised head`);
+  }
+});
+
+test('@2 stampFor on a p head: its own page, cold or warm', () => {
+  const h = '#progress?goal=g-1&p=ticket%2Fkit-1';
+  const cold = S.stampFor({ hash: h, state: null }, null, true, R);
+  assert.deepEqual(plain2(cold), { page: '#progress?goal=g-1', depth: 1, openedHere: false }, 'cold');
+  assert.deepEqual(plain2(S.closeTarget(cold)), { replace: '#progress?goal=g-1' });
+  assert.deepEqual(plain2(S.stampFor({ hash: h, state: null }, { page: '#board', depth: 0, openedHere: true }, false, R)), { page: '#progress?goal=g-1', depth: 1, openedHere: false }, 'warm over another page');
+  assert.deepEqual(plain2(S.stampFor({ hash: h, state: null }, { page: '#progress?goal=g-1', depth: 0, openedHere: true }, false, R)), { page: '#progress?goal=g-1', depth: 1, openedHere: true }, 'warm over its own page');
+  assert.deepEqual(plain2(S.stampFor({ hash: h, state: null }, { page: '#progress?goal=g-1', depth: 1, openedHere: false }, false, R)), { page: '#progress?goal=g-1', depth: 2, openedHere: false }, 'from a peek over its own page');
+});
+
+test('@2 rememberedFilters: a fresh head with p says what it shows', () => {
+  const stored = { goal: 'g-1' };
+  const keys = (h) => Object.keys(S.parseHead(h, R).state);
+  assert.equal(S.rememberedFilters('board', keys('#board?p=ticket%2Fkit-1'), true, stored), null, 'a head with p');
+  assert.equal(S.rememberedFilters('board', keys('#board?th=open&p=ticket%2Fkit-1'), true, stored), null, 'with p and th');
+  assert.deepEqual(plain2(S.rememberedFilters('board', keys('#board?th=open'), true, stored)), { goal: 'g-1' }, 'without p the store fills in');
+});
+
+test('@2 rememberedFilters: an empty value is a value', () => {
+  const stored = { goal: 'g-1', kind: 'Mock' };
+  const keys = (h) => Object.keys(S.parseHead(h, R).state);
+  for (const [page, h] of [['board', '#board?goal='], ['board', '#board?att='], ['progress', '#progress?goal='], ['library', '#library?kind=']]) assert.equal(S.rememberedFilters(page, keys(h), true, stored), null, h);
 });
 
 test('stampFor, closeTarget and rememberedFilters', () => {
@@ -536,6 +715,7 @@ const BREAK = {
 const EXTRA = [
   ['overflow', "document.querySelector('#small p').style.marginLeft = '-60px';"],
   ['header-pad', "document.querySelector('.pagebar').style.paddingRight = '24px';"],
+  ['tab-motion', "document.querySelector('.tabbar.sub [role=tab]').style.transition = 'color 1s'"],
 ];
 // a page's own prose and ignore add to the defaults
 test('measure options: a page adds to prose and ignore', async () => {
@@ -563,6 +743,9 @@ test('the measure: every check passes on the fixture at three sizes and fails on
   const res = await measureAt(p, url, { ready: 'window.__ready' });
   assert.deepEqual(Object.keys(res), SIZES.map(([w, h]) => `${w}x${h}`));
   for (const [size, fails] of Object.entries(res)) assert.deepEqual(fails, [], `the fixture at ${size}`);
+  // A4: the sub bar is 30px tall and its panel is labelled by its selected tab
+  assert.equal(await p.ev("(() => { const t = document.querySelector('.tabbar.sub [role=\"tab\"]'); return t && getComputedStyle(t).height; })()"), '30px', 'the fixture has a .tabbar.sub whose first tab is 30px tall');
+  assert.equal(await p.ev("(() => { const e = document.querySelector('[role=\"tabpanel\"]#fx-list'); return e && e.getAttribute('aria-labelledby'); })()"), 'tab-fx-list-open');
   // the c6 pair side by side at 720
   await p.send('Emulation.setDeviceMetricsOverride', { width: 720, height: 800, deviceScaleFactor: 1, mobile: false });
   await p.send('Page.navigate', { url });
@@ -592,4 +775,114 @@ test('the measure: every check passes on the fixture at three sizes and fails on
     const fails = await measure(p);
     assert.ok(fails.some((f) => f.startsWith(`${check}: `)), `${check} fails on its broken copy: ${JSON.stringify(fails)}`);
   }
+});
+
+// ---- §10 the hub frame: the two fakes, each on a loopback origin of its own (headless Chrome) ----
+const FAKES = ['hub-frame-fake.html', 'dashboard-frame-fake.html'];
+const FAKE_DIR = path.join(here, 'fixtures');
+const serveFakes = () => new Promise((resolve, reject) => {
+  const s = http.createServer((req, res) => {
+    const name = new URL(req.url, 'http://x').pathname.slice(1);
+    if (!FAKES.includes(name)) { res.writeHead(404); return void res.end(); }
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(fs.readFileSync(path.join(FAKE_DIR, name)));
+  });
+  s.on('error', reject);
+  s.listen(0, '127.0.0.1', () => resolve(s));
+});
+
+test('the hub frame: hub-base on every load, the hub follows hub-route from its frame only, a bad base is kept by no one', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 120000 }, async (t) => {
+  const later = cleanup(t);
+  const hubS = await serveFakes(), dashS = await serveFakes();
+  later(() => new Promise((r) => hubS.close(r)));
+  later(() => new Promise((r) => dashS.close(r)));
+  const hubO = `http://127.0.0.1:${hubS.address().port}`, dashO = `http://127.0.0.1:${dashS.address().port}`;
+  const chrome = await openChrome();
+  later(() => chrome.close());
+  const p = await chrome.newPage();
+  later(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  const until = async (fn, what) => {
+    let last;
+    for (let i = 0; i < 200; i++) { try { last = await fn(); if (last === true) return; } catch (e) { last = e.message; } await new Promise((r) => setTimeout(r, 50)); }
+    assert.fail(`${what} (last: ${JSON.stringify(last)})`);
+  };
+  const key = 'devteam-dev';
+  const base = `${hubO}/hub-frame-fake.html#${key}/`;
+  const src = `${dashO}/dashboard-frame-fake.html#board?goal=g-1`;
+  // before its first hub-base the dashboard posts nothing: the hub holds that base back while the frame loads,
+  // writes its head and changes its hash
+  const hubUrl = `${hubO}/hub-frame-fake.html?key=${key}&src=${encodeURIComponent(src)}`;
+  await p.send('Page.navigate', { url: `${hubUrl}&hold=1` });
+  await until(async () => (await p.ev('window.__held')) === true && (await p.evIn(dashO, "document.getElementById('head').textContent")) === '#board?goal=g-1', 'the held frame has loaded');
+  await p.evIn(dashO, "location.hash = '#goals'");
+  await new Promise((r) => setTimeout(r, 400));
+  assert.deepEqual(await p.ev("window.__log.filter((e) => e.got === 'hub-route')"), [], 'the dashboard fake posts no hub-route before its first hub-base');
+  await p.ev('window.__release()');
+  await until(async () => (await p.ev('location.hash')) === `#${key}/goals`, 'its head goes at once with the first');
+  await p.send('Page.navigate', { url: hubUrl });
+  // the bases the dashboard fake kept: true when there is one at least and each is the hub fake's (it sends one on
+  // load and one after each hub-route it accepts), else the list
+  const bases = async () => { const b = await p.evIn(dashO, 'JSON.stringify(window.__bases)'); const l = JSON.parse(b); return (l.length > 0 && l.every((x) => x === base)) || b; };
+  await until(bases, "the dashboard fake receives the hub fake's base on load");
+  await until(async () => (await p.ev('location.hash')) === `#${key}/board?goal=g-1`, 'the hub fake has the head the dashboard fake loaded at');
+  // the hub's hash follows each head the dashboard is sent to (by assignment: a new entry, a hashchange)
+  for (const h of ['#board?goal=g-1&p=ticket%2Fkit-1', '#progress?goal=g-1', `#library?${pq(`artifact/tree/${HEX40}/the-mock?path=b.html`)}`, '#talk/t-1?u=u-1']) {
+    await p.evIn(dashO, `location.hash = ${JSON.stringify(h)}`);
+    await until(async () => (await p.ev('location.hash')) === `#${key}/${h.slice(1)}`, `the hub fake's hash follows ${h}`);
+  }
+  // a head over 2,048 characters is sent as null: the bare key
+  await p.evIn(dashO, `location.hash = '#board?goal=' + 'x'.repeat(2100)`);
+  await until(async () => (await p.ev('location.hash')) === `#${key}`, 'a head sent as null shows the bare key');
+  await p.evIn(dashO, "location.hash = '#goals'");
+  await until(async () => (await p.ev('location.hash')) === `#${key}/goals`, 'and follows again after it');
+  // the dashboard reloads itself: a new document, hub-base again
+  await p.evIn(dashO, 'location.reload()');
+  await until(async () => (await p.ev("window.__log.filter((e) => e.why === 'load').length")) === 2 && (await bases()) === true, 'the dashboard fake receives hub-base again after it reloads itself');
+  // a hub-base the dashboard must not keep: javascript:, data:, credentials
+  await until(async () => (await p.evIn(dashO, 'window.__seen')) >= 1, 'the reloaded fake has read a base');
+  await new Promise((r) => setTimeout(r, 300));
+  const seen = await p.evIn(dashO, 'window.__seen');
+  for (const b of ['javascript:alert(1)//', 'data:text/html,x', `http://u:pw@127.0.0.1:1/x#`, `https://u@127.0.0.1:1/#`]) await p.ev(`document.getElementById('f').contentWindow.postMessage({ devteam: 'hub-base', base: ${JSON.stringify(b)} }, ${JSON.stringify(dashO)})`);
+  await until(async () => (await p.evIn(dashO, 'window.__seen')) >= seen + 4, 'the dashboard fake read the four bad bases');
+  assert.equal(await p.evIn(dashO, 'window.__base()'), base, 'the dashboard fake keeps its base');
+  assert.equal(await bases(), true, 'and keeps none of the bad ones');
+  // a hub-route from the frame itself whose head is over 2,048 characters, or not a string: not accepted
+  const atBad = await p.ev('location.hash');
+  await p.evIn(dashO, `window.parent.postMessage({ devteam: 'hub-route', head: '#' + 'x'.repeat(2048) }, ${JSON.stringify(hubO)})`);
+  await p.evIn(dashO, `window.parent.postMessage({ devteam: 'hub-route', head: 1 }, ${JSON.stringify(hubO)})`);
+  const badHeads = "window.__log.filter((e) => e.got === 'hub-route' && (e.head === 1 || (typeof e.head === 'string' && e.head.length === 2049)))";
+  await until(async () => (await p.ev(`${badHeads}.length`)) === 2, 'the hub fake received the long head and the non-string one');
+  assert.deepEqual(await p.ev(`${badHeads}.map((e) => e.accepted)`), [false, false], 'a head over 2,048 characters or not a string is not accepted');
+  assert.equal(await p.ev('location.hash'), atBad, "the hub fake's hash does not move for them");
+  // a hub-route from a window that is not the hub's frame (another window at the frame's origin, and the hub's own):
+  // the hub's hash doesn't change
+  const before = await p.ev('location.hash');
+  await p.ev(`(() => { const r = document.createElement('iframe'); r.id = 'rogue'; r.src = ${JSON.stringify(`${dashO}/dashboard-frame-fake.html#rogue`)}; document.body.append(r); })()`);
+  await until(async () => (await p.evIn(dashO, 'location.hash')) === '#rogue', 'the other window has loaded');
+  await p.evIn(dashO, "window.parent.postMessage({ devteam: 'hub-route', head: '#evil' }, '*')");
+  await p.ev("window.postMessage({ devteam: 'hub-route', head: '#self' }, '*')");
+  await until(async () => (await p.ev("window.__log.filter((e) => e.head === '#evil' || e.head === '#self').length")) === 2, 'the hub fake received both');
+  assert.deepEqual(await p.ev("window.__log.filter((e) => e.head === '#evil' || e.head === '#self').map((e) => e.accepted)"), [false, false], 'neither is accepted');
+  assert.equal(await p.ev('location.hash'), before, "the hub fake's hash does not change");
+  // the frame's window showing a page of a third origin: the hub sends hub-base only to the frame's origin, so that
+  // page reads none, and its hub-route is refused though it comes from the frame's window
+  const thirdS = await serveFakes();
+  later(() => new Promise((r) => thirdS.close(r)));
+  const thirdO = `http://127.0.0.1:${thirdS.address().port}`;
+  const loads = await p.ev("window.__log.filter((e) => e.why === 'load').length");
+  await p.ev(`document.getElementById('f').src = ${JSON.stringify(`${thirdO}/dashboard-frame-fake.html#third`)}`);
+  await until(async () => (await p.ev("window.__log.filter((e) => e.why === 'load').length")) === loads + 1 && (await p.evIn(thirdO, 'location.hash')) === '#third', 'the frame has loaded a third origin, and the hub fake sent its base');
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(await p.evIn(thirdO, 'window.__seen'), 0, "hub-base goes to the frame's origin only: the third origin reads none");
+  await p.evIn(thirdO, "window.parent.postMessage({ devteam: 'hub-route', head: '#third' }, '*')");
+  await until(async () => (await p.ev("window.__log.filter((e) => e.head === '#third').length")) === 1, 'the hub fake received the third origin\'s hub-route');
+  assert.deepEqual(await p.ev("window.__log.filter((e) => e.head === '#third').map((e) => [e.origin, e.accepted])"), [[thirdO, false]], "from the frame's window but not the frame's origin: not accepted");
+  assert.equal(await p.ev('location.hash'), before, "the hub fake's hash still does not change");
+  // a hub framing the dashboard from the dashboard's own origin: the dashboard fake keeps no base from it
+  await p.send('Page.navigate', { url: `${dashO}/hub-frame-fake.html?key=${key}&src=${encodeURIComponent(`${dashO}/dashboard-frame-fake.html#same`)}` });
+  await until(async () => (await p.ev("window.__log.filter((e) => e.why === 'load').length")) === 1 && (await p.ev("document.getElementById('f').contentWindow.location.hash")) === '#same', 'a same-origin hub has framed the dashboard fake and sent its base');
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(await p.ev("document.getElementById('f').contentWindow.__bases.length"), 0, 'the dashboard fake keeps no hub-base from its own origin');
 });

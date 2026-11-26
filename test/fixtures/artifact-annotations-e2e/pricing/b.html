@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="copy" content="draft-1"><title>Pricing B</title>
+<style>
+  body { margin: 0; font: 16px/1.4 sans-serif; background: #fff; color: #111; height: 2600px; position: relative; }
+  #to-section-2, #to-a, #section-2, #faq-cancel { position: absolute; display: block; box-sizing: border-box; margin: 0; }
+  /* the links stay put when the page scrolls to the questions */
+  #to-section-2, #to-a { position: fixed; z-index: 1; background: #fff; }
+  #to-section-2 { left: 40px; top: 40px; width: 160px; height: 32px; }
+  #to-a { left: 220px; top: 40px; width: 160px; height: 32px; }
+  /* the in-page link scrolls the page to the questions; the question shows before and after */
+  #section-2 { left: 0; top: 400px; width: 100%; height: 600px; }
+  #faq-cancel { left: 80px; top: 460px; width: 240px; height: 60px; background: #f0e0c8; }
+</style></head>
+<body>
+<a id="to-section-2" href="#section-2">To the questions</a>
+<a id="to-a" href="a.html">Back to prices</a>
+<section id="section-2"><h2>Questions</h2></section>
+<div id="faq-cancel">Can I cancel?</div>
+<script>
+const IDS = ['to-section-2', 'to-a', 'faq-cancel'];
+const rects = () => Object.fromEntries(IDS.filter((id) => document.getElementById(id)).map((id) => { const r = document.getElementById(id).getBoundingClientRect(); return [id, { x: r.left, y: r.top, w: r.width, h: r.height }]; }));
+const copy = document.querySelector('meta[name=copy]').content;
+const say = () => parent.postMessage({ own: 'at', page: 'pricing/b.html', hash: location.hash, copy, rects: rects() }, '*');
+addEventListener('load', () => { say(); requestAnimationFrame(() => requestAnimationFrame(say)); });
+addEventListener('resize', say);
+addEventListener('hashchange', () => requestAnimationFrame(say));
+</script>
+</body></html>
