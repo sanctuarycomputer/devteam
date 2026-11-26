@@ -176,6 +176,11 @@ test('P1t the region reads a hostile or large exterior text in under 2 s each', 
     ['an ## heading of 50,000 unclosed declarations', `## a${'<!x '.repeat(50000)}`],
     ['an ## heading of 30,000 attribute names holding <', `## a${'<b a<b a '.repeat(30000)}`],
     ['an ## heading of 50,000 unclosed CDATA', `## a${'<![CDATA['.repeat(50000)}`],
+    // finals 4 and 4b: the cut at each span's first >, and the brackets, in linear time
+    ['an ## heading of 50,000 comments, none ended --!>', `## a${'<!-- -->'.repeat(50000)}`],
+    ['an ## heading of 100,000 < then a letter, no >', `## a${'<x'.repeat(100000)}`],
+    ['an ## heading of 50,000 unclosed comments', `## a${'<!--'.repeat(50000)}`],
+    ['an ## heading of 50,000 ][', `## a${'[a]['.repeat(50000)}`],
   ]) {
     const start = process.hrtime.bigint();
     assert.doesNotThrow(() => P.checkExterior(`# T\n\n${x}\n`, { today: W2.today, visibility: 'public', allowed }), what);
@@ -549,6 +554,35 @@ const HEADING_FORMS = [
   ['an ## heading split by a quoted < in an attribute', '## Z<b title="<">orbly</b>', ['Z<b title="<">orbly</b>']],
   ['an ## heading split by a single-quoted <', "## Z<b title='<'>orbly</b>", ["Z<b title='<'>orbly</b>"]],
   ['an <h2> split by a quoted < in an attribute', '<h2>Z<b title="<">orbly</b></h2>', ['Z<b title=" orbly']],
+  // finals 4 and 4b: mixed forms (what only seen dropped, with what only joined did), read joined
+  ['an ## heading split by &shy; and a declaration', '## Z&shy;<!x y>orbly', ['Z&shy;<!x y>orbly']],
+  ['an ## heading split by a CGJ and a U+FEFF', '## Z\u034F\uFEFForbly', ['Z\u034F orbly']],
+  ['an ## heading split by &zwj; and strikethrough', '## Z&zwj;~~orbly~~', ['Z&zwj;~~orbly~~']],
+  ['an ## heading split by a CGJ and a declaration', '## Z\u034F<!x y>orbly', ['Z\u034F<!x y>orbly']],
+  ['an ## heading split by &#x34f; and strikethrough', '## Z&#x34f;~~orbly~~', ['Z&#x34f;~~orbly~~']],
+  ['an ## heading split by a VS16 and an end tag', '## Z\uFE0F</div>orbly', ['Z\uFE0F</div>orbly']],
+  ['an ## heading split by &lrm; and a <td>', '## Z&lrm;<td>orbly', ['Z&lrm;<td>orbly']],
+  ['an ## heading split by a numeric default-ignorable and strikethrough', '## Z&#x2065;~~orbly~~', ['Z&#x2065;~~orbly~~']],
+  // a reference link's brackets, and its label, taken out
+  ['an ## heading a full reference link splits', '## Z[orbly][r]\n\n[r]: https://x.example', ['Z[orbly][r]']],
+  ['an ## heading a collapsed reference link splits', '## Z[orbly][]\n\n[orbly]: https://x.example', ['Z[orbly][]']],
+  ['an ## heading a shortcut reference link splits', '## Z[orbly]\n\n[orbly]: https://x.example', ['Z[orbly]']],
+  ['an ## heading a reference link opens', '## [Z][r]orbly\n\n[r]: https://x.example', ['[Z][r]orbly']],
+  // a combining mark NFKC cannot compose, dropped
+  ['an ## heading of a capital with a combining low line', '## Z\u0332orbly', ['Z\u0332orbly']],
+  ['an ## heading of a capital with an acute no letter takes', '## Q\u0301uux', ['Q\u0301uux']],
+  // each span cut again where a page ends it, at its first >
+  ['an ## heading an instruction splits, ended at its first >', '## Z<?x>orbly ?>', ['Z<?x>orbly ?>']],
+  ['an ## heading a declaration holding < splits', '## Z<!x <y>orbly', ['Z<!x <y>orbly']],
+  ['an ## heading a declaration holding a tag splits', '## Z<!x <b>orbly', ['Z<!x <b>orbly']],
+  ['an <h2> an instruction splits', '<h2>Z<?x>orbly</h2>', ['Z orbly']],
+  ['an <h2> a spaced end tag splits', '<h2>Z</ x>orbly</h2>', ['Z orbly']],
+  ['an <h2> split by <!-->', '<h2>Z<!-->orbly</h2>', ['Z orbly']],
+  ['an <h2> split by <!--->', '<h2>Z<!--->orbly</h2>', ['Z orbly']],
+  ['an <h2> split by a comment ended --!>', '<h2>Z<!-- --!>orbly</h2>', ['Z orbly']],
+  ['an ## heading a comment holding > and an instruction split', '## Z<!-- > --><?x>orbly ?>', ['Z<!-- > --><?x>orbly ?>']],
+  ['an <h2> split by a tag CommonMark does not take', '<h2>Z<b_x>orbly</h2>', ['Z orbly']],
+  ['an <h2> split by a tag with a stray quote', '<h2>Z<b a=x"y>orbly</h2>', ['Z orbly']],
 ];
 const NOT_REFUSED = [
   ['an ## heading in a fence', '```\n## Zorbly\n```'],

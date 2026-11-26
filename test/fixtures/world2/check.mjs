@@ -696,20 +696,53 @@ export const headed = last((text) => {
 // shown or joined. Each later reading is made only when the one before finds nothing, so a refused heading
 // costs one.
 // A # or ## heading's joined reading, judged beside the two above: its markup taken out with no
-// separator and the spaces typed kept, as a page joins a word a tag or a mark splits. Each comment,
-// processing instruction and CDATA section, then each tag (a quoted value read to its quote), end tag,
-// declaration and autolink, goes whole; only a line break or a paragraph (<br>, <p> and their end
-// tags) reads as a space. Then each character reference decoded, the text NFKC-normalised, each
-// format character (Unicode Cf: a soft hyphen, a zero-width space or joiner, a word joiner, U+FEFF)
-// dropped, read as words, and each ~ * _ ` mark taken out. Linear: a span ends at its quote or its >.
+// separator and the spaces typed kept, as a page joins a word a tag or a mark splits. Its spans are
+// cut two ways (joined, joinedAtGt); only a line break or a paragraph (<br>, <p> and their end tags)
+// reads as a space. What is left is squeezed (squeeze). Linear: a span ends at its quote or its >.
+// SPAN: a tag (a quoted value read to its quote), end tag, declaration or autolink, as CommonMark reads it.
 const SPAN = /<\/?[A-Za-z][A-Za-z0-9-]*(?:\s+[^\s"'<>\/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*\s*\/?>|<![A-Za-z][^<>]*>|<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*>/g;
 const BREAKS = /^<\/?(?:br|p)(?![A-Za-z0-9-])/i;
-const joined = (s) => words(decode(cut(cut(cut(s, '<!--', '-->'), '<?', '?>'), '<![CDATA[', ']]>').replace(SPAN, (t) => (BREAKS.test(t) ? ' ' : ''))).normalize('NFKC').replace(/\p{Cf}/gu, '')).replace(/[~*_`]/g, '');
+// The text joined after its cuts: each character reference decoded, NFKC-normalised, each format,
+// default-ignorable and combining mark left over dropped, read as words, a reference link's label after
+// its ] taken out, and each ~ * _ ` [ ] mark taken out.
+const squeeze = (t) => words(decode(t).normalize('NFKC').replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}\p{Mn}]/gu, '')).replace(/\]\[[^[\]]{0,999}\]/g, ']').replace(/[~*_`[\]]/g, '');
+// s with each span cut where a page ends it, at its first > (quotes ignored), read once; a comment at
+// -->, --!> or at once; <br>, <p> and their end tags a space. An unclosed span stays as text. Each end
+// looked for is kept until passed, so each is found once.
+const atGt = (s) => {
+  let out = '';
+  let at = 0;
+  const next = {};
+  const find = (t, from) => { if (next[t] === undefined || (next[t] >= 0 && next[t] < from)) next[t] = s.indexOf(t, from); return next[t]; };
+  for (let i = s.indexOf('<'); i >= 0; i = s.indexOf('<', at)) {
+    out += s.slice(at, i);
+    if (s.startsWith('<!--', i)) { // a comment ends at once (<!-->, <!--->), or at --> or --!>
+      if (s[i + 4] === '>' || s.startsWith('->', i + 4)) { at = i + (s[i + 4] === '>' ? 5 : 6); continue; }
+      const ends = [['-->', 3], ['--!>', 4]].map(([t, n]) => [find(t, i + 4), n]).filter(([e]) => e >= 0);
+      if (!ends.length) { at = i; break; }
+      const [e, n] = ends.reduce((a, b) => (b[0] < a[0] ? b : a));
+      at = e + n;
+      continue;
+    }
+    if (!/[A-Za-z/!?]/.test(s[i + 1] ?? '')) { out += '<'; at = i + 1; continue; }
+    const e = find('>', i + 1);
+    if (e < 0) { at = i; break; }
+    if (BREAKS.test(s.slice(i, Math.min(e + 1, i + 6)))) out += ' ';
+    at = e + 1;
+  }
+  return out + s.slice(at);
+};
+// The joined reading, cut two ways (ruling m-20261126-071801827): as CommonMark reads its spans
+// (SPAN, a quoted value to its quote), and as a page ends them (atGt). The invisible characters and
+// their named references go first, before decode. The CDATA cut can't change a verdict (CDATA is
+// upper case, so the reading as written refuses it): kept for the reading's sake.
+const joined = (s) => squeeze(cut(cut(cut(s.replace(INVISIBLE, ''), '<!--', '-->'), '<?', '?>'), '<![CDATA[', ']]>').replace(SPAN, (t) => (BREAKS.test(t) ? ' ' : '')));
+const joinedAtGt = (s) => squeeze(atGt(s.replace(INVISIBLE, '')));
 const unnamedWord = (t, names) => [...t.matchAll(WORD)].some((m) => { const w = capWord(m[0]); return w !== null && w.toLowerCase() !== 'exterior' && !namesWhole(names, w); });
 const unnamedHeading = (h, names) => (h.level > 2
   ? !namesWhole(names, h.text)
   : unnamedWord(h.text, names) || unnamedWord(seen(h.raw), names) || unnamedWord(joined(h.raw), names)
-    || hosts(h.raw).some((x) => !namesWhole(names, x)));
+    || unnamedWord(joinedAtGt(h.raw), names) || hosts(h.raw).some((x) => !namesWhole(names, x)));
 
 // exterior.md: { errors, warnings, refused, held, hosts }. On a repo known private nothing is refused
 // or held; visibility 'public' or 'unknown' keeps the names rule. Every heading, in any form (headed),
