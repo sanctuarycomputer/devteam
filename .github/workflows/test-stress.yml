@@ -295,6 +295,10 @@ jobs:
     if: always() && needs.parity-build.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # the report is red until 1:1, and the merge gate refuses every red check: the run stays green,
+    # the red is the report step's own outcome, its summary and the parity-report artifact (the
+    # supervisor's ruling, kit-895). The step carries it too, so the job's check is green as well.
+    continue-on-error: true
     env:
       SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
@@ -324,6 +328,7 @@ jobs:
           cat "$RUNNER_TEMP/report.txt"
           if [ -f "$RUNNER_TEMP/parity/parity.md" ]; then cat "$RUNNER_TEMP/parity/parity.md" >> "$GITHUB_STEP_SUMMARY"; fi
           exit "$rc"
+        continue-on-error: true
       - if: always()
         uses: actions/upload-artifact@v4
         with:
