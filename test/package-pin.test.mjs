@@ -215,6 +215,19 @@ test('C5 unreachable, unpublished, no npm, an npm older than 9.5: the pair as it
     await reg.fail('unreachable');
     I.dt(['package', 'pin', 'v0.101.0'], reg.env(I.clean));
     assert.deepEqual(I.pair(), { 'package.json': null, 'package-lock.json': null }, 'C5 no pair before, none after');
+    await reg.fail(null);
+    const env = reg.env(I.clean);
+    const fs1 = I.findings(env);
+    for (const c of cases) {
+      const f = fs1.find((x) => x.subject === c.tag);
+      assert.ok(f, `C5 ${c.tag}: the supervisor's findings show it`);
+      assert.equal(f.severity, 'medium', `C5 ${c.tag}: a medium finding`);
+      assert.match(f.detail, new RegExp(`\\(${c.cause}\\)`), `C5 ${c.tag}: the finding names the cause`);
+    }
+    // a pin of the tag written since clears its finding
+    const r = I.dt(['package', 'pin', 'v0.101.0'], env);
+    assert.equal(r.status, 0, `C5 the pin, reachable again: ${r.stderr}`);
+    assert.ok(!I.findings(env).some((x) => x.subject === 'v0.101.0'), 'C5 a written pin clears its tag\'s finding');
   } finally { await reg.close(); }
 });
 

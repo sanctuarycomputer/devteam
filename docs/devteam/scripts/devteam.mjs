@@ -20574,6 +20574,7 @@ function collectMetrics(since, reviewsSince = 0) {
   let idlePlanning = 0;
   const ready = [...ts.values()].filter((t) => isActive(t) && !isHeld(t) && !mergeShaFor(t.id) && !(activeWorker(t.id) && !stoppedLaunch(t.id)) && (t.depends_on ?? []).every((d) => mergeShaFor(d)) && !notSchedulable(t) && ticketMode(t) === 'run');
   holdFindings(add, settings);
+  packagePinFindings(add);
   // A goal's live ticket that waits, directly or through others, on work of a goal
   // PRIORITY_INVERSION_GAP or more numbers worse that nobody has started: a ticket that could start
   // now (its dependencies merged, no worker), or one held. Nothing else pushes that work, and a
@@ -33969,6 +33970,21 @@ function packagePin(kitDir, tag) {
     note('package-pinned', `package pin ${tag}: pinned ${name}@${version}, layout ${layout}`, 'pinned');
     return { exit: 0, line: `package pin ${tag}: pinned ${name}@${version} (layout ${layout}, ${integrity.slice(0, 19)}…) in ${files}` };
   } finally { fs.rmSync(view, { recursive: true, force: true }); }
+}
+// Each tag whose latest package pin in the last 14 days was skipped is a medium finding naming the
+// cause, until a pin of that tag is written (package-pinned) or the supervisor acks it.
+function packagePinFindings(add, now = Date.now()) {
+  const latest = new Map();
+  for (const o of logObjects('observation')) {
+    if (!['package-pin-skipped', 'package-pinned'].includes(o.kind) || !/^package:v\d/.test(String(o.subject)) || !(now - Date.parse(o.created_at) <= 14 * DAY)) continue;
+    const was = latest.get(o.subject);
+    if (!was || o.created_at >= was.created_at) latest.set(o.subject, o);
+  }
+  for (const [subject, o] of latest) {
+    if (o.kind !== 'package-pin-skipped') continue;
+    const tag = subject.slice('package:'.length);
+    add('medium', 'package-pin-skipped', tag, String(o.detail ?? '').slice(0, 300), `the sync's pin was left as it was: fix the cause, then devteam.mjs package pin ${tag} in .worktrees/chore-devteam-sync-${tag} and chore pr it; before layout 2 the sync may merge without it`);
+  }
 }
 // package pin|install|status (kit-install@1). Until each is built, it says so.
 function cmdPackage() {
