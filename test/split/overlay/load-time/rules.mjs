@@ -486,16 +486,24 @@ const lexical = (stmts) => stmts.flatMap((s) => {
   return [];
 });
 const parse = (text) => acorn.parse(text, { ecmaVersion: 'latest', sourceType: 'module', locations: true, allowReturnOutsideFunction: false });
-// a program's renamed import specifiers: local -> the name it imports
-const renames = (ast, as = new Map()) => {
-  for (const s of ast.body) if (s.type === 'ImportDeclaration') for (const x of s.specifiers) if (x.type === 'ImportSpecifier' && (x.imported.name ?? x.imported.value) !== x.local.name) as.set(x.local.name, x.imported.name ?? x.imported.value);
+// where a relative import of file leads, as a path like the owners' ('./a.mjs' from lib/b.mjs is lib/a.mjs);
+// anything else (node:path, a package) leads to no module of the split
+const posix = require('node:path').posix;
+const target = (file, spec) => (/^\.\.?\//.test(spec) ? posix.join(posix.dirname(file), spec) : null);
+// a program's renamed import specifiers: local -> the let it imports, or null when its source is not that
+// let's owner (another module's binding of the same name, or a builtin's), so a write to it is no let's
+const renames = (file, ast, as = new Map()) => {
+  for (const s of ast.body) if (s.type === 'ImportDeclaration') for (const x of s.specifiers) {
+    const name = x.imported?.name ?? x.imported?.value;
+    if (x.type === 'ImportSpecifier' && name !== x.local.name) as.set(x.local.name, LETS.get(name) === target(file, s.source.value) ? name : null);
+  }
   return as;
 };
 // as: the renames of the module's imports region; the entry's own imports are in its text
 function writesOf(file, text, as) {
   const ast = parse(text);
-  const AS = renames(ast, new Map(as));
-  const of = (x) => AS.get(x) ?? x;
+  const AS = renames(file, ast, new Map(as));
+  const of = (x) => (AS.has(x) ? AS.get(x) : x);
   const out = [];
   const bound = (sc, x) => { for (let s = sc; s; s = s.up) if (s.names.has(x)) return true; return false; };
   const foreign = (sc, x) => !bound(sc, x) && LETS.has(of(x)) && LETS.get(of(x)) !== file;
@@ -536,7 +544,7 @@ function writes(file, given, imports) {
   let text = given;
   const sites = [], refused = [];
   let as;
-  try { as = imports ? renames(parse(imports)) : new Map(); } catch (e) {
+  try { as = imports ? renames(file, parse(imports)) : new Map(); } catch (e) {
     if (!parseError(e)) throw e;
     refused.push({ line: e.loc.line, names: [], form: 'parse', why: 'its imports do not parse: ' + e.message, imports: true });
     return { file, text, sites, refused };

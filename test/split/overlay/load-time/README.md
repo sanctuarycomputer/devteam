@@ -20,7 +20,7 @@ In the tree, the CLI's modules do no work while they load (`cutover-tree@1`, the
      - a local `setX` in scope;
      - a pattern whose default or computed key reads a name it writes;
      - a let whose setter's name is already taken, by a top-level name or a global such as `setTimeout`;
-     - a write through a renamed import (`import { X as Q }`, then `Q = 1`).
+     - a write through a renamed import of the let from its owner (`import { X as Q } from './a.mjs'`, then `Q = 1`). A renamed import from any other module is no write to that let.
    - If acorn can't be loaded, the rule is refused as a whole and says so (`node's acorn (--expose-internals) failed: …`). Any other failure of the child is named `the writes child failed: …`.
 
 Then two checks run, after every area's rules. Whatever they refuse is reported stale, and the tree is still written.

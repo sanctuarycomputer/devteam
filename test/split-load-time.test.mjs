@@ -56,6 +56,9 @@ test('L4: the check refuses a module that spawns, writes, prints or reads proces
 
 // lets a module owns, and one that writes them in every form, and names them only locally
 const LETS = mod([], 'export let X = 0;\nexport let Y = 0;\nexport let Z = null;\nexport let S = \'\';\nexport let W = null;\nexport const K = 1;\n');
+// renamed imports of names that are lets elsewhere, from modules that don't own them: k.mjs's const X (a.mjs
+// owns the let X) and node:path's join (j.mjs owns a let join)
+const OTHER_SOURCE = () => ({ 'a.mjs': LETS, 'j.mjs': mod([], 'export let join = 0;\n'), 'k.mjs': mod([], 'export const X = 5;\n'), 'h.mjs': mod(["import { X as Q } from './k.mjs';", "import { join as J } from 'node:path';"], 'export function w() { Q = 1; J = 2; }\n') });
 
 test("L5: the shared-state check refuses each form of write to another module's let, and no write to a local of that name", async () => {
   const refused = await checkOn({ 'a.mjs': LETS, 'b.mjs': mod(["import { X, Y } from './a.mjs';"], [
@@ -72,6 +75,12 @@ test("L5: the shared-state check refuses each form of write to another module's 
   // a write through a renamed import is a write to the let it imports, named by both names
   const renamed = await checkOn({ 'a.mjs': LETS, 'c.mjs': mod(["import { X as Q } from './a.mjs';"], 'export function w() { Q = 1; }\n') }, 'shared-state');
   assert.deepEqual(renamed.map((r) => `${r.site}: ${r.why}`), [`${LIB}/c.mjs:4 Q: writes Q (assign), the let X of ${LIB}/a.mjs: an import can't be assigned`]);
+  // a renamed import from a module that is not the let's owner (a same-named const of a third module, a builtin
+  // whose export shares a let's name) is no write to that let
+  assert.deepEqual(await checkOn(OTHER_SOURCE(), 'shared-state'), []);
+  // an imports region that doesn't parse: the module is refused, at that region's own line
+  const broken = await checkOn({ 'a.mjs': LETS, 'g.mjs': mod(["import { K } from './a.mjs';", "import { X from './a.mjs';"], 'export function w() { X = 1; }\n') }, 'shared-state');
+  assert.deepEqual(broken.map((r) => `${r.site}: ${r.why}`), [`${LIB}/g.mjs:3 : its imports do not parse: Unexpected token (2:11)`]);
 });
 
 test("L5b: the shared-state check reads the entry too, whose imports are in its body: a write there to another module's let is refused", async () => {
@@ -120,6 +129,11 @@ test('L7: the setters rule refuses a write it can\'t rewrite (++, a pattern used
   const r = await settersOn(rm);
   assert.deepEqual(r.refused.map((x) => `${x.site}: ${x.why}`), [`${LIB}/e.mjs:4 Q: Q is a renamed import of the let X of ${LIB}/a.mjs: the rule can't rewrite it`]);
   assert.deepEqual([r.changed, rm['e.mjs'].includes('Q = 1;') && !rm['a.mjs'].includes('setX')], [[], true], 'no setter, and the write left as written');
+  // a renamed import from a module that is not the owner: no let's write, so nothing refused or rewritten
+  const om2 = OTHER_SOURCE();
+  const before = { ...om2 };
+  const n = await settersOn(om2);
+  assert.deepEqual([n.refused, n.changed, om2], [[], [], before]);
 });
 
 test('L8: when node\'s acorn can\'t load, or the writes child fails otherwise, the setters rule and the shared-state check are refused as a whole, naming which', async () => {
