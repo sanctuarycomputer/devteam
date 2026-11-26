@@ -33353,7 +33353,9 @@ function cmdRecurring() {
 //   each of a path's first three components is compared as git compares .git on any file system:
 //   case-insensitively, after Unicode NFC normalisation, with the code points HFS+ ignores removed (U+200C
 //   to U+200F, U+202A to U+202E, U+206A to U+206F, U+FEFF), with a trailing run of dots and spaces dropped,
-//   and a component that is the name's NTFS 8.3 short name (DEVTEA~<digit>, KIT~<digit>) matching too; so
+//   and a component that is the name's NTFS 8.3 short name (DEVTEA~<digit>, KIT~<digit>) matching too; a
+//   component is cut at its first ':' (an NTFS stream: .kit::$INDEX_ALLOCATION, .kit:x) and a '\' is read
+//   as a separator (.kit\x), as git's is_ntfs_dotgit does; so
 //   .KIT/, Docs/DevTeam/.kit/, .kit./ and KIT~1/ are .kit. An install is only ever made on the machine, by
 //   the step. The ignore line does not fold case on a case-sensitive file system; merge's refusal is what
 //   stops .KIT.

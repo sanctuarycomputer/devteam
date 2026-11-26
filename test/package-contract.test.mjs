@@ -392,10 +392,12 @@ test('C13 each failure, driven once', async () => {
       } else if (f === 'hostile-env') {
         const e = reg.env();
         assert.ok(Object.keys(e).some((k) => /^npm_config_registry$/i.test(k)) && Object.keys(e).some((k) => /^NPM_CONFIG_/.test(k)), 'C13 hostile-env: env() carries npm config pointing elsewhere');
+        assert.equal(e['npm_config_@sanctuarycomputer:registry'], 'http://127.0.0.1:9/', "C13 hostile-env: and a scoped registry for the package's scope");
         const vd = viewDir('hostile-view');
         const raw = spawnSync('npm', ['view', `${NAME}@0.101.0`, '--json', `--registry=${reg.url}`, '--ignore-scripts', `--prefix=${vd}`, '--workspaces=false'], { cwd: vd, env: { ...e, ...npmEnv(reg) }, encoding: 'utf8', timeout: 60000 });
         assert.equal(raw.status, 1, 'C13 hostile-env: npm refuses a call that passed the config on');
         assert.match(raw.stderr, /npm config from the environment reached npm/, 'C13 hostile-env: and says so');
+        assert.match(raw.stderr, /npm_config_@sanctuarycomputer:registry/, 'C13 hostile-env: naming the scoped registry too');
         assert.equal(npm(reg, ['view', `${NAME}@0.101.0`, '--json', ...FLAGS(reg)]).status, 0, 'C13 hostile-env: the same call with the config dropped passes');
       }
       seen.push(f);
@@ -436,6 +438,7 @@ test('C14 the fake npm refuses a call that breaks the calling rules', async () =
     refused([...view, `--registry=${reg.url}`], {}, /--ignore-scripts/, 'no --ignore-scripts');
     refused([...view, ...FLAGS(reg)], { env: npmEnv(reg, { npm_config_cache: '/tmp/x' }) }, /npm config from the environment reached npm: npm_config_cache/, 'any other npm_config_ variable');
     refused([...view, ...FLAGS(reg)], { env: npmEnv(reg, { NPM_CONFIG_REGISTRY: 'http://127.0.0.1:9/' }) }, /npm config from the environment reached npm: NPM_CONFIG_REGISTRY/, 'an upper-case NPM_CONFIG_ variable');
+    refused([...view, ...FLAGS(reg)], { env: npmEnv(reg, { 'npm_config_@sanctuarycomputer:registry': 'http://127.0.0.1:9/' }) }, /npm config from the environment reached npm: npm_config_@sanctuarycomputer:registry/, 'a scoped registry variable, a name no shell keeps');
     const env = npmEnv(reg);
     refused([...view, ...FLAGS(reg)], { env: { ...env, npm_config_globalconfig: env.npm_config_userconfig } }, /double-loading config/, 'one file for both configs');
     const full = path.join(reg.dir, 'full-npmrc');
@@ -472,6 +475,13 @@ test('C14 the fake npm refuses a call that breaks the calling rules', async () =
     fs.writeFileSync(path.join(busy, 'x'), '');
     refused([...view, ...FLAGS(reg)], { cwd: busy }, viewRule, 'view in a folder holding more than its package.json');
     refused([...view, ...FLAGS(reg)], { cwd: scratch('view-bare') }, viewRule, 'view in a folder with no package.json');
+    const wsView = scratch('view-ws');
+    fs.writeFileSync(path.join(wsView, 'package.json'), '{"workspaces":["x"],"packageManager":"npm@10.9.9"}\n');
+    refused([...view, ...FLAGS(reg)], { cwd: wsView }, viewRule, "view whose package.json isn't {}");
+    const linkView = scratch('view-link');
+    fs.writeFileSync(path.join(linkView, '..', 'view-link-target.json'), '{}\n');
+    fs.symlinkSync(path.join(linkView, '..', 'view-link-target.json'), path.join(linkView, 'package.json'));
+    refused([...view, ...FLAGS(reg)], { cwd: linkView }, viewRule, 'view whose package.json is a symlink');
     const wsRoot = scratch('ws-root');
     fs.writeFileSync(path.join(wsRoot, 'package.json'), `${JSON.stringify({ name: 'proj', private: true, workspaces: ['v/*'] })}\n`);
     const wsPin = path.join(wsRoot, 'v', 'pin');
@@ -693,6 +703,7 @@ test('C16 the comment above packagePinPair states kit-install@1, and the alpha-b
     ['the folders npm runs in', /in a folder the step made that holds no \.npmrc: ci and audit in \.kit\/<version>-<hash>\/, view in its own folder made outside the checkout \(mkdtemp under os\.tmpdir\(\)\) holding only a package\.json the step writes \(\{\}\)/],
     ['nothing above is refused', /so a workspace root or an \.npmrc above changes nothing and is not refused \(C4 runs real npm to show it\)/],
     ['merge compares .kit as git compares .git', /each of a path's first three components is compared as git compares \.git on any file system: case-insensitively, after Unicode NFC normalisation, with the code points HFS\+ ignores removed[\s\S]*a trailing run of dots and spaces dropped[\s\S]*NTFS 8\.3 short name[\s\S]*\.KIT\/, Docs\/DevTeam\/\.kit\/, \.kit\.\/ and KIT~1\/ are \.kit/],
+    ['the NTFS stream and backslash spellings', /a component is cut at its first ':' \(an NTFS stream: \.kit::\$INDEX_ALLOCATION, \.kit:x\) and a '\\' is read as a separator \(\.kit\\x\)/],
     ['the ignore line does not fold case', /The ignore line does not fold case[\s\S]*merge's refusal is what stops \.KIT/],
     ['audit reports the attestation', /npm audit signatures must then pass on the installed tree and report the package's attestation verified/],
     ['the bundle fetched once in 15 s', /is fetched once \(15 s, at most 1 MiB\)/],

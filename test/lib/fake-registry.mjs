@@ -38,7 +38,9 @@
 //                   the provenance statement names another repository, workflow file, ref or commit
 //   digest          the statement's subject digest is another package's
 //   old-npm         npm says 9.4.2, and audit signatures checks no attestation
-//   hostile-env     env() adds npm_config_* and NPM_CONFIG_* variables that point npm elsewhere
+//   hostile-env     env() adds npm_config_* and NPM_CONFIG_* variables that point npm elsewhere, one of
+//                   them npm_config_@sanctuarycomputer:registry (a name no shell keeps, so the fake's npm
+//                   is a node script, never a shell wrapper)
 //   server-error    every request is a 503 (an outage: unreachable to the kit, never a refusal)
 //   attestation-gone
 //                   manifests advertise attestations but the bundle is a 404 (real npm's audit fails E404)
@@ -56,7 +58,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { fork, spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const SELF = fileURLToPath(import.meta.url);
 export const FIXTURES = path.resolve(path.dirname(SELF), '..', 'fixtures', 'kit-install');
@@ -240,7 +242,10 @@ export async function startFakeRegistry({ fail = null, commits = {} } = {}) {
     child.on('message', on);
     child.send({ id });
   });
-  fs.writeFileSync(path.join(bin, 'npm'), `#!/bin/sh\nexec '${process.execPath.replace(/'/g, "'\\''")}' '${SELF.replace(/'/g, "'\\''")}' npm '${stateFile.replace(/'/g, "'\\''")}' "$@"\n`, { mode: 0o755 });
+  // the npm is a node script, not a shell wrapper: a shell (dash) drops variables whose names aren't shell
+  // names, such as npm_config_@scope:registry, which real npm reads, so the fake must see them too
+  if (/\s/.test(process.execPath)) throw new Error(`fake registry: node's path has a space, which a #! line can't hold (${process.execPath})`);
+  fs.writeFileSync(path.join(bin, 'npm'), `#!${process.execPath}\nimport(${JSON.stringify(pathToFileURL(SELF).href)}).then((m) => m.fakeNpm(${JSON.stringify(stateFile)}, process.argv.slice(2)));\n`, { mode: 0o755 });
   return {
     url: state.url, port: first.port, bin, dir, home,
     // base's variables with this npm first on PATH and the registry named for the kit (a loopback URL,
@@ -250,7 +255,7 @@ export async function startFakeRegistry({ fail = null, commits = {} } = {}) {
       if (state.fail === 'hostile-env') {
         const evil = path.join(dir, 'evil-npmrc');
         fs.writeFileSync(evil, 'registry=http://127.0.0.1:9/\nignore-scripts=false\n');
-        Object.assign(e, { npm_config_registry: 'http://127.0.0.1:9/', NPM_CONFIG_USERCONFIG: evil, npm_config_ignore_scripts: 'false' });
+        Object.assign(e, { npm_config_registry: 'http://127.0.0.1:9/', NPM_CONFIG_USERCONFIG: evil, npm_config_ignore_scripts: 'false', 'npm_config_@sanctuarycomputer:registry': 'http://127.0.0.1:9/' });
       }
       return e;
     },
@@ -281,7 +286,7 @@ export async function startFakeRegistry({ fail = null, commits = {} } = {}) {
 }
 
 // ---- the fake npm -----------------------------------------------------------------------------
-async function fakeNpm(stateFile, args) {
+export async function fakeNpm(stateFile, args) {
   const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
   const npmEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => /^npm_config_/i.test(k)));
   let status = 0;
@@ -313,7 +318,8 @@ async function fakeNpm(stateFile, args) {
       if (extra.length || !once || !shape) return rule(`every call is exactly view <name>@<version> [<field>] [--json], ci [--dry-run] or audit signatures, with --registry=<the registry>, --ignore-scripts, --prefix=<the folder it runs in> and --workspaces=false and nothing else (got ${args.join(' ')})`);
     }
     if (fs.existsSync('.npmrc')) return rule('npm runs in a folder with no .npmrc');
-    if (plain[0] === 'view' && fs.readdirSync('.').join('/') !== 'package.json') return rule('view runs in its own folder holding only a package.json the step writes');
+    const viewOk = () => { try { return fs.readdirSync('.').join('/') === 'package.json' && fs.lstatSync('package.json').isFile() && fs.readFileSync('package.json', 'utf8').trim() === '{}'; } catch { return false; } };
+    if (plain[0] === 'view' && !viewOk()) return rule('view runs in its own folder holding only a package.json the step writes ({}, a regular file)');
     const stray = Object.keys(npmEnv).filter((k) => !['npm_config_userconfig', 'npm_config_globalconfig'].includes(k));
     if (stray.length) return rule(`npm config from the environment reached npm: ${stray.sort().join(', ')}`);
     const u = npmEnv.npm_config_userconfig, g = npmEnv.npm_config_globalconfig;
