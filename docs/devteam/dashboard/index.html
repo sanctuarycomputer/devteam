@@ -11834,10 +11834,15 @@ async function termRead(w) {
   let j = null;
   if (r && r.status !== 304) j = await r.json().catch(() => null);
   s.reading = false;
-  s.every = took > TERM_MS.slow ? Math.min(TERM_MS.most, Math.max(TERM_MS.slow, s.every * 2)) : TERM_MS.every;
+  // a read that failed counts as slow, so a dashboard that is down is asked less often, not every 150 ms
+  const failed = !r || (r.status !== 304 && !(r.ok && j?.v === 1));
+  s.every = took > TERM_MS.slow || failed ? Math.min(TERM_MS.most, Math.max(TERM_MS.slow, s.every * 2)) : TERM_MS.every;
   if (r?.status === 403 && typeof j?.why === 'string') { TERM.why = j.why; TERM.token = null; thDraw(); return void termRedraw(); }
+  // a read's own words, kept apart from a post's refusal: the next good read takes them away
+  const was = s.readErr;
+  s.readErr = !failed ? null : !r ? "The dashboard didn't answer; trying again." : "The screen couldn't be read just now; trying again.";
   if (r?.ok && j?.v === 1) termScreen(w, j);
-  else if (!r || (r.status !== 304 && !r.ok)) { s.err = "The dashboard didn't answer; trying again."; termHint(w); }
+  else if (s.readErr !== was) termHint(w);
   termSchedule(w);
 }
 // A screen in hand (a read's, or a post's answer): kept with its etag and drawn. Shell's first live screen marks it
@@ -11845,6 +11850,11 @@ async function termRead(w) {
 function termScreen(w, j) {
   const s = termTab(w);
   if (j.state === 'live') s.live = true;
+  // the numbers written into xterm are numbers in range, whatever the answer held (terminal@1 §6's bounds)
+  const n = (v, lo, hi, d) => (Number.isInteger(v) ? Math.min(hi, Math.max(lo, v)) : d);
+  const cols = n(j.cols, 1, 500, 80), rows = n(j.rows, 1, 200, 24);
+  j = { ...j, cols, rows, lines: Array.isArray(j.lines) ? j.lines.filter((l) => typeof l === 'string').slice(0, rows) : [],
+    cursor: { x: n(j.cursor?.x, 0, cols - 1, 0), y: n(j.cursor?.y, 0, rows - 1, 0), visible: j.cursor?.visible === true } };
   s.screen = j;
   s.etag = typeof j.etag === 'string' ? j.etag : null;
   termPaint(w);
@@ -11899,7 +11909,7 @@ function termPaint(w) {
   if (!s.box) return;
   const st = s.box.querySelector('.term-state'), wrap = s.box.querySelector('.term-wrap'), live = s.box.querySelector('[data-term-live]');
   const state = (html, label) => { st.innerHTML = html; st.hidden = false; wrap.hidden = true; live.classList.add('off'); live.lastChild.textContent = label; termHint(w); };
-  if (TERM.why && TERM.why !== 'view') return void state(`<p>${esc(TERM_WHY_WORDS[TERM.why] ?? "The terminal tabs didn't answer. Reload the page to try again.")}</p>`, 'off');
+  if (TERM.why && TERM.why !== 'view') return void state(`<p>${esc(Object.hasOwn(TERM_WHY_WORDS, TERM.why) ? TERM_WHY_WORDS[TERM.why] : "The terminal tabs didn't answer. Reload the page to try again.")}</p>`, 'off');
   const sc = s.screen;
   if (w === 'shell' && sc?.state === 'gone' && s.live) return void state('<h3>The shell ended.</h3><button type="button" data-term-newshell>Open a new shell</button>', 'ended');
   if (w === 'shell' && !sc && s.err) return void state(`<p>${esc(s.err)}</p><button type="button" data-term-newshell>Try again</button>`, 'not open');
@@ -12008,7 +12018,7 @@ function termHint(w) {
   if (!h) return;
   const held = s.screen?.held;
   let html;
-  if (s.err) html = `<span class="err">${esc(s.err)}</span>`;
+  if (s.err || s.readErr) html = `<span class="err">${esc(s.err || s.readErr)}</span>`;
   else if (false) html = `<span data-term-waiting>Messages for the supervisor are waiting until you send or clear your line.${held.prompt === 'unknown' ? ' Answer it here to let them through.' : ''}</span>`;
   else if (TERM.lib === 'failed') html = "<span>The terminal couldn't load, so typing is off. This is the screen as text.</span>";
   else if (s.screen?.state === 'live') html = '<span>Click the screen to type.</span> <span><kbd>Ctrl</kbd> <kbd>]</kbd> to leave it.</span>';

@@ -179,6 +179,22 @@ test("terminal A11: th=supervisor draws the fake's screen with xterm.js, loaded 
   assert.equal(await R.p.ev(`document.querySelector('#th-tabs [data-tab="supervisor"]').hasAttribute('aria-disabled')`), false, 'and enabled');
 });
 
+test('terminal A11: a failed read shows its words until a read succeeds again, and failed reads back off', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=supervisor' });
+  const hint = `document.querySelector('.term-box[data-term="supervisor"] .term-hint').textContent`;
+  await R.soon(`!!document.querySelector('.term-box[data-term="supervisor"] .xterm')`, 'drawn');
+  const reads = () => R.term(/\/supervisor\/screen$/).length;
+  R.fr.hooks.answer = (p) => (p.endsWith('/screen') ? { status: 502, json: {} } : null);
+  await R.soon(`/couldn't be read just now/.test(${hint})`, 'a failed read: its words');
+  const a = reads();
+  await sleep(3000);
+  assert.ok(reads() - a <= 8, `failed reads back off: ${reads() - a} reads in 3 s`);
+  R.fr.hooks.answer = () => null;
+  R.fake.set({ lines: ['back again'] });
+  await R.soon(`${screenText()}.includes('back again')`, 'a good read draws');
+  await R.soon(`!/couldn't be read|didn't answer/.test(${hint}) && /Click the screen to type/.test(${hint})`, "a good read takes the read's words away");
+});
+
 test('terminal A11: the screen polls only while the document is visible and its box is seen', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
   const R = await open(t, { hash: '#overview?th=supervisor' });
   const reads = () => R.term(/\/supervisor\/screen$/).length;
