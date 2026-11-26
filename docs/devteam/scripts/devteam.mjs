@@ -33852,10 +33852,135 @@ function packagePinPair(pin) {
     'package-lock.json': text({ name: 'devteam-instance', lockfileVersion: 3, requires: true, packages: { '': { name: 'devteam-instance', dependencies }, [`node_modules/${name}`]: { version, resolved, integrity } } }),
   };
 }
+// npmRun (kit-install@1): the one function every kit npm call goes through. It runs `npm <args>` in cwd
+// (absolute) with --registry=<the registry>, --ignore-scripts, --prefix=<cwd> and --workspaces=false
+// after args, each once; with every variable whose name starts with npm_config_, in any letter case,
+// dropped from npm's environment, and npm_config_userconfig and npm_config_globalconfig naming two
+// different empty files in a folder of its own (made under os.tmpdir(), removed after). The registry is
+// https://registry.npmjs.org/, or DEVTEAM_NPM_REGISTRY when that is exactly http://127.0.0.1:<port>/;
+// any other non-empty value throws (code EDEVTEAMREGISTRY) before npm runs. Returns { status, stdout,
+// stderr, error (the spawn's code: ENOENT for no npm on PATH, ETIMEDOUT past timeout ms), registry }.
+function npmRun(args, { cwd, timeout = 120000 } = {}) {
+  const set = process.env.DEVTEAM_NPM_REGISTRY ?? '';
+  const port = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/$/.exec(set)?.[1];
+  if (set !== '' && !(Number(port) <= 65535)) {
+    const e = new Error(`DEVTEAM_NPM_REGISTRY is ${JSON.stringify(set.slice(0, 200))}: it may only be http://127.0.0.1:<port>/ (a test's registry), or unset for the public one`);
+    e.code = 'EDEVTEAMREGISTRY';
+    throw e;
+  }
+  const registry = set === '' ? 'https://registry.npmjs.org/' : set;
+  if (typeof cwd !== 'string' || !path.isAbsolute(cwd)) throw new Error('npmRun: cwd must be an absolute path');
+  const conf = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-npmrc-'));
+  try {
+    const user = path.join(conf, 'user');
+    const global = path.join(conf, 'global');
+    fs.writeFileSync(user, '');
+    fs.writeFileSync(global, '');
+    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^npm_config_/i.test(k)));
+    env.npm_config_userconfig = user;
+    env.npm_config_globalconfig = global;
+    const r = spawnSync('npm', [...args, `--registry=${registry}`, '--ignore-scripts', `--prefix=${cwd}`, '--workspaces=false'], { cwd, env, encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 });
+    return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error?.code ?? null, registry };
+  } finally { fs.rmSync(conf, { recursive: true, force: true }); }
+}
+// package pin <tag> (kit-install@1, decision 2 of kit-package-dist): writes docs/devteam/package.json and
+// package-lock.json into kitDir, packagePinPair's output for the registry's manifest of
+// <package_name from main's settings>@<tag without its v>, layout from the manifest's devteam.layout.
+// It returns { exit, line } and throws nothing; only the kit's own log write can still die (a refused
+// line, the log's lock past its wait). Best effort before layout 2: no npm on PATH, an npm older than 9.5, a registry that can't be reached and a version not published leave both files
+// as they were, exit 0, and log a package-pin-skipped observation naming the cause, which
+// packagePinFindings turns into a finding; a pin written logs package-pinned, which clears it. A tag that
+// isn't vX.Y.Z, a bad DEVTEAM_NPM_REGISTRY, a temp folder it can't make, an unreadable main, a manifest packagePinPair won't take, a
+// failed write and any other npm failure exit 1 and write nothing (an npm failure is logged as a skip
+// too, so it shows).
+function packagePin(kitDir, tag) {
+  const m = /^v((?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8}))$/.exec(typeof tag === 'string' ? tag : '');
+  if (!m) return { exit: 1, line: `package pin: ${JSON.stringify(String(tag ?? '').slice(0, 80))} is not a release tag vX.Y.Z; nothing pinned` };
+  const version = m[1];
+  const files = 'docs/devteam/package.json and package-lock.json';
+  const main = mainRef();
+  const s = main ? settingsAt(main) : null;
+  const name = s?.package_name;
+  if (typeof name !== 'string' || !name) return { exit: 1, line: `package pin ${tag}: can't read package_name from main's settings${main ? ` (${main})` : ' (no main branch)'}; ${files} left as they were` };
+  const by = logWriter();
+  const note = (kind, detail, cause) => {
+    try {
+      appendLog({ type: 'observation', source: { ticket: 'worker', planner: 'planner', responder: 'responder' }[writerClass(by)] ?? 'supervisor', subject: `package:${tag}`, kind, detail, severity: kind === 'package-pinned' ? 1 : 2, valence: kind === 'package-pinned' ? 1 : -1, source_key: `package-pin:${tag}:${cause}` }, by);
+    } catch {}
+  };
+  const skip = (cause, why, exit = 0) => {
+    note('package-pin-skipped', `package pin ${tag} skipped (${cause}): ${why}`, cause);
+    return { exit, line: `package pin ${tag}: skipped (${cause}): ${why}; ${files} left as they were` };
+  };
+  // npmRun throws for a bad DEVTEAM_NPM_REGISTRY and for a temp folder it can't make (a full or
+  // unwritable os.tmpdir()): each is exit 1 with its line
+  const thrown = (e) => ({ exit: 1, line: `package pin ${tag}: ${e.syscall ? `can't make a folder under ${os.tmpdir()} (${e.code ?? e.message})` : e.message}; ${files} left as they were` });
+  let view = null;
+  try {
+    view = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-npm-view-'));
+    fs.writeFileSync(path.join(view, 'package.json'), '{}\n');
+  } catch (e) {
+    if (view) fs.rmSync(view, { recursive: true, force: true });
+    return thrown(e);
+  }
+  try {
+    const npm = (args, timeout = 120000) => npmRun(args, { cwd: view, timeout });
+    let v;
+    // --version reads no registry: 30 s is long for it
+    try { v = npm(['--version'], 30000); } catch (e) { return thrown(e); }
+    if (v.error === 'ENOENT') return skip('no-npm', 'no npm on PATH');
+    const nv = /^(\d+)\.(\d+)\.(\d+)/.exec(v.stdout.trim());
+    if (v.status !== 0 || !nv) return skip('npm-failed', `npm --version failed (${v.error ?? `exit ${v.status}`}: ${(v.stderr.trim() || v.stdout.trim()).split('\n')[0].slice(0, 200)})`, 1);
+    if (Number(nv[1]) < 9 || (Number(nv[1]) === 9 && Number(nv[2]) < 5)) return skip('old-npm', `npm ${nv[0]} is older than 9.5, which can't verify attestations`);
+    let r;
+    try { r = npm(['view', `${name}@${version}`, '--json']); } catch (e) { return thrown(e); }
+    if (r.status !== 0 || r.error) {
+      let code = /^npm (?:error|ERR!) code (\S+)/m.exec(r.stderr)?.[1] ?? null;
+      if (!code) { try { code = JSON.parse(r.stdout)?.error?.code ?? null; } catch {} }
+      if (r.error === 'ETIMEDOUT') code = 'ETIMEDOUT';
+      if (typeof code === 'string' && /^(ECONN[A-Z]*|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|ENETUNREACH|EHOSTUNREACH|E5[0-9][0-9]|E429)$/.test(code)) return skip('unreachable', `the registry ${r.registry} can't be reached (${code})`);
+      if (code === 'E404') return skip('unpublished', `${name}@${version} is not published on ${r.registry} (E404)`);
+      return skip('npm-failed', `npm view ${name}@${version} failed (${code ?? r.error ?? `exit ${r.status}`})`, 1);
+    }
+    let man = null;
+    try { man = JSON.parse(r.stdout); } catch {}
+    const refuse = (why) => ({ exit: 1, line: `package pin ${tag}: refused: the registry's manifest of ${name}@${version} ${why}; ${files} left as they were` });
+    if (!man || typeof man !== 'object' || Array.isArray(man)) return refuse('is not one JSON object');
+    if (man.name !== name || man.version !== version) return refuse(`names ${String(man.name).slice(0, 80)}@${String(man.version).slice(0, 40)}`);
+    const layout = man.devteam?.layout;
+    if (layout !== 1 && layout !== 2) return refuse('has no devteam.layout of 1 or 2');
+    let pair;
+    try { pair = packagePinPair({ name, version, integrity: man.dist?.integrity, resolved: `https://registry.npmjs.org/${name}/-/${name.slice(name.indexOf('/') + 1)}-${version}.tgz`, layout }); } catch (e) { return refuse(`isn't a pin (${e.message})`); }
+    // both written beside their place, then each renamed over it: the lock first, so a stop between the
+    // two leaves a lock that names the new version beside the old package.json, which merge refuses
+    const tmps = [];
+    try {
+      for (const f of ['package-lock.json', 'package.json']) {
+        const t = path.join(kitDir, `.${f}.${process.pid}-${crypto.randomBytes(4).toString('hex')}.tmp`);
+        fs.writeFileSync(t, pair[f], { flag: 'wx' });
+        tmps.push([t, path.join(kitDir, f)]);
+      }
+      for (const [t, f] of tmps) fs.renameSync(t, f);
+    } catch (e) {
+      for (const [t] of tmps) fs.rmSync(t, { force: true });
+      return { exit: 1, line: `package pin ${tag}: can't write ${files} (${e.code ?? e.message})` };
+    }
+    const integrity = man.dist.integrity;
+    note('package-pinned', `package pin ${tag}: pinned ${name}@${version}, layout ${layout}`, 'pinned');
+    return { exit: 0, line: `package pin ${tag}: pinned ${name}@${version} (layout ${layout}, ${integrity.slice(0, 19)}…) in ${files}` };
+  } finally { fs.rmSync(view, { recursive: true, force: true }); }
+}
 // package pin|install|status (kit-install@1). Until each is built, it says so.
 function cmdPackage() {
   const sub = positional[0];
-  if (['pin', 'install', 'status'].includes(sub)) die(`package ${sub}: not built yet`);
+  if (sub === 'pin') {
+    if (positional.length !== 2) die('usage: package pin <tag>');
+    if (!commonDir || !projectInRepo || kitRel.startsWith('..')) die('package pin needs a git checkout with the kit and the project inside it');
+    const r = packagePin(path.join(repoRoot, kitRel), positional[1]);
+    if (r.exit) { process.stderr.write(`devteam: ${r.line}\n`); process.exit(r.exit); }
+    return out(r.line);
+  }
+  if (['install', 'status'].includes(sub)) die(`package ${sub}: not built yet`);
   die('usage: package pin <tag> | package install [--version v] [--into <dir>] | package status [--json]');
 }
 
