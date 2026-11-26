@@ -1637,6 +1637,7 @@ const CLASS_WORDS = Object.freeze({
   'registry-attest': 'Confirming the registry is complete',
   'new-dependency': 'Adding a new dependency',
   'artifact-publish': 'Publishing a page',
+  'artifact-restore': 'Bringing an archived page back into the Library',
   'recurring-edit': 'Adding, changing or stopping a job',
   'pane-answer': "Answering the supervisor's terminal",
   'goal-order': 'Putting the goals in order',
@@ -14729,7 +14730,30 @@ function cmdArtifact() {
     for (const a of list) out(`${a.slug} ${a.error ? `(broken: ${a.error})` : quoteData(a.title)} for ${a.for.join(', ')}`);
     return;
   }
-  die('usage: artifact new <slug> --title t --summary s [--for json] [--kind mock|diagram|docs] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact versions <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner | artifact handoff <slug> [--at <where>] [--json] | artifact notes <slug> [--at <where>] [--json] | artifact addressed <t-id> --note "<what changed>" [--sha <commit>] [--draft <worktree>]');
+  // artifact restore <slug> --reason "<why>": the supervisor brings an archived item back into the
+  // Library (constitutional: the owner asks in a thread and corrects it like any act). Its files never
+  // moved: it is one act in the log.
+  if (sub === 'restore') {
+    const slugName = args[0];
+    if (!LINK_ID.test(slugName ?? '')) die('usage: artifact restore <slug> --reason "<why>"   (the supervisor\'s)');
+    supervisorOnly('artifact restore');
+    const reason = (flagStr('reason') ?? '').replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim();
+    if (!reason) die('artifact restore needs --reason "<why>", which the owner reads with the act');
+    if (Buffer.byteLength(reason) > 500) die(`--reason is at most 500 bytes; this one is ${Buffer.byteLength(reason)}`);
+    const landed = landedArtifacts();
+    if (!landed.some((a) => a.slug === slugName)) die(draftArtifacts(landed).some((a) => a.slug === slugName) ? `${slugName} is a draft; only a landed artifact is ever archived` : `${slugName}: no artifact by that name on main`);
+    // two restores at once write one act: the check and the line under one lock
+    fs.mkdirSync(runDir, { recursive: true });
+    const done = withLock(runPath('artifact-archive'), () => {
+      logCache = null;
+      if (archiveRecords().get(slugName)?.class !== 'artifact-archive') return false;
+      appendLog({ type: 'act', class: 'artifact-restore', what: `restore: ${reason}`, refs: [`artifact:${slugName}`], reversible: true }, 'supervisor');
+      return true;
+    });
+    if (!done) die(`${slugName} is not archived; there is nothing to restore`);
+    return out(`restored ${slugName}: it is back in the Library`);
+  }
+  die('usage: artifact new <slug> --title t --summary s [--for json] [--kind mock|diagram|docs] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact versions <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner | artifact handoff <slug> [--at <where>] [--json] | artifact notes <slug> [--at <where>] [--json] | artifact addressed <t-id> --note "<what changed>" [--sha <commit>] [--draft <worktree>] | artifact archivable <goal-id> [--at <time>] [--json] | artifact restore <slug> --reason "<why>"');
 }
 function cmdArtifacts() {
   gitReadCache = new Map();
@@ -40471,6 +40495,8 @@ const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   artifact notes <slug> [--at main|<worktree>|tree:<id>] [--json]   the notes on that copy not yet resolved: each one's state, the spot as data, the owner's words
   artifact addressed <t-id> --note "<what changed>" [--sha <commit>] [--draft <worktree>]   (the session a note was handed to, or the supervisor) mark it, with the kit's picture of the spot: look at it
   artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner   the owner's record that a landed artifact went public or came down (the gateway's confirm page runs these; by hand they record intent only)
+  artifact archivable <goal-id> [--at <time>] [--json]   the landed artifacts an archive question for that met goal may archive (landed by --at); writes nothing
+  artifact restore <slug> --reason "<why>"   (supervisor) bring an archived artifact back into the Library: one artifact-restore act, no file changes
   artifacts [--json]              landed artifacts, and drafts in session worktrees
   preview <port> [--label "<one line>"]   register a server you are running; prints the link for this machine (a name derived from project, session and label)
   preview --run "<command>" [--port <p>] [--label …]   the kit runs it in a tmux window beside yours; PORT is set, {port} in the command is filled in, a free port in 4400-4499 is picked without --port
