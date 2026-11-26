@@ -73,6 +73,17 @@ test('A7b: tLensMessage keeps the arrows and maps any other key as today', () =>
   assert.deepEqual([of('Escape'), of('Shift'), of('Enter')], ['Escape', 'Shift', 'Shift'], 'any other key as today');
 });
 
+// kit-860: a note whose session's worktree is gone is with the supervisor (with differs from handed.to): open to Hand over again
+test('G4a: tNoteState reads a gone session\'s note as open, and any other handed note as with', () => {
+  const src = /function tNoteState\(t\) \{[\s\S]*?\n\}/.exec(HTML)[0];
+  const tNoteState = vm.runInNewContext(`(${src})`);
+  const at = '2026-11-20T10:01:00.000Z';
+  assert.equal(tNoteState({ status: 'open', handed: { to: 'plan-gone', at }, with: 'supervisor', waiting: 'supervisor' }), 'open');
+  assert.equal(tNoteState({ status: 'open', handed: { to: 'plan-pricing', at }, with: 'plan-pricing', waiting: 'session' }), 'with');
+  assert.equal(tNoteState({ status: 'open', handed: { to: 'supervisor', at }, with: 'supervisor', waiting: 'supervisor' }), 'with');
+  assert.equal(tNoteState({ status: 'open', handed: null }), 'open');
+});
+
 test('A21: --av-measure in css-viewer; no ch width in css-viewer or css-threads', () => {
   const part = (n) => new RegExp(`/\\* ${n} start \\*/([\\s\\S]*?)/\\* ${n} end \\*/`).exec(HTML)?.[1] ?? '';
   assert.match(part('css-viewer'), /--av-measure:\s*calc\(\(var\(--page-max, 1200px\) - 2 \* var\(--page-pad, 32px\) - 11 \* var\(--gap, 16px\)\) \/ 2 \+ 5 \* var\(--gap, 16px\)\)/, '--av-measure defined in css-viewer');
@@ -126,6 +137,47 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await new Promise((r) => setTimeout(r, 1500));
     assert.equal(await V.p.ev(`window.__posts.filter((x) => x.action === 'artifact-handoff').length`), 4, 'setup: it was posted');
     assert.deepEqual(await V.p.ev(`[AV.at, ${text('#e-avn')}]`), ['main', ''], "another version's refusal");
+  });
+
+  await sub('G4b: a gone session\'s note counts in Hand over (N), and a press no pane took says where it waits', async () => {
+    const V = await tabOf({ [N.trial]: { ...ROW.C1(), with: 'supervisor', waiting: 'supervisor' }, [N.plans]: ROW.C1() });
+    await openAt(V, AV_WT, 'plan-pricing');
+    await has(V, '#av-handover', 'the gone one is open again');
+    assert.equal(await V.p.ev(text('#av-handover')), 'Hand over (1)', 'only the gone session\'s note');
+    // its card (kit-148's tCardState): open again, so Hand over again; never With the gone session
+    // (at a place the Library doesn't list, as a gone session's isn't: Hand over goes to the supervisor)
+    assert.equal(await V.p.ev(`(() => { const t = TL.threads.find((x) => x.id === ${J(N.trial)}); return tCardState({ ...t, subject: { ...t.subject, at: 'plan-went' } }, Date.now()); })()`), 'Not handed over yet. Hand over sends it to the supervisor.', "the gone session's card says to hand it over again");
+    const gone = { ...ROW.C1(), with: 'supervisor', waiting: 'supervisor' };
+    // each press on a note of its own: the one just pressed is believed handed for 10 s
+    for (const [to, words, rows, nobody = false] of [['plan-pricing', 'Not typed: plan-pricing has no pane. It waits in its messages until plan-pricing or the supervisor reads it.', { [N.trial]: gone, [N.plans]: ROW.C1() }], ['supervisor', 'Not typed: the supervisor has no pane. It waits in its messages until it reads them.', { [N.trial]: ROW.C1(), [N.plans]: gone }], ['plan-pricing', 'Not typed: neither plan-pricing nor the supervisor has a pane. It waits in their messages until one of them is back.', { [N.trial]: ROW.C1(), [N.plans]: ROW.C1(), [N.annual]: gone }, true]]) {
+      await V.rows(rows);
+      assert.ok(await V.settle(`${shown('#av-handover')} && ${text('#av-handover')} === 'Hand over (1)' && !AV.notesBusy`, 4000), `${to}: setup: one note to press`);
+      await V.p.ev(`(avNotes.say(''), window.__replies['artifact-handoff'] = { body: { to: ${J(to)}, typed: false, count: 1, nobody: ${nobody} } }, true)`);
+      const posts = await V.p.ev(`window.__posts.filter((x) => x.action === 'artifact-handoff').length`);
+      await V.p.click('#av-handover');
+      await V.soon(`window.__posts.filter((x) => x.action === 'artifact-handoff').length === ${posts + 1}`, `${to}: setup: the press posted`);
+      assert.ok(await V.settle(`${text('#e-avn')} === ${J(words)}`, 4000), `${to}: it says ${J(await V.p.ev(text('#e-avn')))}`);
+    }
+  });
+
+  await sub('G4d: the reminder\'s Hand over says the bar\'s line when no pane took it, under With <to>', async () => {
+    const V = await tabOf({ [N.trial]: ROW.C20() });
+    // each case: the viewer opened on an open note and closed by Back (a close the page can't stop, so kit-148's
+    // reminder shows; the X would ask first, kit-937); its Hand over answered typed: false
+    for (const [to, words, nobody = false] of [['plan-pricing', 'Not typed: plan-pricing has no pane. It waits in its messages until plan-pricing or the supervisor reads it.'], ['supervisor', 'Not typed: the supervisor has no pane. It waits in its messages until it reads them.'], ['plan-pricing', 'Not typed: neither plan-pricing nor the supervisor has a pane. It waits in their messages until one of them is back.', true]]) {
+      await V.rows({ [N.trial]: ROW.C20() });
+      await openAt(V, AV_WT, 'plan-pricing');
+      await has(V, '#av-handover', `${to}: setup: an open note`);
+      await V.p.ev('history.back(); void 0');
+      assert.ok(await V.settle(shown('#av-remind'), 4000), `${to}: setup: the reminder shows`);
+      assert.equal(await V.p.ev(text('#e-avr')), '', `${to}: a new card shows no line from the one before`);
+      await V.p.ev(`(window.__replies['artifact-handoff'] = { body: { to: ${J(to)}, typed: false, count: 1, nobody: ${nobody} } }, true)`);
+      const posts = await V.p.ev(`window.__posts.filter((x) => x.action === 'artifact-handoff').length`);
+      await V.p.click('#av-remind-hand');
+      await V.soon(`window.__posts.filter((x) => x.action === 'artifact-handoff').length === ${posts + 1}`, `${to}: setup: the card's press posted`);
+      const got = `[${text('#av-remind .tx')}, ${text('#e-avr')}]`;
+      assert.ok(await V.settle(`(([tx, e]) => tx === ${J(`With ${to}`)} && e === ${J(words)})(${got})`, 4000), `${to}: it says ${J(await V.p.ev(got))}`);
+    }
   });
 
   await sub('A3: the filter starts on To check once any exist, Open and All on choice, kept in localStorage', async () => {

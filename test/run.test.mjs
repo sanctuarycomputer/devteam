@@ -61,6 +61,43 @@ test('cli-runner keeps its compile cache in DEVTEAM_TEST_SHARED_TMP', { skip: !m
   }
 });
 
+// kit-950: a warm process reports its exit only after the script's own exit listeners have run. The
+// kit writes run/cache as it ends; a test that reads it once runNode returns must find it written.
+// No timing: each listener looks at its slot (cli.mjs's dt-cli-*/<n> under TMPDIR, the one holding
+// the request) and says whether the runner had already reported, its exit file there or the slot
+// gone. Run in the old order, the answer is "late" or not yet written; never "ok".
+test('cli-runner reports the exit after the script\'s own exit listeners', () => {
+  const S = fresh('exit-order');
+  const T = fresh('exit-order-tmp');
+  try {
+    const script = path.join(S, 'late.mjs');
+    const mark = path.join(S, 'mark');
+    fs.writeFileSync(script, `import fs from 'node:fs';
+import path from 'node:path';
+const T = ${JSON.stringify(T)};
+const slot = fs.readdirSync(T).filter((d) => d.startsWith('dt-cli-')).flatMap((d) => fs.readdirSync(path.join(T, d)).map((n) => path.join(T, d, n))).find((d) => fs.existsSync(path.join(d, 'req.json')));
+const said = (who) => () => { const reported = !slot || !fs.existsSync(slot) || fs.existsSync(path.join(slot, 'exit')); fs.appendFileSync(${JSON.stringify(mark)}, who + (reported ? ':late ' : ':ok ')); };
+// one listener added as the script loads, one later (as the kit adds its cache writers)
+process.on('exit', said('a'));
+setTimeout(() => { process.once('exit', said('b')); process.exitCode = 3; }, 10);
+`);
+    const code = `import fs from 'node:fs';
+      import { runNode } from ${JSON.stringify(pathToFileURL(path.join(lib, 'cli.mjs')).href)};
+      const r = runNode(${JSON.stringify(script)}, [], { env: { PATH: process.env.PATH, TMPDIR: ${JSON.stringify(T)} } });
+      let seen = null; try { seen = fs.readFileSync(${JSON.stringify(mark)}, 'utf8'); } catch {}
+      console.log(JSON.stringify({ status: r.status, seen }));`;
+    // DEVTEAM_TEST_COLD would bypass the warm runner this checks; TMPDIR puts its slots where the script looks
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { env: nodeEnv({ DEVTEAM_TEST_COLD: undefined, TMPDIR: T }), encoding: 'utf8', timeout: 30000 });
+    assert.equal(r.status, 0, r.stderr);
+    const o = JSON.parse(r.stdout);
+    assert.equal(o.seen, 'a:ok b:ok ', 'R1: both exit listeners ran before the runner reported the exit');
+    assert.equal(o.status, 3, 'R2: the exit code is the script\'s');
+  } finally {
+    fs.rmSync(S, { recursive: true, force: true });
+    fs.rmSync(T, { recursive: true, force: true });
+  }
+});
+
 // ---- the runner's pure parts (T2) ----
 const R = await import('./run.mjs');
 const root = R.ROOT;

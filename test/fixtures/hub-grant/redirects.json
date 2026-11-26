@@ -1,0 +1,154 @@
+{
+  "cases": [
+    {
+      "name": "loopback any port for the kit's client",
+      "client": "devteam",
+      "uri": "http://127.0.0.1:53682/cb",
+      "ok": true
+    },
+    {
+      "name": "localhost, port 1",
+      "client": "devteam",
+      "uri": "http://localhost:1/",
+      "ok": true
+    },
+    {
+      "name": "port 65535, with a query",
+      "client": "devteam",
+      "uri": "http://127.0.0.1:65535/cb?x=1",
+      "ok": true
+    },
+    {
+      "name": "port 65536",
+      "client": "devteam",
+      "uri": "http://127.0.0.1:65536/cb",
+      "ok": false
+    },
+    {
+      "name": "no port",
+      "client": "devteam",
+      "uri": "http://127.0.0.1/cb",
+      "ok": false
+    },
+    {
+      "name": "https loopback",
+      "client": "devteam",
+      "uri": "https://127.0.0.1:5000/cb",
+      "ok": false
+    },
+    {
+      "name": "[::1]",
+      "client": "devteam",
+      "uri": "http://[::1]:5000/cb",
+      "ok": false
+    },
+    {
+      "name": "LOCALHOST in capitals",
+      "client": "devteam",
+      "uri": "http://LOCALHOST:5000/cb",
+      "ok": false
+    },
+    {
+      "name": "another loopback address",
+      "client": "devteam",
+      "uri": "http://127.0.0.2:5000/cb",
+      "ok": false
+    },
+    {
+      "name": "a fragment",
+      "client": "devteam",
+      "uri": "http://127.0.0.1:5000/cb#x",
+      "ok": false
+    },
+    {
+      "name": "user info",
+      "client": "devteam",
+      "uri": "http://u@127.0.0.1:5000/cb",
+      "ok": false
+    },
+    {
+      "name": "javascript:",
+      "client": "devteam",
+      "uri": "javascript:alert(1)",
+      "ok": false
+    },
+    {
+      "name": "an https site for the kit's client",
+      "client": "devteam",
+      "uri": "https://app.example.com/oauth/cb",
+      "ok": false
+    },
+    {
+      "name": "https listed",
+      "client": "metadata/good.json",
+      "uri": "https://app.example.com/oauth/cb",
+      "ok": true
+    },
+    {
+      "name": "a host differing by case",
+      "client": "metadata/good.json",
+      "uri": "https://App.example.com/oauth/cb",
+      "ok": false
+    },
+    {
+      "name": "a trailing slash not listed",
+      "client": "metadata/good.json",
+      "uri": "https://app.example.com/oauth/cb/",
+      "ok": false
+    },
+    {
+      "name": "listed loopback on another port",
+      "client": "metadata/good.json",
+      "uri": "http://127.0.0.1:4000/callback",
+      "ok": true
+    },
+    {
+      "name": "listed loopback on another path",
+      "client": "metadata/good.json",
+      "uri": "http://127.0.0.1:3118/other",
+      "ok": false
+    },
+    {
+      "name": "loopback not listed",
+      "client": "metadata/https-only.json",
+      "uri": "http://127.0.0.1:5000/cb",
+      "ok": false
+    },
+    {
+      "name": "portless listing, any port",
+      "client": "metadata/native-portless.json",
+      "uri": "http://localhost:54321/callback",
+      "ok": true
+    },
+    {
+      "name": "portless listing, no port",
+      "client": "metadata/native-portless.json",
+      "uri": "http://127.0.0.1/callback",
+      "ok": true
+    },
+    {
+      "name": "portless listing, the other loopback host",
+      "client": "metadata/native-portless.json",
+      "uri": "http://[::1]:54321/callback",
+      "ok": false
+    },
+    {
+      "name": "portless listing, another path",
+      "client": "metadata/native-portless.json",
+      "uri": "http://localhost:54321/other",
+      "ok": false
+    },
+    {
+      "name": "[::1] listed, another port",
+      "client": "metadata/ipv6-loopback.json",
+      "uri": "http://[::1]:9000/cb",
+      "ok": true
+    },
+    {
+      "name": "javascript: for a metadata client",
+      "client": "metadata/good.json",
+      "uri": "javascript:alert(1)",
+      "ok": false
+    }
+  ]
+}

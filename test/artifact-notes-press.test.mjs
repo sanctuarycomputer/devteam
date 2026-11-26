@@ -571,7 +571,7 @@ test('the viewer: what a framed page cannot do to a press, the bar, the card', {
     const V = await tabOf({ [N.trial]: ROW.C20(), [N.plans]: ROW.C20() });
     await openAt(V, AV_WT, 'plan-pricing');
     await has(V, '#av-handover', 'the pill');
-    const WORDS = 'Not typed: plan-pricing has no pane. It reads this when it next checks.';
+    const WORDS = 'Not typed: plan-pricing has no pane. It waits in its messages until plan-pricing or the supervisor reads it.';
     const said = `[document.getElementById('e-avn').textContent, document.getElementById('e-avn').title]`;
     const hand = async (body, o = {}) => { await V.rows({ [N.trial]: ROW.C20(), [N.plans]: ROW.C20() }); await V.p.ev(`(AV.handed = null, window.__replies['artifact-handoff'] = ${J({ body, ...o })}, tlDraw(), true)`); const n = (await acts(V, 'artifact-handoff')).length; await V.p.ev(`(document.getElementById('av-handover').click(), true)`); await V.soon(`window.__posts.filter((x) => x.action === 'artifact-handoff').length > ${n}`, 'setup: posted'); };
     const no = { to: 'plan-pricing', typed: false, count: 2 };

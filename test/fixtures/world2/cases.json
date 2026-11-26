@@ -809,12 +809,14 @@
     {
       "file": "cases/public-section.md",
       "doc": "exterior",
-      "shows": "an unnamed word in a ## heading is held, not refused",
+      "shows": "an unnamed capitalised word in a ## heading is refused, and held",
       "visibility": "public",
       "expect": {
         "errors": [],
         "warnings": [],
-        "refused": [],
+        "refused": [
+          "Zorbly"
+        ],
         "held": [
           "Zorbly"
         ],
