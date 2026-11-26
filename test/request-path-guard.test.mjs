@@ -4,6 +4,8 @@
 // is a 500 from servePageAsset, the dashboard and its hub serve on; the hub and the browser view
 // never read it. R3 every place the dashboard's handler and routes build a URL from req.url sits
 // inside a try (the one parse at the top answers 400).
+// R4 a route that throws on what a request carries (today: /api/file with a NUL in its path, which
+// execFile refuses) is answered 400 or 500, never a stop, and logged with its path only; it serves on.
 // Ports: +50 the dashboard's hub (the dashboard itself is pinned on a free port outside the block)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -136,4 +138,20 @@ test('R3 every new URL(req.url …) in the dashboard handler, its routes and ser
   const lines = text.split('\n').filter((l) => /new URL\(req\.url\b/.test(l));
   assert.ok(lines.length >= 3, `R3 found the parses (${lines.length})`);
   for (const l of lines) assert.match(l, /try \{[^}]*new URL\(req\.url\b/, `R3 inside a try: ${l.trim().slice(0, 160)}`);
+});
+
+test('R4 a route that throws on a request is answered (400 or 500) and the dashboard serves on', { timeout: 300000 }, async (t) => {
+  const { dash, port, root } = await dashboard(t);
+  for (const target of ['/api/file?path=%00', '/api/file?path=a%00b&ref=HEAD']) {
+    const r = await raw(port, target);
+    assert.ok([400, 500].includes(r.status), `R4 GET ${target} is answered 400 or 500 (got ${r.status}; ${dash.out().split('\n').filter((l) => /crash/.test(l)).slice(-1)[0] ?? ''})`);
+    await alive(port, `R4 after GET ${target}`);
+  }
+  assert.equal(dash.p.exitCode, null, 'R4 the dashboard process is still running');
+  // the dashboard's log names each failure by method and path, the query cut
+  let logText = '';
+  try { logText = fs.readFileSync(path.join(root, 'docs', 'devteam', 'run', 'dashboard.log'), 'utf8'); } catch {}
+  const lines = logText.split('\n').filter((l) => / request failed: /.test(l));
+  assert.equal(lines.length, 2, `R4 the log has a request failed line for each (${lines.length})`);
+  for (const l of lines) assert.match(l, / request failed: GET \/api\/file: /, `R4 the line names the method and path, no query: ${l.slice(0, 160)}`);
 });

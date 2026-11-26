@@ -30834,7 +30834,7 @@ async function cmdDashboard() {
   const logWatch = presenceChanged(liveLogDir(), () => { dataEpoch += 1; presence.changed(); });
   every(logWatch.tick, 1000);
   const D = dashContext({ log, page, pageCsp, run, describing, versioning, remote, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, ACTION_JSON, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, sessionPrompts, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
-  const server = http.createServer(async (req, res) => {
+  const handle = async (req, res) => {
     if (draining) res.setHeader('connection', 'close');
     // Node's five minutes for a body, for all but an upload (UPLOAD_REQUEST_MS, and its stall timer)
     const bodyTimer = setTimeout(() => { if (!req.complete) req.destroy(); }, bodyMs);
@@ -30859,6 +30859,16 @@ async function cmdDashboard() {
     if (isTerm) return await term.handle(req, res, u);
     const q = { okHost, bodyTimer, u };
     for (const route of DASHBOARD_ROUTES) if (await route(D, req, res, q) !== DASH_NEXT) return;
+  };
+  // A throw out of any route, one no guard foresaw, is that request's 500 (or, once its headers are
+  // out, its connection dropped), logged, and never the dashboard's stop: an async handler's
+  // rejection would reach processLog, which exits.
+  const server = http.createServer((req, res) => {
+    handle(req, res).catch((e) => {
+      log(`request failed: ${req.method} ${String(req.url).split('?')[0].slice(0, 200)}: ${e?.stack ?? e}`);
+      if (!res.headersSent) return send(res, 500, 'text/plain; charset=utf-8', 'this request failed');
+      res.destroy();
+    });
   });
   // Two dashboards starting at once can pick the same free port: the one that loses picks again.
   const tried = [];
