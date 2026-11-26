@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { write } from './lib/kit.mjs';
 import { fixture, SUP } from './lib/next-step-fixture.mjs';
-import { checkExterior as refCheckExterior } from './fixtures/world2/check.mjs';
+import { checkExterior as refCheckExterior, headings as refHeadings } from './fixtures/world2/check.mjs';
 
 const P = 'docs/devteam/project';
 const STRAT = `${P}/strategy.md`;
@@ -21,6 +21,9 @@ const DAY = 86400000;
 const SHIFT = Math.round((Date.parse(`${TODAY}T00:00:00Z`) - Date.parse(`${W2.today}T00:00:00Z`)) / DAY);
 const realDay = (d) => { const t = new Date(`${d}T00:00:00Z`); return !Number.isNaN(t.getTime()) && t.toISOString().slice(0, 10) === d; };
 const shifted = (text) => text.replace(/(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)/g, (d) => (realDay(d) ? new Date(Date.parse(`${d}T00:00:00Z`) + SHIFT * DAY).toISOString().slice(0, 10) : d));
+// The wording a refused heading's line takes: "(a ### heading)" only where text heads an entry with
+// it (a level-3 ATX heading), "(a heading)" for any other form or level (kit-933).
+const formOf = (text, n) => (refHeadings(text).some((h) => h.level === 3 && h.text === n) ? '(a ### heading)' : '(a heading)');
 const oracle = (c) => refCheckExterior(shifted(world2(c.file)), { today: TODAY, visibility: c.visibility, allowed });
 
 test('P4 chore pr refuses or pushes each world2 exterior case as the reference says', async () => {
@@ -53,7 +56,7 @@ test('P4 chore pr refuses or pushes each world2 exterior case as the reference s
       const refused = open ? o.refused : [];
       const r = run(['chore', 'pr', 'drafts', '--title', 'drafts']);
       for (const e of o.errors) assert.ok(r.text.includes(`exterior.md: ${e}`), `P4 chore pr on ${c.file} says "${e}"\n${r.text}`);
-      for (const n of refused) assert.ok(r.text.includes(`"${n}" (a ### heading)`), `P4 chore pr on ${c.file} refuses "${n}"\n${r.text}`);
+      for (const n of refused) assert.ok(r.text.includes(`"${n}" ${formOf(shifted(world2(c.file)), n)} `), `P4 chore pr on ${c.file} refuses "${n}" as ${formOf(shifted(world2(c.file)), n)}\n${r.text}`);
       for (const x of words) assert.ok(r.text.includes(`"${x}" (`), `P4 chore pr on ${c.file} holds "${x}"\n${r.text}`);
       const pushes = !o.errors.length && !refused.length && !words.length;
       assert.equal(r.status === 0, pushes, `P4 chore pr ${pushes ? 'pushes' : 'refuses'} ${c.file}\n${r.text}`);
