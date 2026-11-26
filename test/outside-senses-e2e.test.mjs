@@ -20,21 +20,28 @@ const EXT = `${P}/exterior.md`;
 const FIX = (f) => fs.readFileSync(new URL(`./fixtures/outside-e2e/${f}`, import.meta.url), 'utf8');
 const STRATEGY = FIX('strategy.md');
 const SELF_MD = FIX('self.md');
+const EXTERIOR_MD = FIX('exterior.md');
+// kit-867: the next Exterior a pass drafts, and its change note beside the senses' readings
+const EXTERIOR_2 = FIX('exterior-2.md');
+const NOTE_2 = `${P}/senses/exterior-change-2.md`;
+const CHANGE_NOTE = FIX('exterior-change-2.md');
+// the strategy before the owner's names: no Cartwell
+const UNNAMED = FIX('strategy-unnamed.md');
 // the supervisor's senses: a page describing them and the readings they wrote
 const SENSES = { [`${P}/senses.md`]: FIX('senses.md'), [`${P}/senses/daily-sales.md`]: FIX('senses/daily-sales.md'), [`${P}/senses/cartwell-pricing.md`]: FIX('senses/cartwell-pricing.md') };
 // the code self.md's parts name, and Stripe as a dependency
 const CODE = { 'src/checkout/page.js': 'export {};\n', 'src/payments/charge.js': 'export {};\n', 'package.json': `${JSON.stringify({ name: 'tillstack', dependencies: { stripe: '^17.0.0' } }, null, 2)}\n` };
 const re = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 
-// The project: main holds the strategy (linking self.md) and the code, and no self.md; a gh on PATH
-// says acme/tillstack is private, as the supervisor would have found it.
-function project() {
-  const F = fixture('outside-e2e');
+// The project: main holds the strategy (linking self.md) and the code, and no self.md, unless start
+// says otherwise; a gh on PATH says acme/tillstack is private (or vis), as the supervisor would have found it.
+function project({ name = 'outside-e2e', vis = 'PRIVATE', start = {} } = {}) {
+  const F = fixture(name);
   const { old, g } = F;
   const bin = path.join(F.base, 'bin');
   g(['config', `url.${F.org}.insteadOf`, 'https://github.com/acme/tillstack.git'], old);
   g(['remote', 'set-url', 'origin', 'https://github.com/acme/tillstack.git'], old);
-  write(path.join(bin, 'gh'), '#!/bin/sh\ncase "$*" in *acme/tillstack*) ;; *) exit 1 ;; esac\nif [ "$1 $2" = "repo view" ]; then echo PRIVATE; exit 0; fi\nexit 1\n');
+  write(path.join(bin, 'gh'), `#!/bin/sh\ncase "$*" in *acme/tillstack*) ;; *) exit 1 ;; esac\nif [ "$1 $2" = "repo view" ]; then echo ${vis}; exit 0; fi\nexit 1\n`);
   fs.chmodSync(path.join(bin, 'gh'), 0o755);
   const ENV = { ...SUP, PATH: `${bin}${path.delimiter}${process.env.PATH}` };
   const run = (args, env = ENV) => { const r = F.run(old, args, env); return { status: r.status, out: r.out, err: r.err, text: `${r.out}\n${r.err}` }; };
@@ -52,7 +59,7 @@ function project() {
     g(['commit', '-qm', msg], old);
     g(['push', '-q', 'origin', 'main'], old);
   };
-  onMain({ [STRAT]: STRATEGY, ...CODE }, 'tillstack');
+  onMain({ [STRAT]: STRATEGY, ...CODE, ...start }, 'tillstack');
   const blob = (rel) => g(['rev-parse', `origin/main:${rel}`], old);
   // a chore as the supervisor makes one: start it, change its worktree, chore pr; its head
   const chore = (slug, change) => {
@@ -62,18 +69,27 @@ function project() {
     ok(['chore', 'pr', slug, '--title', `${slug} draft`]);
     return g(['rev-parse', 'HEAD'], w);
   };
+  // chore pr as it goes, refused or not (--names-checked words in more); and whether the branch is pushed
+  const chorePr = (slug, change, more = []) => {
+    const w = path.join(old, '.worktrees', `chore-${slug}`);
+    if (!fs.existsSync(w)) ok(['chore', 'start', slug]);
+    change(w);
+    return run(['chore', 'pr', slug, '--title', `${slug} draft`, ...more]);
+  };
+  const pushed = (slug) => Boolean(g(['ls-remote', 'origin', `refs/heads/chore-${slug}`], old));
   const merge = (slug, q, dry = true) => run(['merge', '--chore', slug, ...(dry ? ['--dry-run'] : []), ...(q ? ['--approved', q] : [])]);
   const body = path.join(F.base, 'pr-body.md');
   write(body, 'x\n\n## One-way doors\n\nNone.\n');
   const checkPr = (slug, sha, q) => run(['check-pr', '--head-ref', `chore-${slug}`, '--sha', sha, '--title', `chore-${slug}: x`, '--body-file', body, ...(q ? ['--approved', q] : [])]);
   // ask the owner about the draft of rel on chore-<slug>, as supervisor.md says; the question's id
+  // (a strategy-change names no chore: it lands in any PR its pinned text is the head of)
   let n = 0;
   const ask = (cls, rel, title, slug) => ok(['ask', '--question', `Approve this draft of ${title} (${++n})?`, '--recommendation', 'yes', '--stake', '3', '--urgency', '2',
-    '--class', cls, '--reasons', 'owner-only', '--links', JSON.stringify([{ title, path: rel, ref: `chore-${slug}` }]), '--approves', `chore-${slug}`]).trim();
+    '--class', cls, '--reasons', 'owner-only', '--links', JSON.stringify([{ title, path: rel, ref: `chore-${slug}` }]), ...(cls === 'strategy-change' ? [] : ['--approves', `chore-${slug}`])]).trim();
   const answered = (cls, rel, title, slug) => { const q = ask(cls, rel, title, slug); owner(['answer', q, 'yes']); return q; };
   const metrics = () => json(ok(['metrics', '--json']));
   const findings = (kind) => metrics().findings.filter((f) => f.kind === kind);
-  return { ...F, ENV, run, runIn, ok, owner, onMain, blob, chore, merge, checkPr, ask, answered, metrics, findings };
+  return { ...F, ENV, run, runIn, ok, owner, onMain, blob, chore, chorePr, pushed, merge, checkPr, ask, answered, metrics, findings };
 }
 
 // a draft check run in the chore's worktree: it read the draft (not "not drafted" or "nothing to check") and found no error
@@ -125,7 +141,6 @@ test('Tillstack draws self.md, then exterior.md, each landed only with the owner
       assert.deepEqual(W.findings('self-missing'), [], 'E2 self-missing gone');
     });
 
-    const EXTERIOR_MD = FIX('exterior.md');
     await check('K3a exterior-missing is high until the owner is asked about a draft', () => {
       assert.deepEqual(severity('exterior-missing'), ['high'], 'K3a high until the owner is asked about a draft');
     });
@@ -231,5 +246,122 @@ test('Tillstack draws self.md, then exterior.md, each landed only with the owner
       assert.doesNotMatch(src, /senses\.md/, 'E10 devteam.mjs does not name senses.md');
       assert.doesNotMatch(src, /project\/senses/, 'E10 devteam.mjs does not name project/senses');
     });
+
+    // kit-867 (OUT-S8): a pass found something changed; the next Exterior, with its change note beside
+    // the senses' readings, lands only under its own exterior-change answer, never the first one's
+    await check('E11 a second exterior.md lands through its own answer, with its change note; the first answer does not land it', () => {
+      assert.equal(W.findings('exterior-stale').length, 1, 'E11 exterior-stale from E7 is still raised');
+      const sha = W.chore('exterior-2', (w) => {
+        write(path.join(w, EXT), EXTERIOR_2);
+        write(path.join(w, NOTE_2), CHANGE_NOTE);
+        checked(W.runIn(w, ['exterior', 'check']), 'E11 the second draft passes exterior check');
+      });
+      refused(W.merge('exterior-2', extQ), new RegExp(`${re(extQ)} approves chore-exterior, not chore-exterior-2`), 'E11 the first version\'s answer does not land the second');
+      refused(W.checkPr('exterior-2', sha, extQ), new RegExp(`${re(extQ)} approves chore-exterior, not chore-exterior-2`), 'E11 nor does check-pr pass it');
+      const q2 = W.answered('exterior-change', EXT, 'The exterior', 'exterior-2');
+      landed(W.checkPr('exterior-2', sha, q2), 'E11 check-pr passes under its own answer');
+      landed(W.merge('exterior-2', q2, false), 'E11 merge --chore lands it under its own answer');
+      W.g(['pull', '-q', '--ff-only', 'origin', 'main'], W.old);
+      assert.equal(W.g(['show', `origin/main:${EXT}`], W.old), EXTERIOR_2.trimEnd(), 'E11 main holds the second exterior.md');
+      assert.equal(W.g(['show', `origin/main:${NOTE_2}`], W.old), CHANGE_NOTE.trimEnd(), 'E11 its change note landed with it');
+      assert.deepEqual(W.findings('exterior-stale'), [], 'E11 not stale: drawn from main\'s strategy.md and the new self.md');
+    });
   } finally { W.done(); }
+});
+
+// kit-867 (OUT-S6): a Tillstack whose main still holds a version 1 self.md (a fenced self block, as an
+// older kit landed it) migrates it to a plain one through self-change.
+test('a version 1 self.md on main migrates to a plain one through self-change', async (t) => {
+  const W = project({ name: 'outside-e2e-v1', start: { [SELF]: FIX('self-v1.md') } });
+  const check = (title, fn) => t.test(title, fn);
+  try {
+    await check('M1 main\'s version 1 self.md raises one self-drift asking for the plain version, and no self-missing', () => {
+      const f = W.findings('self-drift');
+      assert.deepEqual(f.map((x) => [x.severity, x.key]), [['low', 'self@1']], `M1 one self-drift, keyed self@1\n${JSON.stringify(f)}`);
+      assert.match(f[0].suggestion, /plain document/, 'M1 it asks for the plain version');
+      assert.deepEqual(W.findings('self-missing'), [], 'M1 no self-missing: main has a self.md');
+    });
+    await check('M2 the plain draft passes self check, is refused until a self-change answer pins it, then lands and clears self-drift', () => {
+      const sha = W.chore('self', (w) => { write(path.join(w, SELF), SELF_MD); checked(W.runIn(w, ['self', 'check']), 'M2 the plain draft passes self check'); });
+      refused(W.merge('self'), new RegExp(`changes ${re(SELF)}: .*the owner's answer is needed: ask --class self-change`), 'M2 no answer: merge refuses');
+      const q = W.answered('self-change', SELF, 'The Self', 'self');
+      landed(W.checkPr('self', sha, q), 'M2 check-pr passes under the answer');
+      landed(W.merge('self', q, false), 'M2 merge --chore lands it under the answer');
+      W.g(['pull', '-q', '--ff-only', 'origin', 'main'], W.old);
+      assert.equal(W.g(['show', `origin/main:${SELF}`], W.old), SELF_MD.trimEnd(), 'M2 main holds the plain self.md');
+      assert.deepEqual(W.findings('self-drift'), [], 'M2 the plain version clears self-drift');
+    });
+  } finally { W.done(); }
+});
+
+// kit-867 (OUT-S7): on a public repo the same exterior.md draft is refused while main's strategy
+// doesn't name Cartwell, passes once it does and its held words and link hosts are named on the
+// chore, and is refused again once the owner takes the name back.
+test('on a public repo the exterior draft is refused, passes once named, and is refused again once taken back', async (t) => {
+  const W = project({ name: 'outside-e2e-public', vis: 'PUBLIC', start: { [STRAT]: UNNAMED, [SELF]: SELF_MD } });
+  const check = (title, fn) => t.test(title, fn);
+  const HEADING = /"Cartwell" \(a ### heading\) is not named whole in origin main's strategy\.md/;
+  const strategyChange = (slug, text) => {
+    W.chore(slug, (w) => write(path.join(w, STRAT), text));
+    refused(W.merge(slug), new RegExp(`changes ${re(STRAT)}: .*ask --class strategy-change`), `${slug}: no answer, no strategy change`);
+    landed(W.merge(slug, W.answered('strategy-change', STRAT, 'The strategy', slug), false), `${slug}: lands under the owner's strategy-change answer`);
+    W.g(['pull', '-q', '--ff-only', 'origin', 'main'], W.old);
+  };
+  let words = [];
+  try {
+    await check('U1 main\'s strategy names no Cartwell: chore pr refuses the draft\'s Cartwell heading, naming it on the chore or not, and pushes nothing', () => {
+      const r = W.chorePr('exterior', (w) => write(path.join(w, EXT), EXTERIOR_MD));
+      refused(r, HEADING, 'U1 chore pr refuses the heading');
+      const named = W.chorePr('exterior', () => {}, ['--names-checked', 'Cartwell,Exterior,tillstack.example,status.stripe.com,cartwell.example']);
+      refused(named, HEADING, 'U1 --names-checked never clears a heading');
+      assert.equal(W.pushed('exterior'), false, 'U1 nothing pushed');
+    });
+    await check('U2 the owner\'s names, as a strategy-change, land on main', () => {
+      strategyChange('strategy-names', STRATEGY);
+      assert.match(W.g(['show', `origin/main:${STRAT}`], W.old), /Cartwell/, 'U2 main\'s strategy names Cartwell');
+    });
+    await check('U3 the same draft holds its words and link hosts until they are named on the chore, then pushes and lands under its exterior-change answer', () => {
+      const w = path.join(W.old, '.worktrees', 'chore-exterior');
+      W.g(['merge', '-q', '--ff-only', 'origin/main'], w);
+      const r = W.chorePr('exterior', () => assert.equal(fs.readFileSync(path.join(w, EXT), 'utf8'), EXTERIOR_MD, 'U3 the same draft'));
+      assert.notEqual(r.status, 0, `U3 held until named\n${r.text}`);
+      assert.doesNotMatch(r.text, HEADING, 'U3 the heading is no longer refused');
+      for (const x of ['"tillstack.example" (link host)', '"status.stripe.com" (link host)', '"cartwell.example" (link host)']) assert.ok(r.text.includes(x), `U3 holds ${x}\n${r.text}`);
+      assert.equal(W.pushed('exterior'), false, 'U3 nothing pushed while held');
+      words = /--names-checked (\S+)/.exec(r.text)?.[1]?.split(',') ?? [];
+      assert.ok(words.length, `U3 the refusal lists the words to name\n${r.text}`);
+      landed(W.chorePr('exterior', () => {}, ['--names-checked', words.join(',')]), 'U3 chore pr pushes once each is named');
+      assert.equal(W.pushed('exterior'), true, 'U3 pushed');
+      const sha = W.g(['rev-parse', 'HEAD'], w);
+      const q = W.answered('exterior-change', EXT, 'The exterior', 'exterior');
+      landed(W.checkPr('exterior', sha, q), 'U3 check-pr passes under the answer');
+      landed(W.merge('exterior', q, false), 'U3 merge --chore lands it');
+      W.g(['pull', '-q', '--ff-only', 'origin', 'main'], W.old);
+      assert.equal(W.g(['show', `origin/main:${EXT}`], W.old), EXTERIOR_MD.trimEnd(), 'U3 main holds the exterior.md');
+      assert.deepEqual([W.findings('exterior-drift'), W.findings('exterior-stale')], [[], []], 'U3 no exterior-drift and no exterior-stale');
+    });
+    await check('U4 once the owner takes Cartwell back, main\'s heading raises exterior-drift and the next draft is refused again, named on the chore or not', () => {
+      strategyChange('strategy-back', UNNAMED);
+      const f = W.findings('exterior-drift');
+      assert.deepEqual(f.map((x) => x.key), ['cartwell'], `U4 one exterior-drift, for Cartwell\n${JSON.stringify(f)}`);
+      const next = `${EXTERIOR_MD}\nShops print their receipts.\n`;
+      refused(W.chorePr('exterior-2', (w) => write(path.join(w, EXT), next)), HEADING, 'U4 chore pr refuses the heading again');
+      refused(W.chorePr('exterior-2', () => {}, ['--names-checked', [...words, 'Cartwell'].join(',')]), HEADING, 'U4 naming it on the chore, Cartwell too, does not clear it');
+      assert.equal(W.pushed('exterior-2'), false, 'U4 nothing pushed');
+    });
+  } finally { W.done(); }
+});
+
+// kit-867 (OUT-S8): supervisor.md says how the Self and the Exterior are kept right
+test('S supervisor.md says the weekly pass, its due and overdue, what starts one sooner, what starts a new self.md, and one question per document', () => {
+  const md = fs.readFileSync(path.join(KIT, 'process', 'supervisor.md'), 'utf8');
+  const keep = /\n\*\*Keeping the Self and the Exterior right\.\*\*\n([\s\S]*?)(?=\n\n|$)/.exec(md)?.[1] ?? '';
+  const bullet = (head) => keep.split('\n').find((l) => l.startsWith(`- **${head}`)) ?? '';
+  assert.match(bullet('One weekly pass'), /"every":"1w"/, 'S1 a weekly pass');
+  assert.match(bullet('One weekly pass'), /`recurring-due` and `recurring-overdue`/, 'S2 its due and overdue');
+  assert.match(bullet('Sooner'), /fast sense[\s\S]*`exterior-stale`[\s\S]*a move the owner mentions[\s\S]*starts a pass at once/, 'S3 what starts one sooner');
+  assert.match(bullet('What starts a new Self'), /`self-drift`; an approved strategy change; and, in the weekly pass, a reading of what merged/, 'S4 what starts a new self.md');
+  assert.match(bullet('Proposing a change'), /one question per document \(`self-change` or `exterior-change`[\s\S]*never one per passage/, 'S5 one question per document');
+  assert.match(bullet('Proposing a change'), /one short line per changed passage/, 'S6 a line per changed passage');
+  assert.match(bullet('Proposing a change'), /change note is a markdown file under `project\/senses\/` on the draft's own branch/, 'S7 the change note');
 });

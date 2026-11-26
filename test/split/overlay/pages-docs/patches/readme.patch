@@ -1,0 +1,15 @@
+diff --git a/README.md b/README.md
+index c022db92be44e7f019fd678ad3b00779ebd2d9af..dc0071494d68ce7071fb71ac8957b20d66497c58 100644
+--- a/README.md
++++ b/README.md
+@@ -15,3 +15,5 @@ docs/devteam/
+   schema/log.schema.json       the eleven event types and who may write what
+-  scripts/devteam.mjs          the one script (node, no dependencies)
++  scripts/devteam.mjs          the shim every command runs: it starts scripts/cli.mjs (node, no dependencies)
++  scripts/cli.mjs              the CLI's entry: the Node check, the guard, and each command's dispatch
++  scripts/lib/<module>.mjs     the CLI's code, one module per domain (lib/dashboard/ and lib/hub/ for the servers)
+   dashboard/index.html         the owner's page
+@@ -216,2 +218,2 @@ gh release create vX.Y.Z --target main --title vX.Y.Z --notes-file notes.md
+ 
+-What a release changes decides its number. A patch (`vX.Y.Z`, Z above 0) changes nothing the box image runs or relies on since its minor `vX.Y.0`: the list is `IMAGE_RUNS` in `docs/devteam/scripts/devteam.mjs`, and `devteam.mjs box-pins changed --since vX.Y.0 --smoke`, run in a checkout of the release, says `kind: patch`. Anything else is a minor (`vX.Y.0`), whether it fixes or adds. A minor has a release-prep PR (`box-pins bump --release vX.Y.0`) and deploys the box; a patch keeps its minor's stamp, has none, and lands in place (the deploy gate, above).
++What a release changes decides its number. A patch (`vX.Y.Z`, Z above 0) changes nothing the box image runs or relies on since its minor `vX.Y.0`: the list is `IMAGE_RUNS` in `docs/devteam/scripts/lib/box-pins.mjs`, and `devteam.mjs box-pins changed --since vX.Y.0 --smoke`, run in a checkout of the release, says `kind: patch`. Anything else is a minor (`vX.Y.0`), whether it fixes or adds. A minor has a release-prep PR (`box-pins bump --release vX.Y.0`) and deploys the box; a patch keeps its minor's stamp, has none, and lands in place (the deploy gate, above).

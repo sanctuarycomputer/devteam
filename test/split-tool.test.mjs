@@ -1,7 +1,7 @@
 // The split tool (kit-890): test/split/split.mjs writes the kit at a commit with its CLI in
 // modules, --verify proves a tree moved every declaration unchanged, and --count is the sizing count.
 // The F and R tests run on a fixture repo the test makes, so they always run. The H tests split this
-// checkout's own HEAD with the real manifest; when HEAD has drifted from the manifest (a start renamed,
+// checkout's own HEAD with the real manifest and no overlay; when HEAD has drifted from the manifest (a start renamed,
 // a module past the cap, a form the scanner can't read) they skip and name it, so a regular PR is
 // never failed by drift the split tool hasn't caught up with yet.
 import { test, after } from 'node:test';
@@ -350,8 +350,14 @@ const M = JSON.parse(fs.readFileSync(path.join(root, 'test', 'split', 'manifest.
 const sha = run('git', ['-C', root, 'rev-parse', 'HEAD']).stdout.trim();
 const tree = path.join(tmp, 'head');
 const lib = path.join(tree, M.dir);
-const headSplit = split('--at', sha, '--out', tree);
-const headVerify = headSplit.status === 0 ? split('--verify', '--at', sha, '--tree', tree) : null;
+// the H tests judge the tool alone: a split dir with every manifest*.json and no overlay (each
+// overlay area's own test judges that area)
+const headDir = path.join(tmp, 'head-split');
+fs.mkdirSync(headDir);
+for (const m of fs.readdirSync(path.join(root, 'test', 'split')).filter((f) => /^manifest.*\.json$/.test(f))) fs.copyFileSync(path.join(root, 'test', 'split', m), path.join(headDir, m));
+const H = ['--split-dir', headDir];
+const headSplit = split(...H, '--at', sha, '--out', tree);
+const headVerify = headSplit.status === 0 ? split(...H, '--verify', '--at', sha, '--tree', tree) : null;
 // HEAD drifted from the manifest: the H tests skip, naming what drifted. Only these drift kinds
 // skip (a start gone or out of order, a module past the cap, a form the scanner can't
 // read, a declaration fileParts and the scanner read differently); any other problem, or a crash,
@@ -413,7 +419,7 @@ test('H3: at HEAD, the default entry imports every module in manifest order, the
 });
 
 test('H4: at HEAD, verify is clean and the independent count is equal', { skip: STALE }, () => {
-  const v = split('--verify', '--at', sha, '--tree', tree, '--json');
+  const v = split(...H, '--verify', '--at', sha, '--tree', tree, '--json');
   assert.equal(v.status, 0, v.stdout);
   const j = JSON.parse(v.stdout).report[0];
   assert.deepEqual(j.problems, []);
