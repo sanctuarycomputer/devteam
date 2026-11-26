@@ -11826,7 +11826,8 @@ function termSchedule(w) {
 // screen itself); a 304 keeps it. A read over 300 ms doubles the interval up to 2 s; a fast one brings it back.
 async function termRead(w) {
   const s = termTab(w);
-  if (s.reading || !termLive(w)) return;
+  // a refused shell/open has no shell to read: it waits for Try again
+  if (s.reading || !termLive(w) || s.openErr) return;
   s.reading = true;
   const t0 = performance.now();
   let r = null;
@@ -11844,6 +11845,8 @@ async function termRead(w) {
   s.readErr = !failed ? null : !r ? "The dashboard didn't answer; trying again." : "The screen couldn't be read just now; trying again.";
   if (r?.ok && j?.v === 1) termScreen(w, j);
   else if (s.readErr !== was) termHint(w);
+  // a key post refused while this read was out (the pane moved): this answer may be from before, so read again now
+  if (s.again) { s.again = false; s.etag = null; return void termRead(w); }
   termSchedule(w);
 }
 // A screen in hand (a read's, or a post's answer): kept with its etag and drawn. Shell's first live screen marks it
@@ -11865,15 +11868,14 @@ function termScreen(w, j) {
 async function termOpen() {
   const s = termTab('shell');
   if (s.opening || !TERM.token) return;
-  s.opening = true; s.opened = true; s.err = '';
+  s.opening = true; s.opened = true; s.openErr = '';
   const { cols, rows } = termFitSize(s);
   let r = null, j = null;
   try { r = await fetch('/api/term/shell/open', { method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ which: 'shell', page: TERM.page, token: TERM.token, cols, rows }) }); j = await r.json().catch(() => null); } catch { r = null; }
   s.opening = false;
-  if (r?.ok && j?.v === 1) { s.live = false; termScreen('shell', j); }
-  else s.err = r?.status === 409 ? "The shell couldn't be opened: this project has no tmux session." : termWords(r, j);
-  termPaint('shell');
-  termSchedule('shell');
+  // a refused open stays refused (its words, Try again) and reads nothing: there is no shell to read
+  if (r?.ok && j?.v === 1) { s.live = false; termScreen('shell', j); termSchedule('shell'); }
+  else { s.openErr = r?.status === 409 ? "The shell couldn't be opened: this project has no tmux session." : termWords(r, j); termPaint('shell'); }
 }
 // The panel's size in cells at 12 px (the shell is made to fit it): terminal@1 §9's bounds.
 function termFitSize(s) {
@@ -11914,7 +11916,7 @@ function termPaint(w) {
   if (TERM.why && TERM.why !== 'view') return void state(`<p>${esc(Object.hasOwn(TERM_WHY_WORDS, TERM.why) ? TERM_WHY_WORDS[TERM.why] : "The terminal tabs didn't answer. Reload the page to try again.")}</p>`, 'off');
   const sc = s.screen;
   if (w === 'shell' && sc?.state === 'gone' && s.live) return void state('<h3>The shell ended.</h3><button type="button" data-term-newshell>Open a new shell</button>', 'ended');
-  if (w === 'shell' && !sc && s.err) return void state(`<p>${esc(s.err)}</p><button type="button" data-term-newshell>Try again</button>`, 'not open');
+  if (w === 'shell' && s.openErr) return void state(`<p>${esc(s.openErr)}</p><button type="button" data-term-newshell>Try again</button>`, 'not open');
   if (w === 'supervisor' && sc?.state === 'gone') {
     const box = hostHere(location, pageHello(location)?.name)?.box;
     return void state(`<h3>The supervisor isn't running.</h3><p>To bring it back, run this in a terminal on this machine:</p><code>node docs/devteam/scripts/devteam.mjs recover</code>${box ? `<p><a class="linkish" data-term-terminal href="${esc(`${location.protocol}//${box}/#terminal`)}" target="_top">Open the Terminal page</a></p>` : ''}`, 'not running');
@@ -12002,7 +12004,7 @@ async function termPump(w) {
   s.err = termWords(r, j);
   if (r?.status === 403 && j?.why) { TERM.why = j.why; TERM.token = null; thDraw(); termRedraw(); }
   // the pane moved or went: read it again now
-  if (r?.status === 423 || r?.status === 409) { s.etag = null; clearTimeout(s.timer); s.timer = null; termRead(w); }
+  if (r?.status === 423 || r?.status === 409) { s.etag = null; clearTimeout(s.timer); s.timer = null; if (s.reading) s.again = true; else termRead(w); }
   termHint(w);
 }
 // A refused post's words: the server's plain words (terminal@1 §4), else what happened.

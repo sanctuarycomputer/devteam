@@ -215,6 +215,26 @@ test('terminal A11: at most one key post is in flight; queued keys merge up to 4
   await R.soon(`/busy/.test(document.querySelector('.term-box[data-term="supervisor"] .term-hint').textContent)`, 'the busy words');
   await sleep(1500);
   assert.equal(R.posts().length, before + 1, 'the refused post is sent once and never retried');
+  R.fake.set({ busy: false });
+  await R.p.type('s');
+  for (const end = Date.now() + 20000; !R.fake.typed('supervisor').join('').endsWith('s'); await sleep(100)) if (Date.now() > end) assert.fail('timed out: a post taken again');
+  const seqs = R.posts().map((b) => b.seq);
+  assert.ok(seqs.every((q, i) => i === 0 || q === seqs[i - 1] + 1), `seq counts up by one and a refused one is never reused: ${seqs}`);
+  assert.equal(new Set(R.posts().map((b) => b.page)).size, 1, 'one page id for every post of a page load');
+  // a 423 (the pane moved): the screen read again at once, not at the next poll
+  R.fr.hooks.delay = (p) => (p.endsWith('/screen') ? 400 : 0);
+  await sleep(6000);
+  R.fr.hooks.answer = (path) => (path.endsWith('/keys') ? { status: 423, json: { error: 'the pane moved' } } : null);
+  await R.p.type('m');
+  await R.soon(`/pane moved/i.test(document.querySelector('.term-box[data-term="supervisor"] .term-hint').textContent)`, 'a 423: its words');
+  const posted = R.term(/\/keys$/).at(-1).end;
+  const after = () => R.term(/\/supervisor\/screen$/).find((e) => e.start >= posted);
+  for (const end = Date.now() + 3000; !after() && Date.now() < end; ) await sleep(50);
+  const next = after();
+  // a read out when the 423 came (400 ms each here) is followed by a new one as soon as it ends
+  assert.ok(next && next.start - posted < 700, `a 423 reads the screen at once (${next ? next.start - posted : 'none'} ms after; the poll was 2 s)`);
+  R.fr.hooks.answer = () => null;
+  R.fr.hooks.delay = () => 0;
   // a 500 carrying an exception's text: fixed words, the text never shown
   R.fake.set({ busy: false });
   R.fr.hooks.answer = (path) => (path.endsWith('/keys') ? { status: 500, json: { error: 'EACCES: permission denied, open /home/owner/.devteam/secret' } } : null);
@@ -352,6 +372,16 @@ test("terminal A11b: a multi-line paste asks 'Paste N lines?'; confirmed, one pa
   await R.p.ev(pasteIn('"'.repeat(60000)));
   await R.soon(`/too large/.test(document.querySelector('.term-box[data-term="supervisor"] .term-hint').textContent)`, 'too large');
   assert.equal(R.posts().length, 2, 'nothing of it sent');
+  // keys never merge into a queued paste, nor a paste into keys: a key in flight, a paste and a key behind it
+  R.fake.set({ sendMs: 600 });
+  await R.p.type('k');
+  await sleep(100);
+  await R.p.ev(pasteIn('p1'));
+  await R.p.type('q');
+  for (const end = Date.now() + 10000; R.posts().length < 5 && Date.now() < end; ) await sleep(100);
+  R.fake.set({ sendMs: 0 });
+  const tail = R.posts().slice(2).map((b) => (b.paste !== undefined ? `paste:${b.paste}` : `data:${Buffer.from(b.data, 'hex')}`));
+  assert.deepEqual(tail, ['data:k', 'paste:p1', 'data:q'], 'three posts, in order, a paste never merged with keys');
 });
 
 test("terminal A12: th=shell posts shell/open once and draws the shell; an ended shell shows 'The shell ended.' with Open a new shell", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
@@ -438,6 +468,19 @@ test('terminal A13: the /view/ page keeps both slots disabled', { skip: canDrive
   assert.equal(R.term(/./).length, 0, 'the /view/ page asks nothing of the terminal routes');
 });
 
+test('terminal A13: a refused shell/open shows its words with Try again, which stays and opens the shell', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=shell', fake: { shell: false, openFails: true } });
+  const again = `!!document.querySelector('.term-box[data-term="shell"] .term-state:not([hidden]) [data-term-newshell]')?.textContent.includes('Try again')`;
+  await R.soon(again, 'the refusal with Try again');
+  await sleep(1200);
+  assert.ok(await R.p.ev(again), 'Try again stays: no read takes the refusal away');
+  assert.equal(R.term(/\/shell\/screen$/).length, 0, 'a refused open reads no screen');
+  R.fake.set({ openFails: false });
+  await R.p.click('.term-box[data-term="shell"] [data-term-newshell]');
+  await R.soon(`!!document.querySelector('.term-box[data-term="shell"] .xterm') && document.querySelector('.term-box[data-term="shell"] .term-state').hidden`, 'Try again opens the shell');
+  assert.equal(R.term(/\/shell\/open$/).length, 2, 'Try again posts shell/open again');
+});
+
 test('terminal A13: held kit messages behind an open owner line show the waiting note', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
   const R = await open(t, { hash: '#overview?th=supervisor' });
   const hint = `document.querySelector('.term-box[data-term="supervisor"] .term-hint').textContent`;
@@ -451,6 +494,22 @@ test('terminal A13: held kit messages behind an open owner line show the waiting
   assert.doesNotMatch(await R.p.ev(hint), /Answer it here/, 'a readable prompt: no answer-it-here sentence');
   await R.p.key('Enter');
   await R.soon(`!/waiting until/.test(${hint})`, 'a line sent: no note');
+  // a paste leaves the line open (it never submits); Ctrl+C ends it
+  await R.p.ev(pasteIn('pasted'));
+  await R.soon(`/waiting until/.test(${hint})`, 'a paste leaves the line open: the note');
+  for (const type of ['keyDown', 'keyUp']) await R.p.send('Input.dispatchKeyEvent', { type, key: 'c', code: 'KeyC', modifiers: 2, windowsVirtualKeyCode: 67 });
+  await R.soon(`!/waiting until/.test(${hint})`, 'Ctrl+C ends the line: no note');
+  // a post the server didn't take changes nothing
+  R.fr.hooks.rewrite = (p, j) => (p.endsWith('/keys') ? { ...j, taken: false } : j);
+  await R.p.type('z');
+  await sleep(800);
+  assert.doesNotMatch(await R.p.ev(hint), /waiting until/, 'a post not taken leaves the line as it was');
+  R.fr.hooks.rewrite = null;
+  // exactly 2 minutes is over the threshold
+  R.fake.set({ held: { count: 1, oldest_ms: 120000, prompt: 'readable' } });
+  await sleep(800);
+  await R.p.type('y');
+  await R.soon(`/waiting until/.test(${hint})`, 'held exactly 2 minutes: the note');
 });
 
 test("terminal A14b: the page asks GET /api/term/token once on load, before any tab is pressed; why view hides both tabs", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
