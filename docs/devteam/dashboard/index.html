@@ -123,6 +123,7 @@ try {
   :where(.shell) .tabbar .n:not(:where(.no-shell, .no-shell *)) { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
   :where(.shell) .tabbar .n.blue:not(:where(.no-shell, .no-shell *)) { color: var(--blue-fg); font-weight: 500; }
   :where(.shell) .tabbar .spacer:not(:where(.no-shell, .no-shell *)) { flex: 1; }
+  :where(.shell) .tabbar.sub [role="tab"]:not(:where(.no-shell, .no-shell *)) { height: 30px; font-size: 12px; padding: 0 8px; }
   /* the record table: sortable monospace headers, every row opens its record, "None" when empty */
   :where(.shell) .db-t:not(:where(.no-shell, .no-shell *)) { width: 100%; border-collapse: collapse; }
   :where(.shell) .db-t th:not(:where(.no-shell, .no-shell *)), :where(.shell) .db-t td:not(:where(.no-shell, .no-shell *)) { text-align: left; border-bottom: 1px solid var(--line); }
@@ -1546,13 +1547,30 @@ const escHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;
 const shellText = (html) => String(html ?? '').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').trim();
 
 // ---- the tab bar: counts, a disabled state, roving tabindex, arrows that skip disabled tabs ----
-function tabBar({ tabs = [], selected = null } = {}) {
-  const sel = tabs.some((t) => t.id === selected && !t.disabled) ? selected : (tabs.find((t) => !t.disabled) || {}).id;
-  return `<div class="tabbar" role="tablist">${tabs.map((t) => {
+const TAB_PANEL = /^[a-z][a-z0-9-]*$/;
+const TAB_ID = /^[A-Za-z0-9_-]+$/;
+const goodPanel = (p) => typeof p === 'string' && TAB_PANEL.test(p);
+const goodTabId = (id) => TAB_ID.test(String(id ?? ''));
+// the tab a bar selects: selected if it is enabled, else the first enabled tab (undefined: none)
+function tabSelected(tabs, selected) {
+  return tabs.some((t) => t.id === selected && !t.disabled) ? selected : (tabs.find((t) => !t.disabled) || {}).id;
+}
+function tabBar({ tabs = [], selected = null, panel = null, size = null } = {}) {
+  const sel = tabSelected(tabs, selected);
+  return `<div class="tabbar${size === 'sub' ? ' sub' : ''}" role="tablist">${tabs.map((t) => {
     const on = t.id === sel;
+    const ctl = goodPanel(panel) && goodTabId(t.id) ? ` id="tab-${panel}-${t.id}" aria-controls="${panel}"` : '';
     const n = t.count === undefined || t.count === null || t.count === '' ? '' : ` <span class="n${t.waiting ? ' blue' : ''}">${escHtml(t.count)}</span>`;
-    return `<button type="button" role="tab" data-tab="${escHtml(t.id)}" aria-selected="${on}" tabindex="${on ? 0 : -1}"${t.disabled ? ' aria-disabled="true"' : ''}>${escHtml(t.label)}${n}</button>`;
+    return `<button type="button" role="tab" data-tab="${escHtml(t.id)}"${ctl} aria-selected="${on}" tabindex="${on ? 0 : -1}"${t.disabled ? ' aria-disabled="true"' : ''}>${escHtml(t.label)}${n}</button>`;
   }).join('')}</div>`;
+}
+// the panel a tab bar controls, labelled by the tab the bar selects; a bad panel gives html unwrapped
+function tabPanel({ panel, tabs = [], selected = null } = {}, html) {
+  const body = html ?? '';
+  if (!goodPanel(panel)) return body;
+  const sel = tabSelected(tabs, selected);
+  const lab = sel !== undefined && goodTabId(sel) ? ` aria-labelledby="tab-${panel}-${sel}"` : '';
+  return `<div role="tabpanel" id="${panel}"${lab}>${body}</div>`;
 }
 // the tab an arrow, Home or End moves to from fromId, wrapping and skipping disabled tabs (null: not a move)
 function tabStep(tabs, fromId, key) {
@@ -1753,7 +1771,13 @@ function peekHead(v, routes) {
   const path = q < 0 ? h : h.slice(0, q);
   const query = new URLSearchParams(q < 0 ? '' : h.slice(q + 1));
   const peeks = routes.peeks || [];
-  if (path === 'file') return peeks.includes('file') && query.get('path') ? `file?${query}` : null;
+  if (path === 'file') {
+    if (!peeks.includes('file') || !query.get('path')) return null;
+    const view = query.get('view');
+    query.delete('view');
+    if (view === 'raw' || view === 'rendered') query.append('view', view);
+    return `file?${query}`;
+  }
   const s = path.indexOf('/');
   const kind = s < 0 ? path : path.slice(0, s), rest = s < 0 ? '' : path.slice(s + 1);
   if (!rest || !peeks.includes(kind) || kind === 'file') return null;
