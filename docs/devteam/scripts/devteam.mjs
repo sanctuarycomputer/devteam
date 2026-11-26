@@ -14183,11 +14183,36 @@ function shotSweep(id, now) {
   }
 }
 /* note-shots end */
-// An artifact's versions, newest first: its drafts (a worktree's copy that differs from main's), then
-// main's version (landed) and the ones before it (earlier), from the walk artifactTreeOk makes, so
-// every tree listed is one /artifact/tree/ serves. Only trees with an artifact.json, each once at its
-// newest commit; main's capped at ARTIFACT_VERSIONS_MAX versions, counted after those filters. Null
-// when there is nothing at all.
+// A tree's fingerprint, the one describeArtifact gives the same files (kit-947): fingerprint() over
+// git ls-tree -r's paths and blob ids. Kept in run/cache by tree id (a tree id's files never change),
+// the newest 20,000, written once as the process ends; null, and nothing kept, when git can't read it.
+function treeFingerprint(tree) {
+  const file = path.join(runDir, 'cache', 'artifact-tree-fps.json');
+  const kept = treeFingerprint.kept ??= (() => {
+    const k = { data: {}, dirty: false };
+    try { const d = JSON.parse(fs.readFileSync(file, 'utf8')); if (isObj(d)) k.data = d; } catch {}
+    process.on('exit', () => {
+      if (!k.dirty) return;
+      const ids = Object.keys(k.data);
+      for (const id of ids.slice(0, Math.max(0, ids.length - 20000))) delete k.data[id];
+      try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(k.data)); } catch {}
+    });
+    return k;
+  })();
+  if (typeof kept.data[tree] === 'string') return kept.data[tree];
+  const raw = /^[0-9a-f]{40,64}$/.test(tree ?? '') ? git(['ls-tree', '-r', '-z', tree], mainRoot) : null;
+  if (raw === null) return null;
+  const entries = raw.split('\0').filter(Boolean).map((l) => { const tab = l.indexOf('\t'); return { path: l.slice(tab + 1), oid: l.slice(0, tab).split(' ')[2] }; });
+  kept.data[tree] = fingerprint(entries);
+  kept.dirty = true;
+  return kept.data[tree];
+}
+// An artifact's versions in one list, newest first by time: main's distinct contents (each at the
+// first commit that made it; landed is the one main holds now) and the drafts with content of their
+// own (dated by their page's last change), keyed by fingerprint, so a copy is never its own entry.
+// Only servable trees (with an artifact.json), from the walk artifactTreeOk makes, so every tree
+// listed is one /artifact/tree/ serves. The whole list is capped at ARTIFACT_VERSIONS_MAX, never
+// cutting landed. Null when there is nothing at all.
 const ARTIFACT_VERSIONS_MAX = 200;
 function artifactVersions(slug) {
   const drafts = draftArtifacts().filter((a) => a.slug === slug)
@@ -14209,7 +14234,7 @@ function artifactVersions(slug) {
     const raw = git(['log', '--format=%x01%H %cI', '--raw', '--no-abbrev', '-t', '-m', '--first-parent', '--no-renames', ref, '--', folder], mainRoot);
     // a failed read is a failure (exit 1), never an empty history (exit 3)
     if (raw === null) die(`${slug}: could not read main's history`);
-    const seen = new Set();
+    // every commit that made a tree, newest first; a revert's tree is kept here and collapsed below
     for (const chunk of raw.split('\x01').slice(1)) {
       const [head, ...lines] = chunk.split('\n');
       const [commit, time] = head.split(' ');
@@ -14218,8 +14243,7 @@ function artifactVersions(slug) {
         const m = /^:(\d+) (\d+) ([0-9a-f]+) ([0-9a-f]+) \S+\t(.*)$/.exec(l);
         if (m && m[5] === folder && m[2] === '040000') { tree = m[4]; break; }
       }
-      if (!tree || /^0+$/.test(tree) || seen.has(tree)) continue;
-      seen.add(tree);
+      if (!tree || /^0+$/.test(tree)) continue;
       main.push({ tree, commit, time });
     }
     // only servable: a tree without artifact.json at its top (from before the manifest) is left out
@@ -14234,7 +14258,21 @@ function artifactVersions(slug) {
     // a folder missing on main is an empty answer (""), not a failure: only null is
     if (nowLs === null) die(`${slug}: could not read main's history`);
     const nowTree = treeNow(nowLs);
-    main = main.map((e) => ({ kind: e.tree === nowTree ? 'landed' : 'earlier', at: `tree:${e.tree}`, tree: e.tree, commit: e.commit, time: e.time, url: `/artifact/tree/${e.tree}/${slug}/` }));
+    const nowFp = nowTree ? treeFingerprint(nowTree) : null;
+    // one entry per content, at the first commit that made it: walked oldest first, the first of each
+    // fingerprint kept (a tree git can't fingerprint stands alone, by its id), then newest first again,
+    // so each sits at its earliest commit's place in the walk
+    const firsts = new Map();
+    for (const e of [...main].reverse()) {
+      const fp = treeFingerprint(e.tree);
+      const key = fp ?? `tree:${e.tree}`;
+      if (!firsts.has(key)) firsts.set(key, { ...e, fp });
+    }
+    main = [...firsts.values()].reverse().map((e) => {
+      const landed = !!nowTree && (e.fp ? e.fp === nowFp : e.tree === nowTree);
+      const tree = landed ? nowTree : e.tree;
+      return { kind: landed ? 'landed' : 'earlier', at: `tree:${tree}`, tree, commit: e.commit, time: e.time, fp: e.fp, url: `/artifact/tree/${tree}/${slug}/` };
+    });
     truncated = main.length > ARTIFACT_VERSIONS_MAX;
     main = main.slice(0, ARTIFACT_VERSIONS_MAX);
   }
