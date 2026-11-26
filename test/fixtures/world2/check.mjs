@@ -174,6 +174,62 @@ function mask(block, comments = true) {
   }
   return done + out.slice(at);
 }
+// One block's text with what a page keeps as text masked, read left to right as a page reads it: each
+// code span (md, a markdown block) by spaces, each comment by \0. It stops at anything else that could
+// open HTML or an autolink (a < then anything but a space), a comment holding -- or never ended, or an
+// escaped run of backticks, so a span or comment counts only where nothing before it could take in its
+// opener.
+function kept(s, md) {
+  const runs = md ? [...s.matchAll(/`+/g)].map((m) => ({ i: m.index, n: m[0].length })) : [];
+  const later = new Map();
+  for (let k = runs.length - 1; k >= 0; k -= 1) { runs[k].close = later.get(runs[k].n); later.set(runs[k].n, k); }
+  const escaped = (i) => { let n = 0; while (s[i - 1 - n] === '\\') n += 1; return md && n % 2 === 1; };
+  let out = '';
+  let at = 0;
+  let r = 0;
+  const hide = (i, end, by) => { out += s.slice(at, i) + s.slice(i, end).replace(/[^\n]/g, by); at = end; return end; };
+  for (let i = 0; i < s.length;) {
+    if (s[i] === '`' && md) {
+      while (runs[r].i < i) r += 1;
+      if (escaped(i)) break;
+      const { n, close } = runs[r];
+      i = close === undefined ? i + n : hide(i, runs[close].i + n, ' ');
+    } else if (s[i] !== '<') i += 1;
+    else if (escaped(i) || [undefined, ' ', '\t', '\n'].includes(s[i + 1])) i += 1;
+    else if (!s.startsWith('<!--', i)) break;
+    else if (s[i + 4] === '>') i = hide(i, i + 5, '\0');
+    else if (s.startsWith('->', i + 4)) i = hide(i, i + 6, '\0');
+    else {
+      const k = s.indexOf('--', i + 4);
+      if (k < 0 || s[k + 2] !== '>') break;
+      i = hide(i, k + 3, '\0');
+    }
+  }
+  return out + s.slice(at);
+}
+// A line with each table cell (between |s not escaped) read by kept on its own.
+function cells(s) {
+  let out = '';
+  let at = 0;
+  for (let i = 0; i <= s.length; i += 1) {
+    if (i < s.length && s[i] !== '|') continue;
+    let n = 0;
+    while (s[i - 1 - n] === '\\') n += 1;
+    if (i < s.length && n % 2) continue;
+    out += kept(s.slice(at, i), true) + (i < s.length ? '|' : '');
+    at = i + 1;
+  }
+  return out;
+}
+// An HTML block's first line (CommonMark's kinds 1 to 6), and what ends it: a blank line where none.
+const HTMLBLOCK = [
+  [/^<(?:pre|script|style|textarea)(?=[\s>]|$)/i, /<\/(?:pre|script|style|textarea)>/i],
+  [/^<!--/, /-->/],
+  [/^<\?/, /\?>/],
+  [/^<![A-Za-z]/, />/],
+  [/^<!\[CDATA\[/, /\]\]>/],
+  [/^<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|source|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?=[\s/>]|$)/i, null],
+];
 // The text outside code and comments, line for line. A block (what a span or link stays inside) ends
 // at a blank or unread line, a heading, a list item or a table row.
 export const plain = last((text) => {
@@ -688,18 +744,66 @@ export const headed = last((text) => {
   const starts = [0];
   for (let i = raw.indexOf('\n'); i >= 0; i = raw.indexOf('\n', i + 1)) starts.push(i + 1);
   const lineOf = (o) => { let a = 0; let b = starts.length - 1; while (a < b) { const m = (a + b + 1) >> 1; if (starts[m] <= o) a = m; else b = m - 1; } return a + 1; };
-  // Each line as a page reads it: null in a fence, indented code or a comment that opens a line; each
-  // paragraph's code spans and comments masked by spaces. A tag is in code where it is not left as <.
+  // Where a page keeps an HTML heading tag as text (code), so the names rule judges it as before: in a
+  // fence or indented code outside an HTML block, or wholly inside a comment, or in a code span whose
+  // two marks its line and cell hold (ruling m-20261126-121428851). The lines are cut into blocks as a
+  // page cuts them: an HTML block (CommonMark's seven kinds; a fence that opens in one is read as HTML
+  // to its end), and a paragraph, which a blank line, a heading, a rule, an underline, a list item, a
+  // table row or an HTML block ends. Each block is read by kept, once.
+  const ls = lines(text);
+  const sc = scan(text).lines;
   const rd = readable(text);
-  const shownLines = [];
-  for (let i = 0; i < rd.length;) {
-    if (rd[i] === null || !rd[i].trim()) { shownLines.push(rd[i]); i += 1; continue; }
-    let j = i;
-    while (j < rd.length && rd[j] !== null && rd[j].trim()) j += 1;
-    for (const t of mask(rd.slice(i, j).join('\n')).split('\n')) shownLines.push(t); // no spread: a paragraph may be 200,000 lines
-    i = j;
+  const kind = []; // each line's: code, html or md
+  const blocks = []; // { a, b, md, alone }: first and last line
+  let end = null; // what ends the open HTML block: its pattern, or '' for a blank line
+  let taken = false; // in a fence that opened in an HTML block
+  let rc = false; // readable's comment, to tell its unread lines from indented code
+  for (let l = 0; l < ls.length; l += 1) {
+    const s = ls[l];
+    let comment = false;
+    if (!sc[l].code) { comment = rc || /^ {0,3}<!--/.test(s); if (comment) rc = !s.includes('-->'); }
+    if (end === '' && !s.trim()) end = null;
+    taken = sc[l].code && (sc[l].opens ? end !== null : taken);
+    const code = sc[l].code || (rd[l] === null && !comment);
+    const last = blocks[blocks.length - 1];
+    const para = kind[l - 1] === 'md' && !!ls[l - 1].trim() && !last.alone;
+    let k = -1;
+    let seven = false;
+    if (end === null && !code) {
+      const xs = [s.replace(/^ {0,3}/, ''), s.slice(OPENERS.exec(s)[0].length).replace(/^[ \t]*/, '')];
+      k = HTMLBLOCK.findIndex(([o]) => xs.some((x) => o.test(x)));
+      seven = k < 0 && !para && xs.some((x) => /^<\/?[A-Za-z]/.test(x) && trimST(x).endsWith('>'));
+    }
+    if (k >= 0 || seven) {
+      kind.push('html');
+      blocks.push({ a: l, b: l, md: false });
+      end = k >= 0 && HTMLBLOCK[k][1] ? HTMLBLOCK[k][1] : '';
+    } else if (end !== null || taken) {
+      kind.push('html');
+      if (kind[l - 1] === 'html') last.b = l; else blocks.push({ a: l, b: l, md: false });
+    } else if (code) kind.push('code');
+    else {
+      kind.push('md');
+      const alone = HEAD.test(s) || BREAK.test(s) || UNDER.test(s) || /^ {0,3}\|/.test(s);
+      if (!s.trim()) continue;
+      if (para && !alone && !LIST.test(s)) last.b = l;
+      else blocks.push({ a: l, b: l, md: true, alone });
+    }
+    if (end && kind[l] === 'html' && end.test(s)) end = null;
   }
-  const inCode = (o) => { const l = lineOf(o) - 1; const t = shownLines[l]; return t === null || (t !== undefined && t[o - starts[l]] !== '<'); };
+  const km = []; // each line as kept reads its block
+  for (const { a, b, md } of blocks) { let l = a; for (const t of kept(ls.slice(a, b + 1).join('\n'), md).split('\n')) { km[l] = t; l += 1; } }
+  const cellsOf = new Map();
+  const inCode = (o) => {
+    const l = lineOf(o) - 1;
+    const c = o - starts[l];
+    if (kind[l] === 'code') return true;
+    const ch = km[l]?.[c];
+    if (ch !== ' ' && ch !== '\0') return false;
+    if (kind[l] === 'html' || (ch === '\0' && !ls[l].includes('|'))) return true;
+    if (!cellsOf.has(l)) cellsOf.set(l, cells(ls[l]));
+    return cellsOf.get(l)[c] !== '<';
+  };
   for (const m of raw.matchAll(HTMLHEAD)) { const body = m[2].replace(/^[^>]*>/, ''); add(Number(m[1]), body, lineOf(m.index), words(body.replace(/<[^<>]*>/g, shown)), (inCode(m.index) ? { code: true } : { html: true })); }
   return out.filter((h) => h.text).sort((a, b) => a.line - b.line);
 });
