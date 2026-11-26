@@ -29416,11 +29416,19 @@ function pageVersion(page) {
 // <seg> first), to a GET, as before (a HEAD there is the dashboard's 404). Every other method, and
 // every other path, is DASH_NEXT; in the tree it may answer GET and HEAD, and nothing else.
 function servePageAsset(req, res, server) {
-  if (req.method !== 'GET') return DASH_NEXT;
-  const m = server === 'dashboard' ? /^\/review\/[^/]+\/(devteam-ui\.(?:css|js))$/.exec(new URL(req.url, 'http://x').pathname) : null;
+  if (req.method !== 'GET' || server !== 'dashboard') return DASH_NEXT;
+  let p;
+  try { p = new URL(req.url, 'http://x').pathname; } catch { return DASH_NEXT; }
+  const m = /^\/review\/[^/]+\/(devteam-ui\.(?:css|js))$/.exec(p);
   if (!m) return DASH_NEXT;
+  // read before any header, so a file that is gone is a 500 (as servePage's), never a throw after a 200
+  let body;
+  try { body = fs.readFileSync(path.join(kitDir, 'dashboard', m[1])); } catch {
+    res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+    return res.end('this file could not be read\n');
+  }
   res.writeHead(200, { 'content-type': m[1].endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
-  return res.end(fs.readFileSync(path.join(kitDir, 'dashboard', m[1])));
+  return res.end(body);
 }
 // A static export served from folder at base, by alpha-build@1's rules and
 // test/fixtures/alpha-serving.json. A caller's mistake throws before any request is read: a base
