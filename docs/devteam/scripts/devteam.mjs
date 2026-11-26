@@ -7706,7 +7706,8 @@ worldFileFails.actOf = (ref) => {
 // self@2's and exterior@2's reader (log.schema.json#self2, #exterior): test/fixtures/world2/check.mjs's
 // rules, rule for rule (its reading of lines, fences, code, comments and links; parts; the title;
 // checkSelf; selfHeld, the names rule's words; and, since kit-863, namesWhole, entries, capitalised,
-// hosts and checkExterior, exterior.md's contract and names rule), so the kit gives every case of
+// hosts and checkExterior, exterior.md's contract and names rule, which since kit-933 reads every
+// heading form, headed), so the kit gives every case of
 // test/fixtures/world2/cases.json the result it lists. One closure, so none of its names meets
 // another of this file's; it reads nothing but its arguments, path and URL (a test runs this region
 // alone).
@@ -8405,7 +8406,7 @@ const selfPlain = (() => {
     };
   }
 
-  return { version, checkSelf, selfHeld, scan, plain, headings, links, parts, namesWhole, entries, capitalised, hosts, checkExterior };
+  return { version, checkSelf, selfHeld, scan, plain, headings, links, parts, namesWhole, checkExterior };
 })();
 // 1 when a fence's info string is exactly self or exterior (version 1), else 2.
 const selfPlainVersion = selfPlain.version;
@@ -8876,17 +8877,12 @@ function exteriorDoc(text) {
   return { version, block: errors.length ? null : v, errors };
 }
 const exteriorTreeText = () => readText(path.join(projectDir, 'exterior.md'));
-// A version 1 file's checks past its contract, for validate. The head's strategy.md and self.md blobs
-// (null for no file): ref's, or with ref null the working tree's (git hash-object, so an uncommitted
-// draft counts), with the strategy's text when it was read from the tree.
-function headBlobs(ref, root = projectDir) {
-  const rels = { strategy: strategyRel, self: `${projectRel}/self.md` };
-  if (ref) {
-    const at = (rel) => git(['rev-parse', '--verify', '--quiet', `${ref}:${rel}`], mainRoot);
-    return { strategyBlob: at(rels.strategy), selfBlob: at(rels.self), strategyText: null };
-  }
-  const tree = (name) => { const f = path.join(root, name); return fs.existsSync(f) ? git(['hash-object', '--', f], mainRoot) : null; };
-  return { strategyBlob: tree('strategy.md'), selfBlob: tree('self.md'), strategyText: readText(path.join(root, 'strategy.md')) };
+// A version 1 file's checks past its contract, for validate: the working tree's strategy.md and
+// self.md blobs (git hash-object, so an uncommitted draft counts; null for no file) and the strategy's
+// text.
+function headBlobs() {
+  const tree = (name) => { const f = path.join(projectDir, name); return fs.existsSync(f) ? git(['hash-object', '--', f], mainRoot) : null; };
+  return { strategyBlob: tree('strategy.md'), selfBlob: tree('self.md'), strategyText: readText(path.join(projectDir, 'strategy.md')) };
 }
 // Whether validate is at the draft: main can be read and the working tree's exterior.md is not
 // main's (none on main counts as differing). With no main (a depth-1 CI checkout) it is not.
@@ -9177,7 +9173,7 @@ function exteriorValidateLines() {
   if (text === null) return { errors: [], warnings: [] };
   const { block, errors } = exteriorDoc(text);
   if (!block) return { errors, warnings: [] };
-  return exteriorBlobLines(block, { draft: exteriorAtDraft(), ...headBlobs(null) });
+  return exteriorBlobLines(block, { draft: exteriorAtDraft(), ...headBlobs() });
 }
 // dashboard-data's exterior block (log.schema.json#exterior@1 dashboard), for a version 1 file whose
 // block holds: file order, relation_word or null, each signal's score weight×value. kit-868 drops it.
@@ -40504,7 +40500,7 @@ const HELP_OBSERVE = `Observe and orient
   governance [--json]   the kit's governance and process files and the project's strategy, Self and exterior: title, last change, changed here
   self show [--json]   main's project/self.md, what the project is, printed as it is; --json is the dashboard's self block, null when not drafted or plain (self@2)
   self check   the working tree's self.md against self@2 (a plain document; a fenced self block is refused), each part link on disk, and the names rule; errors exit 1, warnings don't
-  exterior show [--json] | exterior check   show: main's project/exterior.md, what the project relates to, printed as it is (--json a version 1 block's dashboard data, else null); check: the working tree's draft against exterior@2 (a version 1 block refused), its dated sources, and on a repo not known to be private the names rule (a ### heading not named whole in origin main's strategy or dependency names refused; each other capitalised word and link host held until named on the chore); errors exit 1
+  exterior show [--json] | exterior check   show: main's project/exterior.md, what the project relates to, printed as it is (--json a version 1 block's dashboard data, else null); check: the working tree's draft against exterior@2 (a version 1 block refused), its dated sources, and on a repo not known to be private the names rule (a heading of any form refused: one of level 3 to 6 not named whole, or a # or ## one holding a capitalised word not named whole, in origin main's strategy or dependency names; each other capitalised word and link host held until named on the chore); errors exit 1
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
   search "<words>" [--type <log type>|doc]… [--since <date>] [--limit n] [--json]   what the project already wrote about it, best first, quoted as data (supervisor.md §6)
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …`;

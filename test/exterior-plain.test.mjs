@@ -582,3 +582,27 @@ test('F4 exterior-drift reads every heading form as the draft does', withProject
   });
 }));
 
+test('F5 headBlobs reads the working tree only; the region returns only what is read', () => {
+  const at = SRC.indexOf('function headBlobs(');
+  assert.ok(at > 0, 'F5 headBlobs is defined');
+  const body = SRC.slice(at, SRC.indexOf('\n}\n', at));
+  assert.match(body, /^function headBlobs\(\) \{/, `F5 headBlobs takes nothing\n${body.split('\n')[0]}`);
+  assert.doesNotMatch(body, /\bref\b|\broot\b|rev-parse/, `F5 no ref branch and no root\n${body}`);
+  const comment = SRC.slice(0, at).split('\n').reverse().slice(1).filter((_, i, a) => a.slice(0, i + 1).every((l) => l.startsWith('//'))).reverse().join('\n');
+  assert.match(comment, /working tree/, `F5 its comment says it reads the working tree\n${comment}`);
+  assert.doesNotMatch(comment, /\bref\b/, `F5 its comment no longer speaks of a ref\n${comment}`);
+  const keys = Object.keys(plainOf());
+  for (const k of ['entries', 'capitalised', 'hosts']) assert.ok(!keys.includes(k), `F5 the region no longer returns ${k}: ${keys}`);
+  for (const k of ['checkExterior', 'headings', 'namesWhole']) assert.ok(keys.includes(k), `F5 the region still returns ${k}`);
+});
+
+test('F6 the contract and the help say every heading form', () => {
+  const S = JSON.parse(fs.readFileSync(new URL('../docs/devteam/schema/log.schema.json', import.meta.url), 'utf8'));
+  const d = S.$defs.exterior2.description;
+  assert.doesNotMatch(d, /each ### heading must be named whole/, 'F6 the schema no longer limits the rule to ###');
+  assert.doesNotMatch(d, /Headings in code or a comment are not read\./, 'F6 the schema no longer says no heading in code or a comment is read');
+  for (const w of ['every heading', 'setext', '<h1>', 'list item or block quote', 'wherever it stands', 'level 3 to 6', 'capitalised word but Exterior']) assert.ok(d.includes(w), `F6 the schema says "${w}"`);
+  const help = SRC.slice(SRC.indexOf('const HELP_OBSERVE')).split('\n').find((l) => l.includes('exterior show'));
+  assert.doesNotMatch(help, /a ### heading not named whole/, `F6 the help no longer limits the rule to ###: ${help}`);
+  assert.match(help, /a heading of any form/, `F6 the help says any form: ${help}`);
+});
