@@ -5,9 +5,14 @@
 // never read it. R3 every place the dashboard's handler and routes build a URL from req.url sits
 // inside a try (the one parse at the top answers 400).
 // R4 a route that throws on what a request carries (today: /api/file with a NUL in its path, which
-// execFile refuses) is answered 400 or 500, never a stop, and logged with its path only; it serves on.
+// execFile refuses) is answered 400 or 500, never a stop; it serves on. Its log line is the method, the
+// path without its query, and the error's class and code; nothing from the query or the error's
+// message (kit-1030: the query's value, a marker here, appears nowhere in the dashboard's log, though
+// Node's message quotes it).
 // R5 dashRequestFailed, the handler's catch, on its own: a 500 before any header, a destroy once
-// headers are out and the response is open, nothing once it has ended; the logged path cut at 200.
+// headers are out and the response is open, nothing once it has ended; the logged path cut at 200, and
+// of the error only its class. R6 (kit-1030) the error is its class and code, never its message or
+// stack, which can quote the request; a thrown value that is no object is named by its type.
 // Ports: +50 the dashboard's hub (the dashboard itself is pinned on a free port outside the block)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -149,9 +154,12 @@ test('R3 every new URL(req.url …) in the dashboard handler, its routes and ser
   for (const l of lines) assert.match(l, /try \{[^}]*new URL\(req\.url\b/, `R3 inside a try: ${l.trim().slice(0, 160)}`);
 });
 
-test('R4 a route that throws on a request is answered (400 or 500) and the dashboard serves on', { timeout: 300000 }, async (t) => {
+test('R4 a route that throws on a request is answered (400 or 500), logged without its input, and the dashboard serves on', { timeout: 300000 }, async (t) => {
   const { dash, port, root } = await dashboard(t);
-  for (const target of ['/api/file?path=%00', '/api/file?path=a%00b&ref=HEAD']) {
+  // MARK is the request's own text: execFile's error message quotes the bad value, so a log of the
+  // message or stack would carry it
+  const MARK = 'kit1030marker';
+  for (const target of [`/api/file?path=${MARK}%00`, `/api/file?path=a%00${MARK}&ref=HEAD`]) {
     const r = await raw(port, target);
     assert.ok([400, 500].includes(r.status), `R4 GET ${target} is answered 400 or 500 (got ${r.status}; ${dash.out().split('\n').filter((l) => /crash/.test(l)).slice(-1)[0] ?? ''})`);
     if (r.status === 500) {
@@ -161,12 +169,13 @@ test('R4 a route that throws on a request is answered (400 or 500) and the dashb
     await alive(port, `R4 after GET ${target}`);
   }
   assert.equal(dash.p.exitCode, null, 'R4 the dashboard process is still running');
-  // the dashboard's log names each failure by method and path, the query cut
+  // the dashboard's log names each failure by method, path (the query cut) and the error's class and code
   let logText = '';
   try { logText = fs.readFileSync(path.join(root, 'docs', 'devteam', 'run', 'dashboard.log'), 'utf8'); } catch {}
   const lines = logText.split('\n').filter((l) => / request failed: /.test(l));
   assert.equal(lines.length, 2, `R4 the log has a request failed line for each (${lines.length})`);
-  for (const l of lines) assert.match(l, / request failed: GET \/api\/file: /, `R4 the line names the method and path, no query: ${l.slice(0, 160)}`);
+  assert.ok(!logText.includes(MARK), `R4 the query's value is nowhere in the dashboard's log: ${logText.split('\n').filter((l) => l.includes(MARK)).map((l) => l.slice(0, 200)).join(' | ')}`);
+  for (const l of lines) assert.match(l, / request failed: GET \/api\/file: TypeError ERR_INVALID_ARG_VALUE$/, `R4 the line is the method, the path without its query, the error's class and code: ${l.slice(0, 160)}`);
 });
 
 // the handler's catch on its own, under node:vm, with a response stub that records what it was asked
@@ -180,7 +189,7 @@ test('R5 dashRequestFailed: a 500 before headers, a destroy after them while ope
     return o;
   };
   const err = new Error('boom');
-  const run = (url, res) => { const lines = []; dashRequestFailed((m) => lines.push(m), { method: 'GET', url }, res, err); return lines; };
+  const run = (url, res, e = err) => { const lines = []; dashRequestFailed((m) => lines.push(m), { method: 'GET', url }, res, e); return lines; };
   // before any header: the 500, as the handler's other plain answers
   const a = stub(false, false);
   const la = run('/api/file?path=x', a);
@@ -188,7 +197,7 @@ test('R5 dashRequestFailed: a 500 before headers, a destroy after them while ope
   assert.deepEqual({ ...a.headers }, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' }, "R5 the 500's headers");
   assert.equal(a.body, 'this request failed', "R5 the 500's body");
   assert.equal(a.destroyed, false, 'R5 before any header: no destroy');
-  assert.deepEqual(la.map((l) => l.split('\n')[0]), ['request failed: GET /api/file: Error: boom'], 'R5 one log line: method, path without its query, the error');
+  assert.deepEqual(la, ['request failed: GET /api/file: Error'], "R5 one log line: method, path without its query, the error's class");
   // headers out, response open: destroyed, nothing written
   const b = stub(true, false);
   run('/x', b);
@@ -203,5 +212,35 @@ test('R5 dashRequestFailed: a 500 before headers, a destroy after them while ope
   // a long path is cut at 200 characters, the query never logged
   const long = `/${'a'.repeat(300)}`;
   const ld = run(`${long}?q=secret`, stub(false, false));
-  assert.equal(ld[0].split('\n')[0], `request failed: GET ${long.slice(0, 200)}: Error: boom`, 'R5 the logged path is cut at 200 characters, without its query');
+  assert.deepEqual(ld, [`request failed: GET ${long.slice(0, 200)}: Error`], 'R5 the logged path is cut at 200 characters, without its query');
+});
+
+// kit-1030: of the error, dashRequestFailed logs its class and code only, never its message or stack,
+// which can quote the request (MARK stands for the request's text); a code that is no plain name is
+// left out, and a thrown value that is no object is named by its type
+test('R6 dashRequestFailed: the error is logged by class and code, never by its text', () => {
+  const i = src.indexOf('\nfunction dashRequestFailed(');
+  const code = src.slice(i + 1, src.indexOf('\n}\n', i + 1) + 3);
+  const dashRequestFailed = vm.runInContext(`${code}\n;dashRequestFailed`, vm.createContext({}));
+  const stub = () => { const o = { headersSent: false, writableEnded: false, code: null, writeHead(c) { o.code = c; }, end() {}, destroy() {} }; return o; };
+  const run = (url, res, e) => { const lines = []; dashRequestFailed((m) => lines.push(m), { method: 'GET', url }, res, e); return lines; };
+  const MARK = 'kit1030marker';
+  const quoting = Object.assign(new TypeError(`Received '${MARK}'`), { code: 'ERR_INVALID_ARG_VALUE' });
+  assert.deepEqual(run('/api/file', stub(), quoting), ['request failed: GET /api/file: TypeError ERR_INVALID_ARG_VALUE'], 'R6 a message quoting the request: the line is the class and code, not the message');
+  class Odd extends Error {}
+  const odd = Object.assign(new Odd(MARK), { code: `${MARK} x` });
+  assert.deepEqual(run('/x', stub(), odd), ['request failed: GET /x: Odd'], 'R6 a code that is no plain name is left out');
+  const long = Object.assign(new Error(MARK), { code: `E${'X'.repeat(64)}` });
+  assert.deepEqual(run('/x', stub(), long), ['request failed: GET /x: Error'], 'R6 a code over 64 characters is left out');
+  assert.deepEqual(run('/x', stub(), `thrown ${MARK}`), ['request failed: GET /x: string'], 'R6 a thrown string: its type, never its text');
+  assert.deepEqual(run('/x', stub(), null), ['request failed: GET /x: null'], 'R6 a thrown null: null');
+  assert.deepEqual(run('/x', stub(), Object.create(null)), ['request failed: GET /x: object'], 'R6 a thrown object with no class: its type');
+  const trap = new Proxy({}, { get() { throw new Error(MARK); }, getPrototypeOf() { throw new Error(MARK); } });
+  const tr = stub();
+  let threw = null;
+  let tl = null;
+  try { tl = run('/x', tr, trap); } catch (e) { threw = e; }
+  assert.equal(threw, null, 'R6 a thrown object whose reads throw: no throw out of the catch');
+  assert.deepEqual(tl, ['request failed: GET /x: object'], 'R6 a thrown object whose reads throw: its type');
+  assert.equal(tr.code, 500, 'R6 a thrown object whose reads throw: still the 500');
 });
