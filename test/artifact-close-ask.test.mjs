@@ -84,6 +84,7 @@ test('the ask before a close', { skip: SKIP, timeout: 1500000 }, async (t) => {
   version('ask-vo', 2);
   version('ask-narrow', 2);
   version('ask-moved', 2);
+  version('ask-focus', 2);
 
   // The viewer opened on two-pages at w (main, or a draft), up, its lens ready and its notes read.
   const openAt = async (V, w, ids = []) => {
@@ -391,6 +392,29 @@ test('the ask before a close', { skip: SKIP, timeout: 1500000 }, async (t) => {
     await noAsk(W, 'A6 a preview');
     await noCard(W, 'A6 a preview');
   });
+
+  // ---- A8: the focus put back (kit-976) ----
+  // The Tab round (A1) is the keydown trap's; this is the focusout handler's: a focus that leaves the ask
+  // any other way (a click on its own text, which has nothing to take the focus; the focus sent to the
+  // page body, as a script's blur does) comes back inside it. A click outside it takes it away (A5 veil),
+  // so the page body is reached by the focus, not by a click.
+  const INSIDE = "document.getElementById('av-ask').contains(document.activeElement)";
+  const ON = "(document.activeElement?.id || document.activeElement?.tagName || null)";
+  for (const how of ['text', 'body']) {
+    await sub(`A8: with the ask up, ${how === 'text' ? 'a click on its text' : 'the focus sent to the page body'} leaves the focus inside #av-ask`, async () => {
+      const V = await visit('#library');
+      await openAt(V, 'ask-focus');
+      await askedBy(V, 'x', `A8 ${how}`);
+      await V.p.ev("window.__left = []; document.getElementById('av-ask').addEventListener('focusout', (e) => window.__left.push(e.relatedTarget?.id || e.relatedTarget?.tagName || null)); void 0");
+      if (how === 'text') await pressId(V, 'av-ask-tx');
+      else await V.p.ev('document.activeElement.blur(); void 0');
+      assert.ok((await V.p.ev('window.__left.length')) > 0, `setup: A8 ${how} took the focus off the ask's button`);
+      await V.settle(INSIDE, 1000);
+      await V.p.ev(FRAMES);
+      assert.equal(await V.p.ev(ASK), true, `A8 ${how}: the ask stays`);
+      assert.equal(await V.p.ev(INSIDE), true, `A8 ${how}: the focus back inside #av-ask (it is on ${await V.p.ev(ON)})`);
+    });
+  }
 
   // ---- A7: nothing to ask about, view only, and 375 px ----
   await sub('A7: no open notes, all handed or a preview: no ask, the viewer closes', async () => {
