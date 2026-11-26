@@ -6,6 +6,7 @@
 // Stop hook (stop-ok): once per stop, an ask with no q-… id sends it back to ask it in the Inbox.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { firstId, RATE, YN } from './lib/answer-words-fixture.mjs';
@@ -43,6 +44,24 @@ test('thread reply: an ask of the owner names its Inbox question', async (t) => 
     assert.match(said, /- And drop the US banner\?/, 'one question shown covers one ask, not two');
   });
 
+  await t.test('a q-… id counts only for a question in the log', () => {
+    const said = F.fails(['thread', 'reply', T, 'Ship it (q-20260101-000000123)?', '--refs', `goal:${F.goal}`], { DEVTEAM_ROLE: 'supervisor' });
+    assert.match(said, /- Ship it \(q-20260101-000000123\)\?/, 'a made-up id files nothing');
+  });
+
+  await t.test('a q-… id covers only the ask it is in, not one later in its line', () => {
+    const Q = JSON.parse(F.sup(['questions', '--all', '--json'])).find((x) => x.thread === T).id;
+    const said = F.fails(['thread', 'reply', T, `Merged it (${Q} answered). Should I also drop the US banner?`, '--refs', `goal:${F.goal}`], { DEVTEAM_ROLE: 'supervisor' });
+    assert.match(said, /Should I also drop the US banner\?/, 'an id earlier in the line files no ask after it');
+  });
+
+  await t.test('--refs question:<id> counts only for a question open, or asked in this thread', () => {
+    const elsewhere = firstId(F.sup(['ask', '--question', 'Should the receipts go out in French first?', '--recommendation', 'Yes', '--choices', YN, ...RATE]));
+    F.sup(['withdraw', elsewhere, '--reason', 'moot']);
+    const said = F.fails(['thread', 'reply', T, 'Ship the banner?', '--refs', `question:${elsewhere}`], { DEVTEAM_ROLE: 'supervisor' });
+    assert.match(said, /- Ship the banner\?/, 'a closed question from elsewhere shows nothing asked');
+  });
+
   await t.test('no question mark and no list: nothing to file; code and quotes are words, not asks', () => {
     assert.match(F.sup(['thread', 'reply', T, 'Done: the measure reads EU orders now.', '--refs', `goal:${F.goal}`]), /^u-/);
     assert.match(F.sup(['thread', 'reply', T, 'You asked:\n> why EU only?\nBecause the launch is EU first.\n```\ngrep -c "?" orders.csv\n```', '--refs', `goal:${F.goal}`]), /^u-/);
@@ -51,6 +70,8 @@ test('thread reply: an ask of the owner names its Inbox question', async (t) => 
   await t.test('--no-ask lets through words that only read as an ask, and needs its why', () => {
     assert.match(F.fails(['thread', 'reply', T, 'Anything else?', '--refs', `goal:${F.goal}`, '--no-ask', ' '], { DEVTEAM_ROLE: 'supervisor' }), /--no-ask "<why>": say why/);
     assert.match(F.sup(['thread', 'reply', T, 'Anything else?', '--refs', `goal:${F.goal}`, '--no-ask', 'a sign-off, nothing waits on it']), /^u-/);
+    // its why is kept on the turn, where thread show prints it
+    assert.match(F.sup(['thread', 'show', T]), /, no ask: .*a sign-off, nothing waits on it/);
   });
 
   await t.test("the supervisor's own thread: its first words ask nothing unfiled", () => {
@@ -60,34 +81,67 @@ test('thread reply: an ask of the owner names its Inbox question', async (t) => 
   });
 });
 
-test("stop-ok: the supervisor's window sends an unfiled ask back once", (t) => {
+test("stop-ok: the supervisor's window sends an unfiled ask back once", async (t) => {
   const F = threadsFixture('owner-asks-stop');
   t.after(() => F.done());
   const DT = path.join(F.old, 'docs/devteam/scripts/devteam.mjs');
   const transcript = path.join(F.old, 'transcript.jsonl');
-  const stop = (input, role = 'supervisor') => {
+  const stop = (input, role = 'supervisor', { cwd = F.old, args = [] } = {}) => {
     const env = { ...F.env({ DEVTEAM_ROLE: role }) };
     delete env.DEVTEAM_SUPERVISOR;
-    const r = runNode(DT, ['stop-ok'], { cwd: F.old, env, input: JSON.stringify(input) });
+    const r = runNode(DT, ['stop-ok', ...args], { cwd, env, input: JSON.stringify(input) });
     return { status: r.status, err: r.stderr };
   };
-  const asks = 'Merged both.\n\nOpen questions for you:\n- SOPS copy: go for the updated draft?\n- Fourthwall: what should I do first?\n- q-20261120-001739159: is the Identity machine goal met?';
-  let r = stop({ last_assistant_message: asks, stop_hook_active: false });
-  assert.equal(r.status, 2, 'sent back');
-  assert.match(r.err, /asked the owner 2 things in your window with no Inbox question/);
-  assert.match(r.err, /- SOPS copy: go for the updated draft\?/);
-  assert.doesNotMatch(r.err, /Identity machine/, 'the line with its q-… id is filed');
-  assert.equal(stop({ last_assistant_message: asks, stop_hook_active: true }).status, 0, 'the second stop goes through');
-  assert.equal(stop({ last_assistant_message: 'Ticked: 3 merged, 2 workers started.' }).status, 0, 'nothing asked');
-  assert.equal(stop({ last_assistant_message: asks }, 'responder').status, 0, 'only the supervisor\'s window');
-  // the transcript, when Claude Code gives no last_assistant_message: the newest assistant text
-  fs.writeFileSync(transcript, [
-    { type: 'assistant', message: { content: [{ type: 'text', text: 'Ship the banner?' }] } },
-    { type: 'user', message: { content: 'ok' } },
-    { type: 'assistant', message: { content: [{ type: 'text', text: 'Waiting on you:\n- Rotate the proposal passwords.' }, { type: 'tool_use', name: 'Bash' }] } },
-  ].map((e) => JSON.stringify(e)).join('\n'));
-  r = stop({ transcript_path: transcript });
-  assert.equal(r.status, 2);
-  assert.match(r.err, /- Rotate the proposal passwords\./);
-  assert.doesNotMatch(r.err, /Ship the banner/, 'only the newest message');
+  const Q = firstId(F.sup(['ask', '--question', 'Is the Identity machine goal met?', '--recommendation', 'Yes', '--choices', YN, ...RATE]));
+  const asks = `Merged both.\n\nOpen questions for you:\n- SOPS copy: go for the updated draft?\n- Fourthwall: what should I do first?\n- ${Q}: is the Identity machine goal met?`;
+
+  await t.test('sent back once, naming each ask; a line with its question\'s id is filed', () => {
+    const r = stop({ last_assistant_message: asks, stop_hook_active: false });
+    assert.equal(r.status, 2, 'sent back');
+    assert.match(r.err, /asked the owner 2 things in your window with no Inbox question/);
+    assert.match(r.err, /- SOPS copy: go for the updated draft\?/);
+    assert.doesNotMatch(r.err, /Identity machine/, 'the line with its q-… id is filed');
+    assert.equal(stop({ last_assistant_message: asks, stop_hook_active: true }).status, 0, 'the second stop goes through');
+    assert.equal(stop({ last_assistant_message: 'Ticked: 3 merged, 2 workers started.' }).status, 0, 'nothing asked');
+    assert.equal(stop({ last_assistant_message: asks }, 'responder').status, 0, 'only the supervisor\'s window');
+  });
+
+  await t.test('an id no question in the log has files nothing', () => {
+    const r = stop({ last_assistant_message: 'Open questions for you:\n- q-20260101-000000123: is the banner live?' });
+    assert.equal(r.status, 2);
+    assert.match(r.err, /- q-20260101-000000123: is the banner live\?/);
+  });
+
+  // the supervisor cds into a ticket's worktree to review or merge; it is still the supervisor there
+  const wt = path.join(F.old, '.worktrees', 'kit-999-x');
+  execFileSync('git', ['worktree', 'add', '-q', '-b', 'ticket/kit-999-x', wt], { cwd: F.old, stdio: 'ignore' });
+  // a phase line an hour older than the worktree's last commit: the worker's check would send it back
+  fs.appendFileSync(path.join(F.logDir, 'kit-999-x.jsonl'), `${JSON.stringify({ v: 1, id: 'h-20261101-000000001-kit-999-x', op: 'new', at: new Date(Date.now() - 3600000).toISOString(), by: 'kit-999-x', type: 'phase', from: null, to: 'build' })}\n`);
+
+  await t.test('by its role, not its folder: the supervisor in a ticket\'s worktree', () => {
+    const r = stop({ last_assistant_message: asks }, 'supervisor', { cwd: wt });
+    assert.equal(r.status, 2, `its ask is checked there too: ${r.err}`);
+    assert.match(r.err, /asked the owner 2 things/);
+    assert.equal(stop({ last_assistant_message: 'Ticked.' }, 'supervisor', { cwd: wt }).status, 0, "and it never gets the worker's phase check");
+    assert.equal(stop({ last_assistant_message: asks }, '', { cwd: wt, args: ['--supervisor'] }).status, 2, "its hook's --supervisor says whose window it is");
+  });
+
+  await t.test("the worker's check honours stop_hook_active: no stop is blocked twice", () => {
+    const r = stop({ last_assistant_message: 'Done.' }, 'worker', { cwd: wt });
+    assert.equal(r.status, 2, 'sent back once');
+    assert.match(r.err, /your last commit is newer than your last phase line/);
+    assert.equal(stop({ last_assistant_message: 'Done.', stop_hook_active: true }, 'worker', { cwd: wt }).status, 0, 'its second stop goes through');
+  });
+
+  await t.test('the transcript, when Claude Code gives no last_assistant_message: the newest assistant text', () => {
+    fs.writeFileSync(transcript, [
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'Ship the banner?' }] } },
+      { type: 'user', message: { content: 'ok' } },
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'Waiting on you:\n- Rotate the proposal passwords.' }, { type: 'tool_use', name: 'Bash' }] } },
+    ].map((e) => JSON.stringify(e)).join('\n'));
+    const r = stop({ transcript_path: transcript });
+    assert.equal(r.status, 2);
+    assert.match(r.err, /- Rotate the proposal passwords\./);
+    assert.doesNotMatch(r.err, /Ship the banner/, 'only the newest message');
+  });
 });

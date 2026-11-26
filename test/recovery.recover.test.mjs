@@ -15,15 +15,32 @@ test('a supervisor that can\'t be restarted: the finding and fleet status give t
     F.tick(OFF);
     const f = findings(F).find((x) => x.kind === 'supervisor-at-limit');
     assert.ok(f);
-    assert.ok(f.suggestion.includes(`claude --resume ${SID}`), f.suggestion);
+    // with its Stop hook, as recover's own start has it (supervisor.md §6, Every ask is an Inbox question)
+    assert.ok(f.suggestion.includes(`claude --settings '${path.join(fs.realpathSync(F.root), 'docs/devteam/run/agent/supervisor-claude.json')}' --resume ${SID}`), f.suggestion);
+    assert.match(fs.readFileSync(path.join(F.root, 'docs/devteam/run/agent/supervisor-claude.json'), 'utf8'), /devteam\.mjs' stop-ok --supervisor"/, 'its hook says whose window it is');
     assert.doesNotMatch(f.suggestion, /dangerously-skip-permissions/, 'no running process to take it from: left out');
     assert.ok(f.suggestion.includes('DEVTEAM_ROLE=supervisor'), f.suggestion);
     // a dead machine, not at a limit: fleet status still says how to bring the supervisor back
     F.writeTranscript(SID, [{ type: 'user', message: { content: SUP } }, { type: 'assistant', timestamp: new Date().toISOString(), message: { content: [{ type: 'text', text: 'working' }] } }]);
     const shown = F.run(['fleet', 'status', '--no-fetch'], { DEVTEAM_ROLE: '' });
-    assert.match(shown.stdout, new RegExp(`recovery .*claude --resume ${SID}`), shown.stderr);
-    assert.ok(json(F.run(['fleet', 'status', '--no-fetch', '--json'], { DEVTEAM_ROLE: '' }).stdout).recovery.endsWith(`claude --resume ${SID}`));
+    assert.match(shown.stdout, new RegExp(`recovery .*claude --settings \\S+supervisor-claude\\.json' --resume ${SID}`), shown.stderr);
+    assert.ok(json(F.run(['fleet', 'status', '--no-fetch', '--json'], { DEVTEAM_ROLE: '' }).stdout).recovery.endsWith(`supervisor-claude.json' --resume ${SID}`));
     assert.equal(F.run(['supervisor-session'], { DEVTEAM_ROLE: '' }).stdout, `${SID}\n`, 'stdout stays the bare id: the box\'s boot reads it');
+  } finally { F.done(); }
+});
+
+// The Stop hook's file is written before recover claims the start: a write that fails leaves no claim
+// behind, so the next recover doesn't answer "brought back moments ago" for a start that never was.
+test('recover: a failed write of the Stop hook claims no start', () => {
+  const F = fixture('rechook', { resume: CLAUDE_RESUME });
+  try {
+    F.writeTranscript(SID, [{ type: 'user', message: { content: SUP } }, { type: 'assistant', timestamp: new Date().toISOString(), message: { content: [{ type: 'text', text: 'working' }] } }]);
+    write(path.join(F.root, 'docs/devteam/run/agent'), 'a file where its folder goes\n');
+    const r = F.run(['recover', '--force'], { DEVTEAM_ROLE: '', DEVTEAM_CSWAP: 'off', DEVTEAM_MACHINE_EPOCH: 'boot2' });
+    assert.notEqual(r.status, 0, 'the write failed');
+    const up = path.join(F.root, 'docs/devteam/run/supervisor-up.json');
+    assert.ok(!fs.existsSync(up) || !json(fs.readFileSync(up, 'utf8')).starting, `no start claimed: ${fs.existsSync(up) ? fs.readFileSync(up, 'utf8') : ''}`);
+    assert.deepEqual(F.claudeCalls(), [], 'nothing started');
   } finally { F.done(); }
 });
 

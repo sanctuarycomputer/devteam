@@ -10,6 +10,8 @@ import { spawnSync } from 'node:child_process';
 import { hasTmux, until } from './lib/kit.mjs';
 import { CLAUDE_RESUME, fixture as recoveryFixture, MENU, rateLimit, SID, SKIP, SUP as SUP_PROMPT, supervisorPane } from './lib/recovery-fixture.mjs';
 
+// the restart carries the supervisor's Stop hook (supervisor.md §6, Every ask is an Inbox question): --settings does not outlive its process
+const hooked = (call) => { assert.match(call ?? '', /^supervisor\|--settings \S+\/run\/agent\/supervisor-claude\.json /, call); return call.replace(/--settings \S+ /, ''); };
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 // accounts-tick isn't a launch, but it types the supervisor's resume_command into its pane after a
@@ -39,7 +41,7 @@ test('accounts-tick restarts a supervisor stopped at a limit with origin\'s resu
       g(['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/planted']);
       assert.match(F.tick(cswap(F)), /restarted the supervisor/);
       await until(() => F.claudeCalls().length === 1, 'the stand-in claude ran');
-      assert.equal(F.claudeCalls()[0], `supervisor|--resume ${SID} --dangerously-skip-permissions You were restarted after a usage limit, on this same conversation. Carry on from where you were.`);
+      assert.equal(hooked(F.claudeCalls()[0]), `supervisor|--resume ${SID} --dangerously-skip-permissions You were restarted after a usage limit, on this same conversation. Carry on from where you were.`);
       assert.equal(pane.keys(), '', 'no key reaches the old process');
     } finally { F.done(); }
   });
