@@ -414,7 +414,16 @@ function listedByRoot(instances, ports) {
 }
 export const HOST_LABEL = /^(?!\d+$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 export const RESERVED_LABELS = ['term', 'public', 'www'];
-export const RESERVED_SEGMENTS = ['api', 'artifact', 'c', 'healthz', 'index.html', 'presence', 'public-manifest', 'review', 'upload', 'view'];
+export const RESERVED_SEGMENTS = ['api', 'artifact', 'c', 'healthz', 'index.html', 'next', 'presence', 'public-manifest', 'review', 'upload', 'view'];
+// A name that can be a project's host: a label, and not a reserved one.
+const hostable = (name) => HOST_LABEL.test(name) && !RESERVED_LABELS.includes(name);
+// A page needs an address: <project>.<box>/<slug>/, where the slug is none of the dashboard's paths
+// and the project's name is a host label. Publish's check, slug first; null when it has one.
+export const addressProblem = (m) => {
+  if (RESERVED_SEGMENTS.includes(m.slug)) return `${m.slug} is a path of the dashboard, so a page can't be published under it: rename the artifact`;
+  if (!hostable(m.project)) return `${m.project} can't be a host name, so a page of it would have no address: rename the project (settings.md's project)`;
+  return null;
+};
 // The kit's rule for a branch name (docs/devteam/scripts/devteam.mjs), copied because the gateway
 // imports nothing of the kit; a test holds the two to the same characters.
 const BRANCH_AT = /^(?!.*\.\.)(?!.*\/\/)(?!.*\/\.)(?!.*\.lock(?:\/|$))(?!.*[/.]$)[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
@@ -1087,7 +1096,6 @@ export function createGateway(opts = {}) {
   // What the owner published, to anyone: under its project's own host. A project whose name isn't a
   // host label has no such host, so a page of it has no address.
   const publicAddress = (project, slug) => `${projectOrigin(project)}/${slug}/`;
-  const hostable = (name) => HOST_LABEL.test(name) && !RESERVED_LABELS.includes(name);
   // Parsed once, before anything else starts: a cap that isn't a number would compare false
   // against every total and publish without limit, so a bad one stops the gateway instead.
   const maxSet = opts.publicMax ?? env.DEVTEAM_PUBLIC_MAX;
@@ -2842,12 +2850,6 @@ export function createGateway(opts = {}) {
     return m;
   };
   const manifestHash = (m) => hex256(canonicalJson(m));
-  // A page needs an address: <project>.<box>/<slug>/, where the slug is none of the dashboard's paths.
-  const addressProblem = (m) => {
-    if (RESERVED_SEGMENTS.includes(m.slug)) return `${m.slug} is a path of the dashboard, so a page can't be published under it: rename the artifact`;
-    if (!hostable(m.project)) return `${m.project} can't be a host name, so a page of it would have no address: rename the project (settings.md's project)`;
-    return null;
-  };
   // Whether this item may go on the box as it stands: bound to the root the owner saw, and under
   // the cap with this item's files in place of its old version. Checked before the slow work, and
   // again in the queue against the state it will change.
