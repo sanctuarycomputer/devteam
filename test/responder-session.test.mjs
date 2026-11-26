@@ -481,7 +481,7 @@ test('R8: the responder gets the workers\' deny rules and no Stop hook; responde
     p = start();
     assert.deepEqual(p.permissions.deny, DEFAULT_DENY.map((c) => `Bash(${c})`), "the workers' default list");
     assert.equal(p.hooks.Stop, undefined, 'no Stop hook');
-    assert.match(p.hooks.PreToolUse[0].hooks[0].command, /bash-ok\.mjs'$/, 'the inline-rm guard, as every session the kit starts');
+    assert.match(p.hooks.PreToolUse[0].hooks[0].command, /devteam\.mjs' bash-ok$/, 'the inline-rm guard, as every session the kit starts');
     for (let i = 0; i < 50 && !/claude --settings/.test(fs.existsSync(keys) ? fs.readFileSync(keys, 'utf8') : ''); i++) sleep(100);
     assert.match(fs.readFileSync(keys, 'utf8'), new RegExp(`claude --settings '${policy.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}' --model probe`), 'started with that policy');
 
@@ -492,7 +492,7 @@ test('R8: the responder gets the workers\' deny rules and no Stop hook; responde
     const w = JSON.parse(fs.readFileSync(path.join(F.old, 'docs/devteam/run/agent/ch-01-a-claude.json'), 'utf8'));
     // the worker's file is byte for byte what makeSession wrote before the shared helper (spec 1.13), with the rm guard
     const kitMjs = path.join(F.old, 'docs', 'devteam', 'scripts', 'devteam.mjs');
-    const want = `${JSON.stringify({ permissions: { deny: DEFAULT_DENY.map((c) => `Bash(${c})`) }, hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: `node '${path.join(path.dirname(kitMjs), 'bash-ok.mjs')}'`, timeout: 10 }] }], Stop: [{ hooks: [{ type: 'command', command: `node '${kitMjs}' stop-ok` }] }] } }, null, 2)}\n`;
+    const want = `${JSON.stringify({ permissions: { deny: DEFAULT_DENY.map((c) => `Bash(${c})`) }, hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: `node '${kitMjs}' bash-ok`, timeout: 10 }] }], Stop: [{ hooks: [{ type: 'command', command: `node '${kitMjs}' stop-ok` }] }] } }, null, 2)}\n`;
     assert.equal(fs.readFileSync(path.join(F.old, 'docs/devteam/run/agent/ch-01-a-claude.json'), 'utf8'), want, "the worker's policy file");
     assert.deepEqual(p.permissions.deny, w.permissions.deny, "a worker's list");
     assert.ok(w.hooks?.Stop, 'the worker has its Stop hook; the responder has none');
