@@ -33302,13 +33302,12 @@ function cmdRecurring() {
 //   no --reg or --registry <url>, no ignore-scripts negation, no other prefix or workspace flag, no
 //   --userconfig or --globalconfig). With the last two npm never walks up to a package.json, its workspaces,
 //   its lock or an .npmrc above that folder (a workspace root above .kit would otherwise install its own
-//   lock, bytes the pin never named). Each runs with npm_config_userconfig and npm_config_globalconfig naming
+//   lock, bytes the pin never named), so a workspace root or an .npmrc above changes nothing and is not
+//   refused (C4 runs real npm to show it). Each runs with npm_config_userconfig and npm_config_globalconfig naming
 //   two different empty files (regular files; npm refuses one file for both), with no other npm_config_* or
 //   NPM_CONFIG_* variable in its environment, and in a folder the step made that holds no .npmrc: ci and
 //   audit in .kit/<version>-<hash>/, view in its own folder made outside the checkout (mkdtemp under
-//   os.tmpdir()) holding only a package.json the step writes ({}). No folder above the one npm runs in, up
-//   to the file system's root, may hold an .npmrc or a package.json with workspaces: the step looks before
-//   each call, and one there is a refusal from layout 2, a finding before, and npm is not run. An npm
+//   os.tmpdir()) holding only a package.json the step writes ({}). An npm
 //   older than 9.5 can't verify attestations: a finding before layout 2, a refusal from it. A registry
 //   that can't be reached is not a refusal: a fetch or npm call that gets no answer in time, a network
 //   error, or any status but 200 and 404 (a 5xx, a 429), and an npm call that fails with a network code

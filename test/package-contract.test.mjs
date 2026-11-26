@@ -119,6 +119,33 @@ test('C4 real npm ci --ignore-scripts --dry-run accepts the pair offline', { ski
   const r = spawnSync('npm', ['ci', '--ignore-scripts', '--dry-run', '--offline', `--registry=${PUBLIC}`, `--prefix=${d}`, '--workspaces=false'], { cwd: d, env, encoding: 'utf8', timeout: 120000 });
   assert.equal(r.status, 0, `C4 npm ci accepts the pair: ${r.stdout}\n${r.stderr}`);
   assert.match(r.stdout, /added 1 package/, 'C4 one package');
+  // D22: with --prefix=<its folder> and --workspaces=false real npm reads nothing above that folder
+  const dry = (cwd, flags) => spawnSync('npm', ['ci', '--ignore-scripts', '--dry-run', '--offline', `--registry=${PUBLIC}`, ...flags], { cwd, env, encoding: 'utf8', timeout: 120000 });
+  const root = scratch('npm-ws-root');
+  const v = path.join(root, 'v', 'pin');
+  fs.mkdirSync(v, { recursive: true });
+  for (const f of ['package.json', 'package-lock.json']) fs.copyFileSync(path.join(KI, 'pin', f), path.join(v, f));
+  const entry = readJson(path.join(v, 'package-lock.json')).packages[`node_modules/${NAME}`];
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'proj', private: true, workspaces: ['v/*'] }));
+  fs.writeFileSync(path.join(root, 'package-lock.json'), JSON.stringify({ name: 'proj', lockfileVersion: 3, requires: true, packages: {
+    '': { name: 'proj', workspaces: ['v/*'] },
+    'node_modules/devteam-instance': { resolved: 'v/pin', link: true },
+    'v/pin': { name: 'devteam-instance', dependencies: { [NAME]: entry.version, 'left-pad': '1.3.0' } },
+    [`v/pin/node_modules/${NAME}`]: entry,
+    'v/pin/node_modules/left-pad': { version: '1.3.0', resolved: `${PUBLIC}left-pad/-/left-pad-1.3.0.tgz`, integrity: 'sha512-XI5MPzVNApjAyhQzphX8BkmKsKUxD4LdyK24iZeQEVcGHdNQ7wkvFiJcAJLZPpH0/SCNbwVFCcD9yJM4fwKiUjQ==' },
+  } }));
+  assert.match(dry(v, []).stdout, /added 2 packages/, "C4 without the flags npm takes a workspace root's lock above (the control)");
+  const kept = dry(v, [`--prefix=${v}`, '--workspaces=false']);
+  assert.equal(kept.status, 0, kept.stderr);
+  assert.match(kept.stdout, /added 1 package\b/, 'C4 with --prefix and --workspaces=false a workspace root above changes nothing');
+  const rcRoot = scratch('npm-rc-root');
+  fs.writeFileSync(path.join(rcRoot, 'package.json'), '{"name":"proj"}\n');
+  fs.writeFileSync(path.join(rcRoot, '.npmrc'), '@sanctuarycomputer:registry=http://127.0.0.1:9/\n');
+  const rv = path.join(rcRoot, 'view');
+  fs.mkdirSync(rv);
+  const get = (flags) => spawnSync('npm', ['config', 'get', '@sanctuarycomputer:registry', ...flags], { cwd: rv, env, encoding: 'utf8', timeout: 60000 }).stdout.trim();
+  assert.equal(get([]), 'http://127.0.0.1:9/', 'C4 without the flags npm reads an .npmrc above (the control)');
+  assert.equal(get([`--prefix=${rv}`, '--workspaces=false']), 'undefined', 'C4 with --prefix and --workspaces=false an .npmrc above is not read');
 });
 
 test('C5 packagePinPair refuses bad input, guards in order, quoting nothing it was given', () => {
@@ -445,25 +472,20 @@ test('C14 the fake npm refuses a call that breaks the calling rules', async () =
     fs.writeFileSync(path.join(busy, 'x'), '');
     refused([...view, ...FLAGS(reg)], { cwd: busy }, viewRule, 'view in a folder holding more than its package.json');
     refused([...view, ...FLAGS(reg)], { cwd: scratch('view-bare') }, viewRule, 'view in a folder with no package.json');
-    const aboveRule = /a folder above where npm runs holds an \.npmrc or a package\.json with workspaces/;
     const wsRoot = scratch('ws-root');
     fs.writeFileSync(path.join(wsRoot, 'package.json'), `${JSON.stringify({ name: 'proj', private: true, workspaces: ['v/*'] })}\n`);
     const wsPin = path.join(wsRoot, 'v', 'pin');
     fs.mkdirSync(wsPin, { recursive: true });
     for (const f of ['package.json', 'package-lock.json']) fs.copyFileSync(path.join(pinDir(), f), path.join(wsPin, f));
-    refused(['ci', ...FLAGS(reg)], { cwd: wsPin }, aboveRule, 'ci under a package.json with workspaces');
+    const wsCi = npm(reg, ['ci', ...FLAGS(reg)], { cwd: wsPin });
+    assert.equal(wsCi.status, 0, `C14 a workspace root above changes nothing: ${wsCi.stderr}`);
+    assert.ok(fs.existsSync(path.join(wsPin, 'node_modules', NAME, 'package.json')), 'C14 a workspace root above: ci installs the pin in its own folder');
     const rcRoot = scratch('rc-root');
     fs.writeFileSync(path.join(rcRoot, '.npmrc'), '@sanctuarycomputer:registry=http://127.0.0.1:9/\n');
     const rcView = path.join(rcRoot, 'a', 'view');
     fs.mkdirSync(rcView, { recursive: true });
     fs.writeFileSync(path.join(rcView, 'package.json'), '{}\n');
-    refused([...view, ...FLAGS(reg)], { cwd: rcView }, aboveRule, 'view under an .npmrc');
-    const plainRoot = scratch('plain-root');
-    fs.writeFileSync(path.join(plainRoot, 'package.json'), '{"name":"proj"}\n');
-    const plainPin = path.join(plainRoot, 'pin');
-    fs.mkdirSync(plainPin);
-    for (const f of ['package.json', 'package-lock.json']) fs.copyFileSync(path.join(pinDir(), f), path.join(plainPin, f));
-    assert.equal(npm(reg, ['ci', '--dry-run', ...FLAGS(reg)], { cwd: plainPin }).status, 0, 'C14 a package.json above with no workspaces passes');
+    assert.equal(npm(reg, [...view, ...FLAGS(reg)], { cwd: rcView }).status, 0, 'C14 an .npmrc above changes nothing');
     const rc = scratch('with-npmrc');
     fs.writeFileSync(path.join(rc, '.npmrc'), 'strict-ssl=false\n');
     refused([...view, ...FLAGS(reg)], { cwd: rc }, /runs in a folder with no \.npmrc/, 'a .npmrc where npm runs');
@@ -669,7 +691,7 @@ test('C16 the comment above packagePinPair states kit-install@1, and the alpha-b
     ['the exact calls', /exactly npm view <name>@<version> \[<field>\] \[--json\], npm ci \[--dry-run\] and npm audit signatures[\s\S]*no other argument in any form \(no second or scoped registry/],
     ['nothing above npm\'s folder', /--registry=<the registry>, --ignore-scripts, --prefix=<the folder it runs in> and --workspaces=false, each once[\s\S]*npm never walks up to a package\.json, its workspaces, its lock or an \.npmrc above that folder/],
     ['the folders npm runs in', /in a folder the step made that holds no \.npmrc: ci and audit in \.kit\/<version>-<hash>\/, view in its own folder made outside the checkout \(mkdtemp under os\.tmpdir\(\)\) holding only a package\.json the step writes \(\{\}\)/],
-    ['nothing above may configure npm', /No folder above the one npm runs in, up to the file system's root, may hold an \.npmrc or a package\.json with workspaces: the step looks before each call, and one there is a refusal from layout 2, a finding before, and npm is not run/],
+    ['nothing above is refused', /so a workspace root or an \.npmrc above changes nothing and is not refused \(C4 runs real npm to show it\)/],
     ['merge compares .kit as git compares .git', /each of a path's first three components is compared as git compares \.git on any file system: case-insensitively, after Unicode NFC normalisation, with the code points HFS\+ ignores removed[\s\S]*a trailing run of dots and spaces dropped[\s\S]*NTFS 8\.3 short name[\s\S]*\.KIT\/, Docs\/DevTeam\/\.kit\/, \.kit\.\/ and KIT~1\/ are \.kit/],
     ['the ignore line does not fold case', /The ignore line does not fold case[\s\S]*merge's refusal is what stops \.KIT/],
     ['audit reports the attestation', /npm audit signatures must then pass on the installed tree and report the package's attestation verified/],
