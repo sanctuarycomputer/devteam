@@ -1,0 +1,21 @@
+#!/usr/bin/env node
+// a fixture CLI for the overlay tests; the test puts the kit's parts region where PARTS is
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// ===== 1. one =====
+
+const NAME = 'fixture';
+// says hello
+function greet(who) {
+  return `hello ${who}`;
+}
+function whereAmI() { return path.dirname(fileURLToPath(import.meta.url)); }
+function helper() { return 1; }
+function other() { return 2; }
+function serve() { return 'cli'; }
+/* PARTS */
+
+// ===== 2. two =====
+
+function main() { return [greet(NAME), whereAmI(), helper(), other()]; }

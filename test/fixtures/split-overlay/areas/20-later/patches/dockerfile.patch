@@ -1,0 +1,7 @@
+--- a/cloud/Dockerfile
++++ b/cloud/Dockerfile
+@@ -2,3 +2,4 @@
+ COPY docs/devteam /opt/devteam/kit
+ COPY cloud/gateway /opt/devteam/gateway
++RUN npm i -g devteam
+ CMD ["node"]
