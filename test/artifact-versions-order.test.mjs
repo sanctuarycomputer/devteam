@@ -196,6 +196,29 @@ test('main moving refreshes the drop: a copy listed while main lacks it goes onc
   assert.deepEqual(rows(), ['main'], 'main moved: the copy of its earlier X is no draft');
 });
 
+test('a branch from another machine holding a copy of an earlier main version is no draft, even under another tree id', (t) => {
+  const F = threadsFixture('order-remote-copy');
+  cleanup(t)(() => F.done());
+  landAt(F, 'order-mock', page(1), '2026-01-01T00:00:00Z');
+  const v2 = landAt(F, 'order-mock', page(2), '2026-02-01T00:00:00Z');
+  // v1's bytes with index.html executable: the same fingerprint (paths and blobs), another tree id
+  const side = path.join(path.dirname(F.old), 'order-copy');
+  gitAt(F.old, null, ['worktree', 'add', '-q', '-b', 'order-copy', side, v2.commit]);
+  const dir = path.join(side, ARTIFACTS_REL, 'order-mock');
+  putIn(dir, page(1));
+  fs.chmodSync(path.join(dir, 'index.html'), 0o755);
+  gitAt(side, '2026-03-01T00:00:00Z', ['add', '-A']);
+  gitAt(side, '2026-03-01T00:00:00Z', ['commit', '-qm', 'order-mock back to v1, executable']);
+  const tip = gitAt(side, null, ['rev-parse', 'HEAD']);
+  gitAt(F.old, null, ['update-ref', 'refs/devteam-remote/ticket/copy-01', tip]);
+  gitAt(F.old, null, ['worktree', 'remove', '--force', side]);
+  gitAt(F.old, null, ['branch', '-qD', 'order-copy']);
+  const v1tree = gitAt(F.old, null, ['rev-parse', `HEAD~1:${ARTIFACTS_REL}/order-mock`]);
+  assert.notEqual(gitAt(F.old, null, ['rev-parse', `${tip}:${ARTIFACTS_REL}/order-mock`]), v1tree, 'another tree id');
+  const lib = JSON.parse(F.owner(['dashboard-data'])).library.artifacts.filter((a) => a.slug === 'order-mock').map((a) => a.at);
+  assert.deepEqual(lib, ['main'], 'the branch copy of v1 is no draft');
+});
+
 // git on PATH writing each call's arguments to a file: run(args) runs devteam.mjs through it and
 // gives its output and the git calls it made
 function gitSpy(F) {
