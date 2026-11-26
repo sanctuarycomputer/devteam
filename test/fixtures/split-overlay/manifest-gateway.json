@@ -1,0 +1,8 @@
+{
+  "source": "cloud/gateway.mjs",
+  "dir": "cloud/gateway",
+  "cap": 2000,
+  "modules": [
+    { "name": "routes", "from": { "line": 1 } }
+  ]
+}
