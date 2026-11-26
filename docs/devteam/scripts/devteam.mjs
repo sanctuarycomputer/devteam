@@ -14212,33 +14212,87 @@ function shotSweep(id, now) {
   }
 }
 /* note-shots end */
-// An artifact's versions, newest first: its drafts (a worktree's copy that differs from main's), then
-// main's version (landed) and the ones before it (earlier), from the walk artifactTreeOk makes, so
-// every tree listed is one /artifact/tree/ serves. Only trees with an artifact.json, each once at its
-// newest commit; main's capped at ARTIFACT_VERSIONS_MAX versions, counted after those filters. Null
-// when there is nothing at all.
+// A tree's fingerprint, the one describeArtifact gives the same files (kit-947): fingerprint() over
+// git ls-tree -r's paths and blob ids. Kept in run/cache by tree id (a tree id's files never change),
+// the newest 20,000, written once as the process ends; null, and nothing kept, when git can't read it.
+function treeFingerprint(tree) {
+  const file = path.join(runDir, 'cache', 'artifact-tree-fps.json');
+  const kept = treeFingerprint.kept ??= (() => {
+    const k = { data: {}, dirty: false };
+    try { const d = JSON.parse(fs.readFileSync(file, 'utf8')); if (isObj(d)) k.data = d; } catch {}
+    process.on('exit', () => {
+      if (!k.dirty) return;
+      const ids = Object.keys(k.data);
+      for (const id of ids.slice(0, Math.max(0, ids.length - 20000))) delete k.data[id];
+      try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(k.data)); } catch {}
+    });
+    return k;
+  })();
+  if (typeof kept.data[tree] === 'string') return kept.data[tree];
+  const raw = /^[0-9a-f]{40,64}$/.test(tree ?? '') ? git(['ls-tree', '-r', '-z', tree], mainRoot) : null;
+  if (raw === null) return null;
+  const entries = raw.split('\0').filter(Boolean).map((l) => { const tab = l.indexOf('\t'); return { path: l.slice(tab + 1), oid: l.slice(0, tab).split(' ')[2] }; });
+  kept.data[tree] = fingerprint(entries);
+  kept.dirty = true;
+  return kept.data[tree];
+}
+// When a draft's page last changed, ISO (kit-947), never its branch's head: a branch from another
+// machine, its folder's last commit up to the tip; a worktree that is its own checkout, its files'
+// newest time while it has changes there (git status, taking no lock in another session's checkout),
+// otherwise its folder's last commit up to HEAD; a plain folder, its files' newest time. A commit's
+// time is kept in run/cache by the tip or HEAD and the slug (the newest 2,000), written once as the
+// process ends; with no commit, or git failing, the files' time.
+function draftChangedAt(row) {
+  const file = path.join(runDir, 'cache', 'artifact-draft-times.json');
+  const kept = draftChangedAt.kept ??= (() => {
+    const k = { data: {}, dirty: false };
+    try { const d = JSON.parse(fs.readFileSync(file, 'utf8')); if (isObj(d)) k.data = d; } catch {}
+    process.on('exit', () => {
+      if (!k.dirty) return;
+      const keys = Object.keys(k.data);
+      for (const key of keys.slice(0, Math.max(0, keys.length - 2000))) delete k.data[key];
+      try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(k.data)); } catch {}
+    });
+    return k;
+  })();
+  const files = row.updated_at ?? null;
+  const lastCommit = (sha, cwd, folder) => {
+    if (!/^[0-9a-f]{40,64}$/.test(sha ?? '')) return files;
+    const key = `${sha} ${row.slug}`;
+    if (typeof kept.data[key] === 'string') return kept.data[key];
+    const t = git(['log', '-1', '--format=%cI', sha, '--', folder], cwd);
+    if (!t || Number.isNaN(Date.parse(t))) return files;
+    kept.data[key] = new Date(t).toISOString();
+    kept.dirty = true;
+    return kept.data[key];
+  };
+  if (row.remote) return lastCommit(row.commit, mainRoot, `${ARTIFACTS_REL}/${row.slug}`);
+  const root = draftWorktree(row.at);
+  if (!root) return files;
+  // a plain folder under .worktrees/ has no checkout of its own: git would walk up to main's
+  const top = git(['rev-parse', '--show-toplevel'], root);
+  try { if (!top || fs.realpathSync(top) !== root) return files; } catch { return files; }
+  const folder = path.join(root, ARTIFACTS_REL, row.slug);
+  const st = git(['--no-optional-locks', 'status', '--porcelain', '-z', '--untracked-files=all', '--', folder], root);
+  if (st === null || st !== '') return files;
+  return lastCommit(git(['rev-parse', 'HEAD'], root), root, folder);
+}
+// An artifact's versions in one list, newest first by time: main's distinct contents (each at the
+// first commit that made it; landed is the one main holds now) and the drafts with content of their
+// own (dated by their page's last change), keyed by fingerprint, so a copy is never its own entry.
+// Only servable trees (with an artifact.json), from the walk artifactTreeOk makes, so every tree
+// listed is one /artifact/tree/ serves. The whole list is capped at ARTIFACT_VERSIONS_MAX, never
+// cutting landed. Null when there is nothing at all.
 const ARTIFACT_VERSIONS_MAX = 200;
 function artifactVersions(slug) {
-  const drafts = draftArtifacts().filter((a) => a.slug === slug)
-    .sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))
-    .map((a) => {
-      const root = draftWorktree(a.at);
-      // a plain folder under .worktrees/ has no checkout of its own: git would walk up to main's
-      const top = root ? git(['rev-parse', '--show-toplevel'], root) : null;
-      let commit = null;
-      try { commit = top && fs.realpathSync(top) === root ? git(['rev-parse', 'HEAD'], root) : null; } catch {}
-      if (a.remote) return { kind: 'draft', at: a.at, worktree: a.at, branch: a.branch, commit: a.commit, time: a.updated_at, fp: a.fp, url: `/artifact/origin/${encodeURIComponent(a.branch)}/${slug}/` };
-      return { kind: 'draft', at: a.at, worktree: a.at, commit, time: a.updated_at, fp: a.fp, url: `/artifact/wt/${a.at}/${slug}/` };
-    });
   const ref = mainRef();
   let main = [];
-  let truncated = false;
   if (ref) {
     const folder = `${ARTIFACTS_REL}/${slug}`;
     const raw = git(['log', '--format=%x01%H %cI', '--raw', '--no-abbrev', '-t', '-m', '--first-parent', '--no-renames', ref, '--', folder], mainRoot);
     // a failed read is a failure (exit 1), never an empty history (exit 3)
     if (raw === null) die(`${slug}: could not read main's history`);
-    const seen = new Set();
+    // every commit that made a tree, newest first; a revert's tree is kept here and collapsed below
     for (const chunk of raw.split('\x01').slice(1)) {
       const [head, ...lines] = chunk.split('\n');
       const [commit, time] = head.split(' ');
@@ -14247,8 +14301,7 @@ function artifactVersions(slug) {
         const m = /^:(\d+) (\d+) ([0-9a-f]+) ([0-9a-f]+) \S+\t(.*)$/.exec(l);
         if (m && m[5] === folder && m[2] === '040000') { tree = m[4]; break; }
       }
-      if (!tree || /^0+$/.test(tree) || seen.has(tree)) continue;
-      seen.add(tree);
+      if (!tree || /^0+$/.test(tree)) continue;
       main.push({ tree, commit, time });
     }
     // only servable: a tree without artifact.json at its top (from before the manifest) is left out
@@ -14263,12 +14316,51 @@ function artifactVersions(slug) {
     // a folder missing on main is an empty answer (""), not a failure: only null is
     if (nowLs === null) die(`${slug}: could not read main's history`);
     const nowTree = treeNow(nowLs);
-    main = main.map((e) => ({ kind: e.tree === nowTree ? 'landed' : 'earlier', at: `tree:${e.tree}`, tree: e.tree, commit: e.commit, time: e.time, url: `/artifact/tree/${e.tree}/${slug}/` }));
-    truncated = main.length > ARTIFACT_VERSIONS_MAX;
-    main = main.slice(0, ARTIFACT_VERSIONS_MAX);
+    const nowFp = nowTree ? treeFingerprint(nowTree) : null;
+    // one entry per content, at the first commit that made it: walked oldest first, the first of each
+    // fingerprint kept (a tree git can't fingerprint stands alone, by its id), then newest first again,
+    // so each sits at its earliest commit's place in the walk
+    const firsts = new Map();
+    for (const e of [...main].reverse()) {
+      const fp = treeFingerprint(e.tree);
+      const key = fp ?? `tree:${e.tree}`;
+      if (!firsts.has(key)) firsts.set(key, { ...e, fp });
+    }
+    main = [...firsts.values()].reverse().map((e) => {
+      const landed = !!nowTree && (e.fp ? e.fp === nowFp : e.tree === nowTree);
+      const tree = landed ? nowTree : e.tree;
+      return { kind: landed ? 'landed' : 'earlier', at: `tree:${tree}`, tree, commit: e.commit, time: e.time, fp: e.fp, url: `/artifact/tree/${tree}/${slug}/` };
+    });
   }
-  if (!drafts.length && !main.length) return null;
-  return { slug, versions: [...drafts, ...main], truncated };
+  // the drafts with content of their own: a copy of any of main's is none, and copies of one page are
+  // one entry, the copy made first (on a tie, the first listed), each dated by its page's last change
+  const onMain = new Set(main.map((e) => e.fp).filter(Boolean));
+  const byFp = new Map();
+  for (const a of draftArtifacts().filter((d) => d.slug === slug && !onMain.has(d.fp))) {
+    const time = draftChangedAt(a);
+    let v;
+    if (a.remote) v = { kind: 'draft', at: a.at, worktree: a.at, branch: a.branch, commit: a.commit, time, fp: a.fp, url: `/artifact/origin/${encodeURIComponent(a.branch)}/${slug}/` };
+    else {
+      const root = draftWorktree(a.at);
+      // a plain folder under .worktrees/ has no checkout of its own: git would walk up to main's
+      const top = root ? git(['rev-parse', '--show-toplevel'], root) : null;
+      let commit = null;
+      try { commit = top && fs.realpathSync(top) === root ? git(['rev-parse', 'HEAD'], root) : null; } catch {}
+      v = { kind: 'draft', at: a.at, worktree: a.at, commit, time, fp: a.fp, url: `/artifact/wt/${a.at}/${slug}/` };
+    }
+    const was = byFp.get(a.fp);
+    if (!was || Date.parse(time) < Date.parse(was.time)) byFp.set(a.fp, v);
+  }
+  // one list by instant (main's times keep git's offset, drafts' are UTC), newest first; the sort is
+  // stable, so a tie keeps drafts first and main's in walk order
+  const at = (v) => { const t = Date.parse(v.time); return Number.isNaN(t) ? -Infinity : t; };
+  let list = [...byFp.values(), ...main].sort((a, b) => at(b) - at(a));
+  if (!list.length) return null;
+  const truncated = list.length > ARTIFACT_VERSIONS_MAX;
+  // the cap never cuts landed: past it, landed takes the last place, which keeps the order
+  const li = list.findIndex((v) => v.kind === 'landed');
+  list = li >= ARTIFACT_VERSIONS_MAX ? [...list.slice(0, ARTIFACT_VERSIONS_MAX - 1), list[li]] : list.slice(0, ARTIFACT_VERSIONS_MAX);
+  return { slug, versions: list, truncated };
 }
 // A broken manifest is listed by its slug and error, never its unvalidated title.
 function describeArtifact(slug, at, src) {
@@ -14305,6 +14397,37 @@ function landedArtifacts() {
 // removed shows nothing.
 function draftArtifacts(landed = landedArtifacts()) {
   const fpOf = new Map(landed.map((a) => [a.slug, a.fp]));
+  const msha = mainSha();
+  // A copy of any version main has had is no draft either (kit-947): the fingerprints of every tree
+  // in main's history of a slug, asked only for a slug with a copy that differs from landed, kept in
+  // run/cache by main's sha (a new sha starts afresh) and slug, written once as the process ends.
+  // With no main, or git failing, nothing is kept and nothing more is dropped.
+  const mf = draftArtifacts.mainFps ??= (() => {
+    const file = path.join(runDir, 'cache', 'artifacts-main-fps.json');
+    const k = { data: { sha: null, slugs: {} }, dirty: false };
+    try { const d = JSON.parse(fs.readFileSync(file, 'utf8')); if (isObj(d) && typeof d.sha === 'string' && isObj(d.slugs)) k.data = d; } catch {}
+    process.on('exit', () => { if (k.dirty) try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(k.data)); } catch {} });
+    return k;
+  })();
+  if (msha && mf.data.sha !== msha) { mf.data = { sha: msha, slugs: {} }; mf.dirty = true; }
+  const mainFps = (slug) => {
+    const have = msha ? mf.data.slugs[slug] : null;
+    if (Array.isArray(have)) return new Set(have);
+    if (!msha) return new Set();
+    const a = treeFolderArgs(msha, slug);
+    const log = git(a.log, mainRoot), now = git(a.now, mainRoot);
+    if (log === null || now === null) return new Set();
+    const trees = new Set();
+    for (const l of log.split('\n')) {
+      const m = /^:\d+ \d+ [0-9a-f]+ ([0-9a-f]+) \S+\t(.*)$/.exec(l);
+      if (m && m[2] === `${ARTIFACTS_REL}/${slug}` && !/^0+$/.test(m[1])) trees.add(m[1]);
+    }
+    if (treeNow(now)) trees.add(treeNow(now));
+    const fps = [...trees].map(treeFingerprint);
+    // one tree git couldn't read: this answer is used, never kept
+    if (fps.every(Boolean)) { mf.data.slugs[slug] = fps; mf.dirty = true; }
+    return new Set(fps.filter(Boolean));
+  };
   const res = [];
   let names = [];
   // no .worktrees/ is no worktree drafts; drafts from other machines are still listed below
@@ -14317,7 +14440,7 @@ function draftArtifacts(landed = landedArtifacts()) {
       const src = artifactSource(w, s);
       if (!src) continue;
       const d = describeArtifact(s, w, src);
-      if (fpOf.get(s) !== d.fp) res.push(d);
+      if (fpOf.get(s) !== d.fp && !mainFps(s).has(d.fp)) res.push(d);
     }
   }
   // Drafts from other machines (kit-750): each branch the dashboard fetched into refs/devteam-remote/
@@ -14327,7 +14450,7 @@ function draftArtifacts(landed = landedArtifacts()) {
   // kept on origin shows nothing. A branch's slugs are kept by its tip and main's (artifacts-remote),
   // a description by tree id (artifacts-remote-trees). A worktree draft of the same slug wins, and
   // names the branches it hides (remote_branches).
-  const ref = mainRef(), msha = mainSha(), mainB = loadSettings().main_branch;
+  const ref = mainRef(), mainB = loadSettings().main_branch;
   const refs = ref ? git(['for-each-ref', '--sort=-committerdate', '--format=%(refname) %(objectname) %(committerdate:iso-strict)', 'refs/devteam-remote/'], mainRoot) : null;
   if (!refs) return res;
   // a branch this machine has too (refs/heads/<b>: its own pushed work) is not from another machine
@@ -14372,7 +14495,7 @@ function draftArtifacts(landed = landedArtifacts()) {
         }
         for (const slug of [...new Set(slugs)].filter((x) => LINK_ID.test(x ?? '')).sort()) {
           const tree = treeNow(git(['ls-tree', sha, '--', `${ARTIFACTS_REL}/${slug}`], mainRoot));
-          if (tree && !mainHas(slug, tree)) kept.push([slug, tree]);
+          if (tree && !mainHas(slug, tree) && !mainFps(slug).has(treeFingerprint(tree))) kept.push([slug, tree]);
         }
       }
     }
