@@ -104,19 +104,32 @@ export function kitParts(text) {
 
 // The names fileParts reads as declarations in the source that the scanner doesn't declare: a
 // declaration the scanner missed (a line it wrongly reads as inside a template or comment), or a
-// column-0 line inside a template that fileParts reads as one. Either way the split can't be sure.
-export function partsNames(kit, src, srcFile) {
+// column-0 line inside a template that fileParts reads as one. Either way the split can't be sure,
+// unless the line lies inside a declaration the manifest names in templates (a page's browser code,
+// written at column 0 in a template): { refused, accepted }, each "<name> (the leaf at line N)",
+// accepted ones with "in <template>"; unknown: each templates name that is no top-level declaration.
+export function partsNames(kit, src, srcFile, templates = []) {
   const P = kit.fileParts(src, srcFile);
   const S = items(strip(src).text);
   const ours = new Set(S.items.flatMap((x) => (x.kind === 'decl' ? x.names : [])));
-  const out = [];
+  const whole = items(src).items.filter((x) => x.kind === 'decl');
+  const named = [];
+  const refused = [], accepted = [], unknown = [];
+  for (const t of templates) {
+    const it = whole.find((x) => x.names.includes(t));
+    if (it) named.push({ name: t, from: it.from, to: it.to });
+    else unknown.push(t);
+  }
   for (let i = 1; i <= P.n; i++) {
     const k = P.owner[i];
     if (!k.startsWith('d:') || P.owner[i - 1] === k) continue;
     const name = k.slice(2).split('/').pop().replace(/#\d+$/, '');
-    if (!ours.has(name)) out.push(`${name} (the leaf at line ${i})`);
+    if (ours.has(name)) continue;
+    const inside = named.find((x) => i > x.from && i <= x.to);
+    if (inside) accepted.push(`${name} (the leaf at line ${i}) in ${inside.name}`);
+    else refused.push(`${name} (the leaf at line ${i})`);
   }
-  return out;
+  return { refused, accepted, unknown };
 }
 // The independent count: the declaration leaves fileParts finds in the source and in the tree's
 // modules (export stripped first on both sides), compared as multisets of text. { equal, source,
