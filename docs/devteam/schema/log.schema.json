@@ -39,7 +39,8 @@
         "act",
         "spend",
         "thread",
-        "turn"
+        "turn",
+        "artifact"
       ]
     },
     "op": {
@@ -2746,6 +2747,29 @@
         },
         "additionalProperties": false,
         "x-required-new": ["thread", "text"]
+      },
+      "artifact": {
+        "description": "A landed artifact's organising attributes (kit-934): one object per slug, id artifact:<slug>. archived takes it out of the Library and deletes nothing; artifact archive|restore writes it, the supervisor's or (--owner) the owner's, and kit-935 sets it when a goal is met. Not an act and not a call: trust, decisions and corrections leave it out. Once the owner has set archived, a supervisor's set of it no longer applies (the fold's rank rule), so the owner's word stands until the owner changes it.",
+        "type": "object",
+        "properties": {
+          "archived": {
+            "description": "Whether the artifact is archived: out of the Library, its files untouched.",
+            "type": "boolean",
+            "x-tip": "Archived: out of the Library, nothing deleted."
+          },
+          "goal": {
+            "description": "The met goal it was archived for (kit-935), or null.",
+            "type": ["string", "null"],
+            "pattern": "^g-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$"
+          },
+          "reason": {
+            "description": "Why, in one line, or null.",
+            "type": ["string", "null"],
+            "maxLength": 500
+          }
+        },
+        "additionalProperties": false,
+        "x-required-new": ["archived"]
       }
     },
     "person": {
@@ -3181,7 +3205,8 @@
     "pattern": "^[a-z]-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$",
     "keyed": {
       "ticket": "^[a-z][a-z0-9]*(-[a-z0-9]+)*-[0-9]{2,}-[a-z0-9]+(-[a-z0-9]+)*$",
-      "feature": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
+      "feature": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+      "artifact": "^artifact:[a-z][a-z0-9]*(-[a-z0-9]+)*$"
     }
   },
   "x-authority": {
@@ -3201,7 +3226,8 @@
         "message",
         "act",
         "thread",
-        "turn"
+        "turn",
+        "artifact"
       ],
       "supervisor": [
         "goal",
@@ -3218,7 +3244,8 @@
         "gate",
         "spend",
         "turn",
-        "thread"
+        "thread",
+        "artifact"
       ],
       "planner": [
         "feature",
@@ -3242,6 +3269,10 @@
       ]
     },
     "set": {
+      "artifact": {
+        "supervisor": ["archived", "goal", "reason"],
+        "owner": ["archived", "goal", "reason"]
+      },
       "goal": {
         "supervisor": [
           "title",
