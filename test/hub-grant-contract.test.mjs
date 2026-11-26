@@ -110,6 +110,10 @@ test('C12: owner-act and the MCP rule read the token; a code keeps its stamp; ho
   states(8, ['Hosts are compared exactly as written, as today']);
   states(6, ['of printable ASCII, with no space or control character']);
   states(4, ['in its ASCII (punycode) form', 'or nothing they asked for is theirs to allow (a View person asking only for `threads:write`)']);
+  states(14, ['A code traded under another is `invalid_grant`', 'a consent allowed under another is refused as §4\'s are (400, words) and redirects nowhere']);
+  assert.ok(!section(14).includes('or a consent allowed, under another is `invalid_grant`'), '§14 no longer makes a consent under another stamp invalid_grant');
+  states(9, ['Narrowing binds that access token only', 'a process that must not rule is given only the access token, never the refresh token']);
+  states(10, ['and so do their codes not yet traded: re-adding the person revives neither, and such a code traded later is `invalid_grant`']);
 });
 
 test('C11: exact routes, raw paths refused before matching, and /upload\'s Origin rule', () => {
