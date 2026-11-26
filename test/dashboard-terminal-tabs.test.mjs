@@ -179,6 +179,50 @@ test("terminal A11: th=supervisor draws the fake's screen with xterm.js, loaded 
   assert.equal(await R.p.ev(`document.querySelector('#th-tabs [data-tab="supervisor"]').hasAttribute('aria-disabled')`), false, 'and enabled');
 });
 
+test("terminal A11: typing 'echo hi' and Enter posts the bytes, in order, and the echo shows", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=supervisor' });
+  await focusScreen(R);
+  await R.p.type('echo hi');
+  await R.p.key('Enter');
+  await R.soon(`${screenText()}.includes('echo hi')`, 'the echo on the screen');
+  const typed = R.fake.typed('supervisor').join('');
+  assert.equal(typed, 'echo hi\r', 'exactly the keys, in order, once each');
+  const ps = R.posts();
+  assert.ok(ps.every((b, i) => b.seq === i + 1 && b.which === 'supervisor' && b.pane === '%1' && /^[A-Za-z0-9_-]{16,64}$/.test(b.page)), `seq counts up from 1 with the pane and page: ${JSON.stringify(ps)}`);
+});
+
+test('terminal A11: at most one key post is in flight; queued keys merge up to 4096 bytes; a failed post is not retried', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=supervisor', fake: { sendMs: 400 } });
+  await focusScreen(R);
+  await R.p.type('abcd');
+  await sleep(2000);
+  const ks = R.term(/\/keys$/);
+  // never two at once: each post starts after the one before has been answered
+  for (let i = 1; i < ks.length; i++) assert.ok(ks[i].start >= ks[i - 1].end, `post ${i + 1} started before post ${i} was answered`);
+  assert.equal(R.fake.typed('supervisor').join(''), 'abcd');
+  assert.ok(ks.length < 4, `the keys queued behind the first were merged: ${ks.length} posts`);
+  // 5000 bytes typed at once while a post is in flight: merged into posts of at most 4096 bytes
+  await R.p.type('x');
+  await R.p.send('Input.insertText', { text: 'y'.repeat(5000) });
+  await sleep(3000);
+  const sizes = R.posts().map((b) => (b.data ? b.data.length / 2 : 0));
+  assert.ok(sizes.every((n) => n <= 4096), `no post over 4096 bytes: ${sizes}`);
+  assert.equal(R.fake.typed('supervisor').join(''), `abcdx${'y'.repeat(5000)}`, 'every byte once, in order');
+  // a failure: the fake's supervisor busy (503); one post, its error shown, the queue dropped, nothing resent
+  R.fake.set({ busy: true, sendMs: 0 });
+  const before = R.posts().length;
+  await R.p.type('q');
+  await R.soon(`/busy/.test(document.querySelector('.term-box[data-term="supervisor"] .term-hint').textContent)`, 'the busy words');
+  await sleep(1500);
+  assert.equal(R.posts().length, before + 1, 'the refused post is sent once and never retried');
+  // a 500 carrying an exception's text: fixed words, the text never shown
+  R.fake.set({ busy: false });
+  R.fr.hooks.answer = (path) => (path.endsWith('/keys') ? { status: 500, json: { error: 'EACCES: permission denied, open /home/owner/.devteam/secret' } } : null);
+  await R.p.type('r');
+  await R.soon(`document.querySelector('.term-box[data-term="supervisor"] .term-hint').textContent.includes('had a problem')`, 'a 500: fixed words');
+  assert.ok(!(await R.p.ev(`document.querySelector('.term-box[data-term="supervisor"]').textContent.includes('EACCES')`)), "a 500's own text is never shown");
+});
+
 test('terminal A11: a failed read shows its words until a read succeeds again, and failed reads back off', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
   const R = await open(t, { hash: '#overview?th=supervisor' });
   const hint = `document.querySelector('.term-box[data-term="supervisor"] .term-hint').textContent`;
@@ -278,6 +322,63 @@ test('terminal A11: a screen line carrying a query (DSR, a focus-report mode, an
   assert.equal(R.posts().length, 0, 'no post without a key press');
 });
 
+test("terminal A11b: a multi-line paste asks 'Paste N lines?'; confirmed, one paste post; cancelled, nothing", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=supervisor' });
+  await focusScreen(R);
+  await R.p.ev(pasteIn('one\ntwo\nthree'));
+  await R.soon(`document.querySelector('.term-box[data-term="supervisor"] .term-ask:not([hidden])')?.textContent.includes('Paste 3 lines?')`, 'the question');
+  assert.equal(R.posts().length, 0, 'nothing sent while it asks');
+  await R.p.click('.term-box[data-term="supervisor"] [data-term-paste="no"]');
+  await sleep(800);
+  assert.equal(R.posts().length, 0, 'cancelled: nothing sent');
+  await R.p.ev(pasteIn('one\ntwo\nthree'));
+  await R.soon(`!!document.querySelector('.term-box[data-term="supervisor"] .term-ask:not([hidden])')`, 'asked again');
+  await R.p.click('.term-box[data-term="supervisor"] [data-term-paste="yes"]');
+  await sleep(800);
+  const ps = R.posts();
+  assert.equal(ps.length, 1, 'confirmed: one post');
+  assert.deepEqual(Object.keys(ps[0]).sort(), ['page', 'pane', 'paste', 'seq', 'token', 'which'], 'a paste post, not keys');
+  assert.equal(ps[0].paste, 'one\ntwo\nthree', 'the text whole');
+  // a one-line paste goes without asking; its bracket markers are left to the server to drop (kit-612 F1)
+  await R.p.ev(pasteIn('a\x1b[201~b'));
+  await sleep(800);
+  assert.equal(R.posts().length, 2, 'a one-line paste is sent without a question');
+  assert.equal(R.posts()[1].paste, 'a\x1b[201~b', 'as it was pasted: the server drops bracket markers (terminal@1 §8)');
+  // the cap counts UTF-8 bytes: 60,000 characters of é are 120,000 bytes
+  await R.p.ev(pasteIn('é'.repeat(60000)));
+  await R.soon(`/too large/.test(document.querySelector('.term-box[data-term="supervisor"] .term-hint').textContent)`, 'too large in bytes');
+  assert.equal(R.posts().length, 2, 'nothing of it sent: the cap is in bytes');
+  // too large for one post: refused here, whole
+  await R.p.ev(pasteIn('"'.repeat(60000)));
+  await R.soon(`/too large/.test(document.querySelector('.term-box[data-term="supervisor"] .term-hint').textContent)`, 'too large');
+  assert.equal(R.posts().length, 2, 'nothing of it sent');
+});
+
+test("terminal A12: th=shell posts shell/open once and draws the shell; an ended shell shows 'The shell ended.' with Open a new shell", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=shell', fake: { shell: false, lines: ['SUPERVISOR-PANE-ONLY'] } });
+  await R.soon(`!!document.querySelector('.term-box[data-term="shell"] .xterm')`, 'the shell drawn');
+  await sleep(400);
+  assert.ok(!(await R.p.ev(`${screenText('shell')}.includes('SUPERVISOR-PANE-ONLY')`)), "the Shell tab draws the shell's screen, never the supervisor's");
+  await focusScreen(R, 'shell');
+  await R.p.type('ls');
+  await R.soon(`${screenText('shell')}.includes('ls')`, 'typed into the shell');
+  assert.deepEqual(R.fake.typed('supervisor'), [], "nothing typed into the supervisor's pane");
+  // another tab and back: no second open
+  await R.p.click('#th-tabs [data-tab="supervisor"]');
+  await R.p.click('#th-tabs [data-tab="shell"]');
+  await sleep(600);
+  const opens = R.term(/\/shell\/open$/);
+  assert.equal(opens.length, 1, 'shell/open posted once');
+  const b = JSON.parse(opens[0].body);
+  assert.ok(b.which === 'shell' && b.cols >= 20 && b.cols <= 500 && b.rows >= 5 && b.rows <= 200, `the panel's size: ${opens[0].body}`);
+  // the shell exits
+  R.fake.set({ shell: false });
+  await R.soon(`document.querySelector('.term-box[data-term="shell"] .term-state:not([hidden])')?.textContent.includes('The shell ended.')`, 'The shell ended.');
+  await R.p.click('.term-box[data-term="shell"] [data-term-newshell]');
+  await R.soon(`!!document.querySelector('.term-box[data-term="shell"] .term-state[hidden]')`, 'a new shell drawn');
+  assert.equal(R.term(/\/shell\/open$/).length, 2, 'Open a new shell posts shell/open again');
+});
+
 test("terminal A13: state gone shows 'The supervisor isn't running.' with the recover command and polls every 5 s", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
   const R = await open(t, { hash: '#overview?th=supervisor', fake: { supervisor: 'gone' } });
   const st = `document.querySelector('.term-box[data-term="supervisor"] .term-state:not([hidden])')`;
@@ -337,6 +438,21 @@ test('terminal A13: the /view/ page keeps both slots disabled', { skip: canDrive
   assert.equal(R.term(/./).length, 0, 'the /view/ page asks nothing of the terminal routes');
 });
 
+test('terminal A13: held kit messages behind an open owner line show the waiting note', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=supervisor' });
+  const hint = `document.querySelector('.term-box[data-term="supervisor"] .term-hint').textContent`;
+  await focusScreen(R);
+  // held lines alone (a question on the pane held them): no note
+  R.fake.set({ held: { count: 2, oldest_ms: 130000, prompt: 'readable' } });
+  await sleep(800);
+  assert.doesNotMatch(await R.p.ev(hint), /waiting until/, 'the count alone never shows the note');
+  await R.p.type('half a line');
+  await R.soon(`/Messages for the supervisor are waiting until you send or clear your line\\./.test(${hint})`, 'the note, behind the open line');
+  assert.doesNotMatch(await R.p.ev(hint), /Answer it here/, 'a readable prompt: no answer-it-here sentence');
+  await R.p.key('Enter');
+  await R.soon(`!/waiting until/.test(${hint})`, 'a line sent: no note');
+});
+
 test("terminal A14b: the page asks GET /api/term/token once on load, before any tab is pressed; why view hides both tabs", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
   const R = await open(t, { hash: '#overview' });
   await sleep(800);
@@ -350,6 +466,29 @@ test("terminal A14b: the page asks GET /api/term/token once on load, before any 
     await V.soon(`!!document.querySelector('#th-tabs [data-tab="threads"]') && TERM.why === 'view'`, 'refused');
     assert.deepEqual(await V.p.ev(`[...document.querySelectorAll('#th-tabs [role="tab"]')].map((b) => b.dataset.tab)`), ['inbox', 'threads'], `${JSON.stringify(fo)}: both terminal tabs hidden`);
   }
+});
+
+test('terminal A14b: held over 2 minutes on an unknown prompt adds the answer-it-here sentence; app_cursor makes ArrowUp ESC O A', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=supervisor' });
+  const hint = `document.querySelector('.term-box[data-term="supervisor"] .term-hint').textContent`;
+  await focusScreen(R);
+  await R.p.type('x');
+  R.fake.set({ held: { count: 1, oldest_ms: 119000, prompt: 'unknown' } });
+  await sleep(800);
+  assert.doesNotMatch(await R.p.ev(hint), /waiting until/, 'under 2 minutes: no note');
+  R.fake.set({ held: { count: 1, oldest_ms: 121000, prompt: 'unknown' } });
+  await R.soon(`/waiting until you send or clear your line\\. Answer it here to let them through\\./.test(${hint})`, 'the note with the answer-it-here sentence');
+  // cursor keys: as the program asked
+  await arrowUp(R.p);
+  await sleep(400);
+  assert.equal(R.posts().at(-1).data, hex('\x1b[A'), 'normal mode: ESC [ A');
+  R.fr.hooks.rewrite = (p, j) => (p.endsWith('/screen') || p.endsWith('/keys') ? { ...j, modes: { app_cursor: true, app_keypad: false } } : j);
+  // a new screen (a 304 has no body to rewrite)
+  R.fake.set({ lines: ['a program in cursor-key mode'] });
+  await R.soon(`${screenText()}.includes('cursor-key mode')`, 'the new screen');
+  await arrowUp(R.p);
+  await sleep(600);
+  assert.equal(R.posts().at(-1).data, hex('\x1bOA'), 'app_cursor: ESC O A');
 });
 
 test('terminal A14b: a slow read backs off to 2 s and a fast one comes back', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {

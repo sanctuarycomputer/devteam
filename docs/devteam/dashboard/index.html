@@ -11813,6 +11813,7 @@ function termSync(shown = TERM.shown) {
   for (const w of TERM_IDS) {
     const s = termTab(w);
     if (!termLive(w)) { clearTimeout(s.timer); s.timer = null; continue; }
+    if (w === 'shell' && !s.opened) { termOpen(); continue; }
     if (!s.timer && !s.reading) termRead(w);
   }
 }
@@ -11850,9 +11851,10 @@ async function termRead(w) {
 function termScreen(w, j) {
   const s = termTab(w);
   if (j.state === 'live') s.live = true;
-  // the numbers written into xterm are numbers in range, whatever the answer held (terminal@1 §6's bounds)
-  const n = (v, lo, hi, d) => (Number.isInteger(v) ? Math.min(hi, Math.max(lo, v)) : d);
-  const cols = n(j.cols, 1, 500, 80), rows = n(j.rows, 1, 200, 24);
+  // the numbers written into xterm are whole numbers in range, whatever the answer held; a gone screen's 0 by 0
+  // (terminal@1 §6) keeps the 80 by 24 a new xterm starts at
+  const n = (v, lo, hi, d) => (Number.isInteger(v) && v >= lo ? Math.min(hi, v) : d);
+  const cols = n(j.cols, 1, 2000, 80), rows = n(j.rows, 1, 1000, 24);
   j = { ...j, cols, rows, lines: Array.isArray(j.lines) ? j.lines.filter((l) => typeof l === 'string').slice(0, rows) : [],
     cursor: { x: n(j.cursor?.x, 0, cols - 1, 0), y: n(j.cursor?.y, 0, rows - 1, 0), visible: j.cursor?.visible === true } };
   s.screen = j;
@@ -11957,7 +11959,8 @@ function termMake(w, Terminal) {
 const termKeysOn = (w) => !!termTab(w).term && TERM.lib !== 'failed' && !!TERM.token && termTab(w).screen?.state === 'live';
 // Keys: queued behind the post in flight; queued data merges up to 4096 bytes, never across a paste.
 function termKeys(w, bytes) {
-  return;
+  const s = termTab(w);
+  if (!termKeysOn(w) || !bytes.length) return;
   for (let i = 0; i < bytes.length; i += TERM_DATA_MAX) {
     const part = bytes.subarray(i, i + TERM_DATA_MAX), last = s.queue[s.queue.length - 1];
     if (last?.data && last.data.length + part.length <= TERM_DATA_MAX) { const m = new Uint8Array(last.data.length + part.length); m.set(last.data); m.set(part, last.data.length); last.data = m; }
@@ -11967,7 +11970,8 @@ function termKeys(w, bytes) {
 }
 // A paste: more than one line asks "Paste N lines?" first; too large for one post is refused here, whole.
 function termPaste(w, text) {
-  return;
+  const s = termTab(w);
+  if (!termKeysOn(w)) return;
   if (termBytes(JSON.stringify({ which: w, pane: s.screen.pane, page: TERM.page, seq: s.seq + 1, paste: text, token: TERM.token })).length > TERM_BODY_MAX) { s.err = 'That paste is too large to send in one piece, so nothing was sent.'; return void termHint(w); }
   const n = text.split(/\r\n|\r|\n/).length;
   if (n < 2) { s.queue.push({ paste: text }); return void termPump(w); }
@@ -12019,7 +12023,7 @@ function termHint(w) {
   const held = s.screen?.held;
   let html;
   if (s.err || s.readErr) html = `<span class="err">${esc(s.err || s.readErr)}</span>`;
-  else if (false) html = `<span data-term-waiting>Messages for the supervisor are waiting until you send or clear your line.${held.prompt === 'unknown' ? ' Answer it here to let them through.' : ''}</span>`;
+  else if (w === 'supervisor' && s.own === 'open' && held && held.count > 0 && held.oldest_ms >= 120000) html = `<span data-term-waiting>Messages for the supervisor are waiting until you send or clear your line.${held.prompt === 'unknown' ? ' Answer it here to let them through.' : ''}</span>`;
   else if (TERM.lib === 'failed') html = "<span>The terminal couldn't load, so typing is off. This is the screen as text.</span>";
   else if (s.screen?.state === 'live') html = '<span>Click the screen to type.</span> <span><kbd>Ctrl</kbd> <kbd>]</kbd> to leave it.</span>';
   else html = '';
