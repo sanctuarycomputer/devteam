@@ -29233,17 +29233,22 @@ function servePageAsset(req, res, server) {
   res.writeHead(200, { 'content-type': m[1].endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
   return res.end(fs.readFileSync(path.join(kitDir, 'dashboard', m[1])));
 }
-// A static export served from folder at base ('/next', or '' for the root), by alpha-build@1's
-// rules and test/fixtures/alpha-serving.json. DASH_NEXT for a method but GET and HEAD, or a path
-// outside base; inside it, it always answers. The query is ignored. A path over 2048 bytes, a
-// segment that does not decode (each decoded once), an empty segment but the last, '.', '..', or a
-// decoded '/', '\' or NUL is a 404, as is anything whose real path (symlinks followed) is outside
-// the folder, is not a file, or has a type not in the known list. A folder without its slash is a
-// 301 to it with one; a folder is its index.html. An .html page carries the policy
-// policyFor(<route>) gives, <route> as csp-hashes.json keys it ('/', '/threads/one/'); one it gives
-// no string for is a 500. The 404 is text/plain, 'not found'. A base that is not '' or '/<name>'
-// without a trailing slash, or a folder that is not a string, throws (a caller's mistake, before
-// any request is read); a folder that isn't there serves nothing (404).
+// A static export served from folder at base, by alpha-build@1's rules and
+// test/fixtures/alpha-serving.json. A caller's mistake throws before any request is read: a base
+// that is not '' (the root) or '/<name>[/<name>…]' (no trailing slash, no empty, '?' or '#' part),
+// or a folder that is not a non-empty string. Then, in order: DASH_NEXT for a method but GET and
+// HEAD, or a path (the query cut off, and ignored from here on) that is neither base nor under
+// base/; inside it, it always answers. A 404 (text/plain, 'not found') for a request over 2048
+// bytes; a segment that does not decode (each is decoded once), an empty segment but the last, '.',
+// '..', or a decoded '/', '\' or NUL; a real path (symlinks followed) that is missing or outside the
+// folder's real path; a file asked for with a trailing slash; a folder's index.html whose real path
+// is missing or outside; anything not a regular file; a type not in the known list. A 301 for base
+// itself (to base/) and for a folder without its slash (to the path with one, no query). A folder
+// is its index.html. A 200 carries the type, content-length, cache-control: no-store and nosniff,
+// and no body to a HEAD. An .html file carries the policy policyFor(<route>) gives, <route> being
+// its folder as csp-hashes.json keys a route ('/', '/threads/one/'), so a page that is not a
+// route's index.html gets its folder's policy; policyFor is asked only for .html, and a policy that
+// is not a non-empty string, or a throw, is a 500. A folder that isn't there serves 404s.
 function serveAppFiles(folder, base, req, res, policyFor) {
   if (typeof base !== 'string' || (base !== '' && !/^\/[^/?#]+(?:\/[^/?#]+)*$/.test(base))) throw new Error(`serveAppFiles: base ${JSON.stringify(base)} is not '' or /<name>`);
   if (typeof folder !== 'string' || !folder) throw new Error('serveAppFiles: no folder');
@@ -29269,6 +29274,7 @@ function serveAppFiles(folder, base, req, res, policyFor) {
   try { top = fs.realpathSync(folder); real = fs.realpathSync(path.join(top, ...parts)); st = fs.statSync(real); } catch { return none(); }
   const inside = (f) => f === top || f.startsWith(top + path.sep);
   if (!inside(real)) return none();
+  if (!st.isDirectory() && parts.length && p.endsWith('/')) return none();
   if (st.isDirectory()) {
     if (!p.endsWith('/')) return answer(301, { location: `${p}/` });
     try { real = fs.realpathSync(path.join(real, 'index.html')); st = fs.statSync(real); } catch { return none(); }
@@ -29284,7 +29290,8 @@ function serveAppFiles(folder, base, req, res, policyFor) {
   if (ext === 'html') {
     const rel = path.relative(top, path.dirname(real)).split(path.sep).join('/');
     const route = rel ? `/${rel}/` : '/';
-    const policy = policyFor(route);
+    let policy;
+    try { policy = policyFor(route); } catch { policy = null; }
     if (typeof policy !== 'string' || !policy) return answer(500, { 'content-type': 'text/plain; charset=utf-8' }, 'no policy for this page\n');
     headers['content-security-policy'] = policy;
   }

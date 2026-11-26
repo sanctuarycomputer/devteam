@@ -4,7 +4,7 @@
 // Ports: +50 the dashboard's hub (the dashboard itself is pinned on a free port outside the block)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -146,6 +146,27 @@ test('S6 serveAppFiles beyond the table: each segment decoded once, a .. that st
   assert.ok(Buffer.byteLength(far) > 2048, 'S6 the far path is over 2048 bytes');
   assert.equal((await ask(port, far)).status, 404, 'S6 a path over 2048 bytes is a 404, though its file is there');
   assert.equal((await ask(port, '/next//index.html')).status, 404, 'S6 an empty segment but the last is a 404');
+  // a folder whose index.html is a symlink out of the folder (task-1 F1)
+  fs.mkdirSync(path.join(root, 'ix'));
+  fs.symlinkSync('../../outside.txt', path.join(root, 'ix', 'index.html'));
+  const ix = await ask(port, '/next/ix/');
+  assert.equal(ix.status, 404, "S6 a folder's index.html that leads out of the folder is a 404");
+  assert.ok(!ix.body.toString().includes('outside the served folder'), 'S6 and nothing of the file it leads to');
+  // not a regular file: a FIFO with a known type would block the read (task-1 F2)
+  // a writer at its other end for 5 s, so a server that read it would get 'x' and answer, not hang
+  if (spawnSync('mkfifo', [path.join(root, 'pipe.txt')]).status === 0) {
+    const fifo = path.join(root, 'pipe.txt');
+    spawn('timeout', ['5', 'sh', '-c', 'printf x > "$1"', 'sh', fifo], { stdio: 'ignore' });
+    // its writer, still opening the FIFO, is let go at once: a reader opened and closed (timeout ends it in 5 s at worst)
+    t.after(() => { try { fs.closeSync(fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK)); } catch {} });
+    assert.equal((await ask(port, '/next/pipe.txt')).status, 404, 'S6 a FIFO is a 404');
+  }
+  // a file asked for as a folder (task-1 F3)
+  for (const p of ['/next/index.txt/', '/next/threads/one/index.html/']) assert.equal((await ask(port, p)).status, 404, `S6 ${p}: a file with a trailing slash is a 404`);
+  // a folder's redirect drops the query (task-1 F6)
+  const q = await ask(port, '/next/threads/one?_rsc=1');
+  assert.equal(q.status, 301, 'S6 a folder without its slash, with a query');
+  assert.equal(q.headers.location, '/next/threads/one/', 'S6 its Location has no query');
 });
 
 test('S8 servePage answers 500 for a page it cannot read; serveAppFiles refuses a base or folder a caller got wrong', async (t) => {
@@ -159,6 +180,17 @@ test('S8 servePage answers 500 for a page it cannot read; serveAppFiles refuses 
   assert.equal(r.headers['content-security-policy'], undefined, 'S8 with no policy of a page');
   assert.equal(pageVersion('dashboard'), '', "S8 pageVersion of a page that is not there is ''");
   assert.throws(() => servePage(null, {}, {}, 'nope', ''), /no page nope/, 'S8 a page name not of the three throws');
+  // the policy is written last: a caller's header can't replace it (task-1 F6)
+  fs.mkdirSync(path.join(K, 'dashboard'));
+  fs.writeFileSync(path.join(K, 'dashboard', 'hub.html'), '<!doctype html><title>hub</title>');
+  const last = await listen(t, (req, res) => servePage(null, req, res, 'hub', 'the policy', { 'content-security-policy': 'a header' }));
+  assert.equal((await ask(last, '/')).headers['content-security-policy'], 'the policy', "S8 a caller's header doesn't replace the policy");
+  // policyFor that throws is a 500, never a throw out of serveAppFiles (task-1 F4)
+  const AB0 = scratch('ab0');
+  t.after(() => fs.rmSync(AB0, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(AB0, 'index.html'), '<!doctype html><title>x</title>');
+  const thrower = await listen(t, (req, res) => { try { serveAppFiles(AB0, '/next', req, res, () => { throw new Error('no'); }); } catch { res.writeHead(598); res.end(); } });
+  assert.equal((await ask(thrower, '/next/')).status, 500, 'S8 a policyFor that throws is a 500, never a throw out of serveAppFiles');
   for (const base of ['/next/', 'next', '/', '/a//b', undefined, null, 1]) assert.throws(() => serveAppFiles('/x', base, { method: 'GET', url: '/' }, {}, POLICY), /serveAppFiles: base/, `S8 base ${JSON.stringify(base)} throws`);
   for (const folder of ['', undefined, null]) assert.throws(() => serveAppFiles(folder, '/next', { method: 'GET', url: '/next/' }, {}, POLICY), /serveAppFiles: no folder/, `S8 folder ${JSON.stringify(folder)} throws`);
   const none = await listen(t, (req, res) => { if (serveAppFiles(path.join(K, 'gone'), '/next', req, res, POLICY) === NEXT) { res.writeHead(599); res.end(); } });
