@@ -208,6 +208,57 @@ test('D3c: a carried declaration that makes a new overlay rule site is a conflic
   }
 });
 
+// kit-1025: the forms of assignment the scan reads besides a plain one. Each branch has twice (in
+// one) assign counter (a let of two) one way; each is a conflict naming twice and counter.
+const assignForms = [
+  ['D3d-array: a destructuring array assignment', 'function twice(x) { let y; [counter, y] = [x, 1]; return x * 2; }'],
+  ['D3d-object: a destructuring object assignment, shorthand', 'function twice(x) { ({ counter } = { counter: x }); return x * 2; }'],
+  ['D3d-renamed: a destructuring object assignment, renamed, nested in an array', 'function twice(x) { [{ n: counter }] = [{ n: x }]; return x * 2; }'],
+  ['D3d-for-of: a for-of head', 'function twice(x) { for (counter of [x]) {} return x * 2; }'],
+  ['D3d-for-in: a for-in head', 'function twice(x) { for (counter in { x }) {} return x * 2; }'],
+  ['D3d-lines: the name and the = on different lines', 'function twice(x) {\n  counter\n    = x;\n  return x * 2;\n}'],
+  ['D3d-if: a destructuring array assignment as the body of an if', 'function twice(x) { if (x) [counter] = [x]; return x * 2; }'],
+];
+for (const [title, body] of assignForms) {
+  test(`${title} to another module's let is a conflict naming the declaration and the let`, () => {
+    const f = fixture();
+    f.branch('form', (s) => s.replace('function twice(x) { return x * 2; }', body));
+    const r = f.rebase('form', '--onto', 'main');
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stdout, /^ {2}conflict: twice: the branch assigns counter, a let of another module \(docs\/devteam\/scripts\/lib\/two\.mjs\)/m);
+    assert.equal(f.exists('form-modules'), false, 'no branch made');
+  });
+}
+
+test('D3d-none: a declaration, a member, a parameter default (nested too), a declared for head, a catch parameter or a class field naming the let is no conflict', () => {
+  const f = fixture();
+  const edit = (s) => s.replace('function twice(x) { return x * 2; }', [
+    'function twice(x) {',
+    '  const [counter] = [x];',
+    '  const o = {};',
+    '  o[counter] = 1;',
+    '  o',
+    '    .counter = 2;',
+    '  o.',
+    '    counter = 3;',
+    '  for (const counter of [x]) o.k = counter;',
+    '  for (let { counter } of [o]) o.c = counter;',
+    '  for (const { a: [counter] = [] } of [o]) o.d = counter;',
+    '  try { o.e = 1; } catch ({ a: [counter] = [] }) { o.e = counter; }',
+    '  o.K = class { [counter] = 1; };',
+    '  return x * 2;',
+    '}',
+    'function opts({ counter } = {}) { return counter; }',
+    'function deep({ a: [counter] = [] }) { return counter; }',
+    'function own(o) { const { counter } = o; return counter; }',
+    'function pick(xs) { return xs.map(([counter] = []) => counter); }',
+  ].join('\n'));
+  f.branch('none', edit);
+  const r = f.rebase('none', '--onto', 'main');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  for (const m of build(edit(BASE), M).modules) assert.equal(f.show('none-modules', m.file), m.text, `${m.file} as the split of the head`);
+});
+
 test('A2: other files the branch changed are applied; one that does not apply to the tree is a conflict naming it', () => {
   const f = fixture();
   f.branch('docs', null, { 'README.md': 'a fixture, changed\n' });
