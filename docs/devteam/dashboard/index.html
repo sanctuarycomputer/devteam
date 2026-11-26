@@ -1331,6 +1331,8 @@ try {
 /* the Supervisor and Shell tabs (kit-614): on a terminal tab the panel's + hides (html.th-term) and Wide widens the
    panel to half the window above 900px (html.th-wide, over the layout's --threads-w, so the page and a peek move
    with it); the tab's box fills the panel's body, the screen scrolling sideways below the font's 9 px floor */
+html.th-term .threads-head [data-tl-new] { display: none; }
+@media (min-width: 901px) { html.th-term.th-wide { --threads-w: max(380px, 50vw); } }
 html.th-term #th-body { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
 html.th-term #th-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .term-box { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -11810,6 +11812,8 @@ function termSync(shown = TERM.shown) {
   TERM.shown = shown;
   const root = document.documentElement;
   root.classList.toggle('th-term', !!shown);
+  root.classList.toggle('th-wide', !!shown && termWide());
+  termWideButton();
   for (const w of TERM_IDS) {
     const s = termTab(w);
     if (!termLive(w)) { clearTimeout(s.timer); s.timer = null; continue; }
@@ -11899,7 +11903,8 @@ function termFont(s) {
   const wrap = s.box.querySelector('.term-wrap');
   const room = wrap.clientWidth - parseFloat(getComputedStyle(wrap).paddingLeft) - parseFloat(getComputedStyle(wrap).paddingRight);
   const cols = s.screen?.cols || 80;
-  return 12;
+  for (let px = 12; px > 9; px--) if (termCell(px).w * cols <= room) return px;
+  return 9;
 }
 // The xterm theme from the page's tokens, in light and dark.
 function termTheme() {
@@ -11948,6 +11953,10 @@ function termMake(w, Terminal) {
   const term = new Terminal({ cols: sc?.cols || 80, rows: sc?.rows || 24, fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--mono'), fontSize: 12, theme: termTheme(), scrollback: 0, cursorBlink: false, allowProposedApi: false, disableStdin: false });
   term.open(screen);
   s.term = term;
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type === 'keydown' && e.ctrlKey && (e.key === ']' || e.code === 'BracketRight')) { term.blur(); document.querySelector('#th-tabs [role="tab"][aria-selected="true"]')?.focus(); return false; }
+    return true;
+  });
   term.onData((d) => termKeys(w, termBytes(d)));
   term.onBinary((d) => termKeys(w, Uint8Array.from(d, (c) => c.charCodeAt(0) & 255)));
   // a paste: caught before xterm's own handler, asked about when it is more than one line, sent as one paste post

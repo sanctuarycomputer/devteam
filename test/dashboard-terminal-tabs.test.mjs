@@ -116,6 +116,8 @@ async function open(t, { fake: fo = {}, hash = '#overview', path = '/', setup = 
   await p.send('Runtime.enable');
   await p.send('Network.enable');
   await p.send('Emulation.setDeviceMetricsOverride', { width: size[0], height: size[1], deviceScaleFactor: 1, mobile: false });
+  // a port the OS gives out again is the same origin: a last test's remembered panel (thRemember) or Wide would carry over
+  await p.send('Storage.clearDataForOrigin', { origin: new URL(fr.url).origin, storageTypes: 'local_storage' });
   if (setup) await setup(p, fr, fake);
   await p.send('Page.navigate', { url: `${fr.url}${path}${hash}` });
   const soon = soonIn(p);
@@ -223,7 +225,7 @@ test('terminal A11: at most one key post is in flight; queued keys merge up to 4
   assert.equal(new Set(R.posts().map((b) => b.page)).size, 1, 'one page id for every post of a page load');
   // a 423 (the pane moved): the screen read again at once, not at the next poll
   R.fr.hooks.delay = (p) => (p.endsWith('/screen') ? 400 : 0);
-  await sleep(6000);
+  await sleep(3500);
   R.fr.hooks.answer = (path) => (path.endsWith('/keys') ? { status: 423, json: { error: 'the pane moved' } } : null);
   await R.p.type('m');
   await R.soon(`/pane moved/i.test(document.querySelector('.term-box[data-term="supervisor"] .term-hint').textContent)`, 'a 423: its words');
@@ -510,6 +512,74 @@ test('terminal A13: held kit messages behind an open owner line show the waiting
   await sleep(800);
   await R.p.type('y');
   await R.soon(`/waiting until/.test(${hint})`, 'held exactly 2 minutes: the note');
+});
+
+test('terminal A14: the font scales down to fit the columns, to a 9 px floor, then the screen scrolls sideways', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=supervisor', fake: { cols: 40, rows: 10, lines: ['x'.repeat(40)] } });
+  const font = `termTab('supervisor').term?.options.fontSize`;
+  const fits = `(() => { const w = document.querySelector('.term-box[data-term="supervisor"] .term-wrap'); return w.scrollWidth <= w.clientWidth; })()`;
+  await R.soon(`${font} > 0`, 'drawn');
+  assert.equal(await R.p.ev(font), 12, '40 columns fit at 12 px');
+  R.fake.set({ cols: 52, lines: ['x'.repeat(52)] });
+  await R.soon(`${font} < 12 && ${font} > 9`, 'scaled down');
+  assert.ok(await R.p.ev(fits), 'and fits without scrolling');
+  R.fake.set({ cols: 120, lines: ['x'.repeat(120)] });
+  await R.soon(`${font} === 9`, 'the floor');
+  assert.equal(await R.p.ev(fits), false, 'wider than the box');
+  assert.match(await R.p.ev(`getComputedStyle(document.querySelector('.term-box[data-term="supervisor"] .term-wrap')).overflowX`), /^(auto|scroll)$/, 'the screen scrolls sideways, not clipped');
+});
+
+test('terminal A14: Wide widens the panel to half the window on a terminal tab, is remembered, and moves a side peek with it', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=supervisor' });
+  const w = `document.getElementById('threads').getBoundingClientRect().width`;
+  await R.soon(`!!document.getElementById('th-wide') && !document.getElementById('th-wide').hidden`, 'Wide shown');
+  assert.equal(Math.round(await R.p.ev(w)), 380);
+  await R.p.click('#th-wide');
+  await R.soon(`Math.round(${w}) === 720`, 'half the 1440 px window');
+  assert.equal(await R.p.ev(`localStorage.getItem('devteam.threads.wide')`), '1', 'remembered');
+  assert.equal(await R.p.ev(`document.getElementById('th-wide').getAttribute('aria-pressed')`), 'true');
+  // a side peek's right edge meets the panel's left edge
+  await R.p.ev(`location.hash = '#file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md'`);
+  await R.soon(`document.body.classList.contains('peek-open') || document.querySelector('.shell.peek-open')`, 'a peek');
+  await R.p.ev(`thGo({ th: 'supervisor' })`);
+  await R.soon(`Math.round(document.querySelector('.drawer').getBoundingClientRect().right) === 720`, "the peek's right edge at the wide panel's left");
+  // not on Threads: back to 380, Wide hidden
+  await R.p.click('#th-tabs [data-tab="threads"]');
+  await R.soon(`Math.round(${w}) === 380 && document.getElementById('th-wide').hidden`, 'Threads is the panel’s own width');
+  // remembered across a reload
+  await R.p.ev(`location.hash = '#overview?th=supervisor'; location.reload()`);
+  await R.soon(`typeof TERM === 'object' && Math.round(${w}) === 720`, 'wide again after a reload');
+});
+
+test('terminal A14: Ctrl+] releases focus; Escape goes to the pane; the + button hides on terminal tabs', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=supervisor' });
+  const plus = `getComputedStyle(document.querySelector('.threads-head [data-tl-new]')).display`;
+  await focusScreen(R);
+  assert.equal(await R.p.ev(plus), 'none', 'the + hidden on Supervisor');
+  await R.p.key('Escape');
+  await sleep(500);
+  assert.equal(R.fake.typed('supervisor').join(''), '\x1b', 'Escape is typed into the pane');
+  assert.equal(await R.p.ev(`document.body.classList.contains('threads-open') || !!document.querySelector('.shell.threads-open')`), true, 'and the panel stays open');
+  await R.p.send('Input.dispatchKeyEvent', { type: 'keyDown', key: ']', code: 'BracketRight', modifiers: 2, windowsVirtualKeyCode: 221 });
+  await R.p.send('Input.dispatchKeyEvent', { type: 'keyUp', key: ']', code: 'BracketRight', modifiers: 2, windowsVirtualKeyCode: 221 });
+  await R.soon(`!document.activeElement?.classList.contains('xterm-helper-textarea')`, 'released');
+  await sleep(300);
+  assert.equal(R.fake.typed('supervisor').join(''), '\x1b', 'Ctrl+] is not typed');
+  assert.ok(await R.p.ev(`document.querySelector('.term-box[data-term="supervisor"] .term-hint').textContent.includes('to leave it')`), 'the hint says so');
+  await R.p.click('#th-tabs [data-tab="threads"]');
+  await R.soon(`${plus} !== 'none'`, 'the + back on Threads');
+});
+
+test('terminal measure: the measure check passes at 1440, 720 and 390 px with a terminal tab open', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=supervisor', fake: { lines: ['a line of the supervisor\'s screen, wider than half the grid would ever let running text be, as code is'] } });
+  const o = { view: '#no-such-view', inbox: '#no-such-inbox', ignore: '.term-screen' };
+  const res = await measureAt(R.p, `${R.url}/#overview?th=supervisor`, { ready: `${PANEL_AT_REST} && !!document.querySelector('.term-box[data-term="supervisor"] .xterm-rows')`, ...o });
+  for (const [size, fails] of Object.entries(res)) assert.deepEqual(fails, [], `the screen, ${size}: ${fails.join('; ')}`);
+  // the tab's running text at its widest: Wide on, the supervisor not running
+  await R.p.ev(`localStorage.setItem('devteam.threads.wide', '1'); true`);
+  R.fake.set({ supervisor: 'gone' });
+  const gone = await measureAt(R.p, `${R.url}/#overview?th=supervisor`, { ready: `${PANEL_AT_REST} && !!document.querySelector('.term-box[data-term="supervisor"] .term-state:not([hidden]) code')`, ...o });
+  for (const [size, fails] of Object.entries(gone)) assert.deepEqual(fails, [], `not running, Wide, ${size}: ${fails.join('; ')}`);
 });
 
 test("terminal A14b: the page asks GET /api/term/token once on load, before any tab is pressed; why view hides both tabs", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
