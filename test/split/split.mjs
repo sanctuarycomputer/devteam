@@ -14,9 +14,10 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { build } from './lib/split.mjs';
+import { build, strip } from './lib/split.mjs';
 import { count } from './lib/count.mjs';
-import { applyOverlay, applyPatches, loadOverlay } from './lib/overlay.mjs';
+import { items } from './lib/js.mjs';
+import { applyOverlay, applyPatches, loadOverlay, regionProblems, restore } from './lib/overlay.mjs';
 import { kitParts, partsCount, partsNames, verify } from './lib/verify.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -77,26 +78,36 @@ if (flag('verify')) {
   if (!tree || !fs.statSync(tree, { throwIfNoEntry: false })?.isDirectory()) refuse('--verify needs --tree <a generated tree>');
   const report = [];
   let bad = false;
-  for (const { name, M, src } of sources) {
+  // what the overlay writes besides the generated modules (files/ files, files a rule wrote) is the
+  // overlay's own, not moved declarations
+  const overlayFiles = new Set([...ov.files.map((f) => f.path), ...[...ov.text.keys()].filter((f) => !ov.modules.has(f))]);
+  for (const { name, M, src, b } of builds) {
     const dir = path.join(tree, M.dir);
     const modules = [];
     const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (e.name.endsWith('.mjs')) modules.push({ file: path.relative(tree, p).split(path.sep).join('/'), text: fs.readFileSync(p, 'utf8') }); } };
     if (fs.existsSync(dir)) walk(dir);
-    const problems = modules.length ? verify(src, M, modules) : [`no modules under ${M.dir}`];
+    const mine = modules.filter((m) => !overlayFiles.has(m.file));
+    const accepted = ov.accepted.get(M.source) ?? new Set();
+    const overlaid = new Map([...ov.modules].filter(([, s]) => s === M.source).map(([f]) => [f, ov.text.get(f)]));
+    const back = restore(items(strip(src).text), mine, accepted, overlaid, b.builtins);
+    // verify judges the restored modules; the tree's own regions and lengths are judged here
+    const cap = mine.filter((m) => m.text.split('\n').length - (m.text.endsWith('\n') ? 1 : 0) > (M.cap ?? 2000)).map((m) => `over the cap: ${m.file} is ${m.text.split('\n').length - (m.text.endsWith('\n') ? 1 : 0)} lines (cap ${M.cap ?? 2000})`);
+    const problems = mine.length ? [...back.problems, ...regionProblems(mine, b.builtins), ...cap, ...verify(src, M, back.modules).filter((p) => !p.startsWith('over the cap:'))] : [`no modules under ${M.dir}`];
     const kit = kitParts(src) ?? kitParts(show('docs/devteam/scripts/devteam.mjs') ?? '');
     let pc = null;
     if (!kit) problems.push(`independent count: no fileParts at ${sha}`);
     else {
       for (const x of partsNames(kit, src, M.source)) problems.push(`fileParts reads a declaration the scanner doesn't: ${x}`);
-      pc = partsCount(kit, src, M.source, modules);
+      pc = partsCount(kit, src, M.source, back.modules);
       if (!pc.equal) problems.push(`independent count: fileParts finds ${pc.source} declaration leaves in the source and ${pc.tree} in the tree; only in the source: ${pc.onlySource.slice(0, 5).join(' | ')}; only in the tree: ${pc.onlyTree.slice(0, 5).join(' | ')}`);
     }
     if (problems.length) bad = true;
-    report.push({ manifest: name, source: M.source, modules: modules.length, problems, parts: pc && { equal: pc.equal, source: pc.source, tree: pc.tree } });
+    report.push({ manifest: name, source: M.source, modules: mine.length, accepted: [...accepted].sort(), problems, parts: pc && { equal: pc.equal, source: pc.source, tree: pc.tree } });
   }
   if (flag('json')) say(JSON.stringify({ sha, tree: path.resolve(tree), clean: !bad, report }, null, 2));
   else for (const x of report) {
     say(`${x.source} at ${sha.slice(0, 8)}: ${x.modules} modules, ${x.problems.length ? `${x.problems.length} problems` : 'clean'}${x.parts ? `; independent count ${x.parts.equal ? 'equal' : 'differs'} (${x.parts.source} declaration leaves in the source, ${x.parts.tree} in the tree)` : ''}`);
+    if (x.accepted.length) say(`  accepted as changed by the overlay: ${x.accepted.join(', ')}`);
     for (const p of x.problems) say(`  ${p}`);
   }
   process.exit(bad ? 1 : 0);

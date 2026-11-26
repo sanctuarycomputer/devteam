@@ -351,3 +351,55 @@ export function applyPatches(out, folders, report, env) {
   }
 }
 
+// For --verify: a tree's modules with every declaration the overlay accepted put back as the source
+// has it (or taken out, when the source has none), after checking each is exactly what the overlay
+// makes. { modules, problems }. The regions are made again, so verify judges only the declarations;
+// the tree's own regions are checked by regionProblems.
+export function restore(srcItems, modules, accepted, overlaid, builtins) {
+  const problems = [];
+  const srcDecl = (name) => {
+    const it = srcItems.items.find((x) => x.kind === 'decl' && x.names.includes(name));
+    if (!it) return null;
+    const ls = srcItems.lines.slice(it.from - 1, it.to);
+    ls[it.line - it.from] = ls[it.line - it.from].replace(/^export\s+/, '');
+    return ls.join('\n');
+  };
+  const out = modules.map((m) => ({ ...m }));
+  // "a.mjs, b.mjs (2 times)": the modules a name is declared in, sorted, with how often
+  const where = (pairs) => pairs.filter(([, n]) => n).sort(([a], [b]) => (a < b ? -1 : 1)).map(([f, n]) => `${f}${n > 1 ? ` (${n} times)` : ''}`).join(', ') || 'no module';
+  for (const name of accepted) {
+    // where the overlay puts it, and how often, must be where the tree has it
+    const want = new Map([...overlaid].map(([f, t]) => [f, findDecls(t, name)]));
+    const have = where(out.map((m) => [m.file, findDecls(m.text, name).length]));
+    const should = where([...want].map(([f, ds]) => [f, ds.length]));
+    if (have !== should) problems.push(`placed: ${name} is in ${have} in the tree, and the overlay puts it in ${should}`);
+    for (const m of out) {
+      const ds = findDecls(m.text, name);
+      const w = want.get(m.file) ?? [];
+      ds.forEach((d, i) => { if (w[i] && d.text !== w[i].text) problems.push(`changed: ${name} in ${m.file} differs from what the overlay makes of it`); });
+      const orig = srcDecl(name) ?? '';
+      for (const d of [...ds].reverse()) m.text = spliceDecl(m.text, d.from, d.to, orig);
+    }
+  }
+  const t = new Map(out.map((m) => [m.file, m.text]));
+  const re = remakeRegions(out.map((m) => m.file).filter((f) => readModule(t.get(f)).region), (f) => t.get(f), builtins);
+  return { modules: out.map((m) => ({ file: m.file, text: re.get(m.file) ?? m.text })), problems };
+}
+
+// The tree's own imports regions against its own modules, worded as verify words them (verify itself
+// sees the restored modules, whose regions restore made again): one problem per module whose region
+// is not what the tree's declarations make it.
+export function regionProblems(modules, builtins) {
+  const t = new Map(modules.map((m) => [m.file, m.text]));
+  const files = modules.filter((m) => readModule(m.text).region).map((m) => m.file);
+  const want = remakeRegions(files, (f) => t.get(f), builtins);
+  const out = [];
+  for (const f of files) {
+    const have = readModule(t.get(f)).region, should = readModule(want.get(f)).region;
+    if (have.join('\n') === should.join('\n')) continue;
+    const hs = new Set(have), ns = new Set(should);
+    const missing = should.filter((l) => !hs.has(l)), extra = have.filter((l) => !ns.has(l));
+    out.push(`stale imports region: ${f}${missing.length ? `; missing ${missing.join(' ')}` : ''}${extra.length ? `; extra ${extra.join(' ')}` : ''}${!missing.length && !extra.length ? '; not sorted' : ''}`);
+  }
+  return out;
+}
