@@ -23,6 +23,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { PORTS, threadsFixture, hasTmux, until } from './lib/kit.mjs';
 // a box's operator store, its gateway key and a signed press (as test/operator-threads.*.test.mjs)
 import { machine } from './lib/operator-threads-fixture.mjs';
+import { gatewaySource } from './lib/gateway-source.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..');
@@ -508,7 +509,7 @@ test('org-access A2: invites and people stop at their caps', async () => {
 // kept by the operator's store word for word, so it still reads as the gateway's.
 const CLAIM_RULE = /const CLAIM_LINK = (\/.*\/[a-z]*);/;
 test('org-access A2: the gateway\'s and devteam.mjs\'s claim-link rules are one, and a press the gateway redacted still reads as signed', async () => {
-  const gwRule = CLAIM_RULE.exec(fs.readFileSync(path.join(repo, 'cloud', 'gateway.mjs'), 'utf8'))?.[1];
+  const gwRule = CLAIM_RULE.exec(gatewaySource())?.[1];
   const dtRule = CLAIM_RULE.exec(fs.readFileSync(path.join(repo, 'docs', 'devteam', 'scripts', 'devteam.mjs'), 'utf8'))?.[1];
   assert.ok(gwRule, 'the gateway has the rule');
   assert.equal(dtRule, gwRule, 'devteam.mjs has the same rule');
@@ -772,7 +773,7 @@ test('org-access A5: an invite link signs nobody in until a passkey is made', as
 });
 
 test('org-access A5: only a finished sign-in method flow mints a session (the gateway\'s source)', () => {
-  const src = fs.readFileSync(path.join(repo, 'cloud', 'gateway.mjs'), 'utf8');
+  const src = gatewaySource();
   const from = src.indexOf('const finishFlow = async');
   const to = src.indexOf('const flowAnswer', from);
   assert.ok(from > 0 && to > from, 'finishFlow is found');

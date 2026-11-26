@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 // the suite's shared env scrub, tmux shim and stand-ins (it also claims a port block, unused here)
 import { PORTS as KIT_PORTS, fleetFixture, startDashboard, write } from './lib/kit.mjs';
 import { canDrive, openChrome } from './lib/chrome.mjs';
+import { gatewaySource } from './lib/gateway-source.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const kit = path.resolve(here, '..', 'docs', 'devteam');
@@ -1243,7 +1244,7 @@ test("the kit's preview lens and framing rules are the gateway's own: the laptop
   const kitLens = /^const PREVIEW_LENS = String\.raw`([^`]*)`;$/m.exec(src)?.[1];
   assert.ok(kitLens, 'the kit holds the lens as one String.raw');
   assert.equal(kitLens, G.PREVIEW_LENS, 'byte for byte');
-  const gw = fs.readFileSync(path.join(here, '..', 'cloud', 'gateway.mjs'), 'utf8');
+  const gw = gatewaySource();
   for (const name of ['FRAME_ANCESTORS', 'replaceFrameAncestors']) {
     const one = (text) => new RegExp(`^(?:export )?const ${name} = (.*)$`, 'm').exec(text)?.[1];
     assert.ok(one(src), `the kit has ${name}`);
@@ -3245,7 +3246,7 @@ test('serve writes image: <release> at start, or image: none', { timeout: 60000 
 });
 
 test('only boxImage reads DEVTEAM_KIT_RELEASE and DEVTEAM_BOX_TOOLS in gateway.mjs', () => {
-  const src = fs.readFileSync(path.join(here, '..', 'cloud', 'gateway.mjs'), 'utf8');
+  const src = gatewaySource();
   const fn = G.boxImage.toString();
   const count = (s, w) => s.split(w).length - 1;
   for (const w of ['DEVTEAM_KIT_RELEASE', 'DEVTEAM_BOX_TOOLS']) {
@@ -3464,7 +3465,7 @@ on('C4g a signed-out WebSocket answers a listed and a made-up name alike', { lis
   assert.equal(b.hub.hits, 0);
 });
 test('C4h a bad /c/ link does the same MAC work on an unlisted name', () => {
-  const src = fs.readFileSync(path.join(here, '..', 'cloud', 'gateway.mjs'), 'utf8');
+  const src = gatewaySource();
   assert.match(src, /const capGood = capOk\(capPort \?\? 0, cm\[4\]/, 'capOk runs before the name is judged');
   assert.doesNotMatch(src, /capPort === null \|\| !capOk/, 'an unlisted name must not skip it');
 });
@@ -3581,7 +3582,7 @@ on('C5h a ticket/<id> draft\'s capability loads as a cross-site frame, and the p
   }
 });
 test('C5i the gateway\'s BRANCH_AT is the kit\'s, character for character', () => {
-  const of = (file) => /^const BRANCH_AT = (.+);$/m.exec(fs.readFileSync(path.join(here, '..', file), 'utf8'))?.[1];
+  const of = (file) => /^const BRANCH_AT = (.+);$/m.exec((file === 'cloud/gateway.mjs' ? gatewaySource() : fs.readFileSync(path.join(here, '..', file), 'utf8')))?.[1];
   const kit = of('docs/devteam/scripts/devteam.mjs');
   assert.ok(kit, 'the kit defines it');
   assert.equal(of('cloud/gateway.mjs'), kit);

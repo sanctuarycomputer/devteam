@@ -15,6 +15,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 // the suite's shared env scrub and tmux shim
 import './lib/kit.mjs';
+import { gatewaySource } from './lib/gateway-source.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..');
@@ -179,7 +180,7 @@ async function gateway(name, extra = {}) {
 }
 
 // --- kit-253: admins and handing the box over ---------------------------------------------------
-const GATEWAY_SRC = () => fs.readFileSync(NEW, 'utf8');
+const GATEWAY_SRC = () => gatewaySource();
 const OLD_SHA = '7eebabfde62c642427c0c507f41fdb9db62bedc6';
 let oldFile = null;
 // OLD's cloud/gateway.mjs from git history, as test/org-access.people-state.test.mjs fetches it:
