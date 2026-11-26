@@ -2755,8 +2755,9 @@ const questionHash = (q) => crypto.createHash('sha256').update(canonical(Object.
 // (questionView's status "answered", bound to the question's hash), never a default or a line the
 // supervisor wrote, and the class is hashed, so setting it after the answer reopens the question.
 const isDoorQuestion = (v) => v?.kind === 'one-way-door' || v?.class === 'one-way-door';
-// A door answer approves a plan only as recommended: an owner who chose otherwise said no to the
-// plan built on the recommendation. A door asked with no recommendation is the owner's open choice.
+// A door answer approves the plan built on the recommendation only as recommended: an owner who
+// chose otherwise said no to that plan (their pick of a marked alternative approves the plan built on
+// it instead: doorPick). A door asked with no recommendation is the owner's open choice.
 const doorAgreed = (v) => !v.recommendation || v.matched === true;
 // The owner's own pick of another listed choice on a door, one the question marked "approves": true
 // when it was asked: the label, or null. Only the owner's own pick counts: their choice on the card
@@ -2769,18 +2770,19 @@ const doorPick = (v) => {
   if (v.in_words !== false || typeof v.choice !== 'string' || String(v.words ?? '').trim()) return null;
   if (v.answered_by !== 'owner' || ['chat', 'thread'].includes(v.channel)) return null;
   const c = (v.choices ?? []).find((x) => isObj(x) && String(x.label ?? '').trim().toLowerCase() === v.choice.trim().toLowerCase());
-  return c?.approves === true ? c.label : null;
+  return c?.approves === true && !DECLINING_LABEL.test(String(c.label)) ? c.label : null;
 };
-// A pick is undone when the owner answered the same door again later (asked again: the same ticket and
-// goal, nearly the same question, as ask's re-ask check reads it),
-// with anything that doesn't approve: their latest word on a door is the one that counts.
-const doorPickUndone = (v, all) => all.some((q) => q.id !== v.id && isDoorQuestion(q) && (q.ticket ?? null) === (v.ticket ?? null) && (q.goal ?? null) === (v.goal ?? null) && nearlySameQuestion(q.question, v.question) && q.status === 'answered' && String(q.answered_at ?? '') > String(v.answered_at ?? '') && !doorAgreed(q) && !doorPick(q));
+// Only the owner's latest word on a door counts: a pick is undone once the same door was asked again
+// (the same ticket and goal, nearly the same question, as ask's re-ask check reads it), while that
+// re-ask is open, and once it is answered, whatever the answer; the re-ask is then the one to cite.
+const doorPickUndone = (v, all) => all.some((q) => q.id !== v.id && isDoorQuestion(q) && (q.ticket ?? null) === (v.ticket ?? null) && (q.goal ?? null) === (v.goal ?? null) && nearlySameQuestion(q.question, v.question) && String(q.asked_at ?? '') > String(v.asked_at ?? '') && (q.status === 'open' || q.status === 'answered'));
 // The line a plan, and the plan review that approves it, carry for a pick: exactly
 // "- One-way door <qid>: <choice>", the choice as labelled (case aside).
 const DOOR_PICK_LINE = /^-[ \t]*One-way door[ \t]+(q-\S+?):[ \t]*(.+?)[ \t]*$/gm;
 const doorPickNamed = (text, qid, pick) => [...String(text ?? '').matchAll(DOOR_PICK_LINE)].some((m) => m[1] === qid && m[2].trim().toLowerCase() === pick.trim().toLowerCase());
 // A choice that declines reads as one: never marked "approves".
-const DECLINING_LABEL = /^\s*(no|not( now| yet)?|don'?t|do not|never|hold( off)?|wait|later|skip|decline|reject|cancel|stop|keep (it )?as it is|leave it)\b/i;
+// A word list is never complete, so the plan reviewer checks too (quality.md §3); this catches the plain ones.
+const DECLINING_LABEL = /^\s*(no|nope|nah|not( now| yet)?|none|neither|don['’]?t|do not|never|hold( off)?|wait|later|skip|decline|reject|cancel|stop|abort|revert|undo|pause|postpone|defer|delay|status quo|(keep|leave)( it| things| everything)? (as|how) (it )?(is|was)|leave it)\b/i;
 
 // Folded questions in the shape the inbox uses.
 function questionView(q) {
@@ -16317,7 +16319,7 @@ function cmdAct() {
       if (approval.status !== 'answered') die(`${approved} was not answered by the owner; a one-way door needs the owner's answer, never a default`);
       if (!doorAgreed(approval)) {
         const pick = doorPick(approval) && !doorPickUndone(approval, questions()) ? doorPick(approval) : null;
-        if (!pick) die(`${approved} was answered "${String(approval.answer ?? '').slice(0, 80)}", neither its recommendation ("${approval.recommendation}") nor a choice it marked "approves" that the owner picked themselves (and didn't take back by answering the door again): a plan built on the recommendation isn't what the owner said yes to; replan to their answer and ask about that`);
+        if (!pick) die(`${approved} was answered "${String(approval.answer ?? '').slice(0, 80)}", not its recommendation ("${approval.recommendation}") nor a choice it marked "approves" that the owner picked themselves, with no later answer to the same door: a plan built on the recommendation isn't what the owner said yes to; replan to their answer and ask about that`);
         picks.push({ id: approved, pick });
       }
       if (approval.ticket !== t.id) {
@@ -16330,7 +16332,7 @@ function cmdAct() {
       }
     } else if (doors.length && !questions().some((q) => isDoorQuestion(q) && q.ticket === t.id && q.status === 'answered' && doorAgreed(q))) {
       // the owner picked a marked alternative: that answer approves the plan built on it, once the
-      // plan and its approving review name it (below); any one such door, as any one agreed door does
+      // plan and its approving review name it (below); any one named pick approves, as any one agreed door does
       const qs = questions();
       picks = qs.filter((q) => isDoorQuestion(q) && q.ticket === t.id && doorPick(q) && !doorPickUndone(q, qs)).map((q) => ({ id: q.id, pick: doorPick(q) }));
       if (!picks.length) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved, or you cite the owner's answer to the goal's one-way-door question (--approved <qid>) and the plan review says it covers the plan (constitution.md §4)`);
