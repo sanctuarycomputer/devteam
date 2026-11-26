@@ -442,7 +442,12 @@ test('G1a a hand-over whose worktree went after the press is with the supervisor
     fs.mkdirSync(path.join(F.old, '.worktrees', 'plan-went'));
     assert.deepEqual([show(id).with, show(id).waiting], ['plan-went', 'session']);
     fs.rmdirSync(path.join(F.old, '.worktrees', 'plan-went'));
-  } finally { F.g(['worktree', 'prune'], F.old); F.g(['branch', '-D', 'plan/went'], F.old); }
+  } finally {
+    // whatever a failure left: the folder made again, the worktree's record, its branch
+    fs.rmSync(path.join(F.old, '.worktrees', 'plan-went'), { recursive: true, force: true });
+    F.g(['worktree', 'prune'], F.old);
+    try { F.g(['branch', '-D', 'plan/went'], F.old); } catch {}
+  }
 }));
 
 test('G1c a note that came back waits on the supervisor: thread-waiting times it, and the gone session\'s own turn doesn\'t end that', fresh(() => {
@@ -451,6 +456,9 @@ test('G1c a note that came back waits on the supervisor: thread-waiting times it
   assert.deepEqual([show(id).with, show(id).waiting], ['supervisor', 'supervisor']);
   const found = JSON.parse(ok(cli(['metrics', '--json'], F.SUP))).findings.filter((f) => f.subject === id).map((f) => f.kind);
   assert.ok(found.includes('thread-waiting'), `thread-waiting names it: ${found}`);
+  // the supervisor's reply after the hand-over ends its wait, as for a note handed to it
+  F.hand('supervisor', { type: 'turn', thread: id, text: 'On it.' }, 20 * MIN);
+  assert.deepEqual([show(id).with, show(id).waiting], ['supervisor', 'session'], "the supervisor's reply: the owner's move");
 }));
 
 test('G1b a second Hand over sends it again, to the supervisor; a third sends nothing', fresh(() => {
@@ -476,14 +484,15 @@ test("G3 a live session's note is never moved: a standing worktree with no pane,
   // a worktree folder the kit won't use (a link to somewhere else) is there, not gone: only a missing one is
   const link = path.join(F.old, '.worktrees', 'plan-elsewhere');
   fs.symlinkSync(fs.mkdtempSync(path.join(F.base, 'elsewhere-')), link);
-  const odd = note('plan-elsewhere'); handed(odd, 'plan-elsewhere');
-  assert.deepEqual([show(live).with, show(live).waiting, show(tk).with], ['plan-pricing', 'session', 'x-01-y']);
-  assert.deepEqual([show(marked).check, show(marked).with ?? null, show(done).status], ['addressed', null, 'resolved']);
-  assert.equal(ok(cli(['thread', 'list', '--with', 'supervisor'])), 'no notes are with supervisor');
-  for (const at of ['plan-pricing', 'x-01-y', 'main', 'plan-gone']) assert.equal(JSON.parse(ok(cli(handoff('--at', at, '--json')))).count, 0, at);
-  assert.deepEqual([show(live).handed.to, show(tk).handed.to], ['plan-pricing', 'x-01-y']);
-  assert.deepEqual([show(odd).with, show(odd).waiting], ['plan-elsewhere', 'session']);
-  fs.unlinkSync(link);
+  try {
+    const odd = note('plan-elsewhere'); handed(odd, 'plan-elsewhere');
+    assert.deepEqual([show(live).with, show(live).waiting, show(tk).with], ['plan-pricing', 'session', 'x-01-y']);
+    assert.deepEqual([show(marked).check, show(marked).with ?? null, show(done).status], ['addressed', null, 'resolved']);
+    assert.equal(ok(cli(['thread', 'list', '--with', 'supervisor'])), 'no notes are with supervisor');
+    for (const at of ['plan-pricing', 'x-01-y', 'main', 'plan-gone']) assert.equal(JSON.parse(ok(cli(handoff('--at', at, '--json')))).count, 0, at);
+    assert.deepEqual([show(live).handed.to, show(tk).handed.to], ['plan-pricing', 'x-01-y']);
+    assert.deepEqual([show(odd).with, show(odd).waiting], ['plan-elsewhere', 'session']);
+  } finally { fs.rmSync(link, { force: true }); }
 }));
 
 test("G2c the press's reply says when nobody's pane took it", fresh(() => {

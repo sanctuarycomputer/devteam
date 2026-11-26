@@ -145,7 +145,8 @@ test('the viewer: Hand over, the stepper, the cards, the picture and Show me', {
     await has(V, '#av-handover', 'the gone one is open again');
     assert.equal(await V.p.ev(text('#av-handover')), 'Hand over (1)', 'only the gone session\'s note');
     // its card (kit-148's tCardState): open again, so Hand over again; never With the gone session
-    assert.match(await V.p.ev(`tCardState(TL.threads.find((t) => t.id === ${J(N.trial)}), Date.now()) ?? ''`), /^Not handed over yet\. Hand over sends it to /, "the gone session's card says to hand it over again");
+    // (at a place the Library doesn't list, as a gone session's isn't: Hand over goes to the supervisor)
+    assert.equal(await V.p.ev(`(() => { const t = TL.threads.find((x) => x.id === ${J(N.trial)}); return tCardState({ ...t, subject: { ...t.subject, at: 'plan-went' } }, Date.now()); })()`), 'Not handed over yet. Hand over sends it to the supervisor.', "the gone session's card says to hand it over again");
     const gone = { ...ROW.C1(), with: 'supervisor', waiting: 'supervisor' };
     // each press on a note of its own: the one just pressed is believed handed for 10 s
     for (const [to, words, rows, nobody = false] of [['plan-pricing', 'Not typed: plan-pricing has no pane. It waits in its messages until plan-pricing or the supervisor reads it.', { [N.trial]: gone, [N.plans]: ROW.C1() }], ['supervisor', 'Not typed: the supervisor has no pane. It waits in its messages until it reads them.', { [N.trial]: ROW.C1(), [N.plans]: gone }], ['plan-pricing', 'Not typed: neither plan-pricing nor the supervisor has a pane. It waits in their messages until one of them is back.', { [N.trial]: ROW.C1(), [N.plans]: ROW.C1(), [N.annual]: gone }, true]]) {
