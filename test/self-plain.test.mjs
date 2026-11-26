@@ -243,19 +243,23 @@ test('S the names hold reads the whole plain text; self show prints it; its data
   });
 }));
 
-test('N the names hold reads a heading, a list item, a table row, a link\'s words, code and a comment whole, their first word too; only a prose sentence\'s first word is skipped (final-1b F1)', withProject('names', {}, async (W, check) => {
-  await check('N1 the reference and the self-plain region give each names case of cases.json its words', () => {
-    const region = SRC.match(/\/\* self-plain start \*\/([\s\S]*?)\/\* self-plain end \*\//)?.[1] ?? '';
-    const { held } = vm.runInContext(`${region}\n;({ held: selfPlain.selfHeld })`, vm.createContext({ path }));
-    assert.equal(W2.names.length, 8, 'N1 eight names cases');
-    for (const c of W2.names) {
+// The self-plain region's selfHeld, run alone.
+const regionHeld = () => {
+  const region = SRC.match(/\/\* self-plain start \*\/([\s\S]*?)\/\* self-plain end \*\//)?.[1] ?? '';
+  return vm.runInContext(`${region}\n;({ held: selfPlain.selfHeld })`, vm.createContext({ path })).held;
+};
+test('N the names hold reads a heading (# or setext), a list item, a quote, a table row, the words in [ ], code, a comment and a marked first word whole; only a bare prose sentence\'s first word is skipped (final-1b F1, kit-926)', withProject('names', {}, async (W, check) => {
+  await check('N1 nineteen names cases', () => assert.equal(W2.names.length, 19, 'N1 nineteen names cases'));
+  for (const c of W2.names) {
+    await check(`N1 the reference and the self-plain region give ${c.file} its words (${c.shows})`, () => {
       assert.deepEqual(refSelfHeld(world2(c.file)), c.words, `N1 the reference on ${c.file}`);
+      const held = regionHeld();
       assert.equal(typeof held, 'function', 'N1 the region has selfHeld');
       assert.deepEqual(JSON.parse(JSON.stringify(held(world2(c.file)))), c.words, `N1 the region on ${c.file}`);
-    }
-  });
-  await check('N2 self check warns, in order, on each names case\'s words that main\'s strategy lacks: the word first in a heading, a list item, a bold list item, a link, a code span, a table cell, a comment and a fence', () => {
-    for (const c of W2.names) {
+    });
+  }
+  for (const c of W2.names) {
+    await check(`N2 self check warns, in order, on the words of ${c.file} that main's strategy lacks`, () => {
       write(path.join(W.old, SELF), world2(c.file));
       const r = W.run(['self', 'check']);
       W.g(['checkout', '--', SELF], W.old);
@@ -264,7 +268,20 @@ test('N the names hold reads a heading, a list item, a table row, a link\'s word
       const want = c.words.filter((w) => !refNamesWhole(STRATEGY, w));
       assert.ok(want.length > 0, `N2 ${c.file} names a word the strategy lacks`);
       assert.deepEqual(warned, want, `N2 ${c.file}\n${r.out}`);
-    }
+    });
+  }
+  await check('N3 the self-plain region\'s selfHeld is check.mjs\'s, line for line (two spaces in, no export)', () => {
+    const ref = fs.readFileSync(new URL('./fixtures/world2/check.mjs', import.meta.url), 'utf8').match(/\nexport function selfHeld\(text\) \{\n[\s\S]*?\n\}\n/)?.[0];
+    const region = SRC.match(/\n {2}function selfHeld\(text\) \{\n[\s\S]*?\n {2}\}\n/)?.[0];
+    assert.ok(ref && region, 'N3 both have selfHeld');
+    assert.equal(region.split('\n').map((l) => l.replace(/^ {2}/, '')).join('\n'), ref.replace('\nexport ', '\n'), 'N3 the same function');
+  });
+  await check('N4 the self-plain region\'s selfHeld reads 40,000 nested [ then links in under 2 s (kit-862 final-3 M1)', () => {
+    const held = regionHeld();
+    const start = process.hrtime.bigint();
+    held(`# T\n\n${'['.repeat(40000)}${'[a](b) '.repeat(40000)}\n`);
+    const s = Number(process.hrtime.bigint() - start) / 1e9;
+    assert.ok(s < 2, `N4 took ${s.toFixed(2)} s`);
   });
 }));
 
