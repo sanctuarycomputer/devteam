@@ -151,15 +151,22 @@ function testBrowserPids() {
 // throws (a Chrome that can't start, or is still slow at the budget, is B1's to report) and it leaves
 // nothing running. It returns each launch's ms, a '!' after one that didn't answer.
 const WARM_FAST_MS = 5000, WARM_BUDGET_MS = 90000;
+// Each launch that answered: its profile, and where its singleton socket was (the profile's SingletonSocket
+// link, resolved from the profile), for W1.
+const warmSockets = [];
 async function warmChrome() {
   const tries = [];
   const home = fs.mkdtempSync(path.join(tmp, 'warm-home-'));
   for (const end = Date.now() + WARM_BUDGET_MS; Date.now() < end;) {
     const profile = fs.mkdtempSync(path.join(tmp, 'warm-'));
+    // Chrome's temp folders in t/ in its profile, removed with it: SIGKILLed below, it leaves them, and
+    // loose in the temp folder they pile up (kit-1023). TMPDIR=t is relative to its working folder, the
+    // profile, as in openChrome (test/lib/chrome.mjs): a socket's path is capped at 107 bytes.
+    fs.mkdirSync(path.join(profile, 't'));
     const t0 = Date.now();
     let c;
     // spawn throws some errors (ENOTDIR, say) rather than emitting them: a launch that didn't start
-    try { c = spawn(chromePath, ['--headless=new', `--user-data-dir=${profile}`, '--remote-debugging-pipe', '--no-sandbox', '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync', '--proxy-server=127.0.0.1:9', 'about:blank'], { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'], env: { ...process.env, HOME: home } }); } catch { tries.push(`${Date.now() - t0}!`); try { fs.rmSync(profile, { recursive: true, force: true }); } catch {} break; }
+    try { c = spawn(chromePath, ['--headless=new', `--user-data-dir=${profile}`, '--remote-debugging-pipe', '--no-sandbox', '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--disable-sync', '--proxy-server=127.0.0.1:9', 'about:blank'], { cwd: profile, detached: true, stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'], env: { ...process.env, HOME: home, TMPDIR: 't' } }); } catch { tries.push(`${Date.now() - t0}!`); try { fs.rmSync(profile, { recursive: true, force: true }); } catch {} break; }
     let gone = false;
     const how = await new Promise((resolve) => {
       const timer = setTimeout(() => resolve('late'), Math.max(0, end - Date.now()));
@@ -173,6 +180,7 @@ async function warmChrome() {
     });
     const ms = Date.now() - t0;
     tries.push(how === 'answered' ? ms : `${ms}!`);
+    if (how === 'answered') { let sock; try { sock = path.resolve(profile, fs.readlinkSync(path.join(profile, 'SingletonSocket'))); } catch (e) { sock = `unread: ${e.code}`; } warmSockets.push({ profile, sock }); }
     if (c.pid) { try { process.kill(-c.pid, 'SIGKILL'); } catch {} }
     // its exit, for at most 5 s: a process in disk wait dies only once its read returns
     if (c.pid && !gone) await new Promise((r) => { if (c.exitCode !== null || c.signalCode !== null) return r(); const t = setTimeout(r, 5000); c.once('exit', () => { clearTimeout(t); r(); }); });
@@ -409,6 +417,17 @@ function controlPost(port, headers, body = JSON.stringify({ verb: 'status', args
     req.end(body);
   });
 }
+
+// kit-1023: each warm-up Chrome is SIGKILLed, so its temp folders must be in its profile and go with it, never
+// loose in the temp folder. (A warm-up with no launch that answered is B1's to report.)
+test('W1 the warm-up\'s Chromes keep their temp folders in their profiles, removed with them', opts, async () => {
+  await setup;
+  assert.deepEqual(fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('org.chromium.')), [], 'the killed warm-up Chromes left nothing loose in the temp folder');
+  for (const { profile, sock } of warmSockets) {
+    assert.ok(sock.startsWith(path.join(profile, 't') + path.sep), `the warm-up Chrome's temp folder is t/ in its profile (${profile}/t), not ${path.dirname(sock)}`);
+    assert.equal(fs.existsSync(profile), false, `the warm-up profile ${profile} is removed with its Chrome`);
+  }
+});
 
 test('B1 Chrome runs in the preview window; D1 the profile folder; status while running', opts, async () => {
   await started(a);
