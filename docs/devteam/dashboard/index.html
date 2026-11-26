@@ -11843,6 +11843,7 @@ async function termRead(w) {
   // a refused shell/open has no shell to read: it waits for Try again
   if (s.reading || !termLive(w) || s.openErr) return;
   s.reading = true;
+  const opens = s.opens ?? 0;
   const t0 = performance.now();
   let r = null;
   try { r = await fetch(`/api/term/${w}/screen`, { cache: 'no-store', headers: s.etag ? { 'if-none-match': `"${s.etag}"` } : {} }); } catch { r = null; }
@@ -11850,6 +11851,8 @@ async function termRead(w) {
   let j = null;
   if (r && r.status !== 304) j = await r.json().catch(() => null);
   s.reading = false;
+  // a read started before the latest shell/open is of the shell before it (an ended one's gone): dropped
+  if ((s.opens ?? 0) !== opens) return void termSchedule(w);
   // a read that failed counts as slow, so a dashboard that is down is asked less often, not every 150 ms
   const failed = !r || (r.status !== 304 && !(r.ok && j?.v === 1));
   s.every = took > TERM_MS.slow || failed ? Math.min(TERM_MS.most, Math.max(TERM_MS.slow, s.every * 2)) : TERM_MS.every;
@@ -11882,7 +11885,7 @@ function termScreen(w, j) {
 async function termOpen() {
   const s = termTab('shell');
   if (s.opening || !TERM.token) return;
-  s.opening = true; s.opened = true; s.openErr = '';
+  s.opening = true; s.opened = true; s.openErr = ''; s.opens = (s.opens ?? 0) + 1;
   const { cols, rows } = termFitSize(s);
   let r = null, j = null;
   try { r = await fetch('/api/term/shell/open', { method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ which: 'shell', page: TERM.page, token: TERM.token, cols, rows }) }); j = await r.json().catch(() => null); } catch { r = null; }

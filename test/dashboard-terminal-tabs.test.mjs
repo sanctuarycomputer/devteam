@@ -21,7 +21,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // rewritten to the server each request goes to, so the fake's own guards see a same-origin request; Sec-Fetch-Site
 // is passed as the browser sent it (or dropped, with hooks.noFetchSite). log: every /api/term/* request with its
 // start and end times and its body; hooks.delay(path) holds an answer that many ms; hooks.rewrite(path, json) changes
-// a JSON answer; hooks.answer(path) gives { status, json } to answer in the fake's place. /__hub (on localhost, another origin) is a page that frames the dashboard, as the hub does.
+// a JSON answer; hooks.answer(path) gives { status, json, ms? } to answer in the fake's place (held ms first). /__hub (on localhost, another origin) is a page that frames the dashboard, as the hub does.
 async function front(dashPort, fake) {
   const log = [];
   const hooks = { delay: () => 0, rewrite: null, noFetchSite: false, answer: () => null };
@@ -44,6 +44,7 @@ async function front(dashPort, fake) {
       const entry = term ? { method: req.method, path: u.pathname, start: Date.now(), end: null, status: null, body: body.length ? body.toString('utf8') : null } : null;
       if (entry) log.push(entry);
       const own = term ? hooks.answer(u.pathname) : null;
+      if (own?.ms) await sleep(own.ms);
       if (own) { entry.end = Date.now(); entry.status = own.status; res.writeHead(own.status, { 'content-type': 'application/json' }); return res.end(JSON.stringify(own.json)); }
       const up = http.request({ host: '127.0.0.1', port: to, path: req.url, method: req.method, headers }, async (r) => {
         const got = [];
@@ -324,6 +325,16 @@ test("terminal A11: in the hub's frame, hub-visible false stops the poll and tru
   const b0 = reads();
   await sleep(1200);
   assert.ok(reads() - b0 >= 3, `hub-visible before a hub-base is ignored (${reads() - b0} reads)`);
+  // a hub-base whose base isn't an http(s) address without credentials, of at most 2048 characters (@3): no origin kept
+  for (const [what, base] of [['javascript:', 'javascript:alert(1)'], ['credentials', `http://u:p@localhost:${port}/#proj/`], ['2049 characters', `http://localhost:${port}/#${'a'.repeat(2049 - `http://localhost:${port}/#`.length)}`]]) {
+    await R.p.ev(`document.getElementById('f').contentWindow.postMessage({ devteam: 'hub-base', base: ${JSON.stringify(base)} }, 'http://127.0.0.1:${port}'); true`);
+    await sleep(200);
+    await post(false);
+    await sleep(500);
+    const b = reads();
+    await sleep(1200);
+    assert.ok(reads() - b >= 3, `a hub-base with a bad base (${what}) keeps no origin: hub-visible still ignored (${reads() - b} reads)`);
+  }
   // the hub's base, as the hub sends it on the frame's load (laptop form)
   await R.p.ev(`document.getElementById('f').contentWindow.postMessage({ devteam: 'hub-base', base: 'http://localhost:${port}/#proj/' }, 'http://127.0.0.1:${port}'); true`);
   await sleep(200);
@@ -406,9 +417,18 @@ test("terminal A12: th=shell posts shell/open once and draws the shell; an ended
   // the shell exits
   R.fake.set({ shell: false });
   await R.soon(`document.querySelector('.term-box[data-term="shell"] .term-state:not([hidden])')?.textContent.includes('The shell ended.')`, 'The shell ended.');
+  // a read of the ended shell still out when Open a new shell is pressed: its gone answer, held 1.5 s, comes after the
+  // new shell's screen and is dropped (final-1b 1b-1)
+  const before = R.term(/\/shell\/screen$/).length;
+  let once = true;
+  R.fr.hooks.answer = (p) => (p.endsWith('/shell/screen') && once ? ((once = false), { status: 200, ms: 1500, json: { v: 1, which: 'shell', state: 'gone', pane: null, cols: 0, rows: 0, lines: [], cursor: { x: 0, y: 0, visible: false }, modes: { app_cursor: false, app_keypad: false }, history_size: 0, held: { count: 0, oldest_ms: 0, prompt: 'readable' }, etag: 'stale' } }) : null);
+  for (const end = Date.now() + 8000; R.term(/\/shell\/screen$/).length === before; await sleep(50)) if (Date.now() > end) assert.fail('timed out: a read of the ended shell out');
   await R.p.click('.term-box[data-term="shell"] [data-term-newshell]');
   await R.soon(`!!document.querySelector('.term-box[data-term="shell"] .term-state[hidden]')`, 'a new shell drawn');
   assert.equal(R.term(/\/shell\/open$/).length, 2, 'Open a new shell posts shell/open again');
+  await sleep(2000);
+  R.fr.hooks.answer = () => null;
+  assert.ok(await R.p.ev(`document.querySelector('.term-box[data-term="shell"] .term-state').hidden`), "a read from before the new shell's open is dropped: no 'The shell ended.' on the new shell");
 });
 
 test("terminal A13: state gone shows 'The supervisor isn't running.' with the recover command and polls every 5 s", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
