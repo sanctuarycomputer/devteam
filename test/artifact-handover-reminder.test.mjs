@@ -498,21 +498,38 @@ test('the reminder on close, and notes with a session', { skip: SKIP, timeout: 1
     assert.ok(g.right <= g.panel, `R6: the card ${J(g)} is left of the panel`);
     assert.ok(g.top, 'R6: the card is on top at its centre');
     assert.ok(g.z[0] < g.z[1], `R6: the card is under the panel (${J(g.z)})`);
+    // Y is the one tab in this file opened with the Threads panel, which the page remembers in localStorage
+    // (devteam.threads.open), so the next tab's WATCH would clear a stored key as its first document starts. Three
+    // times on CI (kit-924) that next tab, R7's first, never committed its navigation. Not reproduced off CI and
+    // not shown to be the cause: Y leaves nothing stored, so the next tab's clear finds nothing.
+    await Y.p.ev('localStorage.clear(); void 0');
+    assert.equal(await Y.p.ev('localStorage.length'), 0, 'setup: Y leaves nothing in localStorage (kit-924)');
   });
 
   // R7: a preview, and a viewer replaced, show none; at 375 px it fits.
   await sub('R7: previews, replacing, and 375 px', async () => {
-    let V = await visit('#library');
+    // A tab that got its response and never committed (CI, kit-924): Chrome holds every call to a tab while its
+    // navigation is pending, so the visit's first wait gets "no answer from Chrome in 30 s", the tab not yet at a URL
+    // and the answer to Page.navigate the last thing its socket heard (kit-914's diagnosis). That shape alone is said
+    // as such, with the tickets that look for why (kit-924, kit-930); any other failure is thrown as it was.
+    const NEVER_COMMITTED = /no answer from Chrome in 30 s; tab \S+ at ; last heard on its socket: [^;]*the answer to Page\.navigate [\d.]+ s ago; /;
+    const visit7 = async (hash, opts) => {
+      try { return await visit(hash, opts); } catch (e) {
+        if (NEVER_COMMITTED.test(e.message)) assert.fail(`R7: the tab sent to ${hash} got its response and never committed its navigation, and Chrome held every call to it: a stall inside Chrome, not this case's (kit-924; kit-930 names the process holding it). ${e.message}`);
+        throw e;
+      }
+    };
+    let V = await visit7('#library');
     await V.open(PV);
     await closeBy(V, 'x');
     await notShown(V, 'R7 a preview');
-    V = await visit('#library');
+    V = await visit7('#library');
     await openW(V, 'plan-rem');
     await V.open('#artifact/main/viewer-b');
     await notShown(V, 'R7 replaced by another artifact');
     await V.open(PV);
     await notShown(V, 'R7 replaced by a preview');
-    V = await visit('#library', { width: 375, height: 700 });
+    V = await visit7('#library', { width: 375, height: 700 });
     await openW(V, 'plan-rem');
     await closeBy(V, 'x');
     await shownSoon(V, 'R7 375');
