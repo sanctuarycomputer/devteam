@@ -7,9 +7,10 @@
 //   `fake npm: … (kit-install@1)`  a contract rule (exactly one --registry= naming this registry, the
 //                                  DEVTEAM_NPM_REGISTRY env() sets; --ignore-scripts; --prefix=<the folder
 //                                  it runs in> and --workspaces=false, once each; each command's exact
-//                                  arguments and nothing else; no npm_config_* or NPM_CONFIG_* but two
-//                                  different empty regular config files; no .npmrc where it runs; view in
-//                                  a folder holding only its package.json); real npm takes these. Like real
+//                                  arguments and nothing else; no npm_config_ variable, in any letter case
+//                                  (npm reads the prefix so), but two different empty regular config
+//                                  files; no .npmrc where it runs; view in a folder holding only its
+//                                  package.json); real npm takes these. Like real
 //                                  npm given --prefix and --workspaces=false, it reads nothing above that
 //                                  folder: a workspace root or an .npmrc there changes nothing
 //   `npm error code …`             what real npm does (10.x): a pair out of sync (package.json's version not
@@ -38,9 +39,11 @@
 //                   the provenance statement names another repository, workflow file, ref or commit
 //   digest          the statement's subject digest is another package's
 //   old-npm         npm says 9.4.2, and audit signatures checks no attestation
-//   hostile-env     env() adds npm_config_* and NPM_CONFIG_* variables that point npm elsewhere, one of
-//                   them npm_config_@sanctuarycomputer:registry (a name no shell keeps, so the fake's npm
-//                   is a node script, never a shell wrapper)
+//   hostile-env     env() adds npm_config_*, NPM_CONFIG_* and mixed-case Npm_Config_* variables that point
+//                   npm elsewhere, among them npm_config_@sanctuarycomputer:registry and
+//                   Npm_Config_@sanctuarycomputer:registry (names no shell keeps, so the fake's npm is a
+//                   node script, never a shell wrapper); a kit that drops only the two spellings
+//                   npm_config_* and NPM_CONFIG_* leaves the mixed one, and the fake npm refuses it
 //   server-error    every request is a 503 (an outage: unreachable to the kit, never a refusal)
 //   attestation-gone
 //                   manifests advertise attestations but the bundle is a 404 (real npm's audit fails E404)
@@ -255,7 +258,7 @@ export async function startFakeRegistry({ fail = null, commits = {} } = {}) {
       if (state.fail === 'hostile-env') {
         const evil = path.join(dir, 'evil-npmrc');
         fs.writeFileSync(evil, 'registry=http://127.0.0.1:9/\nignore-scripts=false\n');
-        Object.assign(e, { npm_config_registry: 'http://127.0.0.1:9/', NPM_CONFIG_USERCONFIG: evil, npm_config_ignore_scripts: 'false', 'npm_config_@sanctuarycomputer:registry': 'http://127.0.0.1:9/' });
+        Object.assign(e, { npm_config_registry: 'http://127.0.0.1:9/', NPM_CONFIG_USERCONFIG: evil, npm_config_ignore_scripts: 'false', 'npm_config_@sanctuarycomputer:registry': 'http://127.0.0.1:9/', 'Npm_Config_@sanctuarycomputer:registry': 'http://127.0.0.1:9/' });
       }
       return e;
     },
