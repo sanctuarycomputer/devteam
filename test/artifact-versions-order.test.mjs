@@ -183,6 +183,19 @@ test('the Library lists no copy of main\'s landed or an earlier version as a dra
   assert.deepEqual(lib.map((a) => a.at).sort(), ['kit-103-real', 'main'], 'O9: the Library row opens main; no Draft row for a stale copy');
 });
 
+test('main moving refreshes the drop: a copy listed while main lacks it goes once main has had it', (t) => {
+  const F = threadsFixture('order-moved');
+  cleanup(t)(() => F.done());
+  landAt(F, 'order-mock', page(1), '2026-01-01T00:00:00Z');
+  plainCopy(F, 'kit-101-x', 'order-mock', page('X'));
+  const rows = () => JSON.parse(F.owner(['dashboard-data'])).library.artifacts.filter((a) => a.slug === 'order-mock').map((a) => a.at).sort();
+  assert.deepEqual(rows(), ['kit-101-x', 'main'], 'X is a draft while main never had it');
+  // main lands X, then Y: X is an earlier version now, not landed
+  landAt(F, 'order-mock', page('X'), '2026-02-01T00:00:00Z');
+  landAt(F, 'order-mock', page('Y'), '2026-03-01T00:00:00Z');
+  assert.deepEqual(rows(), ['main'], 'main moved: the copy of its earlier X is no draft');
+});
+
 // git on PATH writing each call's arguments to a file: run(args) runs devteam.mjs through it and
 // gives its output and the git calls it made
 function gitSpy(F) {
@@ -209,7 +222,10 @@ test('the drop is kept in run/cache: a second dashboard-data read runs no git lo
   assert.ok(first.calls.length > 0, 'the wrapper saw git');
   assert.equal(typeof treeFps(F)[v2.tree], 'string', 'O10: main\'s tree fingerprint kept by tree id after a Library read');
   const second = run(['dashboard-data']);
-  const forDrop = second.calls.filter((c) => (/^log\b/.test(c) && c.includes(ARTIFACTS_REL)) || /^ls-tree\b.*\s-[a-z]*r[a-z]*(\s|$)/.test(c));
+  // the drop's git: a log of an artifact's folder, or a recursive ls-tree of a tree id or an artifact
+  // (dashboard-data runs other recursive ls-trees, of the kit's own files, every time)
+  const lsR = (c) => /^ls-tree\b/.test(c) && /\s-[a-z]*r[a-z]*(\s|$)/.test(c) && (/\s[0-9a-f]{40,64}(\s|$)/.test(c) || c.includes(ARTIFACTS_REL));
+  const forDrop = second.calls.filter((c) => (/^log\b/.test(c) && c.includes(ARTIFACTS_REL)) || lsR(c));
   assert.deepEqual(forDrop, [], 'O11: nothing changed, no git log or ls-tree -r for the drop');
   assert.deepEqual(JSON.parse(second.out).library.artifacts.filter((a) => a.slug === 'order-mock').map((a) => a.at).sort(), ['kit-102-real', 'kit-103-checkout', 'main'], 'O11: the same drop, from the cache');
 });

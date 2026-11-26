@@ -14368,6 +14368,37 @@ function landedArtifacts() {
 // removed shows nothing.
 function draftArtifacts(landed = landedArtifacts()) {
   const fpOf = new Map(landed.map((a) => [a.slug, a.fp]));
+  const msha = mainSha();
+  // A copy of any version main has had is no draft either (kit-947): the fingerprints of every tree
+  // in main's history of a slug, asked only for a slug with a copy that differs from landed, kept in
+  // run/cache by main's sha (a new sha starts afresh) and slug, written once as the process ends.
+  // With no main, or git failing, nothing is kept and nothing more is dropped.
+  const mf = draftArtifacts.mainFps ??= (() => {
+    const file = path.join(runDir, 'cache', 'artifacts-main-fps.json');
+    const k = { data: { sha: null, slugs: {} }, dirty: false };
+    try { const d = JSON.parse(fs.readFileSync(file, 'utf8')); if (isObj(d) && typeof d.sha === 'string' && isObj(d.slugs)) k.data = d; } catch {}
+    process.on('exit', () => { if (k.dirty) try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(k.data)); } catch {} });
+    return k;
+  })();
+  if (msha && mf.data.sha !== msha) { mf.data = { sha: msha, slugs: {} }; mf.dirty = true; }
+  const mainFps = (slug) => {
+    const have = msha ? mf.data.slugs[slug] : null;
+    if (Array.isArray(have)) return new Set(have);
+    if (!msha) return new Set();
+    const a = treeFolderArgs(msha, slug);
+    const log = git(a.log, mainRoot), now = git(a.now, mainRoot);
+    if (log === null || now === null) return new Set();
+    const trees = new Set();
+    for (const l of log.split('\n')) {
+      const m = /^:\d+ \d+ [0-9a-f]+ ([0-9a-f]+) \S+\t(.*)$/.exec(l);
+      if (m && m[2] === `${ARTIFACTS_REL}/${slug}` && !/^0+$/.test(m[1])) trees.add(m[1]);
+    }
+    if (treeNow(now)) trees.add(treeNow(now));
+    const fps = [...trees].map(treeFingerprint);
+    // one tree git couldn't read: this answer is used, never kept
+    if (fps.every(Boolean)) { mf.data.slugs[slug] = fps; mf.dirty = true; }
+    return new Set(fps.filter(Boolean));
+  };
   const res = [];
   let names = [];
   // no .worktrees/ is no worktree drafts; drafts from other machines are still listed below
@@ -14380,7 +14411,7 @@ function draftArtifacts(landed = landedArtifacts()) {
       const src = artifactSource(w, s);
       if (!src) continue;
       const d = describeArtifact(s, w, src);
-      if (fpOf.get(s) !== d.fp) res.push(d);
+      if (fpOf.get(s) !== d.fp && !mainFps(s).has(d.fp)) res.push(d);
     }
   }
   // Drafts from other machines (kit-750): each branch the dashboard fetched into refs/devteam-remote/
@@ -14390,7 +14421,7 @@ function draftArtifacts(landed = landedArtifacts()) {
   // kept on origin shows nothing. A branch's slugs are kept by its tip and main's (artifacts-remote),
   // a description by tree id (artifacts-remote-trees). A worktree draft of the same slug wins, and
   // names the branches it hides (remote_branches).
-  const ref = mainRef(), msha = mainSha(), mainB = loadSettings().main_branch;
+  const ref = mainRef(), mainB = loadSettings().main_branch;
   const refs = ref ? git(['for-each-ref', '--sort=-committerdate', '--format=%(refname) %(objectname) %(committerdate:iso-strict)', 'refs/devteam-remote/'], mainRoot) : null;
   if (!refs) return res;
   // a branch this machine has too (refs/heads/<b>: its own pushed work) is not from another machine
@@ -14435,7 +14466,7 @@ function draftArtifacts(landed = landedArtifacts()) {
         }
         for (const slug of [...new Set(slugs)].filter((x) => LINK_ID.test(x ?? '')).sort()) {
           const tree = treeNow(git(['ls-tree', sha, '--', `${ARTIFACTS_REL}/${slug}`], mainRoot));
-          if (tree && !mainHas(slug, tree)) kept.push([slug, tree]);
+          if (tree && !mainHas(slug, tree) && !mainFps(slug).has(treeFingerprint(tree))) kept.push([slug, tree]);
         }
       }
     }
