@@ -14,9 +14,11 @@
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import zlib from 'node:zlib';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -28,6 +30,12 @@ export const PARTS = [
 ];
 export const FILES_PART = { part: 'files', key: 'files', groups: '', shard: '' };
 export const OLD_PAGES = ['index.html', 'hub.html', 'canvas.html', 'browser.html', 'devteam-ui.js', 'devteam-ui.css'].map((f) => `docs/devteam/dashboard/${f}`);
+export const PAGES = [
+  { page: 'dashboard', old: 'docs/devteam/dashboard/index.html', app: 'dashboard', route: '/' },
+  { page: 'canvas', old: 'docs/devteam/dashboard/canvas.html', app: 'dashboard', route: '/view/canvas/' },
+  { page: 'browser view', old: 'docs/devteam/dashboard/browser.html', app: 'dashboard', route: '/browser/' },
+  { page: 'hub', old: 'docs/devteam/dashboard/hub.html', app: 'hub', route: '/' },
+];
 export const STARTUP_BOUND = 1.1;
 export const LIST_CAP = 200;
 const ENTRY_MAX = 64 * 1024;
@@ -39,6 +47,7 @@ const run = (cmd, a, o = {}) => spawnSync(cmd, a, { maxBuffer: 1 << 30, encoding
 export const gitOf = (repo) => (a, o) => { const r = run('git', ['-C', repo, ...a], o); return r.status === 0 ? r.stdout : null; };
 export const median = (xs) => { const s = [...xs].sort((a, b) => a - b); const n = s.length; return n ? (n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2) : null; };
 export const sha256 = (text) => crypto.createHash('sha256').update(text).digest('hex');
+const gz = (buf) => zlib.gzipSync(buf, { level: 6 }).length;
 export function writeJson(file, value) {
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`);
@@ -236,8 +245,98 @@ export function unportedVm({ source, tree }) {
   });
 }
 
+// ---- pages: weight (dev-981's split) and time to first data ----
+export function namedFiles(html) {
+  const files = new Set();
+  for (const m of html.matchAll(/<(script|link)\b[^>]*>/gi)) {
+    const tag = m[0];
+    if (/^<script/i.test(tag) && /\snomodule\b/i.test(tag)) continue;
+    const u = /\s(?:src|href)\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1];
+    if (u && u.startsWith('/_next/static/')) files.add(u.split(/[?#]/)[0]);
+  }
+  return files;
+}
+const htmlFiles = (out, rel = '', acc = []) => {
+  for (const e of fs.readdirSync(path.join(out, rel), { withFileTypes: true })) {
+    const r = rel ? `${rel}/${e.name}` : e.name;
+    if (e.isDirectory()) { if (r !== '_next') htmlFiles(out, r, acc); } else if (e.name.endsWith('.html')) acc.push(r);
+  }
+  return acc;
+};
+export function runtimeOf(out) {
+  const sets = htmlFiles(out).map((h) => namedFiles(fs.readFileSync(path.join(out, h), 'utf8')));
+  if (sets.length < 2) return new Set();
+  return new Set([...sets[0]].filter((f) => sets.every((s) => s.has(f))));
+}
+export const routeHtml = (out, route) => path.join(out, ...route.split('/').filter(Boolean), 'index.html');
+export function weigh({ out, route, oldHtml }) {
+  const html = fs.readFileSync(routeHtml(out, route));
+  const runtime = runtimeOf(out);
+  const named = namedFiles(html.toString('utf8'));
+  const size = (u) => { const p = path.join(out, ...u.split('/').filter(Boolean)); return fs.existsSync(p) ? gz(fs.readFileSync(p)) : 0; };
+  const own = gz(html) + [...named].filter((u) => !runtime.has(u)).reduce((s, u) => s + size(u), 0);
+  const runtimeBytes = [...runtime].reduce((s, u) => s + size(u), 0);
+  const today = gz(oldHtml);
+  return { today, own, runtime: runtimeBytes, own_ratio: own / today, whole_ratio: (own + runtimeBytes) / today };
+}
+
+const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2' };
+// a server of its own: the page at its route, the app's files, '{}' with x-parity-data for anything else
+export function pageServer({ route, html, out = null }) {
+  const srv = http.createServer((req, res) => {
+    const p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+    let file = null;
+    if (p === route || p === route.replace(/\/$/, '') || p === `${route}index.html`) file = { body: html, type: TYPES['.html'] };
+    else if (out) {
+      const abs = path.join(out, ...p.split('/').filter(Boolean));
+      if (abs.startsWith(out + path.sep) && fs.statSync(abs, { throwIfNoEntry: false })?.isFile()) file = { body: fs.readFileSync(abs), type: TYPES[path.extname(abs)] ?? 'application/octet-stream' };
+    }
+    if (file) { res.writeHead(200, { 'content-type': file.type, 'cache-control': 'no-store' }); res.end(file.body); return; }
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-parity-data': '1', 'access-control-expose-headers': 'x-parity-data' });
+    res.end('{}');
+  });
+  srv.on('upgrade', (req, socket) => socket.destroy());
+  return new Promise((resolve) => srv.listen(0, '127.0.0.1', () => resolve({ origin: `http://127.0.0.1:${srv.address().port}`, close: () => new Promise((r) => { srv.closeAllConnections?.(); srv.close(r); }) })));
+}
+export const FIRST_DATA = `(() => {
+  const done = () => { if (window.__firstData !== undefined) return; window.__firstData = null; requestAnimationFrame(() => requestAnimationFrame(() => { window.__firstData = performance.now(); })); };
+  const f = window.fetch;
+  window.fetch = (...a) => f(...a).then((r) => { if (r.headers.get('x-parity-data')) done(); return r; });
+  const send = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send = function (...a) { this.addEventListener('load', () => { if (this.getResponseHeader('x-parity-data')) done(); }); return send.apply(this, a); };
+})();`;
+// median ms to first data over `loads` loads, or null when no data request came in `wait` ms
+export async function firstData(chrome, url, { loads = 5, wait = 10000 } = {}) {
+  const p = await chrome.newPage();
+  try {
+    await p.send('Page.enable');
+    await p.send('Network.enable');
+    // the server is plain http on 127.0.0.1: every https request (CDN fonts, scripts) fails at once
+    await p.send('Network.setBlockedURLs', { urls: ['https://*'] });
+    await p.send('Page.addScriptToEvaluateOnNewDocument', { source: FIRST_DATA });
+    const times = [];
+    for (let i = 0; i < loads; i++) {
+      await p.send('Page.navigate', { url: 'about:blank' });
+      await p.send('Page.navigate', { url });
+      const end = Date.now() + wait;
+      let t = null;
+      while (Date.now() < end) {
+        t = await p.ev('typeof window.__firstData === "number" ? window.__firstData : null').catch(() => null);
+        if (typeof t === 'number') break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      if (typeof t !== 'number') return null;
+      times.push(t);
+    }
+    return median(times);
+  } finally { p.close(); }
+}
+
+// ---- the stages ----
+// every DEVTEAM_* but the tests' own switches (DEVTEAM_TEST_*, as test.yml sets them) is removed
 // ---- the children: start-up and the test parts ----
 export const childEnv = (home, extra = {}, from = process.env) => ({ ...gitEnv(), ...Object.fromEntries(Object.entries(from).filter(([k]) => k.startsWith('DEVTEAM_TEST_'))), HOME: home, DEVTEAM_HUB_PORT: '4987', DEVTEAM_CGROUP: '/nonexistent/devteam-cgroup', DEVTEAM_MEMINFO: '/nonexistent/devteam-meminfo', ...extra });
+const nodeMajor = () => Number(process.versions.node.split('.')[0]);
 const tail = (s, n = 40) => String(s ?? '').trimEnd().split('\n').slice(-n).join('\n');
 
 export function startup({ source, tree, runs, home }) {
@@ -260,6 +359,59 @@ export function judgeStartup({ runs, source_ms, tree_ms, failed = {} }) {
   const ok = !failed.source && !failed.tree && source_ms > 0;
   const ratio = ok ? tree_ms / source_ms : null;
   return { runs, source_ms, tree_ms, ratio, bound: STARTUP_BOUND, ok: ok && ratio <= STARTUP_BOUND, ...(Object.keys(failed).length ? { failed } : {}) };
+}
+
+export function buildApps({ tree, home, major = nodeMajor() }) {
+  const dir = path.join(tree, 'apps');
+  if (!fs.existsSync(dir)) return 'no apps yet';
+  const apps = [];
+  for (const app of fs.readdirSync(dir).sort()) {
+    const at = path.join(dir, app);
+    if (!fs.existsSync(path.join(at, 'package.json'))) continue;
+    if (major !== 24) { apps.push({ app, ok: false, why: `apps build on Node 24 only (this is Node ${major})` }); continue; }
+    const env = childEnv(home, { DEVTEAM_BASE_PATH: '' });
+    let why = null;
+    for (const a of [['ci', '--ignore-scripts'], ['run', 'build']]) {
+      const r = spawnSync('npm', a, { cwd: at, env, encoding: 'utf8', maxBuffer: 1 << 28, timeout: 30 * 60000 });
+      if (r.status !== 0) { why = `npm ${a.join(' ')} failed (${r.status ?? r.signal}):\n${tail(`${r.stdout}\n${r.stderr}`)}`; break; }
+    }
+    if (!why && !fs.existsSync(path.join(at, 'out'))) why = 'the build wrote no out/';
+    if (why) { apps.push({ app, ok: false, why }); continue; }
+    const to = path.join(tree, 'docs', 'devteam', 'apps', app);
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    fs.cpSync(path.join(at, 'out'), to, { recursive: true });
+    apps.push({ app, ok: true, out: path.relative(tree, to), lib_dist: fs.existsSync(path.join(at, 'lib-dist')) });
+  }
+  return apps;
+}
+
+export async function pages({ source, tree, apps, chromeLib = path.join(here, '..', 'lib', 'chrome.mjs') }) {
+  if (apps === 'no apps yet') return 'no apps yet';
+  const built = new Set(apps.filter((a) => a.ok).map((a) => a.app));
+  let chrome = null, chromeWhy = null;
+  try {
+    const c = await import(pathToFileURL(chromeLib).href);
+    if (c.canDrive) chrome = await c.openChrome(); else chromeWhy = 'not measured: no Chrome here';
+  } catch (e) { chromeWhy = `not measured: ${e.message}`; }
+  const out = [];
+  try {
+    for (const pg of PAGES) {
+      const appOut = path.join(tree, 'docs', 'devteam', 'apps', pg.app);
+      const oldHtml = fs.existsSync(path.join(source, pg.old)) ? fs.readFileSync(path.join(source, pg.old)) : null;
+      if (!built.has(pg.app) || !fs.existsSync(routeHtml(appOut, pg.route))) { out.push({ page: pg.page, why: 'not built yet' }); continue; }
+      if (!oldHtml) { out.push({ page: pg.page, why: `${pg.old} is not at the source` }); continue; }
+      const row = { page: pg.page, app: pg.app, route: pg.route, weight: weigh({ out: appOut, route: pg.route, oldHtml }) };
+      if (!chrome) row.time = chromeWhy;
+      else {
+        const time = async (srvOpts) => { const s = await pageServer(srvOpts); try { return await firstData(chrome, `${s.origin}${pg.route}`); } finally { await s.close(); } };
+        const today = await time({ route: pg.route, html: oldHtml });
+        const app = await time({ route: pg.route, html: fs.readFileSync(routeHtml(appOut, pg.route)), out: appOut });
+        row.time = today === null || app === null ? `not measured: no data request in 10 s${today === null ? ' (today)' : ''}${app === null ? ' (the app)' : ''}` : { today_ms: today, app_ms: app, ratio: app / today };
+      }
+      out.push(row);
+    }
+  } finally { await chrome?.close(); }
+  return out;
 }
 
 export function runPart({ root, part, files, home, concurrency }) {
@@ -288,6 +440,7 @@ export function isClean(r) {
 }
 
 const pct = (x) => (typeof x === 'number' ? `${x.toFixed(2)}×` : String(x));
+const kb = (n) => `${(n / 1000).toFixed(1)} KB`;
 const capped = (rows, fmt) => [...rows.slice(0, LIST_CAP).map(fmt), ...(rows.length > LIST_CAP ? [`- … and ${rows.length - LIST_CAP} more (parity.json has all)`] : [])];
 export function summary(r) {
   const L = [`# parity@1 at ${r.sha.slice(0, 8)}: ${r.clean ? 'clean (1:1)' : 'not clean'}`, ''];
@@ -300,7 +453,7 @@ export function summary(r) {
   const s = r.startup;
   L.push(`- Start-up (whoami, ${s?.runs} runs each): ${s?.ratio == null ? `not measured${s?.failed ? ` (${Object.entries(s.failed).map(([k, v]) => `${k}: ${v}`).join('; ')})` : ''}` : `${pct(s.ratio)} (tree ${s.tree_ms.toFixed(0)} ms, source ${s.source_ms.toFixed(0)} ms; bound ${pct(s.bound)})${s.ok ? '' : ' OVER'}`}`);
   if (r.pages === 'no apps yet') L.push('- Pages: no apps yet');
-  else L.push(`- Pages: ${r.pages.length} measured (parity.json has them)`);
+  else for (const p of r.pages) L.push(`- Page ${p.page}: ${p.weight ? `own ${kb(p.weight.own)} vs today ${kb(p.weight.today)} (${pct(p.weight.own_ratio)}), runtime ${kb(p.weight.runtime)}, whole ${pct(p.weight.whole_ratio)}; first data ${typeof p.time === 'object' ? `${p.time.app_ms.toFixed(0)} ms vs today ${p.time.today_ms.toFixed(0)} ms (${pct(p.time.ratio)})` : p.time}` : p.why} (reported, never failing)`);
   const pc = r.page_commits;
   L.push(`- Unacknowledged page commits: ${pc.why ? pc.why : pc.unacknowledged.length}${pc.unported.length ? `; acknowledged, not ported: ${pc.unported.length}` : ''}${pc.shallow ? ' (history is shallow)' : ''}`);
   const sec = (title, rows, fmt) => { if (rows.length) L.push('', `## ${title} (${rows.length})`, '', ...capped(rows, fmt)); };
@@ -385,8 +538,8 @@ export async function build({ sha, repo, splitDir, work, startupRuns, files }) {
     result.startup = startup({ source, tree, runs: startupRuns, home });
     snapshot(tree, `parity: the tree at ${sha}`, origin);
     result.verify = vj ? { clean: !!vj.clean, problems: vj.report.flatMap((r) => r.problems) } : { clean: false, problems: [`verify exited ${v.status}: ${tail(v.stderr, 10)}`] };
-    result.apps = 'no apps yet';
-    result.pages = 'no apps yet';
+    result.apps = buildApps({ tree, home });
+    result.pages = await pages({ source, tree, apps: result.apps });
   }
   snapshot(source, `parity: the source at ${sha}`, origin);
   writeJson(path.join(work, 'build.json'), result);
