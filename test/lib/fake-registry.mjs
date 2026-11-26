@@ -245,7 +245,7 @@ export async function startFakeRegistry({ fail = null, commits = {} } = {}) {
   // the npm is a node script, not a shell wrapper: a shell (dash) drops variables whose names aren't shell
   // names, such as npm_config_@scope:registry, which real npm reads, so the fake must see them too
   if (/\s/.test(process.execPath)) throw new Error(`fake registry: node's path has a space, which a #! line can't hold (${process.execPath})`);
-  fs.writeFileSync(path.join(bin, 'npm'), `#!${process.execPath}\nimport(${JSON.stringify(pathToFileURL(SELF).href)}).then((m) => m.fakeNpm(${JSON.stringify(stateFile)}, process.argv.slice(2)));\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(bin, 'npm'), `#!${process.execPath}\nprocess.exitCode = 1;\nimport(${JSON.stringify(pathToFileURL(SELF).href)}).then((m) => m.fakeNpm(${JSON.stringify(stateFile)}, process.argv.slice(2)));\n`, { mode: 0o755 });
   return {
     url: state.url, port: first.port, bin, dir, home,
     // base's variables with this npm first on PATH and the registry named for the kit (a loopback URL,
@@ -331,8 +331,14 @@ export async function fakeNpm(stateFile, args) {
     const notOk = (r, what) => (r.status >= 500 || r.status === 429
       ? err(`E${r.status}`, `${r.status} ${r.status === 429 ? 'Too Many Requests' : 'Service Unavailable'} - GET ${what}`)
       : err('E404', `404 Not Found - GET ${what}`));
-    const get = async (rel) => {
-      try { const r = await fetch(new URL(rel, state.url), { signal: AbortSignal.timeout(10000) }); return { status: r.status, body: Buffer.from(await r.arrayBuffer()) }; } catch (e) { return { down: e?.cause?.code ?? 'ECONNRESET' }; }
+    // node 20's fetch can leave a reset connection's promise unsettled with nothing keeping the process
+    // alive; the loop then drains and the npm would exit 0. A drained loop is that reset: ECONNRESET.
+    const get = (rel) => {
+      const drained = new Promise((resolve) => process.once('beforeExit', () => resolve({ down: 'ECONNRESET' })));
+      const asked = (async () => {
+        try { const r = await fetch(new URL(rel, state.url), { signal: AbortSignal.timeout(10000) }); return { status: r.status, body: Buffer.from(await r.arrayBuffer()) }; } catch (e) { return { down: e?.cause?.code ?? 'ECONNRESET' }; }
+      })();
+      return Promise.race([asked, drained]);
     };
     if (words[0] === 'view') {
       const m = /^(@[^/@]+\/[^@]+|[^@]+)@(\d+\.\d+\.\d+)$/.exec(words[1] ?? '');
