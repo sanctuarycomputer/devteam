@@ -296,7 +296,7 @@ test('bare #<key>, #overview and #settings open as today; a key with a / round-t
   await until(() => F.hashAt(`127.0.0.1:${PS}`) === '#board?goal=g-1', "team/app's frame at the head");
   await until(() => F.gotAt(`127.0.0.1:${PS}`).length > 0, "team/app's hub-base");
   assert.equal(F.gotAt(`127.0.0.1:${PS}`).at(-1).base, `${F.hubOrigin}/#team%2Fapp/`, 'the key encoded in the base too');
-  await into(p, F.lo(PS), routeFrom('#goals'));
+  await into(p, F.lo(PS), "location.hash = '#goals', true");
   await p.until('the key stays encoded', `${hubHash} === '#team%2Fapp/goals'`);
   // a hashchange to a deep head (a link clicked in the hub's own page): that project at that view
   await p.ev(`location.hash = '#alpha/progress?goal=g-9', true`);
