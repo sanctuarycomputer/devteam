@@ -540,9 +540,9 @@ test('terminal A14: Wide widens the panel to half the window on a terminal tab, 
   assert.equal(await R.p.ev(`document.getElementById('th-wide').getAttribute('aria-pressed')`), 'true');
   // the page reads the panel's width back in pixels (a new card is placed left of it, never under it)
   assert.equal(Math.round(await R.p.ev(`thWidth()`)), 720, 'thWidth() is the wide panel in pixels');
-  // pressed looks pressed, with the mouse off the button (its hover is the same well)
-  await R.p.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 });
-  const look = `(() => { const c = getComputedStyle(document.getElementById('th-wide')); return c.backgroundColor + ' ' + c.boxShadow; })()`;
+  // pressed looks pressed: its inset line, which has no transition (the background eases over 0.12 s, and a hover
+  // gives the same well), so one read is the settled look
+  const look = `getComputedStyle(document.getElementById('th-wide')).boxShadow`;
   const pressed = await R.p.ev(look);
   const unpressed = await R.p.ev(`(() => { const b = document.getElementById('th-wide'); b.setAttribute('aria-pressed', 'false'); const v = ${look}; b.setAttribute('aria-pressed', 'true'); return v; })()`);
   assert.notEqual(pressed, unpressed, 'pressed looks pressed');
