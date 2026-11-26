@@ -637,30 +637,40 @@ export function hosts(text) {
 // an ATX heading of any level, at any indent a readable line has (one too deep for a heading reads as
 // one: refusing errs that way), and a setext one, the paragraph's lines above a line of = (level 1)
 // or of - (level 2); each also inside a block quote or a list item, their markers read away (a quote's
-// line goes on the paragraph above, a list item's starts its own). And an HTML <h1>-<h6> tag wherever
-// it stands, in code or a comment too, since an HTML block, a stray backtick or a comment's tail can
-// show one the reading above takes for code: its text up to the next heading tag (HTMLHEAD). Each
-// text is read as a heading's words. Linear in the text: each marker, line and tag read once.
-// The block-quote and list-item markers that open a line (none matches empty).
-const OPENERS = /^(?:[ \t]*>[ \t]?|[ \t]*(?:[-*+]|\d{1,9}[.)])(?:[ \t]+|$))*/;
+// line goes on the paragraph above, a list item's or a footnote's starts its own). And an HTML <h1>-<h6>
+// tag wherever it stands, in code or a comment too, since an HTML block, a stray backtick or a
+// comment's tail can show one the reading above takes for code: its text up to the next heading tag
+// (HTMLHEAD). Each text is read as a heading's words; a # or ## one's also as a page shows them (seen),
+// with its link hosts.
+// Linear in the text: each marker, line and tag read once.
+// The block-quote, list-item and footnote-definition markers that open a line (none matches empty).
+const OPENERS = /^(?:[ \t]*>[ \t]?|[ \t]*(?:[-*+]|\d{1,9}[.)])(?:[ \t]+|$)|[ \t]*\[\^[^\]\s]{1,999}\]:[ \t]*)*/;
 const UNDER = /^[ \t]*(=+|-+)[ \t]*$/;
 // An HTML heading tag and what follows it up to the next heading tag or the end; its own attributes
 // are dropped up to their first >, so a < in a value can't hide it (one > in a value leaves some in,
 // which only refuses more). Each tag inside reads as its alt text, as a page shows an image's.
 const HTMLHEAD = /<h([1-6])(?=[\s/>])([\s\S]*?)(?=<\/?h[1-6][\s/>]|$)/gi;
 const ALT = /\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`=]+))/i;
-const shown = (tag) => { const a = ALT.exec(tag); return ` ${a ? (a[1] ?? a[2] ?? a[3]) : ''} `; };
+// A # or ## heading's words as a page shows them (seen), judged beside its text as written: an
+// autolink as its address, a comment dropped, each other tag as its alt text (an image's; none else
+// has one) with no space, as inline tags show; then each character reference decoded. A comment or
+// tag is read only up to the next < or >, so linearly. Its text as written stays what is refused.
+const SHOWN = /<!--[^<>]*-->|<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*)>|<\/?[A-Za-z][A-Za-z0-9-]*(?:[\s/][^<>]*)?>/g;
+const alt = (tag) => { const a = ALT.exec(tag); return a ? (a[1] ?? a[2] ?? a[3]) : ''; };
+const shown = (tag) => ` ${alt(tag)} `;
+const seen = (s) => decode(words(s).replace(SHOWN, (t, url) => (url ?? (t.startsWith('<!--') ? '' : alt(t))))).replace(/\s+/g, ' ').trim();
 export const headed = last((text) => {
   const out = [];
+  const add = (level, s, line, text = words(s)) => out.push({ level, text, line, ...(level > 2 ? {} : { seen: seen(s), hosts: hosts(s) }) });
   let para = []; // the paragraph's lines so far: [line, its text past its markers]
   readable(text).forEach((l, i) => {
     if (l === null || !l.trim()) { para = []; return; }
     const at = OPENERS.exec(l)[0].length;
     const inner = l.slice(at);
     const atx = /^[ \t]*(#{1,6})(?:[ \t]+(.*))?$/s.exec(inner);
-    if (atx) { out.push({ level: atx[1].length, text: words(trimST(atx[2] ?? '').replace(/(?:^|[ \t])#+$/, '')), line: i + 1 }); para = []; return; }
+    if (atx) { add(atx[1].length, trimST(atx[2] ?? '').replace(/(?:^|[ \t])#+$/, ''), i + 1); para = []; return; }
     const under = para.length && (UNDER.exec(l) ?? UNDER.exec(inner));
-    if (under) { out.push({ level: under[1][0] === '=' ? 1 : 2, text: words(para.map((p) => p[1]).join(' ')), line: para[0][0] }); para = []; return; }
+    if (under) { add(under[1][0] === '=' ? 1 : 2, para.map((p) => p[1]).join(' '), para[0][0]); para = []; return; }
     if (!inner.trim() || BREAK.test(inner)) { para = []; return; }
     if (/[^> \t]/.test(l.slice(0, at))) para = []; // a list item's line starts its own paragraph
     para.push([i + 1, inner]);
@@ -669,15 +679,16 @@ export const headed = last((text) => {
   const starts = [0];
   for (let i = raw.indexOf('\n'); i >= 0; i = raw.indexOf('\n', i + 1)) starts.push(i + 1);
   const lineOf = (o) => { let a = 0; let b = starts.length - 1; while (a < b) { const m = (a + b + 1) >> 1; if (starts[m] <= o) a = m; else b = m - 1; } return a + 1; };
-  for (const m of raw.matchAll(HTMLHEAD)) out.push({ level: Number(m[1]), text: words(m[2].replace(/^[^>]*>/, '').replace(/<[^<>]*>/g, shown)), line: lineOf(m.index) });
+  for (const m of raw.matchAll(HTMLHEAD)) { const body = m[2].replace(/^[^>]*>/, ''); add(Number(m[1]), body, lineOf(m.index), words(body.replace(/<[^<>]*>/g, shown))); }
   return out.filter((h) => h.text).sort((a, b) => a.line - b.line);
 });
 // Whether the names rule refuses a heading: one of level 3 to 6 unless names holds it whole; a # or ##
 // one (the title and the sections, in plain words) when it holds a capitalised word, Exterior aside
-// (the document's own name), that names doesn't hold whole.
+// (the document's own name), or a link host, that names doesn't hold whole, read as written or as shown.
 const unnamedHeading = (h, names) => (h.level > 2
   ? !namesWhole(names, h.text)
-  : [...h.text.matchAll(WORD)].some((m) => { const w = capWord(m[0]); return w !== null && w.toLowerCase() !== 'exterior' && !namesWhole(names, w); }));
+  : [...`${h.text} ${h.seen}`.matchAll(WORD)].some((m) => { const w = capWord(m[0]); return w !== null && w.toLowerCase() !== 'exterior' && !namesWhole(names, w); })
+    || h.hosts.some((x) => !namesWhole(names, x)));
 
 // exterior.md: { errors, warnings, refused, held, hosts }. On a repo known private nothing is refused
 // or held; visibility 'public' or 'unknown' keeps the names rule. Every heading, in any form (headed),

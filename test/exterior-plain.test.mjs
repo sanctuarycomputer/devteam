@@ -497,6 +497,17 @@ const HEADING_FORMS = [
   ['an <h4> whose attribute is a lone <', '<h4 data-x="<">zorbly</h4>', ['zorbly']],
   ['an <h2> whose attribute reads like a heading tag', "<h2 title='<h3'>Zorbly</h2>", ['Zorbly']],
   ['an image in an <h2>', '<h2><img alt="Zorbly" src="z.png"></h2>', ['Zorbly']],
+  // final-1b F1: a footnote definition holds a heading as a list item or a block quote does
+  ['an ## heading in a footnote definition', 'See[^z].\n\n[^z]: ## Zorbly Labs', ['Zorbly Labs']],
+  ['a lower-case #### in a footnote definition', 'See[^z].\n\n[^z]: #### zorbly', ['zorbly']],
+  // final-1 F2: a # or ## heading's words also as a page shows them (references decoded, tags and comments
+  // dropped); its text as written is what is refused. A comment splitting a word was refused before as well.
+  ['an <h2> spelled with a character reference', '<h2>&#90;orbly</h2>', ['&#90;orbly']],
+  ['an ## heading whose word an inline tag splits', '## Z<b>orbly</b>', ['Z<b>orbly</b>']],
+  ['an ## heading whose word a comment splits', '## Zor<!-- -->bly', ['Zor<!-- -->bly']],
+  // final-1 F3: a # or ## heading's link host is judged as its words are
+  ['an ## heading of an autolink', '## <https://zorbly.example>', ['<https://zorbly.example>']],
+  ['an ## heading whose link points at an unnamed host', '## [our partner](https://zorbly.example)', ['our partner']],
 ];
 const NOT_REFUSED = [
   ['an ## heading in a fence', '```\n## Zorbly\n```'],
@@ -513,6 +524,7 @@ const NOT_REFUSED = [
   ['a named ### in a list item', '- ### Ledgerpad'],
   ['a named #### in a block quote', '> #### Acme Storage'],
   ['a dependency name as an <h5>', '<h5>inkwell-sync</h5>'],
+  ['an ## heading of named words, one in an inline tag', '## <em>What</em> to watch'],
 ];
 const formOpts = (visibility, names = allowed.names) => ({ today: W2.today, visibility, allowed: { ...allowed, names } });
 
@@ -601,8 +613,24 @@ test('F6 the contract and the help say every heading form', () => {
   const d = S.$defs.exterior2.description;
   assert.doesNotMatch(d, /each ### heading must be named whole/, 'F6 the schema no longer limits the rule to ###');
   assert.doesNotMatch(d, /Headings in code or a comment are not read\./, 'F6 the schema no longer says no heading in code or a comment is read');
+  assert.ok(d.includes('underlined with = or -'), 'F6 the schema says what a setext heading is, in plain words');
+  for (const w of ['or a footnote', 'but Exterior, or a link host', 'as the page shows them']) assert.ok(d.includes(w), `F6 the schema says "${w}"`);
   for (const w of ['every heading', 'setext', '<h1>', 'list item or block quote', 'wherever it stands', 'level 3 to 6', 'capitalised word but Exterior']) assert.ok(d.includes(w), `F6 the schema says "${w}"`);
   const help = SRC.slice(SRC.indexOf('const HELP_OBSERVE')).split('\n').find((l) => l.includes('exterior show'));
   assert.doesNotMatch(help, /a ### heading not named whole/, `F6 the help no longer limits the rule to ###: ${help}`);
   assert.match(help, /a heading of any form/, `F6 the help says any form: ${help}`);
+  assert.match(help, /but Exterior, or a link host, not named whole/, `F6 the help says a # or ## heading's link host is judged: ${help}`);
 });
+
+test('F7 a refused # or ## heading says to name it in the strategy or reword it, once', withProject('x-forms-once', {}, async (W, check) => {
+  await check('F7 exterior check: one error per refused heading, with its fix', () => {
+    W.setVisibility('public');
+    write(path.join(W.old, EXT), `${EXTERIOR}\n## Zorbly Labs\n\nSome words.\n\n## Zorbly Labs\n`);
+    const r = W.run(['exterior', 'check']);
+    assert.equal(r.status, 1, `F7 exterior check exits 1\n${r.text}`);
+    const got = r.out.split('\n').filter((l) => l.includes('"Zorbly Labs" (a heading)'));
+    assert.equal(got.length, 1, `F7 one line for the heading written twice\n${r.out}`);
+    assert.match(got[0], /name it in the strategy first, or reword it/, `F7 the line says to name it in the strategy or reword it\n${got[0]}`);
+    fs.rmSync(path.join(W.old, EXT));
+  });
+}));

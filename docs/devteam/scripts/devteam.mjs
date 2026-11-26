@@ -8345,30 +8345,40 @@ const selfPlain = (() => {
   // an ATX heading of any level, at any indent a readable line has (one too deep for a heading reads as
   // one: refusing errs that way), and a setext one, the paragraph's lines above a line of = (level 1)
   // or of - (level 2); each also inside a block quote or a list item, their markers read away (a quote's
-  // line goes on the paragraph above, a list item's starts its own). And an HTML <h1>-<h6> tag wherever
-  // it stands, in code or a comment too, since an HTML block, a stray backtick or a comment's tail can
-  // show one the reading above takes for code: its text up to the next heading tag (HTMLHEAD). Each
-  // text is read as a heading's words. Linear in the text: each marker, line and tag read once.
-  // The block-quote and list-item markers that open a line (none matches empty).
-  const OPENERS = /^(?:[ \t]*>[ \t]?|[ \t]*(?:[-*+]|\d{1,9}[.)])(?:[ \t]+|$))*/;
+  // line goes on the paragraph above, a list item's or a footnote's starts its own). And an HTML <h1>-<h6>
+  // tag wherever it stands, in code or a comment too, since an HTML block, a stray backtick or a
+  // comment's tail can show one the reading above takes for code: its text up to the next heading tag
+  // (HTMLHEAD). Each text is read as a heading's words; a # or ## one's also as a page shows them (seen),
+  // with its link hosts.
+  // Linear in the text: each marker, line and tag read once.
+  // The block-quote, list-item and footnote-definition markers that open a line (none matches empty).
+  const OPENERS = /^(?:[ \t]*>[ \t]?|[ \t]*(?:[-*+]|\d{1,9}[.)])(?:[ \t]+|$)|[ \t]*\[\^[^\]\s]{1,999}\]:[ \t]*)*/;
   const UNDER = /^[ \t]*(=+|-+)[ \t]*$/;
   // An HTML heading tag and what follows it up to the next heading tag or the end; its own attributes
   // are dropped up to their first >, so a < in a value can't hide it (one > in a value leaves some in,
   // which only refuses more). Each tag inside reads as its alt text, as a page shows an image's.
   const HTMLHEAD = /<h([1-6])(?=[\s/>])([\s\S]*?)(?=<\/?h[1-6][\s/>]|$)/gi;
   const ALT = /\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`=]+))/i;
-  const shown = (tag) => { const a = ALT.exec(tag); return ` ${a ? (a[1] ?? a[2] ?? a[3]) : ''} `; };
+  // A # or ## heading's words as a page shows them (seen), judged beside its text as written: an
+  // autolink as its address, a comment dropped, each other tag as its alt text (an image's; none else
+  // has one) with no space, as inline tags show; then each character reference decoded. A comment or
+  // tag is read only up to the next < or >, so linearly. Its text as written stays what is refused.
+  const SHOWN = /<!--[^<>]*-->|<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*)>|<\/?[A-Za-z][A-Za-z0-9-]*(?:[\s/][^<>]*)?>/g;
+  const alt = (tag) => { const a = ALT.exec(tag); return a ? (a[1] ?? a[2] ?? a[3]) : ''; };
+  const shown = (tag) => ` ${alt(tag)} `;
+  const seen = (s) => decode(words(s).replace(SHOWN, (t, url) => (url ?? (t.startsWith('<!--') ? '' : alt(t))))).replace(/\s+/g, ' ').trim();
   const headed = last((text) => {
     const out = [];
+    const add = (level, s, line, text = words(s)) => out.push({ level, text, line, ...(level > 2 ? {} : { seen: seen(s), hosts: hosts(s) }) });
     let para = []; // the paragraph's lines so far: [line, its text past its markers]
     readable(text).forEach((l, i) => {
       if (l === null || !l.trim()) { para = []; return; }
       const at = OPENERS.exec(l)[0].length;
       const inner = l.slice(at);
       const atx = /^[ \t]*(#{1,6})(?:[ \t]+(.*))?$/s.exec(inner);
-      if (atx) { out.push({ level: atx[1].length, text: words(trimST(atx[2] ?? '').replace(/(?:^|[ \t])#+$/, '')), line: i + 1 }); para = []; return; }
+      if (atx) { add(atx[1].length, trimST(atx[2] ?? '').replace(/(?:^|[ \t])#+$/, ''), i + 1); para = []; return; }
       const under = para.length && (UNDER.exec(l) ?? UNDER.exec(inner));
-      if (under) { out.push({ level: under[1][0] === '=' ? 1 : 2, text: words(para.map((p) => p[1]).join(' ')), line: para[0][0] }); para = []; return; }
+      if (under) { add(under[1][0] === '=' ? 1 : 2, para.map((p) => p[1]).join(' '), para[0][0]); para = []; return; }
       if (!inner.trim() || BREAK.test(inner)) { para = []; return; }
       if (/[^> \t]/.test(l.slice(0, at))) para = []; // a list item's line starts its own paragraph
       para.push([i + 1, inner]);
@@ -8377,15 +8387,16 @@ const selfPlain = (() => {
     const starts = [0];
     for (let i = raw.indexOf('\n'); i >= 0; i = raw.indexOf('\n', i + 1)) starts.push(i + 1);
     const lineOf = (o) => { let a = 0; let b = starts.length - 1; while (a < b) { const m = (a + b + 1) >> 1; if (starts[m] <= o) a = m; else b = m - 1; } return a + 1; };
-    for (const m of raw.matchAll(HTMLHEAD)) out.push({ level: Number(m[1]), text: words(m[2].replace(/^[^>]*>/, '').replace(/<[^<>]*>/g, shown)), line: lineOf(m.index) });
+    for (const m of raw.matchAll(HTMLHEAD)) { const body = m[2].replace(/^[^>]*>/, ''); add(Number(m[1]), body, lineOf(m.index), words(body.replace(/<[^<>]*>/g, shown))); }
     return out.filter((h) => h.text).sort((a, b) => a.line - b.line);
   });
   // Whether the names rule refuses a heading: one of level 3 to 6 unless names holds it whole; a # or ##
   // one (the title and the sections, in plain words) when it holds a capitalised word, Exterior aside
-  // (the document's own name), that names doesn't hold whole.
+  // (the document's own name), or a link host, that names doesn't hold whole, read as written or as shown.
   const unnamedHeading = (h, names) => (h.level > 2
     ? !namesWhole(names, h.text)
-    : [...h.text.matchAll(WORD)].some((m) => { const w = capWord(m[0]); return w !== null && w.toLowerCase() !== 'exterior' && !namesWhole(names, w); }));
+    : [...`${h.text} ${h.seen}`.matchAll(WORD)].some((m) => { const w = capWord(m[0]); return w !== null && w.toLowerCase() !== 'exterior' && !namesWhole(names, w); })
+      || h.hosts.some((x) => !namesWhole(names, x)));
 
   // exterior.md: { errors, warnings, refused, held, hosts }. On a repo known private nothing is refused
   // or held; visibility 'public' or 'unknown' keeps the names rule. Every heading, in any form (headed),
@@ -8955,7 +8966,7 @@ function exteriorDraft(text, allowed) {
 // form or level as a heading.
 const exteriorRefusedLine = (name, text) => (selfPlain.headings(text).some((h) => h.level === 3 && h.text === name)
   ? `"${name}" (a ### heading) is not named whole in origin main's strategy.md or its dependency names: on a repo not known to be private an entry is headed only by a name they give; head it as a group or a topic, or have the strategy name it first`
-  : `"${name}" (a heading) is not named in origin main's strategy.md or its dependency names: on a repo not known to be private a heading of level 3 to 6 is only a name they give whole, and a # or ## heading holds no capitalised word they don't name; head it in plain words, or have the strategy name it first`);
+  : `"${name}" (a heading) is not named in origin main's strategy.md or its dependency names: on a repo not known to be private a heading of level 3 to 6 is only a name they give whole, and a # or ## heading holds no capitalised word or link host they don't name; name it in the strategy first, or reword it (a # or ## heading may lower-case the word, or use one the strategy holds)`);
 const exteriorWordLine = (w) => `"${w.word}" (${w.where}) is in neither origin main's strategy.md nor its dependency files: on a repo not known to be private, the draft is public once its branch is pushed; reword it, or check it and name it on the chore (chore pr --names-checked)`;
 // The draft's history (every version is pushed): the contract and dated sources on head ({ text }, or
 // null when there is no exterior.md at the head), then the names rule on each version ([{ commit,
@@ -9153,7 +9164,7 @@ function exteriorCheckLines() {
     const v = repoVisibility();
     if (v !== 'private') {
       const tail = v === 'unknown' ? " (the repo's visibility is unknown, which counts as not private)" : '';
-      errors.push(...d.refused.map((n) => `${exteriorRefusedLine(n, text)}${tail}`));
+      errors.push(...[...new Set(d.refused)].map((n) => `${exteriorRefusedLine(n, text)}${tail}`)); // a heading written twice is one line
       warnings.push(...[...d.held.map((word) => ({ word, where: 'word' })), ...d.hosts.map((word) => ({ word, where: 'link host' }))].map(exteriorWordLine));
     }
   }
@@ -40620,7 +40631,7 @@ const HELP_OBSERVE = `Observe and orient
   governance [--json]   the kit's governance and process files and the project's strategy, Self and exterior: title, last change, changed here
   self show [--json]   main's project/self.md, what the project is, printed as it is; --json is the dashboard's self block, null when not drafted or plain (self@2)
   self check   the working tree's self.md against self@2 (a plain document; a fenced self block is refused), each part link on disk, and the names rule; errors exit 1, warnings don't
-  exterior show [--json] | exterior check   show: main's project/exterior.md, what the project relates to, printed as it is (--json a version 1 block's dashboard data, else null); check: the working tree's draft against exterior@2 (a version 1 block refused), its dated sources, and on a repo not known to be private the names rule (a heading of any form refused: one of level 3 to 6 not named whole, or a # or ## one holding a capitalised word but Exterior not named whole, in origin main's strategy or dependency names; each other capitalised word and link host held until named on the chore); errors exit 1
+  exterior show [--json] | exterior check   show: main's project/exterior.md, what the project relates to, printed as it is (--json a version 1 block's dashboard data, else null); check: the working tree's draft against exterior@2 (a version 1 block refused), its dated sources, and on a repo not known to be private the names rule (a heading of any form refused: one of level 3 to 6 not named whole, or a # or ## one holding a capitalised word but Exterior, or a link host, not named whole, in origin main's strategy or dependency names; each other capitalised word and link host held until named on the chore); errors exit 1
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
   search "<words>" [--type <log type>|doc]… [--since <date>] [--limit n] [--json]   what the project already wrote about it, best first, quoted as data (supervisor.md §6)
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …`;
