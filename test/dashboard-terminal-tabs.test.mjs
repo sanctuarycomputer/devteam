@@ -164,9 +164,194 @@ test('terminal routing: a thread opened from a terminal tab opens on Threads (th
   }
 });
 
+test("terminal A11: th=supervisor draws the fake's screen with xterm.js, loaded with its integrity hash only on the first open", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { fake: { lines: ['hello from the fake', '\x1b[32mgreen\x1b[0m line'] } });
+  // not loaded before a terminal tab is open
+  assert.equal(await R.p.ev(`performance.getEntriesByType('resource').filter((e) => e.name.includes('@xterm/xterm')).length + document.querySelectorAll('script[src*="@xterm/xterm"]').length`), 0, 'xterm.js is not asked for before a terminal tab opens');
+  await R.p.ev(`location.hash = '#overview?th=supervisor'`);
+  await R.soon(`${screenText()}.includes('hello from the fake')`, "the fake's screen drawn by xterm");
+  assert.ok(await R.p.ev(`${screenText()}.includes('green line')`), 'an SGR line drawn as its text');
+  const s = await R.p.ev(`(() => { const e = document.querySelector('script[src="${XTERM}"]'); return e && { integrity: e.integrity, cross: e.crossOrigin }; })()`);
+  assert.ok(s, 'xterm.js is loaded from jsdelivr at 5.5.0');
+  assert.match(s.integrity, /^sha384-[A-Za-z0-9+/]{64}$/, 'with an integrity hash');
+  assert.equal(s.cross, 'anonymous');
+  assert.equal(await R.p.ev(`document.querySelector('#th-tabs [data-tab="supervisor"]').getAttribute('aria-selected')`), 'true', 'the Supervisor tab is selected');
+  assert.equal(await R.p.ev(`document.querySelector('#th-tabs [data-tab="supervisor"]').hasAttribute('aria-disabled')`), false, 'and enabled');
+});
+
+test('terminal A11: the screen polls only while the document is visible and its box is seen', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=supervisor' });
+  const reads = () => R.term(/\/supervisor\/screen$/).length;
+  const polling = async (what) => { const a = reads(); await sleep(800); assert.ok(reads() - a >= 3, `${what}: polling (${reads() - a} reads in 800 ms)`); };
+  const still = async (what) => { await sleep(400); const a = reads(); await sleep(1200); assert.equal(reads() - a, 0, `${what}: no reads`); };
+  await R.soon(`!!document.querySelector('.term-box[data-term="supervisor"] .xterm')`, 'drawn');
+  await polling('the tab shown');
+  // the document hidden
+  await R.p.ev(`Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' }); document.dispatchEvent(new Event('visibilitychange')); true`);
+  await still('the document hidden');
+  await R.p.ev(`delete document.visibilityState; document.dispatchEvent(new Event('visibilitychange')); true`);
+  await polling('visible again');
+  // the box off screen: the IntersectionObserver no longer sees it
+  await R.p.ev(`document.querySelector('.term-box[data-term="supervisor"]').style.cssText = 'position: fixed; left: -5000px; top: 0; width: 300px; height: 300px'; true`);
+  await still('the box off screen');
+  await R.p.ev(`document.querySelector('.term-box[data-term="supervisor"]').style.cssText = ''; true`);
+  await polling('the box back');
+});
+
+const pollRig = (R) => {
+  const reads = () => R.term(/\/supervisor\/screen$/).length;
+  return {
+    polling: async (what) => { const a = reads(); await sleep(800); assert.ok(reads() - a >= 3, `${what}: polling (${reads() - a} reads in 800 ms)`); },
+    still: async (what) => { await sleep(400); const a = reads(); await sleep(1200); assert.equal(reads() - a, 0, `${what}: no reads`); },
+  };
+};
+test('terminal A11: the poll stops when the panel closes', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=supervisor' });
+  const { polling, still } = pollRig(R);
+  await R.soon(`!!document.querySelector('.term-box[data-term="supervisor"] .xterm')`, 'drawn');
+  await polling('the tab shown');
+  await R.p.click('#th-close');
+  await still('the panel closed');
+});
+test('terminal A11: the poll stops when another tab is chosen', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=supervisor' });
+  const reads = () => R.term(/\/supervisor\/screen$/).length;
+  const polling = async (what) => { const a = reads(); await sleep(800); assert.ok(reads() - a >= 3, `${what}: polling (${reads() - a} reads in 800 ms)`); };
+  const still = async (what) => { await sleep(400); const a = reads(); await sleep(1200); assert.equal(reads() - a, 0, `${what}: no reads`); };
+  await R.soon(`!!document.querySelector('.term-box[data-term="supervisor"] .xterm')`, 'drawn');
+  await polling('the tab shown');
+  // another tab
+  await R.p.click('#th-tabs [data-tab="threads"]');
+  await still('the Threads tab chosen');
+  await R.p.click('#th-tabs [data-tab="supervisor"]');
+  await polling('Supervisor again');
+});
+
+test("terminal A11: in the hub's frame, hub-visible false stops the poll and true starts it again; before a hub-base it is ignored", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { ready: false, hash: '' });
+  const reads = () => R.term(/\/supervisor\/screen$/).length;
+  const port = R.fr.port;
+  await R.p.send('Page.navigate', { url: `http://localhost:${port}/__hub?h=${encodeURIComponent('#overview?th=supervisor')}` });
+  await R.soon(`(() => { try { return document.getElementById('f').contentWindow.length >= 0; } catch { return false; } })()`, 'the hub page');
+  const until = async (f, what) => { const end = Date.now() + 20000; while (!f()) { if (Date.now() > end) assert.fail(what); await sleep(100); } };
+  await until(() => reads() >= 3, 'the framed tab polls');
+  const post = (v) => R.p.ev(`document.getElementById('f').contentWindow.postMessage({ devteam: 'hub-visible', visible: ${v} }, 'http://127.0.0.1:${port}'); true`);
+  // before any hub-base (dashboard-shell@3): ignored, the tab keeps polling
+  await post(false);
+  await sleep(500);
+  const b0 = reads();
+  await sleep(1200);
+  assert.ok(reads() - b0 >= 3, `hub-visible before a hub-base is ignored (${reads() - b0} reads)`);
+  // the hub's base, as the hub sends it on the frame's load (laptop form)
+  await R.p.ev(`document.getElementById('f').contentWindow.postMessage({ devteam: 'hub-base', base: 'http://localhost:${port}/#proj/' }, 'http://127.0.0.1:${port}'); true`);
+  await sleep(200);
+  await post(false);
+  await sleep(500);
+  const a = reads();
+  await sleep(1200);
+  assert.equal(reads() - a, 0, 'no reads after hub-visible false');
+  await post(true);
+  await until(() => reads() - a >= 3, 'polling again after hub-visible true');
+});
+
+test('terminal A11: a screen line carrying a query (DSR, a focus-report mode, an 8-bit CSI) types nothing back', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=supervisor', fake: { lines: ['ask \x1b[6n me', '\x1b[?1004h\x1b[c\u009b6n done'] } });
+  await focusScreen(R);
+  await R.soon(`${screenText()}.includes('done')`, 'drawn');
+  await sleep(1500);
+  assert.equal(R.posts().length, 0, 'no post without a key press');
+});
+
+test("terminal A13: state gone shows 'The supervisor isn't running.' with the recover command and polls every 5 s", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=supervisor', fake: { supervisor: 'gone' } });
+  const st = `document.querySelector('.term-box[data-term="supervisor"] .term-state:not([hidden])')`;
+  await R.soon(`${st}?.textContent.includes("The supervisor isn't running.")`, 'the words');
+  assert.ok(await R.p.ev(`${st}.querySelector('code').textContent === 'node docs/devteam/scripts/devteam.mjs recover'`), 'the recover command');
+  assert.equal(await R.p.ev(`!!${st}.querySelector('[data-term-terminal]')`), false, 'no Terminal page link on a laptop');
+  const at = R.term(/\/supervisor\/screen$/).length;
+  await sleep(6000);
+  const n = R.term(/\/supervisor\/screen$/).length - at;
+  assert.ok(n >= 1 && n <= 2, `every 5 s while it is gone: ${n} reads in 6 s`);
+  // on a box, the Terminal page's link: the same draw with this page's address as a box's
+  const html = await R.p.ev(`(() => { const h = hostHere({ host: '4321.box.example', protocol: 'https:' }, null); return h && h.box; })()`);
+  assert.equal(html, 'box.example');
+  R.fake.set({ supervisor: 'live' });
+  await R.soon(`!!document.querySelector('.term-box[data-term="supervisor"] .term-state[hidden]')`, 'back once it runs');
+});
+
+test('terminal A13: on a box the not-running state links the Terminal page', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=supervisor', fake: { supervisor: 'gone' } });
+  await R.soon(`!!document.querySelector('.term-box[data-term="supervisor"] .term-state:not([hidden])')`, 'gone');
+  // where the page is: a box's <port>.<name> (hostHere's own rule); the same draw then carries the link
+  const href = await R.p.ev(`(() => { const real = window.hostHere; window.hostHere = () => ({ box: 'box.example' }); try { termPaint('supervisor'); return document.querySelector('.term-box[data-term="supervisor"] [data-term-terminal]')?.getAttribute('href'); } finally { window.hostHere = real; } })()`);
+  assert.equal(href, 'http://box.example/#terminal');
+});
+
+test('terminal A13: with the xterm.js script blocked the tab shows the plain screen and sends no keys', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=supervisor', fake: { lines: ['plain \x1b[1mbold\x1b[0m'] }, setup: (p) => p.send('Network.setBlockedURLs', { urls: ['*@xterm/xterm*'] }) });
+  const box = `document.querySelector('.term-box[data-term="supervisor"]')`;
+  try { await R.soon(`${box}?.querySelector('.term-plain:not([hidden])')?.textContent.trimEnd() === 'plain bold'`, 'the plain screen'); } catch (e) { throw new Error(`${e.message}: ${await R.p.ev(`JSON.stringify({ lib: String(TERM.lib), html: ${box}?.innerHTML.slice(0, 900) })`).catch((x) => x.message)}`); }
+  assert.match(await R.p.ev(`${box}.querySelector('.term-hint').textContent`), /typing is off/);
+  await R.p.click('.term-box[data-term="supervisor"] .term-plain');
+  await R.p.type('x');
+  await R.p.key('Enter');
+  await sleep(800);
+  assert.equal(R.posts().length, 0, 'no keys sent');
+});
+
+for (const [why, words, how] of [
+  ['not-loopback', "only work on this machine's own address", { fake: { refuse: 'not-loopback' } }],
+  ['cross-site', "This browser can't use the terminal tabs", { noFetchSite: true }],
+]) {
+  test(`terminal A13: a ${why} refusal shows its note and stops asking`, { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+    const R = await open(t, { hash: '#overview?th=supervisor', fake: how.fake ?? {}, setup: (p, fr) => { if (how.noFetchSite) fr.hooks.noFetchSite = true; } });
+    await R.soon(`document.querySelector('.term-box[data-term="supervisor"] .term-state:not([hidden])')?.textContent.includes(${JSON.stringify(words)})`, 'the note');
+    await sleep(1500);
+    const tokens = R.term(/\/token$/).length;
+    assert.equal(tokens, why === 'cross-site' ? 2 : 1, `asked ${why === 'cross-site' ? 'twice' : 'once'}`);
+    assert.equal(R.term(/\/screen$/).length, 0, 'and no screen read');
+    assert.equal(await R.p.ev(`document.querySelector('.term-box[data-term="supervisor"] .term-state').textContent.includes(${JSON.stringify(why)})`), false, 'the code is never shown');
+  });
+}
+
 test('terminal A13: the /view/ page keeps both slots disabled', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
   const R = await open(t, { path: '/view/artifact/nothing-here', hash: '', ready: false });
   await R.soon(`!!document.querySelector('#th-tabs [data-tab="shell"]') || (typeof thDraw === 'function' && (thGo({ th: 'open' }), false))`, 'the panel drawn');
   assert.deepEqual(await R.p.ev(`['supervisor', 'shell'].map((id) => document.querySelector('#th-tabs [data-tab="' + id + '"]').getAttribute('aria-disabled'))`), ['true', 'true']);
   assert.equal(R.term(/./).length, 0, 'the /view/ page asks nothing of the terminal routes');
+});
+
+test("terminal A14b: the page asks GET /api/term/token once on load, before any tab is pressed; why view hides both tabs", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview' });
+  await sleep(800);
+  assert.equal(R.term(/\/token$/).length, 1, 'one token request on load');
+  assert.equal(R.term(/\/screen$/).length, 0, 'and nothing else before a tab is pressed');
+  for (const fo of [{ refuse: 'view' }, { gatewayView: true }]) {
+    // the token's answer held 2 s: no terminal tab is ever drawn, before or after
+    const V = await open(t, { hash: '#overview?th=open', fake: fo, setup: (p, fr) => { fr.hooks.delay = (path) => (path.endsWith('/token') ? 2000 : 0); } });
+    await V.soon(`!!document.querySelector('#th-tabs [data-tab="threads"]')`, 'the bar drawn');
+    assert.deepEqual(await V.p.ev(`[...document.querySelectorAll('#th-tabs [role="tab"]')].map((b) => b.dataset.tab)`), ['inbox', 'threads'], `${JSON.stringify(fo)}: no terminal tab while the token is asked`);
+    await V.soon(`!!document.querySelector('#th-tabs [data-tab="threads"]') && TERM.why === 'view'`, 'refused');
+    assert.deepEqual(await V.p.ev(`[...document.querySelectorAll('#th-tabs [role="tab"]')].map((b) => b.dataset.tab)`), ['inbox', 'threads'], `${JSON.stringify(fo)}: both terminal tabs hidden`);
+  }
+});
+
+test('terminal A14b: a slow read backs off to 2 s and a fast one comes back', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=supervisor' });
+  await R.soon(`!!document.querySelector('.term-box[data-term="supervisor"] .xterm')`, 'drawn');
+  // back-off: reads held 400 ms each; the gap after each grows to 2 s
+  const reads = () => R.term(/\/supervisor\/screen$/);
+  R.fr.hooks.delay = (p) => (p.endsWith('/screen') ? 400 : 0);
+  const from = reads().length;
+  await sleep(11000);
+  const slow = reads().slice(from);
+  const gaps = slow.slice(1).map((e, i) => e.start - slow[i].end);
+  // 150 ms doubled after each slow read (300, 600, 1200), then held at 2 s
+  assert.ok(gaps.some((g) => g >= 500 && g <= 1400), `slow reads: the gap doubles (${gaps})`);
+  assert.ok(gaps.slice(-2).every((g) => g >= 1800 && g <= 2600), `slow reads: up to 2 s (${gaps})`);
+  R.fr.hooks.delay = () => 0;
+  await sleep(3500);
+  const fast = reads().slice(-5);
+  const gf = fast.slice(1).map((e, i) => e.start - fast[i].end);
+  assert.ok(gf.every((g) => g < 400), `fast reads: back to 150 ms (${gf})`);
 });
