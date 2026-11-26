@@ -3169,7 +3169,7 @@ http.createServer((req, res) => {
     const ap = (...extra) => dt(['act', '--class', 'approve-plan', '--refs', 'bill-09-door', ...extra, '--', 'plan ok'], sup);
     assert.match(ap().err, /lists one-way doors; /, 'nothing cited, nothing answered for the ticket');
     assert.match(ap('--approved', Dd).err, /was not answered by the owner; a one-way door needs the owner's answer, never a default/, 'a defaulted door approves nothing');
-    assert.match(ap('--approved', Dn).err, /was answered "no", neither its recommendation \("yes"\) nor another of its listed choices/, "the owner's no approves no plan");
+    assert.match(ap('--approved', Dn).err, /was answered "no", neither its recommendation \("yes"\) nor a choice it marked "approves"/, "the owner's no approves no plan");
     assert.match(ap('--approved', Dk).err, /was asked for bill-02-vault, not bill-09-door/, "another ticket's door, though it names the goal");
     assert.match(ap('--approved', Df).err, /is not an answered question/, "the supervisor's own lines answer nothing");
     assert.match(ap('--approved', Dp).err, /was asked in class \(none\), not approve-plan/, 'a class set by the supervisor counts for nothing');
@@ -3200,22 +3200,51 @@ http.createServer((req, res) => {
     // another listed choice the door marked "approves": the owner's pick of it approves the plan built
     // on it, once the plan names it; a choice that declines ("no") never does
     const Dx = hand({ kind: 'owner-decision', class: 'one-way-door', goal: G, question: 'Retire the old gate now?', recommendation: 'yes', choices: [{ label: 'yes' }, { label: 'Keep it 30 days', approves: true }, { label: 'no' }] });
-    must(['answer', Dx, 'Keep it 30 days']);
+    must(['answer', Dx, '--choice', 'Keep it 30 days']);
     const Dz = hand({ kind: 'owner-decision', class: 'one-way-door', goal: G, question: 'Retire the old gate tomorrow?', recommendation: 'yes', choices: [{ label: 'yes' }, { label: 'Keep it 30 days', approves: true }, { label: 'no' }] });
     must(['answer', Dz, 'no']);
     covers(Dx, Dz);
     assert.match(ap('--approved', Dz).err, /was answered "no", neither its recommendation/, 'a declining choice approves nothing');
-    assert.match(ap('--approved', Dx).err, new RegExp(`${Dx} was answered "Keep it 30 days", one of its listed choices but not its recommendation: the plan approves only when it is built on that pick and says so`), 'the plan must name the pick');
+    assert.match(ap('--approved', Dx).err, new RegExp(`${Dx} was answered "Keep it 30 days", a choice it marked "approves" but not its recommendation: the plan approves only when it is built on that pick and both the plan and its latest approving plan review say so`), 'the plan must name the pick');
+    // a loose mention is no naming: only the exact line counts, the choice as labelled
+    write(path.join(tdir, 'plan.md'), `# plan\n\n## TL;DR\n\n- move the gate into packages/gate; not ${Dx}'s keep it 30 days\n\n## Tasks\n\n- T1 gate\n`);
+    commit('bill-09-door: a plan that only mentions the pick');
+    assert.match(ap('--approved', Dx).err, /a choice it marked "approves"/, 'a line that mentions the pick names nothing');
     write(path.join(tdir, 'plan.md'), `# plan\n\n## TL;DR\n\n- move the gate into packages/gate\n- One-way door ${Dx}: Keep it 30 days\n\n## Tasks\n\n- T1 gate\n`);
     const p2 = commit('bill-09-door: plan on the owner\'s pick');
     write(path.join(tdir, 'reviews/plan-1.md'), review('reviewer-a', p2).replace('\n\n|', `\n- Goal-level door: ${Dx} covers this plan\n\n|`));
+    commit('plan review of the pick, not naming it');
+    assert.match(ap('--approved', Dx).err, /its latest approving plan review say so/, 'the plan review names the pick too');
+    write(path.join(tdir, 'reviews/plan-1.md'), review('reviewer-a', p2).replace('\n\n|', `\n- Goal-level door: ${Dx} covers this plan\n- One-way door ${Dx}: Keep it 30 days\n\n|`));
     commit('plan review of the pick');
     must(['act', '--class', 'approve-plan', '--refs', 'bill-09-door', '--approved', Dx, '--', 'plan on the owner\'s pick ok'], sup);
+    // asked again and answered no later, the old pick no longer approves
+    const Dr = hand({ kind: 'owner-decision', class: 'one-way-door', goal: G, question: 'Retire the old gate now?', recommendation: 'yes', choices: [{ label: 'yes' }, { label: 'Keep it 30 days', approves: true }, { label: 'no' }] });
+    must(['answer', Dr, '--choice', 'no']);
+    assert.match(ap('--approved', Dx).err, /didn't take back/, 'a later no to the same door takes the pick back');
+    // only the owner's own keyed pick counts: the same label in their words, or recorded from chat, approves nothing
+    const Dw = hand({ kind: 'owner-decision', class: 'one-way-door', goal: G, question: 'Retire the old gate this week?', recommendation: 'yes', choices: [{ label: 'yes' }, { label: 'Keep it 30 days', approves: true }, { label: 'no' }] });
+    must(['answer', Dw, 'Keep it 30 days — actually no']);
+    covers(Dw, Dz);
+    assert.match(ap('--approved', Dw).err, /neither its recommendation/, 'words beginning with the label are not a pick');
+    const Dh = hand({ kind: 'owner-decision', class: 'one-way-door', goal: G, question: 'Retire the old gate next week?', recommendation: 'yes', choices: [{ label: 'yes' }, { label: 'Keep it 30 days', approves: true }, { label: 'no' }] });
+    assert.match(dt(['answer', Dh, '--choice', 'Keep it 30 days', '--from-chat', '--said', 'keep it 30 days'], sup).err, /not with --from-chat/, 'a pick is never recorded from chat');
+    must(['answer', Dh, 'Keep it 30 days', '--from-chat', '--said', 'keep it 30 days'], sup);
+    covers(Dh, Dz);
+    assert.match(ap('--approved', Dh).err, /neither its recommendation/, 'a pick recorded from chat is not the owner\'s own');
+    // an unmarked alternative approves nothing, picked or not
+    const Du = hand({ kind: 'owner-decision', class: 'one-way-door', goal: G, question: 'Retire the old gate in a month?', recommendation: 'yes', choices: [{ label: 'yes' }, { label: 'Keep it 60 days' }, { label: 'no' }] });
+    must(['answer', Du, '--choice', 'Keep it 60 days']);
+    covers(Du, Dz);
+    assert.match(ap('--approved', Du).err, /neither its recommendation/, 'an unmarked alternative approves nothing');
     // ask: "approves" goes only on a door's choices other than the recommendation, and only as true
     const ch = (c) => JSON.stringify([{ label: 'yes' }, c, { label: 'no' }]);
     assert.match(dt(['ask', '--kind', 'owner-decision', '--question', 'Rename the gate package?', '--recommendation', 'yes', '--choices', ch({ label: 'Rename later', approves: true })], sup).err, /"approves" goes on a one-way door's choices/);
     assert.match(dt(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'Delete the gate audit rows?', '--recommendation', 'yes', '--choices', ch({ label: 'Archive them', approves: false })], sup).err, /"approves" is true or left out/);
     assert.match(dt(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'Delete the gate audit rows?', '--recommendation', 'yes', '--choices', JSON.stringify([{ label: 'yes', approves: true }, { label: 'no' }])], sup).err, /is the recommendation, which approves already/);
+    assert.match(dt(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'Delete the gate audit rows?', '--recommendation', 'yes', '--choices', ch({ label: 'Not now', approves: true })], sup).err, /reads as a no/, 'a declining choice is never marked');
+    const Qa = must(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'Delete the gate audit rows?', '--recommendation', 'yes', '--choices', ch({ label: 'Archive them', approves: true })], sup).trim().split('\n')[0];
+    assert.equal(json(must(['questions', '--id', Qa, '--json']))[0].choices[1].approves, true, 'ask stores the mark');
     // ask: class one-way-door is asked as a one-way door, never as another kind, and never with a default
     // the same decision again is refused, with the answer to cite; something material changed lets it through, said first
     // the owner's case: the goal's door answered, then the same move asked again for a ticket, as another kind
