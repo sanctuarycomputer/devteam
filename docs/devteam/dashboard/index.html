@@ -1739,10 +1739,42 @@ const threadsTabs = (() => {
   };
 })();
 
-// ---- the URL: page heads (#<page>[?state]) and today's link heads ----
-const STATE_KEYS = { '*': ['th', 't'], board: ['goal', 'feat', 'repo', 'att'], progress: ['goal', 'narrow', 'show'], library: ['kind', 'goal'], goals: ['gt'], sensors: ['st'], loop: ['lt', 'kind', 'orient'] };
+// ---- the URL (dashboard-shell@2): page heads (#<page>[?state], p the open peek or viewer) and link heads ----
+const STATE_KEYS = { '*': ['th', 't', 'i', 'u', 'p'], board: ['goal', 'feat', 'repo', 'att'], progress: ['goal', 'narrow', 'show'], library: ['kind', 'goal'], goals: ['gt'], sensors: ['st'], loop: ['lt', 'kind', 'orient'] };
 const stateKeys = (page) => [...(STATE_KEYS[page] || []), ...STATE_KEYS['*']];
-// routes (the page's own table, outside this block): { pages, links: { kind: home }, files: [[RegExp, home]], redirects: { head: head } }
+// A peek's or a viewer's head without '#' (a p value, or a legacy head's), as the canonical head of that view, or
+// null when it names none: its kind one of routes.peeks; a file by its query (path required); an artifact's
+// version main, wt/<worktree> or tree/<40 or 64 hex> (anything else is main), its slug an artifact slug, its page
+// kept only when the server can serve it (index.html is the default); a preview's route kept unless '/'. A query
+// is read with URLSearchParams and written with it again, so a page or a route holding & = # round-trips.
+function peekHead(v, routes) {
+  const h = String(v ?? '');
+  const q = h.indexOf('?');
+  const path = q < 0 ? h : h.slice(0, q);
+  const query = new URLSearchParams(q < 0 ? '' : h.slice(q + 1));
+  const peeks = routes.peeks || [];
+  if (path === 'file') return peeks.includes('file') && query.get('path') ? `file?${query}` : null;
+  const s = path.indexOf('/');
+  const kind = s < 0 ? path : path.slice(0, s), rest = s < 0 ? '' : path.slice(s + 1);
+  if (!rest || !peeks.includes(kind) || kind === 'file') return null;
+  if (kind === 'artifact') {
+    const segs = rest.split('/'), slug = segs.pop();
+    if (!/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(slug)) return null;
+    let at = 'main';
+    if (segs.length === 2 && segs[0] === 'wt' && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(segs[1])) at = `wt/${segs[1]}`;
+    if (segs.length === 2 && segs[0] === 'tree' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(segs[1])) at = `tree/${segs[1]}`;
+    const page = query.get('path');
+    const keep = page !== null && page !== 'index.html' && /^[A-Za-z0-9._/-]+$/.test(page) && page.split('/').every((x) => x && !x.startsWith('.'));
+    return `artifact/${at}/${slug}${keep ? `?${new URLSearchParams({ path: page })}` : ''}`;
+  }
+  if (kind === 'preview') {
+    if (rest.includes('/')) return null;
+    const route = query.get('route');
+    return `preview/${rest}${route && route !== '/' ? `?${new URLSearchParams({ route })}` : ''}`;
+  }
+  return h;
+}
+// routes (the page's own table, outside this block): { pages, peeks, links: { kind: home }, files: [[RegExp, home]], redirects: { head: head } }
 function parseHead(hash, routes) {
   let h = String(hash ?? '').replace(/^#/, '');
   let redirected = false;
@@ -1758,12 +1790,17 @@ function parseHead(hash, routes) {
       const hit = (routes.files || []).find(([re]) => re.test(path));
       home = hit ? hit[1] : 'library';
     }
+    // a peek's or a viewer's link head is legacy: its home page with it as p (none when it names no view)
+    if ((routes.peeks || []).includes(kind)) { const p = peekHead(h, routes); return { page: home, state: p ? { p } : {}, legacy: true }; }
     return { link: h, kind, home };
   }
   const page = (routes.pages || []).includes(first) ? first : 'overview';
   const got = new URLSearchParams(q < 0 ? '' : h.slice(q + 1));
   const state = {};
   for (const k of stateKeys(page)) if (got.has(k)) state[k] = got.get(k);
+  // i is a card in the Inbox tab: only with th=inbox; p only a view routes.peeks names, as its canonical head
+  if (state.i !== undefined && state.th !== 'inbox') delete state.i;
+  if (state.p !== undefined) { const p = peekHead(state.p, routes); if (p) state.p = p; else delete state.p; }
   return redirected ? { page, state, redirected } : { page, state };
 }
 function headFor(p) {
@@ -1773,13 +1810,17 @@ function headFor(p) {
   const s = qs.toString();
   return `#${p.page}${s ? `?${s}` : ''}`;
 }
-// history.state for an entry: { page, depth, openedHere }. entry = { hash, state }, here = what was on
-// screen (its stamp), cold = the visit's first route
+// history.state for an entry: { page, depth, openedHere }, page the entry's head without p. entry = { hash, state },
+// here = what was on screen (its stamp), cold = the visit's first route
 function stampFor(entry, here, cold, routes) {
   if (entry.state && typeof entry.state.page === 'string') return entry.state;
   const p = parseHead(entry.hash, routes);
-  if (p.link === undefined) return { page: headFor(p), depth: 0, openedHere: !cold };
-  if (cold || !here) return { page: headFor(parseHead(p.home, routes)), depth: 1, openedHere: false };
+  const link = p.link !== undefined || !!p.legacy;
+  if (!link && p.state.p === undefined) return { page: headFor(p), depth: 0, openedHere: !cold };
+  // a p head names its page; a link or a legacy head is over its kind's home on a cold load, else over what is on screen
+  const page = link ? null : headFor({ page: p.page, state: { ...p.state, p: undefined } });
+  if (cold || !here) return { page: page ?? headFor(parseHead(p.link !== undefined ? p.home : p.page, routes)), depth: 1, openedHere: false };
+  if (page !== null && page !== here.page) return { page, depth: 1, openedHere: false };
   // from a peek: every entry down to the page was pushed in this visit only if the peek below's were
   if (here.depth > 0) return { page: here.page, depth: here.depth + 1, openedHere: !!here.openedHere };
   return { page: here.page, depth: 1, openedHere: true };
@@ -1788,7 +1829,7 @@ function stampFor(entry, here, cold, routes) {
 const withPage = (state, page) => ({ ...state, page });
 // closing a peek: back to the page under it, by history when this visit pushed the entries, else in place
 const closeTarget = (state) => (state && state.openedHere && state.depth > 0 ? { go: -state.depth } : { replace: (state && state.page) || '#overview' });
-// remembered filters: a page's own keys, applied only to a fresh entry whose head carries none of them
+// remembered filters: a page's own keys, applied only to a fresh entry whose head carries none of them and no p
 const REMEMBERED = { board: ['goal', 'feat', 'repo', 'att'], progress: ['goal'], library: ['goal', 'kind'] };
 // stored as one flat object ({ goal, feat, repo, att, kind }), so the goal is shared by the pages that remember it
 const FILTERS_KEY = 'devteam.board.filters';
@@ -1796,7 +1837,8 @@ function storedFilters() { try { return JSON.parse(localStorage.getItem(FILTERS_
 function rememberedFilters(page, keys, fresh, stored = storedFilters()) {
   const own = REMEMBERED[page] || [];
   if (!fresh || !own.length || !stored || typeof stored !== 'object') return null;
-  if ((keys || []).some((k) => own.includes(k))) return null;
+  // a head that names one of the page's filters (an empty value too) or a peek says what it shows
+  if ((keys || []).some((k) => own.includes(k) || k === 'p')) return null;
   const out = {};
   for (const k of own) if (typeof stored[k] === 'string' && stored[k]) out[k] = stored[k];
   return Object.keys(out).length ? out : null;
@@ -1819,6 +1861,8 @@ function saveFilters(page, state) {
 const SHELL_ROUTES_PAGES = ['overview', 'goals', 'progress', 'board', 'library', 'trust', 'efficiency', 'awareness', 'governance', 'sensors', 'jobs', 'retros', 'loop', 'settings'];
 const SHELL_ROUTES = {
   pages: SHELL_ROUTES_PAGES,
+  // dashboard-shell@2: what p may open, each a peek kind (TYPE_META's) or one of the two viewers
+  peeks: ['ticket', 'goal', 'feature', 'story', 'release', 'wave', 'milestone', 'act', 'decision', 'retro', 'lesson', 'problem', 'thread', 'planner', 'q', 'file', 'sensor', 'observation', 'signal', 'learning', 'lib', 'class', 'recurring', 'builtin', 'artifact', 'preview'],
   links: {
     ticket: 'board', feature: 'board', story: 'board', release: 'board', wave: 'board', milestone: 'board', planner: 'board', thread: 'board',
     goal: 'goals', q: 'overview', talk: 'overview',
@@ -2470,7 +2514,7 @@ let SENSOR_TAB = 'production';
 bindTabBar($('monitoring'), { onSelect: (id) => {
   if (!['production', 'fleet'].includes(id)) return;
   const cur = parseHead(location.hash, SHELL_ROUTES);
-  const state = cur.link === undefined && cur.page === 'sensors' ? { ...cur.state } : {};
+  const state = cur.link === undefined && !cur.legacy && cur.page === 'sensors' ? { ...cur.state } : {};
   if (id === 'fleet') state.st = 'fleet'; else delete state.st;
   SENSOR_TAB = id;
   if (DATA) renderMonitoring(DATA);
@@ -2868,7 +2912,7 @@ function narrowViews(p, goal) {
 // The page head in force: the hash's, or under a link (a peek) the head in its stamp.
 function pageHeadNow() {
   const h = parseHead(location.hash, SHELL_ROUTES);
-  return h.link === undefined ? h : parseHead(typeof history.state?.page === 'string' ? history.state.page : '#overview', SHELL_ROUTES);
+  return h.link === undefined && !h.legacy ? h : parseHead(typeof history.state?.page === 'string' ? history.state.page : '#overview', SHELL_ROUTES);
 }
 // A page's filters as the head in force has them (none when another page shows), with a goal naming no goal
 // a filter can pick, a Narrow outside the goal's views and a Show that isn't one dropped: the controls then show
@@ -2961,7 +3005,7 @@ function drawFilterPage(page) {
 // stamp's page head with it, so a peek opened over it closes back to the filtered head.
 function filterHead(fresh) {
   let p = parseHead(location.hash, SHELL_ROUTES);
-  if (p.link !== undefined || p.redirected || !FILTER_PAGES.includes(p.page)) return;
+  if (p.link !== undefined || p.legacy || p.redirected || !FILTER_PAGES.includes(p.page)) return;
   const r = fresh ? rememberedFilters(p.page, Object.keys(p.state), true) : null;
   if (r) p = { page: p.page, state: { ...p.state, ...r } };
   const head = headFor(p);
@@ -4754,7 +4798,7 @@ window.addEventListener('keydown', (e) => {
 bindTabBar($('goals'), { onSelect: (id) => {
   if (!GOALS_TABS.includes(id)) return;
   const cur = parseHead(location.hash, SHELL_ROUTES);
-  const state = cur.link === undefined && cur.page === 'goals' ? { ...cur.state } : {};
+  const state = cur.link === undefined && !cur.legacy && cur.page === 'goals' ? { ...cur.state } : {};
   if (id === 'active') delete state.gt; else state.gt = id;
   GOALS_TAB = id;
   renderGoals();
@@ -7714,12 +7758,12 @@ function closeArtifact() {
 // cold stampFor (a ticket peek would go over #board, without th).
 function avReturn() {
   const now = history.state?.page || '#library', r = parseHead(AV_RET || '#library', SHELL_ROUTES);
-  if (r.link !== undefined) return { head: AV_RET, stamp: { page: now, depth: 1, openedHere: false } };
+  if (r.link !== undefined || r.legacy) return { head: AV_RET, stamp: { page: now, depth: 1, openedHere: false } };
   const c = parseHead(now, SHELL_ROUTES), s = { ...r.state };
   delete s.th;
   delete s.t;
-  if (c.link === undefined && c.state.th !== undefined) s.th = c.state.th;
-  if (c.link === undefined && c.state.t !== undefined) s.t = c.state.t;
+  if (c.link === undefined && !c.legacy && c.state.th !== undefined) s.th = c.state.th;
+  if (c.link === undefined && !c.legacy && c.state.t !== undefined) s.t = c.state.t;
   const head = headFor({ page: r.page, state: s });
   return { head, stamp: { page: head, depth: 0, openedHere: false } };
 }
@@ -7842,7 +7886,7 @@ function routeHead({ fresh = false, carry = null } = {}) {
   // leaving a talk/ entry (a route to any other head) closes the card it opened
   if (TL.route && raw !== `talk/${encodeURIComponent(TL.route)}` && raw !== `talk/${TL.route}`) tlLeave();
   // a link opens over the page in its stamp: the one it was clicked on, or on a cold load its kind's home
-  if (p.link !== undefined) showHead(parseHead(HERE.page, SHELL_ROUTES));
+  if (p.link !== undefined || p.legacy) showHead(parseHead(HERE.page, SHELL_ROUTES));
   // before anything that hides the drawer, the scrim or a review: the viewer opens over them
   // (a viewer opening takes the head it is over, and counts the frame's moves from none)
   if (raw.startsWith('preview/')) { if (!AV) { AV_RET = ROUTED ? LAST_HEAD : null; AV_NAVS = 0; AV_FRAME_ESC = false; } openPreview(raw.slice(8)); ROUTED = true; return; }
@@ -7870,7 +7914,7 @@ function routeHead({ fresh = false, carry = null } = {}) {
   if (h.startsWith('file?')) return void openFile(new URLSearchParams(location.hash.slice(6)));
   hideDrawer();
   // a page head: its page; an unknown or empty head, or a redirect, is replaced in place (#overview, #monitoring → #sensors)
-  if (p.link !== undefined) return;
+  if (p.link !== undefined || p.legacy) return;
   if (p.redirected || raw.split('?')[0] !== p.page) history.replaceState(history.state, '', headFor(p));
   showHead(p);
 }
@@ -10058,7 +10102,7 @@ function tlInboxHome(t) {
   const s = t?.subject;
   if (VIEWER || !s) return false;
   if (s.kind === 'item') return inInbox(tlHome(s));
-  if (s.kind === 'page') { const p = parseHead(String(s.view ?? ''), SHELL_ROUTES); return p.link === undefined && p.state?.th === 'inbox'; }
+  if (s.kind === 'page') { const p = parseHead(String(s.view ?? ''), SHELL_ROUTES); return p.link === undefined && !p.legacy && p.state?.th === 'inbox'; }
   return false;
 }
 // A Settings row's element, as Settings draws it (null when it isn't drawn).
@@ -10147,9 +10191,9 @@ function subjectHead(s) {
   }
   if (s?.kind === 'page') {
     const p = parseHead(String(s.view ?? ''), SHELL_ROUTES);
-    if (p.link === undefined) return headFor(p);
+    if (p.link === undefined && !p.legacy) return headFor(p);
     // a view with a path the table doesn't redirect (#loop/<other>): its page, if it is one
-    return headFor(parseHead(SHELL_ROUTES.pages.includes(p.kind) ? p.kind : p.home, SHELL_ROUTES));
+    return headFor(parseHead(p.legacy ? p.page : SHELL_ROUTES.pages.includes(p.kind) ? p.kind : p.home, SHELL_ROUTES));
   }
   return '#overview';
 }
@@ -11050,7 +11094,7 @@ bindTabBar($('th-tabs'), { onSelect: (id) => { thSync(); if (id !== (TH.th === '
 // talk/) the page head under it, history.state.page.
 function thHead() {
   const p = parseHead(location.hash, SHELL_ROUTES);
-  if (p.link === undefined) return headFor(p);
+  if (p.link === undefined && !p.legacy) return headFor(p);
   return typeof history.state?.page === 'string' ? history.state.page : '#overview';
 }
 // TH as the page head in force has it. A head thGo writes (a card's ×: a new entry) is in force at once, but routed
@@ -11089,7 +11133,8 @@ function thGo({ th = null, t, focus = false } = {}) {
   if (t) state.t = t;
   const next = headFor({ page: p.page, state });
   if (next === head) return void thRoute();
-  if (parseHead(location.hash, SHELL_ROUTES).link !== undefined) {
+  const at = parseHead(location.hash, SHELL_ROUTES);
+  if (at.link !== undefined || at.legacy) {
     // under a talk/ head a change of t replaces the talk/ entry with the page head (stamped): one card, one thread
     if (location.hash.startsWith('#talk/') && (t || null) !== (p.state.t || null)) return void goHead(next, { replace: true });
     history.replaceState(withPage(history.state, next), '', location.href);
@@ -11118,7 +11163,8 @@ const thReady = () => TL.have > 0 && !!DATA;
 // The page head in force changed in place, stamped: the entry's own head (hash and stamp), or under a link head
 // the page under it (withPage), the link left as it is.
 function thReplace(next) {
-  if (parseHead(location.hash, SHELL_ROUTES).link === undefined) history.replaceState(withPage(history.state, next), '', next);
+  const at = parseHead(location.hash, SHELL_ROUTES);
+  if (at.link === undefined && !at.legacy) history.replaceState(withPage(history.state, next), '', next);
   else history.replaceState(withPage(history.state, next), '');
   HERE = history.state;
 }
@@ -11131,7 +11177,7 @@ function thUnknown(t) {
 function thDecide() {
   const head = thHead();
   const p = parseHead(head, SHELL_ROUTES);
-  if (p.link !== undefined) return;
+  if (p.link !== undefined || p.legacy) return;
   const s = { ...p.state };
   // bad values (the block's parseHead keeps any): th open or resolved, t a thread id
   if (s.th !== undefined && !TH_LISTS.includes(s.th)) delete s.th;
@@ -11170,7 +11216,7 @@ function thRemember() {
   if (VIEWER) return;
   const head = thHead();
   const p = parseHead(head, SHELL_ROUTES);
-  if (p.link !== undefined || p.state.th !== undefined || p.state.t !== undefined) return;
+  if (p.link !== undefined || p.legacy || p.state.th !== undefined || p.state.t !== undefined) return;
   const v = thStored();
   if (v) thReplace(headFor({ page: p.page, state: { ...p.state, ...v } }));
 }
@@ -11179,7 +11225,7 @@ function thRemember() {
 // A page head without its t.
 function thWithout(head) {
   const p = parseHead(head, SHELL_ROUTES);
-  if (p.link !== undefined || p.state.t === undefined) return head;
+  if (p.link !== undefined || p.legacy || p.state.t === undefined) return head;
   const s = { ...p.state };
   delete s.t;
   return headFor({ page: p.page, state: s });
@@ -11193,7 +11239,7 @@ function thFreshness() {
 function thCarry(page) {
   const head = thHead();
   const p = parseHead(head, SHELL_ROUTES), c = parseHead(page, SHELL_ROUTES);
-  if (p.link !== undefined || c.link !== undefined || p.page !== c.page) return;
+  if (p.link !== undefined || p.legacy || c.link !== undefined || c.legacy || p.page !== c.page) return;
   const s = { ...p.state };
   delete s.th;
   delete s.t;

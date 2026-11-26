@@ -81,7 +81,7 @@ test("threads on the dashboard page: Shift and point, the card, the pins and the
   // the subject and title its Shift+click gives, as :3344 asserts) and subtest 9's reply (:3373)
   T = F.owner(['thread', 'new', 'Narrow this to the EU launch', '--title', 'Launch checkout', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}`, quote: 'Launch checkout' })]).split('\n')[0];
   { const th = threads().find((x) => x.id === T); assert.deepEqual([th.subject.kind, th.subject.ref, th.title], ['item', `goal:${F.goal}`, 'Launch checkout']); }
-  F.sup(['thread', 'reply', T, 'That drops the measure to EU orders; want me to propose the change?']);
+  F.sup(['thread', 'reply', T, 'That drops the measure to EU orders; want me to propose the change?', '--no-ask', 'a test of the page, not of asks']);
   // the keys log subtest 12 installs (:3408), as the page has it by subtest 24
   await p.ev(`(() => { if (window.__keys) return; window.__keys = []; addEventListener('keydown', (e) => { const { key, shiftKey, ctrlKey, altKey, metaKey, keyCode, isComposing, repeat } = e; window.__keys.push({ key, shiftKey, ctrlKey, altKey, metaKey, keyCode, isComposing, repeat }); }, true); })()`);
   // the page at #goals, the card closed and T's pin drawn, as subtest 19 leaves it (:3643's wait)
@@ -139,7 +139,7 @@ test("threads on the dashboard page: Shift and point, the card, the pins and the
   // the subject and title its Shift+click gives, as :3344 asserts) and subtest 9's reply (:3373)
   T = F.owner(['thread', 'new', 'Narrow this to the EU launch', '--title', 'Launch checkout', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}`, quote: 'Launch checkout' })]).split('\n')[0];
   { const th = threads().find((x) => x.id === T); assert.deepEqual([th.subject.kind, th.subject.ref, th.title], ['item', `goal:${F.goal}`, 'Launch checkout']); }
-  F.sup(['thread', 'reply', T, 'That drops the measure to EU orders; want me to propose the change?']);
+  F.sup(['thread', 'reply', T, 'That drops the measure to EU orders; want me to propose the change?', '--no-ask', 'a test of the page, not of asks']);
   // subtest 26's question, left open, and its resolve: the proposal accepted (:3745, :3759, and the
   // owner's accept, :3761's click, by the kit's command), resolved as :3762 waits for
   F.sup(['thread', 'ask', T, '--question', 'Tell the US team?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);

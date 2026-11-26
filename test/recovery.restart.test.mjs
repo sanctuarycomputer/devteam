@@ -10,6 +10,8 @@ import { CLAUDE_RESUME, findings, fixture, MENU, OFF, rateLimit, ROOM, SID, SKIP
 
 const FULL = { schemaVersion: 1, accounts: [{ number: 1, email: 'a@x', active: true, usageStatus: 'ok', usage: { fiveHour: { pct: 100 }, sevenDay: { pct: 30 } } }] };
 const withCswap = (F) => ({ DEVTEAM_CSWAP: F.cswap });
+// the restart carries the supervisor's Stop hook (supervisor.md §6, Every ask is an Inbox question): --settings does not outlive its process
+const hooked = (call) => { assert.match(call ?? '', /^supervisor\|--settings \S+\/run\/agent\/supervisor-claude\.json /, call); return call.replace(/--settings \S+ /, ''); };
 const left = (F, pane) => { assert.equal(pane.keys(), ''); assert.deepEqual(F.claudeCalls(), []); assert.ok(!fs.existsSync(F.restartsFile) || !/"supervisor"/.test(fs.readFileSync(F.restartsFile, 'utf8')), 'no attempt spent'); };
 
 test('not onto a full account: a known-full active account waits for room', { skip: !hasTmux }, async () => {
@@ -37,7 +39,7 @@ test('a supervisor stopped at a limit is restarted on its exact conversation, no
     assert.match(said, /restarted the supervisor/);
     assert.equal(F.state().supervisor_limit, null, 'restarted this tick: not reported as stopped');
     await until(() => F.claudeCalls().length === 1, 'the stand-in claude ran');
-    assert.equal(F.claudeCalls()[0], `supervisor|--resume ${SID} --dangerously-skip-permissions You were restarted after a usage limit, on this same conversation. Carry on from where you were.`);
+    assert.equal(hooked(F.claudeCalls()[0]), `supervisor|--resume ${SID} --dangerously-skip-permissions You were restarted after a usage limit, on this same conversation. Carry on from where you were.`);
     assert.equal(pane.keys(), '', 'no key reaches the old process');
     assert.match(fs.readFileSync(F.restartsFile, 'utf8'), /"supervisor"/, 'the same record as the workers');
     const logged = json(F.run(['log', '--type', 'observation', '--json']).stdout);
@@ -182,7 +184,7 @@ test('the restart keeps the permissions the running supervisor had: no flag it w
     assert.doesNotMatch(plain.run(['fleet', 'status', '--no-fetch'], { DEVTEAM_ROLE: '' }).stdout, /dangerously/, 'the recovery line');
     assert.match(plain.tick(withCswap(plain)), /restarted the supervisor/);
     await until(() => plain.claudeCalls().length === 1, 'the stand-in claude ran');
-    assert.equal(plain.claudeCalls()[0], `supervisor|--resume ${SID} You were restarted after a usage limit, on this same conversation. Carry on from where you were.`);
+    assert.equal(hooked(plain.claudeCalls()[0]), `supervisor|--resume ${SID} You were restarted after a usage limit, on this same conversation. Carry on from where you were.`);
   } finally { plain.done(); }
   // started with it: carried over, and the printed command says so too
   const flagged = fixture('supflagged', { resume: CLAUDE_RESUME });
@@ -191,11 +193,11 @@ test('the restart keeps the permissions the running supervisor had: no flag it w
     const pane = supervisorPane(flagged, MENU, { prefix: 'DEVTEAM_ROLE=supervisor ', shell: true, args: SKIP });
     await until(() => pane.shows().includes('Esc to cancel'), 'the menu');
     flagged.tick(withCswap(flagged));
-    assert.ok(findings(flagged).find((x) => x.kind === 'supervisor-at-limit').suggestion.includes(`claude --resume ${SID}${SKIP}`));
+    assert.ok(findings(flagged).find((x) => x.kind === 'supervisor-at-limit').suggestion.includes(`claude --resume ${SID}${SKIP}`), 'printed only: no Stop hook file is written, and none was yet');
     assert.match(flagged.run(['fleet', 'status', '--no-fetch'], { DEVTEAM_ROLE: '' }).stdout, new RegExp(`recovery .*claude --resume ${SID}${SKIP}`));
     assert.match(flagged.tick(withCswap(flagged)), /restarted the supervisor/);
     await until(() => flagged.claudeCalls().length === 1, 'the stand-in claude ran');
-    assert.ok(flagged.claudeCalls()[0].startsWith(`supervisor|--resume ${SID}${SKIP} `), flagged.claudeCalls()[0]);
+    assert.ok(hooked(flagged.claudeCalls()[0]).startsWith(`supervisor|--resume ${SID}${SKIP} `), flagged.claudeCalls()[0]);
   } finally { flagged.done(); }
 });
 
