@@ -92,6 +92,9 @@ const soonIn = (p, ms = 20000) => async (expr, what) => {
 let shared = null;
 const base = () => (shared ??= (async () => {
   const F = threadsFixture('term');
+  // two threads for the router's checks: one shown in the panel (no subject), one on its subject's page (a goal)
+  F.owner(['thread', 'new', 'Where do we start?']);
+  F.owner(['thread', 'new', 'About this goal', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}` })]);
   const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
   const chrome = await openChrome();
   return { F, dash, port, chrome };
@@ -135,10 +138,29 @@ const hex = (s) => Buffer.from(s, 'latin1').toString('hex');
 // ArrowUp, as a keyboard sends it (chrome.mjs's key() knows only a few named keys)
 const arrowUp = async (p) => { for (const type of ['rawKeyDown', 'keyUp']) await p.send('Input.dispatchKeyEvent', { type, key: 'ArrowUp', code: 'ArrowUp', windowsVirtualKeyCode: 38 }); };
 
+// The router (dashboard-shell@3, th): th=supervisor and th=shell exclude t and u; opening a thread from a terminal tab
+// gives th=open. The fixture's own threads: one shown in the panel, one on its subject's page.
+const threadIds = (R) => R.p.ev(`(() => { const open = TL.threads.filter((t) => t.status === 'open'); const inPanel = open.find((t) => tlInPanel(t)); const onPage = open.find((t) => !tlInPanel(t) && !tlInboxHome(t) && t.subject?.kind !== 'artifact' && t.subject?.kind !== 'preview'); return { inPanel: inPanel?.id ?? null, onPage: onPage?.id ?? null }; })()`);
 test('terminal routing: th=supervisor and th=shell drop t and u from the address (dashboard-shell@3)', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R0 = await open(t, { hash: '#overview' });
+  const { inPanel } = await threadIds(R0);
+  assert.ok(inPanel, 'the fixture has a thread shown in the panel');
   for (const w of ['supervisor', 'shell']) {
-    const R = await open(t, { hash: `#overview?th=${w}&t=t-20261101-000000000-owner&u=u-20261101-000000000-owner` });
+    const R = await open(t, { hash: `#overview?th=${w}&t=${inPanel}&u=u-20261101-000000000-owner` });
     await R.soon(`location.hash.includes('th=${w}') && !/[?&][tu]=/.test(location.hash)`, `th=${w}: t and u dropped, th kept (${w})`);
+  }
+});
+
+test('terminal routing: a thread opened from a terminal tab opens on Threads (th=open), never beside th=supervisor', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const R = await open(t, { hash: '#overview?th=supervisor' });
+  const { inPanel, onPage } = await threadIds(R);
+  assert.ok(inPanel && onPage, `the fixture has a thread in the panel and one on its subject's page: ${inPanel}, ${onPage}`);
+  for (const id of [inPanel, onPage]) {
+    await R.p.ev(`thGo({ th: 'supervisor' }); true`);
+    await R.soon(`TH.th === 'supervisor'`, 'back on Supervisor');
+    // a thread's link, as a card or a mention gives it (#talk/<id>, the router's tlRoute)
+    await R.p.ev(`location.hash = ${JSON.stringify(`#talk/${id}`)}; true`);
+    await R.soon(`TH.th === 'open' && TH.t === ${JSON.stringify(id)}`, `${id === inPanel ? 'in the panel' : "on its subject's page"}: th=open with t (${id})`);
   }
 });
 
