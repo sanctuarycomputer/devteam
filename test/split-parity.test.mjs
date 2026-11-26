@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { canDrive, openChrome } from './lib/chrome.mjs';
 import {
   PARTS, buildApps, childEnv, compare, differing, firstData, history, gitOf, isClean, judgeStartup, judgeTest as judgeTestOf, mainlineOf,
-  pageCommits, pageServer, parseArgs, parseTap, readEntry, sha256, summary, testEntryPath, unportedVm, weigh, report, runPart } from './split/parity.mjs';
+  pageCommits, pageServer, parseArgs, parseTap, readEntry, sha256, summary, testEntryPath, unportedVm, weigh, report, build, runPart } from './split/parity.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tool = path.join(root, 'test', 'split', 'parity.mjs');
@@ -133,6 +133,20 @@ test('C4: TAP gives each test its joined name and its status; a failed file with
   ]);
 });
 
+test('C33: two run.mjs outputs joined (rest 1/5: alone, then the shard) are both read; a skip in the second\'s tree is failing', () => {
+  const out = (file, line) => [`# ${file}`, 'TAP version 13', '# Subtest: t', line, '', 'summary: 1 file, concurrency 2', '', `${file}  1.0  ok`].join('\n');
+  const joined = (line) => `${out('test/alone.test.mjs', 'ok 1 - t')}\n${out('test/shard.test.mjs', line)}\n`;
+  const src = parseTap(joined('ok 1 - t')), tr = parseTap(joined('ok 1 - t # SKIP no tool'));
+  assert.deepEqual(src.tests.map((x) => x.file), ['test/alone.test.mjs', 'test/shard.test.mjs'], 'the second output\'s tests are read');
+  assert.deepEqual(compare(src, tr), [{ file: 'test/shard.test.mjs', name: 't', why: 'runs at the source, skipped in the tree' }]);
+});
+
+test('C37: a test name a file repeats is matched by occurrence: a skipped twin behind a passing one is failing', () => {
+  const side = (second) => ({ files: ['test/r.test.mjs'], tests: [{ file: 'test/r.test.mjs', name: 'same', status: 'pass' }, { file: 'test/r.test.mjs', name: 'same', status: second }] });
+  assert.deepEqual(compare(side('pass'), side('skip')), [{ file: 'test/r.test.mjs', name: 'same', why: 'runs at the source, skipped in the tree' }]);
+  assert.deepEqual(compare(side('pass'), side('pass')), []);
+});
+
 test('C6: runs at the source and skipped in the tree is failing; skipped on both is not; absent or failing in the tree is', () => {
   const t = (name, status, file = 'test/a.test.mjs') => ({ file, name, status });
   const source = { files: ['test/a.test.mjs', 'test/gone.test.mjs'], tests: [t('runs', 'pass'), t('both skip', 'skip'), t('vanishes', 'pass'), t('breaks', 'pass'), t('was skipped', 'skip')] };
@@ -155,6 +169,20 @@ test('C5: start-up over 10% slower makes the report not clean; 5% does not', () 
   assert.equal(slow.ratio, 1.2);
   assert.equal(isClean({ ...base, startup: slow }), false);
   assert.equal(isClean({ ...base, startup: fine }), true);
+});
+
+test('C34: each of a stale item, a missing part, an unported node:vm test and an unaccepted differing test alone makes the report not clean; the summary lists a stale item', () => {
+  const ok = { ...base, sha: 'a'.repeat(40), pages: 'no apps yet', startup: judgeStartup({ runs: 50, source_ms: 100, tree_ms: 100 }) };
+  assert.equal(isClean(ok), true, 'the base is clean');
+  assert.equal(isClean({ ...ok, stale: [{ area: 'tests', kind: 'hash conflict', name: 'x' }] }), false, 'a stale item');
+  assert.equal(isClean({ ...ok, missing_parts: ['chrome 4/4'] }), false, 'a missing part');
+  assert.equal(isClean({ ...ok, unported_vm: ['test/v.test.mjs'] }), false, 'an unported node:vm test');
+  assert.equal(isClean({ ...ok, differing: [{ file: 'test/d.test.mjs', change: 'changed', accepted: false, why: 'no ledger entry' }] }), false, 'an unaccepted differing test');
+  assert.equal(isClean({ ...ok, differing: [{ file: 'test/d.test.mjs', change: 'changed', accepted: true, ticket: 'kit-7-test' }] }), true, 'an accepted one is fine');
+  const r = { ...ok, stale: [{ area: 'tests', kind: 'hash conflict', name: 'x' }] };
+  r.clean = isClean(r);
+  assert.match(summary(r), /- Stale items: 1\n/);
+  assert.match(summary(r), /## Stale items \(1\)\n\n- \{"area":"tests","kind":"hash conflict","name":"x"\}/);
 });
 
 test('C16: a page three times today\'s weight and time is printed and leaves the report clean', () => {
@@ -326,6 +354,23 @@ test('C2: a split that refuses gives a report that says the tree wasn\'t built, 
   assert.match(fs.readFileSync(path.join(tmp, 'c2-work', 'parity.md'), 'utf8'), /- Verify: tree not built: split: manifest\.json: src\/tool\.mjs is not in/);
 });
 
+test('C35: build carries split\'s --json stale items into build.json and still tests the stale tree', async () => {
+  const stub = path.join(tmp, 'c35-split.mjs');
+  write(stub, `import fs from 'node:fs';
+const a = process.argv.slice(2);
+if (a.includes('--verify')) { console.log(JSON.stringify({ clean: true, report: [] })); process.exit(0); }
+const out = a[a.indexOf('--out') + 1];
+fs.mkdirSync(out, { recursive: true });
+fs.writeFileSync(out + '/README.md', 'tree');
+console.log(JSON.stringify({ stale: [{ area: 'tests', kind: 'hash conflict', name: 'x' }] }));
+`);
+  const work = path.join(tmp, 'c35-work');
+  const b = await build({ sha: LSHA, repo: L, work, startupRuns: 1, files: ['test/a.test.mjs'], split: stub });
+  assert.equal(b.split.ok, true, 'a stale tree is built');
+  assert.deepEqual(b.split.stale, [{ area: 'tests', kind: 'hash conflict', name: 'x' }]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(work, 'build.json'), 'utf8')).split.stale, b.split.stale);
+});
+
 test('C9: page commits after the baseline need a ledger entry; one names its tickets; before the baseline none count', () => {
   const pc = pageCommits({ git: lgit, mainline: LSHA, read, hist });
   assert.equal(pc.baseline, merges['kit-895-parity-run']);
@@ -404,6 +449,12 @@ test('C3: PARTS are test.yml\'s Node 24 parts, in order, with alone first in res
   assert.deepEqual(PARTS.map((p) => [p.part, p.key, p.groups, p.shard, !!p.alone]), rows.map((m) => [m[1], m[2], m[3], m[4], !!m[5]]));
 });
 
+test('C36: test-stress\'s parity-test matrix is PARTS, part for part and key for key', () => {
+  const m = /^  parity-test:\n((?:    .*\n|\s*\n)*)/m.exec(stress)?.[1] ?? '';
+  const rows = [...m.matchAll(/^\s*- \{ part: ([^,]+), key: ([^,}]+)/gm)].map((x) => [x[1], x[2].trim()]);
+  assert.deepEqual(rows, PARTS.map((p) => [p.part, p.key]));
+});
+
 test('C31: the report step writes parity.md to the job summary and exits as the report, under GitHub\'s bash -e', () => {
   const step = /^      - name: report\n        run: \|\n((?: {10}.*\n)+)/m.exec(job('parity-report') ?? '')?.[1]?.replace(/^ {10}/gm, '');
   assert.ok(step, 'parity-report has a report step');
@@ -450,6 +501,10 @@ test('C27: the parity parts get test.yml\'s tools and switches: the same pinned 
   assert.equal(e.DEVTEAM_TEST_SOPS, '1');
   assert.equal(e.DEVTEAM_ROLE, undefined);
   assert.equal(e.DEVTEAM_RUN, undefined);
+  assert.equal(e.DEVTEAM_HUB_PORT, '4987', 'the hub port is off 4320');
+  assert.match(e.DEVTEAM_CGROUP, /^\/nonexistent\//, 'the cgroup points nowhere');
+  assert.match(e.DEVTEAM_MEMINFO, /^\/nonexistent\//, 'meminfo points nowhere');
+  assert.equal(e.HOME, '/h');
 });
 
 const job = (name) => { const m = new RegExp(`^  ${name}:\\n((?:    .*\\n|\\s*\\n)*)`, 'm').exec(stress); return m ? m[1] : null; };
