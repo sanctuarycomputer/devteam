@@ -899,7 +899,7 @@ function showOnly(key) {
 }
 function selectOverview() {
   selected = OVERVIEW;
-  history.replaceState(null, '', '#overview');
+  history.replaceState(null, '', tlHash());
   showOnly(OVERVIEW);
   paintOverview();
   tlRefresh();
@@ -1293,6 +1293,8 @@ function hubBase(it) {
   const base = box?.v === 2 ? `${url}#` : `${location.origin}${location.pathname}#${encodeURIComponent(keyOf(it))}/`;
   try { f.contentWindow?.postMessage({ devteam: 'hub-base', base }, new URL(url).origin); } catch {}
 }
+// the Overview's address: the operator thread open on it, if one with a name is
+const tlHash = () => (TL.open && !String(TL.open).startsWith('pending-') ? `#overview?ot=${encodeURIComponent(TL.open)}` : '#overview');
 // A dashboard's head, from its own frame window on its own origin only, and only a head: a string
 // starting with '#' of at most 2,048 characters (the dashboard sends null for a longer one), or null.
 // Kept per project; the address follows only the selected one's.
@@ -1316,6 +1318,7 @@ window.addEventListener('hashchange', () => {
   const { key, head, ot } = hubHead();
   if (key === 'overview') {
     if (selected !== OVERVIEW) selectOverview();
+    if (ot) tlOpen(ot);
     return;
   }
   const it = hubFind(key);
@@ -2785,7 +2788,7 @@ function tlRelay() {
   TL.pend = TL.pend.filter((p) => !(p.confirmed && tLanded(TL.raw, p)));
   TL.threads = tOverlay(TL.raw, TL.pend);
 }
-function tlClose() { TL.open = null; TL.draft = null; tlDraw(); }
+function tlClose() { TL.open = null; TL.draft = null; if (selected === OVERVIEW) history.replaceState(null, '', tlHash()); tlDraw(); }
 async function tlOpen(id, go = true) {
   if (!TL.threads.some((x) => x.id === id)) await tlRefresh();
   const t = TL.threads.find((x) => x.id === id);
@@ -2793,6 +2796,7 @@ async function tlOpen(id, go = true) {
   TL.draft = null;
   TL.open = id;
   TL.openAt = -1;
+  if (selected === OVERVIEW) history.replaceState(null, '', tlHash());
   // from the dock, what it is about is brought into view first
   if (go) tlTarget(t.subject)?.scrollIntoView({ block: 'nearest' });
   tlDraw();
@@ -3213,7 +3217,7 @@ async function draw() {
     else if (pick) select(pick.x.root);
     else if (term && want === 'terminal') selectTerminal();
     else if (want === 'settings') selectSettings();
-    else selectOverview();
+    else { selectOverview(); if (want === 'overview' && ot) tlOpen(ot); }
   }
   paintOverview();
   paintSettings();
