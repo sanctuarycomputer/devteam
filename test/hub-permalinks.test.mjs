@@ -310,6 +310,15 @@ test('bare #<key>, #overview and #settings open as today; a key with a / round-t
   await p.ev(`location.hash = '#team%2Fapp', true`);
   await p.until("a bare key for team/app: its tab", tabOn('team/app'));
   await p.until("and the address at team/app's kept head", `${hubHash} === '#team%2Fapp/goals'`);
+  // Back, then Forward, across two pasted project heads: the hub's pointing a frame at a head pushes no entry
+  await p.ev(`location.hash = '#alpha/progress?goal=g-10', true`);
+  await p.until("alpha's tab, at the pasted head", `${tabOn('alpha')} && ${hubHash} === '#alpha/progress?goal=g-10'`);
+  await until(() => F.hashAt(`127.0.0.1:${PA}`) === '#progress?goal=g-10', "alpha's frame at the pasted head");
+  await p.ev('history.back(), true');
+  await p.until("Back: team/app's tab, at its head", `${tabOn('team/app')} && ${hubHash} === '#team%2Fapp/goals'`);
+  await until(() => F.hashAt(`127.0.0.1:${PS}`) === '#goals', "Back: team/app's frame at its head");
+  await p.ev('history.forward(), true');
+  await p.until("Forward: alpha's tab again, at the pasted head", `${tabOn('alpha')} && ${hubHash} === '#alpha/progress?goal=g-10'`);
   // two projects named gamma: keys gamma-<hex>; one goes, and the other (still keyed by hex while the
   // gone one's tab lingers) is opened by its name
   F.list = [hello('alpha', PA), hello('gamma', PG1, '/srv/g1'), hello('gamma', PG2, '/srv/g2')];
@@ -370,4 +379,13 @@ test('an operator thread on the Overview is #overview?ot=<id>, by replaceState; 
   await p.go(`#overview?ot=${OT}`);
   await p.until("the thread's card, opened cold", card);
   assert.equal(await p.ev(hubHash), `#overview?ot=${OT}`, 'the address keeps it');
+  // a hashchange to an ot that names no listed thread opens nothing, and the address settles on what is open
+  await p.ev(`location.hash = '#overview?ot=ot-20261123-120000000-ffffff', true`);
+  await p.until('the address back at the open thread', `${hubHash} === ${JSON.stringify(`#overview?ot=${OT}`)}`);
+  assert.equal(await p.ev(card), true, "the open thread's card stays");
+  // a hashchange to the thread's address, on the Overview, opens its card
+  await p.ev(`document.querySelector('#tl-card [data-tl-close]').click(), true`);
+  await p.until('the card put away again', `document.getElementById('tl-card').hidden && ${hubHash} === '#overview'`);
+  await p.ev(`location.hash = ${JSON.stringify(`#overview?ot=${OT}`)}, true`);
+  await p.until("the thread's card, from a hashchange", card);
 });

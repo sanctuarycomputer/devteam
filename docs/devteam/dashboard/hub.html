@@ -1246,8 +1246,12 @@ function openAt(root, hash) {
   it.head = hash;
   const had = it.frame;
   const f = frameFor(it);
-  // a frame made just now is already at that head
-  if (had && f instanceof HTMLIFrameElement) f.src = `${urlOf(it.x)}${hash}`;
+  // a frame made just now is already at that head; one that was there is pointed at it in place, pushing
+  // no history entry of its own, so Back and Forward step through the hub's own addresses
+  if (had && f instanceof HTMLIFrameElement) {
+    const to = `${urlOf(it.x)}${hash}`;
+    try { f.contentWindow.location.replace(to); } catch { f.src = to; }
+  }
   select(root);
 }
 /* hubFrameRoute start */
@@ -1318,7 +1322,8 @@ window.addEventListener('hashchange', () => {
   const { key, head, ot } = hubHead();
   if (key === 'overview') {
     if (selected !== OVERVIEW) selectOverview();
-    if (ot) tlOpen(ot);
+    // then the address settles on the thread actually open (an ot naming no listed thread opens nothing)
+    if (ot) tlOpen(ot).finally(() => { if (selected === OVERVIEW) history.replaceState(null, '', tlHash()); });
     return;
   }
   const it = hubFind(key);
