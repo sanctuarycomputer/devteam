@@ -204,7 +204,8 @@ test('P3 to P13: against the fake registry, a release.yml release passes and eac
     await refused('P12 off the default branch', 'default-branch', () => good('0.100.0'), /not on upstream's default branch/);
     // P13 what a forger can serve: changed after signing, another CA or one with the trusted names and another
     // key, a leaf that is a CA, a log time outside the leaf's, the log's entry or one naming something else, another identity
-    const forgeries = { forged: ['signature', /does not verify/], 'other-ca': ['certificate', /not issued by the test trust root/], expired: ['certificate-time', /not valid at the log's time/], 'bad-set': ['tlog', /signed entry timestamp does not verify/], 'no-tlog': ['tlog', /0 entries/], san: ['identity', /other\.yml.*not https:\/\/github\.com\/sanctuarycomputer\/devteam\/\.github\/workflows\/release\.yml@refs\/tags\/v0\.101\.0/], 'impostor-ca': ['certificate', /not issued by the test trust root/], 'leaf-ca': ['certificate', /not issued by the test trust root/], early: ['certificate-time', /not valid at the log's time/], 'entry-payload': ['tlog', /not for this statement, signature and certificate/], 'entry-sig': ['tlog', /not for this statement, signature and certificate/], 'entry-cert': ['tlog', /not for this statement, signature and certificate/] };
+    // (another workflow, another repository, another ref, a ref the tag's is a prefix of)
+    const forgeries = { forged: ['signature', /does not verify/], 'other-ca': ['certificate', /not issued by the test trust root/], expired: ['certificate-time', /not valid at the log's time/], 'bad-set': ['tlog', /signed entry timestamp does not verify/], 'no-tlog': ['tlog', /0 entries/], san: ['identity', /other\.yml.*not https:\/\/github\.com\/sanctuarycomputer\/devteam\/\.github\/workflows\/release\.yml@refs\/tags\/v0\.101\.0/], 'impostor-ca': ['certificate', /not issued by the test trust root/], 'leaf-ca': ['certificate', /not issued by the test trust root/], early: ['certificate-time', /not valid at the log's time/], 'entry-payload': ['tlog', /not for this statement, signature and certificate/], 'entry-sig': ['tlog', /not for this statement, signature and certificate/], 'entry-cert': ['tlog', /not for this statement, signature and certificate/], 'san-repo': ['identity', /devteam-fork\/\.github\/workflows\/release\.yml@refs\/tags\/v0\.101\.0"?, not https:\/\/github\.com\/sanctuarycomputer\/devteam\//], 'san-ref': ['identity', /release\.yml@refs\/pull\/1\/merge"?, not /], 'san-ref-prefix': ['identity', /@refs\/tags\/v0\.101\.0-x"?, not /] };
     for (const [forge, [guard, why]] of Object.entries(forgeries)) {
       await reg.forge(forge);
       await refused(`P13 ${forge}`, guard, () => good(), why);
@@ -286,4 +287,19 @@ test('P16 the test CA: only beside a loopback registry, else every call is refus
     const r = P.prov(RECORDED, { ...P.clean, DEVTEAM_NPM_REGISTRY: s.url, DEVTEAM_SIGSTORE_TEST_CA: reg2.caFile });
     assert.equal(r.refused, 'certificate', `P16 the test CA replaces Sigstore's root (${JSON.stringify(r)})`);
   } finally { await s.close(); await reg2.close(); }
+});
+
+test('P17 the temp folder: no repository around it is read, and none is left behind', async () => {
+  const { reg, env, I } = await setup('p17');
+  try {
+    // a temp folder inside a repository whose own config forbids the local upstream: read, it would fail the call
+    const around = scratch('p17-around');
+    execFileSync('git', ['init', '-q', around]);
+    execFileSync('git', ['config', 'protocol.file.allow', 'never'], { cwd: around });
+    const tmp = path.join(around, 'tmp');
+    fs.mkdirSync(tmp);
+    const r = I.prov({ name: NAME, version: '0.101.0', integrity: integrityOf('0.101.0') }, { ...env, TMPDIR: tmp });
+    assert.equal(r.ok, true, `P17 a repository around the temp folder changes nothing (${JSON.stringify(r)})`);
+    assert.deepEqual(fs.readdirSync(tmp).filter((n) => n.startsWith('devteam-provenance-')), [], 'P17 no devteam-provenance-* folder is left');
+  } finally { await reg.close(); }
 });

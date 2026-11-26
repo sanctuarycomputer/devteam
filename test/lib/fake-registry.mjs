@@ -222,6 +222,9 @@ export function trustRoot(ca) {
 //   bad-set    the log's signed entry timestamp signs another time
 //   no-tlog    no entry from the trust root's log
 //   san        the leaf names another workflow than the statement's (a certificate for other.yml)
+//   san-repo   the leaf is another repository's release.yml at the tag (<repo>-fork, so a prefix compare fails too)
+//   san-ref    the leaf is release.yml at refs/pull/1/merge (a pull_request run of upstream's own file)
+//   san-ref-prefix  the leaf is release.yml at refs/tags/v<version>-x (a tag the version's is a prefix of)
 //   impostor-ca  the leaf is issued by a CA with the trusted one's names but another key (only the
 //              signature check on each certificate, not name matching, refuses it)
 //   leaf-ca    the leaf is itself a CA
@@ -229,7 +232,7 @@ export function trustRoot(ca) {
 //   entry-payload, entry-sig, entry-cert
 //              the log's entry, its timestamp signed by the trusted log, names another payload hash,
 //              another signature or another certificate than the bundle's
-export const FORGERIES = ['no-slsa', 'forged', 'other-ca', 'expired', 'bad-set', 'no-tlog', 'san', 'impostor-ca', 'leaf-ca', 'early', 'entry-payload', 'entry-sig', 'entry-cert'];
+export const FORGERIES = ['no-slsa', 'forged', 'other-ca', 'expired', 'bad-set', 'no-tlog', 'san', 'impostor-ca', 'leaf-ca', 'early', 'entry-payload', 'entry-sig', 'entry-cert', 'san-repo', 'san-ref', 'san-ref-prefix'];
 const PAE = (type, body) => Buffer.concat([Buffer.from(`DSSEv1 ${Buffer.byteLength(type)} ${type} ${body.length} `), body]);
 function signedEnvelope(st, ca, other, forge, impostor) {
   const now = Date.now();
@@ -237,7 +240,9 @@ function signedEnvelope(st, ca, other, forge, impostor) {
   const w = st.predicate.buildDefinition.externalParameters.workflow;
   const by = forge === 'other-ca' ? other : forge === 'impostor-ca' ? impostor : ca;
   const from = forge === 'expired' ? now - 3600000 : forge === 'early' ? now + 120000 : now - 1000;
-  const uri = `${w.repository}/${forge === 'san' ? '.github/workflows/other.yml' : w.path}@${w.ref}`;
+  const leafRepo = forge === 'san-repo' ? `${w.repository}-fork` : w.repository;
+  const leafRef = forge === 'san-ref' ? 'refs/pull/1/merge' : forge === 'san-ref-prefix' ? `${w.ref}-x` : w.ref;
+  const uri = `${leafRepo}/${forge === 'san' ? '.github/workflows/other.yml' : w.path}@${leafRef}`;
   const leaf = mintCert({ cn: null, key: leafKey, issuer: `sigstore-test-${by.tag}-intermediate`, issuerKey: crypto.createPrivateKey(by.intKey), from, to: from + 600000, ca: forge === 'leaf-ca', uri });
   const type = 'application/vnd.in-toto+json';
   const body = Buffer.from(JSON.stringify(st));
