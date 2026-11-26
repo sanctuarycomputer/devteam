@@ -27,7 +27,7 @@ const answer = (t, words) => {
   if (/merge/i.test(words)) {
     kit(['send', 'supervisor', `the owner asks for a merge in ${t}: ${words.slice(0, 120)}`, '--kind', 'handoff', '--thread', t]);
     kit(['thread', 'reply', t, '--', 'Passed to the supervisor: a merge is its call.']);
-  } else kit(['thread', 'reply', t, '--', `stub reply: ${words.slice(0, 80)}`]);
+  } else kit(['thread', 'reply', t, '--no-ask', 'a stub echoing the owner\'s words', '--', `stub reply: ${words.slice(0, 80)}`]);
 };
 const line = (l) => {
   note(`read ${l}`);

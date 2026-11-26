@@ -62,7 +62,9 @@ test('recover: a dead machine with no tmux server brings the supervisor back on 
     assert.match(noted[0], /^%\d+$/);
     assert.equal(noted[1], noted[0], 'recorded for the supervisor, marked as made for it');
     await until(() => F.claudeCalls().length === 1, 'the stand-in claude ran');
-    assert.ok(F.claudeCalls()[0].startsWith(`supervisor|--resume ${SID} --dangerously-skip-permissions This machine restarted`), F.claudeCalls()[0]);
+    // with its Stop hook (supervisor.md §6, Every ask is an Inbox question): the policy recover wrote
+    assert.match(F.claudeCalls()[0], /^supervisor\|--settings \S+\/run\/agent\/supervisor-claude\.json /, F.claudeCalls()[0]);
+    assert.ok(F.claudeCalls()[0].replace(/--settings \S+ /, '').startsWith(`supervisor|--resume ${SID} --dangerously-skip-permissions This machine restarted`), F.claudeCalls()[0]);
     assert.match(F.claudeCalls()[0], /Nothing about this restart came from the owner/, 'it carries no owner authority');
     assert.match(F.claudeCalls()[0], /keep the loop, as before the restart: run the tick \(§3\) now, then wait with devteam\.mjs wait and tick again when it returns, until the owner stops you\. A summary to the owner doesn't end it\.$/, 'and it ends by keeping the loop, never at a summary');
     const again = recover(F, [], server.env);
@@ -182,7 +184,7 @@ test('recover --here: a supervisor from a plain terminal comes back in this one'
     const did = spawnSync(process.execPath, [path.join(F.root, 'docs/devteam/scripts/devteam.mjs'), 'recover', '--here'], { cwd: F.root, encoding: 'utf8', env: { ...F.env(asOwner), SHELL: '/bin/sh', PATH: `${bin}${path.delimiter}${process.env.PATH}` } });
     assert.equal(did.status, 0, did.stderr);
     assert.match(did.stdout, /in this terminal/);
-    assert.match(fs.readFileSync(calls, 'utf8'), new RegExp(`^--resume ${SID} This machine restarted`), 'no permissions flag: it had none');
+    assert.match(fs.readFileSync(calls, 'utf8'), new RegExp(`^--settings \\S+supervisor-claude\\.json --resume ${SID} This machine restarted`), 'no permissions flag: it had none');
   } finally { F.done(); }
 });
 

@@ -11889,6 +11889,12 @@ function cmdThread() {
     if (capped) die(capped);
     const line = { type: 'turn', thread: 't-00000000-000000000-supervisor', text: words, refs: [subject.ref] };
     if (!lineFits(line, 'supervisor')) die('That first turn is too long with its link; shorten it.');
+    // its first words ask nothing no Inbox question holds, as a reply's (supervisor.md §6): a thread
+    // about a question shows that one
+    if (flags['no-ask'] === undefined) {
+      const left = unfiledOwnerAsks(words, String(subject.ref).startsWith('question:') ? [String(subject.ref).slice('question:'.length)] : []);
+      if (left.length) die(`these first words ask the owner ${left.length === 1 ? 'something' : `${left.length} things`} no Inbox question holds, and ${UNFILED_ASKS_WHY}:\n${left.slice(0, 8).map((l) => `  - ${l}`).join('\n')}\nAsk it first (ask), then start the thread about that question (--subject '{"kind":"item","ref":"question:<q-id>"}'); or, when the words ask nothing the owner must answer, --no-ask "<why>"`);
+    } else if (!(flagStr('no-ask') ?? '').trim()) die('--no-ask "<why>": say why these words ask the owner nothing that needs an answer');
     const t = appendLog({ type: 'thread', title, subject }, 'supervisor');
     appendLog({ ...line, thread: t.id }, 'supervisor');
     return out(t.id);
@@ -11962,7 +11968,7 @@ function cmdThread() {
   if (streamed && flags.part !== undefined) {
     const by = logWriter() === 'responder' ? 'responder' : (supervisorOnly('thread reply --part'), replyWriter());
     if (!by) die('thread reply --part: the supervisor or the responder (DEVTEAM_ROLE)');
-    for (const f of ['refs', 'pending', 're', 'off-subject', 'anyway', 'files']) if (flags[f] !== undefined) die(`--${f} goes on --after-parts, with the turn: a part is words only`);
+    for (const f of ['refs', 'pending', 're', 'off-subject', 'anyway', 'files', 'no-ask']) if (flags[f] !== undefined) die(`--${f} goes on --after-parts, with the turn: a part is words only`);
     const [nv, ...after] = asList(flags.part);
     if (!/^[1-9]\d{0,2}$/.test(String(nv ?? ''))) die('--part <n> "<words>": the part\'s number, from 1 (at most 999), then its words');
     const given = [after.join(' ').trim(), wordsFrom(2)].filter(Boolean);
@@ -12026,6 +12032,15 @@ function cmdThread() {
     if (by !== 'owner') {
       const objects = readLog().objects;
       if ((by === 'responder' || session) && !flags.anyway && supervisorAnswered(t.id, objects, by)) die(`the supervisor has answered this (thread show ${t.id}): reply only to add something new, with --anyway`);
+      // every ask of the owner is an Inbox question, linked to this thread (supervisor.md §6): a reply
+      // whose words ask the owner something no question holds is refused, saying what to do.
+      // --no-ask "<why>" lets through words that read as an ask and aren't one ("Anything else?")
+      if (by === 'supervisor' || by === 'responder') {
+        const noAsk = flags['no-ask'] === undefined ? null : (flagStr('no-ask') ?? '').replace(/\s+/g, ' ').trim();
+        if (noAsk === '') die('--no-ask "<why>": say why these words ask the owner nothing that needs an answer');
+        const left = noAsk ? [] : unfiledOwnerAsks(words, refs.filter((r) => r.startsWith('question:')).map((r) => r.slice('question:'.length)));
+        if (left.length) die(`this reply asks the owner ${left.length === 1 ? 'something' : `${left.length} things`} no Inbox question holds, and ${UNFILED_ASKS_WHY}:\n${left.slice(0, 8).map((l) => `  - ${l}`).join('\n')}\n${by === 'responder' ? `Hand ${left.length === 1 ? 'it' : 'them'} to the supervisor to ask here (send supervisor "…" --kind handoff --thread ${t.id}): only it asks the owner` : `Ask ${left.length === 1 ? 'it' : 'each'} here with thread ask ${t.id} --question "…" (an Inbox question that links back to this thread), or decide what is your call and say what you decided`}; show one already asked with --refs question:<q-id> or its q-… id in the line; or, when the words ask nothing the owner must answer, --no-ask "<why>"`);
+      }
       const implied = {};
       askedFor(t, by, objects, { refs, re, off, implied });
       // written as the follow-up it is, so show marks it and reOf sees the turn followed up (task-3-2 F2-1)
@@ -12303,7 +12318,7 @@ function cmdThread() {
     for (const x of vs) out(row(x, x.status === 'open' ? (x.waiting === 'session' ? `with ${x.with}` : waitingWords(x)) : '') + where(x));
     return;
   }
-  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread new --subject \'{"kind":"item","ref":"question:q-…"}\' [--title "<line>"] -- "<words>"   (the supervisor\'s own, about a question or goal)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--re <u-id>] [--off-subject "<why>"] [--anyway]   (the supervisor\'s or the responder\'s; --anyway the responder\'s)   |   thread reply <t-id> --part <n> "<words>"   then   thread reply <t-id> --after-parts ["<last words>"] [reply\'s flags]   (a reply a paragraph at a time, from the replying session)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" [--off-subject "<why>"] <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>] | --accept-addressed --at <when it was marked>]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting [--responder] | --with <session> | --open | --all] [--json]   (words may also follow --)');
+  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread new --subject \'{"kind":"item","ref":"question:q-…"}\' [--title "<line>"] -- "<words>"   (the supervisor\'s own, about a question or goal)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--re <u-id>] [--off-subject "<why>"] [--no-ask "<why>"] [--anyway]   (the supervisor\'s or the responder\'s; --anyway the responder\'s)   |   thread reply <t-id> --part <n> "<words>"   then   thread reply <t-id> --after-parts ["<last words>"] [reply\'s flags]   (a reply a paragraph at a time, from the replying session)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" [--off-subject "<why>"] <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>] | --accept-addressed --at <when it was marked>]   |   thread reopen <t-id> ["<words>"]   |   thread working <t-id> [--done]   (the session holding the owner\'s turn)   |   thread show <t-id> [--json]   |   thread list [--waiting [--responder] | --with <session> | --open | --all] [--json]   (words may also follow --)');
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
@@ -22791,6 +22806,8 @@ function recoverOne() {
   // find this. Taken back on any exit that started nothing, so the next try doesn't wait it out.
   writeJson(SUPERVISOR_UP_FILE, { ...(rec ?? {}), starting: Date.now() });
   const notStarted = (say) => { if (rec) writeJson(SUPERVISOR_UP_FILE, rec); else fs.rmSync(SUPERVISOR_UP_FILE, { force: true }); return { say }; };
+  // its Stop hook: an ask of the owner left in its window with no Inbox question goes back to it
+  cmd = withSupervisorPolicy(cmd);
   let msg = id ? RECOVER_MESSAGE : supervisorOpeningPrompt();
   if (missing.length) msg = `${msg}\n\nThis machine is missing: ${missing.join(' ')} (worktree_files). Before unparking or starting any worker, ask the owner for each in the Inbox: an owner-action question with --secrets and the sink file:<path>. Never in chat.`;
   fs.mkdirSync(runDir, { recursive: true });
@@ -30262,8 +30279,69 @@ function gateAll() {
 }
 
 // For an agent's stop hook: exit 2 while the worker's last commit is newer than its last phase line.
+// --- every ask of the owner is an Inbox question ---
+//
+// The owner looks at the Inbox, not at a pane or a thread's scrollback: an ask that lives only in
+// words gets forgotten. ownerAsks(text) reads words written to the owner (a reply in a thread, the
+// supervisor's own message in its window) for the things they ask: a line that ends in a question
+// mark, and each item listed under a lead line such as "Waiting on you:" or "Open questions for
+// you:". Code blocks and quoted lines are left out. A line that names a q-… id is filed: it points at
+// its Inbox question. What's left are asks only the words hold.
+const OWNER_ASK_QID = /\bq-\d{8}-\d{6,9}\b/;
+const OWNER_ASK_LEAD = /\b(waiting on you|(open |pending )?questions? for you|for you to (decide|answer|do|check)|needs? (from )?you|from you:|your (call|answer|decision)s?)\b/i;
+function ownerAsks(text) {
+  const asks = [];
+  let fence = false;
+  let listed = false;
+  for (const raw of String(text ?? '').split('\n')) {
+    const line = raw.trim();
+    if (/^(```|~~~)/.test(line)) { fence = !fence; continue; }
+    if (fence || line.startsWith('>')) continue;
+    if (!line) { listed = false; continue; }
+    const item = /^([-*•]|\d+[.)])\s+/.test(line);
+    if (!item) listed = OWNER_ASK_LEAD.test(line) && /:\s*$/.test(line);
+    const words = line.replace(/^([-*•]|\d+[.)])\s+/, '');
+    const asking = /\?[\s"'”’)*_\]]*$/.test(words) || (item && listed);
+    if (asking && !(OWNER_ASK_LEAD.test(line) && /:\s*$/.test(line))) asks.push({ line: words, filed: OWNER_ASK_QID.test(words) });
+  }
+  return asks;
+}
+// The asks in text that point at no Inbox question. A reply that shows questions (--refs
+// question:<id>, ids its words don't already name) covers that many of them, in order: "Ship it?"
+// with --refs question:q-… is that question asked in the thread.
+function unfiledOwnerAsks(text, shown = []) {
+  const named = shown.filter((q) => !String(text ?? '').includes(q));
+  return ownerAsks(text).filter((a) => !a.filed).slice(named.length).map((a) => a.line);
+}
+const UNFILED_ASKS_WHY = 'the owner answers in the Inbox and can lose an ask that lives only in words (supervisor.md §6, Every ask is an Inbox question)';
+// The last thing the session said, from a Stop hook's input: last_assistant_message where Claude Code
+// gives it, else the newest assistant entry with text in the transcript.
+function stopHookLastWords(input) {
+  if (typeof input?.last_assistant_message === 'string') return input.last_assistant_message;
+  const lines = (readText(String(input?.transcript_path ?? '')) ?? '').split('\n').filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let e;
+    try { e = JSON.parse(lines[i]); } catch { continue; }
+    const content = e?.type === 'assistant' ? e.message?.content : null;
+    const text = Array.isArray(content) ? content.filter((c) => c?.type === 'text').map((c) => c.text).join('\n') : typeof content === 'string' ? content : '';
+    if (text.trim()) return text;
+  }
+  return '';
+}
 function cmdStopOk() {
   const id = currentTicketId();
+  // the supervisor's own window (its Stop hook, supervisorPolicy): once per stop, an ask of the owner
+  // that names no Inbox question sends it back to ask it there. stop_hook_active is Claude Code's
+  // "this hook already sent it back": the second stop always goes through.
+  if (!id && process.env.DEVTEAM_ROLE === 'supervisor') {
+    let input = null;
+    try { input = JSON.parse(fs.readFileSync(0, 'utf8') || 'null'); } catch {}
+    if (input?.stop_hook_active) process.exit(0);
+    const left = unfiledOwnerAsks(stopHookLastWords(input));
+    if (!left.length) process.exit(0);
+    process.stderr.write(`devteam: you asked the owner ${left.length === 1 ? 'something' : `${left.length} things`} in your window with no Inbox question, and ${UNFILED_ASKS_WHY}:\n${left.slice(0, 12).map((l) => `  - ${l}`).join('\n')}\nFor each: ask it in the Inbox (ask, or thread ask <t-id> when it came up in a thread, so the question and the thread link to each other), give it a --default where §6 allows one, or decide it yourself and log it when it is your call; one already asked, cite it by its q-… id. Then say it again with each q-… id beside its line.\n`);
+    process.exit(2);
+  }
   if (!id) process.exit(0);
   const last = logObjects('phase').filter((p) => p.created_by === id).sort(byTime).pop();
   const commitAt = Date.parse(cwdGit(['log', '-1', '--format=%cI']) ?? '');
@@ -39599,6 +39677,16 @@ function claudePolicy(name, s, mb, { stopHook = false } = {}) {
   fs.writeFileSync(policy, `${JSON.stringify({ permissions: { deny: deniedFor(s.worker_denied_commands, mb).map((c) => `Bash(${c})`) }, ...hooks }, null, 2)}\n`);
   return policy;
 }
+// The supervisor's: only the Stop hook (stop-ok), which sends an ask of the owner that names no Inbox
+// question back to be asked there. No deny rules: the worker's are not the supervisor's. Its path.
+function supervisorPolicy() {
+  const policy = path.join(runDir, 'agent', 'supervisor-claude.json');
+  fs.mkdirSync(path.dirname(policy), { recursive: true });
+  fs.writeFileSync(policy, `${JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok` }] }] } }, null, 2)}\n`);
+  return policy;
+}
+// A Claude Code supervisor command with that policy: any other agent command as it is.
+const withSupervisorPolicy = (cmd) => (/^claude(\s|$)/.test(cmd ?? '') && !/\s--settings\s/.test(` ${cmd} `) ? cmd.replace(/^claude/, `claude --settings '${supervisorPolicy()}'`) : cmd);
 // The agent's trust in its folder, before it starts (agent_trust_command); a dialog left up is a finding.
 function trustWorktree(wt, s, R) {
   if (s.agent_trust_command && typeof s.agent_trust_command !== 'string') warn('agent_trust_command is not a string (a shell command), so it was not run');
@@ -40222,7 +40310,7 @@ const HELP_DECIDE = `Decide and act (supervisor.md, constitution.md)
   settings set <key> <1..20|none> [--for <act-id>]   (the supervisor sets max_active_tickets or max_active_per_component in its settings chore, .worktrees/chore-settings; none is no limit; --for names the owner's owner-setting act it lands, which must be the latest for the key with this value. It applies once merge --chore settings lands it)
   owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor's own settings, max_active_tickets or max_active_per_component; none is no limit. The dashboard's Settings page runs it on Save; the supervisor lands it with settings set in its settings chore)
   pane question [--json]   (what the supervisor's terminal is asking; the owner answers it on the dashboard's card, which sends that option's digit key and nothing else: no command answers it)
-  thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--re <u-id>] [--off-subject "<why>"] [--anyway] | thread reply <t-id> --part <n> "<words>", then thread reply <t-id> --after-parts ["<last words>"] [reply's flags] | thread ask <t-id> --question "…" [--off-subject "<why>"] <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>" | thread unready <t-id> --reason "<line>"   (supervisor; the responder replies too)   reply, ask an Inbox question in it, propose resolving it (on an artifact note it takes a picture of the spot: look at it), withdraw a proposal or a session's mark; a turn nothing waits on (no owner turn owed, no open handoff) names its --refs on the thread's subject, or follows up your --pending turn with --re <that turn>, or says --off-subject "<why>"
+  thread reply <t-id> "<words>" [--refs <type>:<id>…] [--pending] [--re <u-id>] [--off-subject "<why>"] [--no-ask "<why>"] [--anyway] | thread reply <t-id> --part <n> "<words>", then thread reply <t-id> --after-parts ["<last words>"] [reply's flags] | thread ask <t-id> --question "…" [--off-subject "<why>"] <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>" | thread unready <t-id> --reason "<line>"   (supervisor; the responder replies too)   reply, ask an Inbox question in it, propose resolving it (on an artifact note it takes a picture of the spot: look at it), withdraw a proposal or a session's mark; a turn nothing waits on (no owner turn owed, no open handoff) names its --refs on the thread's subject, or follows up your --pending turn with --re <that turn>, or says --off-subject "<why>"
   thread working <t-id> [--done]   (the session holding the owner's turn: the card shows it is responding until you reply)
   thread show <t-id> [--json] | thread list [--waiting [--responder] | --with <session> | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply; --waiting --responder: the owner's turns owed and routed to the responder, oldest first; --with: the artifact notes handed to that session, not yet marked
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]   questions print in Inbox order: the most valuable first
