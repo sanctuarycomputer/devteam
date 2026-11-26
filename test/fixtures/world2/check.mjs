@@ -692,13 +692,24 @@ export const headed = last((text) => {
 });
 // Whether the names rule refuses a heading: one of level 3 to 6 unless names holds it whole; a # or ##
 // one (the title and the sections, in plain words) when it holds a capitalised word, Exterior aside
-// (the document's own name), or a link host, that names doesn't hold whole, read as written or as
-// shown. Each later reading is made only when the one before finds nothing, so a refused heading
+// (the document's own name), or a link host, that names doesn't hold whole, read as written, as
+// shown or joined. Each later reading is made only when the one before finds nothing, so a refused heading
 // costs one.
+// A # or ## heading's joined reading, judged beside the two above: its markup taken out with no
+// separator and the spaces typed kept, as a page joins a word a tag or a mark splits. Each comment,
+// processing instruction and CDATA section, then each tag (a quoted value read to its quote), end tag,
+// declaration and autolink, goes whole; only a line break or a paragraph (<br>, <p> and their end
+// tags) reads as a space. Then each character reference decoded, the text NFKC-normalised, each
+// format character (Unicode Cf: a soft hyphen, a zero-width space or joiner, a word joiner, U+FEFF)
+// dropped, read as words, and each ~ * _ ` mark taken out. Linear: a span ends at its quote or its >.
+const SPAN = /<\/?[A-Za-z][A-Za-z0-9-]*(?:\s+[^\s"'<>\/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*\s*\/?>|<![A-Za-z][^<>]*>|<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*>/g;
+const BREAKS = /^<\/?(?:br|p)(?![A-Za-z0-9-])/i;
+const joined = (s) => words(decode(cut(cut(cut(s, '<!--', '-->'), '<?', '?>'), '<![CDATA[', ']]>').replace(SPAN, (t) => (BREAKS.test(t) ? ' ' : ''))).normalize('NFKC').replace(/\p{Cf}/gu, '')).replace(/[~*_`]/g, '');
 const unnamedWord = (t, names) => [...t.matchAll(WORD)].some((m) => { const w = capWord(m[0]); return w !== null && w.toLowerCase() !== 'exterior' && !namesWhole(names, w); });
 const unnamedHeading = (h, names) => (h.level > 2
   ? !namesWhole(names, h.text)
-  : unnamedWord(h.text, names) || unnamedWord(seen(h.raw), names) || hosts(h.raw).some((x) => !namesWhole(names, x)));
+  : unnamedWord(h.text, names) || unnamedWord(seen(h.raw), names) || unnamedWord(joined(h.raw), names)
+    || hosts(h.raw).some((x) => !namesWhole(names, x)));
 
 // exterior.md: { errors, warnings, refused, held, hosts }. On a repo known private nothing is refused
 // or held; visibility 'public' or 'unknown' keeps the names rule. Every heading, in any form (headed),

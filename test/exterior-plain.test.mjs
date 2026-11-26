@@ -171,6 +171,11 @@ test('P1t the region reads a hostile or large exterior text in under 2 s each', 
     ['an ## heading of 100,000 unclosed <?', `## a${'<?'.repeat(100000)}`],
     ['an ## heading of 50,000 unclosed quoted values', `## a${'<b title="'.repeat(50000)}`],
     ['an ## heading of 50,000 quoted >', `## a${'<b title=">'.repeat(50000)}`],
+    // finals 3 and 3b: the joined reading, each span read whole in linear time
+    ['an ## heading of 30,000 quoted values holding a tag', `## a${'<b a="<b a="'.repeat(30000)}`],
+    ['an ## heading of 50,000 unclosed declarations', `## a${'<!x '.repeat(50000)}`],
+    ['an ## heading of 30,000 attribute names holding <', `## a${'<b a<b a '.repeat(30000)}`],
+    ['an ## heading of 50,000 unclosed CDATA', `## a${'<![CDATA['.repeat(50000)}`],
   ]) {
     const start = process.hrtime.bigint();
     assert.doesNotThrow(() => P.checkExterior(`# T\n\n${x}\n`, { today: W2.today, visibility: 'public', allowed }), what);
@@ -528,6 +533,22 @@ const HEADING_FORMS = [
   ['an ## heading split by a zero-width space', '## Z\u200Borbly', ['Z\u200Borbly']],
   ['an ## heading split by a zero-width joiner', '## Z\u200Dorbly', ['Z\u200Dorbly']],
   ['an ## heading split by a word joiner', '## Z\u2060orbly', ['Z\u2060orbly']],
+  // finals 3 and 3b: a # or ## heading's joined reading (markup removed with no separator, typed spaces kept)
+  ['an ## heading split by a literal U+FEFF', '## Z\uFEFForbly', ['Z orbly']],
+  ['a setext heading split by a literal U+FEFF', 'Z\uFEFForbly\n---', ['Z orbly']],
+  ['an ## heading split by a declaration', '## Z<!x y>orbly', ['Z<!x y>orbly']],
+  ['an ## heading split by a lower-case doctype', '## Z<!doctype y>orbly', ['Z<!doctype y>orbly']],
+  ['an ## heading split by an end tag that closes nothing', '## Z</div>orbly', ['Z</div>orbly']],
+  ['an ## heading split by a </section>', '## Z</section>orbly', ['Z</section>orbly']],
+  ['an ## heading split by a <td> outside a table', '## Z<td>orbly', ['Z<td>orbly']],
+  ['an <h2> split by an end tag that closes nothing', '<h2>Z</div>orbly</h2>', ['Z orbly']],
+  ['an ## heading half struck through', '## Z~~orbly~~', ['Z~~orbly~~']],
+  ['an ## heading of a decomposed capital', '## E\u0301mile', ['E\u0301mile']],
+  ['a # heading of a decomposed capital', '# E\u0301mile', ['E\u0301mile']],
+  ['an ## heading with a decomposed capital later', '## our rival E\u0301mile', ['our rival E\u0301mile']],
+  ['an ## heading split by a quoted < in an attribute', '## Z<b title="<">orbly</b>', ['Z<b title="<">orbly</b>']],
+  ['an ## heading split by a single-quoted <', "## Z<b title='<'>orbly</b>", ["Z<b title='<'>orbly</b>"]],
+  ['an <h2> split by a quoted < in an attribute', '<h2>Z<b title="<">orbly</b></h2>', ['Z<b title=" orbly']],
 ];
 const NOT_REFUSED = [
   ['an ## heading in a fence', '```\n## Zorbly\n```'],
