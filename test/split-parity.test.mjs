@@ -10,9 +10,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { canDrive, openChrome } from './lib/chrome.mjs';
 import {
-  PARTS, childEnv, compare, differing, history, gitOf, isClean, judgeStartup, judgeTest as judgeTestOf, mainlineOf,
-  pageCommits, parseArgs, parseTap, readEntry, sha256, summary, testEntryPath, unportedVm, report, runPart } from './split/parity.mjs';
+  PARTS, buildApps, childEnv, compare, differing, firstData, history, gitOf, isClean, judgeStartup, judgeTest as judgeTestOf, mainlineOf,
+  pageCommits, pageServer, parseArgs, parseTap, readEntry, sha256, summary, testEntryPath, unportedVm, weigh, report, runPart } from './split/parity.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tool = path.join(root, 'test', 'split', 'parity.mjs');
@@ -154,6 +155,14 @@ test('C5: start-up over 10% slower makes the report not clean; 5% does not', () 
   assert.equal(slow.ratio, 1.2);
   assert.equal(isClean({ ...base, startup: slow }), false);
   assert.equal(isClean({ ...base, startup: fine }), true);
+});
+
+test('C16: a page three times today\'s weight and time is printed and leaves the report clean', () => {
+  const r = { ...base, sha: 'a'.repeat(40), startup: judgeStartup({ runs: 50, source_ms: 100, tree_ms: 100 }), page_commits: { ...base.page_commits },
+    pages: [{ page: 'hub', weight: { today: 70000, own: 210000, runtime: 135000, own_ratio: 3, whole_ratio: 4.9 }, time: { today_ms: 100, app_ms: 300, ratio: 3 } }] };
+  r.clean = isClean(r);
+  assert.equal(r.clean, true);
+  assert.match(summary(r), /- Page hub: own 210\.0 KB vs today 70\.0 KB \(3\.00×\), runtime 135\.0 KB, whole 4\.90×; first data 300 ms vs today 100 ms \(3\.00×\) \(reported, never failing\)/);
 });
 
 // ---- L: the ledgers, on a fixture repo with merge commits ----
@@ -323,6 +332,67 @@ test('C9: page commits after the baseline need a ledger entry; one names its tic
   assert.deepEqual(pc.unacknowledged.map((c) => c.commit), [merges['kit-3-page'], merges['kit-14-page-late']]);
   assert.deepEqual(pc.unported, [{ commit: merges['kit-4-page'], open: [{ page: 'docs/devteam/dashboard/index.html', ticket: 'kit-6-later' }] }]);
   assert.ok(!JSON.stringify(pc).includes(merges['kit-2-before']), 'a page commit before the baseline is not listed');
+});
+
+// ---- A and W: apps, weight and time ----
+function demoApp(dir) {
+  write(path.join(dir, 'apps/demo/package.json'), JSON.stringify({ name: 'demo', version: '1.0.0', private: true, scripts: { build: 'node build.mjs' } }));
+  write(path.join(dir, 'apps/demo/package-lock.json'), JSON.stringify({ name: 'demo', version: '1.0.0', lockfileVersion: 3, requires: true, packages: { '': { name: 'demo', version: '1.0.0' } } }));
+  write(path.join(dir, 'apps/demo/.npmrc'), 'audit=false\nfund=false\nupdate-notifier=false\n');
+  write(path.join(dir, 'apps/demo/build.mjs'), `import fs from 'node:fs';
+fs.mkdirSync('out', { recursive: true }); fs.mkdirSync('lib-dist', { recursive: true });
+fs.writeFileSync('out/index.html', '<p>demo</p>');
+fs.writeFileSync('out/base-path.txt', JSON.stringify(process.env.DEVTEAM_BASE_PATH ?? null));
+fs.writeFileSync('lib-dist/x.js', 'export const x = 1;');
+`);
+}
+test('C13: on Node 24 each app builds with an empty base path, out/ lands in docs/devteam/apps/<app>/, lib-dist/ stays', () => {
+  const tree = path.join(tmp, 'apps-tree');
+  demoApp(tree);
+  const home = path.join(tmp, 'apps-home');
+  fs.mkdirSync(home);
+  const [a] = buildApps({ tree, home, major: 24 });
+  assert.equal(a.ok, true, a.why);
+  assert.equal(fs.readFileSync(path.join(tree, 'docs/devteam/apps/demo/index.html'), 'utf8'), '<p>demo</p>');
+  assert.equal(fs.readFileSync(path.join(tree, 'docs/devteam/apps/demo/base-path.txt'), 'utf8'), '""');
+  assert.ok(fs.existsSync(path.join(tree, 'apps/demo/lib-dist/x.js')));
+  const other = path.join(tmp, 'apps-tree-22');
+  demoApp(other);
+  assert.deepEqual(buildApps({ tree: other, home, major: 22 }), [{ app: 'demo', ok: false, why: 'apps build on Node 24 only (this is Node 22)' }]);
+  assert.equal(buildApps({ tree: path.join(tmp, 'no-apps'), home }), 'no apps yet');
+});
+
+const OUT = path.join(tmp, 'out');
+write(path.join(OUT, 'index.html'), '<html><script src="/_next/static/chunks/rt.js"></script><script src="/_next/static/chunks/home.js"></script><script nomodule src="/_next/static/chunks/poly.js"></script><link rel="stylesheet" href="/_next/static/css/a.css"></html>');
+write(path.join(OUT, 'view/canvas/index.html'), '<html><script src="/_next/static/chunks/rt.js"></script><script src="/_next/static/chunks/canvas.js"></script><link rel="stylesheet" href="/_next/static/css/a.css"></html>');
+write(path.join(OUT, '404.html'), '<html><script src="/_next/static/chunks/rt.js"></script></html>');
+write(path.join(OUT, '_next/static/chunks/rt.js'), 'r'.repeat(5000) + Math.random());
+write(path.join(OUT, '_next/static/chunks/home.js'), 'fetch("/api/x").then((r) => r.json()).then(() => { document.body.dataset.data = "1"; });');
+write(path.join(OUT, '_next/static/chunks/canvas.js'), 'c'.repeat(100));
+write(path.join(OUT, '_next/static/chunks/poly.js'), 'p'.repeat(100000) + Math.random());
+write(path.join(OUT, '_next/static/css/a.css'), 'body{}');
+
+test('C14: the runtime is the files every exported page names; own is the rest plus the page; nomodule is not counted', async () => {
+  const zlib = await import('node:zlib');
+  const g = (f) => zlib.gzipSync(fs.readFileSync(path.join(OUT, f)), { level: 6 }).length;
+  const w = weigh({ out: OUT, route: '/', oldHtml: Buffer.from('<p>today</p>') });
+  assert.equal(w.runtime, g('_next/static/chunks/rt.js'));
+  assert.equal(w.own, g('index.html') + g('_next/static/chunks/home.js') + g('_next/static/css/a.css'));
+  assert.equal(w.today, zlib.gzipSync(Buffer.from('<p>today</p>'), { level: 6 }).length);
+});
+
+test('C15: time to first data, today and in the app; a page that asks for no data is not measured', { skip: canDrive ? false : 'needs Chrome and Node 22+ (lib/chrome.mjs canDrive)' }, async (t) => {
+  const chrome = await openChrome();
+  t.after(() => chrome.close());
+  const today = await pageServer({ route: '/', html: '<script>fetch("/api/data").then((r) => r.json())</script>' });
+  t.after(() => today.close());
+  const app = await pageServer({ route: '/', html: fs.readFileSync(path.join(OUT, 'index.html')), out: OUT });
+  t.after(() => app.close());
+  const quiet = await pageServer({ route: '/', html: '<p>no data</p>' });
+  t.after(() => quiet.close());
+  assert.equal(typeof await firstData(chrome, `${today.origin}/`, { loads: 2 }), 'number');
+  assert.equal(typeof await firstData(chrome, `${app.origin}/`, { loads: 2 }), 'number');
+  assert.equal(await firstData(chrome, `${quiet.origin}/`, { loads: 1, wait: 1500 }), null);
 });
 
 // ---- Y: the workflows ----
