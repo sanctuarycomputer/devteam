@@ -30,6 +30,193 @@ if (Number(process.versions.node.split('.')[0]) < 18) {
   process.exit(1);
 }
 
+// bash-ok: a Claude Code PreToolUse hook on Bash in every Claude Code session the kit starts
+// (claudePolicy, supervisorPolicy). An inline rm or rmdir whose path is built from a variable, a
+// glob, a brace or $(…) is refused, with worker.md's "Scripts go in files" as the reason, before
+// Claude Code stops on its permission prompt ("Dangerous rm operation") in a window nobody
+// watches; a subagent's prompt stops its whole session behind it. The session reads the reason and
+// writes the script file instead. It runs here, before anything else: it needs no repo, settings or
+// log, and the hook runs on every command. It only ever refuses; anything it can't read goes through.
+//
+// It reads the line as a shell would, enough to find command words: quotes, comments, heredoc
+// bodies and redirections are not commands, so `rm` in a grep pattern, a commit message or a PR
+// body passes; a $(…) or `…` is read as its own command too. Separators: ; & | newlines ( ).
+// Wrappers it looks through: sudo, doas, env, timeout, nice, ionice, nohup, setsid, taskset,
+// flock, prlimit, stdbuf, command, builtin, exec, time and the shell's own then/do/else/!.
+// sh -c / bash -c and eval are read again. Not covered: xargs rm (its paths come on stdin) and
+// find -delete or -exec rm (no variable path in the line).
+if (process.argv[2] === 'bash-ok') {
+  const WHY = 'Run any multi-step shell command, heredoc, or `rm` of a variable, glob or `$(…)` as a script file you write with your file tool and then run, never inline: a permission prompt stops the whole session. In that file, delete only paths built with `${VAR:?}` on every part, under a directory the script made or names literally, and never a path read from a file or from `$(…)`.';
+  // the line as simple commands, each a list of words { text, expands }; subs: the text of each $(…) and `…`
+  const lex = (src) => {
+    const s = String(src ?? '');
+    const cmds = [];
+    const subs = [];
+    let words = [];
+    let w = null;
+    let redirect = false;
+    const heredocs = [];
+    const endWord = () => { if (w) { if (redirect) redirect = false; else words.push(w); } w = null; };
+    const endCmd = () => { endWord(); if (words.length) cmds.push(words); words = []; };
+    const cur = () => (w ??= { text: '', expands: false });
+    // the end of a heredoc body that starts on the line after i: the index after its delimiter line
+    const skipBody = (i, delim, tabs) => {
+      let j = i;
+      for (;;) {
+        if (j >= s.length) return s.length;
+        const nl = s.indexOf('\n', j);
+        const line = s.slice(j, nl < 0 ? s.length : nl);
+        j = nl < 0 ? s.length : nl + 1;
+        if ((tabs ? line.replace(/^\t+/, '') : line) === delim) return j;
+      }
+    };
+    const heredocAt = (j) => {
+      let k = j + 2;
+      const tabs = s[k] === '-';
+      if (tabs) k++;
+      while (s[k] === ' ' || s[k] === '\t') k++;
+      let d = '';
+      while (k < s.length && !/[\s;&|<>()]/.test(s[k])) { if (!`'"\\`.includes(s[k])) d += s[k]; k++; }
+      return { end: k, delim: d, tabs };
+    };
+    // $( … ) or ` … `: its end, with nesting, quotes and heredoc bodies inside it; its text is read as commands too
+    const skipSubst = (i, close) => {
+      let depth = 1;
+      const pending = [];
+      for (let j = i; j < s.length; j++) {
+        const c = s[j];
+        if (c === '\\') { j++; continue; }
+        if (c === '\n' && pending.length) { let k = j + 1; while (pending.length) { const h = pending.shift(); k = skipBody(k, h.delim, h.tabs); } j = k - 1; continue; }
+        if (close === ')' && c === '<' && s[j + 1] === '<' && s[j + 2] !== '<') { const h = heredocAt(j); if (h.delim) pending.push(h); j = h.end - 1; continue; }
+        if (close === ')' && c === "'") { const k = s.indexOf("'", j + 1); if (k < 0) return s.length; j = k; continue; }
+        if (close === ')' && c === '"') { let k = j + 1; while (k < s.length && s[k] !== '"') k += s[k] === '\\' ? 2 : 1; j = k; continue; }
+        if (close === ')' && c === '(') depth++;
+        if (c === close && --depth === 0) { subs.push(s.slice(i, j)); return j + 1; }
+      }
+      return s.length;
+    };
+    let i = 0;
+    while (i < s.length) {
+      const c = s[i];
+      if (c === '\n') {
+        endCmd();
+        i++;
+        while (heredocs.length) { const h = heredocs.shift(); i = skipBody(i, h.delim, h.tabs); }
+        continue;
+      }
+      if (c === ' ' || c === '\t') { endWord(); i++; continue; }
+      if (c === '\\') { if (s[i + 1] === '\n') { i += 2; continue; } cur().text += s[i + 1] ?? ''; i += 2; continue; }
+      if (c === '#' && !w) { const nl = s.indexOf('\n', i); i = nl < 0 ? s.length : nl; continue; }
+      if (c === ';' || c === '&' || c === '|' || c === '(' || c === ')') {
+        if (c === '&' && (s[i - 1] === '>' || s[i + 1] === '>')) { i++; continue; }
+        endCmd(); i++; continue;
+      }
+      if (c === '<' && s[i + 1] === '<' && s[i + 2] !== '<') { endWord(); const h = heredocAt(i); if (h.delim) heredocs.push(h); i = h.end; continue; }
+      if (c === '<' || c === '>') {
+        if (w && /^\d+$/.test(w.text) && !w.expands) w = null;
+        endWord();
+        let j = i;
+        while (s[j] === '<' || s[j] === '>' || s[j] === '&' || s[j] === '|') j++;
+        if (/^[0-9-]/.test(s[j] ?? '') && s[j - 1] === '&') { while (/[0-9-]/.test(s[j] ?? '')) j++; i = j; continue; }
+        redirect = true;
+        i = j;
+        continue;
+      }
+      if (c === "'") { const k = s.indexOf("'", i + 1); cur().text += s.slice(i + 1, k < 0 ? s.length : k); i = k < 0 ? s.length : k + 1; continue; }
+      if (c === '"') {
+        let j = i + 1;
+        while (j < s.length && s[j] !== '"') {
+          if (s[j] === '\\') { cur().text += s[j + 1] ?? ''; j += 2; continue; }
+          if (s[j] === '$' || s[j] === '`') {
+            cur().expands = true;
+            if (s[j] === '$' && s[j + 1] === '(') { const e = skipSubst(j + 2, ')'); cur().text += s.slice(j, e); j = e; continue; }
+            if (s[j] === '`') { const e = skipSubst(j + 1, '`'); cur().text += s.slice(j, e); j = e; continue; }
+          }
+          cur().text += s[j];
+          j++;
+        }
+        cur();
+        i = j + 1;
+        continue;
+      }
+      if (c === '$' || c === '`') {
+        cur().expands = true;
+        if (c === '$' && s[i + 1] === '(') { const e = skipSubst(i + 2, ')'); cur().text += s.slice(i, e); i = e; continue; }
+        if (c === '`') { const e = skipSubst(i + 1, '`'); cur().text += s.slice(i, e); i = e; continue; }
+        cur().text += c;
+        i++;
+        continue;
+      }
+      if ('*?[{'.includes(c)) cur().expands = true;
+      cur().text += c;
+      i++;
+    }
+    endCmd();
+    return { cmds, subs };
+  };
+  // wrappers looked through, and the pattern of their options that take a value
+  const WRAP = {
+    sudo: /^-[ugpCDhrtTUR]$/, doas: /^-[uC]$/, env: /^-[uSC]$/, timeout: /^-[sk]$/, nice: /^-n$/, ionice: /^-[cnpP]$/, stdbuf: /^-[ioe]$/,
+    taskset: null, flock: /^-[wEs]$/, prlimit: /^-p$/, setsid: null, nohup: null, command: null, builtin: null, exec: /^-a$/, time: null,
+    '!': null, then: null, do: null, else: null, elif: null, if: null, while: null, until: null, '{': null, '}': null,
+  };
+  const ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=/;
+  const risky = (command, depth = 0) => {
+    if (depth > 3) return null;
+    const { cmds, subs } = lex(command);
+    for (const sub of subs) { const hit = risky(sub, depth + 1); if (hit) return hit; }
+    for (const words of cmds) {
+      let i = 0;
+      for (;;) {
+        const t = words[i]?.text;
+        if (t === undefined) break;
+        if (ASSIGN.test(t)) { i++; continue; }
+        if (!Object.hasOwn(WRAP, t)) break;
+        const takes = WRAP[t];
+        i++;
+        while (words[i] && /^-/.test(words[i].text) && words[i].text !== '--') { if (takes?.test(words[i].text)) i++; i++; }
+        if (words[i]?.text === '--') i++;
+        if (t === 'env') while (words[i] && ASSIGN.test(words[i].text)) i++;
+        if (t === 'timeout' && words[i] && /^[\d.]+[smhd]?$/.test(words[i].text)) i++;
+        if (t === 'taskset' && words[i]) i++; // its mask or cpu list
+        if (t === 'flock' && words[i]) i++; // its lock file or fd
+      }
+      const cmd = words[i]?.text ?? '';
+      const rest = words.slice(i + 1);
+      if (/^(?:\S*\/)?(?:ba|z|da)?sh$/.test(cmd)) {
+        const k = rest.findIndex((x) => /^-\w*c\w*$/.test(x.text));
+        if (k >= 0 && rest[k + 1]) { const hit = risky(rest[k + 1].text, depth + 1); if (hit) return hit; }
+        continue;
+      }
+      if (cmd === 'eval') { const hit = risky(rest.map((x) => x.text).join(' '), depth + 1); if (hit) return hit; continue; }
+      if (!/^(?:\S*\/)?(?:rm|rmdir)$/.test(cmd)) continue;
+      let opts = true;
+      for (const a of rest) {
+        if (opts && a.text === '--') { opts = false; continue; }
+        if (opts && /^-/.test(a.text) && !a.expands) continue;
+        if (a.expands) return words.map((x) => x.text).join(' ');
+      }
+    }
+    return null;
+  };
+  // the hook's input, read to its end (a slow writer's stdin may come in parts); never waits long
+  const text = await new Promise((resolve) => {
+    let d = '';
+    const done = () => resolve(d);
+    const timer = setTimeout(done, 5000);
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (c) => { d += c; });
+    process.stdin.on('end', () => { clearTimeout(timer); done(); });
+    process.stdin.on('error', () => { clearTimeout(timer); done(); });
+  });
+  let input = null;
+  try { input = JSON.parse(text || 'null'); } catch {}
+  let hit = null;
+  try { hit = input?.tool_name && input.tool_name !== 'Bash' ? null : risky(input?.tool_input?.command); } catch { hit = null; }
+  if (hit) process.stdout.write(`${JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `devteam: refused before it could stop on a permission prompt nobody answers: \`${hit.slice(0, 160)}\` removes a path built from a variable, glob or $(…). ${WHY}` } })}\n`);
+  process.exit(0);
+}
+
 // A worktree's branch carries the kit as it was when the branch forked, but every session writes the
 // one live log and answers to the rules on main, so in a project the main checkout's copy runs: a
 // worker on an old branch otherwise gets old commands (an "unknown command" for one the docs name)
@@ -40881,14 +41068,18 @@ function responderDirty(wt, seeded) {
   for (const e of flags.stdout.split('\0').filter(Boolean)) if (e[0] !== 'H') hits.push(e.slice(2));
   return hits;
 }
+// The PreToolUse hook every Claude Code session the kit starts gets: bash-ok on Bash (see it at the
+// top of this file), which refuses an inline rm of a variable, glob or $(…) before Claude Code can
+// stop on its prompt (worker.md, "Scripts go in files"); a timeout so a stuck node never holds a command.
+const bashOkHook = () => [{ matcher: 'Bash', hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' bash-ok`, timeout: 10 }] }];
 // A Claude Code policy file for one session, passed with --settings: the owner's worker deny rules,
 // naming the main branch of the repo it works in. A worker or planner also gets the Stop hook
 // (stop-ok); the responder doesn't. Its path.
 function claudePolicy(name, s, mb, { stopHook = false } = {}) {
   const policy = path.join(runDir, 'agent', `${name}-claude.json`);
   fs.mkdirSync(path.dirname(policy), { recursive: true });
-  const hooks = stopHook ? { hooks: { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok` }] }] } } : {};
-  fs.writeFileSync(policy, `${JSON.stringify({ permissions: { deny: deniedFor(s.worker_denied_commands, mb).map((c) => `Bash(${c})`) }, ...hooks }, null, 2)}\n`);
+  const hooks = { PreToolUse: bashOkHook(), ...(stopHook ? { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok` }] }] } : {}) };
+  fs.writeFileSync(policy, `${JSON.stringify({ permissions: { deny: deniedFor(s.worker_denied_commands, mb).map((c) => `Bash(${c})`) }, hooks }, null, 2)}\n`);
   return policy;
 }
 // The supervisor's: only the Stop hook (stop-ok), which sends an ask of the owner that names no Inbox
@@ -40897,7 +41088,7 @@ const supervisorPolicyFile = () => path.join(runDir, 'agent', 'supervisor-claude
 function supervisorPolicy() {
   const policy = supervisorPolicyFile();
   fs.mkdirSync(path.dirname(policy), { recursive: true });
-  fs.writeFileSync(policy, `${JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok --supervisor` }] }] } }, null, 2)}\n`);
+  fs.writeFileSync(policy, `${JSON.stringify({ hooks: { PreToolUse: bashOkHook(), Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok --supervisor` }] }] } }, null, 2)}\n`);
   return policy;
 }
 // A Claude Code supervisor command with that policy: any other agent command as it is. Written only
