@@ -1,0 +1,18 @@
+{
+  "name": "@sanctuarycomputer/devteam",
+  "version": "0.0.0",
+  "description": "A kit a project copies into docs/devteam/ and owns: a supervised fleet of coding-agent sessions.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sanctuarycomputer/devteam.git"
+  },
+  "files": [
+    "docs/devteam/",
+    "!docs/devteam/project/",
+    "!docs/devteam/run/"
+  ],
+  "dependencies": {},
+  "devteam": {
+    "layout": 1
+  }
+}
