@@ -102,6 +102,16 @@ test('C10: the label rule', () => {
     'refused at authorize with words, never cut', 'on a character boundary', 'the words `an app`', 'sends the computer\'s hostname by default', 'It neither starts nor ends with a space']);
 });
 
+test('C12: owner-act and the MCP rule read the token; a code keeps its stamp; hosts exact; client_id ASCII', () => {
+  states(11, ['`owner-act` is `1` exactly when the access token used for the request holds `owner:act`', 'A token narrowed to leave out `owner:act` carries `0`, though its grant holds it']);
+  states(12, ['in the scope of the access token that request used']);
+  states(9, ['A narrowed `scope` must hold at least one scope of the resource named, else `invalid_scope`', 'a request needing a scope the token dropped is 403 `insufficient_scope`', 'A code whose person is no longer listed is `invalid_grant`']);
+  states(14, ['A code and a consent record carry the `peopleStamp` they were made under']);
+  states(8, ['Hosts are compared exactly as written, as today']);
+  states(6, ['of printable ASCII, with no space or control character']);
+  states(4, ['in its ASCII (punycode) form', 'or nothing they asked for is theirs to allow (a View person asking only for `threads:write`)']);
+});
+
 test('C11: exact routes, raw paths refused before matching, and /upload\'s Origin rule', () => {
   states(7, ['by exact method and exact path', '**Paths are judged raw, before matching.**', 'a dot segment', '`%2e` or `%2E`', 'an encoded slash (`%2f`, `%2F`)', 'a doubled slash (`//`)',
     'A `threads:write` token passes that route\'s Origin rule for that route alone']);
@@ -255,6 +265,11 @@ async function runSteps(fake, steps, vars) {
       }
       like(j, Object.fromEntries(Object.entries(step.expect).filter(([k]) => k !== 'status')), at);
       for (const [k, name] of Object.entries(step.save ?? {})) vars[name] = j[k];
+      continue;
+    }
+    if (step.mark) {
+      const m = parseGrantMark(['x-devteam-grant', fake.markFor(sub(step.mark, vars))]);
+      assert.equal(m.ownerAct, step.expect.ownerAct, `${at}: owner-act`);
       continue;
     }
     if (step.mcp) {

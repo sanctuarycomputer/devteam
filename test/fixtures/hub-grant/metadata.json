@@ -150,6 +150,24 @@
       "ok": false
     },
     {
+      "name": "a tab in the client_id",
+      "url": "https://app.exa\tmple.com/oauth/client.json",
+      "answer": {
+        "status": 200,
+        "body": "{\"client_id\":\"https://app.exa\\tmple.com/oauth/client.json\",\"client_name\":\"Example App\",\"redirect_uris\":[\"https://app.example.com/oauth/cb\"]}"
+      },
+      "ok": false
+    },
+    {
+      "name": "a listed loopback redirect with no path",
+      "url": "https://app.example.com/oauth/client.json",
+      "answer": {
+        "status": 200,
+        "body": "{\"client_id\":\"https://app.example.com/oauth/client.json\",\"client_name\":\"Example App\",\"redirect_uris\":[\"http://localhost\"]}"
+      },
+      "ok": false
+    },
+    {
       "name": "a dot segment in the client_id",
       "url": "https://app.example.com/oauth/../client.json",
       "answer": {

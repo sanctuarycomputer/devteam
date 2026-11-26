@@ -153,7 +153,9 @@ const httpsUri = (uri) => {
 };
 // §6: a loopback redirect a metadata document may list: 127.0.0.1, localhost or [::1], with or
 // without a port, then a path. Compared with the port left out (§4).
-const LISTED_LOOPBACK = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(?::([1-9][0-9]{0,4}))?(\/[^#]*)?$/;
+const AUTHORIZE_PARAMS = new Set(['response_type', 'client_id', 'redirect_uri', 'code_challenge', 'code_challenge_method', 'state', 'scope', 'resource', 'label']);
+const TOKEN_PARAMS = new Set(['grant_type', 'code', 'redirect_uri', 'client_id', 'code_verifier', 'resource', 'refresh_token', 'scope']);
+const LISTED_LOOPBACK = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(?::([1-9][0-9]{0,4}))?(\/[^#]*)$/;
 const listedLoopback = (uri) => {
   const m = typeof uri === 'string' ? LISTED_LOOPBACK.exec(uri) : null;
   return m && (m[2] === undefined || Number(m[2]) <= 65535) ? { host: m[1], rest: m[3] ?? '' } : null;
@@ -198,6 +200,7 @@ export function addressAllowed(ip) {
 export function clientIdUrlProblem(url) {
   if (typeof url !== 'string' || !url.startsWith('https://') || url.includes('#')) return 'not an https URL without a fragment';
   if (/\\|%5c/i.test(url)) return 'a backslash';
+  if (/[^\x21-\x7e]/.test(url)) return 'a space, control or non-ASCII character';
   let u;
   try { u = new URL(url); } catch { return 'not a URL'; }
   if (u.username || u.password) return 'user info';
@@ -331,7 +334,7 @@ export async function startHubGrantFake(opts = {}) {
     };
     const fail = (error, description) => back({ error, error_description: description, state: typeof state === 'string' && state.length >= 1 && state.length <= LIMITS.stateChars ? state : undefined, iss: origin });
     for (const [k, v] of q) if (k === null || v.includes(null)) return fail('invalid_request', 'a parameter is not valid UTF-8');
-    for (const [k, v] of q) if (k !== 'resource' && v.length > 1) return fail('invalid_request', `${k} is given more than once`);
+    for (const [k, v] of q) if (k !== 'resource' && AUTHORIZE_PARAMS.has(k) && v.length > 1) return fail('invalid_request', `${k} is given more than once`);
     if (one('response_type') !== 'code') return fail('unsupported_response_type', 'only response_type=code');
     if (one('code_challenge_method') !== 'S256') return fail('invalid_request', 'code_challenge_method must be S256');
     if (!/^[A-Za-z0-9_-]{43}$/.test(one('code_challenge') ?? '')) return fail('invalid_request', 'code_challenge must be a base64url SHA-256');
@@ -356,7 +359,7 @@ export async function startHubGrantFake(opts = {}) {
     scopes = scopes.filter((s) => mayHold(person, s));
     if (!scopes.length) return fail('access_denied', 'nothing you asked for is yours to allow');
     const code = token();
-    codes.set(hash(code), { client_id: client.id, client_name: client.name, redirect, challenge: one('code_challenge'), resources, scopes, label, person: person.id, expires: now() + LIMITS.codeMs, used: false });
+    codes.set(hash(code), { client_id: client.id, client_name: client.name, redirect, challenge: one('code_challenge'), resources, scopes, label, person: person.id, stamp, expires: now() + LIMITS.codeMs, used: false });
     return back({ code, state, iss: origin });
   }
 
@@ -377,7 +380,7 @@ export async function startHubGrantFake(opts = {}) {
     const body = await readBody(req, LIMITS.formBytes);
     if (body === null) return json(res, 413, { error: 'invalid_request', error_description: 'the request is over 16 KB' });
     const f = group(parsePairs(body));
-    for (const [k, v] of f) if (k === null || v.includes(null) || v.length > 1) return oauthError(res, 'invalid_request', 'a parameter is repeated or not valid UTF-8');
+    for (const [k, v] of f) if (k === null || v.includes(null) || (TOKEN_PARAMS.has(k) && v.length > 1)) return oauthError(res, 'invalid_request', 'a parameter is repeated or not valid UTF-8');
     const one = (k) => f.get(k)?.[0];
     const pickResource = (g) => {
       const r = one('resource');
@@ -395,6 +398,8 @@ export async function startHubGrantFake(opts = {}) {
         return oauthError(res, 'invalid_grant', 'that code was used before');
       }
       if (c.expires <= now()) return oauthError(res, 'invalid_grant', 'that code has expired');
+      if (c.stamp !== stamp) return oauthError(res, 'invalid_grant', 'the passkeys changed since this code was made: sign in again');
+      if (!personOf(c.person)) return oauthError(res, 'invalid_grant', 'this person is no longer on the hub');
       const verifier = one('code_verifier');
       if (verifier === undefined || !/^[A-Za-z0-9\-._~]{43,128}$/.test(verifier)) return oauthError(res, 'invalid_request', 'code_verifier is missing or malformed');
       if (one('client_id') !== c.client_id || one('redirect_uri') !== c.redirect) return oauthError(res, 'invalid_grant', 'the client or redirect differs from the authorize request');
@@ -423,6 +428,7 @@ export async function startHubGrantFake(opts = {}) {
       if (one('scope') !== undefined) {
         narrow = one('scope').split(' ');
         if (narrow.some((s) => !g.scopes.includes(s))) return oauthError(res, 'invalid_scope', 'a refresh never widens the sign-in');
+        if (!scopesFor(g, pick.r, narrow).length) return oauthError(res, 'invalid_scope', 'nothing in that scope is for the resource named');
       }
       g.refresh_spent = [...g.refresh_spent, g.refresh_hash].slice(-LIMITS.spentKept);
       return issue(res, g, pick.r, narrow);
@@ -531,6 +537,13 @@ export async function startHubGrantFake(opts = {}) {
     handle,
     // a copy of the grants record (§14), as the gateway would keep it
     grants: () => JSON.parse(JSON.stringify(grants)),
+    // §11: the x-devteam-grant value a request with this access token would carry, or null when the token opens nothing.
+    markFor: (tokenValue) => {
+      const a = access.get(hash(String(tokenValue)));
+      if (!a || a.expires <= now() || !alive(a.grant)) return null;
+      const p = personOf(a.grant.person);
+      return formatGrantMark({ id: a.grant.id, ownerAct: a.scopes.includes('owner:act') && mayHold(p, 'owner:act'), label: a.grant.label });
+    },
     setPeople: (list) => { people = list.map((p) => ({ ...p })); },
     actAs: (id) => { as = id; },
     setStamp: (s) => { stamp = s; },

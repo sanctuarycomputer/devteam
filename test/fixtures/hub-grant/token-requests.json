@@ -2772,6 +2772,537 @@
       ]
     },
     {
+      "name": "a token narrowed to leave out owner:act carries owner-act=0, and its dropped scope is refused",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "set": {
+              "scope": "hub:read mcp owner:act"
+            }
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r1",
+            "access_token": "m1"
+          }
+        },
+        {
+          "mark": "$m1",
+          "expect": {
+            "ownerAct": true
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ],
+            [
+              "scope",
+              "mcp"
+            ]
+          ],
+          "expect": {
+            "status": 200,
+            "scope": "mcp"
+          },
+          "save": {
+            "refresh_token": "r2",
+            "access_token": "m2"
+          }
+        },
+        {
+          "mark": "$m2",
+          "expect": {
+            "ownerAct": false
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r2"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ],
+            [
+              "scope",
+              "owner:act"
+            ]
+          ],
+          "expect": {
+            "status": 200,
+            "scope": "owner:act"
+          },
+          "save": {
+            "refresh_token": "r3",
+            "access_token": "m3"
+          }
+        },
+        {
+          "mcp": {
+            "token": "$m3",
+            "body": {
+              "jsonrpc": "2.0",
+              "id": 1,
+              "method": "ping"
+            }
+          },
+          "expect": {
+            "status": 403
+          }
+        },
+        {
+          "mark": "$m3",
+          "expect": {
+            "ownerAct": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "a narrowed scope with nothing of the resource named",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "set": {
+              "scope": "hub:read mcp"
+            }
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r1"
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ],
+            [
+              "scope",
+              "hub:read"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_scope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a code traded after the passkeys change",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "stamp": "stamp-2"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        },
+        {
+          "grants": {
+            "count": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "a code traded after its person was removed",
+      "steps": [
+        {
+          "as": "p-sam"
+        },
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "people": [
+            {
+              "id": "p-owner",
+              "name": "Alex Rivera",
+              "role": "owner",
+              "level": "full"
+            },
+            {
+              "id": "p-vee",
+              "name": "Vee Park",
+              "role": "member",
+              "level": "view"
+            }
+          ]
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ]
+          ],
+          "expect": {
+            "status": 400,
+            "error": "invalid_grant"
+          }
+        }
+      ]
+    },
+    {
+      "name": "an unknown parameter repeated is ignored",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit",
+            "add": [
+              [
+                "prompt",
+                "a"
+              ],
+              [
+                "prompt",
+                "b"
+              ]
+            ]
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$root"
+            ],
+            [
+              "extra",
+              "1"
+            ],
+            [
+              "extra",
+              "2"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          }
+        }
+      ]
+    },
+    {
+      "name": "RFC 7009 revoke by a spent refresh token ends the grant",
+      "steps": [
+        {
+          "authorize": {
+            "use": "kit"
+          },
+          "expect": {
+            "redirect": {
+              "code": true,
+              "state": "s1",
+              "iss": true
+            }
+          },
+          "save": "c1"
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "authorization_code"
+            ],
+            [
+              "code",
+              "$c1"
+            ],
+            [
+              "code_verifier",
+              "$verifier"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "redirect_uri",
+              "$redirect"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r1"
+          }
+        },
+        {
+          "token": [
+            [
+              "grant_type",
+              "refresh_token"
+            ],
+            [
+              "refresh_token",
+              "$r1"
+            ],
+            [
+              "client_id",
+              "devteam"
+            ],
+            [
+              "resource",
+              "$mcp"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          },
+          "save": {
+            "refresh_token": "r2",
+            "access_token": "m2"
+          }
+        },
+        {
+          "revoke": [
+            [
+              "token",
+              "$r1"
+            ]
+          ],
+          "expect": {
+            "status": 200
+          }
+        },
+        {
+          "mcp": {
+            "token": "$m2",
+            "body": {
+              "jsonrpc": "2.0",
+              "id": 1,
+              "method": "ping"
+            }
+          },
+          "expect": {
+            "status": 401
+          }
+        }
+      ]
+    },
+    {
       "name": "a plain challenge method",
       "steps": [
         {
