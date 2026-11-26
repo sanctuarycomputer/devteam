@@ -39,6 +39,20 @@ const typeSeen = (pid) => {
 };
 // a processes line's rows as [type, pid, the rest]
 const rowsOf = (line) => line.replace(/^processes: /, '').split(', ').map((row) => row.match(/^(.+?) (\d+) (.+)$/)).map((m) => m && [m[1], Number(m[2]), m[3]]);
+// What is wrong with a processes line held against the test's own read (seen: pid -> its type, null once gone): each
+// row has its state and CPU, or is 'gone' (exited inside the look's window); each row's type is its pid's while the
+// pid is there; a browser and a renderer are named
+const rowProblems = (line, seen = typeSeen) => {
+  const rows = rowsOf(line);
+  const out = [];
+  for (const [type, pid, rest] of rows) {
+    if (rest !== 'gone' && !/^[A-Za-z] [a-z]+ \d+% cpu$/.test(rest)) out.push(`${type} ${pid}: no state and CPU (${rest})`);
+    const is = seen(pid);
+    if (is && is !== type) out.push(`pid ${pid} is a ${is}, named ${type}`);
+  }
+  for (const type of ['browser', 'renderer']) if (!rows.some(([t, , rest]) => t === type && rest !== 'gone')) out.push(`no ${type} named`);
+  return out;
+};
 // a look past its own bound (a loaded runner): said so, and logged, not failed (kit-918)
 const OUT_OF_BOUND = /unread|cut at 4 s|the list of processes: (ps: )?no answer/;
 // the pids in this Chrome's process group, by the test's own read of /proc
@@ -74,15 +88,11 @@ test('a call with no answer says what Chrome was doing', { skip: canDrive ? fals
         // (kit-918): each line is then the form that says so, and never a wrong one. The held page never answers the second session.
         assert.match(ra.e.message, looks(HELD));
         assert.match(rb.e.message, looks(ANY));
-        // kit-930: each of its Chrome's processes named by its type, with its state and CPU: each row the type the test
-        // itself reads for that pid (one gone since, skipped), the browser and a renderer among them
+        // kit-930: each of its Chrome's processes named by its type, with its state and CPU (or gone, exited inside the
+        // look's window), held against the test's own read; the browser and a renderer among them
         const line = ra.e.message.slice(ra.e.message.lastIndexOf('; processes: ') + 2);
-        if (!OUT_OF_BOUND.test(line)) {
-          const rows = rowsOf(line);
-          for (const [type, pid, rest] of rows) { assert.match(rest, /^[A-Za-z] [a-z]+ \d+% cpu$/, `${type} ${pid}: its state and CPU`); const seen = typeSeen(pid); if (seen) assert.equal(type, seen, `pid ${pid}'s type`); }
-          for (const type of ['browser', 'renderer']) assert.ok(rows.some(([t]) => t === type), `a ${type} named: ${line}`);
-        }
-        for (const r of [ra, rb]) if (/unread|cut at 4 s|a second session: no answer|Chrome's list of tabs: no answer|diagnosis cut at 6 s|Chrome's endpoint: /.test(r.e.message)) t.diagnostic(`a look ran out its bound: ${r.e.message.slice(r.e.message.indexOf('; Chrome '))}`);
+        if (!OUT_OF_BOUND.test(line)) assert.deepEqual(rowProblems(line), [], line);
+        for (const r of [ra, rb]) if (/unread|cut at 4 s|the list of processes: |a second session: no answer|Chrome's list of tabs: no answer|diagnosis cut at 6 s|Chrome's endpoint: /.test(r.e.message)) t.diagnostic(`a look ran out its bound: ${r.e.message.slice(r.e.message.indexOf('; Chrome '))}`);
         // answered by the test, the page goes on: the held call ran once
         await held.send('Page.handleJavaScriptDialog', { accept: true });
         await new Promise((r) => setTimeout(r, Math.max(500, until - Date.now() + 500)));
@@ -345,3 +355,15 @@ test('processesOf: calls at once share the two places; held reads hold them acro
   const c = fakeProc({ 30: { pgrp: 30, cmdline: CMD.browser } });
   assert.equal(await processesOf(30, { io: c.io, window: 20 }), 'processes: browser 30 S sleeping 0% cpu', 'once they settle, the places are free again');
 });
+// kit-930 (CI run 45735417062): a renderer that exits inside the look's window is a 'gone' row, which the line may hold
+test('rowProblems: a gone row is taken; a row without state or CPU, a wrong type, or no browser or renderer is a problem', () => {
+  const seen = (types) => (pid) => types[pid] ?? null;
+  const ok = 'processes: browser 10 S sleeping 1% cpu, renderer 16 S sleeping 0% cpu, renderer 17 gone';
+  assert.deepEqual(rowProblems(ok, seen({ 10: 'browser', 16: 'renderer' })), []);
+  assert.deepEqual(rowProblems(ok, seen({ 10: 'browser', 16: 'renderer', 17: 'renderer' })), [], 'a gone row whose pid is still there: its type is still checked');
+  assert.deepEqual(rowProblems(ok, seen({ 10: 'browser', 16: 'renderer', 17: 'GPU' })), ['pid 17 is a GPU, named renderer']);
+  assert.deepEqual(rowProblems('processes: browser 10 S sleeping, renderer 16 S sleeping 0% cpu', seen({})), ['browser 10: no state and CPU (S sleeping)']);
+  assert.deepEqual(rowProblems('processes: renderer 16 S sleeping 0% cpu', seen({})), ['no browser named']);
+  assert.deepEqual(rowProblems('processes: browser 10 S sleeping 0% cpu, renderer 16 gone', seen({})), ['no renderer named']);
+});
+
