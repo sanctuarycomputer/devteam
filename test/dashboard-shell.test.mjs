@@ -516,10 +516,12 @@ test('@2 legacy heads: every peek kind and the two viewers open over their home 
 });
 
 test('@2 p of an unknown kind, or an artifact with a bad slug, is dropped', () => {
-  for (const v of ['nothing/x', 'talk/t-1', 'review/q-1', 'review-preview?path=a.html', 'ticket', 'ticket/', 'file?title=x', 'artifact/main/Bad_Slug', 'artifact/main/', 'artifact/tree/' + HEX40 + '/-x', 'preview/a/b']) {
+  for (const v of ['nothing/x', 'talk/t-1', 'review/q-1', 'review-preview?path=a.html', 'ticket', 'ticket/', 'file?title=x', 'file/x', 'file/x?path=a.md', 'artifact/main/Bad_Slug', 'artifact/main/', 'artifact/tree/' + HEX40 + '/-x', 'preview/a/b']) {
     assert.deepEqual(plain2(S.parseHead(`#board?goal=g-1&${pq(v)}`, R)), { page: 'board', state: { goal: 'g-1' } }, v);
   }
   assert.deepEqual(plain2(S.parseHead('#artifact/main/Bad_Slug', R)), { page: 'library', state: {}, legacy: true }, 'a legacy viewer head naming no artifact: its home, no p');
+  // a file is file?<query> with a path (§6), never file/<anything>
+  assert.deepEqual(plain2(S.parseHead('#file/x', R)), { page: 'library', state: {}, legacy: true }, 'a legacy file/ head names no file: its home, no p');
 });
 
 test('@2 i is kept only with th=inbox', () => {
@@ -789,6 +791,14 @@ test('the hub frame: hub-base on every load, the hub follows hub-route from its 
   await until(async () => (await p.evIn(dashO, 'window.__seen')) >= seen + 4, 'the dashboard fake read the four bad bases');
   assert.equal(await p.evIn(dashO, 'window.__base()'), base, 'the dashboard fake keeps its base');
   assert.equal(await bases(), true, 'and keeps none of the bad ones');
+  // a hub-route from the frame itself whose head is over 2,048 characters, or not a string: not accepted
+  const atBad = await p.ev('location.hash');
+  await p.evIn(dashO, `window.parent.postMessage({ devteam: 'hub-route', head: '#' + 'x'.repeat(2048) }, ${JSON.stringify(hubO)})`);
+  await p.evIn(dashO, `window.parent.postMessage({ devteam: 'hub-route', head: 1 }, ${JSON.stringify(hubO)})`);
+  const badHeads = "window.__log.filter((e) => e.got === 'hub-route' && (e.head === 1 || (typeof e.head === 'string' && e.head.length === 2049)))";
+  await until(async () => (await p.ev(`${badHeads}.length`)) === 2, 'the hub fake received the long head and the non-string one');
+  assert.deepEqual(await p.ev(`${badHeads}.map((e) => e.accepted)`), [false, false], 'a head over 2,048 characters or not a string is not accepted');
+  assert.equal(await p.ev('location.hash'), atBad, "the hub fake's hash does not move for them");
   // a hub-route from a window that is not the hub's frame (another window at the frame's origin, and the hub's own):
   // the hub's hash doesn't change
   const before = await p.ev('location.hash');
@@ -799,4 +809,23 @@ test('the hub frame: hub-base on every load, the hub follows hub-route from its 
   await until(async () => (await p.ev("window.__log.filter((e) => e.head === '#evil' || e.head === '#self').length")) === 2, 'the hub fake received both');
   assert.deepEqual(await p.ev("window.__log.filter((e) => e.head === '#evil' || e.head === '#self').map((e) => e.accepted)"), [false, false], 'neither is accepted');
   assert.equal(await p.ev('location.hash'), before, "the hub fake's hash does not change");
+  // the frame's window showing a page of a third origin: the hub sends hub-base only to the frame's origin, so that
+  // page reads none, and its hub-route is refused though it comes from the frame's window
+  const thirdS = await serveFakes();
+  later(() => new Promise((r) => thirdS.close(r)));
+  const thirdO = `http://127.0.0.1:${thirdS.address().port}`;
+  const loads = await p.ev("window.__log.filter((e) => e.why === 'load').length");
+  await p.ev(`document.getElementById('f').src = ${JSON.stringify(`${thirdO}/dashboard-frame-fake.html#third`)}`);
+  await until(async () => (await p.ev("window.__log.filter((e) => e.why === 'load').length")) === loads + 1 && (await p.evIn(thirdO, 'location.hash')) === '#third', 'the frame has loaded a third origin, and the hub fake sent its base');
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(await p.evIn(thirdO, 'window.__seen'), 0, "hub-base goes to the frame's origin only: the third origin reads none");
+  await p.evIn(thirdO, "window.parent.postMessage({ devteam: 'hub-route', head: '#third' }, '*')");
+  await until(async () => (await p.ev("window.__log.filter((e) => e.head === '#third').length")) === 1, 'the hub fake received the third origin\'s hub-route');
+  assert.deepEqual(await p.ev("window.__log.filter((e) => e.head === '#third').map((e) => [e.origin, e.accepted])"), [[thirdO, false]], "from the frame's window but not the frame's origin: not accepted");
+  assert.equal(await p.ev('location.hash'), before, "the hub fake's hash still does not change");
+  // a hub framing the dashboard from the dashboard's own origin: the dashboard fake keeps no base from it
+  await p.send('Page.navigate', { url: `${dashO}/hub-frame-fake.html?key=${key}&src=${encodeURIComponent(`${dashO}/dashboard-frame-fake.html#same`)}` });
+  await until(async () => (await p.ev("window.__log.filter((e) => e.why === 'load').length")) === 1 && (await p.ev("document.getElementById('f').contentWindow.location.hash")) === '#same', 'a same-origin hub has framed the dashboard fake and sent its base');
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(await p.ev("document.getElementById('f').contentWindow.__bases.length"), 0, 'the dashboard fake keeps no hub-base from its own origin');
 });

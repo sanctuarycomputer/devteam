@@ -1756,7 +1756,7 @@ function peekHead(v, routes) {
   if (path === 'file') return peeks.includes('file') && query.get('path') ? `file?${query}` : null;
   const s = path.indexOf('/');
   const kind = s < 0 ? path : path.slice(0, s), rest = s < 0 ? '' : path.slice(s + 1);
-  if (!rest || !peeks.includes(kind)) return null;
+  if (!rest || !peeks.includes(kind) || kind === 'file') return null;
   if (kind === 'artifact') {
     const segs = rest.split('/'), slug = segs.pop();
     if (!/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(slug)) return null;
