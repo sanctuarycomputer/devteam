@@ -1,9 +1,9 @@
-// Archived artifacts (kit-934, DCL-S15): the archive state is the log's, folded from the supervisor's
-// acts of class artifact-archive and artifact-restore, newest per slug, and never stored in
-// artifact.json. allArtifacts() (so 'artifacts' and /api/data's library.artifacts) carries
-// archived: {at, goal, question} on a landed entry that is archived. 'artifact restore <slug>
-// --reason' is the supervisor's. archivableArtifacts(g, at) ('artifact archivable <g> [--at]') is the
-// one rule of what a met goal's question may archive (kit-935, kit-936).
+// Archived artifacts (kit-934, DCL-S15): archived is a plain attribute of a landed artifact, kept in
+// the log as an object of type artifact (id artifact:<slug>) that the supervisor or the owner writes
+// with 'artifact archive|restore <slug> [--reason] [--owner]'; never in artifact.json, never an act.
+// allArtifacts() (so 'artifacts' and /api/data's library.artifacts) carries archived: {at, by, goal}
+// on a landed entry that is archived. archivableArtifacts(g, at) ('artifact archivable <g> [--at]')
+// is the one rule of which artifacts a met goal's items are (kit-935, kit-936).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -26,21 +26,17 @@ const landAt = (F, when, msg = 'artifacts') => {
   execFileSync('git', ['commit', '-qm', msg], { cwd: F.old, env });
   execFileSync('git', ['push', '-q', 'origin', 'HEAD:main'], { cwd: F.old, env });
 };
-const stamp = (d) => `${d.toISOString().slice(0, 10).replace(/-/g, '')}-${d.toISOString().slice(11, 23).replace(/[:.]/g, '')}`;
-// an act written by hand, as the kit would have written it agoMs ago, in by's live file
-const handAct = (F, by, o, agoMs, file = null) => {
-  const d = new Date(Date.now() - agoMs);
-  return F.hand(by, { type: 'act', id: `a-${stamp(d)}-${by}`, reversible: true, ...o }, agoMs, file);
-};
 const rows = (F) => JSON.parse(F.sup(['artifacts', '--json']));
 const bySlug = (list) => Object.fromEntries(list.filter((a) => a.at === 'main').map((a) => [a.slug, a]));
 const libRows = (F) => JSON.parse(F.sup(['dashboard-data'])).library.artifacts;
 const logBytes = (F) => fs.readdirSync(F.logDir).sort().map((f) => `${f}:${fs.readFileSync(path.join(F.logDir, f), 'utf8')}`).join('\n');
 const treeOf = (root) => execFileSync('git', ['-C', root, 'ls-files', '-s', '-o', '--exclude-standard', ARTIFACTS_REL], { encoding: 'utf8' })
   + fs.readdirSync(path.join(root, ARTIFACTS_REL), { recursive: true }).sort().map((f) => { const p = path.join(root, ARTIFACTS_REL, f); return fs.statSync(p).isFile() ? `${f}:${fs.readFileSync(p, 'utf8')}` : f; }).join('\n');
-const acts = (F, cls) => fs.readdirSync(F.logDir).flatMap((f) => fs.readFileSync(path.join(F.logDir, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))).filter((o) => o.type === 'act' && o.class === cls);
+const logLines = (F) => fs.readdirSync(F.logDir).flatMap((f) => fs.readFileSync(path.join(F.logDir, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)));
+const artLines = (F) => logLines(F).filter((o) => o.type === 'artifact');
+const OWN = ['--owner'];
 
-// One fixture for the fold: three landed artifacts for the goal and a worktree with two drafts.
+// One fixture for the attribute: three landed artifacts for the goal and a worktree with two drafts.
 function foldFixture(t, name) {
   const F = threadsFixture(name);
   cleanup(t)(() => F.done());
@@ -52,132 +48,151 @@ function foldFixture(t, name) {
   drawn(wt, 'd-new', [`goal:${F.goal}`]);
   return { F, wt };
 }
-const Q = 'q-20260102-000000000-supervisor';
 
-test('C1: the supervisor\'s artifact-archive act archives each slug it names; allArtifacts, artifacts and /api/data carry archived {at, goal, question} on landed entries only', (t) => {
-  const { F } = foldFixture(t, 'archive-fold');
-  const id = handAct(F, 'supervisor', { class: 'artifact-archive', what: 'archive', refs: [F.goal, 'artifact:a-one', 'artifact:a-two'], approved_by: Q }, 60000);
-  const at = acts(F, 'artifact-archive').find((a) => a.id === id).at;
-  const want = { at, goal: F.goal, question: Q };
+test('C1: artifact archive (the supervisor) writes one artifact line; allArtifacts, artifacts and /api/data carry archived {at, by, goal} on that landed entry only', (t) => {
+  const { F } = foldFixture(t, 'archive-attr');
+  const out = F.sup(['artifact', 'archive', 'a-one', '--reason', 'its goal is met']);
+  assert.match(out, /archived a-one/);
+  const l = artLines(F);
+  assert.equal(l.length, 1, 'one artifact line');
+  assert.deepEqual({ id: l[0].id, op: l[0].op, by: l[0].by, archived: l[0].archived, goal: l[0].goal, reason: l[0].reason }, { id: 'artifact:a-one', op: 'new', by: 'supervisor', archived: true, goal: null, reason: 'its goal is met' });
+  assert.equal(logLines(F).filter((o) => o.type === 'act' && /artifact-(archive|restore)/.test(o.class ?? '')).length, 0, 'no act is written');
+  const want = { at: l[0].at, by: 'supervisor', goal: null };
   const cli = rows(F);
-  const m = bySlug(cli);
-  assert.deepEqual(m['a-one'].archived, want, 'a-one is archived, with the act\'s time, goal and question');
-  assert.deepEqual(m['a-two'].archived, want, 'a-two too');
-  assert.equal('archived' in m['a-three'], false, 'a-three, not named, has no archived key');
+  assert.deepEqual(bySlug(cli)['a-one'].archived, want);
+  for (const s of ['a-two', 'a-three']) assert.equal('archived' in bySlug(cli)[s], false, `${s} has no archived key`);
   for (const d of cli.filter((a) => a.at !== 'main')) assert.equal('archived' in d, false, `the draft ${d.slug} in ${d.at} has no archived key`);
   const lib = libRows(F);
   assert.deepEqual(bySlug(lib)['a-one'].archived, want, '/api/data library.artifacts carries it');
-  assert.equal('archived' in bySlug(lib)['a-three'], false);
+  assert.equal('archived' in bySlug(lib)['a-two'], false);
   for (const d of lib.filter((a) => a.at !== 'main')) assert.equal('archived' in d, false, `/api/data: the draft ${d.slug} has no archived key`);
-  // the text list: [archived] after an archived slug's state, and on no other line
   const text = F.sup(['artifacts']).split('\n');
-  assert.ok(text.some((l) => l.startsWith('a-one [landed] [archived] ')), text.join('\n'));
-  assert.ok(text.some((l) => l.startsWith('a-two [landed] [archived] ')), text.join('\n'));
-  assert.equal(text.filter((l) => l.includes('[archived]')).length, 2, text.join('\n'));
-  // an act with no goal ref and no approved_by: goal and question are null, never missing
-  handAct(F, 'supervisor', { class: 'artifact-archive', what: 'archive', refs: ['artifact:a-three'] }, 30000);
-  assert.deepEqual(bySlug(rows(F))['a-three'].archived, { at: acts(F, 'artifact-archive').find((a) => a.refs.length === 1).at, goal: null, question: null }, 'no goal ref and no question: both null');
+  assert.ok(text.some((x) => x.startsWith('a-one [landed] [archived] ')), text.join('\n'));
+  assert.equal(text.filter((x) => x.includes('[archived]')).length, 1, text.join('\n'));
+  // a line with a goal (as kit-935 writes it): goal shows
+  F.hand('supervisor', { type: 'artifact', id: 'artifact:a-two', archived: true, goal: F.goal }, 1000);
+  assert.equal(bySlug(rows(F))['a-two'].archived.goal, F.goal);
 });
 
-test('C2: artifact restore (the supervisor) appends one artifact-restore act and the slug is unarchived; the newest act per slug wins; no artifact file changes', (t) => {
-  const { F, wt } = foldFixture(t, 'archive-restore');
-  handAct(F, 'supervisor', { class: 'artifact-archive', what: 'archive', refs: [F.goal, 'artifact:a-one', 'artifact:a-two'], approved_by: Q }, 60000);
+test('C2: artifact restore sets archived false with a set line, and the entry loses archived; archive again; the owner\'s --owner lines too; no artifact file changes', (t) => {
+  const { F, wt } = foldFixture(t, 'archive-attr-restore');
   const before = { main: treeOf(F.old), wt: treeOf(wt) };
-  const n = acts(F, 'artifact-restore').length;
-  F.sup(['artifact', 'restore', 'a-one', '--reason', 'its goal was reopened']);
-  const r = acts(F, 'artifact-restore');
-  assert.equal(r.length, n + 1, 'one artifact-restore act');
-  const a = r[r.length - 1];
-  assert.equal(a.by, 'supervisor');
-  assert.deepEqual(a.refs, ['artifact:a-one']);
-  assert.match(a.what, /^restore\b/);
-  assert.match(a.what, /its goal was reopened/, 'the reason is in what');
-  assert.equal(a.rung, undefined, 'a constitutional act carries no rung');
-  let m = bySlug(rows(F));
-  assert.equal('archived' in m['a-one'], false, 'a-one is back');
-  assert.ok(m['a-two'].archived, 'a-two stays archived');
-  // a newer archive act wins over the restore
-  const id = handAct(F, 'supervisor', { class: 'artifact-archive', what: 'archive', refs: [F.goal, 'artifact:a-one'], approved_by: Q }, 0);
-  m = bySlug(rows(F));
-  assert.equal(m['a-one'].archived?.at, acts(F, 'artifact-archive').find((x) => x.id === id).at, 'the newest act per slug wins');
+  F.sup(['artifact', 'archive', 'a-one']);
+  assert.match(F.sup(['artifact', 'restore', 'a-one', '--reason', 'still in use']), /restored a-one/);
+  let l = artLines(F);
+  assert.deepEqual(l.map((x) => [x.op, x.archived]), [['new', true], ['set', false]], 'new, then set');
+  assert.equal(l[1].reason, 'still in use');
+  assert.equal('archived' in bySlug(rows(F))['a-one'], false, 'a-one is back');
+  F.sup(['artifact', 'archive', 'a-one']);
+  assert.deepEqual(bySlug(rows(F))['a-one'].archived, { at: artLines(F).pop().at, by: 'supervisor', goal: null }, 'archived again: newest set wins, with its time');
+  // the owner, outside any session, with --owner
+  F.owner(['artifact', 'archive', 'a-two', ...OWN]);
+  l = artLines(F).filter((x) => x.id === 'artifact:a-two');
+  assert.deepEqual(l.map((x) => [x.op, x.by, x.archived]), [['new', 'owner', true]]);
+  assert.equal(l[0].channel, 'cli', 'an owner line carries its channel');
+  assert.equal(bySlug(rows(F))['a-two'].archived.by, 'owner');
+  F.owner(['artifact', 'restore', 'a-two', ...OWN]);
+  assert.equal('archived' in bySlug(rows(F))['a-two'], false, 'the owner restores it');
+  const lc = F.run(F.old, ['log-check']);
+  assert.equal(lc.status, 0, `log-check passes with these lines: ${lc.out}\n${lc.err}`);
+  assert.match(F.sup(['history']), /^\S+ +artifact +owner\b/m, 'history lists the lines');
   assert.equal(treeOf(F.old), before.main, 'nothing under project/artifacts/ on main\'s checkout changed');
   assert.equal(treeOf(wt), before.wt, 'nor in the draft\'s worktree');
 });
 
-test('C3: restore refuses a slug that isn\'t archived, a draft, an unknown or malformed slug and a missing reason, writing nothing', (t) => {
-  const { F } = foldFixture(t, 'archive-restore-refusals');
-  handAct(F, 'supervisor', { class: 'artifact-archive', what: 'archive', refs: [F.goal, 'artifact:a-one'], approved_by: Q }, 60000);
+test('C3: archive and restore refuse a no-op, a draft, an unknown or malformed slug and a long reason, writing nothing', (t) => {
+  const { F } = foldFixture(t, 'archive-attr-refusals');
+  F.sup(['artifact', 'archive', 'a-one']);
   const before = logBytes(F);
   const cases = [
-    [['a-three', '--reason', 'a reason'], /a-three is not archived/],
-    [['d-new', '--reason', 'a reason'], /d-new is a draft/],
-    [['no-such', '--reason', 'a reason'], /no-such: no artifact/],
-    [['Bad_Slug', '--reason', 'a reason'], /usage: artifact restore <slug> --reason/],
-    [['a-one'], /--reason/],
-    [['a-one', '--reason', '  '], /--reason/],
-    [['a-one', '--reason', 'x'.repeat(501)], /--reason is at most 500 bytes; this one is 501/],
+    [['archive', 'a-one'], /a-one is already archived/],
+    [['restore', 'a-three'], /a-three is not archived/],
+    [['archive', 'd-new'], /d-new is a draft/],
+    [['restore', 'd-new'], /d-new is a draft/],
+    [['archive', 'no-such'], /no-such: no artifact/],
+    [['archive', 'Bad_Slug'], /usage: artifact archive <slug>/],
+    [['restore'], /usage: artifact restore <slug>/],
+    [['archive', 'a-two', '--reason', 'x'.repeat(501)], /--reason is at most 500 bytes; this one is 501/],
   ];
   for (const [args, re] of cases) {
-    const said = F.fails(['artifact', 'restore', ...args], SUP);
+    const said = F.fails(['artifact', ...args], SUP);
     assert.match(said, re, `${args.join(' ')}: ${said}`);
   }
   assert.equal(logBytes(F), before, 'no refusal wrote a line');
-  // a long reason (485 bytes) is taken, and control characters and runs of space collapse to one space
+  // control characters and runs of space collapse to one space; a blank reason is none
   F.sup(['artifact', 'restore', 'a-one', '--reason', `two\u0007words\n\n  here ${'y'.repeat(470)}`]);
-  assert.equal(acts(F, 'artifact-restore').pop().what, `restore: two words here ${'y'.repeat(470)}`);
+  assert.equal(artLines(F).pop().reason, `two words here ${'y'.repeat(470)}`);
+  F.sup(['artifact', 'archive', 'a-one', '--reason', '   ']);
+  assert.equal(artLines(F).pop().reason, null);
 });
 
-test('C4: a worker or a planner may not restore', (t) => {
-  const { F } = foldFixture(t, 'archive-restore-sessions');
-  handAct(F, 'supervisor', { class: 'artifact-archive', what: 'archive', refs: [F.goal, 'artifact:a-one'], approved_by: Q }, 60000);
+test('C4: a worker, a planner and the responder may not archive or restore, with or without --owner; the supervisor\'s session may not use --owner', (t) => {
+  const { F } = foldFixture(t, 'archive-attr-sessions');
+  F.sup(['artifact', 'archive', 'a-one']);
   const before = logBytes(F);
-  for (const role of [{ DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'arch-01-x' }, { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'arch' }]) {
-    const said = F.fails(['artifact', 'restore', 'a-one', '--reason', 'a reason'], role);
-    assert.match(said, /the supervisor does this/, said);
+  for (const role of [{ DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'arch-01-x' }, { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'arch' }, { DEVTEAM_ROLE: 'responder' }, SUP]) {
+    for (const [sub, slug] of [['restore', 'a-one'], ['archive', 'a-two']]) {
+      if (role !== SUP) assert.match(F.fails(['artifact', sub, slug], role), /the supervisor does this/, `${role.DEVTEAM_ROLE} ${sub}`);
+      assert.match(F.fails(['artifact', sub, slug, ...OWN], role), /owner commands don't run in an agent session/, `${role.DEVTEAM_ROLE} ${sub} --owner`);
+    }
   }
   assert.equal(logBytes(F), before, 'nothing written');
   assert.ok(bySlug(rows(F))['a-one'].archived, 'a-one stays archived');
 });
 
-test('C5a: an owner line of artifact-archive or artifact-restore is refused by the log\'s integrity check', (t) => {
-  const { F } = foldFixture(t, 'archive-integrity');
-  for (const [cls, what] of [['artifact-archive', 'archive'], ['artifact-restore', 'restore']]) {
-    const d = new Date(Date.now() - 30000);
-    const r = F.checkWith(['owner', { type: 'act', id: `a-${stamp(d)}-owner`, class: cls, what, refs: [F.goal, 'artifact:a-one'] }]);
-    assert.notEqual(r.status, 0, `log-check refuses the owner's ${cls}: ${r.said}`);
-    assert.match(r.said, /the owner's acts are artifact-publish, pane-answer, goal-order, owner-setting only/, r.said);
-  }
+test('C5: once the owner has set archived, the supervisor\'s command is refused, and a supervisor\'s hand-written set under it changes nothing', (t) => {
+  const { F } = foldFixture(t, 'archive-attr-rank');
+  F.sup(['artifact', 'archive', 'a-one']);
+  F.owner(['artifact', 'restore', 'a-one', ...OWN]);
+  const before = logBytes(F);
+  assert.match(F.fails(['artifact', 'archive', 'a-one'], SUP), /a-one: the owner restored it .*so only the owner changes it now/);
+  assert.equal(logBytes(F), before, 'the refusal wrote nothing');
+  F.hand('supervisor', { type: 'artifact', op: 'set', id: 'artifact:a-one', archived: true, goal: F.goal }, 0);
+  assert.equal('archived' in bySlug(rows(F))['a-one'], false, 'the owner\'s word stands');
+  // the owner may still change it
+  F.owner(['artifact', 'archive', 'a-one', ...OWN]);
+  assert.equal(bySlug(rows(F))['a-one'].archived.by, 'owner');
+  // the owner creates the object (no line of the supervisor's before it): the supervisor is refused too
+  F.owner(['artifact', 'archive', 'a-two', ...OWN]);
+  const mid = logBytes(F);
+  assert.match(F.fails(['artifact', 'restore', 'a-two'], SUP), /a-two: the owner archived it .*so only the owner changes it now/);
+  assert.equal(logBytes(F), mid, 'the refusal wrote nothing');
+  assert.ok(bySlug(rows(F))['a-two'].archived, 'a-two stays archived');
 });
 
-test('C5b: read, not only checked: an owner\'s or a ticket\'s line of either class archives or restores nothing', (t) => {
-  const { F } = foldFixture(t, 'archive-integrity-read');
-  handAct(F, 'owner', { class: 'artifact-archive', what: 'archive', refs: [F.goal, 'artifact:a-one'], channel: 'cli' }, 50000, `owner-${new Date().toISOString().slice(0, 7)}.jsonl`);
-  handAct(F, 'arch-01-x', { class: 'artifact-archive', what: 'archive', refs: [F.goal, 'artifact:a-two'] }, 40000, 'arch-01-x.jsonl');
-  const m = bySlug(rows(F));
-  assert.equal('archived' in m['a-one'], false, 'the owner\'s line archives nothing');
-  assert.equal('archived' in m['a-two'], false, 'a ticket\'s line archives nothing');
-  // a supervisor's archive then an owner's restore: the owner's line restores nothing
-  handAct(F, 'supervisor', { class: 'artifact-archive', what: 'archive', refs: [F.goal, 'artifact:a-three'], approved_by: Q }, 30000);
-  handAct(F, 'owner', { class: 'artifact-restore', what: 'restore', refs: ['artifact:a-three'], channel: 'cli' }, 20000, `owner-${new Date().toISOString().slice(0, 7)}.jsonl`);
-  assert.ok(bySlug(rows(F))['a-three'].archived, 'the owner\'s restore line restores nothing');
-});
-
-test('C6: no schema field is added; the restore line carries only fields the act schema has; constitution.md lists artifact-restore as constitutional; it has plain words', (t) => {
-  const { F } = foldFixture(t, 'archive-schema');
+test('C6: the log schema: the artifact type, its keyed id, and who may write it; a ticket\'s or a planner\'s artifact line is refused, and a ticket\'s is read as nothing', (t) => {
+  const { F } = foldFixture(t, 'archive-attr-schema');
   const schema = JSON.parse(fs.readFileSync(path.join(kit, 'schema/log.schema.json'), 'utf8'));
-  const props = Object.keys(schema.$defs.types.act.properties);
-  assert.deepEqual(props, ['person', 'class', 'scope', 'what', 'rung', 'refs', 'reversible', 'approved_by', 'decision', 'knowledge', 'corrected', 'repaired', 'id_block', 'entry_hash', 'prior_hash', 'repo', 'artifact', 'proof', 'key', 'value', 'for', 'tree'], 'the act schema\'s fields are as before');
-  handAct(F, 'supervisor', { class: 'artifact-archive', what: 'archive', refs: [F.goal, 'artifact:a-one'], approved_by: Q }, 60000);
-  F.sup(['artifact', 'restore', 'a-one', '--reason', 'a reason']);
-  const a = acts(F, 'artifact-restore').pop();
-  const ENVELOPE = ['v', 'id', 'type', 'op', 'at', 'by', 'channel'];
-  for (const k of Object.keys(a)) assert.ok(ENVELOPE.includes(k) || props.includes(k), `the restore line's ${k} is an act field`);
-  const lc = F.run(F.old, ['log-check']);
-  assert.equal(lc.status, 0, `log-check passes with the restore line: ${lc.out}\n${lc.err}`);
-  const block = JSON.parse(fs.readFileSync(path.join(kit, 'governance/constitution.md'), 'utf8').match(/```json devteam\s*\n([\s\S]*?)\n```/)[1]);
-  assert.ok(block.constitutional.includes('artifact-restore'), 'artifact-restore is constitutional');
+  assert.deepEqual(Object.keys(schema.$defs.types.artifact.properties), ['archived', 'goal', 'reason']);
+  assert.deepEqual(schema.$defs.types.artifact['x-required-new'], ['archived']);
+  assert.equal(schema['x-id'].keyed.artifact, '^artifact:[a-z][a-z0-9]*(-[a-z0-9]+)*$');
+  const a = schema['x-authority'];
+  for (const w of ['owner', 'supervisor']) {
+    assert.ok(a.new[w].includes('artifact'), `${w} may create`);
+    assert.deepEqual(a.set.artifact[w], ['archived', 'goal', 'reason'], `${w} may set`);
+  }
+  for (const w of ['planner', 'ticket', 'responder']) {
+    assert.ok(!a.new[w].includes('artifact'), `${w} may not create`);
+    assert.equal(a.set.artifact[w], undefined, `${w} may not set`);
+  }
+  const lines = [
+    ['arch-01-x', { type: 'artifact', id: 'artifact:a-one', archived: true }, 'arch-01-x.jsonl', /ticket may not create artifact lines/],
+    ['plan-arch', { type: 'artifact', id: 'artifact:a-one', archived: true }, `plan-arch-${new Date().toISOString().slice(0, 7)}.jsonl`, /planner may not create artifact lines/],
+    ['supervisor', { type: 'artifact', id: 'a-one', archived: true }, null, /artifact id must match/],
+    ['supervisor', { type: 'artifact', id: 'artifact:a-one' }, null, /artifact\.archived is required/],
+    ['supervisor', { type: 'artifact', id: 'artifact:a-one', archived: 'yes' }, null, /artifact\.archived must be boolean/],
+  ];
+  for (const [by, o, file, re] of lines) {
+    const r = F.checkWith([by, o, file]);
+    assert.notEqual(r.status, 0, `log-check refuses ${JSON.stringify(o)} by ${by}`);
+    assert.match(r.said, re, r.said);
+  }
+  // read, not only checked: a ticket's line archives nothing
+  F.hand('arch-01-x', { type: 'artifact', id: 'artifact:a-two', archived: true }, 1000, 'arch-01-x.jsonl');
+  assert.equal('archived' in bySlug(rows(F))['a-two'], false, 'a ticket\'s line archives nothing');
+  // nothing about it is a class: the plain-words list has no artifact-archive or artifact-restore
   const words = JSON.parse(F.sup(['dashboard-data'])).class_words;
-  assert.equal(typeof words['artifact-restore'], 'string', 'artifact-restore has plain words');
+  for (const c of ['artifact-archive', 'artifact-restore']) assert.equal(words[c], undefined, `${c} is no class`);
 });
 
 // The archivable rule. Goals: G (met), H (met), R (running). Features: fg serves G, fgh serves G and
@@ -254,8 +269,8 @@ test('C9: artifact archivable refuses an unknown goal and a bad --at', (t) => {
   assert.match(F.fails(['artifact', 'archivable', G, '--at', 'yesterday'], SUP), /--at is a time/);
 });
 
-test('C12: help lists artifact archivable and artifact restore', (t) => {
+test('C12: help lists artifact archivable, archive and restore', (t) => {
   const { F } = foldFixture(t, 'archive-help');
   const help = F.sup(['help']);
-  for (const s of ['artifact archivable <goal-id> [--at <time>] [--json]', 'artifact restore <slug> --reason "<why>"']) assert.ok(help.includes(s), `help lists ${s}`);
+  for (const s of ['artifact archivable <goal-id> [--at <time>] [--json]', 'artifact archive|restore <slug> [--reason "<why>"] [--owner]']) assert.ok(help.includes(s), `help lists ${s}`);
 });
