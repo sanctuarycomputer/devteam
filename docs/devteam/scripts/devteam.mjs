@@ -34562,20 +34562,21 @@ function packageProvenance({ name, version, integrity } = {}) {
   let bare;
   try { bare = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-provenance-')); } catch (e) { return down(`can't make a folder under ${os.tmpdir()} to ask upstream (${e.code ?? e.message})`); }
   try {
+    // the bare repository first, so no git call here reads a repository around the temp folder (its config)
+    if (gitx(['init', '--quiet', '--bare'], bare).status !== 0) return down(`can't make a repository under ${os.tmpdir()} to ask upstream`);
     const ls = gitx(['ls-remote', src, ref, `${ref}^{}`], bare);
     if (ls.status !== 0) return down(`upstream ${src} can't be reached (${(ls.stderr || ls.error?.code || `exit ${ls.status}`).trim().split('\n')[0].slice(0, 200)})`);
     const refs = Object.fromEntries(ls.stdout.split('\n').filter(Boolean).map((l) => l.split('\t').reverse()));
     const tagged = refs[`${ref}^{}`] ?? refs[ref];
     if (!tagged) return refuse('tag', `upstream ${src} has no tag v${version}`);
     if (tagged !== commit) return refuse('commit', `the statement's commit ${commit.slice(0, 12)} is not the tag v${version}'s at upstream (${tagged.slice(0, 12)})`);
-    if (gitx(['init', '--quiet', '--bare'], bare).status !== 0) return down(`can't make a repository under ${os.tmpdir()} to read upstream's default branch`);
     const fetched = gitx(['fetch', '--quiet', '--no-tags', '--filter=tree:0', src, `+${ref}:refs/t`, '+HEAD:refs/d'], bare);
     if (fetched.status !== 0) return down(`upstream ${src} can't be fetched (${(fetched.stderr || fetched.error?.code || `exit ${fetched.status}`).trim().split('\n').pop().slice(0, 200)})`);
     if (gitx(['rev-parse', '--verify', '--quiet', 'refs/t^{commit}'], bare).stdout.trim() !== commit) return refuse('commit', `the tag v${version} fetched from upstream is not ${commit.slice(0, 12)}`);
     const anc = gitx(['merge-base', '--is-ancestor', commit, 'refs/d'], bare);
     if (anc.status === 1) return refuse('default-branch', `the tag v${version}'s commit ${commit.slice(0, 12)} is not on upstream's default branch`);
     if (anc.status !== 0) return down(`can't tell whether ${commit.slice(0, 12)} is on upstream's default branch (${(anc.stderr || `exit ${anc.status}`).trim().split('\n')[0].slice(0, 200)})`);
-  } finally { fs.rmSync(bare, { recursive: true, force: true }); }
+  } finally { try { fs.rmSync(bare, { recursive: true, force: true }); } catch { /* a folder left in the temp folder changes no answer */ } }
   return { ok: true, unreachable: false, refused: null, why: null, read, provenance: { repo: up, workflow: WORKFLOW, ref, commit } };
 }
 // package pin|install|status (kit-install@1). Until each is built, it says so.

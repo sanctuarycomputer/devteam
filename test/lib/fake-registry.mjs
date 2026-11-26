@@ -384,7 +384,7 @@ export async function startFakeRegistry({ fail = null, commits = {}, forge = nul
       }
       return e;
     },
-    // another failure from now on (null: none); resolves once the registry has it
+    // the test CA's trust root (test-ca.json), as env() names it in DEVTEAM_SIGSTORE_TEST_CA
     caFile,
     // another forgery from now on (null: none); resolves once the registry has it
     async forge(name) {
@@ -398,6 +398,7 @@ export async function startFakeRegistry({ fail = null, commits = {}, forge = nul
       if (!fs.existsSync(requestsFile)) return [];
       return fs.readFileSync(requestsFile, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
     },
+    // another failure from now on (null: none); resolves once the registry has it
     async fail(name) {
       if (name !== null && !FAILURES.includes(name)) throw new Error(`fake registry: no failure called ${name}`);
       state.fail = name;
