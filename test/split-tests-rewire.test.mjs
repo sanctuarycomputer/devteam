@@ -283,3 +283,36 @@ test('W6: in tree A with a stand-in shim, the world fixture\'s checker cuts sche
   assert.equal(r.stdout, 'loaded', r.stderr.slice(-1500));
 });
 
+test('W7: a patch in the area is applied after the rule, listed naming its test, and replayed by the test-change check', async () => {
+  assert.notEqual(patchedText, null, 'the tests area exports rewireReads');
+  assert.equal(C.status, 0, C.err);
+  assert.deepEqual(mine(C, 'stale'), [], 'nothing of the tests area is stale in tree C');
+  assert.deepEqual(mine(C, 'applied').find((a) => a.kind === 'patch' && a.name === PATCH)?.sites, [PATCHED], 'the patch is listed, naming the test');
+  const l = patchedText.split('\n');
+  assert.equal(C.read(PATCHED), [l[0], ADDED, ...l.slice(1)].join('\n'), 'the tree\'s file is the rule\'s text with the patch on it');
+  const source0 = run('git', ['-C', root, 'show', `${sha}:${PATCHED}`]).stdout;
+  const inC = await load('finding.mjs', path.join(tmp, 'split-C', 'overlay', 'tests'));
+  assert.equal(inC.sameBeyondFinding?.(source0, C.read(PATCHED), PATCHED), true, 'the area\'s finding replays its patch');
+  assert.equal(sameBeyondFinding(source0, C.read(PATCHED), PATCHED), false, 'without the patch in the area, the added line is a difference');
+});
+
+// ---- the test-change check ----
+test('W8: sameBeyondFinding accepts a test that differs only in how it finds its source, and flags one whose assertion differs', () => {
+  const file = 'test/some.test.mjs';
+  const src = `${head.replace("import { kit, kit as KIT } from './lib/kit.mjs';\n", '')}import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { kit } from './lib/kit.mjs';\nconst src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');\ntest('t', () => { assert.ok(src.includes('cmdMerge')); });\n`;
+  const tree = rewireReads(file, src, { gateway: true }).text;
+  assert.notEqual(tree, src, 'the fixture is rewired');
+  assert.equal(sameBeyondFinding(src, tree, file), true, 'only how it finds its source');
+  assert.equal(sameBeyondFinding(src, tree.replace("includes('cmdMerge')", "includes('cmdDone')"), file), false, 'an assertion changed');
+  assert.equal(sameBeyondFinding(src, tree.replace("test('t', () =>", "test('t', { timeout: 1 }, () =>"), file), false, 'a timing changed');
+  assert.equal(sameBeyondFinding(src, src.replace("includes('cmdMerge')", "includes('cmdDone')"), file), false, 'an assertion changed with no finding change');
+  assert.equal(sameBeyondFinding(src, tree, 'docs/devteam/scripts/devteam.mjs'), false, 'not a test');
+});
+test('W9: with the parity run\'s own differing(), every test the tests area changed in tree B is accepted; only added files are left', async () => {
+  const { differing, findingChecks } = await import(pathToFileURL(path.join(root, 'test', 'split', 'parity.mjs')).href);
+  const without = differing({ source: root, tree: B.out });
+  assert.ok(without.filter((d) => d.change === 'changed').length >= 50, `the area changes the kit's tests (${without.length} differ before the check)`);
+  const left = differing({ source: root, tree: B.out, checks: await findingChecks(root) });
+  assert.deepEqual(left.filter((d) => d.change === 'changed').map((d) => d.file), [], 'changed tests the check does not accept');
+});
+
