@@ -1,0 +1,8 @@
+diff --git a/docs/devteam/.gitignore b/docs/devteam/.gitignore
+index b264df86d5eadb3c75061f656999ae79c32b5ed5..0b25b5e27c5b46cd31f98a45471d56235a1b4a57 100644
+--- a/docs/devteam/.gitignore
++++ b/docs/devteam/.gitignore
+@@ -1,2 +1,3 @@
+ run/
+ .kit
++apps/
