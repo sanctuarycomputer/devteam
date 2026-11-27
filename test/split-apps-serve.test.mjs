@@ -673,3 +673,41 @@ test("I2: IMAGE_RUNS names the hub app and the shared code as files, and serveAp
   assert.deepEqual(sourceParts().filter((p) => !R.parts.includes(p)), [], "every part of main's");
   assert.equal(R.parts.indexOf('serveAppFiles'), R.parts.indexOf('servePageAsset') + 1);
 });
+
+// ---- the patches ----
+const treeText = (rel) => fs.readFileSync(path.join(TREE, rel), 'utf8');
+test("G1: the tree's docs/devteam/.gitignore ignores apps/, so a build is never committed", { skip: skipFor('G1') }, () => {
+  assert.ok(treeText('docs/devteam/.gitignore').split('\n').includes('apps/'));
+  assert.equal(git(TREE, 'check-ignore', '-q', 'docs/devteam/apps/dashboard/index.html').status, 0);
+});
+
+test("G2: box-image.yml's paths name the hub app and the shared code, not hub.html", { skip: skipFor('G2') }, () => {
+  const line = treeText('.github/workflows/box-image.yml').split('\n').find((l) => /^\s+paths:/.test(l));
+  assert.ok(line, 'a paths: line');
+  assert.match(line, /'apps\/hub\/\*\*'/);
+  assert.match(line, /'apps\/dashboard\/src\/shared\/\*\*'/);
+  assert.doesNotMatch(line, /hub\.html/);
+});
+
+test("G3: test.yml builds the apps once in build-apps, and every kit shard places the build before its first test run", { skip: skipFor('G3') }, () => {
+  const lines = treeText('.github/workflows/test.yml').split('\n').filter((l) => !/^\s*#/.test(l));
+  // a top-level job's lines, from its name to the next job's
+  const job = (name) => {
+    const at = lines.findIndex((l) => l === `  ${name}:`);
+    assert.ok(at !== -1, `a job ${name}`);
+    const end = lines.findIndex((l, i) => i > at && /^  [\w-]+:$/.test(l));
+    return lines.slice(at, end === -1 ? undefined : end);
+  };
+  const b = job('build-apps').join('\n');
+  assert.match(b, /node-version: 24\b/);
+  assert.match(b, /for d in apps\/\*\/; do .*npm ci --ignore-scripts && DEVTEAM_BASE_PATH= npm run build/);
+  assert.match(b, /uses: actions\/upload-artifact@v4\n\s+with:\n\s+name: apps-build/);
+  const k = job('kit');
+  assert.ok(k.some((l) => /^    needs: build-apps$/.test(l)), 'kit needs build-apps');
+  const dl = k.findIndex((l) => /uses: actions\/download-artifact@v4/.test(l));
+  assert.ok(dl !== -1 && /name: apps-build/.test(k[dl + 2]), 'kit downloads apps-build');
+  const place = k.findIndex((l, i) => i > dl && /mv "\$d\/out" "docs\/devteam\/apps\/\$a"/.test(l));
+  assert.ok(place !== -1, 'a step places each out/ at docs/devteam/apps/<app>/');
+  const firstTest = k.findIndex((l) => /^\s+(- )?run: .*test\/run\.mjs/.test(l));
+  assert.ok(firstTest !== -1 && place < firstTest, 'the build is placed before the first test step');
+});

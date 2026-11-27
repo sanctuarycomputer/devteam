@@ -1,0 +1,54 @@
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+index 091e3213536805d03c3f58b9ddf85f576f656320..332d85b17fdab848d4c23bf93328bb4a919a1a89 100644
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -10,10 +10,33 @@ concurrency:
+   group: test-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+ jobs:
++  # the apps (apps@1), built once at the root (DEVTEAM_BASE_PATH empty) for every kit job: each app's
++  # export (out/) and its library build (lib-dist/), handed on as one artifact
++  build-apps:
++    runs-on: ubuntu-latest
++    timeout-minutes: 20
++    steps:
++      - uses: actions/checkout@v5
++      - uses: actions/setup-node@v5
++        with:
++          node-version: 24
++      - run: |
++          set -euo pipefail
++          for d in apps/*/; do [ -f "$d/package.json" ] || continue; (cd "$d" && npm ci --ignore-scripts && DEVTEAM_BASE_PATH= npm run build) || exit 1; done
++      - uses: actions/upload-artifact@v4
++        with:
++          name: apps-build
++          path: |
++            apps/*/out
++            apps/*/lib-dist
++          if-no-files-found: error
++          retention-days: 7
+   kit:
+     # named, so a check reads kit (22, rest 1/4): without a name GitHub joins every include key
+     # (key, groups, shard, alone, gitleaks) into it
+     name: kit (${{ matrix.node }}, ${{ matrix.part }})
++    # every shard waits for the apps' one build
++    needs: build-apps
+     # Projects run the kit on whatever Node they pin, so every supported major is tested. Every job
+     # runs test/run.mjs, which runs each file in a process of its own under a per-file watchdog (300 s,
+     # 600 s for the chain and the files it lists as long): a hung file fails in at most its timeout,
+@@ -73,6 +96,15 @@ jobs:
+       - uses: actions/setup-node@v5
+         with:
+           node-version: ${{ matrix.node }}
++      # the built apps: each out/ where the kit serves it (docs/devteam/apps/<app>/), lib-dist/ back in
++      # its app (the download lands them at apps/<app>/out and apps/<app>/lib-dist)
++      - uses: actions/download-artifact@v4
++        with:
++          name: apps-build
++          path: apps
++      - run: |
++          set -euo pipefail
++          for d in apps/*/; do a=$(basename "$d"); [ -d "$d/out" ] || continue; mkdir -p docs/devteam/apps; rm -rf "docs/devteam/apps/${a:?}"; mv "$d/out" "docs/devteam/apps/$a"; done
+       # the kit drives workers through tmux; the tests run it on servers of their own, through shims
+       # that refuse the machine's default server (test/lib/kit.mjs, test/run.mjs)
+       - run: command -v tmux || (sudo apt-get update -q && sudo apt-get install -yq tmux)
