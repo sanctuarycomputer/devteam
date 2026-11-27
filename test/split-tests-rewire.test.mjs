@@ -115,3 +115,171 @@ test('W3: in tree B, a /* name start */ slice and a ^const line find the source\
   const unexplained = names.filter((k) => slice(got, k) !== slice(source, k)).filter((k) => !changed.has(`marker ${k} start`) && !declsIn(slice(source, k) ?? '').some((n) => changed.has(n)));
   assert.deepEqual(unexplained, [], 'marker regions whose text differs where load-time changed nothing in them');
 });
+
+// ---- the rewrite, case by case: each way a test calls node:fs to read a file ----
+// Only the callee changes: the read's arguments stay as written, and cliRead looks at the path when the
+// test runs, so the path's form (a join, a URL, a helper's parameter, a copy's) is not the rule's concern.
+const head = "import fs from 'node:fs';\nimport path from 'node:path';\nimport { readFileSync } from 'node:fs';\nimport fsp, { readFile } from 'node:fs/promises';\n// reads docs/devteam/scripts/devteam.mjs\n";
+const IMPORT = /^import fsp, \{ readFile \} from 'node:fs\/promises';\nimport \{ cli\w+(?:, cli\w+)* \} from '\.\/lib\/cli-source\.mjs';$/m;
+const FORMS = [
+  ['fs.readFileSync', "const s = fs.readFileSync(p, 'utf8');", /^const s = cliRead\(fs\.readFileSync, fs, p, 'utf8'\);$/m],
+  ['an imported readFileSync', 'const s = readFileSync(p);', /^const s = cliRead\(readFileSync, undefined, p\);$/m],
+  ['fs.promises.readFile', "const s = await fs.promises.readFile(p, 'utf8');", /^const s = await cliReadAsync\(fs\.promises\.readFile, fs\.promises, p, 'utf8'\);$/m],
+  ['a fs/promises module\'s readFile', 'const s = await fsp.readFile(p);', /^const s = await cliReadAsync\(fsp\.readFile, fsp, p\);$/m],
+  ['an imported readFile', 'const s = await readFile(p);', /^const s = await cliReadAsync\(readFile, undefined, p\);$/m],
+  ['a spread of a read', "const s = [...fs.readFileSync(p, 'utf8')];", /^const s = \[\.\.\.cliRead\(fs\.readFileSync, fs, p, 'utf8'\)\];$/m],
+  ['a helper that reads any path', "const read = (...q) => fs.readFileSync(path.join(root, ...q), 'utf8');", /^const read = \(\.\.\.q\) => cliRead\(fs\.readFileSync, fs, path\.join\(root, \.\.\.q\), 'utf8'\);$/m],
+  ['a callback fs.readFile', "fs.readFile(p, 'utf8', (e, s) => {});", /^cliReadCallback\(fs\.readFile, fs, p, 'utf8', \(e, s\) => \{\}\);$/m],
+  ['a read handed on as a value', 'const io = { readFile: fs.promises.readFile, rs: fs.readFileSync, same: fs.readFileSync === x };', /^const io = \{ readFile: cliReaderAsync\(fs\.promises\.readFile, fs\.promises\), rs: cliReader\(fs\.readFileSync, fs\), same: fs\.readFileSync === x \};$/m],
+  ['a read across lines', "const s = fs\n  .readFileSync(\n    p,\n    'utf8');", /^const s = cliRead\(fs\.readFileSync, fs, \n {4}p,\n {4}'utf8'\);$/m],
+];
+FORMS.forEach(([what, body, want], i) => {
+  test(`W4: the rule sends a read by ${what} through cliRead, once, and the file still parses`, () => {
+    const file = 'test/some.test.mjs';
+    const r = rewireCliReads(file, `${head}\n${body}\n`);
+    assert.deepEqual(r.refused, []);
+    assert.match(r.text, want);
+    assert.match(r.text, IMPORT, 'the helper\'s import follows the last import');
+    assert.equal(rewireCliReads(file, r.text).text, r.text, 'a second pass changes nothing');
+    const f = path.join(tmp, `w4-${i}.mjs`);
+    fs.writeFileSync(f, r.text);
+    assert.equal(run(process.execPath, ['--check', f]).status, 0, 'the rewired file parses');
+  });
+});
+test('W4l: what is not a node:fs read is left as written, and a file with no node:fs import is unchanged', () => {
+  const plain = "import { readFileSync } from './lib/kit.mjs';\n// docs/devteam/scripts/devteam.mjs\nconst s = readFileSync(p, 'utf8');\n";
+  assert.equal(rewireCliReads('test/other.test.mjs', plain).text, plain, 'a file with no node:fs import');
+  const notReads = `${head}const a = o.readFileSync(p);\nconst b = x.fs.readFileSync(p);\nconst c = { readFileSync: (f) => f };\nconst d = 'fs.readFileSync(p)';\n// fs.readFileSync(p)\nconst e = \`\${fs.existsSync(p)} fs.readFileSync(p)\`;\n`;
+  assert.equal(rewireCliReads('test/some.test.mjs', notReads).text, notReads, 'a stand-in\'s, another object\'s, a key, a string, a comment, a template');
+});
+
+// A copy of tree A whose devteam.mjs is no longer the CLI's text (a stand-in for the shim, kit-892): a
+// test passes there only if its reads of the CLI go through the helper.
+const STAND_IN = "#!/usr/bin/env node\n// a stand-in for the shim: not the CLI's text\nthrow new Error('stand-in shim');\n";
+const shimTree = (() => {
+  let d = null;
+  return () => {
+    if (d) return d;
+    d = path.join(tmp, 'tree-A-shim');
+    fs.cpSync(A.out, d, { recursive: true });
+    fs.writeFileSync(path.join(d, CLI), STAND_IN);
+    return d;
+  };
+})();
+test('W4r: in tree A with a stand-in shim, a rewired read of the CLI by any path form gets the single file\'s text; other files are read as they are', () => {
+  const probe = `import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
+import fsp from 'node:fs/promises';
+// reads docs/devteam/scripts/devteam.mjs by each path form, a copy, and a descriptor
+const here = path.dirname(fileURLToPath(import.meta.url));
+const root = path.resolve(here, '..');
+const kit = path.join(root, 'docs', 'devteam');
+const read = (...p) => fs.readFileSync(path.join(root, ...p), 'utf8');
+const at = path.join(kit, 'scripts', 'devteam.mjs');
+const fd = fs.openSync(at, 'r');
+const out = {
+  join: fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8'),
+  url: fs.readFileSync(new URL('../docs/devteam/scripts/devteam.mjs', import.meta.url), 'utf8'),
+  fileURLToPath: fs.readFileSync(fileURLToPath(new URL('../docs/devteam/scripts/devteam.mjs', import.meta.url)), 'utf8'),
+  relative: fs.readFileSync(path.relative(process.cwd(), at), 'utf8'),
+  helper: read('docs', 'devteam', 'scripts', 'devteam.mjs'),
+  options: fs.readFileSync(at, { encoding: 'utf8' }),
+  imported: readFileSync(at, 'utf8'),
+  buffer: fs.readFileSync(at).toString('utf8'),
+  isBuffer: Buffer.isBuffer(fs.readFileSync(at)),
+  bufferPath: fs.readFileSync(Buffer.from(at), 'utf8'),
+  promises: await fs.promises.readFile(at, 'utf8'),
+  fsp: await fsp.readFile(at, 'utf8'),
+  callback: await new Promise((res, rej) => fs.readFile(at, 'utf8', (e, s) => (e ? rej(e) : res(s)))),
+  copy: fs.readFileSync(process.argv[2], 'utf8'),
+  descriptor: fs.readFileSync(fd, 'utf8'),
+};
+process.stdout.write(JSON.stringify(out));
+`;
+  const d = shimTree(), file = 'test/w4r-probe.mjs';
+  const r = rewireCliReads(file, probe);
+  fs.writeFileSync(path.join(d, file), r.text);
+  const copy = path.join(tmp, 'w4r-copy', 'devteam.mjs');
+  fs.mkdirSync(path.dirname(copy), { recursive: true });
+  fs.writeFileSync(copy, 'a fixture\'s copy\n');
+  const p = run(process.execPath, [file, copy], { cwd: d, env: quiet, timeout: 60e3 });
+  assert.equal(p.status, 0, p.stderr);
+  const out = JSON.parse(p.stdout);
+  for (const k of ['join', 'url', 'fileURLToPath', 'relative', 'helper', 'options', 'imported', 'buffer', 'bufferPath', 'promises', 'fsp', 'callback']) assert.ok(out[k] === source, `${k}: the read gets the single file's text (${JSON.stringify(String(out[k]).slice(0, 60))})`);
+  assert.equal(out.isBuffer, true, 'a read with no encoding gets a Buffer');
+  assert.equal(out.copy, 'a fixture\'s copy\n', 'a copy elsewhere is read as it is');
+  assert.equal(out.descriptor, STAND_IN, 'a read by descriptor is the file\'s own');
+});
+
+// The oracle for "every read": in tree A, any reference to readFileSync or readFile (a call or not: an
+// alias, a destructuring, a .call) on the file's node:fs import, or bare, in any test file, that is not
+// cliRead's or cliReadAsync's first argument. It does not ask the rule what it rewrote, and it reads
+// every test file, whether or not its text names the CLI.
+function unwrapped(T, added) {
+  const { scan } = jsLib;
+  const left = [];
+  let files = 0;
+  const walk = (d) => {
+    for (const e of fs.readdirSync(path.join(T.out, d), { withFileTypes: true })) {
+      const f = `${d}/${e.name}`;
+      if (e.isDirectory()) { if (f !== 'test/split') walk(f); continue; }
+      if (!f.endsWith('.mjs') || f.startsWith('test/split-') || f === CLI_HELPER || f === 'test/lib/gateway-source.mjs' || added.has(f)) continue;
+      const text = T.read(f);
+      files++;
+      const code = scan(text).code;
+      const fsNames = [...text.matchAll(/^import (?:\* as )?([\w$]+)\b[^;]*?from '(?:node:)?fs(?:\/promises)?';/gm)].map((m) => m[1]);
+      for (const m of code.matchAll(/(?<![\w$])(readFileSync|readFile)\b/g)) {
+        const before = code.slice(Math.max(0, m.index - 60), m.index), after = code.slice(m.index + m[0].length, m.index + m[0].length + 3);
+        const lineAt = text.slice(0, m.index).split('\n').length;
+        if (/^import\b/.test(text.split('\n')[lineAt - 1])) continue;
+        const member = /(?<!\.)\.\s*$/.test(before);
+        if (member && !fsNames.some((n) => new RegExp(String.raw`(?<![\w$])(?<!(?:^|[^.])\.)${n.replace(/\$/g, '\\$')}\s*\.\s*(promises\s*\.\s*)?$`).test(before))) continue;
+        if (!member && /^\s*:/.test(after)) continue;
+        if (/cli(?:Read|Reader)(Async|Callback)?\(\s*([\w$]+\s*\.\s*)?(promises\s*\.\s*)?$/.test(before) && /^\s*,/.test(after)) continue;
+        left.push(`${f}:${lineAt}: ${text.split('\n')[lineAt - 1].trim().slice(0, 120)}`);
+      }
+    }
+  };
+  walk('test');
+  return { left, files };
+}
+test('W5: in tree A every node:fs read in a test file goes through the helper, by an oracle that is not the rule', (t) => {
+  const added = new Set(mine(A, 'applied').filter((a) => a.kind === 'file').map((a) => a.name));
+  const { left, files } = unwrapped(A, added);
+  assert.ok(files >= 400, `the kit's test files (${files})`);
+  assert.deepEqual(left, [], 'reads not through the helper left in the tree');
+  const sites = mine(A, 'applied').find((a) => a.name === 'test-reads')?.sites ?? [];
+  const through = sites.filter((s) => /node:fs reads? through cliRead/.test(s));
+  assert.ok(through.length >= 300, `the rule sends the kit's tests' reads through the helper (${through.length} files)`);
+  // the forms in use, for the PR body
+  const count = (re) => through.reduce((n, s) => n + [...(A.read(s.split(' ')[0]) ?? '').matchAll(re)].length, 0);
+  t.diagnostic(`files ${through.length}; cliRead(fs.readFileSync ${count(/cliRead\(fs\.readFileSync,/g)}; cliRead(readFileSync ${count(/cliRead\(readFileSync,/g)}; cliReadAsync(fs.promises.readFile ${count(/cliReadAsync\(fs\.promises\.readFile,/g)}; other cliReadAsync ${count(/cliReadAsync\((?!fs\.promises\.readFile,)/g)}`);
+});
+
+// Tests that read the CLI's text and run nothing, run in the stand-in copy: whole files, and one test of
+// three more, each read by a form a path-based rule could not place (a helper's parameters, a fixture's
+// module, an environment-chosen path), and two that read through a path imported from a fixture and never
+// name the CLI. A row whose file, or whose named test, is gone at HEAD is skipped.
+const RUNS = [
+  ['test/pane-question.parse.test.mjs'], ['test/box-health-claude.test.mjs'], ['test/dashboard-loop.test.mjs'], ['test/dashboard-copy.test.mjs'],
+  ['test/box-health-park.test.mjs'], ['test/box-health-room.test.mjs'],
+  ['test/project-hosts-contract.test.mjs', 'every first segment the dashboard server answers is reserved'],
+  ['test/browser-lock.test.mjs', 'the function is cut from devteam.mjs'],
+];
+for (const [file, name] of RUNS) {
+  const at = path.join(root, file);
+  const gone = (!fs.existsSync(at) && `${file} is gone at HEAD`) || (name && !fs.readFileSync(at, 'utf8').includes(name) && `${file} has no test "${name}" at HEAD`);
+  test(`W6: in tree A with a stand-in shim, ${file}${name ? ` "${name}"` : ''} passes`, { timeout: 200e3, skip: gone }, () => {
+    const r = run(process.execPath, ['--test', '--test-reporter=tap', '--test-concurrency=1', ...(name ? [`--test-name-pattern=${name}`] : []), file], { cwd: shimTree(), env: quiet, timeout: 180e3 });
+    assert.match(r.stdout, /^# fail 0$/m, `${file} in the tree:\n${r.stdout.slice(-3000)}${r.stderr.slice(-1000)}`);
+    assert.doesNotMatch(r.stdout, /^# pass 0$/m, 'it ran tests');
+    assert.equal(r.status, 0);
+  });
+}
+test('W6: in tree A with a stand-in shim, the world fixture\'s checker cuts schemaErrors from the CLI\'s text', { skip: !fs.existsSync(path.join(root, 'test/fixtures/world/check.mjs')) && 'gone at HEAD' }, () => {
+  const r = run(process.execPath, ['--input-type=module', '-e', "await import('./test/fixtures/world/check.mjs'); process.stdout.write('loaded');"], { cwd: shimTree(), env: quiet, timeout: 60e3 });
+  assert.equal(r.stdout, 'loaded', r.stderr.slice(-1500));
+});
+
