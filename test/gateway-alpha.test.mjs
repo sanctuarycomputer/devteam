@@ -86,6 +86,12 @@ const RECORD_BIG = alphaFolder('record-big', '0.101.0-63959e27d616', {
 const RECORD_TYPE = alphaFolder('record-type', '0.101.0-63959e27d616', {
   edit: (dir) => { const f = path.join(dir, 'verified.json'); put(f, { ...json(f), integrity_ok: 'true' }); },
 });
+// final-1b F1: kit-install@1's other fields, each broken in its own copy (v, provenance, at).
+const recordEdit = (change) => (dir) => { const f = path.join(dir, 'verified.json'); const o = json(f); change(o); put(f, o); };
+const RECORD_V2 = alphaFolder('record-v2', '0.101.0-63959e27d616', { edit: recordEdit((o) => { o.v = 2; }) });
+const RECORD_NO_PROVENANCE = alphaFolder('record-no-provenance', '0.101.0-63959e27d616', { edit: recordEdit((o) => { delete o.provenance; }) });
+const RECORD_EMPTY_COMMIT = alphaFolder('record-empty-commit', '0.101.0-63959e27d616', { edit: recordEdit((o) => { o.provenance.commit = ''; }) });
+const RECORD_NO_AT = alphaFolder('record-no-at', '0.101.0-63959e27d616', { edit: recordEdit((o) => { delete o.at; }) });
 const PKG_OUTSIDE = alphaFolder('package-outside', '0.101.0-63959e27d616', {
   edit: (dir) => {
     const elsewhere = path.join(scratch, 'alpha', 'package-elsewhere');
@@ -311,6 +317,10 @@ const WHY = [
   ['a verified.json that is a symlink', alphaEnv(RECORD_LINK.dir), /didn.t pass its checks/, { on: true, verified: false, release: null, why: 'unverified' }],
   ['a verified.json over 4 KiB', alphaEnv(RECORD_BIG.dir), /didn.t pass its checks/, { on: true, verified: false, release: null, why: 'unverified' }],
   ['a record field of another type', alphaEnv(RECORD_TYPE.dir), /didn.t pass its checks/, { on: true, verified: false, release: null, why: 'unverified' }],
+  ['a record whose v is 2', alphaEnv(RECORD_V2.dir), /didn.t pass its checks/, { on: true, verified: false, release: null, why: 'unverified' }],
+  ['a record with no provenance', alphaEnv(RECORD_NO_PROVENANCE.dir), /didn.t pass its checks/, { on: true, verified: false, release: null, why: 'unverified' }],
+  ['a record whose provenance commit is empty', alphaEnv(RECORD_EMPTY_COMMIT.dir), /didn.t pass its checks/, { on: true, verified: false, release: null, why: 'unverified' }],
+  ['a record with no at', alphaEnv(RECORD_NO_AT.dir), /didn.t pass its checks/, { on: true, verified: false, release: null, why: 'unverified' }],
   ['node_modules/<name> resolving outside the folder', alphaEnv(PKG_OUTSIDE.dir), /didn.t pass its checks/, { on: true, verified: false, release: null, why: 'unverified' }],
   ['a layout that package.json doesn\'t name', alphaEnv(LAYOUT_DIFFERS.dir), /didn.t pass its checks/, { on: true, verified: false, release: null, why: 'unverified' }],
   ['a package whose own package.json names another version', alphaEnv(INNER_DIFFERS.dir), /didn.t pass its checks/, { on: true, verified: false, release: null, why: 'unverified' }],
