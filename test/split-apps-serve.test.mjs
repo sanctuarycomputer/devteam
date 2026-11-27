@@ -325,10 +325,11 @@ if (treeMade && !MANIFEST_SKIP) {
 }
 const started = () => { if (startError) throw new Error(`the servers didn't start: ${startError.message}`); };
 
-test("A1: HEAD's split applies exactly apps-serve's and apps-tests' items, none of either stale, no conflict naming them", { skip: skipFor('A1') }, () => {
+test("A1: HEAD's split applies exactly apps-serve's items and, among apps-tests', kit-984's two patches; none of either stale, no conflict naming them", { skip: skipFor('A1') }, () => {
   assert.equal(split.status, 0, split.stderr);
   assert.deepEqual(area('apps-serve').applied, ['override IMAGE_RUNS', 'override kitWatched', 'override pageVersion', 'override servePage', 'override servePageAsset', 'patch box-image-yml.patch', 'patch devteam-mjs-kitwatched.patch', 'patch gitignore.patch', 'patch test-yml.patch']);
-  assert.deepEqual(area('apps-tests').applied, ['patch dashboard.kit-watch-pane.test.mjs.patch', 'patch dashboard.kit-watch.test.mjs.patch']);
+  // apps-tests is shared: later ports add their own items, so A1 asks only for kit-984's
+  for (const p of ['patch dashboard.kit-watch-pane.test.mjs.patch', 'patch dashboard.kit-watch.test.mjs.patch']) assert.ok(area('apps-tests').applied.includes(p), `apps-tests applies ${p}: ${area('apps-tests').applied.join(', ')}`);
   assert.deepEqual([...area('apps-serve').stale, ...area('apps-tests').stale], []);
   assert.deepEqual((J.overlay?.conflicts ?? []).filter((c) => c.areas.some((a) => MINE.includes(a))), []);
 });
