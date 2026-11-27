@@ -1,5 +1,5 @@
 diff --git a/test/canvas-editor.test.mjs b/test/canvas-editor.test.mjs
-index 425a2a8eb168273ea22e3f4ec511c31325626739..37be727e3e90202f75b55c87abf03d24307a190d 100644
+index 425a2a8eb168273ea22e3f4ec511c31325626739..6665a26c5210c19191b376e5915f80dab408b5a9 100644
 --- a/test/canvas-editor.test.mjs
 +++ b/test/canvas-editor.test.mjs
 @@ -6,6 +6,7 @@
@@ -48,7 +48,7 @@ index 425a2a8eb168273ea22e3f4ec511c31325626739..37be727e3e90202f75b55c87abf03d24
    res.writeHead(404, { 'Content-Length': 0 });
    res.end();
  }
-@@ -1395,18 +1418,19 @@ test('the hostile document runs nothing', { skip: canDrive ? false : 'needs Chro
+@@ -1395,18 +1418,20 @@ test('the hostile document runs nothing', { skip: canDrive ? false : 'needs Chro
    });
  });
  
@@ -73,12 +73,13 @@ index 425a2a8eb168273ea22e3f4ec511c31325626739..37be727e3e90202f75b55c87abf03d24
 -  assert.equal((src.match(/<script\b/g) ?? []).length, 1, 'one script element in the page');
 -  const js = pageScript();
 +  const src = canvasSource();
++  assert.ok(src.trim(), 'the canvas modules hold source');
 +  assert.doesNotMatch(src, /<script\b/, 'no script element in the modules');
 +  const js = src;
    for (const token of ['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'createContextualFragment', 'DOMParser', 'setHTMLUnsafe', 'parseHTMLUnsafe', 'srcdoc', 'cssText', "setAttribute('style'", 'setAttribute("style"', 'eval(', 'new Function', 'import(']) {
      assert.equal(js.includes(token), false, `the script holds no ${token}`);
    }
-@@ -1418,7 +1442,7 @@ test("the page's source holds no markup sinks", { skip: canDrive ? false : 'need
+@@ -1418,7 +1443,7 @@ test("the page's source holds no markup sinks", { skip: canDrive ? false : 'need
  // kit-312: the page's own free-text check takes exactly what canvas-doc@1's name and text classes take,
  // and every place that sends free text (the Name and Text fields, an upload's name) uses it.
  test("the page's free text: no control character but tab, line feed and carriage return", () => {
