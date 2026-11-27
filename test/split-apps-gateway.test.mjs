@@ -10,8 +10,10 @@
 // Skips, each naming its cause, never fail a regular PR: manifest drift that stops HEAD's split, and
 // an apps-gateway override or a gateway-area item that went stale because its original changed on
 // main (the parity run reports it, and the next apps ticket re-pins it); and one of this ticket's
-// test patches that no longer applies because its file changed since the patch was made, which skips
-// A1 and that patch's part of K1, naming it. Another ticket's stale apps-tests item is printed, not
+// test patches that no longer applies, when the tree's text of its file is not the blob the patch's
+// index line names and test/<f> or the tests area changed since the patch's last commit (or the
+// checkout is shallow, so that can't be told), which skips A1 and that patch's part of K1, naming it.
+// Another ticket's stale apps-tests item is printed, not
 // failed. Anything else stale of apps-gateway, the gateway area or this ticket's patches (a gateway-area
 // item stale with no drift included), any conflict, or a crash fails.
 // K1 holds this ticket's fourteen test patches in apps-tests to the lines the spec names, each with its
@@ -116,10 +118,12 @@ function driftOf(s) {
   return false;
 }
 const DRIFT_SKIP = STALE.map(driftOf).find(Boolean) ?? false;
-// One of this ticket's test patches that no longer applies is drift when the tree's text of its file
-// (unpatched, as the patch failed) is no longer the blob the patch's index line names: the file changed
-// on main, or in the tests area's rewrite, since the patch was made. Its name -> the skip, naming it.
-// A patch that fails on the very text it was made from is broken: no skip, A1 and K1 fail.
+// One of this ticket's test patches that no longer applies is drift when both hold: the tree's text of
+// its file (unpatched, as the patch failed) is not the blob the patch's index line names, and since the
+// patch's last commit test/<f> or test/split/overlay/tests (the rewrite the patch sits on) changed by
+// HEAD. Its name -> the skip, naming it. In a shallow checkout (test.yml's, depth 1) the second can't be
+// read, so it skips, naming that, as driftOf does. Any other patch that no longer applies (one made on
+// another text with nothing changed since, a wrong or edited blob) is broken: no skip, A1 and K1 fail.
 const PATCH_SKIP = {};
 for (const s of STALE) {
   if (s.area !== 'apps-tests' || s.kind !== 'patch' || !PATCHES.includes(s.name) || !/^no longer applies/.test(s.why)) continue;
@@ -129,7 +133,10 @@ for (const s of STALE) {
   const blob = text.match(/^index ([0-9a-f]{40})\.\./m)?.[1];
   const abs = file ? path.join(TREE, file) : null;
   const now = abs && fs.existsSync(abs) ? run('git', ['hash-object', abs]).stdout.trim() : '';
-  if (blob && now && blob !== now) PATCH_SKIP[s.name] = `this ticket's patch ${s.name} no longer applies: ${file} changed since the patch was made (${s.why.slice(0, 160)})`;
+  if (!blob || !now || blob === now) continue;
+  if (SHALLOW) { PATCH_SKIP[s.name] = `this ticket's patch ${s.name} no longer applies and this checkout is shallow, so drift on main can't be told from a broken patch (${s.why.slice(0, 160)})`; continue; }
+  const at = lastCommitOf(`test/split/overlay/apps-tests/patches/${s.name}`);
+  if (changedSince(at, file) || changedSince(at, 'test/split/overlay/tests')) PATCH_SKIP[s.name] = `this ticket's patch ${s.name} no longer applies: ${file} or the tests area changed on main since the patch's last commit (${s.why.slice(0, 160)})`;
 }
 const skip = () => MANIFEST_SKIP || DRIFT_SKIP;
 
@@ -581,6 +588,7 @@ const EXPECT = {
     minus: ["const HUB_PAGE = path.join(repo, 'docs', 'devteam', 'dashboard', 'hub.html');",
       "  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubPage: HUB_PAGE, log: (m) => logs.push(m), ...opts });"],
     plus: ["const HUB_APP = path.join(repo, 'docs', 'devteam', 'apps', 'hub');",
+      "  if (module !== NEW) opts.hubPage = path.join(HUB_APP, 'index.html'); // the older gateway (OLD_SHA) reads hubPage, not hubApp",
       "  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubApp: HUB_APP, log: (m) => logs.push(m), ...opts });"],
   },
   'org-access.admins.chrome.test.mjs': {
@@ -615,6 +623,7 @@ const EXPECT = {
     minus: ["const HUB_PAGE = path.join(repo, 'docs', 'devteam', 'dashboard', 'hub.html');",
       "  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubPage: HUB_PAGE, log: (m) => logs.push(m), ...opts });"],
     plus: ["const HUB_APP = path.join(repo, 'docs', 'devteam', 'apps', 'hub');",
+      "  if (module !== NEW) opts.hubPage = path.join(HUB_APP, 'index.html'); // the older gateway (OLD_SHA) reads hubPage, not hubApp",
       "  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubApp: HUB_APP, log: (m) => logs.push(m), ...opts });"],
   },
   'org-access.view.test.mjs': {

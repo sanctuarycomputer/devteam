@@ -1,5 +1,5 @@
 diff --git a/test/org-access.people-state.test.mjs b/test/org-access.people-state.test.mjs
-index 110ce932938ab8d4576287a68ac1396965fbf4d5..7f43e1269d21ee8b02322c45ae757ab73800f4e7 100644
+index 110ce932938ab8d4576287a68ac1396965fbf4d5..d3e465c8b188f6a4473cbf3e7c8fd52bb21b0551 100644
 --- a/test/org-access.people-state.test.mjs
 +++ b/test/org-access.people-state.test.mjs
 @@ -20,7 +20,7 @@ import { cliRead } from './lib/cli-source.mjs';
@@ -11,7 +11,15 @@ index 110ce932938ab8d4576287a68ac1396965fbf4d5..7f43e1269d21ee8b02322c45ae757ab7
  // ports of its own, apart from test/gateway.test.mjs's (10000 + …) and lib/kit.mjs's blocks (20000 and up)
  const HUB = 15000 + (process.pid % 90) * 50;
  const P = HUB + 1;
-@@ -114,7 +114,7 @@ async function gateway(name, extra = {}) {
+@@ -103,6 +103,7 @@ const modules = new Map();
+ const load = async (file) => { if (!modules.has(file)) modules.set(file, await import(pathToFileURL(file).href)); return modules.get(file); };
+ async function gateway(name, extra = {}) {
+   const { module = NEW, token: given, port: fixed, ...opts } = extra;
++  if (module !== NEW) opts.hubPage = path.join(HUB_APP, 'index.html'); // the older gateway (OLD_SHA) reads hubPage, not hubApp
+   const G = await load(module);
+   const port = fixed ?? await freePort();
+   const publicUrl = `http://box.localhost:${port}`;
+@@ -114,7 +115,7 @@ async function gateway(name, extra = {}) {
    fs.mkdirSync(uploadsDir, { recursive: true, mode: 0o750 });
    const logs = [];
    const dir = opts.dir ?? path.join(tmp, name);
