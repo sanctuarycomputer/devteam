@@ -13,9 +13,9 @@ Each app, `apps/dashboard/` and `apps/hub/`, holds:
 
 | file | what it is |
 |---|---|
-| `package.json` | `private`, `devDependencies` only, each pinned exactly and published at least 7 days before it was pinned; the same pins in both apps. Its `build` script: `next build && node ../dashboard/scripts/csp-hashes.mjs out && node ../dashboard/scripts/lib-build.mjs`. |
+| `package.json` | `private`, `devDependencies` only, each pinned exactly and published at least 7 days before it was pinned; the same pins in both apps. Its `build` script: `next build && node ../dashboard/scripts/csp-hashes.mjs out && node ../dashboard/scripts/lib-build.mjs` (the hub's); the dashboard's writes the design-system page's catalog first: `node ../dashboard/scripts/ui-catalog.mjs && next build && node ../dashboard/scripts/csp-hashes.mjs out && node ../dashboard/scripts/lib-build.mjs`, and it has `dev` (`next dev`) with `predev` (`node ../dashboard/scripts/ui-catalog.mjs`). |
 | `package-lock.json` | lockfile version 3; both apps lock the same packages at the same versions. Installed with `npm ci --ignore-scripts`. |
-| `.gitignore` | `node_modules/`, `.next/`, `out/`, `lib-dist/`, `next-env.d.ts` |
+| `.gitignore` | `node_modules/`, `.next/`, `out/`, `lib-dist/`, `next-env.d.ts`; the dashboard's also `src/views/design-system/catalog.gen.ts` (generated) |
 | `next.config.mjs` | `output: 'export'`, `trailingSlash: true`, `basePath` from `DEVTEAM_BASE_PATH` (empty when unset), images unoptimized, the base path passed to the page as `process.env.DEVTEAM_BASE_PATH`, and `turbopack.root` at `apps/` (so the hub can import the dashboard's `src/shared/`). |
 | `tsconfig.json` | the pages' types, in the form `next build` writes it back (committed that way, so a build leaves it unchanged). |
 | `tsconfig.lib.json` | `src/lib/**/*.ts` (and in the dashboard `src/shared/**/*.ts`) compiled to ES2020 modules for Node, with ES2020's and the DOM's types and no `jsx`. |
@@ -29,6 +29,7 @@ The dashboard also holds `src/shared/` (shared code), `APPS.md` (this file) and 
 - `scripts/csp-hashes.mjs <out>`: the hash step. It reads each exported page as the HTML parser does and writes `out/csp-hashes.json`, `{ "v": 1, "pages": { "<route>": ["sha256-…", …] } }`, one entry per `index.html` keyed by its route without the base path (`/`, `/view/canvas/`), each inline script's hash once. A page it can't read (a script or a tag that never ends) fails the build (exit 1). It also prints each page's inline styles, which a route under `style-src 'self'` must not have.
 - `scripts/lib-build.mjs`: `tsc -p tsconfig.lib.json` into a fresh `lib-dist/`, then `lib-dist/package.json` `{"type":"module"}` so Node 18 loads the files as modules. An app with no module yet gets the marker alone.
 - `scripts/compat-scan.mjs`: writes both `COMPAT.md` files from the tests at a base, and checks them and the root stubs (`--check`).
+- `scripts/ui-catalog.mjs`: writes the design-system page's catalog from `src/shared/ui/`, and with `--duplicates` prints the duplicates scan (`apps-src@2`, below).
 
 **`lib-dist/` keeps `src/`'s folders**: `src/lib/<module>.ts` compiles to `lib-dist/lib/<module>.js`, and `src/shared/<module>.ts` to `lib-dist/shared/<module>.js`. A ported `node:vm` test imports `apps/<app>/lib-dist/lib/<module>.js`. Every `.ts` file in `src/shared/` and `src/lib/` imports no React and touches no DOM at import: it may use `window` or `document` inside a function (the lib compile has the DOM's types), but importing it on Node must not throw, which `test/apps-build.test.mjs` checks for every module in `lib-dist/`. A `.ts` file importing a `.tsx` file fails the lib compile (no `jsx`), and one importing React or Next fails `test/apps-build.test.mjs`: components are `.tsx`, the pages' alone.
 
@@ -47,12 +48,12 @@ The pages run the React that Next vendors for the App Router (`next/dist/compile
 
 | app | route | exported as | root view | served at (by `page-seam@1`) |
 |---|---|---|---|---|
-| `apps/dashboard` | `/` | `index.html` | `shell` | `/`, hash routed as today, and `/view/artifact/<id>`, `/view/preview/<name>` |
+| `apps/dashboard` | `/` | `index.html` | `shell` (`design-system` at `#design-system`) | `/`, hash routed as today, and `/view/artifact/<id>`, `/view/preview/<name>` |
 | `apps/dashboard` | `/view/canvas/` | `view/canvas/index.html` | `canvas` | `/view/canvas/<slug>` |
 | `apps/dashboard` | `/browser/` | `browser/index.html` | `browser` | the browser view server's `/` |
 | `apps/hub` | `/` | `index.html` | `hub-shell` | `/` |
 
-No other route. Each route's `page.tsx` renders its root view's `index.tsx` and nothing else. `/browser/` has no inline style: its policy is `style-src 'self'`.
+No other route. Each route's `page.tsx` renders its root view's `index.tsx` and nothing else, but `/`'s, which renders the shell through the design-system gate (`src/views/design-system/gate.tsx`, `apps-src@2`): loaded at `#design-system` or `#design-system/<name>` on the app's `/` (`appPath()`), the page shows the design-system view in the shell's place. The page is a hash on `/`, not a route of its own. `/browser/` has no inline style: its policy is `style-src 'self'`.
 
 ## Paths
 
@@ -88,6 +89,8 @@ The lists below are the scan's (`node apps/dashboard/scripts/compat-scan.mjs --b
 ## Shared code
 
 `apps/dashboard/src/shared/` holds what more than one view or both apps use: the layout CSS and tokens, the shell, the router, the thread layer and the plain-words helpers, as the ports move them in; and from this contract `paths.ts`, `compat.ts`, `poll.ts` and `back-link.tsx`.
+
+`apps/dashboard/src/shared/ui/` holds the shared UI components (`apps-src@2`, below), one per file with its specimens beside it; the hub imports one as `@shared/ui/<name>`.
 
 The hub imports it as `@shared/<module>` (its `tsconfig.json` maps `@shared/*` to `../dashboard/src/shared/*`; Turbopack's root is `apps/`). The hub holds no copy: there is no `apps/hub/src/shared/`.
 
@@ -145,6 +148,28 @@ the alpha's own way back to the stable page (`alpha@1`), styled by `app.css` (no
 - A ported `node:vm` test keeps its file name, test names and cases, and imports from `apps/<app>/lib-dist/lib/<module>.js` (or `lib-dist/shared/`) in place of slicing the page.
 - The entry's hash covers the test's final text in the tree, after every overlay area (the `tests/` area applies after `apps-tests/`), and is checked against a PR diff touching the overlay path that produces it.
 - This contract adds two tests on main, `test/apps-build.test.mjs` and `test/apps-compat.test.mjs`. Each skips, saying why, where no app is built, so CI on main is unaffected; the parity run, which builds both apps, runs them.
+
+## `apps-src@2`
+
+- Version: 2 (this section; the rest of the file is version 1, and every part of it holds).
+- Between: the design-system page (`kit-1040`) and every port, the components' tickets and the sweeps after it.
+- Checked by: `test/apps-design-system.test.mjs`, and `test/apps-build.test.mjs` (the dashboard's build string).
+
+**The page.** `/#design-system` on the dashboard's `/`, linked from nowhere: no tab, side-bar entry, `SHELL_ROUTES` entry or link names it. `src/app/page.tsx` renders `<Root><Shell /></Root>`. The gate (`src/views/design-system/gate.tsx`) reads the page's address once, at load: at `#design-system` or `#design-system/<name>` with `appPath()` `/`, the shell's server-rendered markup is left unhydrated (its Suspense boundary waits on a promise that never settles, so no effect of the shell or of a view inside it runs: no data loop, no `/api/` call, no poll, no socket), and the view (`src/views/design-system/index.tsx`), loaded by a dynamic `import()` into a chunk `/` never fetches, takes its place. Anywhere else the gate renders the shell as before. A view's module starts no work at its top level (a fetch, a poll, a socket, a listener; registering a global is not work): it starts in an effect, so a page that never hydrates it runs none of it. The page shows the tokens (every custom property the layout CSS defines, read at run time, colours as swatches) and every component of the catalog with its specimens, its file and its props' names, under the anchor `#design-system/<name>`, with a filter by name and an event list. It follows the system theme, as the dashboard does.
+
+**Components.** `apps/dashboard/src/shared/ui/` holds only:
+
+- `<name>.tsx` (`<name>` in kebab-case): one component, its default export; its props as `export type <Pascal>Props = { … }` or `export interface <Pascal>Props { … }`, whose members the page lists;
+- `<name>.specimens.tsx` beside it: `export const specimens: Specimen[]`, at least one, each `{ title: string; note?: string; render: (on: On) => ReactNode }` (`Specimen` and `On` from `src/views/design-system/specimen.ts`): one per state worth seeing (default, empty, long text, disabled, error, each variant). `on('<event>')` is the only handler a specimen passes its component, and it only appends `<name> · <title> <event>` to the page's event list;
+- `<name>.css`, when the component has CSS of its own, imported by `<name>.tsx`. A component whose classes are in the shared layout CSS uses them as they are.
+
+A specimens file names the page (its type's import), and nothing else outside the page does: only the catalog imports specimens.
+
+**The catalog.** `node scripts/ui-catalog.mjs` writes `src/views/design-system/catalog.gen.ts` (gitignored) importing every `<name>.specimens.tsx`, alphabetically, typed `Specimen[]`. The `build` script runs it before `next build`, and `predev` before `next dev`, so a new component is only its own files. It refuses (exit 1, naming the file) a component with no specimens file or no specimen, specimens or CSS with no component, and any other file in the folder; a missing folder is an empty catalog.
+
+**The duplicates scan.** `node scripts/ui-catalog.mjs --duplicates` prints `.<class>: <file>, <file>…`, one line per class, for each class defined in the apps' CSS (any `.css` under either app's `src/`) that is the `className` (static: `"…"` or `{'…'}`) of a JSX tree's outermost element (or a fragment's direct child element) in two or more view folders of either app: `src/views/<view>/`, and `src/shared/<module>/` other than `ui/`. Elements in `src/shared/ui/` aren't counted: rendering a component is the cure. With none it prints `No duplicates.` It always exits 0: its output is the sweeps' work list and their check.
+
+**The rule for the ports.** Parity and `COMPAT.md` come first. A port renders a control from `src/shared/ui/` only where the catalog at its base has a component whose output is exactly the view's markup for it: the same elements, classes, ids, `data-*` attributes, roles and text. Where it differs, or there is no such component, the port keeps the view's own markup and marks it `// ui-candidate: <name>` for the sweeps. A port adds no file to `src/shared/ui/` and changes no component there.
 
 ## The view stubs' exports
 
