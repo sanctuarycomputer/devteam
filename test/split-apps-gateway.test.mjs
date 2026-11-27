@@ -503,10 +503,11 @@ test('S4: a file planted at a gateway route never answers for it, in any case or
   const p = await pair.http();
   const g = await shadowGw();
   const routes = [...PLANTED.filter((f) => !f.endsWith('index.html')).map((f) => `/${f}`), '/dev/', '/next/', '/public/', '/%70ublic/x.txt', '/public%2fx.txt'];
-  for (const route of routes) {
-    const t = { r: await g.req('GET', route, { headers: FETCH }), g };
-    same(t, { r: await p.source.req('GET', route, { headers: FETCH }), g: p.source }, `GET ${route}`);
-    assert.ok(!(t.r.status === 200 && /SHADOW/.test(t.r.body)), `GET ${route}: the planted file is not served`);
+  // as a page and as a fetch: a route family may refuse one of them (/public/… a fetch) before the hook
+  for (const route of routes) for (const [hn, headers] of [['page', NAV], ['fetch', FETCH]]) {
+    const t = { r: await g.req('GET', route, { headers }), g };
+    same(t, { r: await p.source.req('GET', route, { headers }), g: p.source }, `GET ${route} (${hn})`);
+    assert.ok(!(t.r.status === 200 && /SHADOW/.test(t.r.body)), `GET ${route} (${hn}): the planted file is not served`);
   }
 });
 
