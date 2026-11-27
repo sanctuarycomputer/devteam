@@ -9,7 +9,7 @@
 // item a check reads that went stale because its original changed on main (the parity run reports it,
 // and the next apps ticket re-pins it). Anything else stale, any conflict, refusal or crash fails.
 // Ports: +30/31 the hub and base, +32 the dashboard, +33 the browser view (the source's servers first,
-// stopped before the tree's start on the same ports)
+// stopped before the tree's start on the same ports); +60 the browser view of the tree's devteam.mjs (M3)
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -132,12 +132,15 @@ const READS = {
   I: () => driftBy('override', 'IMAGE_RUNS') || LOAD_TIME_SKIP,
   G1: () => driftBy('patch', 'gitignore.patch'),
   W2: () => driftBy('patch', 'devteam-mjs-kitwatched.patch'),
+  // W3 and M read the tree's devteam.mjs patch and the three overrides it copies
+  W3: () => driftBy('patch', 'devteam-mjs-servepage.patch') || READS.D(),
   G2: () => driftBy('patch', 'box-image-yml.patch'),
   G3: () => driftBy('patch', 'test-yml.patch'),
   K: () => ['dashboard.kit-watch.test.mjs.patch', 'dashboard.kit-watch-pane.test.mjs.patch'].map((p) => driftBy('patch', p, 'apps-tests')).find(Boolean) ?? false,
 };
 // D, H, B, R, N, S all read the seam's three overrides and run the tree
 for (const k of ['H', 'B', 'R', 'N', 'S']) READS[k] = READS.D;
+READS.M = READS.W3;
 function skipFor(id) {
   if (MANIFEST_SKIP) return MANIFEST_SKIP;
   if (!treeMade && !/^A/.test(id)) return false; // the test fails on it (A1 names the split's error)
@@ -330,7 +333,7 @@ const started = () => { if (startError) throw new Error(`the servers didn't star
 
 test("A1: HEAD's split applies exactly apps-serve's items and, among apps-tests', kit-984's two patches; none of either stale, no conflict naming them", { skip: skipFor('A1') }, () => {
   assert.equal(split.status, 0, split.stderr);
-  assert.deepEqual(area('apps-serve').applied, ['override IMAGE_RUNS', 'override kitWatched', 'override pageVersion', 'override servePage', 'override servePageAsset', 'patch box-image-yml.patch', 'patch devteam-mjs-kitwatched.patch', 'patch gitignore.patch', 'patch test-yml.patch']);
+  assert.deepEqual(area('apps-serve').applied, ['override IMAGE_RUNS', 'override kitWatched', 'override pageVersion', 'override servePage', 'override servePageAsset', 'patch box-image-yml.patch', 'patch devteam-mjs-kitwatched.patch', 'patch devteam-mjs-servepage.patch', 'patch gitignore.patch', 'patch test-yml.patch']);
   // apps-tests is shared: later ports add their own items, so A1 asks only for kit-984's
   for (const p of ['patch dashboard.kit-watch-pane.test.mjs.patch', 'patch dashboard.kit-watch.test.mjs.patch']) assert.ok(area('apps-tests').applied.includes(p), `apps-tests applies ${p}: ${area('apps-tests').applied.join(', ')}`);
   assert.deepEqual([...area('apps-serve').stale, ...area('apps-tests').stale], []);
@@ -697,6 +700,20 @@ test("W2: the tree's devteam.mjs declares kitWatched as the override does", { sk
   assert.equal(decl(fs.readFileSync(path.join(TREE, 'docs/devteam/scripts/devteam.mjs'), 'utf8'), "the tree's devteam.mjs"), decl(fs.readFileSync(path.join(AREA_DIR, 'overrides/kitWatched.mjs'), 'utf8'), 'the override'));
 });
 
+// The tree's devteam.mjs serves the pages as cli.mjs does (kit-1035): until the entry cutover every test
+// that starts the tree's CLI runs it, so its servePage, pageVersion and servePageAsset are the overrides'
+// text, made so by devteam-mjs-servepage.patch
+const declOf = (t, name, what) => {
+  const all = t.match(new RegExp(`^function ${name}\\(`, 'gm')) ?? [];
+  assert.equal(all.length, 1, `${what} declares ${name} once`);
+  return new RegExp(`^function ${name}\\([^\\n]*\\n[\\s\\S]*?\\n\\}\\n`, 'm').exec(t)[0];
+};
+test("W3: the tree's devteam.mjs declares servePage, pageVersion and servePageAsset as the overrides do", { skip: skipFor('W3') }, () => {
+  assert.ok(area('apps-serve').applied.includes('patch devteam-mjs-servepage.patch'), `the split applies devteam-mjs-servepage.patch (stale: ${JSON.stringify(area('apps-serve').stale)}; conflicts: ${JSON.stringify(J.overlay?.conflicts ?? [])})`);
+  const tree = fs.readFileSync(path.join(TREE, 'docs/devteam/scripts/devteam.mjs'), 'utf8');
+  for (const n of SERVE) assert.equal(declOf(tree, n, "the tree's devteam.mjs"), declOf(fs.readFileSync(path.join(AREA_DIR, 'overrides', `${n}.mjs`), 'utf8'), n, `the ${n} override`), n);
+});
+
 test('I1: a commit to the hub app or the shared code it imports is a minor for the image', { skip: skipFor('I1') }, () => {
   const A = git(TREE, 'rev-parse', 'HEAD').stdout.trim();
   for (const f of ['apps/dashboard/src/shared/probe.ts', 'apps/hub/src/x.tsx']) {
@@ -798,5 +815,79 @@ test('K1: the tree changes only the kit-watch lines the spec names, and each tes
     const entry = path.join(root, 'test/split/ledger/tests', `${f}.json`);
     assert.ok(fs.existsSync(entry), `${f}: a ledger entry`);
     assert.deepEqual(JSON.parse(fs.readFileSync(entry, 'utf8')), { file: `test/${f}`, ticket: 'kit-984-apps-serve', sha256: sha256(tree), source_sha256: sha256(head) });
+  }
+});
+
+// ---- the tree's devteam.mjs, which every test that starts the tree's CLI runs (kit-1035) ----
+// its dashboard and laptop hub on the same ports as cli.mjs's, which stop first; its browser daemon's
+// view on +60 (a preview's port may not be in the instance block). This block stays last: from M1 on,
+// the dashboard and hub ports are the tree's devteam.mjs's, not cli.mjs's.
+// an export file through servePageAsset: 200, its bytes
+const assetOk = async (port, app, rel) => {
+  const r = await req(port, `/${rel}`);
+  assert.equal(r.status, 200, `/${rel}: ${r.body}`);
+  assert.deepEqual(r.body, readApp(`${app}/${rel}`), `/${rel} is the build's file`);
+};
+const MJS = 'docs/devteam/scripts/devteam.mjs';
+const MJS_VIEW_PORT = PORTS + 60;
+let mjsUp = null;
+const mjsDashboard = () => (mjsUp ??= (async () => { await stopTree(); const d = await startDashboard(TREE, MJS, 'tree'); treeKids = [d]; return d; })());
+
+test("M1: the tree's devteam.mjs dashboard serves the build's index.html at / and /index.html under D1's policy, and pageVersion reads the build", { skip: skipFor('M1') }, async () => {
+  started();
+  await mjsDashboard();
+  for (const p of ['/', '/index.html']) {
+    const r = await req(DASH_PORT, p);
+    assert.equal(r.status, 200, `${p}: ${r.body}`);
+    assert.deepEqual(r.body, readApp('dashboard/index.html'), `${p} is the build's page`);
+    assert.equal(r.headers['content-security-policy'], transform(src('dash', p).csp, hashesOf('dashboard', '/'), { dashboard: true }));
+  }
+  assert.equal((await req(DASH_PORT, '/api/data')).headers['x-devteam-page'], sha256(readApp('dashboard/index.html')).slice(0, 16));
+  await assetOk(DASH_PORT, 'dashboard', '_next/static/chunks/app.js');
+});
+
+test("M2: the tree's devteam.mjs laptop hub serves the hub build's index.html under H1's policy", { skip: skipFor('M2') }, async () => {
+  started();
+  await mjsDashboard();
+  const r = await req(HUB_PORT, '/');
+  assert.equal(r.status, 200, String(r.body));
+  assert.deepEqual(r.body, readApp('hub/index.html'));
+  assert.equal(r.headers['content-security-policy'], transform(src('hub', '/').csp, hashesOf('hub', '/')));
+  await assetOk(HUB_PORT, 'hub', '_next/static/chunks/app.js');
+});
+
+// browser serve, as browser start runs it, with a stand-in Chrome that never answers (the view is bound
+// before Chrome starts, and serves its page while the daemon waits); Node 22 for the daemon's WebSocket
+const NODE22 = Number(process.versions.node.split('.')[0]) >= 22;
+test("M3: the tree's devteam.mjs browser daemon finds its page: its view serves the build's browser/index.html under B1's policy", { skip: skipFor('M3') || (NODE22 ? false : 'the browser daemon needs Node 22 or newer') }, async () => {
+  started();
+  const pids = path.join(tmp, 'chrome.pids');
+  const bin = path.join(tmp, 'chrome-stand-in');
+  // no exec: the stand-in stays a chrome-stand-in process (a leak shows by that name), its sleep a child;
+  // both pids are written, and both are killed after
+  fs.writeFileSync(bin, `#!/bin/sh\n[ "$1" = --version ] && exit 0\necho $$ >> '${pids}'\nsleep 30 &\necho $! >> '${pids}'\nwait\n`, { mode: 0o755 });
+  const project = run(process.execPath, [MJS, 'settings', '--get', 'project'], { cwd: TREE, env: envOf('tree') }).stdout.trim();
+  assert.ok(project, "the tree's project has a name");
+  const d = path.join(TREE, 'docs/devteam/run/previews');
+  fs.mkdirSync(d, { recursive: true });
+  const name = 'treemjs-browser';
+  fs.writeFileSync(path.join(d, `${name}.json`), `${JSON.stringify({ name, port: MJS_VIEW_PORT, project, session: 'supervisor', label: 'browser', cwd: TREE, at: new Date().toISOString(), expires: new Date(Date.now() + 86400000).toISOString() }, null, 2)}\n`);
+  const daemon = child([MJS, 'browser', 'serve'], { cwd: TREE, env: { ...envOf('tree'), DEVTEAM_BROWSER_SERVE: '1', PORT: String(MJS_VIEW_PORT), CHROME_PATH: bin } });
+  try {
+    let r = { status: 0 };
+    await until(async () => (r = await req(MJS_VIEW_PORT, '/')).status !== 0 || daemon.exitCode !== null, 30000, 'the browser view');
+    assert.equal(r.status, 200, `the view answers its page (the daemon: ${daemon.out.slice(-400)})`);
+    assert.equal(r.body.toString(), BROWSER_HTML);
+    assert.equal(r.headers['content-security-policy'], `default-src 'none'; script-src 'self' '${BROWSER_HASH}'; style-src 'self'; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'`);
+    await assetOk(MJS_VIEW_PORT, 'dashboard', '_next/static/chunks/app.js');
+  } finally {
+    // SIGTERM first, and up to 15 s for the daemon to end: its own shutdown stops the stand-in, and its
+    // exit removes Chrome's temp folder (/tmp/dc…, browserChromeTmp), which a SIGKILL leaves behind
+    try { process.kill(-daemon.pid, 'SIGTERM'); } catch {}
+    await until(() => daemon.exitCode !== null || daemon.signalCode !== null, 15000, 'the browser daemon to stop').catch(() => {});
+    await stopAll([daemon], [MJS_VIEW_PORT]);
+    let ps = [];
+    try { ps = fs.readFileSync(pids, 'utf8').split('\n').filter(Boolean).map(Number); } catch {}
+    for (const p of ps) { try { process.kill(-p, 'SIGKILL'); } catch {} try { process.kill(p, 'SIGKILL'); } catch {} }
   }
 });
