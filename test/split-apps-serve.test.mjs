@@ -881,6 +881,10 @@ test("M3: the tree's devteam.mjs browser daemon finds its page: its view serves 
     assert.equal(r.headers['content-security-policy'], `default-src 'none'; script-src 'self' '${BROWSER_HASH}'; style-src 'self'; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'`);
     await assetOk(MJS_VIEW_PORT, 'dashboard', '_next/static/chunks/app.js');
   } finally {
+    // SIGTERM first, and up to 15 s for the daemon to end: its own shutdown stops the stand-in, and its
+    // exit removes Chrome's temp folder (/tmp/dc…, browserChromeTmp), which a SIGKILL leaves behind
+    try { process.kill(-daemon.pid, 'SIGTERM'); } catch {}
+    await until(() => daemon.exitCode !== null || daemon.signalCode !== null, 15000, 'the browser daemon to stop').catch(() => {});
     await stopAll([daemon], [MJS_VIEW_PORT]);
     let ps = [];
     try { ps = fs.readFileSync(pids, 'utf8').split('\n').filter(Boolean).map(Number); } catch {}
