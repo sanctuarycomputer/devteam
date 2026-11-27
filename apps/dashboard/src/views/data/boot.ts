@@ -4,22 +4,35 @@ import { HINT_AFTER, PICK_HOLD, PRESS_HOLD, typingIn } from '../../lib/data-hold
 import { ownerLesson } from '../../lib/data-inbox';
 import { later } from '../../lib/data-later';
 import { READ_GIVE_UP_MS } from '../../lib/data-load';
+import { GOAL_REFUSAL, holdOverlay } from '../../lib/data-press';
+import { POLL_MS } from '../../shared/poll';
+import { filesWords, markAnswered, qcardOf, seenHash, sendable } from '../attachments';
 import { attachmentsState } from '../attachments/state';
+import { activeGoalOrder, holdConfirming, moveGoal } from '../goals';
+import { goalsState } from '../goals/state';
 import { helloLoad } from '../overview';
-import { redraw } from '../peeks';
+import { closeDrawer, loadSchemaDocs, peekIsOpen, peekKey, redraw } from '../peeks';
+import { peeksState } from '../peeks/state';
+import { lsGet, lsSet, renderReviewPreview, reviewAnswer, reviewDecline, sitesKey } from '../review';
+import { reviewState } from '../review/state';
+import { loadFleet } from '../settings';
 import { esc } from '../shell';
 import { $ } from '../shell/page';
 import { shell, viewer } from '../shell/state';
 import { askShown, tlCard, tlPins } from '../thread';
 import { threadState } from '../thread/state';
-import { inboxAt, thDraw, tlOwn as layerField, tlRefresh } from '../threads-panel';
+import { inboxAt, inboxGo, inboxTyping, thDraw, thEscapePage, thFreshness, tlClose, tlFloating, tlOwn as layerField, tlRefresh } from '../threads-panel';
 import { threadsPanelState } from '../threads-panel/state';
-import { avFpSeen } from '../viewer';
+import { avFpSeen, leaveArtifact } from '../viewer';
 import { viewerState } from '../viewer/state';
-import { overlaid, press } from './press';
+import { choicesOf, isOa, oaConfirming, oaOpen, oaPaint, oaState, toB64 } from '../words';
+import { wordsState } from '../words/state';
+import { installHubFleet } from './hub-fleet';
+import { SAVING, answerPress, overlaid, press, redrawNow } from './press';
 import { render, showFailure } from './render';
-import { route } from './router';
+import { ROUTE_COLD, leaveReview, loopTab, route, showTab, stampEntry } from './router';
 import { dataState } from './state';
+import { viewerBoot } from './viewer';
 // `Loose` is `any`: index.html's values have no declared types. A cast `(x as Loose)` or a `!` is a type only (SWC
 // strips it; spec A5). Many are there because another view's stub returns `never`: the compiler reads the code
 // after a call into one as unreachable and types its names `never`. That view's port makes them unneeded.
@@ -153,4 +166,392 @@ export function inboxTitle(d: Loose) {
   const n = inboxCount(d);
   document.title = n ? `(${n}) devteam · ${d.project}` : `devteam · ${d.project}`;
   $('inbox-btn-n')!.textContent = n || '';
+}
+
+export function bootData() {
+  window.addEventListener('hashchange', () => { if (shell.DATA) route(); else dataState.TH_CARRY = null; });
+  window.addEventListener('popstate', () => { thFreshness(); if (dataState.TH_CARRY && location.hash === dataState.TH_CARRY_FROM) dataState.TH_CARRY = null; });
+  window.addEventListener('popstate', () => { if (!ROUTE_COLD) stampEntry(); });
+  $('drawer-close')?.addEventListener('click', closeDrawer);
+  $('scrim')?.addEventListener('click', () => (viewerState.AV ? leaveArtifact() : reviewState.RV ? leaveReview() : closeDrawer()));
+  document.addEventListener('keydown', (e: Loose) => {
+    if (e.key !== 'Escape') return;
+    // Escape on a property's key closes its tooltip, not the drawer
+    if (document.activeElement?.matches?.('.props dt[title]')) return void (document.activeElement as Loose).blur();
+    // a half-typed answer in the Inbox tab isn't hidden by a stray key: no peek closes under it (kit-100 spec §2.7)
+    if (!viewerState.AV && !reviewState.RV && inboxTyping(document.activeElement)) return;
+    // a floating card over the viewer closes first; the next Escape closes the viewer (kit-141 spec §Approach 7)
+    if (viewerState.AV && tlFloating()) return void tlClose();
+    if (viewerState.AV) leaveArtifact(); else if (reviewState.RV) leaveReview(); else if (peekIsOpen()) closeDrawer(); else thEscapePage();
+  });
+  document.addEventListener('click', (e: Loose) => { if (e.target.closest('[data-rv-close]')) leaveReview(); });
+  $('loop-tabs')?.addEventListener('click', (e: Loose) => { const b = e.target.closest('[data-tab]'); if (b) loopTab(b.dataset.tab); });
+  showTab(dataState.TAB);
+  addEventListener('beforeunload', (e: Loose) => { if (SAVING) { e.preventDefault(); e.returnValue = ''; } });
+  window.addEventListener('pointerdown', (e: Loose) => { PRESSED = Date.now(); if (picker(e)) PICKING = Date.now(); }, true);
+  for (const up of ['pointerup', 'pointercancel']) window.addEventListener(up, () => setTimeout(() => { PRESSED = 0; drawHeld(); }, 0), true);
+  document.addEventListener('keydown', (e: Loose) => { if (picker(e)) PICKING = Date.now(); }, true);
+  document.addEventListener('change', () => { PICKING = 0; letGo(); }, true);
+  document.addEventListener('focusout', letGo, true);
+  document.addEventListener('compositionstart', () => { COMPOSING = true; }, true);
+  document.addEventListener('compositionend', () => { COMPOSING = false; letGo(); }, true);
+  $('held')!.addEventListener('mousedown', (e: Loose) => e.preventDefault());
+  $('held')!.addEventListener('click', () => { if (dataState.HELD) drawOrHold(dataState.HELD, true); });
+  $('reload-page')!.addEventListener('click', () => location.reload());
+  document.addEventListener('input', (e: Loose) => {
+    const t = e.target;
+    if (!t.matches?.('textarea[data-q]') || layerField(t)) return;
+    shell.drafts[t.dataset.q] = t.value;
+    for (const o of document.querySelectorAll(`textarea[data-q="${CSS.escape(t.dataset.q)}"]`)) if (o !== t && !layerField(o)) (o as Loose).value = t.value;
+  });
+  document.addEventListener('click', async (ev: Loose) => {
+    const hb = ev.target.closest('[data-hold-id]');
+    if (hb) {
+      const id = hb.dataset.holdId, mode = hb.dataset.mode;
+      const errId = `hold-${id}`;
+      // Let go, then Confirm let go: the confirm in page memory (HOLD_CONFIRM), so a redraw keeps it
+      if (mode === 'let-go' && !holdConfirming(id)) {
+        goalsState.HOLD_CONFIRM.set(id, Date.now() + 6000);
+        hb.classList.add('confirm'); hb.textContent = 'Confirm let go';
+        setTimeout(() => {
+          if (holdConfirming(id)) return; // confirmed again since: that one's timer resets it
+          goalsState.HOLD_CONFIRM.delete(id);
+          for (const b of document.querySelectorAll(`[data-hold-id="${CSS.escape(id)}"][data-mode="let-go"]`)) { b.classList.remove('confirm'); b.textContent = 'Let go'; }
+          redraw();
+        }, 6050);
+        return;
+      }
+      goalsState.HOLD_CONFIRM.delete(id);
+      hb.classList.remove('confirm');
+      press(`g:${id}`, {
+        build: () => (['let-go', 'restore'].includes(mode) ? { action: 'goal-decide', body: { id, verdict: mode } } : { action: 'goal-hold', body: { id, mode } }),
+        overlay: holdOverlay(id, mode),
+        apply: () => { redrawNow(); redraw(); },
+        onOk: () => { later(loadFleet); },
+        errId,
+      });
+      return;
+    }
+    // Mark met: confirm in place, then goal status met (a repo or prod check runs again first)
+    const mb = ev.target.closest('[data-met-id]');
+    if (mb) {
+      const id = mb.dataset.metId;
+      if (!mb.classList.contains('confirm')) { mb.classList.add('confirm'); mb.textContent = 'Confirm: mark it met'; setTimeout(() => { mb.classList.remove('confirm'); mb.textContent = 'Mark met'; }, 6000); return; }
+      mb.classList.remove('confirm');
+      // the button says so at once; the goal shows met only once the server has checked it and agreed
+      press(`g:${id}`, {
+        build: () => ({ action: 'goal-met', body: { id } }),
+        apply: () => { mb.disabled = true; mb.textContent = 'Marking met…'; },
+        restore: () => { const b = document.querySelector(`[data-met-id="${CSS.escape(id)}"]`); if (b) { (b as Loose).disabled = false; b.textContent = 'Mark met'; } },
+        onOk: () => { redraw(); },
+        errId: `met-${id}`,
+      });
+      return;
+    }
+    // Move up / Move down in a goal's ⋯: the menu closes, the goal moves one place and the order is saved
+    const gm = ev.target.closest('[data-goal-move]');
+    if (gm) {
+      if (gm.disabled) return;
+      const id = gm.dataset.goalId;
+      gm.closest('details')?.removeAttribute('open');
+      const at = (activeGoalOrder() as Loose).indexOf(id);
+      if (at >= 0) moveGoal(id, gm.dataset.goalMove === 'up' ? at - 1 : at + 1, 'menu');
+      return;
+    }
+    const mv = ev.target.closest('[data-mdview]');
+    if (mv) {
+      const v = mv.dataset.mdview;
+      try { localStorage.setItem('devteam.mdview', v); } catch {}
+      document.querySelectorAll('[data-mdview]').forEach((b: Loose) => b.setAttribute('aria-pressed', String(b.dataset.mdview === v)));
+      document.querySelectorAll('#drawer-body [data-md]').forEach((el: Loose) => { el.hidden = el.dataset.md !== v; });
+      return;
+    }
+    // a planner card opens its peek through the record cards' data-open handlers (kit-91), which leave its question link alone
+    // Stop and Start on a preview: the kit's own actions, as an owner action
+    const pvb = ev.target.closest('[data-preview-stop],[data-preview-start]');
+    if (pvb) {
+      const stop = pvb.dataset.previewStop !== undefined;
+      const name = stop ? pvb.dataset.previewStop : pvb.dataset.previewStart;
+      const label = pvb.textContent;
+      // the row says so at once; the next refresh draws it as the server has it
+      press(`preview:${name}`, {
+        build: () => ({ action: stop ? 'preview-stop' : 'preview-start', body: { name } }),
+        apply: () => { pvb.disabled = true; pvb.textContent = stop ? 'Stopping…' : 'Starting…'; },
+        restore: () => { const b = document.querySelector(`[data-preview-${stop ? 'stop' : 'start'}="${CSS.escape(name)}"]`); if (b) { (b as Loose).disabled = false; b.textContent = label; } },
+        errId: `preview-${name}`,
+      });
+      return;
+    }
+    const cp = ev.target.closest('[data-copy]');
+    if (cp) { try { await navigator.clipboard.writeText(cp.dataset.copy); cp.textContent = 'Copied'; } catch { cp.textContent = 'Select and copy'; } return; }
+    // Forget: record an unpublish through the kit's own action, for a publish line the owner won't
+    // restore (the page is already not live; nothing on the box changes). Twice, as Let go is.
+    const fg = ev.target.closest('[data-forget]');
+    if (fg) {
+      const slug = fg.dataset.forget;
+      if (!fg.classList.contains('confirm')) { fg.classList.add('confirm'); fg.textContent = 'Confirm forget'; setTimeout(() => { fg.classList.remove('confirm'); fg.textContent = 'Forget'; }, 6000); return; }
+      fg.classList.remove('confirm');
+      press(`pub:${slug}`, {
+        build: () => ({ action: 'artifact-publish', body: { op: 'unpublish', slug } }),
+        apply: () => { fg.disabled = true; fg.textContent = 'Forgotten'; },
+        restore: () => { const b = document.querySelector(`[data-forget="${CSS.escape(slug)}"]`); if (b) { (b as Loose).disabled = false; b.textContent = 'Forget'; } },
+        errId: `pub-${slug}`,
+      });
+      return;
+    }
+    // a question the peek can't answer: the Inbox tab at its card (the #inbox listener has run; this target replaces its none)
+    const qin = ev.target.closest('[data-q-inbox]');
+    if (qin && !ev.button && !ev.metaKey && !ev.ctrlKey && !ev.shiftKey && !ev.altKey) { ev.preventDefault(); return void inboxGo({ scrollTo: `#q-${CSS.escape(qin.dataset.qInbox)}` }); }
+    const pick = ev.target.closest('input[data-pick]');
+    if (pick) {
+      wordsState.picks[pick.dataset.pick] = pick.value;
+      // one pick per question, made in whichever copy: the Inbox's card and the thread's show it alike
+      for (const el of document.querySelectorAll(`input[data-pick="${CSS.escape(pick.dataset.pick)}"]`)) { (el as Loose).checked = (el as Loose).value === pick.value; el.closest('.choice')?.classList.toggle('picked', (el as Loose).checked); }
+      if (pick.value === '__other') pick.closest('[data-qcard]')?.querySelector('textarea[data-q]')?.focus();
+      // another answer than Done: the not-done marks go, on every copy
+      if (pick.value !== 'Done' && wordsState.NOT_DONE.delete(pick.dataset.pick)) oaPaint();
+      return;
+    }
+    const ps = ev.target.closest('[data-post-secrets]');
+    if (ps) {
+      const id = ps.dataset.postSecrets;
+      const err = $(`e-${id}`);
+      const inputs = [...document.querySelectorAll(`#q-${CSS.escape(id)} [data-secret]`)];
+      const values = {};
+      for (const el of inputs) {
+        const name = (el as Loose).dataset.secret.slice(id.length + 1);
+        if ((el as Loose).type === 'file') { const f = (el as Loose).files?.[0]; if (f) (values as Loose)[name] = { b64: await later(toB64, f) }; }
+        else if ((el as Loose).value) (values as Loose)[name] = (el as Loose).value;
+      }
+      if (!Object.keys(values).length) { if (err) err.textContent = 'Paste a value or choose a file first.'; return; }
+      // a store started is a store finished: name what's missing before anything is cleared or sent
+      const stores = new Map();
+      for (const el of inputs) if ((el as Loose).dataset.sopsStore) stores.set((el as Loose).dataset.sopsStore, [...(stores.get((el as Loose).dataset.sopsStore) || []), (el as Loose).dataset.secret.slice(id.length + 1)]);
+      for (const [file, names] of stores) {
+        const missing = names.filter((n: Loose) => !(n in values));
+        if (missing.length && missing.length < names.length) { if (err) err.textContent = `${file} takes these together: add ${missing.join(', ')} too, or post none of them yet.`; return; }
+      }
+      if (err) err.textContent = '';
+      // at once: the card says it is posting and takes no second press. It stays in the Inbox until the
+      // server says the question is answered (every secret posted). The values never stay in the page:
+      // wiped from the fields now, and from memory once the post returns, whatever it says.
+      ps.disabled = true; ps.textContent = 'Posting…';
+      inputs.forEach((el: Loose) => { el.value = ''; });
+      press(`q:${id}`, {
+        build: () => ({ action: 'secret', body: { id, values } }),
+        onOk: (out: Loose) => { if (/is answered/.test(out.out || '')) markAnswered(id, 'Posted'); },
+        restore: () => { const b = document.querySelector(`[data-post-secrets="${CSS.escape(id)}"]`); if (b) { (b as Loose).disabled = false; b.textContent = 'Post'; } },
+        errId: id,
+      }).finally(() => { for (const k of Object.keys(values)) { wordsState.SECRET_DRAFTS.delete(`${id}:${k}`); delete (values as Loose)[k]; } });
+      return;
+    }
+    const orv = ev.target.closest('[data-open-review]');
+    if (orv) { location.hash = `review/${orv.dataset.openReview}`; return; }
+    const dopen = ev.target.closest('[data-decline-open]');
+    if (dopen) {
+      const f = document.querySelector(`[data-decline-form="${CSS.escape(dopen.dataset.declineOpen)}"]`);
+      if (f) { (f as Loose).hidden = !(f as Loose).hidden; if (!(f as Loose).hidden) f.querySelector('textarea')?.focus(); }
+      return;
+    }
+    const dsend = ev.target.closest('[data-decline]');
+    if (dsend) {
+      const id = dsend.dataset.decline;
+      return void later(reviewDecline, id, (document.querySelector(`textarea[data-q="${CSS.escape(id)}"]`) as Loose)?.value.trim() ?? '', id, dsend);
+    }
+    if (ev.target.closest('[data-rv-rows] > summary')) {
+      ev.preventDefault();
+      reviewState.RV.rowsOpen = !reviewState.RV.rowsOpen;
+      return void renderReviewPreview();
+    }
+    if (ev.target.closest('[data-rv-raw]')) {
+      const pre = ev.target.closest('p')?.nextElementSibling;
+      if (pre?.classList.contains('rv-raw')) { pre.hidden = !pre.hidden; ev.target.textContent = pre.hidden ? 'Show raw JSON' : 'Hide raw JSON'; if (reviewState.RV) reviewState.RV.rawOpen = !pre.hidden; }
+      return;
+    }
+    const lok = ev.target.closest('[data-rv-link-ok]');
+    if (lok) { lsSet(sitesKey(), [...new Set([...(lsGet(sitesKey()) || []), lok.dataset.rvLinkOk])]); $('rv-link')!.hidden = true; return; }
+    if (ev.target.closest('[data-rv-link-close]')) { $('rv-link')!.hidden = true; return; }
+    const rva = ev.target.closest('[data-rv-answer]');
+    if (rva) return void later(reviewAnswer, rva);
+    if (ev.target.closest('[data-rv-decline-open]')) {
+      const f = $('rv-decline-form');
+      f!.hidden = !f!.hidden;
+      if (!f!.hidden) $('rv-decline-note')!.focus();
+      return;
+    }
+    const rvd = ev.target.closest('[data-rv-decline]');
+    if (rvd && reviewState.RV?.qid) return void later(reviewDecline, reviewState.RV.qid, ($('rv-decline-note') as Loose)!.value.trim(), 'rv', rvd);
+    // A secret's card can be answered without posting anything: a note (Reply), or Can't right now
+    // with the note if there is one. Either is an answer the supervisor reads; no value moves.
+    const cant = ev.target.closest('[data-cant], [data-reply], [data-dontuse]');
+    if (cant) {
+      const id = cant.dataset.cant ?? cant.dataset.reply ?? cant.dataset.dontuse;
+      const { card, errId } = qcardOf(cant);
+      const note = ((card as Loose)?.querySelector('textarea[data-q]')?.value ?? '').trim();
+      if (cant.dataset.reply !== undefined && !note) { const e = $(`e-${errId}`); if (e) e.textContent = 'Write the note first.'; return; }
+      const answer = cant.dataset.dontuse !== undefined ? "Don't use this sensor" : cant.dataset.reply !== undefined ? note : note ? `Can’t right now: ${note}` : 'Can’t right now';
+      const seen = seenHash(id);
+      answerPress(id, card, errId, answer, () => ({ action: 'answer', body: { id, answer, seen } }));
+      return;
+    }
+    // a refused answer's line, dismissed: from every copy of the card at once (a focused button in a
+    // thread's turns would hold that copy's redraw)
+    const dis = ev.target.closest('[data-dismiss-refused]');
+    if (dis) {
+      const id = dis.dataset.dismissRefused;
+      attachmentsState.REFUSED.delete(id);
+      for (const el of document.querySelectorAll(`[data-refused="${CSS.escape(id)}"]`)) el.remove();
+      redrawNow();
+      return;
+    }
+    // A named record's own control on an owner-action card: what the Knowledge page and the goal's hold
+    // bar post. The row shows the press at once on every copy (oaPaint), and comes back if refused.
+    const oak = ev.target.closest('[data-oa-know]');
+    if (oak) {
+      const id = oak.dataset.oaKnow, status = oak.dataset.status, qid = oak.dataset.oaQ;
+      const { pre } = qcardOf(oak);
+      press(`k:${id}`, {
+        build: () => ({ action: 'knowledge', body: { id, status } }),
+        apply: () => { const qv = (shell.DATA as Loose).questions.find((x: Loose) => x.id === qid); wordsState.OA_SET.set(id, { status, at: new Date().toISOString(), words: qv ? (oaState(qv, id) as Loose).words : undefined }); oaPaint(); },
+        undo: () => { wordsState.OA_SET.delete(id); oaPaint(); },
+        onOk: () => { peeksState.PEEKS.delete(peekKey('lesson', id)); },
+        errId: `${pre}oa-${qid}-${id}`,
+      });
+      return;
+    }
+    // Let go, then Confirm let go: the confirm in page memory, so a refresh doesn't take it back
+    const oag = ev.target.closest('[data-oa-goal]');
+    if (oag) {
+      const id = oag.dataset.oaGoal, qid = oag.dataset.oaQ;
+      const { pre } = qcardOf(oag);
+      if (!oaConfirming(id)) { wordsState.OA_CONFIRM.set(id, Date.now() + 6000); setTimeout(oaPaint, 6050); oaPaint(); return; }
+      wordsState.OA_CONFIRM.delete(id);
+      press(`g:${id}`, {
+        build: () => ({ action: 'goal-decide', body: { id, verdict: 'let-go' } }),
+        overlay: holdOverlay(id, 'let-go'),
+        apply: () => { wordsState.OA_SET.set(id, { status: 'abandoned', at: new Date().toISOString() }); oaPaint(); redrawNow(); redraw(); },
+        undo: () => { wordsState.OA_SET.delete(id); oaPaint(); },
+        onOk: () => { later(loadFleet); },
+        errId: `${pre}oa-${qid}-${id}`,
+      });
+      return;
+    }
+    // Answer: the pick and the words, posted on the first press (kit-313)
+    const btn = ev.target.closest('[data-answer]');
+    if (btn) {
+      const id = btn.dataset.answer;
+      const { card, errId } = qcardOf(btn);
+      const note = ((card as Loose)?.querySelector('textarea[data-q]')?.value ?? '').trim();
+      // "Something else" is no pick: the words alone
+      const picked = wordsState.picks[id] && wordsState.picks[id] !== '__other' ? wordsState.picks[id] : '';
+      const answer = picked ? (note ? `${picked} — ${note}` : picked) : note;
+      const err = $(`e-${errId}`);
+      // the files dropped into the note go with it, or alone; none while one is uploading or refused
+      const s = sendable(`q:${id}`);
+      if ((s as Loose).why) { if (err) err.textContent = (s as Loose).why; return; }
+      const files = (s as Loose).files;
+      if (!answer && !files.length) { if (err) err.textContent = 'Pick a choice or write an answer.'; return; }
+      if (err) err.textContent = '';
+      const goalId = btn.dataset.goalAsk;
+      const qv = (shell.DATA as Loose).questions.find((x: Loose) => x.id === id);
+      // a card with choices sends the owner's words and their pick apart, the pick null for words alone, so
+      // the kit never reads words as a choice; a goal approval and an owner-action keep their own answers
+      const apart = !!qv && (choicesOf(qv) as Loose).length > 0 && !['goal-approval', 'owner-action', 'review'].includes(qv.kind) && !(qv.secrets || []).length;
+      // Done on an owner-action whose named records aren't all done: never an answer, however often it is
+      // pressed. Each unchanged record says so, and the line above Send says what to do instead.
+      if (isOa(qv) && picked === 'Done') {
+        const open = oaOpen(qv);
+        if ((open as Loose).length) { wordsState.NOT_DONE.set(id, open); oaPaint(); return; }
+      }
+      if (wordsState.NOT_DONE.delete(id)) oaPaint();
+      if (goalId && !Object.hasOwn(wordsState.GOAL_VERDICTS, picked)) { if (err) err.textContent = 'Choose Approve, Refine or Let go.'; return; }
+      if (goalId && picked === 'Refine' && !note) { if (err) err.textContent = 'Say in the notes what should change.'; return; }
+      const auto = (card as Loose)?.querySelector('input[data-auto]:checked')?.value;
+      const asRule = (card as Loose)?.querySelector('input[data-rulebox]')?.checked;
+      if (asRule && !note && !picked) { if (err) err.textContent = 'Pick an answer or write the rule in the note to keep it as a standing rule.'; return; }
+      // the note is the rule's wording; without one, the chosen answer is the standing answer to questions like this
+      const qText = qv?.question || '';
+      const rule = asRule ? (note || `${picked}: the standing answer to questions like “${qText}”`) : undefined;
+      const seen = seenHash(id);
+      // files alone: the card says what the server records (no pick, and no words of the owner's)
+      answerPress(id, card, errId, goalId ? picked + (note ? ` — ${note}` : '') : answer || filesWords(files.length), () => (goalId
+        ? { action: 'goal-decide', body: { id: goalId, verdict: (wordsState.GOAL_VERDICTS as Loose)[picked], notes: note || undefined } }
+        : { action: 'answer', body: { id, answer: apart ? note : answer, ...(apart ? { choice: picked || null } : {}), autonomy: auto ? Number(auto) : undefined, rule: rule || undefined, seen, ...(files.length ? { files } : {}) } }), goalId ? { plain: GOAL_REFUSAL } : { files });
+      return;
+    }
+    // Keep it / Retire it on the Inbox's lesson card (a peek's Retire it starts a thread: kit-88 spec §2.3)
+    const know = ev.target.closest('[data-know]');
+    if (know) {
+      const kid = know.dataset.know, status = know.dataset.status;
+      const noteEl = document.querySelector(`textarea[data-know-note="${CSS.escape(kid)}"]`);
+      const typed = (noteEl as Loose)?.value ?? '';
+      const note = status === 'accepted' ? typed.replace(/\s+/g, ' ').trim() : '';
+      // the lesson leaves the Inbox at once, and stays out until the data says it is kept or retired
+      const pending = (k: Loose) => k.id === kid && k.status === 'candidate';
+      press(`k:${kid}`, {
+        build: () => ({ action: 'knowledge', body: { id: kid, status, ...(note ? { note } : {}) } }),
+        overlay: { data: (d: Loose) => ({ ...d, ooda: { ...d.ooda, knowledge: d.ooda.knowledge.filter((k: Loose) => !pending(k)) } }), agrees: (raw: Loose) => !raw.ooda.knowledge.some(pending) },
+        apply: () => { shell.drafts[`know:${kid}`] = typed; know.closest('.card')?.remove(); },
+        onOk: () => { delete shell.drafts[`know:${kid}`]; },
+        errId: kid,
+      });
+      return;
+    }
+    const corr = ev.target.closest('[data-correct]');
+    if (corr) {
+      const form = document.querySelector(`[data-correct-form="${corr.dataset.correct}"]`);
+      (form as Loose)!.hidden = !(form as Loose)!.hidden;
+      if (!(form as Loose)!.hidden) form!.querySelector('input')!.focus();
+      return;
+    }
+    const over = ev.target.closest('[data-overrule-send]');
+    if (over) {
+      const id = over.dataset.overruleSend;
+      const field = document.querySelector(`input[data-overrule="${CSS.escape(id)}"]`);
+      const answer = (field as Loose)?.value ?? '';
+      // bound to the question as this page showed it, like every answer
+      const seen = ((shell.DATA as Loose)?.ooda?.answered || []).find((x: Loose) => x.id === id)?.hash ?? seenHash(id);
+      const row = over.closest('.row-inline');
+      const was = row?.innerHTML;
+      // the answered card keeps its place; the row says what was sent, and comes back if refused
+      press(`q:${id}`, {
+        // typed text with no picker: the owner's words alone, never read as a choice
+        build: () => ({ action: 'answer', body: { id, answer, choice: null, ...(seen ? { seen } : {}) } }),
+        apply: () => { if (row) row.innerHTML = `<span class="answered-note"><i class="icon-circle-check" aria-hidden="true"></i> Overruled: <b>${esc(answer)}</b></span><span class="err" id="e-${esc(id)}"></span>`; },
+        restore: () => { const f = document.querySelector(`input[data-overrule="${CSS.escape(id)}"]`); if (f) (f as Loose).value = answer; else if (row && was) row.innerHTML = was; },
+        errId: id,
+      });
+      return;
+    }
+    const send = ev.target.closest('[data-correct-send]');
+    if (send) {
+      const id = send.dataset.correctSend;
+      const reason = (document.querySelector(`input[data-reason="${id}"]`) as Loose)!.value;
+      // the Decide feed's forms are keyed dec:<id>, so a call listed in both feeds has two
+      // a goal's impact (keyed imp:<id>) goes with the value the owner gives it
+      const level = (document.querySelector(`select[data-impact="${id}"]`) as Loose)?.value;
+      const form = send.closest(`[data-correct-form]`) ?? document.querySelector(`[data-correct-form="${CSS.escape(id)}"]`);
+      press(`correct:${id}`, {
+        build: () => ({ action: 'correct', body: { id: id.replace(/^(dec|imp):/, ''), reason, ...(level ? { impact: Number(level) } : {}) } }),
+        apply: () => { if (form) { form.hidden = true; form.insertAdjacentHTML('afterend', `<p class="small answered-note" data-correct-sent="${esc(id)}"><i class="icon-circle-check" aria-hidden="true"></i> Correction sent</p>`); } },
+        restore: () => {
+          document.querySelectorAll(`[data-correct-sent="${CSS.escape(id)}"]`).forEach((el: Loose) => el.remove());
+          const f = document.querySelector(`[data-correct-form="${CSS.escape(id)}"]`);
+          if (f) { (f as Loose).hidden = false; const r = f.querySelector(`input[data-reason="${CSS.escape(id)}"]`); if (r) (r as Loose).value = reason; }
+        },
+        errId: id,
+      });
+      return;
+    }
+  });
+  document.addEventListener('click', (e: Loose) => {
+    const a = viewer() && e.target.closest?.('a[href^="#"]:not([href^="#talk/"])');
+    if (!a) return;
+    e.preventDefault();
+    const h = a.getAttribute('href');
+    window.open(`/${h}`, '_blank', 'noopener,noreferrer');
+  });
+  if (viewer()) viewerBoot();
+  else { later(loadSchemaDocs); load(); setInterval(load, POLL_MS); }
+  installHubFleet();
 }
