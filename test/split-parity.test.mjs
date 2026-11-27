@@ -506,6 +506,44 @@ test('C15: time to first data, today and in the app; a page that asks for no dat
   assert.equal(await firstData(chrome, `${quiet.origin}/`, { loads: 1, wait: 1500 }), null);
 });
 
+// a stand-in for lib/chrome.mjs: each newPage() is a tab that records what it was sent and whether it was closed
+function fakeChrome({ navigate = () => {} } = {}) {
+  const tabs = [];
+  return {
+    tabs,
+    async newPage() {
+      const tab = { sent: [], closed: false };
+      tabs.push(tab);
+      return {
+        async send(method, params) { tab.sent.push([method, params?.url]); if (method === 'Page.navigate') await navigate(tabs.length, params.url); return {}; },
+        async ev() { return 100 + tabs.length; },
+        close() { tab.closed = true; },
+      };
+    },
+  };
+}
+test('C42: first data opens a tab per load, navigates it to the page once, and closes every tab, even when a load throws', async () => {
+  const chrome = fakeChrome();
+  assert.equal(await firstData(chrome, 'http://127.0.0.1:1/', { loads: 3 }), 102);
+  assert.equal(chrome.tabs.length, 3, 'one tab per load');
+  for (const tab of chrome.tabs) {
+    assert.deepEqual(tab.sent.filter(([m]) => m === 'Page.navigate'), [['Page.navigate', 'http://127.0.0.1:1/']], 'one navigate, to the page, with no about:blank');
+    assert.ok(tab.closed, 'each tab is closed');
+  }
+  const failing = fakeChrome({ navigate: (n) => { if (n === 2) throw new Error('Page.navigate: no answer from Chrome in 30 s'); } });
+  await assert.rejects(firstData(failing, 'http://127.0.0.1:1/', { loads: 3 }), /no answer from Chrome/);
+  assert.equal(failing.tabs.length, 2, 'no load after the one that threw');
+  assert.ok(failing.tabs.every((tab) => tab.closed), 'the tab that threw is closed too');
+});
+
+test('C43: today\'s dashboard, which leaves a second load in one tab unanswered, is measured over two loads', { skip: canDrive ? false : 'needs Chrome and Node 22+ (lib/chrome.mjs canDrive)' }, async (t) => {
+  const chrome = await openChrome();
+  t.after(() => chrome.close());
+  const today = await pageServer({ route: '/', html: fs.readFileSync(path.join(root, 'docs/devteam/dashboard/index.html')) });
+  t.after(() => today.close());
+  assert.equal(typeof await firstData(chrome, `${today.origin}/`, { loads: 2 }), 'number');
+});
+
 // ---- Y: the workflows ----
 const stress = fs.readFileSync(path.join(root, '.github/workflows/test-stress.yml'), 'utf8');
 const testYml = fs.readFileSync(path.join(root, '.github/workflows/test.yml'), 'utf8');
