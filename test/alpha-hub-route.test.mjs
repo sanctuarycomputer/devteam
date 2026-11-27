@@ -75,9 +75,9 @@ function setAlpha(root, on) {
 async function hubUp(port) {
   await until(async () => { try { return (await ask(port, '/instances.json')).status === 200; } catch { return false; } }, `the hub on ${port}`);
 }
-async function alphaSays(port, want) {
+async function alphaSays(port, want, label = '') {
   let last;
-  await until(async () => { const r = await ask(port, '/alpha.json'); last = { status: r.status, type: r.headers['content-type'], json: JSON.parse(r.body.toString()) }; return JSON.stringify(last.json) === JSON.stringify(want); }, `/alpha.json to say ${JSON.stringify(want)}`).catch(() => assert.deepEqual(last?.json, want, '/alpha.json'));
+  await until(async () => { const r = await ask(port, '/alpha.json'); last = { status: r.status, type: r.headers['content-type'], json: JSON.parse(r.body.toString()) }; return JSON.stringify(last.json) === JSON.stringify(want); }, `/alpha.json to say ${JSON.stringify(want)}`).catch(() => assert.deepEqual(last?.json, want, `${label ? `${label}: ` : ''}/alpha.json`));
   assert.equal(last.status, 200, '/alpha.json: 200');
   assert.equal(last.type, 'application/json', '/alpha.json: JSON');
 }
@@ -123,7 +123,7 @@ test("H1 the dashboard's hub serves every case of alpha-serving.json under /next
   assert.equal(page.headers['content-security-policy'], HUB_CSP, "the hub page's policy, as before");
   // the setting alpha false, on main: the why-page, and /alpha.json says off
   setAlpha(root, false);
-  await alphaSays(HUB, { on: false, verified: true, release: '0.101.0', why: 'off' });
+  await alphaSays(HUB, { on: false, verified: true, release: '0.101.0', why: 'off' }, 'alpha false');
   await whyEverywhere(HUB, /turned off/, 'alpha false');
   setAlpha(root, true);
   const ok = { on: true, verified: true, release: '0.101.0', why: null };
@@ -133,20 +133,20 @@ test("H1 the dashboard's hub serves every case of alpha-serving.json under /next
   fs.cpSync(path.join(INSTALLS, PROVENANCE_FALSE), path.join(K, PROVENANCE_FALSE), { recursive: true });
   fs.rmSync(path.join(K, 'current'));
   fs.symlinkSync(PROVENANCE_FALSE, path.join(K, 'current'));
-  await alphaSays(HUB, { on: true, verified: false, release: null, why: 'unverified' });
-  await whyEverywhere(HUB, /didn’t pass its checks/, 'unverified');
+  await alphaSays(HUB, { on: true, verified: false, release: null, why: 'unverified' }, 'provenance_ok false');
+  await whyEverywhere(HUB, /didn’t pass its checks/, 'provenance_ok false');
   fs.rmSync(path.join(K, 'current'));
   fs.symlinkSync(GOOD, path.join(K, 'current'));
   await alphaSays(HUB, ok);
   // a verified install with no hub pages: no-pages
   fs.renameSync(served, `${served}.off`);
-  await alphaSays(HUB, { ...ok, why: 'no-pages' });
+  await alphaSays(HUB, { ...ok, why: 'no-pages' }, 'no hub pages');
   await whyEverywhere(HUB, /Release 0\.101\.0 has no alpha pages yet/, 'no hub pages');
   fs.renameSync(`${served}.off`, served);
   await alphaSays(HUB, ok);
   // no install
   fs.renameSync(K, `${K}-off`);
-  await alphaSays(HUB, { on: true, verified: false, release: null, why: 'no-install' });
+  await alphaSays(HUB, { on: true, verified: false, release: null, why: 'no-install' }, 'no install');
   await whyEverywhere(HUB, /no install of the alpha/, 'no install');
 });
 
@@ -156,6 +156,6 @@ test('H2 a hub started with no project (devteam.mjs hub) has no install: /alpha.
   const p = spawn(process.execPath, [path.join(root, 'docs', 'devteam', 'scripts', 'devteam.mjs'), 'hub'], { cwd: root, env, stdio: 'ignore', detached: true });
   t.after(() => { try { process.kill(-p.pid, 'SIGKILL'); } catch {} });
   await hubUp(ALONE);
-  await alphaSays(ALONE, { on: true, verified: false, release: null, why: 'no-install' });
+  await alphaSays(ALONE, { on: true, verified: false, release: null, why: 'no-install' }, 'a hub alone');
   await whyEverywhere(ALONE, /no install of the alpha/, 'a hub alone');
 });
