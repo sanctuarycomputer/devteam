@@ -3,11 +3,15 @@
 // `Loose` is `any`: the page's data has no fixed shape in index.html.
 type Loose = any;
 
+// The servers' (the dashboard's, the hub's, the gateway's) terse refusal of a body they couldn't
 // read says nothing the owner can act on: it is said in plain words, the press's own (plain) if it
 // has some. Any other refusal is the server's own words.
 export const TERSE_REFUSAL = /^(missing or invalid fields\b|bad json$)/;
 export const PLAIN_REFUSAL = 'the server didn\'t take what this page sent, and nothing was recorded. Reload the page and try again.';
 export const GOAL_REFUSAL = 'the server didn\'t take this approval as sent, and nothing was recorded. Reload the page and press Approve, Refine or Let go again.';
+// A goal's hold as the server will show it right after the press: a drain or park is a transition
+// (draining…, parking…) until the server says it has finished; never shown done ahead of it. Let go
+// and restore change the goal's status; restore brings it back parked.
 export function holdOverlay(id: string, mode: string): { data: (d: Loose) => Loose; agrees: (raw: Loose) => boolean } {
   const now = new Date().toISOString();
   const view = (h: Loose) => {

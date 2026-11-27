@@ -1,4 +1,4 @@
-// kit-989: the artifact viewer's data side (index.html:12855-12877): its read, its boot and its talk.
+// kit-989: the artifact viewer's data side (index.html:12783-12861): its read, its boot and its talk.
 import { later } from '../../lib/data-later';
 import { ttPeekPlace } from '../shell';
 import { $ } from '../shell/page';
@@ -12,6 +12,8 @@ import { viewerState } from '../viewer/state';
 type Loose = any;
 
 
+// An artifact's viewer: what /api/view said: the artifact there, or its status (404: nothing there;
+// else 0 for no answer)
 export async function viewerArtifact() {
   const info = async (slug: Loose, at: Loose) => { try { const r = await fetch(`/api/view?${new URLSearchParams({ kind: 'artifact', slug, at })}`); return { status: r.status, d: r.ok ? await r.json() : null }; } catch { return { status: 0, d: null }; } };
   let at = viewer()!.at;
@@ -36,6 +38,11 @@ export async function viewerArtifact() {
   showArtifact(viewer()!.name, at, { title: d?.title || viewer()!.name, note: held ?? (d ? note : got.status === 404 ? 'This artifact is not here' : 'This artifact could not be read'), fp: d?.fp ?? null, mainFp: d?.main_fp ?? null, anchor });
 }
 
+// The viewer's own start: the stage, the layer's threads every 5 s while the tab is seen, the
+// instance's hello (its name) every 30 s, and for an artifact on main its fingerprint every 10 s while
+// seen (/api/view: one artifact describe per ask, for the reload button's hint). A draft's is asked
+// every 2 s by the stage's own poll (avLiveReload: /api/artifact-fp, stat-only), and a tree never changes.
+// Nothing else.
 export async function viewerBoot() {
   document.documentElement.classList.add('viewer');
   // the Inbox button, above the stage: placed by the page's CSS now that .tt isn't drawn (kit-89 spec §2.8)
@@ -80,6 +87,7 @@ export async function viewerBoot() {
   }, 10000);
 }
 
+// #talk/<id> in a viewer tab, and nothing else of the dashboard's routes.
 export function viewerTalk() {
   if (!location.hash.startsWith('#talk/')) return;
   let id = '';

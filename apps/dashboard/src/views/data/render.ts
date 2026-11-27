@@ -127,6 +127,8 @@ export function render(d: Loose) {
   (focusBack as Loose)(focus);
 }
 
+// A failed load is said at the top of the page, never only in the sidebar: before the first good
+// load there is nothing else to see, and after it the page would otherwise show old data as current.
 export function showFailure(message: Loose) {
   const b = $('banner');
   $('stale')!.hidden = true; // the banner says what is shown, and why

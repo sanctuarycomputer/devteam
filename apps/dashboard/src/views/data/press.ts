@@ -69,6 +69,8 @@ export function press(key: Loose, { build, apply, overlay, undo, restore, errId,
   return run;
 }
 
+// What the owner had in a question card (the note, the pick, the trust and rule boxes), to put back
+// if the server refuses the answer.
 export function cardFields(id: Loose, card: Loose) {
   return { note: card?.querySelector('textarea[data-q]')?.value ?? shell.drafts[id], pick: wordsState.picks[id], boxes: [...document.querySelectorAll(`[data-qcard="${CSS.escape(id)}"]`)].map((c: Loose) => ({ at: c.id, auto: c.querySelector('input[data-auto]:checked')?.value ?? null, rule: !!c.querySelector('input[data-rulebox]')?.checked })) };
 }
@@ -90,6 +92,11 @@ export function putBackBoxes(id: Loose, f: Loose) {
   }
 }
 
+// An answer, at once: the card says so, and the server is told. The answer names the question as
+// this page showed it; one changed since is refused, and the card comes back, saying why until the
+// owner dismisses it (REFUSED). stays: false keeps the caller's own one-off error line (a review's).
+// files: the box's files that go with it (kit-171), out of the box while it is on its way, back with the words
+// if it is refused.
 export function answerPress(id: Loose, card: Loose, errId: Loose, text: Loose, build: Loose, { stays = true, plain, files }: Loose = {}) {
   const f = cardFields(id, card);
   let taken: Loose = null;

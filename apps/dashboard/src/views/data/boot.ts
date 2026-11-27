@@ -1,5 +1,5 @@
 // kit-989: data's hold guard, read and Inbox counts (index.html:12258-12416), and bootData(): the statements
-// index.html ran at load, in its order (12122-12880), which DataClient's effect runs once.
+// index.html ran at load, in its order (8115-12898), which DataClient's effect runs once.
 import { HINT_AFTER, PICK_HOLD, PRESS_HOLD, typingIn } from '../../lib/data-hold';
 import { ownerLesson } from '../../lib/data-inbox';
 import { later } from '../../lib/data-later';
@@ -43,6 +43,8 @@ export let STALE = false;
 
 export let HELD_SINCE = 0, COMPOSING = false, PRESSED = 0, PICKING = 0, SENDING = 0;
 
+// A field in the thread layer or the Threads panel holds nothing: both are outside what a redraw rebuilds, so the page refreshes (and the counts move) under a half-written turn.
+// The panel's Inbox tab (#th-inbox) is the exception: render() rebuilds it, so its fields hold as a page's do (layerField, kit-100 spec §2.7).
 export function holding() {
   const ae = document.activeElement;
   return COMPOSING || SENDING > 0 || (typingIn(ae) && !layerField(ae)) || Date.now() - PRESSED < PRESS_HOLD
@@ -141,6 +143,9 @@ export async function loadNow() {
   }
 }
 
+// The server answers a slow read with the last data it had, marked stale: say so where it shows on
+// any screen, with the time of what is drawn (not of a read held while the owner types), until a
+// fresh read lands. A banner at the top says more, and the note gives way to it.
 export function staleNote() {
   const n = $('stale');
   n!.hidden = !STALE || !shell.DATA || !$('banner')!.hidden || !$('updated')!.hidden;
@@ -151,16 +156,24 @@ export function staleNote() {
   n!.style.top = matchMedia('(max-width: 900px)').matches ? `${Math.max(0, document.querySelector('.side')!.getBoundingClientRect().bottom) + 8}px` : '';
 }
 
+// The Inbox's number (kit-100 spec §2.2): the open questions not answered on this page yet (ANSWERED), the
+// lessons sent to the owner, and the sessions at a permission prompt (promptCount). Counted from the data inboxTitle last counted (newer data held back from a redraw
+// included), else the data drawn, so the tab, the button and the tab title always agree; the /view/ tab has no
+// data: hello's number, in the button.
 export function inboxCount(d: Loose = shell.INBOX_D ?? shell.DATA) {
   if (!d) return parseInt((document.getElementById('inbox-btn-n')?.textContent as Loose), 10) || 0;
   return (d.questions || []).filter((q: Loose) => !attachmentsState.ANSWERED.has(q.id)).length + (d.ooda?.knowledge ?? []).filter(ownerLesson).length + promptCount();
 }
 
+// The permission prompts and other dialogs at the top of the Inbox (askHtml), one red question each: the
+// supervisor's terminal's (not a usage-limit stop, and not one just answered here) and each session's
+// (hello's prompt_sessions), as hello counts them into the hub's number.
 export function promptCount() {
   const q = typeof threadState.ASK !== 'undefined' ? askShown() : null;
   return (q && (q as Loose).kind !== 'limit' ? 1 : 0) + (typeof threadsPanelState.TL !== 'undefined' ? (threadsPanelState.TL.prompts ?? []).length : 0);
 }
 
+// The tab title and the Inbox button's red count carry the Inbox's number. Notifications are the hub's, for every instance.
 export function inboxTitle(d: Loose) {
   shell.INBOX_D = d;
   const n = inboxCount(d);

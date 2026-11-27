@@ -30,6 +30,7 @@ type Loose = any;
 
 export let ROUTE_COLD = true;
 
+// Go to a head: a new entry (assigned; hashchange routes it), or this entry replaced by it with a fresh stamp, then routed.
 export function goHead(head: Loose, { replace = false }: Loose = {}) {
   if (!replace) { location.hash = head; return; }
   history.replaceState(stampFor({ hash: head, state: null }, dataState.HERE, ROUTE_COLD, SHELL_ROUTES), '', head);
@@ -47,14 +48,22 @@ export function showHead(p: Loose, opts: Loose) {
   drawFilterPage(p.page);
 }
 
+// A new entry (a hash assigned, a link followed) is stamped at once: the page under it, its depth, and
+// whether this visit pushed every entry down to that page; HERE becomes the entry on screen.
 export function stampEntry() {
   if (!history.state || typeof history.state.page !== 'string') history.replaceState(stampFor({ hash: location.hash, state: history.state }, dataState.HERE, ROUTE_COLD, SHELL_ROUTES), '');
   ROUTE_COLD = false;
   dataState.HERE = history.state;
 }
 
+// Every route draws the Threads panel from the page head in force after the rest (thRoute), whichever way it went
+// (kit-89 spec §2.5): freshness read before the entry is stamped; once stamped (in routeHead, before any link is
+// opened, so a talk/ route reads the head with them) a peek closed carries its page's th and t, and on a fresh entry
+// the remembered panel is applied; then the panel decided, drawn and remembered. A route run inside routeHead (a
+// redirect's stamped replace) has done all of it already.
 export let ROUTE_N = 0;
 
+// LAST_HEAD: the last head routed that isn't the viewer's own (kit-141), what a viewer routed next is opened over
 export let LAST_HEAD: Loose = null;
 
 export function route() {
@@ -115,8 +124,10 @@ export function routeHead({ fresh = false, carry = null }: Loose = {}) {
   (showHead as Loose)(p);
 }
 
+// The drawer hidden, as when the route moves on (closeDrawer also closes its entry): it slides out
 export function hideDrawer() { if (!$('drawer')!.hidden) { peekHide(); peeksState.DRAWER = { kind: null, id: null }; peeksState.LAST_HTML = ''; } }
 
+// a review opened from the dashboard closes back to it; one opened from a link goes to the Inbox
 export let RV_FROM: Loose = null;
 
 export function leaveReview() { if (RV_FROM !== null) history.back(); else location.hash = '#overview?th=inbox'; }
