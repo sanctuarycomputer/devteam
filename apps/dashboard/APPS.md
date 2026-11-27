@@ -92,9 +92,9 @@ The lists below are the scan's (`node apps/dashboard/scripts/compat-scan.mjs --b
 - **Values are copied as `index.html` has them.** A value that names a function can't live in a file that imports no view. Two do: `ATTR` (peeks) and `LOOP_ROWS` (loop). Each starts `null`, typed as its eventual shape; its view's port assigns it once, at its module's top level; until then a read of it fails like a stub's call.
 - **`const` objects stay the same object.** Their properties are mutated in place, as in `index.html` (`TL.threads = …`, `PEEKS.set`). A `let` becomes an assignable property.
 - **A port uses its own state through its object too** (`viewerState.AV`, never a second local `AV`), so every reader sees one value.
-- **Types:** an object or array literal keeps its inferred shape. A `null` or empty value that `index.html` later fills with data is typed loosely (`Loose`, a `type Loose = any` alias in each state file, commented): the untyped page's own contract; `strict` stays on.
+- **Types:** an object or array literal keeps its inferred shape. A `null` or empty value that `index.html` later fills with data is typed loosely (`Loose`, a `type Loose = any` alias in each state file, commented): the untyped page's own contract; `strict` stays on. A property `index.html` adds later to one of these objects (`DRAWER.q`, `FLEET.error`, `TL.sup`, `TS.fpSerial` and the like) isn't in its shape: the port that writes it casts there (`(peeksState.DRAWER as Loose).q = …`), a type SWC strips.
 - **The exception to "A port replaces only its own folder" (The view stubs).** kit-989 created `state.ts` in 16 other views' folders. Each later port of such a view keeps its folder's `state.ts` and its object, and adds and drops none of its names; its own code reads and writes them through the object.
-- **The shell:** its page state is `shell` (`src/views/shell/state.ts`, The view stubs), which holds `PAGE_NOW` too; its other names are exported by its modules.
+- **The shell:** its page state is `shell` (`src/views/shell/state.ts`, The view stubs), which holds `PAGE_NOW` too: `showPage` sets `shell.PAGE_NOW` where it set its own var, and it starts `undefined`, as the var did. The shell's other names are exported by its modules.
 
 The state files:
 
