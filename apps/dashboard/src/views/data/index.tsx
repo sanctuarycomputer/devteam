@@ -1,8 +1,9 @@
 // kit-989: the data view of the dashboard's / route, ported from index.html (data's lines: the router, the presses,
 // the draw, the hold guard, the read and the Inbox counts, the viewer's data side, the hub's fleet ask). Data has no
 // markup in index.html: the view renders DataClient, which boots it once. Below, every function another view calls
-// from it (APPS.md, The view stubs' exports), each a hoisted function that calls data's module at call time, so a
-// view in the shell's cycle may call it at its top level.
+// from it (APPS.md, The view stubs' exports), each a hoisted function that calls data's module at call time. Data's
+// modules import other views, so a call made while the cycle is still loading can find its target unbound
+// (redrawNow and letGo are consts): call these from a function another view runs later, never at its top level.
 import * as Boot from './boot';
 import * as Press from './press';
 import * as Render from './render';
