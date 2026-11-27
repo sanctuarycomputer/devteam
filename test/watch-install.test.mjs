@@ -153,7 +153,9 @@ async function dashboard(t, extra = {}) {
   return { port, log, starts, end, count: (re) => (log().match(new RegExp(re.source, 'g')) ?? []).length };
 }
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
-const ci = (t) => t.reg.calls().filter((c) => c.argv[0] === 'ci').length;
+// npm ci runs for .kit (in .kit/.new-*); with layout 2 the install then does the hub too, after current
+// switched: only .kit's count, so a check made once current switched doesn't race the hub's
+const ci = (t) => t.reg.calls().filter((c) => c.argv[0] === 'ci' && path.dirname(c.cwd) === fs.realpathSync(t.kitTree)).length;
 
 test('W1 main\'s lockfile changing to another version runs the install step once, off the dashboard\'s tick and outliving a restart', { timeout: 240000 }, async () => {
   const t = await instance('w1');
