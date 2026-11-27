@@ -237,3 +237,30 @@ test('R5: a module the overlay grows past the cap is stale, and --verify names i
   assert.deepEqual(staleOf(f.j), [`(overlay) cap ${ONE}`], f.r.stderr);
   assert.match(f.verify().stdout, /over the cap: docs\/devteam\/scripts\/lib\/one\.mjs is \d+ lines \(cap 2000\)/);
 });
+// I: a rule may name an item that is no declaration ('(head)', 'marker <name> start|end') as changed,
+// with its module; --verify accepts and restores it as it does a declaration
+const itemRule = (named) => rule(`const t0 = t.read('${ONE}'); t.write('${ONE}', t0.replace('// a fixture CLI', '// a changed fixture CLI').replace('/* parts end */', '/* parts end */\\nvoid 0;')); return { changed: ${named}, refused: [] };`);
+test('I1: --verify accepts a changed (head) and marker item a rule names with its module', () => {
+  const f = fixture('items', [['10-items', itemRule(`[{ file: '${ONE}', item: '(head)' }, { file: '${ONE}', item: 'marker parts end' }]`)]]);
+  assert.deepEqual(f.j.stale, [], f.r.stderr);
+  assert.match(f.read(ONE), /^void 0;$/m);
+  const v = f.verify();
+  assert.equal(v.status, 0, v.stdout + v.stderr);
+  assert.match(v.stdout, /accepted as changed by the overlay: \(head\), marker parts end/);
+});
+test('I2: --verify still names a (head) or marker item a rule changed without naming it', () => {
+  const f = fixture('items-unnamed', [['10-items', itemRule(`[{ file: '${ONE}' }]`)]]);
+  const v = f.verify();
+  assert.match(v.stdout, /changed: \(head\) in docs\/devteam\/scripts\/lib\/one\.mjs/);
+  assert.match(v.stdout, /changed: marker parts end in docs\/devteam\/scripts\/lib\/one\.mjs/);
+  assert.equal(v.status, 1);
+});
+test('I3: an item site that is not one item of a module the split makes is stale, each named', () => {
+  const f = fixture('items-bad', [['10-items', itemRule(`[{ file: '${ONE}', item: 'marker nope start' }, { file: '${ONE}', item: 'greet' }, { file: 'README.md', item: '(head)' }, { file: '${ONE}', decl: 'greet', item: '(head)' }]`)]]);
+  const why = (f.j.stale ?? []).map((s) => s.why);
+  assert.equal(why.length, 4, JSON.stringify(f.j.stale));
+  assert.match(why[0], /names marker nope start in docs\/devteam\/scripts\/lib\/one\.mjs as changed, but the tool can't place it: it is there 0 times/);
+  assert.match(why[1], /a changed item must be '\(head\)' or 'marker <name> start\|end', alone/);
+  assert.match(why[2], /README\.md is not a module the split makes/);
+  assert.match(why[3], /a changed item must be '\(head\)' or 'marker <name> start\|end', alone/);
+});
