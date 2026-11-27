@@ -16,13 +16,15 @@ In the tree, the CLI's servers serve the built apps (`apps@1` Serving, `page-sea
 - **`patches/`**, each made with `git diff -U3 --full-index` from an edited copy:
   - `gitignore.patch`: `docs/devteam/.gitignore` ignores `apps/`;
   - `box-image-yml.patch`: the path filter names both folders in place of `hub.html`;
-  - `test-yml.patch`: a `build-apps` job (Node 24) builds both apps once, and every `kit` shard needs it and places `out/` and `lib-dist/` before it runs.
+  - `test-yml.patch`: a `build-apps` job (Node 24) builds both apps once, and every `kit` shard needs it and places `out/` and `lib-dist/` before it runs (a shard that places no build fails there).
 - The policy builder is written twice, inside `servePage` and inside `servePageAsset`, between `// policy builder start` and `// policy builder end`. An override replaces one declaration, so there is no shared helper. `test/split-apps-serve.test.mjs` A3 holds the two copies equal.
 
 **When it goes stale** (a regular PR changes one of these declarations, `.gitignore`, `box-image.yml` or `test.yml` on main):
 - The parity run reports it, and `test/split-apps-serve.test.mjs` skips the checks that read it, naming the drift.
 - To re-pin an override, merge main and look at the declaration's new text. Carry the change into the override, then set its pin to 64 zeros, split, and copy the `it is now sha256:<x>` value from the stale report.
 - To remake a patch, edit a copy of the file at HEAD and run `git diff -U3 --full-index`.
+
+**The area `apps-tests`** (this ticket's too, one patch per test file, each with its entry in `test/split/ledger/tests/`): `dashboard.kit-watch.test.mjs` appends to `docs/devteam/apps/dashboard/index.html` (its folder made first) and writes `docs/devteam/apps/hub/index.html` in place of a new stylesheet, expecting `kit files changed (apps/…/index.html)`. `dashboard.kit-watch-pane.test.mjs` makes the same append. When one goes stale (that test changed on main), remake its patch from an edited copy at HEAD and write its entry again with both hashes. K1 checks both.
 
 The tree's own tests that pin today's `IMAGE_RUNS` text or today's page policies fail in the tree. Each is a carry-over ticket, never an edit here (`cutover-tree@1`).
 

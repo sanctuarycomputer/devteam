@@ -704,13 +704,16 @@ test("G3: test.yml builds the apps once in build-apps, and every kit shard place
   const b = job('build-apps').join('\n');
   assert.match(b, /node-version: 24\b/);
   assert.match(b, /for d in apps\/\*\/; do .*npm ci --ignore-scripts && DEVTEAM_BASE_PATH= npm run build/);
-  assert.match(b, /uses: actions\/upload-artifact@v4\n\s+with:\n\s+name: apps-build/);
+  assert.match(b, /uses: actions\/upload-artifact@v4\n\s+with:\n\s+name: apps-build\n\s+path: \|\n\s+apps\/\*\/out\n\s+apps\/\*\/lib-dist\n/, 'the upload holds each out/ and lib-dist/, rooted at apps/');
   const k = job('kit');
   assert.ok(k.some((l) => /^    needs: build-apps$/.test(l)), 'kit needs build-apps');
   const dl = k.findIndex((l) => /uses: actions\/download-artifact@v4/.test(l));
   assert.ok(dl !== -1 && /name: apps-build/.test(k[dl + 2]), 'kit downloads apps-build');
+  // back at apps/<app>/{out,lib-dist}, where the place step looks: without the path they land at the root
+  assert.match(k[dl + 3] ?? '', /^\s+path: apps$/, 'the download lands at apps/');
   const place = k.findIndex((l, i) => i > dl && /mv "\$d\/out" "docs\/devteam\/apps\/\$a"/.test(l));
   assert.ok(place !== -1, 'a step places each out/ at docs/devteam/apps/<app>/');
+  assert.match(k[place + 1] ?? '', /\[ "\$n" -gt 0 \] \|\| \{ .*exit 1; \}/, 'placing none fails the step');
   const firstTest = k.findIndex((l) => /^\s+(- )?run: .*test\/run\.mjs/.test(l));
   assert.ok(firstTest !== -1 && place < firstTest, 'the build is placed before the first test step');
 });
