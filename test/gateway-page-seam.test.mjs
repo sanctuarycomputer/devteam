@@ -190,7 +190,10 @@ test('S2: the hub route sends the given page\'s bytes, read once when the gatewa
   assert.notEqual(head.status, 200, 'HEAD / is not the hub route (GET only, as at main)');
 });
 
-test('S3: gatewayHubPage(opts) resolves today\'s sources in today\'s order: opts.hubPage, DEVTEAM_HUB_PAGE, hub.html beside the gateway, the kit\'s dashboard/hub.html', () => {
+// hub.html beside the gateway (the image's) is never there in a checkout, and a test writes nothing into
+// cloud/, so its place between DEVTEAM_HUB_PAGE and the kit's page isn't tested here: gatewayHubPage's read is
+// main's line as it was (task-1 F1).
+test('S3: gatewayHubPage(opts) resolves today\'s sources in today\'s order, as a checkout has them: opts.hubPage, DEVTEAM_HUB_PAGE, the kit\'s dashboard/hub.html', () => {
   assert.equal(typeof G.gatewayHubPage, 'function', 'cloud/gateway.mjs exports gatewayHubPage');
   assert.ok(!fs.existsSync(path.join(root, 'cloud', 'hub.html')), 'a checkout has no hub.html beside the gateway (the image copies one there)');
   const mine = hubFile('hub-opts');
