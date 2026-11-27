@@ -229,7 +229,9 @@ const until = async (f, what, ms = 30000) => {
   }
 };
 
-// The processes on the machine (Linux): { pid, state, ppid, pgid }.
+// The processes on the machine: { pid, state, ppid, pgid }, from /proc (Linux; elsewhere F1 records nothing
+// and F2 skips).
+const HAS_PROC = fs.existsSync('/proc/self/stat');
 const procs = () => {
   const out = [];
   for (const d of fs.readdirSync('/proc')) {
@@ -252,6 +254,8 @@ let f1Started = null;
 test('F1 in the tree: /#design-system from the dashboard server, light and dark: tokens, every entry under its anchor, the filter, the event list, nothing fetched, no socket, no poll, no error, no violation; an anchor scrolls to its entry; / mounts the shell', { skip: skipChrome, timeout: F1_TIMEOUT }, async (t) => {
   assert.ok(node24 && installed, `in CI the tree's Chrome case runs: it needs Node 24 and apps/dashboard/node_modules (Node ${process.versions.node}, installed: ${installed})`);
   const later = cleanup(t);
+  // once F1 is out of time its teardown has run, but its body goes on: it starts nothing after that
+  const live = (what) => { if (t.signal.aborted) throw new Error(`F1 is out of time: not starting ${what}`); };
   const base = scratch('f1');
   later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   // a scratch copy of the dashboard with the fixture components beside any real ones, built by its own script
@@ -263,6 +267,7 @@ test('F1 in the tree: /#design-system from the dashboard server, light and dark:
   fs.mkdirSync(ui, { recursive: true });
   for (const f of fs.readdirSync(path.join(FIX, 'ui'))) fs.copyFileSync(path.join(FIX, 'ui', f), path.join(ui, f));
   const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('DEVTEAM_') && !['TMUX', 'TMUX_PANE'].includes(k)));
+  live('the scratch build');
   const b = await inGroup('npm', ['run', 'build'], { cwd: copy, env: { ...clean, NEXT_TELEMETRY_DISABLED: '1' } }, 150000, later);
   assert.equal(b.status, 0, `npm run build in the scratch copy${b.timedOut ? ' (out of time: its process group ended)' : ''}:\n${b.out.slice(-3000)}`);
   const catalog = entriesOf(read(path.join(copy, 'src', 'views', 'design-system', 'catalog.gen.ts')));
@@ -277,6 +282,7 @@ test('F1 in the tree: /#design-system from the dashboard server, light and dark:
   fs.rmSync(served, { recursive: true, force: true });
   fs.cpSync(path.join(copy, 'out'), served, { recursive: true });
   const port = await freePort();
+  live('the dashboard server');
   const dash = spawn(process.execPath, [path.join(root, 'docs', 'devteam', 'scripts', 'cli.mjs'), 'dashboard', '--port', String(port)], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   let said = '';
   dash.stdout.on('data', (d) => { said += d; });
@@ -290,13 +296,16 @@ test('F1 in the tree: /#design-system from the dashboard server, light and dark:
   }));
   await until(() => /dashboard on http/.test(said) || dash.exitCode !== null, 'the dashboard server', 120000);
   assert.match(said, /dashboard on http/, `the dashboard server started: ${said.slice(-600)}`);
+  live('Chrome');
   const chrome = await openChrome();
+  if (t.signal.aborted) { await chrome.close(); live('a page'); }
   later(() => chrome.close());
-  const kids = procs().filter((p) => p.ppid === process.pid);
-  f1Started = { pids: kids.map((p) => p.pid), groups: [...new Set(kids.map((p) => p.pgid))].filter((g) => g !== procs().find((p) => p.pid === process.pid)?.pgid) };
-  assert.ok(f1Started.pids.includes(dash.pid), 'F1 sees the server it started');
+  const kids = HAS_PROC ? procs().filter((p) => p.ppid === process.pid) : null;
+  if (kids) f1Started = { pids: kids.map((p) => p.pid), groups: [...new Set(kids.map((p) => p.pgid))].filter((g) => g !== procs().find((p) => p.pid === process.pid)?.pgid) };
+  if (kids) assert.ok(f1Started.pids.includes(dash.pid), 'F1 sees the server it started');
   const url = (hash) => `http://127.0.0.1:${port}/${hash}`;
   const open = async (hash, scheme) => {
+    live('a page');
     const p = await chrome.newPage();
     later(() => p.close());
     await p.send('Page.enable');
@@ -379,7 +388,7 @@ test('F1 in the tree: /#design-system from the dashboard server, light and dark:
   assert.deepEqual((await p.ev('window.__w')).errors, [], '/: no error');
 });
 
-test('F2 F1 ended what it started in its teardown: the dashboard server and Chrome, each by its process group, within its own timeout', { skip: skipChrome }, async (t) => {
+test('F2 F1 ended what it started in its teardown: the dashboard server and Chrome, each by its process group, within its own timeout', { skip: skipChrome || (HAS_PROC ? false : 'no /proc here: F2 reads processes from it (Linux)') }, async (t) => {
   assert.ok(F1_TIMEOUT + TEARDOWN_MAX + F2_WAIT + REST <= WATCHDOG, `F1's timeout, its teardown, F2's wait and the rest of the file (${F1_TIMEOUT + TEARDOWN_MAX + F2_WAIT + REST} ms) fit test.yml's ${WATCHDOG / 1000} s watchdog for a file`);
   if (!f1Started) return t.skip('F1 stopped before its server and Chrome were up');
   const left = () => procs().filter((p) => p.state !== 'Z' && (f1Started.pids.includes(p.pid) || f1Started.groups.includes(p.pgid)));
