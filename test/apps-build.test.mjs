@@ -24,6 +24,8 @@ const readJson = (f) => JSON.parse(fs.readFileSync(f, 'utf8'));
 const HASH = path.join(APPS, 'dashboard', 'scripts', 'csp-hashes.mjs');
 const ROUTES = { dashboard: ['/', '/view/canvas/', '/browser/'], hub: ['/'] };
 const BUILD = 'next build && node ../dashboard/scripts/csp-hashes.mjs out && node ../dashboard/scripts/lib-build.mjs';
+// apps-src@2: the dashboard's build writes the design-system page's catalog first (scripts/ui-catalog.mjs)
+const BUILDS = { dashboard: `node ../dashboard/scripts/ui-catalog.mjs && ${BUILD}`, hub: BUILD };
 const DAY = 24 * 3600 * 1000;
 
 // ---- always ----
@@ -44,7 +46,7 @@ test('B2 dependencies: dev only, exact pins, the same in both apps, and both loc
   for (const a of APP_NAMES) {
     const p = pj[a];
     assert.equal(p.private, true, `apps/${a} is private`);
-    assert.equal(p.scripts?.build, BUILD, `apps/${a}'s build: next build, then the hash step, then lib-dist`);
+    assert.equal(p.scripts?.build, BUILDS[a], `apps/${a}'s build: ${a === 'dashboard' ? 'the catalog, then ' : ''}next build, then the hash step, then lib-dist`);
     for (const k of ['dependencies', 'peerDependencies', 'optionalDependencies', 'bundleDependencies']) assert.equal(p[k], undefined, `apps/${a} has no ${k}`);
     for (const n of ['next', 'react', 'react-dom', 'typescript']) assert.ok(p.devDependencies?.[n], `apps/${a} pins ${n}`);
     for (const [n, v] of Object.entries(p.devDependencies)) assert.match(v, /^\d+\.\d+\.\d+$/, `apps/${a}: ${n} is pinned exactly (${v})`);
@@ -147,7 +149,7 @@ test('B6 APPS.md states apps-src@1 at version 1, every part the design gives it,
   // each section's load-bearing line, so an emptied section fails
   const part = (h) => { const at = md.indexOf(`\n## ${h}\n`); const next = md.indexOf('\n## ', at + 1); return md.slice(at, next < 0 ? md.length : next); };
   const PINS = {
-    Layout: [BUILD, '`node_modules/`, `.next/`, `out/`, `lib-dist/`', 'lib-dist/lib/<module>.js'],
+    Layout: [BUILDS.dashboard, BUILDS.hub, '`node_modules/`, `.next/`, `out/`, `lib-dist/`', 'lib-dist/lib/<module>.js'],
     Routes: ['| `apps/dashboard` | `/view/canvas/` |', '| `apps/dashboard` | `/browser/` |', '| `apps/hub` | `/` |'],
     Paths: ['export function appPath(pathname?: string, base?: string): string;'],
     'The view stubs': ["throw new Error('not ported: <view>');"],
