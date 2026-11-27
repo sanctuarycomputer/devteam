@@ -22656,6 +22656,8 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
   const listHead = { hub: 1, kit, ...(image ? { image: true } : {}) };
   const retry = Number(process.env.DEVTEAM_HUB_RETRY_MS ?? 30000);
   const ownHost = (h) => [`127.0.0.1:${HUB_PORT}`, `localhost:${HUB_PORT}`].includes(h ?? '');
+  // the hub page's policy, and its alpha's under alphaCsp
+  const hubPolicy = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src ${PORT_RANGE.map((p) => `http://127.0.0.1:${p}`).join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
   // One scan at a time, its answer kept for 2 s: however often pages ask, the block is probed at
   // most every 2 s. An instance speaking a newer hello than this hub knows lists only root and port.
   let scanning = null;
@@ -22791,7 +22793,11 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
       const act = req.method === 'POST' && req.url.startsWith('/operator/') && Object.hasOwn(HUB_ACTIONS, req.url.slice(10)) ? HUB_ACTIONS[req.url.slice(10)] : null;
       if (act) return ownerPost(req, send, act);
       if (req.method !== 'GET') return send(405, 'text/plain; charset=utf-8', 'the hub only lists, and takes the owner\'s threads with the operator', { allow: 'GET' });
-      if (req.url === '/') return servePage(null, req, res, 'hub', `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src ${PORT_RANGE.map((p) => `http://127.0.0.1:${p}`).join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`, { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+      if (req.url === '/') return servePage(null, req, res, 'hub', hubPolicy, { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+      // the live alpha (alpha@1, kit-961): the hub app of the project whose dashboard started this hub,
+      // under the hub page's policy with alphaCsp's changes; a hub with no project has no install
+      if (req.url === '/alpha.json') { const { on, verified, release, why } = alphaState('hub', !standalone); return send(200, 'application/json', JSON.stringify({ on, verified, release, why })); }
+      if (alphaServe('hub', req, res, () => hubPolicy, !standalone) !== DASH_NEXT) return;
       // The list is for the hub's own page: another site's page doesn't get to make the hub probe
       // the block (a browser always says where a request came from). The page itself opens from
       // anywhere, a link in a README included.
@@ -29621,6 +29627,157 @@ function dashRoutesApp(D, req, res, q) {
   if (req.method !== 'GET' && req.method !== 'HEAD') return DASH_NEXT;
   return servePageAsset(req, res, 'dashboard');
 }
+// alpha@1 (kit-961): the live alpha at /next/ on a project's dashboard and the laptop hub, served from
+// the project's own verified install (kit-install@1), by serveAppFiles. alphaState(app, project) is
+// what /next/, GET /api/alpha (the dashboard) and GET /alpha.json (the hub) read: { on, verified,
+// release, why, folder }. project is false for a hub with no project (cmdHub's): nothing is installed
+// for it. Otherwise the install is main's checkout's docs/devteam/.kit/current, as packageStatus reads
+// it (a real folder; a current that is a relative symlink or a one-line file naming a real folder
+// beside it); verified as packageStatus says (its record and its pair), and its node_modules/<name>/
+// must resolve inside the folder, a package.json there (a regular file, at most 1 MiB) naming the
+// record's name and version. on is false only when main's settings say alpha: false. release is the
+// verified record's version (X.Y.Z, no v), else null. why is the first of 'off', 'no-install' (no
+// current), 'unverified' and 'no-pages' (no folder node_modules/<name>/docs/devteam/alpha/<app>/
+// whose real path is inside the package's), else null; folder is that real path only when why is
+// null. One read per app and project is kept 2 s, so a page's many files cost one git show.
+const alphaState = (() => {
+  const kept = new Map();
+  const read = (app, project) => {
+    let on = true;
+    if (project) {
+      const main = mainRef();
+      const s = main ? settingsAt(main, { orNull: true }) : null;
+      on = s?.alpha !== false;
+    }
+    const out = (why, verified = false, release = null, folder = null) => ({ on, verified, release, why: on ? why : 'off', folder: on && !why ? folder : null });
+    if (!project) return out('no-install');
+    const tree = path.join(mainRoot, 'docs', 'devteam', '.kit');
+    const t = packageStatus({ tree });
+    if (!t.current) return out('no-install');
+    const one = t.installs.find((i) => i.folder === t.current);
+    if (!one?.verified) return out('unverified');
+    const r = one.record;
+    let pkg;
+    try {
+      const top = fs.realpathSync(path.join(tree, t.current));
+      pkg = fs.realpathSync(path.join(top, 'node_modules', ...r.name.split('/')));
+      if (!pkg.startsWith(top + path.sep)) throw new Error('outside');
+      const f = path.join(pkg, 'package.json');
+      const st = fs.lstatSync(f);
+      if (!st.isFile() || st.size > 1048576) throw new Error('not a file');
+      const pj = JSON.parse(fs.readFileSync(f, 'utf8'));
+      if (pj?.name !== r.name || pj?.version !== r.version) throw new Error('another package');
+    } catch { return out('unverified'); }
+    let folder = null;
+    try {
+      const f = fs.realpathSync(path.join(pkg, 'docs', 'devteam', 'alpha', app));
+      if (f.startsWith(pkg + path.sep) && fs.statSync(f).isDirectory()) folder = f;
+    } catch {}
+    return out(folder ? null : 'no-pages', true, r.version, folder);
+  };
+  return (app, project) => {
+    const key = `${app}\0${project ? 1 : 0}`;
+    const k = kept.get(key);
+    if (k && Date.now() - k.at < 2000) return k.state;
+    const state = read(app, project);
+    kept.set(key, { at: Date.now(), state });
+    return state;
+  };
+})();
+// A /next/ page's policy: the server's own policy for that page with script-src 'self' and the
+// page's hashes (no 'unsafe-inline'), style-src 'self' 'unsafe-inline' (no hash: a hash would make
+// browsers drop 'unsafe-inline' and the export's style attributes), and font-src 'self'; each in
+// place when the policy has it, else added at its end in that order. A policy whose default-src is
+// 'none' and has no img-src (the laptop hub's) also gains img-src 'self' data: at its end, so the
+// app's own images load (kit-package-apps.md's rule; ruling m-20261127-130542042). Every other
+// directive is kept as it is. A hash that is not 'sha256-' and 43 base64 characters and '=' throws.
+function alphaCsp(policy, hashes) {
+  for (const h of hashes) if (typeof h !== 'string' || !/^sha256-[A-Za-z0-9+/]{43}=$/.test(h)) throw new Error(`alphaCsp: ${JSON.stringify(h)} is not a sha256 hash`);
+  const set = { 'script-src': ['script-src', "'self'", ...hashes.map((h) => `'${h}'`)].join(' '), 'style-src': "style-src 'self' 'unsafe-inline'", 'font-src': "font-src 'self'" };
+  const done = new Set();
+  const out = policy.split(';').map((d) => d.trim()).filter(Boolean).map((d) => {
+    const name = d.split(/\s+/)[0].toLowerCase();
+    if (!Object.hasOwn(set, name)) return d;
+    done.add(name);
+    return set[name];
+  });
+  for (const name of Object.keys(set)) if (!done.has(name)) out.push(set[name]);
+  const names = out.map((d) => d.split(/\s+/)[0].toLowerCase());
+  if (out.includes("default-src 'none'") && !names.includes('img-src')) out.push("img-src 'self' data:");
+  return out.join('; ');
+}
+// The page /next/ answers in place of the alpha, a string here and never a file of the install: no
+// script, one sentence on why in plain words, and a link back to the stable page at /.
+function alphaWhyPage(why, release) {
+  const words = {
+    off: 'The alpha is turned off for this project: its alpha setting is false.',
+    'no-install': 'There is no install of the alpha here yet: no verified kit release is installed where this page is served.',
+    unverified: 'The installed release didn’t pass its checks (integrity and provenance), so none of it is served.',
+    'no-pages': `Release ${String(release).replace(/[^0-9.]/g, '')} has no alpha pages yet.`,
+  }[why] ?? 'The alpha isn’t available here.';
+  return `<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>The alpha isn’t here</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:32em;margin:3em auto;padding:0 1em}</style></head><body><h1>The alpha isn’t here</h1><p>${words}</p><p><a href="/">Back to the stable page</a></p></body></html>\n`;
+}
+// /next and everything under it, to a GET or a HEAD, on the dashboard (app 'dashboard') or the
+// laptop hub ('hub'); DASH_NEXT for anything else. With alphaState's why set, every such path is
+// alphaWhyPage under its own policy (script-src 'none'). Otherwise serveAppFiles serves the folder
+// at /next, each page under alphaCsp(policy(), its route's hashes): policy() is the server's own
+// policy for the page, asked only for a page. The hashes are csp-hashes.json's in the folder, read
+// per page: { v: 1, pages: { <route>: [hash…] } }, a regular file of at most 1 MiB, every list at
+// most 256 hashes, each a sha256 source; a route it doesn't list has none. A file that is missing or
+// is anything else makes every page a 500 (serveAppFiles' "no policy"), never a looser policy.
+function alphaServe(app, req, res, policy, project) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return DASH_NEXT;
+  const p = String(req.url).split('?')[0];
+  if (p !== '/next' && !p.startsWith('/next/')) return DASH_NEXT;
+  const st = alphaState(app, project);
+  if (st.why) {
+    const body = Buffer.from(alphaWhyPage(st.why, st.release));
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': body.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'" });
+    return res.end(req.method === 'HEAD' ? undefined : body);
+  }
+  const hashes = (route) => {
+    const f = path.join(st.folder, 'csp-hashes.json');
+    const s = fs.lstatSync(f);
+    if (!s.isFile() || s.size > 1048576) throw new Error('csp-hashes.json is not a file of at most 1 MiB');
+    const j = JSON.parse(fs.readFileSync(f, 'utf8'));
+    if (!j || j.v !== 1 || !j.pages || typeof j.pages !== 'object' || Array.isArray(j.pages)) throw new Error('csp-hashes.json is not { v: 1, pages }');
+    for (const list of Object.values(j.pages)) if (!Array.isArray(list) || list.length > 256 || list.some((h) => typeof h !== 'string' || !/^sha256-[A-Za-z0-9+/]{43}=$/.test(h))) throw new Error('csp-hashes.json holds a list that is not sha256 hashes');
+    return Object.hasOwn(j.pages, route) ? j.pages[route] : [];
+  };
+  return serveAppFiles(st.folder, '/next', req, res, (route) => alphaCsp(policy(), hashes(route)));
+}
+// The dashboard's alpha routes: GET /api/alpha, { on, verified, release, why }; and /next/ by
+// alphaServe under the dashboard's own policy, as / has it (pageCsp(stageFrames())). The viewer's
+// paths under it, /next/view/artifact/<id> and /next/view/preview/<name>, are the / route's
+// index.html (alphaServe asked for /next/), checked and with the policy and referrer-policy that
+// /view/artifact/<id> and /view/preview/<name> have today; a bad id or no such preview is a 404.
+// A plain function, not an async dashRoutes* group, so it sits here with the seam, outside the
+// dashboardRoutes region (as dashRoutesApp); a preview's answer is a promise the route loop awaits.
+function dashRoutesAlpha(D, req, res, q) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return DASH_NEXT;
+  const p = String(req.url).split('?')[0];
+  if (p === '/api/alpha') {
+    if (req.method !== 'GET') return DASH_NEXT;
+    const { on, verified, release, why } = alphaState('dashboard', true);
+    return D.send(res, 200, 'application/json', JSON.stringify({ on, verified, release, why }));
+  }
+  if (p !== '/next' && !p.startsWith('/next/')) return DASH_NEXT;
+  const { pageCsp, stageFrames, previewStage, send } = D;
+  const vw = /^\/next\/view\/artifact\/([^/]+)$/.exec(p);
+  const vp = /^\/next\/view\/preview\/([^/]+)$/.exec(p);
+  if ((vw || vp) && !alphaState('dashboard', true).why) {
+    const root = { method: req.method, url: '/next/' };
+    const viewer = (policy) => { res.setHeader('referrer-policy', 'no-referrer'); return alphaServe('dashboard', root, res, policy, true); };
+    if (vw) {
+      if (!LINK_ID.test(vw[1]) || !ARTIFACT_AT.test(q.u.searchParams.get('at') || 'main')) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
+      return viewer(() => pageCsp());
+    }
+    const rec = PREVIEW_NAME.test(vp[1]) ? readPreviews().find((r) => r.name === vp[1]) : null;
+    if (!rec) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
+    return previewStage(rec).then(({ origin }) => viewer(() => pageCsp(origin ? [origin] : [])));
+  }
+  return alphaServe('dashboard', req, res, () => pageCsp(stageFrames()), true);
+}
 /* cmdDashboard start */
 /* dashboardRoutes start */
 // What a route group returns when none of its routes matched the request.
@@ -30362,7 +30519,7 @@ async function dashRoutesOwner(D, req, res, q) {
   });
   return;
 }
-const DASHBOARD_ROUTES = [dashRoutesUpload, dashRoutesPage, dashRoutesViewer, dashRoutesThreads, dashRoutesReads, dashRoutesFiles, dashRoutesArtifacts, dashRoutesReviewPage, dashRoutesApp, dashRoutesOwner];
+const DASHBOARD_ROUTES = [dashRoutesUpload, dashRoutesPage, dashRoutesViewer, dashRoutesThreads, dashRoutesReads, dashRoutesFiles, dashRoutesArtifacts, dashRoutesReviewPage, dashRoutesAlpha, dashRoutesApp, dashRoutesOwner];
 /* dashboardRoutes end */
 // A request whose handling threw, one no guard foresaw: logged with its method and path (the query
 // cut, at most 200 characters) and the error's class and code, then a 500 when no header is out yet.
