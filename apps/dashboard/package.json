@@ -2,7 +2,9 @@
   "name": "devteam-dashboard",
   "private": true,
   "scripts": {
-    "build": "next build && node ../dashboard/scripts/csp-hashes.mjs out && node ../dashboard/scripts/lib-build.mjs"
+    "dev": "next dev",
+    "predev": "node ../dashboard/scripts/ui-catalog.mjs",
+    "build": "node ../dashboard/scripts/ui-catalog.mjs && next build && node ../dashboard/scripts/csp-hashes.mjs out && node ../dashboard/scripts/lib-build.mjs"
   },
   "devDependencies": {
     "@types/node": "24.19.2",
