@@ -21,7 +21,7 @@ const OUT = path.join(testDir, 'fixtures', 'alpha-build', 'hub', 'out');
 const HASHES = JSON.parse(fs.readFileSync(path.join(OUT, 'csp-hashes.json'), 'utf8')).pages;
 const INSTALLS = path.join(testDir, 'fixtures', 'kit-install', 'kit-link');
 const GOOD = '0.101.0-63959e27d616';
-const NO_RECORD = '0.100.0-2adfe5123521';
+const PROVENANCE_FALSE = '0.99.0-d12588c848a5';
 const NAME = ['@sanctuarycomputer', 'devteam'];
 
 // the hub page's policy, as it is before this ticket (literal), and the alpha's from it
@@ -128,10 +128,11 @@ test("H1 the dashboard's hub serves every case of alpha-serving.json under /next
   setAlpha(root, true);
   const ok = { on: true, verified: true, release: '0.101.0', why: null };
   await alphaSays(HUB, ok);
-  // an unverified install made current (no verified.json): the why-page, as the dashboard's
-  fs.cpSync(path.join(INSTALLS, NO_RECORD), path.join(K, NO_RECORD), { recursive: true });
+  // an install whose record says provenance_ok false made current: its record and package match, so only
+  // packageStatus' verified flag refuses it (the hub's unverified, as D4's on the dashboard)
+  fs.cpSync(path.join(INSTALLS, PROVENANCE_FALSE), path.join(K, PROVENANCE_FALSE), { recursive: true });
   fs.rmSync(path.join(K, 'current'));
-  fs.symlinkSync(NO_RECORD, path.join(K, 'current'));
+  fs.symlinkSync(PROVENANCE_FALSE, path.join(K, 'current'));
   await alphaSays(HUB, { on: true, verified: false, release: null, why: 'unverified' });
   await whyEverywhere(HUB, /didn’t pass its checks/, 'unverified');
   fs.rmSync(path.join(K, 'current'));
