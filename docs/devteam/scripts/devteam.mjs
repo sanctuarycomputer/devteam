@@ -10342,6 +10342,19 @@ function cmdMerge() {
       if (prior.length && !landing) fails.push(`${approved} already approved ${declared.length ? `an act for ${target}` : 'an act'}; ask again for this one`);
     }
   }
+  // The pin (kit-sync@2, kit-957): on every home PR, whatever the approval; no flag skips it.
+  const pinned = R.name === 'home' ? pinCheck({ base: mainRef() ? git(['merge-base', mainRef(), sha]) : null, sha, chore }) : null;
+  if (pinned) {
+    fails.push(...pinned.fails);
+    for (const s of pinned.skips) warn(`pin: can't verify ${pinned.pin.name}@${pinned.pin.version} (${s.cause}): ${s.why}; a layout-1 pin merges anyway, as a finding, and the install after the merge verifies it`);
+    if (pinned.verified) out(`pin: ${pinned.pin.name}@${pinned.pin.version} (layout ${pinned.pin.layout}) is the registry's, with its provenance; it installs ${pinned.install} the merge`);
+  }
+  // package install as a command of its own (a die in it, withLock's wait, never ends merge)
+  const pkgRun = (args) => {
+    const p = spawnSync(process.execPath, [fileURLToPath(import.meta.url), 'package', ...args], { cwd: mainRoot, encoding: 'utf8', timeout: 1800000, stdio: ['ignore', 'pipe', 'pipe'] });
+    const said = `${p.stdout ?? ''}${p.stderr ?? ''}`.trim().replace(/^devteam: /, '');
+    return { exit: p.status ?? 1, line: said || `package ${args[0]} ended without a word (${p.error?.code ?? p.signal ?? `exit ${p.status}`})` };
+  };
   // Gates: the repo's own commands (never inherited), at the exact head, in a detached
   // worktree of that repo seeded from that repo's settings.
   const gates = Object.entries(S.gates ?? {});
@@ -10443,6 +10456,15 @@ function cmdMerge() {
   if (unpinCode) unpinCode();
   const recWords = rec ? `, records at ${rec.sha.slice(0, 12)} in home${rec.landed ? ' (landed already: only the code lands)' : ''}` : '';
   if (dry) return out(`ok: ${branch} at ${sha.slice(0, 12)} would merge${inR}${recWords}`);
+  // a layout-2 pin: installed and verified into its folder in .kit before anything lands; current
+  // switches to it right after the merge (below)
+  if (pinned?.install === 'before') {
+    const p = pinned.pin;
+    const folder = `${p.version}-${Buffer.from(p.integrity.slice(7), 'base64').toString('hex').slice(0, 12)}`;
+    const i = pkgRun(['install', '--version', p.version, '--into', path.join(mainRoot, 'docs', 'devteam', '.kit', folder)]);
+    if (i.exit !== 0) die(`the install of ${p.name}@${p.version} (layout 2) before the merge failed, so nothing merged: ${i.line}`);
+    out(i.line);
+  }
   const mainBranch = S.main_branch;
   // Records first: they land on home's main at exactly the pinned sha (once: a rerun finds them
   // landed), then the code. A code landing that fails after them leaves home with the records and
@@ -10558,7 +10580,7 @@ function cmdMerge() {
   if (R.name === 'home') { mainLogCache = undefined; mergeShaCache.clear(); } else R.resetCaches();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
   // A release-production decision is carried out by the release act, never by the merge act.
-  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${rec ? `; records at ${rec.sha} in home` : ''}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : jobsForced ? ` while its goal is ${jobsForced}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}${coveredNotes.map((n) => `; ${n}`).join('')}`, refs: id ? [id] : plan ? [plan] : [`chore-${chore}`], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
+  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${rec ? `; records at ${rec.sha} in home` : ''}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : jobsForced ? ` while its goal is ${jobsForced}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}${coveredNotes.map((n) => `; ${n}`).join('')}${pinned?.pin ? `; pin ${pinned.pin.name}@${pinned.pin.version} ${pinned.pin.integrity}` : ''}`, refs: id ? [id] : plan ? [plan] : [`chore-${chore}`], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
   // Adding a gate is the supervisor's own act (constitutional gate-add), recorded apart from the merge
   // so the owner sees each new check in the act feed and can correct it.
   if (gateAdds?.length) {
@@ -10568,6 +10590,18 @@ function cmdMerge() {
   if (release) {
     const rel = appendLog({ type: 'act', class: 'release-production', decision: release.decision, rung: release.rung, what: `released ${release.target}${inR} to production by merging ${branch} at ${sha} (release: merge)`, refs: [release.target, act.id], reversible: false, ...onR }, 'supervisor');
     out(`released ${release.target}${inR} to production (${rel.id})`);
+  }
+  // The pin after the merge: main's pin installed (layout 1: verified, unused; layout 2: current switched
+  // to the folder installed before), best effort: a failure is a finding and the merge stays done.
+  if (pinned?.pin) {
+    const p = pinned.pin;
+    const note = (kind, detail, key) => appendLog({ type: 'observation', source: 'supervisor', subject: `package:v${p.version}`, kind, detail: detail.slice(0, 900), severity: kind === 'package-pinned' ? 1 : 2, valence: kind === 'package-pinned' ? 1 : -1, source_key: `package-merge:${sha}:${key}`, refs: [act.id] }, 'supervisor');
+    for (const s of pinned.skips) note('package-pin-skipped', `merge of ${branch} at ${sha.slice(0, 12)}: the pin check of ${p.name}@${p.version} was skipped (${s.cause}): ${s.why}`, s.cause);
+    const i = fetched.ok ? pkgRun(['install']) : { exit: 1, line: `not run: the fetch of ${mainBranch} after the landing failed` };
+    if (i.exit === 0) { out(`pin: ${i.line}`); note('package-pinned', `merge of ${branch} at ${sha.slice(0, 12)}: ${i.line}`, 'installed'); } else {
+      warn(`merged, but the install of ${p.name}@${p.version} after the merge did not finish: ${i.line}`);
+      note('package-pin-skipped', `merge of ${branch} at ${sha.slice(0, 12)}: the install of ${p.name}@${p.version} after the merge failed (install): ${i.line}`, 'install');
+    }
   }
   out(`merged ${branch} at ${sha.slice(0, 12)}${inR} (${act.id})`);
 }
