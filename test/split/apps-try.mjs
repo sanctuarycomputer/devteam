@@ -44,8 +44,9 @@ const gitIn = (cwd, args, env) => spawnSync('git', ['-C', cwd, ...args], { encod
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---- the named files ----
+const NO_FILES = 'name the test files to run: node test/split/apps-try.mjs test/<name>.test.mjs …; apps-try never runs the whole suite';
 export function parseFiles(argv, { cwd, repo }) {
-  if (!argv.length) throw new Refusal('name the test files to run: node test/split/apps-try.mjs test/<name>.test.mjs …; apps-try never runs the whole suite');
+  if (!argv.length) throw new Refusal(NO_FILES);
   const files = [];
   for (const a of argv) {
     if (a.startsWith('-')) throw new Refusal(`unknown option ${a}: apps-try takes test files only`);
@@ -225,6 +226,8 @@ export function buildChanged({ tree, stateFile, state, modules, build, env, say 
 // ---- the run ----
 let running = null, scratchHome = null;
 export async function appsTry({ argv, cwd = process.cwd(), repo = null, split = path.join(here, 'split.mjs'), build = buildApp, node = process.execPath, tmpdir = os.tmpdir(), env = process.env, say = (s) => process.stderr.write(`${s}\n`), stdio = 'inherit', pollMs = 2000 }) {
+  // no file named is refused before anything is read, git included
+  if (!argv.length) throw new Refusal(NO_FILES);
   if (!repo) {
     const t = gitIn(here, ['rev-parse', '--show-toplevel'], env);
     if (t.status !== 0) throw new Refusal(`${here} is not in a git checkout`);

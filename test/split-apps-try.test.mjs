@@ -117,6 +117,13 @@ test('R1 refuses with no file named, before writing anything or taking the lock'
   assert.equal(r.status, 2, r.stderr);
   assert.match(r.stderr, /^apps-try: name the test files to run/);
   assert.equal(fs.existsSync(lock), false);
+  // a copy outside any checkout: still the same refusal, before git is asked anything
+  const outside = path.join(tmp, 'outside', 'test', 'split');
+  write(path.join(outside, 'apps-try.mjs'), fs.readFileSync(tool));
+  write(path.join(outside, 'parity.mjs'), fs.readFileSync(path.join(root, 'test/split/parity.mjs')));
+  const o = spawnSync(process.execPath, [path.join(outside, 'apps-try.mjs')], { encoding: 'utf8', env: { ...base, TMPDIR: lockDir, GIT_CEILING_DIRECTORIES: tmp }, cwd: tmp });
+  assert.equal(o.status, 2, o.stderr);
+  assert.match(o.stderr, /^apps-try: name the test files to run/, 'refused for no file, not for the missing checkout');
 });
 
 test('R2 refuses an option, a file outside the checkout, and a file not in the tree', async () => {
@@ -219,6 +226,16 @@ test('B5 a failed build runs no test, exits through Failure, and is built again 
   assert.deepEqual(builds.map((b) => b.app), ['hub']);
 });
 
+test('B7 a reused tree whose served build is gone builds that app again', async () => {
+  fs.rmSync(path.join(tree, 'docs/devteam/apps/hub'), { recursive: true });
+  const before = lines(splitLog).length;
+  builds = [];
+  assert.equal(await tryIt(['test/a.test.mjs']), 0, said.join('\n'));
+  assert.equal(lines(splitLog).length, before, 'the tree is reused');
+  assert.deepEqual(builds.map((b) => b.app), ['hub'], 'only the app with no served build');
+  assert.ok(fs.existsSync(path.join(tree, 'docs/devteam/apps/hub/index.html')));
+});
+
 test('N1 runs only the named files, with --test-concurrency=2, from the tree', async () => {
   clearProbes();
   fs.rmSync(nodeLog, { force: true });
@@ -318,7 +335,7 @@ const startCli = () => {
 };
 const until = async (f, ms = 10000) => { const end = Date.now() + ms; while (Date.now() < end && !f()) await new Promise((r) => setTimeout(r, 50)); return f(); };
 
-test('L4 the command takes its lock at <os tmpdir>/devteam-apps-try.lock: it waits there on a live holder', async () => {
+test('L4 the command takes its lock at <os tmpdir>/devteam-apps-try.lock: it waits there on a live holder, and a signal while it waits leaves nothing of its own', async () => {
   const holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
   // the lock is the holder's before the command starts
   fs.writeFileSync(lock, JSON.stringify({ pid: holder.pid, started: 'then', cwd: '/elsewhere' }));
@@ -327,6 +344,12 @@ test('L4 the command takes its lock at <os tmpdir>/devteam-apps-try.lock: it wai
     await until(() => cli.err.includes('waiting for'));
     assert.match(cli.err, new RegExp(`waiting for the apps-try holding ${lock.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\(pid ${holder.pid}`));
     assert.equal(fs.existsSync(path.join(tmp, 'cli-split.log')), false, 'nothing split while it waits');
+    // a signal while it waits: it goes, leaving the holder's lock and no file of its own
+    process.kill(cli.pid, 'SIGTERM');
+    const end = await Promise.race([cli.done, new Promise((r) => setTimeout(() => r('still running'), 10000))]);
+    assert.deepEqual(end, { code: 143, signal: null }, cli.err);
+    assert.deepEqual(fs.readdirSync(lockDir).filter((f) => f.startsWith(`${LOCK_NAME}.`)), [], 'no pending lock file left');
+    assert.equal(readJson(lock).pid, holder.pid, 'the holder\'s lock is untouched');
   } finally {
     try { process.kill(-cli.pid, 'SIGKILL'); } catch {}
     holder.kill('SIGKILL');
