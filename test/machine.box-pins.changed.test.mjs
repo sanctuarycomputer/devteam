@@ -204,7 +204,7 @@ test('every devteam.mjs command cloud/Dockerfile runs is a command of the kit (k
   const lines = dockerfile.split('\n').filter((l) => !/^\s*#/.test(l));
   const ran = new Set();
   for (const m of lines.join('\n').matchAll(/scripts\/devteam\.mjs\s+([a-z][a-z-]*)/g)) ran.add(m[1]);
-  assert.deepEqual([...ran].sort(), ['dashboard', 'hub', 'machine', 'operator-thread', 'recover', 'settings']);
+  assert.deepEqual([...ran].sort(), ['dashboard', 'hub', 'machine', 'operator-thread', 'package', 'recover', 'settings']);
   const table = kitSource.slice(kitSource.indexOf('/* commandGroups start */'), kitSource.indexOf('\n};\n', kitSource.indexOf('\nconst COMMANDS = {')));
   for (const c of ran) assert.ok(new RegExp(`(?:^|[\\s,{])(?:'${c}'|${c}):`).test(table), `COMMANDS has ${c}`);
 });
