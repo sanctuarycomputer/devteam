@@ -21,6 +21,7 @@ const OUT = path.join(testDir, 'fixtures', 'alpha-build', 'hub', 'out');
 const HASHES = JSON.parse(fs.readFileSync(path.join(OUT, 'csp-hashes.json'), 'utf8')).pages;
 const INSTALLS = path.join(testDir, 'fixtures', 'kit-install', 'kit-link');
 const GOOD = '0.101.0-63959e27d616';
+const NO_RECORD = '0.100.0-2adfe5123521';
 const NAME = ['@sanctuarycomputer', 'devteam'];
 
 // the hub page's policy, as it is before this ticket (literal), and the alpha's from it
@@ -87,6 +88,8 @@ async function whyEverywhere(port, words, label) {
     assert.equal(r.status, 200, `${n}: status`);
     assert.equal(r.headers['content-type'], 'text/html; charset=utf-8', `${n}: html`);
     assert.equal(r.headers['content-security-policy'], WHY_CSP, `${n}: the why-page's policy`);
+    assert.equal(r.headers['cache-control'], 'no-store', `${n}: no-store`);
+    assert.equal(r.headers['x-content-type-options'], 'nosniff', `${n}: nosniff`);
     const body = r.body.toString();
     assert.match(body, words, `${n}: the reason in plain words`);
     assert.match(body, /<a href="\/">/, `${n}: a link back to /`);
@@ -123,6 +126,23 @@ test("H1 the dashboard's hub serves every case of alpha-serving.json under /next
   await alphaSays(HUB, { on: false, verified: true, release: '0.101.0', why: 'off' });
   await whyEverywhere(HUB, /turned off/, 'alpha false');
   setAlpha(root, true);
+  const ok = { on: true, verified: true, release: '0.101.0', why: null };
+  await alphaSays(HUB, ok);
+  // an unverified install made current (no verified.json): the why-page, as the dashboard's
+  fs.cpSync(path.join(INSTALLS, NO_RECORD), path.join(K, NO_RECORD), { recursive: true });
+  fs.rmSync(path.join(K, 'current'));
+  fs.symlinkSync(NO_RECORD, path.join(K, 'current'));
+  await alphaSays(HUB, { on: true, verified: false, release: null, why: 'unverified' });
+  await whyEverywhere(HUB, /didn’t pass its checks/, 'unverified');
+  fs.rmSync(path.join(K, 'current'));
+  fs.symlinkSync(GOOD, path.join(K, 'current'));
+  await alphaSays(HUB, ok);
+  // a verified install with no hub pages: no-pages
+  fs.renameSync(served, `${served}.off`);
+  await alphaSays(HUB, { ...ok, why: 'no-pages' });
+  await whyEverywhere(HUB, /Release 0\.101\.0 has no alpha pages yet/, 'no hub pages');
+  fs.renameSync(`${served}.off`, served);
+  await alphaSays(HUB, ok);
   // no install
   fs.renameSync(K, `${K}-off`);
   await alphaSays(HUB, { on: true, verified: false, release: null, why: 'no-install' });

@@ -167,11 +167,17 @@ async function whyEverywhere(port, words, label) {
     assert.equal(r.status, 200, `${n}: status`);
     assert.equal(r.headers['content-type'], 'text/html; charset=utf-8', `${n}: html`);
     assert.equal(r.headers['content-security-policy'], WHY_CSP, `${n}: the why-page's policy`);
+    assert.equal(r.headers['cache-control'], 'no-store', `${n}: no-store`);
+    assert.equal(r.headers['x-content-type-options'], 'nosniff', `${n}: nosniff`);
     const body = r.body.toString();
     assert.match(body, words, `${n}: the reason in plain words`);
     assert.match(body, /<a href="\/">/, `${n}: a link back to /`);
     assert.doesNotMatch(body, /<script|__next_f|alpha-build/i, `${n}: nothing of the install`);
   }
+  const h = await ask(port, '/next/', { method: 'HEAD' });
+  assert.equal(h.status, 200, `${label}, HEAD /next/: 200`);
+  assert.equal(h.headers['content-security-policy'], WHY_CSP, `${label}, HEAD /next/: the why-page's policy`);
+  assert.equal(h.body.length, 0, `${label}, HEAD /next/: no body`);
 }
 
 test('D4 short of a verified install with pages, and with alpha on, every /next/ path is the why-page; /api/alpha says why', { timeout: 600000 }, async (t) => {
@@ -185,12 +191,16 @@ test('D4 short of a verified install with pages, and with alpha on, every /next/
   const away = path.join(path.dirname(K), 'away');
   const alpha = path.join(pkg, 'docs', 'devteam', 'alpha');
   const awayPages = path.join(path.dirname(K), 'away-pages');
+  const awayPj = path.join(path.dirname(K), 'away-package.json');
+  const restorePj = () => { fs.rmSync(pj, { force: true }); fs.writeFileSync(pj, was); };
   // each case starts from the served state, so its answer is a fresh read (a state is kept 2 s)
   const cases = [
     ['the unverified tree (no verified.json)', () => point(K, NO_RECORD), () => point(K, GOOD), unverified, /didn’t pass its checks/],
     ['provenance_ok false', () => point(K, PROVENANCE_FALSE), () => point(K, GOOD), unverified, /didn’t pass its checks/],
     ['a package of another version', () => fs.writeFileSync(pj, JSON.stringify({ ...JSON.parse(was), version: '0.101.1' })), () => fs.writeFileSync(pj, was), unverified, /didn’t pass its checks/],
     ['a package outside the folder', () => { fs.renameSync(pkg, away); fs.symlinkSync(away, pkg); }, () => { fs.rmSync(pkg); fs.renameSync(away, pkg); }, unverified, /didn’t pass its checks/],
+    ['a package.json that is a symlink', () => { fs.writeFileSync(awayPj, was); fs.rmSync(pj); fs.symlinkSync(awayPj, pj); }, restorePj, unverified, /didn’t pass its checks/],
+    ['a package.json over 1 MiB', () => fs.writeFileSync(pj, `${was.toString().trimEnd()}${' '.repeat(1048577)}\n`), restorePj, unverified, /didn’t pass its checks/],
     ['no alpha folder', () => fs.renameSync(alpha, `${alpha}.off`), () => fs.renameSync(`${alpha}.off`, alpha), { ...ok, why: 'no-pages' }, /Release 0\.101\.0 has no alpha pages yet/],
     ['a pages folder resolving outside the package', () => { fs.renameSync(path.join(alpha, 'dashboard'), awayPages); fs.symlinkSync(awayPages, path.join(alpha, 'dashboard')); }, () => { fs.rmSync(path.join(alpha, 'dashboard')); fs.renameSync(awayPages, path.join(alpha, 'dashboard')); }, { ...ok, why: 'no-pages' }, /Release 0\.101\.0 has no alpha pages yet/],
     ['no install', () => fs.renameSync(K, `${K}-off`), () => fs.renameSync(`${K}-off`, K), { on: true, verified: false, release: null, why: 'no-install' }, /no install of the alpha/],
@@ -224,7 +234,13 @@ test('D6 a csp-hashes.json missing or holding a source that is no sha256 hash ma
   const good = fs.readFileSync(f);
   const bad = JSON.parse(good);
   bad.pages['/'].push("unsafe-inline' 'unsafe-eval");
-  for (const [label, write] of [['no csp-hashes.json', () => fs.rmSync(f)], ["a source that isn't a sha256 hash", () => fs.writeFileSync(f, JSON.stringify(bad))]]) {
+  const awayHashes = path.join(path.dirname(K), 'away-csp-hashes.json');
+  for (const [label, write] of [
+    ['no csp-hashes.json', () => fs.rmSync(f)],
+    ["a source that isn't a sha256 hash", () => fs.writeFileSync(f, JSON.stringify(bad))],
+    ['a csp-hashes.json that is a symlink', () => { fs.writeFileSync(awayHashes, good); fs.rmSync(f); fs.symlinkSync(awayHashes, f); }],
+    ['a csp-hashes.json over 1 MiB', () => fs.writeFileSync(f, `${good.toString().trimEnd()}${' '.repeat(1048577)}\n`)],
+  ]) {
     write();
     for (const p of ['/next/', '/next/threads/one/']) {
       const r = await ask(port, p);
@@ -232,6 +248,7 @@ test('D6 a csp-hashes.json missing or holding a source that is no sha256 hash ma
       assert.equal(r.headers['content-security-policy'], undefined, `${label}, ${p}: no policy`);
     }
     assert.equal((await ask(port, '/next/_next/static/chunks/app.js')).status, 200, `${label}: a file that is not a page is still served`);
+    fs.rmSync(f, { force: true });
     fs.writeFileSync(f, good);
   }
   fs.mkdirSync(path.join(served, 'extra'));
