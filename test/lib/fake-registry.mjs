@@ -24,7 +24,10 @@
 //
 //   const reg = await startFakeRegistry({ fail: 'integrity' });
 //   spawnSync(process.execPath, [devteam, 'package', 'pin', 'v0.101.0'], { env: reg.env(process.env) });
-//   // env() sets HOME to a folder of the fake's own, so nothing reaches the real ~/.devteam/hub/
+//   // env() sets HOME to a folder of the fake's own, so nothing reaches the real ~/.devteam/hub/, and
+//   // DEVTEAM_SIGSTORE_TEST_CA to the fake's own trust root (kit-974: the provenance is really signed)
+//   reg.requests();       // every HTTP request: { method, url }
+//   await reg.forge('forged');     // a forgery from now on (FORGERIES; null: none)
 //   reg.calls();          // every npm call: { argv, cwd, npm_env, status }
 //   await reg.fail('digest');   // another failure from now on (null: none)
 //   await reg.close();
@@ -142,15 +145,130 @@ export function statement(p, fail) {
     },
   };
 }
+// npm's own publish attestation: signed with the registry's key, which the kit never reads
 const envelope = (st) => ({
   mediaType: 'application/vnd.dev.sigstore.bundle+json;version=0.2',
   verificationMaterial: { tlogEntries: [], note: 'a fake: no signature here verifies' },
   dsseEnvelope: { payload: Buffer.from(JSON.stringify(st)).toString('base64'), payloadType: 'application/vnd.in-toto+json', signatures: [{ sig: 'ZmFrZQ==', keyid: '' }] },
 });
-function attestations(p, fail) {
+
+// ---- the test CA (kit-974) ----------------------------------------------------------------------
+// The SLSA provenance is signed as a release.yml run's is: a short-lived leaf certificate, issued by an
+// intermediate under a root, signs the DSSE envelope, and a log signs an entry for it (Rekor's signed
+// entry timestamp). Here the root, the intermediate and the log are the fake's own, made fresh for each
+// registry: their trust root is written to <dir>/test-ca.json and env() names it in
+// DEVTEAM_SIGSTORE_TEST_CA, which the kit takes only beside a loopback DEVTEAM_NPM_REGISTRY. Node makes no
+// certificates, so they are built here in DER.
+const der = {
+  tlv(tag, ...parts) {
+    const body = Buffer.concat(parts);
+    const n = body.length;
+    const len = n < 128 ? Buffer.from([n]) : n < 256 ? Buffer.from([0x81, n]) : Buffer.from([0x82, n >> 8, n & 255]);
+    return Buffer.concat([Buffer.from([tag]), len, body]);
+  },
+  seq: (...p) => der.tlv(0x30, ...p),
+  set: (...p) => der.tlv(0x31, ...p),
+  int(b) { const x = Buffer.from(b); return der.tlv(0x02, x[0] & 0x80 ? Buffer.concat([Buffer.from([0]), x]) : x); },
+  oid(s) {
+    const [a, b, ...rest] = s.split('.').map(Number);
+    const out = [40 * a + b];
+    for (const v of rest) { const bytes = [v & 127]; for (let x = v >> 7; x; x >>= 7) bytes.unshift((x & 127) | 128); out.push(...bytes); }
+    return der.tlv(0x06, Buffer.from(out));
+  },
+  utf8: (s) => der.tlv(0x0c, Buffer.from(s, 'utf8')),
+  bits: (b) => der.tlv(0x03, Buffer.from([0]), b),
+  octets: (b) => der.tlv(0x04, b),
+  bool: (v) => der.tlv(0x01, Buffer.from([v ? 255 : 0])),
+  time(ms) { const d = new Date(ms).toISOString(); return der.tlv(0x17, Buffer.from(`${d.slice(2, 4)}${d.slice(5, 7)}${d.slice(8, 10)}${d.slice(11, 13)}${d.slice(14, 16)}${d.slice(17, 19)}Z`)); },
+  name: (cn) => (cn === null ? der.seq() : der.seq(der.set(der.seq(der.oid('2.5.4.10'), der.utf8('sigstore.dev'))), der.set(der.seq(der.oid('2.5.4.3'), der.utf8(cn))))),
+};
+const ECDSA_SHA256 = der.seq(der.oid('1.2.840.10045.4.3.2'));
+// one certificate: subject cn (null: an empty name, as Fulcio's leaves have), its key, the issuer's name
+// and key, validity [from, to] in ms, a CA or a leaf (a leaf carries the one URI in its SAN)
+function mintCert({ cn, key, issuer, issuerKey, from, to, ca, uri = null }) {
+  const ext = (oid, critical, value) => der.seq(der.oid(oid), ...(critical ? [der.bool(true)] : []), der.octets(value));
+  const exts = [
+    ext('2.5.29.15', true, ca ? der.tlv(0x03, Buffer.from([1, 0x06])) : der.tlv(0x03, Buffer.from([7, 0x80]))),
+    ext('2.5.29.19', true, ca ? der.seq(der.bool(true)) : der.seq()),
+    ...(uri ? [ext('2.5.29.17', true, der.seq(der.tlv(0x86, Buffer.from(uri))))] : []),
+  ];
+  // a positive serial whose first byte is 1 to 127: DER takes no leading zero byte, and OpenSSL refuses one
+  const serial = crypto.randomBytes(16);
+  serial[0] = (serial[0] & 0x7f) || 1;
+  const tbs = der.seq(der.tlv(0xa0, der.int([2])), der.int(serial), ECDSA_SHA256, der.name(issuer), der.seq(der.time(from), der.time(to)), der.name(cn), crypto.createPublicKey(key).export({ type: 'spki', format: 'der' }), der.tlv(0xa3, der.seq(...exts)));
+  return der.seq(tbs, ECDSA_SHA256, der.bits(crypto.sign('sha256', tbs, issuerKey)));
+}
+const pem = (k) => k.export({ type: 'pkcs8', format: 'pem' });
+const newKey = () => crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey;
+// a CA of the fake's own: { root, intermediate (DER), intKey, logKey (PEM) }
+function makeCa(tag) {
+  const rootKey = newKey(), intKey = newKey(), logKey = newKey();
+  const from = Date.now() - 86400000, to = Date.now() + 10 * 365 * 86400000;
+  const root = mintCert({ cn: `sigstore-test-${tag}`, key: rootKey, issuer: `sigstore-test-${tag}`, issuerKey: rootKey, from, to, ca: true });
+  const intermediate = mintCert({ cn: `sigstore-test-${tag}-intermediate`, key: intKey, issuer: `sigstore-test-${tag}`, issuerKey: rootKey, from, to, ca: true });
+  return { tag, root: root.toString('base64'), intermediate: intermediate.toString('base64'), intKey: pem(intKey), logKey: pem(logKey) };
+}
+// the trust root the kit reads from DEVTEAM_SIGSTORE_TEST_CA: the intermediate and the root, and the log's
+// key (its id is the SHA-256 of its public key, as Rekor's is)
+export function trustRoot(ca) {
+  const spki = crypto.createPublicKey(ca.logKey).export({ type: 'spki', format: 'der' });
+  return { v: 1, fulcio: [ca.intermediate, ca.root], rekor: { keyId: crypto.createHash('sha256').update(spki).digest('hex'), spki: spki.toString('base64') } };
+}
+// What a forger can serve (FORGERIES), one at a time, beside FAILURES (whose list kit-952 fixed):
+//   no-slsa    the bundle holds npm's publish attestation only, no SLSA provenance
+//   forged     the statement is changed after it was signed (one field of its predicate)
+//   other-ca   the leaf is issued by another CA, not the one in the trust root
+//   expired    the log's time is after the leaf's validity
+//   bad-set    the log's signed entry timestamp signs another time
+//   no-tlog    no entry from the trust root's log
+//   san        the leaf names another workflow than the statement's (a certificate for other.yml)
+//   san-repo   the leaf is another repository's release.yml at the tag (<repo>-fork, so a prefix compare fails too)
+//   san-ref    the leaf is release.yml at refs/pull/1/merge (a pull_request run of upstream's own file)
+//   san-ref-prefix  the leaf is release.yml at refs/tags/v<version>-x (a tag the version's is a prefix of)
+//   impostor-ca  the leaf is issued by a CA with the trusted one's names but another key (only the
+//              signature check on each certificate, not name matching, refuses it)
+//   leaf-ca    the leaf is itself a CA
+//   early      the log's time is before the leaf's validity starts
+//   entry-payload, entry-sig, entry-cert
+//              the log's entry, its timestamp signed by the trusted log, names another payload hash,
+//              another signature or another certificate than the bundle's
+export const FORGERIES = ['no-slsa', 'forged', 'other-ca', 'expired', 'bad-set', 'no-tlog', 'san', 'impostor-ca', 'leaf-ca', 'early', 'entry-payload', 'entry-sig', 'entry-cert', 'san-repo', 'san-ref', 'san-ref-prefix'];
+const PAE = (type, body) => Buffer.concat([Buffer.from(`DSSEv1 ${Buffer.byteLength(type)} ${type} ${body.length} `), body]);
+function signedEnvelope(st, ca, other, forge, impostor) {
+  const now = Date.now();
+  const leafKey = newKey();
+  const w = st.predicate.buildDefinition.externalParameters.workflow;
+  const by = forge === 'other-ca' ? other : forge === 'impostor-ca' ? impostor : ca;
+  const from = forge === 'expired' ? now - 3600000 : forge === 'early' ? now + 120000 : now - 1000;
+  const leafRepo = forge === 'san-repo' ? `${w.repository}-fork` : w.repository;
+  const leafRef = forge === 'san-ref' ? 'refs/pull/1/merge' : forge === 'san-ref-prefix' ? `${w.ref}-x` : w.ref;
+  const uri = `${leafRepo}/${forge === 'san' ? '.github/workflows/other.yml' : w.path}@${leafRef}`;
+  const leaf = mintCert({ cn: null, key: leafKey, issuer: `sigstore-test-${by.tag}-intermediate`, issuerKey: crypto.createPrivateKey(by.intKey), from, to: from + 600000, ca: forge === 'leaf-ca', uri });
+  const type = 'application/vnd.in-toto+json';
+  const body = Buffer.from(JSON.stringify(st));
+  const sig = crypto.sign('sha256', PAE(type, body), leafKey).toString('base64');
+  const signedBody = forge === 'forged' ? Buffer.from(JSON.stringify({ ...st, predicate: { ...st.predicate, runDetails: { ...st.predicate.runDetails, builder: { id: 'https://example.com/a-forger' } } } })) : body;
+  const pemOf = (c) => `-----BEGIN CERTIFICATE-----\n${c.toString('base64').match(/.{1,64}/g).join('\n')}\n-----END CERTIFICATE-----\n`;
+  // what the log's entry names: this payload, signature and leaf, unless an entry-* forgery swaps one
+  const entryHash = crypto.createHash('sha256').update(forge === 'entry-payload' ? Buffer.from('another payload') : body).digest('hex');
+  const entrySig = forge === 'entry-sig' ? crypto.sign('sha256', Buffer.from('another statement'), leafKey).toString('base64') : sig;
+  const entryCert = forge === 'entry-cert' ? mintCert({ cn: null, key: newKey(), issuer: `sigstore-test-${ca.tag}-intermediate`, issuerKey: crypto.createPrivateKey(ca.intKey), from, to: from + 600000, ca: false, uri }) : leaf;
+  const entry = { apiVersion: '0.0.1', kind: 'dsse', spec: { envelopeHash: { algorithm: 'sha256', value: '0'.repeat(64) }, payloadHash: { algorithm: 'sha256', value: entryHash }, signatures: [{ signature: entrySig, verifier: Buffer.from(pemOf(entryCert)).toString('base64') }] } };
+  const canonicalizedBody = Buffer.from(JSON.stringify(entry)).toString('base64');
+  const integratedTime = Math.floor(now / 1000);
+  const { keyId } = trustRoot(ca).rekor;
+  const set = JSON.stringify({ body: canonicalizedBody, integratedTime: forge === 'bad-set' ? integratedTime - 1 : integratedTime, logID: keyId, logIndex: 1 });
+  const tlog = { logIndex: '1', logId: { keyId: Buffer.from(keyId, 'hex').toString('base64') }, kindVersion: { kind: 'dsse', version: '0.0.1' }, integratedTime: String(integratedTime), inclusionPromise: { signedEntryTimestamp: crypto.sign('sha256', Buffer.from(set), crypto.createPrivateKey(ca.logKey)).toString('base64') }, canonicalizedBody };
+  return {
+    mediaType: 'application/vnd.dev.sigstore.bundle.v0.3+json',
+    verificationMaterial: { certificate: { rawBytes: leaf.toString('base64') }, tlogEntries: forge === 'no-tlog' ? [] : [tlog], timestampVerificationData: { rfc3161Timestamps: [] } },
+    dsseEnvelope: { payload: signedBody.toString('base64'), payloadType: type, signatures: [{ sig, keyid: '' }] },
+  };
+}
+function attestations(p, fail, state) {
   const st = statement(p, fail);
   const pub = { _type: 'https://in-toto.io/Statement/v0.1', subject: st.subject, predicateType: PUBLISH, predicate: { name: NAME, version: p.version, registry: 'https://registry.npmjs.org' } };
-  return { attestations: [{ predicateType: PUBLISH, bundle: envelope(pub) }, { predicateType: SLSA, bundle: envelope(st) }] };
+  return { attestations: [{ predicateType: PUBLISH, bundle: envelope(pub) }, { predicateType: SLSA, bundle: signedEnvelope(st, state.ca, state.otherCa, state.forge, state.impostorCa) }].filter((a) => !(state.forge === 'no-slsa' && a.predicateType === SLSA)) };
 }
 
 // ---- the server -------------------------------------------------------------------------------
@@ -160,6 +278,8 @@ function serve(stateFile) {
   let state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
   const pkgs = packages(state.commits);
   const server = http.createServer((req, res) => {
+    // every request, in order, for a test that counts what the kit asked (kit-974: the bundle once)
+    fs.appendFileSync(state.requests, `${JSON.stringify({ method: req.method, url: req.url })}\n`);
     const send = (status, type, body) => { res.writeHead(status, { 'content-type': type }); res.end(body); };
     const notFound = () => send(404, 'application/json', '{"error":"Not found"}\n');
     if (req.method !== 'GET') return notFound();
@@ -174,7 +294,7 @@ function serve(stateFile) {
       const pk = at[1] === NAME && pkgs.get(at[2]);
       if (!pk || state.fail === 'no-attestation' || state.fail === 'attestation-gone') return notFound();
       if (state.fail === 'redirect' && !moved) { res.writeHead(302, { location: `http://${req.headers.host}/-/moved${req.url}` }); return res.end(); }
-      return send(200, 'application/json', JSON.stringify(attestations(pk, state.fail)));
+      return send(200, 'application/json', JSON.stringify(attestations(pk, state.fail, state)));
     }
     if (p === `/${NAME}`) {
       const versions = Object.fromEntries([...pkgs.values()].map((pk) => [pk.version, manifest(pk, state.fail)]));
@@ -208,8 +328,9 @@ function serve(stateFile) {
   server.listen(0, '127.0.0.1', () => process.send({ ready: true, port: server.address().port }));
 }
 
-export async function startFakeRegistry({ fail = null, commits = {} } = {}) {
+export async function startFakeRegistry({ fail = null, commits = {}, forge = null } = {}) {
   if (fail !== null && !FAILURES.includes(fail)) throw new Error(`fake registry: no failure called ${fail}`);
+  if (forge !== null && !FORGERIES.includes(forge)) throw new Error(`fake registry: no forgery called ${forge}`);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-fake-registry-'));
   const bin = path.join(dir, 'bin');
   fs.mkdirSync(bin);
@@ -218,7 +339,13 @@ export async function startFakeRegistry({ fail = null, commits = {} } = {}) {
   // a HOME of the fake's own: a test's installs, hub tree included, never reach the real one
   const home = path.join(dir, 'home');
   fs.mkdirSync(home);
-  const state = { url: null, fail, commits, calls: callsFile, scratch: dir };
+  // the test CA, and another CA the trust root doesn't name (forgery 'other-ca')
+  // and an impostor: CA a's names, its own keys (forgery 'impostor-ca')
+  const ca = makeCa('a'), otherCa = makeCa('b'), impostorCa = makeCa('a');
+  const caFile = path.join(dir, 'test-ca.json');
+  fs.writeFileSync(caFile, JSON.stringify(trustRoot(ca)));
+  const requestsFile = path.join(dir, 'requests.jsonl');
+  const state = { url: null, fail, commits, calls: callsFile, scratch: dir, forge, ca, otherCa, impostorCa, requests: requestsFile };
   const save = () => fs.writeFileSync(stateFile, JSON.stringify(state));
   save();
   const child = fork(SELF, ['serve', stateFile], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
@@ -254,13 +381,27 @@ export async function startFakeRegistry({ fail = null, commits = {} } = {}) {
     // base's variables with this npm first on PATH and the registry named for the kit (a loopback URL,
     // the only kind DEVTEAM_NPM_REGISTRY may name); hostile-env adds npm config that points elsewhere
     env(baseEnv = process.env) {
-      const e = { ...baseEnv, PATH: `${bin}${path.delimiter}${baseEnv.PATH ?? ''}`, DEVTEAM_NPM_REGISTRY: state.url, HOME: home };
+      const e = { ...baseEnv, PATH: `${bin}${path.delimiter}${baseEnv.PATH ?? ''}`, DEVTEAM_NPM_REGISTRY: state.url, DEVTEAM_SIGSTORE_TEST_CA: caFile, HOME: home };
       if (state.fail === 'hostile-env') {
         const evil = path.join(dir, 'evil-npmrc');
         fs.writeFileSync(evil, 'registry=http://127.0.0.1:9/\nignore-scripts=false\n');
         Object.assign(e, { npm_config_registry: 'http://127.0.0.1:9/', NPM_CONFIG_USERCONFIG: evil, npm_config_ignore_scripts: 'false', 'npm_config_@sanctuarycomputer:registry': 'http://127.0.0.1:9/', 'Npm_Config_@sanctuarycomputer:registry': 'http://127.0.0.1:9/' });
       }
       return e;
+    },
+    // the test CA's trust root (test-ca.json), as env() names it in DEVTEAM_SIGSTORE_TEST_CA
+    caFile,
+    // another forgery from now on (null: none); resolves once the registry has it
+    async forge(name) {
+      if (name !== null && !FORGERIES.includes(name)) throw new Error(`fake registry: no forgery called ${name}`);
+      state.forge = name;
+      save();
+      await tell();
+    },
+    // every HTTP request the registry was sent: { method, url }
+    requests() {
+      if (!fs.existsSync(requestsFile)) return [];
+      return fs.readFileSync(requestsFile, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
     },
     // another failure from now on (null: none); resolves once the registry has it
     async fail(name) {

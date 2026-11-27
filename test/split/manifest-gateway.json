@@ -1,0 +1,13 @@
+{
+  "source": "cloud/gateway.mjs",
+  "dir": "cloud/gateway",
+  "cap": 3000,
+  "templates": ["CLIENT", "PAGES"],
+  "modules": [
+    { "name": "base", "from": { "line": 1 } },
+    { "name": "assets", "from": { "decl": "PREVIEW_LENS" } },
+    { "name": "server", "from": { "decl": "createGateway" } },
+    { "name": "pages", "from": { "decl": "STYLE" } }
+  ],
+  "place": {}
+}

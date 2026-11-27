@@ -1,0 +1,134 @@
+# Publishes every kit release to npm as @sanctuarycomputer/devteam, with provenance (kit-954). Only on
+# this repository (a fork does nothing) and only a full release: a prerelease publishes nothing.
+#
+# Building and publishing are separate jobs, so nothing that installs or builds can publish (alpha-build@1):
+# - build, with contents: read and no secrets, builds each apps/<app>/ present (npm ci --ignore-scripts,
+#   then npm run build with DEVTEAM_BASE_PATH=/next) and hands only its out/ on, as the artifact alpha.
+# - publish, with id-token: write in the npm-publish environment, installs and builds nothing: it runs
+#   test/release/package-check.mjs on the tag's checkout (the alpha's types, no dependencies, every kit file
+#   byte for byte the tag's, the version from the tag), then publishes the tarball that check packed. It
+#   reads no npm token: npm's trusted publisher for this file trusts the run by OIDC and makes the
+#   provenance itself.
+# - check, a third job that runs only on a pull request that changes this file, package.json, apps/ or
+#   test/release/: after build, the same package check with no publish rights, so the PR shows the packed
+#   file list in its run's summary. On a pull request publish is skipped; on a release, check is.
+#
+# The owner's one-time setup, before the first release that carries this file:
+# 1. In this repository's settings, the environment npm-publish, limited to tags matching v*: a run
+#    outside it, such as one on a branch, can't publish, because the trusted publisher names it and npm
+#    matches the environment name exactly (npm's trusted publishers page, https://docs.npmjs.com/trusted-publishers).
+# 2. On npm, the package exists and has a trusted publisher for this file. Trusted publishing can't
+#    make a first version, so the owner stages a throwaway one from their own login (npm stage publish
+#    --access public --tag bootstrap) and never approves it, then adds the trusted publisher:
+#    npm trust github @sanctuarycomputer/devteam --file release.yml
+#    --repo sanctuarycomputer/devteam --env npm-publish --allow-publish
+#    (https://docs.npmjs.com/cli/v12/commands/npm-trust/). Without it, or from a job outside npm-publish,
+#    OIDC is refused (https://docs.npmjs.com/trusted-publishers) and the publish fails red. The entry names
+#    this file by its name: renaming it stops publishing until the entry changes.
+# 3. The next release runs within 2 days of step 2, or npm drops the unused entry.
+name: release
+on:
+  release:
+    types: [published]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - package.json
+      - apps/**
+      - test/release/**
+permissions: {}
+jobs:
+  build:
+    if: github.event_name == 'pull_request' || (github.repository == 'sanctuarycomputer/devteam' && !github.event.release.prerelease)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          check-latest: true
+          package-manager-cache: false
+      - name: Build each app
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/alpha"
+          for pj in apps/*/package.json; do
+            [ -f "$pj" ] || continue
+            app=$(basename "$(dirname "$pj")")
+            (cd "apps/$app" && npm ci --ignore-scripts && DEVTEAM_BASE_PATH=/next npm run build)
+            cp -R "apps/$app/out" "$RUNNER_TEMP/alpha/$app"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: alpha
+          path: ${{ runner.temp }}/alpha/
+          if-no-files-found: ignore
+          retention-days: 1
+  check:
+    if: github.event_name == 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          check-latest: true
+          package-manager-cache: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: alpha
+          merge-multiple: true
+          path: ${{ runner.temp }}/alpha
+      - name: Check the package
+        shell: bash
+        run: |
+          set -euo pipefail
+          node test/release/package-check.mjs --tag v0.0.0 --tree HEAD --alpha "$RUNNER_TEMP/alpha" --out "$RUNNER_TEMP/pack" --min-npm 11.5.1
+          { echo '### Packed files'; echo; echo '```'; cat "$RUNNER_TEMP/pack/files.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+  publish:
+    if: github.event_name == 'release' && github.repository == 'sanctuarycomputer/devteam' && !github.event.release.prerelease
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          check-latest: true
+          package-manager-cache: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: alpha
+          merge-multiple: true
+          path: ${{ runner.temp }}/alpha
+      - name: Check the package
+        shell: bash
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          node test/release/package-check.mjs --tag "$TAG" --alpha "$RUNNER_TEMP/alpha" --out "$RUNNER_TEMP/pack" --min-npm 11.5.1
+          { echo '### Packed files'; echo; echo '```'; cat "$RUNNER_TEMP/pack/files.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish
+        shell: bash
+        run: npm publish "$RUNNER_TEMP/pack/package.tgz" --access public --provenance --ignore-scripts

@@ -1,8 +1,8 @@
 {
-  "contract": "project-hosts@1",
-  "about": "Cases for project-hosts@1, defined in cloud/gateway.mjs's header comment. labelCases give a name, the projects and previews the hub lists (projects defaults to [name]), and what the name's host is: project (its dashboard), shared (no dashboard; its stored pages still answer), preview, unknown (listed nowhere), or refused with a reason. samples are addresses on box, each with what answers it.",
+  "contract": "project-hosts@2",
+  "about": "Cases for project-hosts@2, defined in cloud/gateway.mjs's header comment. labelCases give a name, the projects and previews the hub lists (projects defaults to [name]), and what the name's host is: project (its dashboard), shared (no dashboard; its stored pages still answer), preview, unknown (listed nowhere), or refused with a reason. samples are addresses on box, each with what answers it.",
   "reservedLabels": ["term", "public", "www"],
-  "reservedSegments": ["api", "artifact", "c", "healthz", "index.html", "presence", "public-manifest", "review", "upload", "view"],
+  "reservedSegments": ["api", "artifact", "c", "healthz", "index.html", "next", "presence", "public-manifest", "review", "upload", "view"],
   "labelCases": [
     { "name": "alpha", "expect": "project" },
     { "name": "beta-app", "expect": "project" },
@@ -31,7 +31,7 @@
     "name": "box.localhost",
     "projects": ["alpha", "beta-app", "twin", "twin"],
     "previews": ["cool-tiger", "alpha", "twin"],
-    "published": { "alpha": ["launch-notes", "view"], "twin": ["twin-notes"], "retired": ["old-notes"] }
+    "published": { "alpha": ["launch-notes", "view", "next"], "twin": ["twin-notes"], "retired": ["old-notes"] }
   },
   "samples": [
     { "url": "https://box.localhost/", "expect": "box" },
@@ -45,6 +45,7 @@
     { "url": "https://alpha.box.localhost/api/data", "expect": "dashboard" },
     { "url": "https://alpha.box.localhost/view/artifact/launch-notes?at=main", "expect": "dashboard" },
     { "url": "https://alpha.box.localhost/view/", "expect": "dashboard" },
+    { "url": "https://alpha.box.localhost/next/", "expect": "dashboard" },
     { "url": "https://alpha.box.localhost/settings", "expect": "dashboard" },
     { "url": "https://beta-app.box.localhost/", "expect": "dashboard" },
     { "url": "https://alpha.box.localhost/launch-notes/", "expect": "public-page" },

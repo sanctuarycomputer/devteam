@@ -30,6 +30,193 @@ if (Number(process.versions.node.split('.')[0]) < 18) {
   process.exit(1);
 }
 
+// bash-ok: a Claude Code PreToolUse hook on Bash in every Claude Code session the kit starts
+// (claudePolicy, supervisorPolicy). An inline rm or rmdir whose path is built from a variable, a
+// glob, a brace or $(…) is refused, with worker.md's "Scripts go in files" as the reason, before
+// Claude Code stops on its permission prompt ("Dangerous rm operation") in a window nobody
+// watches; a subagent's prompt stops its whole session behind it. The session reads the reason and
+// writes the script file instead. It runs here, before anything else: it needs no repo, settings or
+// log, and the hook runs on every command. It only ever refuses; anything it can't read goes through.
+//
+// It reads the line as a shell would, enough to find command words: quotes, comments, heredoc
+// bodies and redirections are not commands, so `rm` in a grep pattern, a commit message or a PR
+// body passes; a $(…) or `…` is read as its own command too. Separators: ; & | newlines ( ).
+// Wrappers it looks through: sudo, doas, env, timeout, nice, ionice, nohup, setsid, taskset,
+// flock, prlimit, stdbuf, command, builtin, exec, time and the shell's own then/do/else/!.
+// sh -c / bash -c and eval are read again. Not covered: xargs rm (its paths come on stdin) and
+// find -delete or -exec rm (no variable path in the line).
+if (process.argv[2] === 'bash-ok') {
+  const WHY = 'Run any multi-step shell command, heredoc, or `rm` of a variable, glob or `$(…)` as a script file you write with your file tool and then run, never inline: a permission prompt stops the whole session. In that file, delete only paths built with `${VAR:?}` on every part, under a directory the script made or names literally, and never a path read from a file or from `$(…)`.';
+  // the line as simple commands, each a list of words { text, expands }; subs: the text of each $(…) and `…`
+  const lex = (src) => {
+    const s = String(src ?? '');
+    const cmds = [];
+    const subs = [];
+    let words = [];
+    let w = null;
+    let redirect = false;
+    const heredocs = [];
+    const endWord = () => { if (w) { if (redirect) redirect = false; else words.push(w); } w = null; };
+    const endCmd = () => { endWord(); if (words.length) cmds.push(words); words = []; };
+    const cur = () => (w ??= { text: '', expands: false });
+    // the end of a heredoc body that starts on the line after i: the index after its delimiter line
+    const skipBody = (i, delim, tabs) => {
+      let j = i;
+      for (;;) {
+        if (j >= s.length) return s.length;
+        const nl = s.indexOf('\n', j);
+        const line = s.slice(j, nl < 0 ? s.length : nl);
+        j = nl < 0 ? s.length : nl + 1;
+        if ((tabs ? line.replace(/^\t+/, '') : line) === delim) return j;
+      }
+    };
+    const heredocAt = (j) => {
+      let k = j + 2;
+      const tabs = s[k] === '-';
+      if (tabs) k++;
+      while (s[k] === ' ' || s[k] === '\t') k++;
+      let d = '';
+      while (k < s.length && !/[\s;&|<>()]/.test(s[k])) { if (!`'"\\`.includes(s[k])) d += s[k]; k++; }
+      return { end: k, delim: d, tabs };
+    };
+    // $( … ) or ` … `: its end, with nesting, quotes and heredoc bodies inside it; its text is read as commands too
+    const skipSubst = (i, close) => {
+      let depth = 1;
+      const pending = [];
+      for (let j = i; j < s.length; j++) {
+        const c = s[j];
+        if (c === '\\') { j++; continue; }
+        if (c === '\n' && pending.length) { let k = j + 1; while (pending.length) { const h = pending.shift(); k = skipBody(k, h.delim, h.tabs); } j = k - 1; continue; }
+        if (close === ')' && c === '<' && s[j + 1] === '<' && s[j + 2] !== '<') { const h = heredocAt(j); if (h.delim) pending.push(h); j = h.end - 1; continue; }
+        if (close === ')' && c === "'") { const k = s.indexOf("'", j + 1); if (k < 0) return s.length; j = k; continue; }
+        if (close === ')' && c === '"') { let k = j + 1; while (k < s.length && s[k] !== '"') k += s[k] === '\\' ? 2 : 1; j = k; continue; }
+        if (close === ')' && c === '(') depth++;
+        if (c === close && --depth === 0) { subs.push(s.slice(i, j)); return j + 1; }
+      }
+      return s.length;
+    };
+    let i = 0;
+    while (i < s.length) {
+      const c = s[i];
+      if (c === '\n') {
+        endCmd();
+        i++;
+        while (heredocs.length) { const h = heredocs.shift(); i = skipBody(i, h.delim, h.tabs); }
+        continue;
+      }
+      if (c === ' ' || c === '\t') { endWord(); i++; continue; }
+      if (c === '\\') { if (s[i + 1] === '\n') { i += 2; continue; } cur().text += s[i + 1] ?? ''; i += 2; continue; }
+      if (c === '#' && !w) { const nl = s.indexOf('\n', i); i = nl < 0 ? s.length : nl; continue; }
+      if (c === ';' || c === '&' || c === '|' || c === '(' || c === ')') {
+        if (c === '&' && (s[i - 1] === '>' || s[i + 1] === '>')) { i++; continue; }
+        endCmd(); i++; continue;
+      }
+      if (c === '<' && s[i + 1] === '<' && s[i + 2] !== '<') { endWord(); const h = heredocAt(i); if (h.delim) heredocs.push(h); i = h.end; continue; }
+      if (c === '<' || c === '>') {
+        if (w && /^\d+$/.test(w.text) && !w.expands) w = null;
+        endWord();
+        let j = i;
+        while (s[j] === '<' || s[j] === '>' || s[j] === '&' || s[j] === '|') j++;
+        if (/^[0-9-]/.test(s[j] ?? '') && s[j - 1] === '&') { while (/[0-9-]/.test(s[j] ?? '')) j++; i = j; continue; }
+        redirect = true;
+        i = j;
+        continue;
+      }
+      if (c === "'") { const k = s.indexOf("'", i + 1); cur().text += s.slice(i + 1, k < 0 ? s.length : k); i = k < 0 ? s.length : k + 1; continue; }
+      if (c === '"') {
+        let j = i + 1;
+        while (j < s.length && s[j] !== '"') {
+          if (s[j] === '\\') { cur().text += s[j + 1] ?? ''; j += 2; continue; }
+          if (s[j] === '$' || s[j] === '`') {
+            cur().expands = true;
+            if (s[j] === '$' && s[j + 1] === '(') { const e = skipSubst(j + 2, ')'); cur().text += s.slice(j, e); j = e; continue; }
+            if (s[j] === '`') { const e = skipSubst(j + 1, '`'); cur().text += s.slice(j, e); j = e; continue; }
+          }
+          cur().text += s[j];
+          j++;
+        }
+        cur();
+        i = j + 1;
+        continue;
+      }
+      if (c === '$' || c === '`') {
+        cur().expands = true;
+        if (c === '$' && s[i + 1] === '(') { const e = skipSubst(i + 2, ')'); cur().text += s.slice(i, e); i = e; continue; }
+        if (c === '`') { const e = skipSubst(i + 1, '`'); cur().text += s.slice(i, e); i = e; continue; }
+        cur().text += c;
+        i++;
+        continue;
+      }
+      if ('*?[{'.includes(c)) cur().expands = true;
+      cur().text += c;
+      i++;
+    }
+    endCmd();
+    return { cmds, subs };
+  };
+  // wrappers looked through, and the pattern of their options that take a value
+  const WRAP = {
+    sudo: /^-[ugpCDhrtTUR]$/, doas: /^-[uC]$/, env: /^-[uSC]$/, timeout: /^-[sk]$/, nice: /^-n$/, ionice: /^-[cnpP]$/, stdbuf: /^-[ioe]$/,
+    taskset: null, flock: /^-[wEs]$/, prlimit: /^-p$/, setsid: null, nohup: null, command: null, builtin: null, exec: /^-a$/, time: null,
+    '!': null, then: null, do: null, else: null, elif: null, if: null, while: null, until: null, '{': null, '}': null,
+  };
+  const ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=/;
+  const risky = (command, depth = 0) => {
+    if (depth > 3) return null;
+    const { cmds, subs } = lex(command);
+    for (const sub of subs) { const hit = risky(sub, depth + 1); if (hit) return hit; }
+    for (const words of cmds) {
+      let i = 0;
+      for (;;) {
+        const t = words[i]?.text;
+        if (t === undefined) break;
+        if (ASSIGN.test(t)) { i++; continue; }
+        if (!Object.hasOwn(WRAP, t)) break;
+        const takes = WRAP[t];
+        i++;
+        while (words[i] && /^-/.test(words[i].text) && words[i].text !== '--') { if (takes?.test(words[i].text)) i++; i++; }
+        if (words[i]?.text === '--') i++;
+        if (t === 'env') while (words[i] && ASSIGN.test(words[i].text)) i++;
+        if (t === 'timeout' && words[i] && /^[\d.]+[smhd]?$/.test(words[i].text)) i++;
+        if (t === 'taskset' && words[i]) i++; // its mask or cpu list
+        if (t === 'flock' && words[i]) i++; // its lock file or fd
+      }
+      const cmd = words[i]?.text ?? '';
+      const rest = words.slice(i + 1);
+      if (/^(?:\S*\/)?(?:ba|z|da)?sh$/.test(cmd)) {
+        const k = rest.findIndex((x) => /^-\w*c\w*$/.test(x.text));
+        if (k >= 0 && rest[k + 1]) { const hit = risky(rest[k + 1].text, depth + 1); if (hit) return hit; }
+        continue;
+      }
+      if (cmd === 'eval') { const hit = risky(rest.map((x) => x.text).join(' '), depth + 1); if (hit) return hit; continue; }
+      if (!/^(?:\S*\/)?(?:rm|rmdir)$/.test(cmd)) continue;
+      let opts = true;
+      for (const a of rest) {
+        if (opts && a.text === '--') { opts = false; continue; }
+        if (opts && /^-/.test(a.text) && !a.expands) continue;
+        if (a.expands) return words.map((x) => x.text).join(' ');
+      }
+    }
+    return null;
+  };
+  // the hook's input, read to its end (a slow writer's stdin may come in parts); never waits long
+  const text = await new Promise((resolve) => {
+    let d = '';
+    const done = () => resolve(d);
+    const timer = setTimeout(done, 5000);
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (c) => { d += c; });
+    process.stdin.on('end', () => { clearTimeout(timer); done(); });
+    process.stdin.on('error', () => { clearTimeout(timer); done(); });
+  });
+  let input = null;
+  try { input = JSON.parse(text || 'null'); } catch {}
+  let hit = null;
+  try { hit = input?.tool_name && input.tool_name !== 'Bash' ? null : risky(input?.tool_input?.command); } catch { hit = null; }
+  if (hit) process.stdout.write(`${JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `devteam: refused before it could stop on a permission prompt nobody answers: \`${hit.slice(0, 160)}\` removes a path built from a variable, glob or $(…). ${WHY}` } })}\n`);
+  process.exit(0);
+}
+
 // A worktree's branch carries the kit as it was when the branch forked, but every session writes the
 // one live log and answers to the rules on main, so in a project the main checkout's copy runs: a
 // worker on an old branch otherwise gets old commands (an "unknown command" for one the docs name)
@@ -8264,50 +8451,78 @@ const selfPlain = (() => {
     w = w.slice(0, end);
     return /^\p{Lu}/u.test(w) && [...w].length >= 2 ? w : null;
   }
-  // self.md's capitalised words for the names rule, each once in order (kit-862). Every word counts but
-  // a prose sentence's first: prose is a paragraph's text outside code, comments and a link's words; a
-  // sentence starts a paragraph or follows . ! or ? and a space. A heading, a list item (its lines up to
-  // a blank one), a table row (a line holding | outside code), code (a fence, indented code, a span), a
-  // comment and a link's words count whole, their first word too: a part's name stands there.
+  // self.md's capitalised words for the names rule, each once in order (kit-862, kit-926). Every word
+  // counts but a bare prose sentence's first: prose is a paragraph's text outside code, comments and
+  // brackets; a sentence starts a paragraph or follows . ! or ? and a space. A heading (# or a setext
+  // one, every line over its = or - line), a list item (its lines up to a blank one), a quote (its
+  // lines up to a blank one, a list item inside it too), a table row (a line holding | outside code, and
+  // the lines after it up to a blank one), code (a fence, indented code, a span), a comment and the
+  // words inside [ ] (a link's, an image's alt text, a reference-style link's) count whole, their first
+  // word too: a part's name stands there. So does a first word with a mark just before it (bold,
+  // italic or a quote mark: ** _ " “ ').
   function selfHeld(text) {
     const src = lines(text);
     const read = readable(text);
     const pl = plain(text).split('\n');
     const at = [];
     pl.reduce((o, l, i) => { at[i] = o; return o + l.length + 1; }, 0);
+    const QUOTE = /^ {0,3}>/;
+    // a setext heading's lines: a paragraph's (from its first line, or the line after a heading), over
+    // a line of = or - alone at most three spaces in (- and a space is one, not a list item); a list
+    // item or a quote opens no heading's text
+    const setext = [];
+    let from = -1;
+    read.forEach((l, i) => {
+      if (l === null || !l.trim() || HEAD.test(l)) from = -1;
+      else if (from >= 0 && /^ {0,3}(?:=+|-+)[ \t]*$/.test(l)) { for (let j = from; j < i; j += 1) setext[j] = true; from = -1; }
+      else if (BREAK.test(l) || LIST.test(l) || QUOTE.test(l)) from = -1;
+      else if (from < 0) from = i;
+    });
     // the links' words, [ to ], sorted and apart (a link inside another's words is none), read by a
     // pointer that only moves on, as the words come in order: each word one look
     const spans = links(text).map((k) => [k.index, k.close]);
     let k = 0;
     const inLink = (o) => { while (k < spans.length && spans[k][1] <= o) k += 1; return k < spans.length && o > spans[k][0]; };
+    // how many [ are open after s, from d: \[ and \] are none, a ] closes one only when one is open
+    const brackets = (s, d) => { for (let j = 0; j < s.length; j += 1) { if (s[j] === '\\') j += 1; else if (s[j] === '[') d += 1; else if (s[j] === ']' && d) d -= 1; } return d; };
     const out = new Set();
     const add = (w) => { const c = capWord(w); if (c) out.add(c); };
     let item = false; // in a list item, until a blank line
+    let quote = false; // in a quote, until a blank line
+    let table = false; // after a table row, until a blank line
     let start = true; // the next prose word starts a sentence
     let gap = '';
+    let depth = 0; // the [ open in this paragraph
     src.forEach((s, i) => {
       const l = read[i];
-      if (l === null || !l.trim() || HEAD.test(l) || BREAK.test(l) || LIST.test(l) || item || pl[i].includes('|')) {
-        if (l !== null && !l.trim()) item = false;
+      if (l === null || !l.trim() || HEAD.test(l) || BREAK.test(l) || LIST.test(l) || item || pl[i].includes('|') || table || setext[i] || quote || QUOTE.test(l)) {
+        if (l !== null && !l.trim()) { item = false; quote = false; table = false; }
         else if (l !== null && LIST.test(l)) item = true;
-        else if (l !== null && (HEAD.test(l) || BREAK.test(l))) item = false;
+        else if (l !== null && (HEAD.test(l) || BREAK.test(l))) { item = false; quote = false; table = false; }
+        if (l !== null && QUOTE.test(l)) quote = true;
+        if (pl[i].includes('|')) table = true;
         for (const m of s.matchAll(WORD)) add(m[0]);
         start = true;
         gap = '';
+        depth = 0;
         return;
       }
       const p = pl[i];
       let prev = 0;
       for (const m of s.matchAll(WORD)) {
-        gap += p.slice(prev, m.index);
+        const before = p.slice(prev, m.index);
+        gap += before;
+        depth = brackets(before, depth);
         prev = m.index + m[0].length;
         const o = at[i] + m.index;
-        const whole = p.slice(m.index, prev) !== m[0] || inLink(o);
+        const whole = p.slice(m.index, prev) !== m[0] || inLink(o) || depth > 0 || (gap !== '' && !/\s$/.test(gap));
         if (whole || !(start || /[.!?]\s/.test(gap))) add(m[0]);
         start = false;
         gap = '';
       }
-      gap += `${p.slice(prev)}\n`;
+      const rest = p.slice(prev);
+      gap += `${rest}\n`;
+      depth = brackets(rest, depth);
     });
     return [...out];
   }
@@ -8841,15 +9056,24 @@ function partPath(p) {
   return String(p).split('/').filter((s) => s !== '' && s !== '.').join('/');
 }
 // Whether a normalised path is on disk under the repo root (the project folder, for a project outside
-// its repo: selfRoot), each segment matched by its exact case (as git reads it), so App/ is missing
-// beside app/ on a disk that folds case too.
+// its repo: selfRoot) where git's tree could hold it, as hasAt reads a commit (kit-926): each segment
+// matched by its exact case (as git reads it), so App/ is missing beside app/ on a disk that folds case
+// too; never through a symlink (a symlink is a file to git: one may be the last segment, never a
+// folder on the way); never into .git, in any case (git keeps no .git in a tree); and never at or
+// into a folder holding its own .git (a nested repo or a submodule, which the tree holds as a gitlink
+// at most). A file not committed yet is still found: self check reads a draft before its commit.
 function hasOnDisk(n) {
   let dir = projectInRepo ? projectRoot : projectDir;
-  for (const seg of n === '' ? [] : n.split('/')) {
+  const segs = n === '' ? [] : n.split('/');
+  for (const [i, seg] of segs.entries()) {
+    if (seg.toLowerCase() === '.git') return false;
     let names;
     try { names = fs.readdirSync(dir); } catch { return false; }
     if (!names.includes(seg)) return false;
     dir = path.join(dir, seg);
+    const st = fs.lstatSync(dir, { throwIfNoEntry: false });
+    if (!st || (st.isSymbolicLink() && i < segs.length - 1)) return false;
+    if (st.isDirectory() && fs.existsSync(path.join(dir, '.git'))) return false;
   }
   return true;
 }
@@ -15215,11 +15439,11 @@ function cmdArtifact() {
     if (flags.json) return out(JSON.stringify(m));
     const bytes = Object.values(m.files).reduce((n, f) => n + f.size, 0);
     const said = `${m.project}/${m.slug} at tree ${m.tree.slice(0, 12)}: ${Object.keys(m.files).length} files, ${bytes} bytes; published, `;
-    // A box image whose gateway serves each project at a host of its own (project-hosts@1) sets
+    // A box image whose gateway serves each project at a host of its own (project-hosts@2) sets
     // DEVTEAM_PROJECT_HOSTS=1; one from before it still serves public.<box>/<project>/<slug>/.
     if (process.env.DEVTEAM_PROJECT_HOSTS !== '1') return out(`${said}it is https://public.<box>/${m.project}/${m.slug}/`);
-    // project-hosts@1's rules, as the gateway's Publish checks them, slug first
-    if (['api', 'artifact', 'c', 'healthz', 'presence', 'public-manifest', 'review', 'upload', 'view'].includes(m.slug)) return out(`${said}it would have no address: ${m.slug} is a path of the dashboard, so rename the artifact`);
+    // project-hosts@2's rules, as the gateway's Publish checks them, slug first (its RESERVED_SEGMENTS)
+    if (['api', 'artifact', 'c', 'healthz', 'index.html', 'next', 'presence', 'public-manifest', 'review', 'upload', 'view'].includes(m.slug)) return out(`${said}it would have no address: ${m.slug} is a path of the dashboard, so rename the artifact`);
     if (!/^(?!\d+$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(m.project) || ['term', 'public', 'www'].includes(m.project)) return out(`${said}it would have no address: ${m.project} can't be a host name, so rename the project (settings.md's project)`);
     return out(`${said}it is https://${m.project}.<box>/${m.slug}/`);
   }
@@ -19292,6 +19516,12 @@ function cmdChore() {
     // the jobs' chore started past Upkeep's hold is the supervisor's call, so it is logged (kit-162)
     const holdRefs = ['upkeep', 'chore-recurring'];
     if (um !== 'run' && slugName === 'recurring') appendLog({ type: 'act', class: 'goal-hold', what: `started chore-recurring while Upkeep is ${um === 'drain' ? 'drained' : holdWords(um)}, with --force`, refs: holdRefs, reversible: true }, 'supervisor');
+    // a kit sync pins the release it copies (kit-install@1), best effort, in a new worktree only;
+    // whatever the pin says, the chore has started (packagePin's sync call, dormant until kit-957)
+    if (made && slugName.startsWith('devteam-sync-')) {
+      const p = packagePin(path.join(wt, kitRel), slugName.slice('devteam-sync-'.length), { sync: wt });
+      if (p) process.stderr.write(`${p.line}${p.exit ? '; the chore goes on' : ''}\n`);
+    }
     return out(wt);
   }
   if (sub === 'adopt' || sub === 'drop') {
@@ -20574,6 +20804,7 @@ function collectMetrics(since, reviewsSince = 0) {
   let idlePlanning = 0;
   const ready = [...ts.values()].filter((t) => isActive(t) && !isHeld(t) && !mergeShaFor(t.id) && !(activeWorker(t.id) && !stoppedLaunch(t.id)) && (t.depends_on ?? []).every((d) => mergeShaFor(d)) && !notSchedulable(t) && ticketMode(t) === 'run');
   holdFindings(add, settings);
+  packagePinFindings(add);
   // A goal's live ticket that waits, directly or through others, on work of a goal
   // PRIORITY_INVERSION_GAP or more numbers worse that nobody has started: a ticket that could start
   // now (its dependencies merged, no worker), or one held. Nothing else pushes that work, and a
@@ -22344,7 +22575,6 @@ function presenceChanged(dir, onChange) {
 }
 
 function startHub(log, { kit = null, image = false, standalone = false } = {}) {
-  const page = path.join(kitDir, 'dashboard', 'hub.html');
   // the hub alone runs its owner actions where it was started, as box-thread's run: on a box that is
   // where the image's kit is no checkout; a dashboard's run in its project
   const actionCwd = standalone ? process.cwd() : mainRoot;
@@ -22486,7 +22716,7 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
       const act = req.method === 'POST' && req.url.startsWith('/operator/') && Object.hasOwn(HUB_ACTIONS, req.url.slice(10)) ? HUB_ACTIONS[req.url.slice(10)] : null;
       if (act) return ownerPost(req, send, act);
       if (req.method !== 'GET') return send(405, 'text/plain; charset=utf-8', 'the hub only lists, and takes the owner\'s threads with the operator', { allow: 'GET' });
-      if (req.url === '/') return send(200, 'text/html; charset=utf-8', fs.readFileSync(page), { 'content-security-policy': `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src ${PORT_RANGE.map((p) => `http://127.0.0.1:${p}`).join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'` });
+      if (req.url === '/') return servePage(null, req, res, 'hub', `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src ${PORT_RANGE.map((p) => `http://127.0.0.1:${p}`).join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`, { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
       // The list is for the hub's own page: another site's page doesn't get to make the hub probe
       // the block (a browser always says where a request came from). The page itself opens from
       // anywhere, a link in a README included.
@@ -22516,6 +22746,7 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
         if (req.headers['if-none-match'] === tag) { res.writeHead(304, { etag: tag, 'cache-control': 'private, no-cache' }); return res.end(); }
         return send(200, 'application/json', body, { etag: tag, 'cache-control': 'private, no-cache' });
       }
+      if (servePageAsset(req, res, 'hub') !== DASH_NEXT) return;
       return send(404, 'text/plain; charset=utf-8', 'not found');
     }));
     current = hub;
@@ -28231,6 +28462,8 @@ const IMAGE_RUNS = {
     'cmdHub', 'cmdMachine', 'cmdOperatorThread', 'cmdRecover', 'cmdBoxPins',
     // what they are built from that serves only the image: the hub
     'probeHello', 'HUB_BODY_MAX', 'hubTurnOk', 'HUB_ACTIONS', 'startHub', 'hubLogger', 'imageHub',
+    // the seam the hub sends its page through, and asks before its 404 (page-seam@1, kit-983)
+    'servePage', 'servePageAsset',
     // recover --machine (a project's own recover runs from that project's kit, never the image's;
     // its recoverOne is listed below as a crossing, since it writes supervisor-up.json)
     'siblingOf', 'isAdopted', 'machineProjects', 'projectKit', 'projectJson', 'kitHasRecover', 'notedPaneOf', 'tmuxName', 'readUpList', 'recoverMachine', 'LEGACY_RECOVER_MESSAGE', 'legacyRecover',
@@ -29187,6 +29420,132 @@ function artifactRemoteRefs({ root, main, onMoved = () => {}, env = process.env 
     stop() { clearTimeout(timer); timer = null; if (child) try { process.kill(-child.pid, 'SIGTERM'); } catch {} },
   };
 }
+// page-seam@1 (kit-983): every page the CLI's servers send goes through servePage, pageVersion and
+// servePageAsset, and serveAppFiles is the one static server by alpha-build@1's rules. At main they
+// send today's pages (dashboard/index.html, hub.html, browser.html) exactly as before; the generated
+// tree overrides only these declarations to serve the apps (designs/kit-package-apps.md).
+// servePage sends one of today's pages: 'dashboard', 'hub' or 'browser', read from the kit's
+// dashboard folder on each request, as text/html with the caller's headers and policy, and no body
+// to a HEAD. A page it can't read is a 500. D.keep, when the caller gives one, holds the page's bytes
+// for the server's life (the browser view, whose page must match the daemon that serves it): called
+// with no res, at the server's creation, it only reads the page into D.keep, and throws when it
+// can't, so that server fails at start.
+function servePage(D, req, res, page, policy, headers = {}) {
+  const file = { dashboard: 'index.html', hub: 'hub.html', browser: 'browser.html' }[page];
+  if (!file) throw new Error(`servePage: no page ${page}`);
+  if (!res) { D.keep[page] = fs.readFileSync(path.join(kitDir, 'dashboard', file)); return; }
+  // 'in', not a read: the dashboard's D (dashContext) throws on a name it was not given
+  const keep = D && 'keep' in D ? D.keep : null;
+  let body = keep?.[page];
+  if (!body) {
+    try { body = fs.readFileSync(path.join(kitDir, 'dashboard', file)); } catch {
+      res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+      return res.end('this page could not be read\n');
+    }
+    if (keep) keep[page] = body;
+  }
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': body.length, ...headers, 'content-security-policy': policy });
+  return res.end(req.method === 'HEAD' ? undefined : body);
+}
+// The x-devteam-page value of a page: the first 16 hex of the sha256 of its file, or '' when it
+// can't be read. An open tab compares it with the one it first saw, and offers a reload.
+function pageVersion(page) {
+  const file = { dashboard: 'index.html', hub: 'hub.html', browser: 'browser.html' }[page];
+  if (!file) return '';
+  try { return sha256(fs.readFileSync(path.join(kitDir, 'dashboard', file))).slice(0, 16); } catch { return ''; }
+}
+// A page's own file, for a request no route of server ('dashboard', 'hub' or 'browser') took, or
+// DASH_NEXT, "not mine": the caller's own answer (its 404) follows. At main only the dashboard has
+// any: the review pages' helpers, /review/<seg>/devteam-ui.css and .js (dashRoutesReviewPage checks
+// <seg> first), to a GET, as before (a HEAD there is the dashboard's 404). Every other method, and
+// every other path, is DASH_NEXT; in the tree it may answer GET and HEAD, and nothing else.
+function servePageAsset(req, res, server) {
+  if (req.method !== 'GET' || server !== 'dashboard') return DASH_NEXT;
+  let p;
+  try { p = new URL(req.url, 'http://x').pathname; } catch { return DASH_NEXT; }
+  const m = /^\/review\/[^/]+\/(devteam-ui\.(?:css|js))$/.exec(p);
+  if (!m) return DASH_NEXT;
+  // read before any header, so a file that is gone is a 500 (as servePage's), never a throw after a 200
+  let body;
+  try { body = fs.readFileSync(path.join(kitDir, 'dashboard', m[1])); } catch {
+    res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+    return res.end('this file could not be read\n');
+  }
+  res.writeHead(200, { 'content-type': m[1].endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+  return res.end(body);
+}
+// A static export served from folder at base, by alpha-build@1's rules and
+// test/fixtures/alpha-serving.json. A caller's mistake throws before any request is read: a base
+// that is not '' (the root) or '/<name>[/<name>…]' (no trailing slash, no empty, '?' or '#' part),
+// or a folder that is not a non-empty string. Then, in order: DASH_NEXT for a method but GET and
+// HEAD, or a path (the query cut off, and ignored from here on) that is neither base nor under
+// base/; inside it, it always answers. A 404 (text/plain, 'not found') for a request over 2048
+// bytes; a segment that does not decode (each is decoded once), an empty segment but the last, '.',
+// '..', or a decoded '/', '\' or NUL; a real path (symlinks followed) that is missing or outside the
+// folder's real path; a file asked for with a trailing slash; a folder's index.html whose real path
+// is missing or outside; anything not a regular file; a type not in the known list. A 301 for base
+// itself (to base/) and for a folder without its slash (to the path with one, no query). A folder
+// is its index.html. A 200 carries the type, content-length, cache-control: no-store and nosniff,
+// and no body to a HEAD. An .html file carries the policy policyFor(<route>) gives, <route> being
+// its folder as csp-hashes.json keys a route ('/', '/threads/one/'), so a page that is not a
+// route's index.html gets its folder's policy; policyFor is asked only for .html, and a policy that
+// is not a non-empty string, or a throw, is a 500. A folder that isn't there serves 404s.
+function serveAppFiles(folder, base, req, res, policyFor) {
+  if (typeof base !== 'string' || (base !== '' && !/^\/[^/?#]+(?:\/[^/?#]+)*$/.test(base))) throw new Error(`serveAppFiles: base ${JSON.stringify(base)} is not '' or /<name>`);
+  if (typeof folder !== 'string' || !folder) throw new Error('serveAppFiles: no folder');
+  const KNOWN = { html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', txt: 'text/plain; charset=utf-8', json: 'application/json', svg: 'image/svg+xml', png: 'image/png', ico: 'image/x-icon', webp: 'image/webp', woff2: 'font/woff2' };
+  if (req.method !== 'GET' && req.method !== 'HEAD') return DASH_NEXT;
+  const raw = String(req.url);
+  const p = raw.split('?')[0];
+  if (p !== base && !p.startsWith(`${base}/`)) return DASH_NEXT;
+  const answer = (code, headers, body) => { res.writeHead(code, { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...headers }); return res.end(req.method === 'HEAD' ? undefined : body); };
+  const none = () => answer(404, { 'content-type': 'text/plain; charset=utf-8' }, 'not found\n');
+  if (Buffer.byteLength(raw) > 2048) return none();
+  if (p === base) return answer(301, { location: `${base}/` });
+  const segs = p.slice(base.length + 1).split('/');
+  const parts = [];
+  for (const [i, s] of segs.entries()) {
+    let d;
+    try { d = decodeURIComponent(s); } catch { return none(); }
+    if (d === '') { if (i === segs.length - 1) continue; return none(); }
+    if (d === '.' || d === '..' || /[/\\\0]/.test(d)) return none();
+    parts.push(d);
+  }
+  let top, real, st;
+  try { top = fs.realpathSync(folder); real = fs.realpathSync(path.join(top, ...parts)); st = fs.statSync(real); } catch { return none(); }
+  const inside = (f) => f === top || f.startsWith(top + path.sep);
+  if (!inside(real)) return none();
+  if (!st.isDirectory() && parts.length && p.endsWith('/')) return none();
+  if (st.isDirectory()) {
+    if (!p.endsWith('/')) return answer(301, { location: `${p}/` });
+    try { real = fs.realpathSync(path.join(real, 'index.html')); st = fs.statSync(real); } catch { return none(); }
+    if (!inside(real)) return none();
+  }
+  if (!st.isFile()) return none();
+  const ext = path.extname(real).slice(1).toLowerCase();
+  const type = Object.hasOwn(KNOWN, ext) ? KNOWN[ext] : null;
+  if (!type) return none();
+  let body;
+  try { body = fs.readFileSync(real); } catch { return none(); }
+  const headers = { 'content-type': type, 'content-length': body.length };
+  if (ext === 'html') {
+    const rel = path.relative(top, path.dirname(real)).split(path.sep).join('/');
+    const route = rel ? `/${rel}/` : '/';
+    let policy;
+    try { policy = policyFor(route); } catch { policy = null; }
+    if (typeof policy !== 'string' || !policy) return answer(500, { 'content-type': 'text/plain; charset=utf-8' }, 'no policy for this page\n');
+    headers['content-security-policy'] = policy;
+  }
+  return answer(200, headers, body);
+}
+// The dashboard's route for a page's own file that no route group took (servePageAsset), GET and
+// HEAD only, before dashRoutesOwner, which answers every POST /api/<name> and the 404 for everything
+// else. A plain function, not an async dashRoutes* group, so it sits here with the seam, outside the
+// dashboardRoutes region; the route loop awaits what it returns all the same.
+function dashRoutesApp(D, req, res, q) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return DASH_NEXT;
+  return servePageAsset(req, res, 'dashboard');
+}
 /* cmdDashboard start */
 /* dashboardRoutes start */
 // What a route group returns when none of its routes matched the request.
@@ -29308,7 +29667,7 @@ async function dashRoutesPage(D, req, res, q) {
     const rest = body.slice(open + 1);
     return `{"${key}":${JSON.stringify(key === 'viewer' ? { level } : level)}${rest.trimStart().startsWith('}') ? '' : ','}${rest}`;
   };
-  const { page, pageCsp, send, helloBody, stageFrames, dashboardData, logWatch } = D;
+  const { pageCsp, send, helloBody, stageFrames, dashboardData, logWatch } = D;
   // hello carries it too, as level: the artifact and preview viewer reads no /api/data, and polls this already
   if (req.method === 'GET' && req.url === '/api/hello') return send(res, 200, 'application/json', withViewer(helloBody(), 'level'));
   // frame-src 'self': a frame of this page (a review page, an HTML mock) may navigate itself, and
@@ -29316,8 +29675,7 @@ async function dashRoutesPage(D, req, res, q) {
   if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
     // frame-ancestors: only this dashboard and the machine's hub may frame it, so another site
     // can't lay it under its own page and steer a click onto an owner action.
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': pageCsp(stageFrames()) });
-    return res.end(fs.readFileSync(page));
+    return servePage(D, req, res, 'dashboard', pageCsp(stageFrames()), { 'cache-control': 'no-store' });
   }
   if (req.method === 'GET' && req.url.startsWith('/api/data')) {
     // the log looked at now, so a change the watch hasn't delivered yet makes the kept build stale
@@ -29331,8 +29689,7 @@ async function dashRoutesPage(D, req, res, q) {
     if (!r.ok && !D.lastData) return send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
     // The page in use says which version of itself it is: an open tab keeps the code it loaded,
     // so after a kit update it compares this with the first one it saw and offers a reload.
-    let version = '';
-    try { version = sha256(fs.readFileSync(page)).slice(0, 16); } catch {}
+    const version = pageVersion('dashboard');
     // a run that failed or timed out serves the last good data, marked stale
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-devteam-page': version, ...(r.ok ? {} : { 'x-devteam-stale': 'true' }) });
     // a fresh run's or the kept last good data, with the viewer for a box's level (D.lastData untouched)
@@ -29343,7 +29700,7 @@ async function dashRoutesPage(D, req, res, q) {
 // /view/artifact/…, /view/preview/…, /api/artifact-fp, /api/view, /api/artifact-versions
 async function dashRoutesViewer(D, req, res, q) {
   const { u } = q;
-  const { page, pageCsp, run, describing, versioning, send, previewStage, remote } = D;
+  const { pageCsp, run, describing, versioning, send, previewStage, remote } = D;
   // The viewer (spec §7): this page in viewer mode, one artifact on its stage. Its frames are this
   // dashboard's own pages. It may be framed by itself and the machine's hub, by policy alone and
   // never X-Frame-Options: on a box the gateway adds the public name to frame-ancestors for its
@@ -29351,8 +29708,7 @@ async function dashRoutesViewer(D, req, res, q) {
   const vw = req.method === 'GET' ? /^\/view\/artifact\/([^/]+)$/.exec(u.pathname) : null;
   if (vw) {
     if (!LINK_ID.test(vw[1]) || !ARTIFACT_AT.test(u.searchParams.get('at') || 'main')) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': pageCsp() });
-    return res.end(fs.readFileSync(page));
+    return servePage(D, req, res, 'dashboard', pageCsp(), { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
   }
   // A preview's viewer: the same page, framing the preview's lens where it is served (previewStage):
   // frame-src names exactly that origin, the preview's own name on a box (the gateway rewrites no
@@ -29363,8 +29719,7 @@ async function dashRoutesViewer(D, req, res, q) {
     const rec = PREVIEW_NAME.test(vp[1]) ? readPreviews().find((r) => r.name === vp[1]) : null;
     if (!rec) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
     const { origin } = await previewStage(rec);
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': pageCsp(origin ? [origin] : []) });
-    return res.end(fs.readFileSync(page));
+    return servePage(D, req, res, 'dashboard', pageCsp(origin ? [origin] : []), { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
   }
   // A draft's fingerprint, for the viewer's 2 s draft poll (responder contract, artifact-fp@1): the
   // same fp artifact describe gives, from stat calls and the oid cache (diskOid hashes only a file
@@ -29710,10 +30065,7 @@ async function dashRoutesReviewPage(D, req, res, q) {
   if (rvm) {
     const [, seg, file] = rvm;
     if (seg !== 'preview' && !ID.test(seg)) return send(res, 404, 'text/plain', 'not found');
-    if (file === 'devteam-ui.css' || file === 'devteam-ui.js') {
-      res.writeHead(200, { 'content-type': file.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
-      return res.end(fs.readFileSync(path.join(kitDir, 'dashboard', file)));
-    }
+    if (file === 'devteam-ui.css' || file === 'devteam-ui.js') return servePageAsset(req, res, 'dashboard');
     if (file !== '') return send(res, 404, 'text/plain', 'not found');
     // Opened top-level it would be same-origin with the owner API; it is served only into a frame
     // of this page (and its policy makes its origin opaque even then).
@@ -29935,8 +30287,30 @@ async function dashRoutesOwner(D, req, res, q) {
   });
   return;
 }
-const DASHBOARD_ROUTES = [dashRoutesUpload, dashRoutesPage, dashRoutesViewer, dashRoutesThreads, dashRoutesReads, dashRoutesFiles, dashRoutesArtifacts, dashRoutesReviewPage, dashRoutesOwner];
+const DASHBOARD_ROUTES = [dashRoutesUpload, dashRoutesPage, dashRoutesViewer, dashRoutesThreads, dashRoutesReads, dashRoutesFiles, dashRoutesArtifacts, dashRoutesReviewPage, dashRoutesApp, dashRoutesOwner];
 /* dashboardRoutes end */
+// A request whose handling threw, one no guard foresaw: logged with its method and path (the query
+// cut, at most 200 characters) and the error's class and code, then a 500 when no header is out yet.
+// Never the error's message or stack, which can quote the request (execFile's names the bad value):
+// a class or code that is no plain name is left out, a thrown non-object is named by its type, and
+// an object whose reads throw is just "object". The filter keeps out odd text, not a plain word: no
+// route may put a request's value in an error's code or class. Once headers are out, a response
+// still open is destroyed, so a cut body looks cut; one already ended is left as it is.
+function dashRequestFailed(log, req, res, e) {
+  let what = e === null ? 'null' : typeof e;
+  if (what === 'object' || what === 'function') {
+    try {
+      const name = [e.constructor?.name, e.code].filter((v) => typeof v === 'string' && /^[A-Za-z_$][\w$]{0,63}$/.test(v));
+      if (name.length) what = name.join(' ');
+    } catch {}
+  }
+  log(`request failed: ${req.method} ${String(req.url).split('?')[0].slice(0, 200)}: ${what}`);
+  if (!res.headersSent) {
+    res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+    return res.end('this request failed');
+  }
+  if (!res.writableEnded) res.destroy();
+}
 async function cmdDashboard() {
   // the kit as this process loaded it, printed first, before any wait (kit-288): a sync landing
   // while it starts is then a change it sees
@@ -30489,27 +30863,37 @@ async function cmdDashboard() {
   const logWatch = presenceChanged(liveLogDir(), () => { dataEpoch += 1; presence.changed(); });
   every(logWatch.tick, 1000);
   const D = dashContext({ log, page, pageCsp, run, describing, versioning, remote, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, ACTION_JSON, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, sessionPrompts, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
+  // A throw out of any route is that request's failure (dashRequestFailed), never the dashboard's
+  // stop: a rejection out of this async handler would reach processLog, which exits.
   const server = http.createServer(async (req, res) => {
-    if (draining) res.setHeader('connection', 'close');
-    // Node's five minutes for a body, for all but an upload (UPLOAD_REQUEST_MS, and its stall timer)
-    const bodyTimer = setTimeout(() => { if (!req.complete) req.destroy(); }, bodyMs);
-    bodyTimer.unref();
-    req.once('close', () => clearTimeout(bodyTimer));
-    // Every route answers only on the dashboard's own address: a page elsewhere that points its own
-    // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
-    const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
-    // the terminal's routes read these two refusals as JSON, with their why (terminal@1 §2)
-    const isTerm = req.url.startsWith('/api/term/');
-    const termNo = (why) => { log(`refused ${req.url.split('?')[0]}: ${why}`); termDrain(req); return send(res, 403, 'application/json', JSON.stringify(req.method === 'POST' ? { error: 'the terminal answers only on this page', why } : { why })); };
-    if (!okHost) return isTerm ? termNo('host') : send(res, 403, 'text/plain; charset=utf-8', 'the dashboard answers only on its own address');
-    // a request a preview's relay forwarded (it sends localhost as Host and Origin, which the owner checks accept): never the owner's
-    if (req.headers[RELAY_MARK] !== undefined) return isTerm ? termNo('relay') : send(res, 403, 'text/plain; charset=utf-8', 'not through a preview relay');
-    // /presence is a socket: a plain request gets its guard's status (presence@1 §2)
-    if (req.url === '/presence' || req.url.startsWith('/presence?')) return presence.refuse(req, res);
-    // the terminal: right after the global guards, before any other route
-    if (isTerm) return await term.handle(req, res, new URL(req.url, 'http://x'));
-    const q = { okHost, bodyTimer, get u() { return this._u ??= new URL(req.url, 'http://x'); } };
-    for (const route of DASHBOARD_ROUTES) if (await route(D, req, res, q) !== DASH_NEXT) return;
+    try {
+      if (draining) res.setHeader('connection', 'close');
+      // Node's five minutes for a body, for all but an upload (UPLOAD_REQUEST_MS, and its stall timer)
+      const bodyTimer = setTimeout(() => { if (!req.complete) req.destroy(); }, bodyMs);
+      bodyTimer.unref();
+      req.once('close', () => clearTimeout(bodyTimer));
+      // Every route answers only on the dashboard's own address: a page elsewhere that points its own
+      // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
+      const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
+      // the terminal's routes read these two refusals as JSON, with their why (terminal@1 §2)
+      const isTerm = req.url.startsWith('/api/term/');
+      const termNo = (why) => { log(`refused ${req.url.split('?')[0]}: ${why}`); termDrain(req); return send(res, 403, 'application/json', JSON.stringify(req.method === 'POST' ? { error: 'the terminal answers only on this page', why } : { why })); };
+      if (!okHost) return isTerm ? termNo('host') : send(res, 403, 'text/plain; charset=utf-8', 'the dashboard answers only on its own address');
+      // a request a preview's relay forwarded (it sends localhost as Host and Origin, which the owner checks accept): never the owner's
+      if (req.headers[RELAY_MARK] !== undefined) return isTerm ? termNo('relay') : send(res, 403, 'text/plain; charset=utf-8', 'not through a preview relay');
+      // /presence is a socket: a plain request gets its guard's status (presence@1 §2)
+      if (req.url === '/presence' || req.url.startsWith('/presence?')) return presence.refuse(req, res);
+      // the request's one parse, which every route reads (q.u): a target that is no URL here is a 400,
+      // never a throw out of this handler, which would stop the dashboard
+      let u;
+      try { u = new URL(req.url, 'http://x'); } catch { return send(res, 400, 'text/plain; charset=utf-8', 'bad request'); }
+      // the terminal: right after the global guards, before any other route
+      if (isTerm) return await term.handle(req, res, u);
+      const q = { okHost, bodyTimer, u };
+      for (const route of DASHBOARD_ROUTES) if (await route(D, req, res, q) !== DASH_NEXT) return;
+    } catch (e) {
+      dashRequestFailed(log, req, res, e);
+    }
   });
   // Two dashboards starting at once can pick the same free port: the one that loses picks again.
   const tried = [];
@@ -33852,10 +34236,373 @@ function packagePinPair(pin) {
     'package-lock.json': text({ name: 'devteam-instance', lockfileVersion: 3, requires: true, packages: { '': { name: 'devteam-instance', dependencies }, [`node_modules/${name}`]: { version, resolved, integrity } } }),
   };
 }
+// npmRun (kit-install@1): the one function every kit npm call goes through. It runs `npm <args>` in cwd
+// (absolute) with --registry=<the registry>, --ignore-scripts, --prefix=<cwd> and --workspaces=false
+// after args, each once; with every variable whose name starts with npm_config_, in any letter case,
+// dropped from npm's environment, and npm_config_userconfig and npm_config_globalconfig naming two
+// different empty files in a folder of its own (made under os.tmpdir(), removed after). The registry is
+// https://registry.npmjs.org/, or DEVTEAM_NPM_REGISTRY when that is exactly http://127.0.0.1:<port>/;
+// any other non-empty value throws (code EDEVTEAMREGISTRY) before npm runs. Returns { status, stdout,
+// stderr, error (the spawn's code: ENOENT for no npm on PATH, ETIMEDOUT past timeout ms), registry }.
+function npmRun(args, { cwd, timeout = 120000 } = {}) {
+  const set = process.env.DEVTEAM_NPM_REGISTRY ?? '';
+  const port = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/$/.exec(set)?.[1];
+  if (set !== '' && !(Number(port) <= 65535)) {
+    const e = new Error(`DEVTEAM_NPM_REGISTRY is ${JSON.stringify(set.slice(0, 200))}: it may only be http://127.0.0.1:<port>/ (a test's registry), or unset for the public one`);
+    e.code = 'EDEVTEAMREGISTRY';
+    throw e;
+  }
+  const registry = set === '' ? 'https://registry.npmjs.org/' : set;
+  if (typeof cwd !== 'string' || !path.isAbsolute(cwd)) throw new Error('npmRun: cwd must be an absolute path');
+  const conf = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-npmrc-'));
+  try {
+    const user = path.join(conf, 'user');
+    const global = path.join(conf, 'global');
+    fs.writeFileSync(user, '');
+    fs.writeFileSync(global, '');
+    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^npm_config_/i.test(k)));
+    env.npm_config_userconfig = user;
+    env.npm_config_globalconfig = global;
+    const r = spawnSync('npm', [...args, `--registry=${registry}`, '--ignore-scripts', `--prefix=${cwd}`, '--workspaces=false'], { cwd, env, encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 });
+    return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error?.code ?? null, registry };
+  } finally { fs.rmSync(conf, { recursive: true, force: true }); }
+}
+// package pin <tag> (kit-install@1, decision 2 of kit-package-dist): writes docs/devteam/package.json and
+// package-lock.json into kitDir, packagePinPair's output for the registry's manifest of
+// <package_name from main's settings>@<tag without its v>, layout from the manifest's devteam.layout.
+// It returns { exit, line } and throws nothing; only the kit's own log write can still die (a refused
+// line, the log's lock past its wait), which is why chore start runs it as a command of its own. Best effort before layout 2: no npm on PATH, an npm older than 9.5, a registry that can't be reached and a version not published leave both files
+// as they were, exit 0, and log a package-pin-skipped observation naming the cause, which
+// packagePinFindings turns into a finding; a pin written logs package-pinned, which clears it. A tag that
+// isn't vX.Y.Z, a bad DEVTEAM_NPM_REGISTRY, a temp folder it can't make, an unreadable main, a
+// manifest packagePinPair won't take and any other npm failure exit 1 and write nothing (an npm failure
+// is logged as a skip too, so it shows); a failed write exits 1 with its temp files removed, and a stop
+// between the two renames leaves the new lock beside the old package.json, which merge refuses.
+// With { sync: <the worktree> } it is chore start's call for a kit sync: while SYNC_PINS is false it
+// does nothing and returns null (kit-955 ships the call dormant: until merge's checks take the pair,
+// kit-957, a sync PR carrying it would need an owner's answer); kit-957 sets it true. On, it runs
+// `package pin <tag>` as a command of its own in that worktree, so nothing the pin does (a die in its
+// log write included) ends the start, and returns { exit, line } from what that command printed.
+function packagePin(kitDir, tag, { sync = null } = {}) {
+  const SYNC_PINS = false;
+  if (sync !== null) {
+    if (!SYNC_PINS) return null;
+    const p = spawnSync(process.execPath, [fileURLToPath(import.meta.url), 'package', 'pin', String(tag)], { cwd: sync, encoding: 'utf8', timeout: 300000, stdio: ['ignore', 'pipe', 'pipe'] });
+    const said = `${p.stdout ?? ''}${p.stderr ?? ''}`.trim();
+    return { exit: p.status ?? 1, line: said || `package pin ${tag}: ended without a word (${p.error?.code ?? p.signal ?? `exit ${p.status}`})` };
+  }
+  const m = /^v((?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8}))$/.exec(typeof tag === 'string' ? tag : '');
+  if (!m) return { exit: 1, line: `package pin: ${JSON.stringify(String(tag ?? '').slice(0, 80))} is not a release tag vX.Y.Z; nothing pinned` };
+  const version = m[1];
+  const files = 'docs/devteam/package.json and package-lock.json';
+  const main = mainRef();
+  const s = main ? settingsAt(main) : null;
+  const name = s?.package_name;
+  if (typeof name !== 'string' || !name) return { exit: 1, line: `package pin ${tag}: can't read package_name from main's settings${main ? ` (${main})` : ' (no main branch)'}; ${files} left as they were` };
+  const by = logWriter();
+  const note = (kind, detail, cause) => {
+    try {
+      appendLog({ type: 'observation', source: { ticket: 'worker', planner: 'planner', responder: 'responder' }[writerClass(by)] ?? 'supervisor', subject: `package:${tag}`, kind, detail, severity: kind === 'package-pinned' ? 1 : 2, valence: kind === 'package-pinned' ? 1 : -1, source_key: `package-pin:${tag}:${cause}` }, by);
+    } catch {}
+  };
+  const skip = (cause, why, exit = 0) => {
+    note('package-pin-skipped', `package pin ${tag} skipped (${cause}): ${why}`, cause);
+    return { exit, line: `package pin ${tag}: skipped (${cause}): ${why}; ${files} left as they were` };
+  };
+  // npmRun throws for a bad DEVTEAM_NPM_REGISTRY and for a temp folder it can't make (a full or
+  // unwritable os.tmpdir()): each is exit 1 with its line
+  const thrown = (e) => ({ exit: 1, line: `package pin ${tag}: ${e.syscall ? `can't make a folder under ${os.tmpdir()} (${e.code ?? e.message})` : e.message}; ${files} left as they were` });
+  let view = null;
+  try {
+    view = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-npm-view-'));
+    fs.writeFileSync(path.join(view, 'package.json'), '{}\n');
+  } catch (e) {
+    if (view) fs.rmSync(view, { recursive: true, force: true });
+    return thrown(e);
+  }
+  try {
+    const npm = (args, timeout = 120000) => npmRun(args, { cwd: view, timeout });
+    let v;
+    // --version reads no registry: 30 s is long for it
+    try { v = npm(['--version'], 30000); } catch (e) { return thrown(e); }
+    if (v.error === 'ENOENT') return skip('no-npm', 'no npm on PATH');
+    const nv = /^(\d+)\.(\d+)\.(\d+)/.exec(v.stdout.trim());
+    if (v.status !== 0 || !nv) return skip('npm-failed', `npm --version failed (${v.error ?? `exit ${v.status}`}: ${(v.stderr.trim() || v.stdout.trim()).split('\n')[0].slice(0, 200)})`, 1);
+    if (Number(nv[1]) < 9 || (Number(nv[1]) === 9 && Number(nv[2]) < 5)) return skip('old-npm', `npm ${nv[0]} is older than 9.5, which can't verify attestations`);
+    let r;
+    try { r = npm(['view', `${name}@${version}`, '--json']); } catch (e) { return thrown(e); }
+    if (r.status !== 0 || r.error) {
+      let code = /^npm (?:error|ERR!) code (\S+)/m.exec(r.stderr)?.[1] ?? null;
+      if (!code) { try { code = JSON.parse(r.stdout)?.error?.code ?? null; } catch {} }
+      if (r.error === 'ETIMEDOUT') code = 'ETIMEDOUT';
+      if (typeof code === 'string' && /^(ECONN[A-Z]*|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|ENETUNREACH|EHOSTUNREACH|E5[0-9][0-9]|E429)$/.test(code)) return skip('unreachable', `the registry ${r.registry} can't be reached (${code})`);
+      if (code === 'E404') return skip('unpublished', `${name}@${version} is not published on ${r.registry} (E404)`);
+      return skip('npm-failed', `npm view ${name}@${version} failed (${code ?? r.error ?? `exit ${r.status}`})`, 1);
+    }
+    let man = null;
+    try { man = JSON.parse(r.stdout); } catch {}
+    const refuse = (why) => ({ exit: 1, line: `package pin ${tag}: refused: the registry's manifest of ${name}@${version} ${why}; ${files} left as they were` });
+    if (!man || typeof man !== 'object' || Array.isArray(man)) return refuse('is not one JSON object');
+    if (man.name !== name || man.version !== version) return refuse(`names ${String(man.name).slice(0, 80)}@${String(man.version).slice(0, 40)}`);
+    const layout = man.devteam?.layout;
+    if (layout !== 1 && layout !== 2) return refuse('has no devteam.layout of 1 or 2');
+    let pair;
+    try { pair = packagePinPair({ name, version, integrity: man.dist?.integrity, resolved: `https://registry.npmjs.org/${name}/-/${name.slice(name.indexOf('/') + 1)}-${version}.tgz`, layout }); } catch (e) { return refuse(`isn't a pin (${e.message})`); }
+    // both written beside their place, then each renamed over it: the lock first, so a stop between the
+    // two leaves a lock that names the new version beside the old package.json, which merge refuses
+    const tmps = [];
+    try {
+      for (const f of ['package-lock.json', 'package.json']) {
+        const t = path.join(kitDir, `.${f}.${process.pid}-${crypto.randomBytes(4).toString('hex')}.tmp`);
+        tmps.push([t, path.join(kitDir, f)]);
+        fs.writeFileSync(t, pair[f], { flag: 'wx' });
+      }
+      for (const [t, f] of tmps) fs.renameSync(t, f);
+    } catch (e) {
+      for (const [t] of tmps) fs.rmSync(t, { force: true });
+      return { exit: 1, line: `package pin ${tag}: can't write ${files} (${e.code ?? e.message})` };
+    }
+    const integrity = man.dist.integrity;
+    note('package-pinned', `package pin ${tag}: pinned ${name}@${version}, layout ${layout}`, 'pinned');
+    return { exit: 0, line: `package pin ${tag}: pinned ${name}@${version} (layout ${layout}, ${integrity.slice(0, 19)}…) in ${files}` };
+  } finally { fs.rmSync(view, { recursive: true, force: true }); }
+}
+// Each tag whose latest package pin in the last 14 days was skipped is a medium finding naming the
+// cause, until a pin of that tag is written (package-pinned) or the supervisor acks it.
+function packagePinFindings(add, now = Date.now()) {
+  const latest = new Map();
+  for (const o of logObjects('observation')) {
+    if (!['package-pin-skipped', 'package-pinned'].includes(o.kind) || !/^package:v\d/.test(String(o.subject)) || !(now - Date.parse(o.created_at) <= 14 * DAY)) continue;
+    const was = latest.get(o.subject);
+    if (!was || o.created_at >= was.created_at) latest.set(o.subject, o);
+  }
+  for (const [subject, o] of latest) {
+    if (o.kind !== 'package-pin-skipped') continue;
+    const tag = subject.slice('package:'.length);
+    add('medium', 'package-pin-skipped', tag, String(o.detail ?? '').slice(0, 300), `the sync's pin was left as it was: fix the cause, then devteam.mjs package pin ${tag} in .worktrees/chore-devteam-sync-${tag} and chore pr it; before layout 2 the sync may merge without it`);
+  }
+}
+// packageProvenance (kit-install@1's Provenance; kit-974): the release <name>@<version> whose tarball is
+// <integrity> was built by upstream's own release.yml at its tag. It returns
+//   { ok: true, provenance: { repo, workflow, ref, commit }, read }
+//   { ok: false, unreachable: true, why }                  the registry or upstream gave no answer
+//   { ok: false, refused: <guard>, why, read }             the first guard that fails, by name
+// and throws only what npmRun throws for a bad DEVTEAM_NPM_REGISTRY (code EDEVTEAMREGISTRY). read is
+// what the signed statement says ({ digest, repo, workflow, ref, commit }, repo as owner/name when it is
+// a github.com URL), or null before it is parsed. Unreachable is never a pass: its caller decides what
+// it means (a finding before layout 2, a stop from it). The guards, in order:
+//  1 the trust root: Sigstore's public-good one, pinned below (Fulcio's intermediate and root, Rekor's
+//    key: trusted_root.json as npm 10.9.9's @sigstore/tuf seeds ship it). DEVTEAM_SIGSTORE_TEST_CA, for
+//    tests, names a file holding another ({ v: 1, fulcio: [intermediate, root], rekor: { keyId, spki } },
+//    base64 DER, at most 64 KiB) and replaces it only beside a loopback DEVTEAM_NPM_REGISTRY (npmRun's
+//    rule); set without one, or unreadable, every call is refused (test-ca), never checked against the
+//    public root instead.
+//  2 input: name, version X.Y.Z and one sha512 integrity.
+//  3 upstream: upstream_repo from main's committed settings (settingsAt(mainRef())), owner/name.
+//  4 the bundle <registry>-/npm/v1/attestations/<name with / as %2f>@<version>, fetched once, in a child
+//    (so the call stays synchronous for merge): 15 s, no redirect followed. No answer, a 3xx, a 5xx or
+//    any status but 200 and 404 is unreachable; 404 is no-attestation; a body over 1 MiB is too-big.
+//  5 bundle: JSON with an attestations list; exactly one entry whose predicateType is SLSA v1 (slsa).
+//  6 statement: its bundle.dsseEnvelope has payloadType application/vnd.in-toto+json and a payload
+//    that is base64 of a JSON in-toto statement of that predicateType. read is taken here.
+//  7 certificate: the leaf (verificationMaterial.certificate, or x509CertificateChain's first) is no CA
+//    and is issued by the trust root's intermediate, itself a CA issued by the root.
+//  8 signature: exactly one, and it verifies over the envelope's DSSE PAE with the leaf's key: a
+//    statement changed after signing (a forged predicate) fails here.
+//  9 tlog: exactly one entry from the trust root's log; its signed entry timestamp verifies with the
+//    log's key; its body is a dsse entry naming this payload's SHA-256, this signature and this leaf;
+//    certificate-time: its time is within the leaf's validity and the chain's. The Merkle inclusion
+//    proof and an RFC 3161 time are not read (npm audit signatures checks the bundle in full; a bundle
+//    that carries only an RFC 3161 time, as Rekor v2's will, is refused here until the kit reads one).
+// 10 digest: exactly one subject, whose digest.sha512 is the integrity's, in hex.
+// 11 repo: externalParameters.workflow.repository is https://github.com/<upstream_repo>.
+// 12 workflow: its path is .github/workflows/release.yml.  13 ref: its ref is refs/tags/v<version>.
+// 14 identity: the leaf's SAN is exactly the URI https://github.com/<upstream_repo>/.github/workflows/
+//    release.yml@refs/tags/v<version>, so the key that signed is that workflow's at that tag.
+//    It trusts that no other workflow runs under release.yml's identity: release.yml has no
+//    workflow_call (a caller of a reusable workflow signs as the called file). Adding one needs this
+//    check to read Fulcio's Source Repository and Build Signer extensions first.
+// 15 commit: resolvedDependencies[0].digest.gitCommit is 40 hex and is the tag's commit at
+//    https://github.com/<upstream_repo>.git (git ls-remote: no answer is unreachable, no such tag is
+//    tag); default-branch: that commit is an ancestor of upstream's HEAD, fetched (commits only) into a
+//    bare repository of its own under os.tmpdir(), removed after, so home's refs never change.
+function packageProvenance({ name, version, integrity } = {}) {
+  const SLSA = 'https://slsa.dev/provenance/v1';
+  const WORKFLOW = '.github/workflows/release.yml';
+  const SIGSTORE = {
+    fulcio: [
+      'MIICGjCCAaGgAwIBAgIUALnViVfnU0brJasmRkHrn/UnfaQwCgYIKoZIzj0EAwMwKjEVMBMGA1UEChMMc2lnc3RvcmUuZGV2MREwDwYDVQQDEwhzaWdzdG9yZTAeFw0yMjA0MTMyMDA2MTVaFw0zMTEwMDUxMzU2NThaMDcxFTATBgNVBAoTDHNpZ3N0b3JlLmRldjEeMBwGA1UEAxMVc2lnc3RvcmUtaW50ZXJtZWRpYXRlMHYwEAYHKoZIzj0CAQYFK4EEACIDYgAE8RVS/ysH+NOvuDZyPIZtilgUF9NlarYpAd9HP1vBBH1U5CV77LSS7s0ZiH4nE7Hv7ptS6LvvR/STk798LVgMzLlJ4HeIfF3tHSaexLcYpSASr1kS0N/RgBJz/9jWCiXno3sweTAOBgNVHQ8BAf8EBAMCAQYwEwYDVR0lBAwwCgYIKwYBBQUHAwMwEgYDVR0TAQH/BAgwBgEB/wIBADAdBgNVHQ4EFgQU39Ppz1YkEZb5qNjpKFWixi4YZD8wHwYDVR0jBBgwFoAUWMAeX5FFpWapesyQoZMi0CrFxfowCgYIKoZIzj0EAwMDZwAwZAIwPCsQK4DYiZYDPIaDi5HFKnfxXx6ASSVmERfsynYBiX2X6SJRnZU84/9DZdnFvvxmAjBOt6QpBlc4J/0DxvkTCqpclvziL6BCCPnjdlIB3Pu3BxsPmygUY7Ii2zbdCdliiow=',
+      'MIIB9zCCAXygAwIBAgIUALZNAPFdxHPwjeDloDwyYChAO/4wCgYIKoZIzj0EAwMwKjEVMBMGA1UEChMMc2lnc3RvcmUuZGV2MREwDwYDVQQDEwhzaWdzdG9yZTAeFw0yMTEwMDcxMzU2NTlaFw0zMTEwMDUxMzU2NThaMCoxFTATBgNVBAoTDHNpZ3N0b3JlLmRldjERMA8GA1UEAxMIc2lnc3RvcmUwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAAT7XeFT4rb3PQGwS4IajtLk3/OlnpgangaBclYpsYBr5i+4ynB07ceb3LP0OIOZdxexX69c5iVuyJRQ+Hz05yi+UF3uBWAlHpiS5sh0+H2GHE7SXrk1EC5m1Tr19L9gg92jYzBhMA4GA1UdDwEB/wQEAwIBBjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBRYwB5fkUWlZql6zJChkyLQKsXF+jAfBgNVHSMEGDAWgBRYwB5fkUWlZql6zJChkyLQKsXF+jAKBggqhkjOPQQDAwNpADBmAjEAj1nHeXZp+13NWBNa+EDsDP8G1WWg1tCMWP/WHPqpaVo0jhsweNFZgSs0eE7wYI4qAjEA2WB9ot98sIkoF3vZYdd3/VtWB5b9TNMea7Ix/stJ5TfcLLeABLE4BNJOsQ4vnBHJ',
+    ],
+    rekor: { keyId: 'c0d23d6ad406973f9559f3ba2d1ca01f84147d8ffc5b8445c224f98b9591801d', spki: 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2G2Y+2tabdTV5BcGiBIx0a9fAFwrkBbmLSGtks4L3qX6yYY0zufBnhC8Ur/iy55GhWP/9A/bY2LhC30M9+RYtw==' },
+  };
+  let read = null;
+  const refuse = (guard, why) => ({ ok: false, unreachable: false, refused: guard, why, read });
+  const down = (why) => ({ ok: false, unreachable: true, refused: null, why, read });
+  const cut = (v) => JSON.stringify(String(v ?? '')).slice(0, 120);
+  // 1. the registry (npmRun's rule) and the trust root
+  const set = process.env.DEVTEAM_NPM_REGISTRY ?? '';
+  const port = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/$/.exec(set)?.[1];
+  if (set !== '' && !(Number(port) <= 65535)) {
+    const e = new Error(`DEVTEAM_NPM_REGISTRY is ${JSON.stringify(set.slice(0, 200))}: it may only be http://127.0.0.1:<port>/ (a test's registry), or unset for the public one`);
+    e.code = 'EDEVTEAMREGISTRY';
+    throw e;
+  }
+  const registry = set === '' ? 'https://registry.npmjs.org/' : set;
+  let trust = SIGSTORE;
+  const testCa = process.env.DEVTEAM_SIGSTORE_TEST_CA ?? '';
+  if (testCa !== '') {
+    if (set === '') return refuse('test-ca', 'DEVTEAM_SIGSTORE_TEST_CA is set without a test registry (a loopback DEVTEAM_NPM_REGISTRY): a test trust root is never used against the public registry, and the public one is never used in its place');
+    try {
+      if (!fs.statSync(testCa).isFile() || fs.statSync(testCa).size > 65536) throw new Error('not a file of at most 64 KiB');
+      const t = JSON.parse(fs.readFileSync(testCa, 'utf8'));
+      if (t?.v !== 1 || !Array.isArray(t.fulcio) || t.fulcio.length !== 2 || !t.fulcio.every((c) => typeof c === 'string') || typeof t.rekor?.keyId !== 'string' || typeof t.rekor?.spki !== 'string') throw new Error('not { v: 1, fulcio: [intermediate, root], rekor: { keyId, spki } }');
+      trust = t;
+    } catch (e) { return refuse('test-ca', `DEVTEAM_SIGSTORE_TEST_CA (${cut(testCa)}) can't be read as a trust root: ${e.message}`); }
+  }
+  // 2. input
+  if (typeof name !== 'string' || name.length > 214 || !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(name)) return refuse('input', `${cut(name)} is not an npm package name`);
+  if (typeof version !== 'string' || !/^(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})$/.test(version)) return refuse('input', `${cut(version)} is not a version X.Y.Z`);
+  if (typeof integrity !== 'string' || !/^sha512-[A-Za-z0-9+/]{86}==$/.test(integrity)) return refuse('input', `${cut(integrity)} is not one sha512 integrity`);
+  const want = Buffer.from(integrity.slice(7), 'base64').toString('hex');
+  // 3. upstream, from main's committed settings
+  const main = mainRef();
+  const up = main ? settingsAt(main)?.upstream_repo : null;
+  if (typeof up !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(up)) return refuse('upstream', `upstream_repo in main's settings${main ? ` (${main})` : ' (no main branch)'} is ${cut(up ?? null)}, not owner/name on github.com`);
+  const ref = `refs/tags/v${version}`;
+  // 4. the bundle, fetched once
+  const url = `${registry}-/npm/v1/attestations/${name.replace('/', '%2f')}@${version}`;
+  // the child's code: every line indented, so no line of this function but its first and last is at column 0
+  const code = `
+    const url = ${JSON.stringify(url)};
+    let r;
+    try {
+      const res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(15000), headers: { accept: 'application/json' } });
+      if (res.status !== 200) r = { status: res.status };
+      else {
+        const parts = []; let n = 0;
+        for await (const c of res.body) { n += c.length; if (n > 1048576) break; parts.push(Buffer.from(c)); }
+        r = n > 1048576 ? { status: 200, big: true } : { status: 200, body: Buffer.concat(parts).toString('base64') };
+      }
+    } catch (e) { r = { down: String(e?.cause?.code ?? e?.name ?? 'error') }; }
+    process.stdout.write(JSON.stringify(r));`;
+  const f = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 4 * 1024 * 1024 });
+  let got = null;
+  try { got = JSON.parse(f.stdout); } catch {}
+  if (!got || got.down || typeof got.status !== 'number') return down(`the registry ${registry} can't be reached (${got?.down ?? f.error?.code ?? f.signal ?? `exit ${f.status}`})`);
+  if (got.status === 404) return refuse('no-attestation', `${name}@${version} has no attestations on ${registry} (404): it was not published with provenance`);
+  if (got.status !== 200) return down(`the registry ${registry} answered ${got.status} for ${name}@${version}'s attestations`);
+  if (got.big) return refuse('too-big', `${name}@${version}'s attestations are over 1 MiB`);
+  // 5. one SLSA provenance
+  let bundle = null;
+  try { bundle = JSON.parse(Buffer.from(got.body, 'base64').toString('utf8')); } catch {}
+  if (!Array.isArray(bundle?.attestations)) return refuse('bundle', `${name}@${version}'s attestations are not JSON with an attestations list`);
+  const slsa = bundle.attestations.filter((a) => a?.predicateType === SLSA);
+  if (slsa.length !== 1) return refuse('slsa', `${name}@${version}'s attestations hold ${slsa.length} SLSA provenance entries, not exactly one`);
+  // 6. the statement
+  const b = slsa[0].bundle;
+  const env = b?.dsseEnvelope;
+  const b64 = (s) => typeof s === 'string' && s.length > 0 && s.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(s);
+  if (env?.payloadType !== 'application/vnd.in-toto+json' || !b64(env.payload)) return refuse('statement', 'the provenance has no base64 in-toto payload');
+  const payload = Buffer.from(env.payload, 'base64');
+  let st = null;
+  try { st = JSON.parse(payload.toString('utf8')); } catch {}
+  if (!st || typeof st !== 'object' || st.predicateType !== SLSA) return refuse('statement', 'the provenance payload is not a JSON SLSA in-toto statement');
+  const w = st.predicate?.buildDefinition?.externalParameters?.workflow;
+  const repoUrl = typeof w?.repository === 'string' ? w.repository : null;
+  read = {
+    digest: st.subject?.[0]?.digest?.sha512 ?? null,
+    repo: repoUrl && /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+$/.test(repoUrl) ? repoUrl.slice('https://github.com/'.length) : repoUrl,
+    workflow: w?.path ?? null,
+    ref: w?.ref ?? null,
+    commit: st.predicate?.buildDefinition?.resolvedDependencies?.[0]?.digest?.gitCommit ?? null,
+  };
+  // 7. the certificate chain
+  const vm = b.verificationMaterial ?? {};
+  const x509 = (s) => new crypto.X509Certificate(Buffer.from(s, 'base64'));
+  let leaf, int, root;
+  try {
+    leaf = x509(vm.certificate?.rawBytes ?? vm.x509CertificateChain?.certificates?.[0]?.rawBytes);
+    [int, root] = trust.fulcio.map(x509);
+  } catch { return refuse('certificate', "the provenance's signing certificate (or the trust root's) does not parse"); }
+  const issued = (c, by) => c.checkIssued(by) && c.verify(by.publicKey);
+  if (leaf.ca || !int.ca || !root.ca || !issued(leaf, int) || !issued(int, root) || !issued(root, root)) return refuse('certificate', `the provenance's signing certificate is not issued by ${trust === SIGSTORE ? "Sigstore's Fulcio" : 'the test trust root'}`);
+  // 8. the signature, over the DSSE PAE
+  const sigs = env.signatures;
+  if (!Array.isArray(sigs) || sigs.length !== 1 || !b64(sigs[0]?.sig)) return refuse('signature', 'the provenance does not carry exactly one signature');
+  const hash = { 'prime256v1': 'sha256', 'secp384r1': 'sha384' }[leaf.publicKey.asymmetricKeyDetails?.namedCurve] ?? 'sha256';
+  const pae = Buffer.concat([Buffer.from(`DSSEv1 ${Buffer.byteLength(env.payloadType)} ${env.payloadType} ${payload.length} `), payload]);
+  let good = false;
+  try { good = crypto.verify(hash, pae, leaf.publicKey, Buffer.from(sigs[0].sig, 'base64')); } catch {}
+  if (!good) return refuse('signature', "the provenance's signature does not verify: its statement is not what was signed");
+  // 9. the log's signed entry, and the leaf valid at its time
+  const keyHex = (e) => { try { return Buffer.from(e?.logId?.keyId ?? '', 'base64').toString('hex'); } catch { return ''; } };
+  const ents = Array.isArray(vm.tlogEntries) ? vm.tlogEntries.filter((e) => keyHex(e) === trust.rekor.keyId) : [];
+  if (ents.length !== 1) return refuse('tlog', `the provenance carries ${ents.length} entries from ${trust === SIGSTORE ? "Rekor's log" : "the test trust root's log"}, not exactly one`);
+  const t = ents[0];
+  let entry = null, setOk = false;
+  try {
+    if (!/^\d{1,12}$/.test(String(t.integratedTime)) || !/^\d{1,15}$/.test(String(t.logIndex)) || !b64(t.canonicalizedBody)) throw new Error('shape');
+    const set = JSON.stringify({ body: t.canonicalizedBody, integratedTime: Number(t.integratedTime), logID: trust.rekor.keyId, logIndex: Number(t.logIndex) });
+    const logKey = crypto.createPublicKey({ key: Buffer.from(trust.rekor.spki, 'base64'), format: 'der', type: 'spki' });
+    setOk = crypto.verify('sha256', Buffer.from(set), logKey, Buffer.from(t.inclusionPromise?.signedEntryTimestamp ?? '', 'base64'));
+    entry = JSON.parse(Buffer.from(t.canonicalizedBody, 'base64').toString('utf8'));
+  } catch {}
+  if (!setOk) return refuse('tlog', "the log's signed entry timestamp does not verify");
+  let verifier = null;
+  try { verifier = new crypto.X509Certificate(Buffer.from(entry.spec.signatures[0].verifier, 'base64')); } catch {}
+  if (entry?.kind !== 'dsse' || entry.spec?.payloadHash?.algorithm !== 'sha256' || entry.spec.payloadHash.value !== crypto.createHash('sha256').update(payload).digest('hex')
+    || entry.spec.signatures?.length !== 1 || entry.spec.signatures[0]?.signature !== sigs[0].sig || !verifier?.raw.equals(leaf.raw)) return refuse('tlog', "the log's entry is not for this statement, signature and certificate");
+  const at = Number(t.integratedTime) * 1000;
+  const during = (c) => Date.parse(c.validFrom) <= at && at <= Date.parse(c.validTo);
+  if (![leaf, int, root].every(during)) return refuse('certificate-time', `the signing certificate was not valid at the log's time, ${new Date(at).toISOString()} (valid ${leaf.validFrom} to ${leaf.validTo})`);
+  // 10-14. what the statement and the certificate claim
+  if (!Array.isArray(st.subject) || st.subject.length !== 1 || typeof read.digest !== 'string' || !/^[0-9a-f]{128}$/.test(read.digest) || read.digest !== want) return refuse('digest', `the statement's subject is not exactly one digest equal to the integrity ${integrity.slice(0, 19)}…`);
+  if (repoUrl !== `https://github.com/${up}`) return refuse('repo', `the statement names the repository ${cut(repoUrl)}, not https://github.com/${up} (upstream_repo in main's settings)`);
+  if (read.workflow !== WORKFLOW) return refuse('workflow', `the statement names the workflow ${cut(read.workflow)}, not ${WORKFLOW}`);
+  if (read.ref !== ref) return refuse('ref', `the statement names the ref ${cut(read.ref)}, not ${ref}`);
+  const san = `URI:https://github.com/${up}/${WORKFLOW}@${ref}`;
+  if (leaf.subjectAltName !== san) return refuse('identity', `the signing certificate names ${cut(leaf.subjectAltName)}, not ${san.slice(4)}`);
+  // 15. the commit: the tag's at upstream, on its default branch
+  const commit = read.commit;
+  if (typeof commit !== 'string' || !/^[0-9a-f]{40}$/.test(commit)) return refuse('commit', `the statement's commit ${cut(commit)} is not 40 hex`);
+  const src = `https://github.com/${up}.git`;
+  const genv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_(DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|COMMON_DIR|NAMESPACE)$/.test(k)));
+  genv.GIT_TERMINAL_PROMPT = '0';
+  const gitx = (args, cwd) => spawnSync('git', args, { cwd, env: genv, encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'pipe'] });
+  let bare;
+  try { bare = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-provenance-')); } catch (e) { return down(`can't make a folder under ${os.tmpdir()} to ask upstream (${e.code ?? e.message})`); }
+  try {
+    // the bare repository first, so no git call here reads a repository around the temp folder (its config)
+    if (gitx(['init', '--quiet', '--bare'], bare).status !== 0) return down(`can't make a repository under ${os.tmpdir()} to ask upstream`);
+    const ls = gitx(['ls-remote', src, ref, `${ref}^{}`], bare);
+    if (ls.status !== 0) return down(`upstream ${src} can't be reached (${(ls.stderr || ls.error?.code || `exit ${ls.status}`).trim().split('\n')[0].slice(0, 200)})`);
+    const refs = Object.fromEntries(ls.stdout.split('\n').filter(Boolean).map((l) => l.split('\t').reverse()));
+    const tagged = refs[`${ref}^{}`] ?? refs[ref];
+    if (!tagged) return refuse('tag', `upstream ${src} has no tag v${version}`);
+    if (tagged !== commit) return refuse('commit', `the statement's commit ${commit.slice(0, 12)} is not the tag v${version}'s at upstream (${tagged.slice(0, 12)})`);
+    const fetched = gitx(['fetch', '--quiet', '--no-tags', '--filter=tree:0', src, `+${ref}:refs/t`, '+HEAD:refs/d'], bare);
+    if (fetched.status !== 0) return down(`upstream ${src} can't be fetched (${(fetched.stderr || fetched.error?.code || `exit ${fetched.status}`).trim().split('\n').pop().slice(0, 200)})`);
+    if (gitx(['rev-parse', '--verify', '--quiet', 'refs/t^{commit}'], bare).stdout.trim() !== commit) return refuse('commit', `the tag v${version} fetched from upstream is not ${commit.slice(0, 12)}`);
+    const anc = gitx(['merge-base', '--is-ancestor', commit, 'refs/d'], bare);
+    if (anc.status === 1) return refuse('default-branch', `the tag v${version}'s commit ${commit.slice(0, 12)} is not on upstream's default branch`);
+    if (anc.status !== 0) return down(`can't tell whether ${commit.slice(0, 12)} is on upstream's default branch (${(anc.stderr || `exit ${anc.status}`).trim().split('\n')[0].slice(0, 200)})`);
+  } finally { try { fs.rmSync(bare, { recursive: true, force: true }); } catch { /* a folder left in the temp folder changes no answer */ } }
+  return { ok: true, unreachable: false, refused: null, why: null, read, provenance: { repo: up, workflow: WORKFLOW, ref, commit } };
+}
 // package pin|install|status (kit-install@1). Until each is built, it says so.
 function cmdPackage() {
   const sub = positional[0];
-  if (['pin', 'install', 'status'].includes(sub)) die(`package ${sub}: not built yet`);
+  if (sub === 'pin') {
+    if (positional.length !== 2) die('usage: package pin <tag>');
+    // the pair goes into the kit folder of the home checkout it runs in (a sync worktree's own), never
+    // into another repo the command happens to run from
+    if (!cwdIsHome || !projectInRepo) die('package pin runs in one of home\'s checkouts (its main checkout or a worktree of it): cd there');
+    const r = packagePin(devteamDir, positional[1]);
+    if (r.exit) { process.stderr.write(`devteam: ${r.line}\n`); process.exit(r.exit); }
+    return out(r.line);
+  }
+  if (['install', 'status'].includes(sub)) die(`package ${sub}: not built yet`);
   die('usage: package pin <tag> | package install [--version v] [--into <dir>] | package status [--json]');
 }
 
@@ -40205,7 +40952,9 @@ function browserViewInput(ctx, v, text) {
 // The view server: GET or HEAD / (Host one of the two loopback forms) is browser.html, read once here;
 // an upgrade passes five guards in order, each refusal a short HTTP answer and a FIN. One viewer.
 function browserViewServer(ctx) {
-  const page = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dashboard', 'browser.html'));
+  // its page, read now and kept for its life: browser.html must match this daemon's code
+  const D = { keep: {} };
+  servePage(D, null, null, 'browser');
   const plain = (code) => `${http.STATUS_CODES[code].toLowerCase()}\n`;
   const server = http.createServer((req, res) => {
     req.on('error', () => {});
@@ -40213,10 +40962,9 @@ function browserViewServer(ctx) {
     req.resume();
     const no = (code, extra = {}) => { res.writeHead(code, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', connection: 'close', ...extra }); res.end(plain(code)); };
     if (!browserViewHost(req, server.address()?.port)) return no(403);
-    if (String(req.url).split('?')[0] !== '/') return no(404);
+    if (String(req.url).split('?')[0] !== '/') return servePageAsset(req, res, 'browser') !== DASH_NEXT ? undefined : no(404);
     if (req.method !== 'GET' && req.method !== 'HEAD') return no(405, { allow: 'GET, HEAD' });
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': page.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': "frame-ancestors 'self'" });
-    res.end(req.method === 'HEAD' ? undefined : page);
+    servePage(D, req, res, 'browser', "frame-ancestors 'self'", { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' });
   });
   server.on('clientError', (e, s) => s.destroy());
   server.on('upgrade', (req, sock, head) => {
@@ -40767,14 +41515,18 @@ function responderDirty(wt, seeded) {
   for (const e of flags.stdout.split('\0').filter(Boolean)) if (e[0] !== 'H') hits.push(e.slice(2));
   return hits;
 }
+// The PreToolUse hook every Claude Code session the kit starts gets: bash-ok on Bash (see it at the
+// top of this file), which refuses an inline rm of a variable, glob or $(…) before Claude Code can
+// stop on its prompt (worker.md, "Scripts go in files"); a timeout so a stuck node never holds a command.
+const bashOkHook = () => [{ matcher: 'Bash', hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' bash-ok`, timeout: 10 }] }];
 // A Claude Code policy file for one session, passed with --settings: the owner's worker deny rules,
 // naming the main branch of the repo it works in. A worker or planner also gets the Stop hook
 // (stop-ok); the responder doesn't. Its path.
 function claudePolicy(name, s, mb, { stopHook = false } = {}) {
   const policy = path.join(runDir, 'agent', `${name}-claude.json`);
   fs.mkdirSync(path.dirname(policy), { recursive: true });
-  const hooks = stopHook ? { hooks: { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok` }] }] } } : {};
-  fs.writeFileSync(policy, `${JSON.stringify({ permissions: { deny: deniedFor(s.worker_denied_commands, mb).map((c) => `Bash(${c})`) }, ...hooks }, null, 2)}\n`);
+  const hooks = { PreToolUse: bashOkHook(), ...(stopHook ? { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok` }] }] } : {}) };
+  fs.writeFileSync(policy, `${JSON.stringify({ permissions: { deny: deniedFor(s.worker_denied_commands, mb).map((c) => `Bash(${c})`) }, hooks }, null, 2)}\n`);
   return policy;
 }
 // The supervisor's: only the Stop hook (stop-ok), which sends an ask of the owner that names no Inbox
@@ -40783,7 +41535,7 @@ const supervisorPolicyFile = () => path.join(runDir, 'agent', 'supervisor-claude
 function supervisorPolicy() {
   const policy = supervisorPolicyFile();
   fs.mkdirSync(path.dirname(policy), { recursive: true });
-  fs.writeFileSync(policy, `${JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok --supervisor` }] }] } }, null, 2)}\n`);
+  fs.writeFileSync(policy, `${JSON.stringify({ hooks: { PreToolUse: bashOkHook(), Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok --supervisor` }] }] } }, null, 2)}\n`);
   return policy;
 }
 // A Claude Code supervisor command with that policy: any other agent command as it is. Written only
