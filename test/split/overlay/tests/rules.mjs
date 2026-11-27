@@ -14,6 +14,7 @@ import path from 'node:path';
 import { items, scan } from '../../lib/js.mjs';
 import { importPath } from '../../lib/split.mjs';
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 export const CLI = 'docs/devteam/scripts/devteam.mjs';
 export const CLI_HELPER = 'test/lib/cli-source.mjs';
@@ -23,6 +24,15 @@ export const GATEWAY_HELPER = 'test/lib/gateway-source.mjs'; // written by the g
 // tests and the two helpers. The gateway's rewrite keeps kit-894's set, which leaves the fixtures out.
 export const isTestFile = (f) => /^test\/.*\.mjs$/.test(f) && !f.startsWith('test/split/') && !f.startsWith('test/split-') && f !== CLI_HELPER && f !== GATEWAY_HELPER;
 export const gatewayFile = (f) => isTestFile(f) && !f.startsWith('test/fixtures/');
+// A file another area of this overlay writes whole from its files/ (package-release's
+// test/release/package-check.mjs) is that area's: the rule leaves it, since two areas that change one
+// file conflict and neither is applied. The areas are this file's sibling folders, as the split loads them.
+const OVERLAY = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const otherAreasFiles = () => new Set(fs.readdirSync(OVERLAY, { withFileTypes: true })
+  .filter((d) => d.isDirectory() && d.name !== path.basename(path.dirname(fileURLToPath(import.meta.url))))
+  .flatMap((d) => filesUnder(path.join(OVERLAY, d.name, 'files'))));
+const filesUnder = (dir, rel = '') => (fs.existsSync(path.join(dir, rel)) ? fs.readdirSync(path.join(dir, rel), { withFileTypes: true })
+  .flatMap((e) => (e.isDirectory() ? filesUnder(dir, path.posix.join(rel, e.name)) : [path.posix.join(rel, e.name)])) : []);
 
 // The source's lines before its declarations: its shebang, its header (up to the first import) and its
 // import lines as written.
@@ -66,8 +76,9 @@ export const rules = [
     apply(t) {
       const changed = [], refused = [];
       const gateway = t.read(GATEWAY_HELPER) !== null;
+      const theirs = otherAreasFiles();
       for (const f of t.files()) {
-        if (!isTestFile(f)) continue;
+        if (!isTestFile(f) || theirs.has(f)) continue;
         const text = t.read(f);
         if (!text) continue;
         const r = rewireReads(f, text, { gateway });

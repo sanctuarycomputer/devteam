@@ -7,6 +7,7 @@
 //   A: gateway and tests (the split alone for the CLI: its modules are the source's declarations)
 //   B: gateway, load-time and tests (the CLI as the tree runs it: cli.mjs, init(), the setters)
 //   C: as A, with a patch this file makes for one test, as a test the rule can't match would have
+//   D: every area of the overlay, as split-load-time and split-release build it (W1 alone)
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -77,7 +78,8 @@ const addPatch = (sd) => {
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, PATCH), `diff --git a/${PATCHED} b/${PATCHED}\n--- a/${PATCHED}\n+++ b/${PATCHED}\n@@ -1,3 +1,4 @@\n ${l[0]}\n+${ADDED}\n ${l[1]}\n ${l[2]}\n`);
 };
-const [A, B, C] = await Promise.all([makeTree('A', ['gateway', 'tests']), makeTree('B', ['gateway', 'load-time', 'tests']), makeTree('C', ['gateway', 'tests'], addPatch)]);
+const ALL = fs.readdirSync(path.join(splitSrc, 'overlay'), { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
+const [A, B, C, D] = await Promise.all([makeTree('A', ['gateway', 'tests']), makeTree('B', ['gateway', 'load-time', 'tests']), makeTree('C', ['gateway', 'tests'], addPatch), makeTree('D', ALL)]);
 // every top-level await comes before the first test(): on Node 18 a root whose tests have all ended
 // at an await runs after() early, which removes the trees
 const jsLib = await import(pathToFileURL(path.join(splitSrc, 'lib', 'js.mjs')).href);
@@ -92,8 +94,10 @@ const helperOf = async (T) => (await import(pathToFileURL(path.join(T.out, CLI_H
 
 const expectItems = () => ['rule cli-source', 'rule test-reads', 'file test/cli-modules.test.mjs'];
 
-test('W1: in both trees the tests area is applied whole, nothing of it stale, no conflict naming it', () => {
-  for (const [n, T] of [['A', A], ['B', B]]) {
+// D: another area's files/ file (package-release's test/release/package-check.mjs) is that area's, so the
+// rule leaves it rather than claim it too (a conflict leaves the whole rule out)
+test('W1: in trees A, B and D (the whole overlay) the tests area is applied whole, nothing of it stale, no conflict naming it', () => {
+  for (const [n, T] of [['A', A], ['B', B], ['D', D]]) {
     assert.equal(T.status, 0, `tree ${n}: ${T.err}`);
     assert.deepEqual(items(mine(T, 'applied')), expectItems(), `tree ${n}: every item of the tests area is applied`);
     assert.deepEqual(mine(T, 'stale'), [], `tree ${n}: nothing of the tests area is stale`);
