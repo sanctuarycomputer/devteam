@@ -8,7 +8,7 @@ import '../../shared/layout/layout.css';
 import './design-system.css';
 import { Component, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { catalog } from './catalog.gen';
-import type { On } from './specimen';
+import type { On, Specimen } from './specimen';
 
 type Token = { name: string; value: string; colour: boolean };
 type Event = { n: number; where: string; event: string };
@@ -21,7 +21,7 @@ function readTokens(): Token[] {
   const visit = (rules: CSSRuleList) => {
     for (const r of Array.from(rules)) {
       if (r instanceof CSSStyleRule) {
-        if (r.selectorText.split(',').some((s) => s.trim() === ':root')) for (const p of Array.from(r.style)) if (p.startsWith('--')) names.add(p);
+        if (r.selectorText.split(',').some((s) => s.trim() === ':root')) for (const p of Array.from(r.style)) if (p.startsWith('--') && !p.startsWith('--lightningcss-')) names.add(p);
       } else if ('cssRules' in r) visit((r as CSSGroupingRule).cssRules);
     }
   };
@@ -38,6 +38,11 @@ function readTokens(): Token[] {
 }
 
 // A specimen that throws shows its error in place, and the rest of the page still renders.
+// a specimen drawn as its own component, so a render that throws is caught by the Contain around it
+function Draw({ specimen, on }: { specimen: Specimen; on: On }) {
+  return <>{specimen.render(on)}</>;
+}
+
 class Contain extends Component<{ children: ReactNode }, { error: string | null }> {
   state = { error: null as string | null };
   static getDerivedStateFromError(e: unknown) { return { error: e instanceof Error ? e.message : String(e) }; }
@@ -63,7 +68,8 @@ export default function DesignSystem() {
   useEffect(() => {
     if (jumped.current || tokens.length === 0) return;
     jumped.current = true;
-    const h = decodeURIComponent(location.hash.slice(1));
+    let h = location.hash.slice(1);
+    try { h = decodeURIComponent(h); } catch { /* a malformed hash is read as it is */ }
     if (h.startsWith('design-system/')) document.getElementById(h)?.scrollIntoView();
   }, [tokens]);
   // a specimen's only handler: one line on the event list, the newest first
@@ -104,7 +110,7 @@ export default function DesignSystem() {
             {c.specimens.map((s) => (
               <figure className="ds-specimen" key={s.title} data-ds-specimen={s.title}>
                 <figcaption><b>{s.title}</b>{s.note ? <span className="ds-note"> {s.note}</span> : null}</figcaption>
-                <div className="ds-stage"><Contain>{s.render(onFor(`${c.name} · ${s.title}`))}</Contain></div>
+                <div className="ds-stage"><Contain><Draw specimen={s} on={onFor(`${c.name} · ${s.title}`)} /></Contain></div>
               </figure>
             ))}
           </article>
