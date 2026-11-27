@@ -672,7 +672,7 @@ test('C11 a careful server passes the whole table on both apps; a careless one f
 
 // ---- the package command ----------------------------------------------------------------------
 
-test('C15 devteam.mjs package prints usage naming pin, install and status; each subcommand is not built yet', () => {
+test('C15 devteam.mjs package prints usage naming pin, install and status; install and status are not built yet', () => {
   const root = bareProject(scratch('cli'), 'pkg');
   const home = scratch('home');
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('DEVTEAM_') || /^DEVTEAM_(TEST_.*|CGROUP|MEMINFO)$/.test(k)));
@@ -683,8 +683,8 @@ test('C15 devteam.mjs package prints usage naming pin, install and status; each 
     assert.equal(r.status, 1, `C15 ${args.join(' ')}: exit 1`);
     assert.match(r.stderr, /usage: package pin <tag> \| package install \[--version v\] \[--into <dir>\] \| package status \[--json\]/, `C15 ${args.join(' ')}: the usage names pin, install and status`);
   }
-  for (const sub of ['pin', 'install', 'status']) {
-    const r = dt(['package', sub, ...(sub === 'pin' ? ['v0.101.0'] : [])]);
+  for (const sub of ['install', 'status']) {
+    const r = dt(['package', sub]);
     assert.equal(r.status, 1, `C15 package ${sub}: exit 1`);
     assert.match(r.stderr, new RegExp(`package ${sub}: not built yet`), `C15 package ${sub}: not built yet`);
   }
