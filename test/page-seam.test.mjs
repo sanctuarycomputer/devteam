@@ -404,7 +404,20 @@ test('S5 each server sends its page through servePage and its assets through ser
   const routes = /^const DASHBOARD_ROUTES = \[([^\]]*)\];$/m.exec(src)[1].split(',').map((s) => s.trim());
   assert.deepEqual(routes.slice(-2), ['dashRoutesApp', 'dashRoutesOwner'], 'S5 dashRoutesApp is second to last, just before dashRoutesOwner (ruling m-20261126-174823122)');
   assert.equal(routes.filter((r) => r === 'dashRoutesApp').length, 1, 'S5 once');
-  assert.ok(!/serveAppFiles\(/.test(src.replace(decl('function serveAppFiles('), '')), 'S5 serveAppFiles has no caller at main');
+  // serveAppFiles' one caller at main is alphaServe (kit-961), the dashboard's and the hub's /next/;
+  // they reach it only through alphaServe, and nothing serves /next/ by a function of its own
+  const callers = src.split(/\n(?=(?:async )?function \w+\(|const \w+ = )/).filter((d) => /serveAppFiles\(/.test(d) && !d.startsWith('function serveAppFiles(')).map((d) => /^(?:async )?(?:function|const) (\w+)/.exec(d)?.[1]);
+  assert.deepEqual(callers, ['alphaServe'], 'S5 serveAppFiles is called by alphaServe alone');
+  assert.equal(decl('function alphaServe(').match(/serveAppFiles\(/g).length, 1, 'S5 alphaServe calls it once');
+  const alphaRoutes = decl('function dashRoutesAlpha(');
+  assert.match(alphaRoutes, /return alphaServe\('dashboard', req, res, \(\) => pageCsp\(stageFrames\(\)\), true\);/, "S5 the dashboard's /next/ is alphaServe under / route's policy");
+  assert.match(alphaRoutes, /const root = \{ method: req\.method, url: '\/next\/' \};[\s\S]*return alphaServe\('dashboard', root, res, policy, true\);/, "S5 the viewer's paths are alphaServe asked for /next/");
+  assert.doesNotMatch(alphaRoutes, /\bfs\.|readFile|createReadStream|writeHead/, 'S5 dashRoutesAlpha reads and sends no file of its own');
+  // each viewer path keeps its own policy, as /view/artifact and /view/preview send it today
+  assert.match(alphaRoutes, /return viewer\(\(\) => pageCsp\(\)\);/, "S5 /next/view/artifact/ is pageCsp()'s");
+  assert.match(alphaRoutes, /previewStage\(rec\)\.then\(\(\{ origin \}\) => viewer\(\(\) => pageCsp\(origin \? \[origin\] : \[\]\)\)\)/, "S5 /next/view/preview/ is pageCsp(origin ? [origin] : [])'s");
+  assert.match(decl('function startHub('), /if \(alphaServe\('hub', req, res, \(\) => hubPolicy, !standalone\) !== DASH_NEXT\) return;/, "S5 the hub's /next/ is alphaServe under the hub page's policy");
+  assert.deepEqual(routes.slice(-3), ['dashRoutesAlpha', 'dashRoutesApp', 'dashRoutesOwner'], 'S5 dashRoutesAlpha sits just before dashRoutesApp');
 });
 
 // ---- the hub's seam is what the box image runs ---------------------------------------------------
