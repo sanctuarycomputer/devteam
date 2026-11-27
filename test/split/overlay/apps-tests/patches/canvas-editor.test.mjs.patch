@@ -1,8 +1,16 @@
 diff --git a/test/canvas-editor.test.mjs b/test/canvas-editor.test.mjs
-index 425a2a8eb168273ea22e3f4ec511c31325626739..654b63f7faf481090da4d21fc9e8d64285f0712b 100644
+index 425a2a8eb168273ea22e3f4ec511c31325626739..37be727e3e90202f75b55c87abf03d24307a190d 100644
 --- a/test/canvas-editor.test.mjs
 +++ b/test/canvas-editor.test.mjs
-@@ -15,7 +15,8 @@ import { until } from './lib/kit.mjs';
+@@ -6,6 +6,7 @@
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+ import fs from 'node:fs';
++import module from 'node:module';
+ import path from 'node:path';
+ import { fileURLToPath } from 'node:url';
+ import { setTimeout as sleep } from 'node:timers/promises';
+@@ -15,7 +16,8 @@ import { until } from './lib/kit.mjs';
  import { cliRead } from './lib/cli-source.mjs';
  
  const here = path.dirname(fileURLToPath(import.meta.url));
@@ -12,7 +20,7 @@ index 425a2a8eb168273ea22e3f4ec511c31325626739..654b63f7faf481090da4d21fc9e8d642
  const FIX = path.join(here, 'fixtures', 'canvas');
  const fixture = (name) => JSON.parse(cliRead(fs.readFileSync, fs, path.join(FIX, name), 'utf8'));
  const IMG_FILE = '429be16d0a91e377.png';
-@@ -35,6 +36,27 @@ function serve(req, res) {
+@@ -35,6 +37,27 @@ function serve(req, res) {
        return;
      }
    }
@@ -40,3 +48,42 @@ index 425a2a8eb168273ea22e3f4ec511c31325626739..654b63f7faf481090da4d21fc9e8d642
    res.writeHead(404, { 'Content-Length': 0 });
    res.end();
  }
+@@ -1395,18 +1418,19 @@ test('the hostile document runs nothing', { skip: canDrive ? false : 'needs Chro
+   });
+ });
+ 
+-// The script between the page's <script> and </script>.
+-const pageScript = () => {
+-  const src = cliRead(fs.readFileSync, fs, PAGE_FILE, 'utf8');
+-  const m = /<script>([\s\S]*?)<\/script>/.exec(src);
+-  assert.ok(m, 'the page has an inline script');
+-  return m[1];
+-};
++// The page's source: the canvas route's modules (apps/dashboard/src/views/canvas/), every .ts, .tsx and
++// .css file under it, sorted by path, joined (kit-1013: the page is the app's route, not canvas.html).
++const CANVAS_SRC = path.join(here, '..', 'apps', 'dashboard', 'src', 'views', 'canvas');
++const canvasFiles = (exts) => fs.readdirSync(CANVAS_SRC, { recursive: true }).map(String).filter((f) => exts.some((x) => f.endsWith(x))).sort().map((f) => path.join(CANVAS_SRC, f));
++const canvasSource = () => canvasFiles(['.ts', '.tsx', '.css']).map((f) => cliRead(fs.readFileSync, fs, f, 'utf8')).join('\n');
++// The script as the page's text read: every .ts module, its types stripped, runs of spaces and tabs made
++// one space and a space before ), comma, ; or ] dropped (line breaks kept, as in the page).
++const typedSource = () => canvasFiles(['.ts']).map((f) => module.stripTypeScriptTypes(cliRead(fs.readFileSync, fs, f, 'utf8'), { mode: 'strip' })).join('\n').replace(/[^\S\n]+/g, ' ').replace(/ ([),;\]])/g, '$1');
+ 
+ test("the page's source holds no markup sinks", { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 120000 }, async (t) => {
+-  const src = cliRead(fs.readFileSync, fs, PAGE_FILE, 'utf8');
+-  assert.equal((src.match(/<script\b/g) ?? []).length, 1, 'one script element in the page');
+-  const js = pageScript();
++  const src = canvasSource();
++  assert.doesNotMatch(src, /<script\b/, 'no script element in the modules');
++  const js = src;
+   for (const token of ['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'createContextualFragment', 'DOMParser', 'setHTMLUnsafe', 'parseHTMLUnsafe', 'srcdoc', 'cssText', "setAttribute('style'", 'setAttribute("style"', 'eval(', 'new Function', 'import(']) {
+     assert.equal(js.includes(token), false, `the script holds no ${token}`);
+   }
+@@ -1418,7 +1442,7 @@ test("the page's source holds no markup sinks", { skip: canDrive ? false : 'need
+ // kit-312: the page's own free-text check takes exactly what canvas-doc@1's name and text classes take,
+ // and every place that sends free text (the Name and Text fields, an upload's name) uses it.
+ test("the page's free text: no control character but tab, line feed and carriage return", () => {
+-  const js = pageScript();
++  const js = typedSource();
+   const m = js.match(/const CONTROL_RE = \/(.+)\/;/);
+   assert.ok(m, 'the page defines CONTROL_RE');
+   const re = new RegExp(m[1]);
