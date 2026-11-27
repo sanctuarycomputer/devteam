@@ -515,6 +515,7 @@ devteam box. Window 0 (operator) looks after the box: tell it what you want. Clo
 Add a repo:  cd ~/code && gh repo clone <owner/repo> && cd <repo> && claude "Use github.com/sanctuarycomputer/devteam to set up a fleet in this repo"
 Tools: languages per project with mise (mise install; asdf works too). box-pg 16 starts another Postgres. ~/.box/boot.sh is what starts at boot.
 Figma: in Claude, /mcp, pick figma and log in once; new sessions then have it, with your Figma access. Use an account limited to the files the fleet needs.
+Context7: every session can look up current library docs. For more than its free rate: a key from context7.com in ~/.box/context7-key, then claude mcp remove -s user context7; rm ~/.box/context7-mcp. The next boot adds it with the key.
 Expo: npx expo start --tunnel for your phone; eas build for builds.
 Heroku: heroku login -i, with a token from heroku authorizations:create --expires-in <seconds> --scope <scopes> on your laptop as the password. It lands in ~/.netrc, readable by every agent here, so keep it narrow and short. (The browser login is refused from another IP.)
 tmux: C-b s lists every session (each repo's supervisor and its workers); C-b d leaves one. touch ~/.devteam-quiet hides this.
@@ -549,6 +550,29 @@ if [ ! -e .box/figma-mcp ]; then
   fi
 fi
 # figma-mcp end
+# context7-mcp start
+# Context7's MCP for new sessions on the box: current docs for the libraries a session uses, so it
+# looks an API up instead of writing it from memory. Its hosted server, so nothing to install or pin.
+# Each lookup sends Context7 a library name and a short topic, never the code. Without a key it is
+# limited per address, which every session here shares: with ~/.box/context7-key (the key alone, one
+# line; the owner makes it at context7.com/dashboard) it goes as a header. Once per disk, as Figma's:
+# delete ~/.box/context7-mcp to add it again (after adding a key, say). Nothing here may stop the boot.
+if [ ! -e .box/context7-mcp ]; then
+  c7key=$(head -n 1 .box/context7-key 2>/dev/null | tr -d '[:space:]')
+  if timeout 30 claude mcp get context7 2>/dev/null | grep -q 'Scope: User config'; then
+    touch .box/context7-mcp 2>/dev/null || note "could not mark the Context7 MCP as added"
+  elif if [ -n "$c7key" ]; then
+      timeout 30 claude mcp add --transport http --scope user context7 https://mcp.context7.com/mcp --header "CONTEXT7_API_KEY: $c7key" >> box.log 2>&1
+    else
+      timeout 30 claude mcp add --transport http --scope user context7 https://mcp.context7.com/mcp >> box.log 2>&1
+    fi; then
+    touch .box/context7-mcp 2>/dev/null || note "could not mark the Context7 MCP as added"
+  else
+    note "could not add the Context7 MCP (see box.log); the next boot tries again"
+  fi
+  unset c7key
+fi
+# context7-mcp end
 # Window 0 is the operator (operator.md): the first thing the Terminal shows, and what checks the restore.
 # A window named operator in home is how the box knows it is up: one closed, even on purpose, is back
 # within a minute (the minute loop), and one renamed is no longer seen, so a second starts.
