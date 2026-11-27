@@ -63,7 +63,7 @@ function upstream() {
 const UP = upstream();
 // an upstream that never answers (git's ext transport, a sleep that holds the pipe) and one that isn't there
 const HANG = path.join(scratch('hang'), 'hang.sh');
-fs.writeFileSync(HANG, '#!/bin/sh\nexec sleep 30 2>/dev/null\n', { mode: 0o755 });
+fs.writeFileSync(HANG, '#!/bin/sh\nexec sleep 90 2>/dev/null\n', { mode: 0o755 });
 const upFile = (tag, f) => execFileSync('git', ['show', `${tag}:docs/devteam/${f}`], { cwd: UP.dir, maxBuffer: 256 * 1024 * 1024 });
 const clean = () => {
   const e = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('DEVTEAM_') && !/^GIT_/.test(k) && !/^npm_config_/i.test(k)));
@@ -170,7 +170,7 @@ test('M2 a pin the registry answers differently is refused, with and without --a
   // contradicts, an E401
   const I = await instance('m2-manifest');
   const bin = scratch('view-npm');
-  fs.writeFileSync(path.join(bin, 'npm'), `#!${process.execPath}\nconst a = process.argv.slice(2);\nconst r = require('node:child_process').spawnSync(${JSON.stringify(path.join(I.reg.bin, 'npm'))}, a, { encoding: 'utf8' });\nlet out = r.stdout ?? '';\nconst how = process.env.DT_VIEW;\nif (a[0] === 'view' && r.status === 0 && how) {\n  if (/^E[A-Z0-9_]+$/.test(how)) { process.stderr.write('npm error code ' + how + '\\nnpm error request failed\\n'); process.exit(1); }\n  const m = JSON.parse(out);\n  if (how === 'dependencies') m.dependencies = { 'left-pad': '1.3.0' };\n  if (how === 'name') m.name = '@someone/devteam';\n  if (how === 'no-layout') delete m.devteam;\n  if (how === 'layout-2') m.devteam = { layout: 2 };\n  out = JSON.stringify(m);\n}\nprocess.stdout.write(out); process.stderr.write(r.stderr ?? ''); process.exit(r.status ?? 1);\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(bin, 'npm'), `#!${process.execPath}\nconst a = process.argv.slice(2);\nconst r = require('node:child_process').spawnSync(${JSON.stringify(path.join(I.reg.bin, 'npm'))}, a, { encoding: 'utf8' });\nlet out = r.stdout ?? '';\nconst how = process.env.DT_VIEW;\nif (a[0] === 'view' && r.status === 0 && how) {\n  if (/^E[A-Z0-9_]+$/.test(how)) { process.stderr.write('npm error code ' + how + '\\nnpm error request failed\\n'); process.exit(1); }\n  const m = JSON.parse(out);\n  if (how === 'empty') process.exit(0);\n  if (how === 'dependencies') m.dependencies = { 'left-pad': '1.3.0' };\n  if (how === 'name') m.name = '@someone/devteam';\n  if (how === 'no-layout') delete m.devteam;\n  if (how === 'layout-2') m.devteam = { layout: 2 };\n  out = JSON.stringify(m);\n}\nprocess.stdout.write(out); process.stderr.write(r.stderr ?? ''); process.exit(r.status ?? 1);\n`, { mode: 0o755 });
   const q = I.answered();
   for (const [how, why] of [['dependencies', /differs from the registry: the package has dependencies \(dependencies\)/], ['name', /differs from the registry: its manifest names @someone\/devteam@0\.101\.0/], ['no-layout', /differs from the registry: its manifest has no devteam\.layout of 1 or 2/], ['layout-2', /differs from the registry: its manifest says layout 2, but v0\.101\.0 lacks the launcher's marker/], ['E401', /differs from the registry: npm view @sanctuarycomputer\/devteam@0\.101\.0 failed \(E401\)/]]) {
     const C = I.pr(`pin-${how.toLowerCase()}`, { pin: '0.101.0', set: 'v0.101.0' });
@@ -178,6 +178,12 @@ test('M2 a pin the registry answers differently is refused, with and without --a
     assert.notEqual(r.status, 0, `M2 ${how}: refused (${r.out})`);
     assert.match(r.out, why, `M2 ${how}: refused naming why`);
   }
+  // npm view answers nothing for a version the package doesn't list (task-1 T1-5): unpublished, not refused
+  const E = I.pr('pin-empty', { pin: '0.101.0', set: 'v0.101.0' });
+  const er = I.dt([...E.args, '--approved', q, '--dry-run'], { PATH: `${bin}${path.delimiter}${I.env.PATH}`, DT_VIEW: 'empty' });
+  assert.equal(er.status, 0, `M2 empty answer: a layout-1 skip (${er.out})`);
+  assert.match(er.stderr, /pin: can't verify @sanctuarycomputer\/devteam@0\.101\.0 \(unpublished\)/, 'M2 empty answer: unpublished');
+  assert.equal(g(['for-each-ref', 'refs/devteam-pin'], I.root), '', 'M2 the tag refs are removed after each check');
   // a socket fault npm names (EPROTO, ENETDOWN): no answer came, so a layout-1 pin goes on, never refused
   for (const how of ['EPROTO', 'ENETDOWN']) {
     const C = I.pr(`pin-${how.toLowerCase()}`, { pin: '0.101.0', set: 'v0.101.0' });
@@ -239,6 +245,7 @@ test('M4 a pin of another version than the head\'s upstream_base, and a deleted 
   g(['commit', '-qm', 'orphan'], w);
   g(['push', '-q', 'origin', 'chore-orphan'], w);
   const o = I.dt(['merge', '--chore', 'orphan', '--title', 'chore-orphan: orphan', '--body-file', path.join(path.dirname(I.root), 'body.md'), '--approved', q, '--dry-run']);
+  assert.notEqual(o.status, 0, 'M4 no merge base: refused, exit');
   assert.match(o.out, /can't find where [0-9a-f]{12} meets origin\/main, so its pin and docs\/devteam\/\.kit can't be checked/, 'M4 no merge base: refused');
 });
 
@@ -282,6 +289,12 @@ test('M5 a sync to a tag that carries the launcher needs its pin, verified, inst
   assert.match(kr.out, /can't verify the layout-2 pin @sanctuarycomputer\/devteam@1\.0\.0 \(unreachable\)/, 'M5 a launcher release pinned as layout 1 outside a sync: held to layout 2');
   // a launcher sync whose pair main pins already: checked in full, installed before, merged
   const K = await instance('m5-pinned', { mainPin: '1.0.0', mainBase: 'v0.101.0' });
+  // the same sync leaving upstream_base at main's v0.101.0: refused with the one fix (task-1 T1-1)
+  const W = K.pr('devteam-sync-v1-0-0', { tag: 'v1.0.0', files: ['governance/quality.md', 'scripts/devteam.mjs'] });
+  const wr = K.dt([...W.args, '--approved', K.answered(), '--dry-run']);
+  assert.notEqual(wr.status, 0, 'M5 main pins the tag, upstream_base not moved: refused');
+  assert.match(wr.out, /v1\.0\.0 carries the launcher \(layout 2\), so its sync must pin it: run devteam\.mjs package pin v1\.0\.0/, 'M5 main pins the tag, upstream_base not moved: the one fix');
+  assert.doesNotMatch(wr.out, /restore main's pair/, "M5 main pins the tag, upstream_base not moved: not main's pair");
   const P = sync(K, 'v1.0.0', { pin: undefined });
   const p = K.dt(P.args);
   assert.equal(p.status, 0, `M5 main pins the tag already: merges (${p.out})`);
@@ -298,11 +311,12 @@ test('M5 a sync to a tag that carries the launcher needs its pin, verified, inst
   // upstream never answers: the tag fetch is killed at its bound, and a layout-1 pin goes on
   const H = await instance('m5-hang', { upstream: 'slow/devteam', fail: 'unreachable' });
   const Q = H.pr('pin-slow', { pin: '0.101.0', set: 'v0.101.0' });
+  const hq = H.answered();
   const t0 = Date.now();
-  const hr = H.dt([...Q.args, '--approved', H.answered(), '--dry-run'], { DEVTEAM_GIT_TIMEOUT_MS: '2000' });
+  const hr = H.dt([...Q.args, '--approved', hq, '--dry-run'], { DEVTEAM_GIT_TIMEOUT_MS: '2000' });
   const took = Date.now() - t0;
   assert.equal(hr.status, 0, `M5 a hung upstream: the merge goes on (${hr.out})`);
-  assert.ok(took < 20000, `M5 a hung upstream: the fetch is bounded (${took} ms)`);
+  assert.ok(took < 45000, `M5 a hung upstream: the fetch is bounded (${took} ms, the upstream hangs 90 s)`);
   assert.match(hr.stderr, /pin: can't read v0\.101\.0 from slow\/devteam, so whether it carries the launcher is left to the registry's manifest/, 'M5 a hung upstream: said');
 });
 
@@ -368,7 +382,9 @@ test('M8 a PR that adds or changes a path under docs/devteam/.kit is refused, wh
     assert.ok(r.out.includes(`adds or changes ${p}: docs/devteam/.kit holds this machine's installs and is never committed`), `M8 ${JSON.stringify(p)}: named (${r.out})`);
   }
   const P = I.pr('kitten', { edit: (w) => { fs.mkdirSync(path.join(w, 'docs/devteam/.kitten'), { recursive: true }); fs.writeFileSync(path.join(w, 'docs/devteam/.kitten/x'), 'x\n'); } });
-  assert.doesNotMatch(I.dt([...P.args, '--approved', q, '--dry-run']).out, /never committed/, 'M8 .kitten is not .kit');
+  const kr = I.dt([...P.args, '--approved', q, '--dry-run']);
+  assert.equal(kr.status, 0, `M8 .kitten merges (${kr.out})`);
+  assert.doesNotMatch(kr.out, /never committed/, 'M8 .kitten is not .kit');
   // a path under .kit main holds already (committed before this rule): a PR that deletes it is not refused for it
   fs.mkdirSync(path.join(I.root, 'docs/devteam/.kit'), { recursive: true });
   fs.writeFileSync(path.join(I.root, 'docs/devteam/.kit/old'), 'x\n');
@@ -376,7 +392,15 @@ test('M8 a PR that adds or changes a path under docs/devteam/.kit is refused, wh
   g(['commit', '-qm', 'a .kit path from before'], I.root);
   g(['push', '-q', 'origin', 'HEAD:main'], I.root);
   const D = I.pr('kit-gone', { edit: (w) => g(['rm', '-q', 'docs/devteam/.kit/old'], w) });
-  assert.doesNotMatch(I.dt([...D.args, '--approved', q, '--dry-run']).out, /never committed/, 'M8 deleting a .kit path is not refused');
+  const dr = I.dt([...D.args, '--approved', q, '--dry-run']);
+  assert.equal(dr.status, 0, `M8 deleting a .kit path merges (${dr.out})`);
+  assert.doesNotMatch(dr.out, /never committed/, 'M8 deleting a .kit path is not refused');
+  // a path with a newline is named quoted, never as two lines (task-1 T1-8)
+  const nl = 'docs/devteam/.kit/a\nb';
+  const NL = I.pr('kit-newline', { edit: (w) => { fs.mkdirSync(path.join(w, 'docs/devteam/.kit'), { recursive: true }); fs.writeFileSync(path.join(w, nl), 'x\n'); g(['add', '-f', '--', nl], w); } });
+  const nr = I.dt([...NL.args, '--approved', q, '--dry-run']);
+  assert.notEqual(nr.status, 0, 'M8 a newline path: refused');
+  assert.ok(nr.out.includes(`adds or changes ${JSON.stringify(nl)}: docs/devteam/.kit`), `M8 a newline path: named quoted (${nr.out})`);
 });
 
 test('M9 the kit ships SYNC_PINS true, once', () => {

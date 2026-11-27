@@ -34956,7 +34956,7 @@ function pinCheck({ base, sha, chore = null } = {}) {
     const main = mainRef();
     if (!main) return r;
     if (!base) { r.fails.push(`can't find where ${sha.slice(0, 12)} meets ${main}, so its pin and docs/devteam/.kit can't be checked`); return r; }
-    const some = (l) => `${l.slice(0, 6).join(', ')}${l.length > 6 ? ', …' : ''}`;
+    const some = (l) => `${l.slice(0, 6).map((p) => (/[\u0000-\u001f\u007f]/.test(p) ? JSON.stringify(p) : p)).join(', ')}${l.length > 6 ? ', …' : ''}`;
     // the exact bytes at a commit (git() drops a final newline), or null
     const show = (ref, f) => { const x = spawnSync('git', ['show', `${ref}:${f}`], { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 256 * 1024 * 1024 }); return x.status === 0 ? x.stdout : null; };
     const marked = (text) => text !== null && text.split('\n')[1] === MARK;
@@ -34979,7 +34979,10 @@ function pinCheck({ base, sha, chore = null } = {}) {
         const ref = `refs/devteam-pin/${tag}`;
         if (src) {
           try {
-            if (recurringRegistry.git(['fetch', '--quiet', '--no-tags', src, `+refs/tags/${tag}:${ref}`], { cwd: mainRoot }).ok) m = marked(show(ref, 'docs/devteam/scripts/devteam.mjs'));
+            if (recurringRegistry.git(['fetch', '--quiet', '--no-tags', src, `+refs/tags/${tag}:${ref}`], { cwd: mainRoot, env: { GIT_TERMINAL_PROMPT: '0' } }).ok) {
+              const text = show(ref, 'docs/devteam/scripts/devteam.mjs');
+              if (text !== null) m = marked(text);
+            }
           } finally { git(['update-ref', '-d', ref], mainRoot); }
         }
         if (m === null) warn(`pin: can't read ${tag} from ${redactUrl(up ?? 'upstream_repo')}, so whether it carries the launcher is ${r.tag === tag ? "read from the PR's own copy" : "left to the registry's manifest (its layout and the pair it makes)"}`);
@@ -35016,7 +35019,7 @@ function pinCheck({ base, sha, chore = null } = {}) {
     // a launcher sync whose pair is main's already: checked only when it pins the tag
     if (r.launcher && r.tag && `v${pin.version}` !== r.tag) { r.fails.push(pinChanged ? `${r.tag} carries the launcher (layout 2), so its sync must pin it, not ${pin.version}: run devteam.mjs package pin ${r.tag} in the sync's worktree, and ask again` : mustPin); return r; }
     r.pin = pin;
-    if (`v${pin.version}` !== expected) { r.fails.push(`pins ${name}@${pin.version}, but upstream_base at its head is ${JSON.stringify(expected ?? null)}: the pin names the release its kit came from; ${fixes}`); return r; }
+    if (`v${pin.version}` !== expected) { r.fails.push(!pinChanged ? mustPin : `pins ${name}@${pin.version}, but upstream_base at its head is ${JSON.stringify(expected ?? null)}: the pin names the release its kit came from; ${fixes}`); return r; }
     // the pinned release's own tag: its marker makes the pin strict, whatever the PR is
     const pinTag = `v${pin.version}`;
     const pinMark = pinTag === r.tag ? tagMarks.get(pinTag) ?? null : tagMarked(pinTag);
@@ -35049,6 +35052,8 @@ function pinCheck({ base, sha, chore = null } = {}) {
         if (code === 'E404') return skip('unpublished', `${what} is not published on ${m.registry} (E404)`);
         return differs(`npm view ${what} failed (${code ?? m.error ?? `exit ${m.status}`}), an answer that is neither the manifest nor a network failure`);
       }
+      // npm view of a version an existing package doesn't list answers nothing, exit 0: unpublished (task-1 T1-5)
+      if (!m.stdout.trim()) return skip('unpublished', `${what} is not listed on ${m.registry} (npm view answered nothing)`);
       let man = null;
       try { man = JSON.parse(m.stdout); } catch {}
       if (!man || typeof man !== 'object' || Array.isArray(man)) return differs('its manifest is not one JSON object');
