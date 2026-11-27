@@ -32,7 +32,8 @@ test('library-items: kinds, order, goals and keep', () => {
   const { patch: data, ids } = libraryFixture({ now });
   const plain = (x) => JSON.parse(JSON.stringify(x));
 
-  assert.deepEqual(plain(LIB_KINDS), [['mock', 'Mock', 'layout-dashboard'], ['diagram', 'Diagram', 'workflow'], ['docs', 'Docs', 'book-open'], ['review', 'Review page', 'list-checks'], ['preview', 'Preview', 'monitor-play'], ['link', 'Link', 'link']]);
+  // Archived (kit-936) is a pseudo-kind no item has: picked, it shows the archived items (test/library-archived.test.mjs)
+  assert.deepEqual(plain(LIB_KINDS), [['mock', 'Mock', 'layout-dashboard'], ['diagram', 'Diagram', 'workflow'], ['docs', 'Docs', 'book-open'], ['review', 'Review page', 'list-checks'], ['preview', 'Preview', 'monitor-play'], ['link', 'Link', 'link'], ['archived', 'Archived', 'archive']]);
   const before = JSON.stringify(data);
   // in this realm, so deepEqual compares values, not the vm's prototypes
   const items = plain(libraryItems(data, now, ctx));
@@ -40,11 +41,12 @@ test('library-items: kinds, order, goals and keep', () => {
   const byId = new Map(items.map((x) => [x.id, x]));
   assert.equal(byId.size, items.length, 'one item per id');
 
-  // kind order, every kind held; the fixture lists them out of order
+  // kind order, every kind held (but Archived, which no item has); the fixture lists them out of order
   const order = LIB_KINDS.map((k) => k[0]);
   const kinds = items.map((x) => x.kind);
   assert.ok(kinds.every((k, i) => i === 0 || order.indexOf(kinds[i - 1]) <= order.indexOf(k)), `kind order: ${kinds.join(' ')}`);
-  for (const k of order) assert.ok(kinds.includes(k), `a ${k} item`);
+  for (const k of order.filter((k) => k !== 'archived')) assert.ok(kinds.includes(k), `a ${k} item`);
+  assert.ok(!kinds.includes('archived'), 'no item of the pseudo-kind Archived');
   const rawKinds = data.library.artifacts.map((a) => a.kind ?? 'mock');
   assert.ok(rawKinds.some((k, i) => i > 0 && order.indexOf(rawKinds[i - 1]) > order.indexOf(k === 'x' ? 'mock' : k)), 'the fixture lists artifacts out of kind order');
   // artifacts in the server's order within a kind (first row of each slug)
@@ -294,7 +296,7 @@ test('Kind and Goal ride in the hash', { ...CHROME, timeout: 300000 }, async (t)
   await go('#library');
   await soon(idsAre(items.map((x) => x.id)), 'every card');
   assert.deepEqual(await p.ev(EXTRA), ['goal', 'kind'], 'Goal, then Kind');
-  assert.deepEqual(await p.ev(`[...${ctl('kind')}.options].map((o) => [o.value, o.textContent])`), [['', 'All kinds'], ['mock', 'Mock'], ['diagram', 'Diagram'], ['docs', 'Docs'], ['review', 'Review page'], ['preview', 'Preview'], ['link', 'Link']]);
+  assert.deepEqual(await p.ev(`[...${ctl('kind')}.options].map((o) => [o.value, o.textContent])`), [['', 'All kinds'], ['mock', 'Mock'], ['diagram', 'Diagram'], ['docs', 'Docs'], ['review', 'Review page'], ['preview', 'Preview'], ['link', 'Link'], ['archived', 'Archived']]);
   assert.equal(await p.ev(`${ctl('kind')}.getAttribute('aria-label')`), 'Kind');
   assert.deepEqual(await p.ev(`[...${ctl('goal')}.options].map((o) => o.value)`), ['', ids.goal1, ids.goal2]);
 
