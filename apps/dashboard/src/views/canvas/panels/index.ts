@@ -1,100 +1,21 @@
-// apps-src@1 view stub: canvas-panels
-// Its port replaces this folder. Until then every function another part of the canvas calls from it, and every binding it shares (on `shared`), throws "not ported: canvas-panels".
+// canvas-panels (kit-1014): the Layers tree and selection, the Properties panel and its fields, zoom and
+// pan, the Pages and page edits (canvas.html 1059-1658, 2238-2629), as modules. Every declaration of each
+// is exported from here, for core and the other sections; `shared` holds the bindings other sections
+// read or assign (kit-1013's rule: `panels.shared.<name>`).
+import { initLayers } from './layers';
+import { initZoom } from './zoom';
+import { initPages } from './pages';
 
-export function baseOf(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-panels');
+export * from './held';
+export * from './layers';
+export * from './zoom';
+export * from './pages';
+export * from './fields';
+
+// Its load-time setup: the page's listeners of these lines, in its order. mount() runs it once, before
+// the other sections' and start().
+export function init(): void {
+  initLayers();
+  initZoom();
+  initPages();
 }
-
-export function buildProps(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-panels');
-}
-
-export function contentBounds(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-panels');
-}
-
-export function fieldNote(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-panels');
-}
-
-export function fieldRow(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-panels');
-}
-
-export function goPage(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-panels');
-}
-
-export function hashPage(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-panels');
-}
-
-export function isTouch(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-panels');
-}
-
-export function markPage(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-panels');
-}
-
-export function placedByXY(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-panels');
-}
-
-export function ready(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-panels');
-}
-
-export function renderLayers(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-panels');
-}
-
-export function select(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-panels');
-}
-
-export function selectIds(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-panels');
-}
-
-export function selectOf(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-panels');
-}
-
-export function selRoots(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-panels');
-}
-
-export function showPage(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-panels');
-}
-
-export function textInput(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-panels');
-}
-
-export function toggleSel(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-panels');
-}
-
-export function typing(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-panels');
-}
-
-export const shared = {
-  get DEFAULT(): any { throw new Error('not ported: canvas-panels'); },
-  set DEFAULT(_v: any) { throw new Error('not ported: canvas-panels'); },
-  get pan(): any { throw new Error('not ported: canvas-panels'); },
-  set pan(_v: any) { throw new Error('not ported: canvas-panels'); },
-  get PX(): any { throw new Error('not ported: canvas-panels'); },
-  set PX(_v: any) { throw new Error('not ported: canvas-panels'); },
-  get shown(): any { throw new Error('not ported: canvas-panels'); },
-  set shown(_v: any) { throw new Error('not ported: canvas-panels'); },
-  get spaceHeld(): any { throw new Error('not ported: canvas-panels'); },
-  set spaceHeld(_v: any) { throw new Error('not ported: canvas-panels'); },
-  get view(): any { throw new Error('not ported: canvas-panels'); },
-  set view(_v: any) { throw new Error('not ported: canvas-panels'); },
-};
-
-// Its load-time setup (listeners), run once by the page mount before start().
-export function init(): void {}
