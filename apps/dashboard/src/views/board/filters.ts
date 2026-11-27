@@ -15,10 +15,15 @@ import { filterTickets, goalFeatures, renderProgress, views } from './progress';
 import { boardState } from './state';
 // `Loose` is `any`: index.html's values have no declared types. A cast `(x as Loose)` or a `!` is a type only (SWC
 // strips it; spec A4). Many are there because another view's stub returns `never`: the compiler reads the code
-// after a call into one as unreachable and types its names `never`. That view's port makes them unneeded.
+// after a call into one as unreachable and types its names `never`. That view's port makes them unneeded. Here most
+// are on a filters object index.html starts as `{}`, which the compiler types `{}`.
 type Loose = any;
 
 
+// ---- the Board's and Progress's header filters (kit-91): in the page bar's .extra, each in the URL ----
+// A page head's state is its filters (dashboard-shell@1's STATE_KEYS): Board goal, feat, repo, att; Progress goal,
+// narrow, show. Each change is a history entry (setFilters assigns the hash), so Back restores the earlier filter.
+// Self Improvement (kit-96) is drawn and read here only: REMEMBERED has no loop, so nothing of it is stored or applied
 export const NARROW_GROUPS = ['Milestones', 'Features', 'Releases', 'Waves', 'Stories'];
 // the goals a filter can name: every goal not let go, by title
 export const filterGoals = () => ((shell.DATA as Loose)?.ooda?.goals || []).filter((g: Loose) => g.status !== 'abandoned').sort((a: Loose, b: Loose) => String(a.title ?? a.id).localeCompare(String(b.title ?? b.id)));
