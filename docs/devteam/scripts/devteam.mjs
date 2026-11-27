@@ -22656,6 +22656,8 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
   const listHead = { hub: 1, kit, ...(image ? { image: true } : {}) };
   const retry = Number(process.env.DEVTEAM_HUB_RETRY_MS ?? 30000);
   const ownHost = (h) => [`127.0.0.1:${HUB_PORT}`, `localhost:${HUB_PORT}`].includes(h ?? '');
+  // the hub page's policy, and its alpha's under alphaCsp
+  const hubPolicy = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src ${PORT_RANGE.map((p) => `http://127.0.0.1:${p}`).join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
   // One scan at a time, its answer kept for 2 s: however often pages ask, the block is probed at
   // most every 2 s. An instance speaking a newer hello than this hub knows lists only root and port.
   let scanning = null;
@@ -22791,7 +22793,11 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
       const act = req.method === 'POST' && req.url.startsWith('/operator/') && Object.hasOwn(HUB_ACTIONS, req.url.slice(10)) ? HUB_ACTIONS[req.url.slice(10)] : null;
       if (act) return ownerPost(req, send, act);
       if (req.method !== 'GET') return send(405, 'text/plain; charset=utf-8', 'the hub only lists, and takes the owner\'s threads with the operator', { allow: 'GET' });
-      if (req.url === '/') return servePage(null, req, res, 'hub', `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src ${PORT_RANGE.map((p) => `http://127.0.0.1:${p}`).join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`, { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+      if (req.url === '/') return servePage(null, req, res, 'hub', hubPolicy, { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+      // the live alpha (alpha@1, kit-961): the hub app of the project whose dashboard started this hub,
+      // under the hub page's policy with alphaCsp's changes; a hub with no project has no install
+      if (req.url === '/alpha.json') { const { on, verified, release, why } = alphaState('hub', !standalone); return send(200, 'application/json', JSON.stringify({ on, verified, release, why })); }
+      if (alphaServe('hub', req, res, () => hubPolicy, !standalone) !== DASH_NEXT) return;
       // The list is for the hub's own page: another site's page doesn't get to make the hub probe
       // the block (a browser always says where a request came from). The page itself opens from
       // anywhere, a link in a README included.
