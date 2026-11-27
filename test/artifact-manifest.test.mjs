@@ -1,6 +1,6 @@
 // The address `artifact manifest <slug>` gives a landed artifact once published (kit-281), and the
 // supervisor's publishing rule that says the same. A box image that serves each project at a host
-// of its own (project-hosts@1, cloud/gateway.mjs) sets DEVTEAM_PROJECT_HOSTS=1: there a public page
+// of its own (project-hosts@2, cloud/gateway.mjs) sets DEVTEAM_PROJECT_HOSTS=1: there a public page
 // is https://<project>.<box>/<slug>/, and public.<box> answers 421. An image from before it does
 // not set it, and its gateway still serves public.<box>/<project>/<slug>/.
 import { test } from 'node:test';
@@ -83,7 +83,7 @@ test('C2 without DEVTEAM_PROJECT_HOSTS=1 (an image before project hosts), artifa
   }
 });
 
-test('C3 with DEVTEAM_PROJECT_HOSTS=1, a project name gets an address only where project-hosts@1 gives it a host (test/fixtures/project-hosts.json)', (t) => {
+test('C3 with DEVTEAM_PROJECT_HOSTS=1, a project name gets an address only where project-hosts@2 gives it a host (test/fixtures/project-hosts.json)', (t) => {
   const P = project(t);
   // every reserved label is refused too, whether or not labelCases lists it
   const names = [...new Map([...HOSTS.labelCases.filter((c) => PUBLIC_PROJECT.test(c.name)).map((c) => [c.name, c.expect]), ...HOSTS.reservedLabels.map((l) => [l, 'refused'])]).entries()];
@@ -105,6 +105,7 @@ test('C3 with DEVTEAM_PROJECT_HOSTS=1, a project name gets an address only where
 test('C4 with DEVTEAM_PROJECT_HOSTS=1, an artifact named after one of the dashboard\'s paths gets no address, and is told to rename', (t) => {
   const reserved = HOSTS.reservedSegments.filter((s) => LINK_ID.test(s));
   assert.ok(reserved.length >= 5, 'the fixture names them');
+  assert.ok(reserved.includes('next'), 'next among them (project-hosts@2)');
   const P = project(t, ['landed-mock', ...reserved]);
   for (const s of reserved) {
     const said = P.manifest(s, ON);
