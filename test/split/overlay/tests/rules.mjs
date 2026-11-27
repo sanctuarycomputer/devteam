@@ -1,19 +1,61 @@
 // The tests' area of the overlay (cutover-tree@1, kit-893): the kit's tests run in the generated tree,
-// finding the gateway's source through its helper.
+// finding the CLI's and the gateway's source through one helper each.
+//   cli-source  test/lib/cli-source.mjs: the CLI's source as the single file had it, read from the
+//               tree's modules when called (the shebang, the header, the import lines as written, then
+//               every module's body in the manifest's order with its imports region and each export
+//               the split added taken off).
 //   test-reads  (when the gateway's area wrote its helper) each read of cloud/gateway.mjs's text becomes
 //               gatewaySource(). The rewrite is rewireGatewayReads (kit-894's, moved here).
 // The rule refuses nothing it can rewrite, so a test it can't match would need a patch here; there is none.
 import { items } from '../../lib/js.mjs';
 import { importPath } from '../../lib/split.mjs';
 
+export const CLI = 'docs/devteam/scripts/devteam.mjs';
+export const CLI_HELPER = 'test/lib/cli-source.mjs';
 export const GATEWAY_HELPER = 'test/lib/gateway-source.mjs'; // written by the gateway's area
 
-// The files the rule reads: every .mjs under test/ but the split's own, its tests and the helper. The
+// The files the rule reads: every .mjs under test/ but the split's own, its tests and the two helpers. The
 // gateway's rewrite keeps kit-894's set, which leaves the fixtures out.
-export const isTestFile = (f) => /^test\/.*\.mjs$/.test(f) && !f.startsWith('test/split/') && !f.startsWith('test/split-') && f !== GATEWAY_HELPER;
+export const isTestFile = (f) => /^test\/.*\.mjs$/.test(f) && !f.startsWith('test/split/') && !f.startsWith('test/split-') && f !== CLI_HELPER && f !== GATEWAY_HELPER;
 export const gatewayFile = (f) => isTestFile(f) && !f.startsWith('test/fixtures/');
 
+// The source's lines before its declarations: its shebang, its header (up to the first import) and its
+// import lines as written.
+export function sourceParts(src) {
+  const S = items(src);
+  const imports = S.items.filter((x) => x.kind === 'import');
+  if (!imports.length) return null;
+  const first = imports[0].from;
+  // the last import statement's own last line: an item's `to` runs on over what follows it (blank
+  // lines, and in the CLI the top-level statements before the first declaration)
+  const lastItem = imports[imports.length - 1];
+  let last = lastItem.line;
+  while (last < S.lines.length && !/;\s*$/.test(S.codeLines[last - 1])) last++;
+  const shebang = S.lines[0].startsWith('#!') ? S.lines[0] : null;
+  return {
+    shebang,
+    head: S.lines.slice(shebang ? 1 : 0, first - 1),
+    imports: S.lines.slice(first - 1, last),
+  };
+}
+
 export const rules = [
+  {
+    name: 'cli-source',
+    apply(t) {
+      const sp = sourceParts(t.read(CLI) ?? '');
+      if (!sp) return { changed: [], refused: [{ site: CLI_HELPER, why: `no import statements in ${CLI} as the rules see it` }] };
+      const files = t.modules().filter((m) => m.source === CLI).map((m) => m.file);
+      if (!files.length) return { changed: [], refused: [{ site: CLI_HELPER, why: `the split makes no module of ${CLI}` }] };
+      const C = items(t.read(CLI));
+      const exported = new Set(C.items.filter((x) => x.kind === 'decl' && x.exported).map((x) => C.lines[x.line - 1]));
+      // per module, the declaration lines the split exported and the single file did not: cliSource
+      // takes "export " off exactly these lines (a template's line that looks like one is left)
+      const strip = files.map((m) => { const M = items(t.read(m)); return M.items.filter((x) => x.kind === 'decl' && x.exported && !exported.has(M.lines[x.line - 1])).map((x) => M.lines[x.line - 1]); });
+      t.write(CLI_HELPER, cliHelperText(files, sp, strip));
+      return { changed: [{ file: CLI_HELPER, site: `${CLI_HELPER}: ${files.length} modules` }], refused: [] };
+    },
+  },
   {
     name: 'test-reads',
     apply(t) {
@@ -32,6 +74,36 @@ export const rules = [
     },
   },
 ];
+
+function cliHelperText(files, sp, strip) {
+  return `// The CLI's source as the single file had it, from the generated tree's modules (written by
+// test/split/overlay/tests, kit-893): the shebang, the header, the import lines as written, then every
+// module's body in the manifest's order with its imports region and each export the split added taken
+// off.
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const MODULES = ${JSON.stringify(files)};
+const SHEBANG = ${JSON.stringify(sp.shebang)};
+const HEAD = ${sp.head.length};
+const IMPORTS = ${JSON.stringify(sp.imports)};
+const STRIP = ${JSON.stringify(strip)}; // per module, the lines the split exported that the single file did not
+
+export function cliSource() {
+  const body = [];
+  MODULES.forEach((f, i) => {
+    const lines = fs.readFileSync(path.join(root, f), 'utf8').split('\\n');
+    if (lines[lines.length - 1] === '') lines.pop();
+    const e = lines[0] === '/* imports start */' ? lines.indexOf('/* imports end */') : -1;
+    const strip = new Set(STRIP[i]);
+    for (const l of lines.slice(e + 1)) body.push(strip.has(l) ? l.slice('export '.length) : l);
+  });
+  return \`\${[...(SHEBANG ? [SHEBANG] : []), ...body.slice(0, HEAD), ...IMPORTS, ...body.slice(HEAD)].join('\\n')}\\n\`;
+}
+`;
+}
 
 // ---- the gateway's reads (kit-894's rewrite, moved here from overlay/gateway/rules.mjs) ----
 
