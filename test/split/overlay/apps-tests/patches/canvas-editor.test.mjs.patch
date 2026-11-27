@@ -1,0 +1,42 @@
+diff --git a/test/canvas-editor.test.mjs b/test/canvas-editor.test.mjs
+index 2bcf140c77762868ee24946c6982a5f0b95443e0..974bd3a96e14cf51546fc8f2e7b1f8f41f649bf5 100644
+--- a/test/canvas-editor.test.mjs
++++ b/test/canvas-editor.test.mjs
+@@ -14,7 +14,8 @@ import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
+ import { until } from './lib/kit.mjs';
+ 
+ const here = path.dirname(fileURLToPath(import.meta.url));
+-const PAGE_FILE = path.join(here, '..', 'docs', 'devteam', 'dashboard', 'canvas.html');
++const PAGE_FILE = path.join(here, '..', 'docs', 'devteam', 'apps', 'dashboard', 'view', 'canvas', 'index.html');
++const APP = path.join(here, '..', 'docs', 'devteam', 'apps', 'dashboard');
+ const FIX = path.join(here, 'fixtures', 'canvas');
+ const fixture = (name) => JSON.parse(fs.readFileSync(path.join(FIX, name), 'utf8'));
+ const IMG_FILE = '429be16d0a91e377.png';
+@@ -34,6 +35,27 @@ function serve(req, res) {
+       return;
+     }
+   }
++  // the export's own files (/_next/* and the rest), GET or HEAD, of a known type; never anything outside
++  // the build: the decoded path must resolve under it, hold no NUL, and be a regular file (not a link)
++  const TYPES = { js: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', html: 'text/html; charset=utf-8', json: 'application/json', txt: 'text/plain; charset=utf-8', svg: 'image/svg+xml', png: 'image/png', ico: 'image/x-icon', woff2: 'font/woff2' };
++  if (req.method === 'GET' || req.method === 'HEAD') {
++    let p = null;
++    try { p = decodeURIComponent(raw); } catch { p = null; }
++    const type = p === null ? undefined : TYPES[path.extname(p).slice(1)];
++    if (p !== null && !p.includes('\0') && type) {
++      const file = path.resolve(APP, `.${p}`);
++      let body = null;
++      try {
++        const real = fs.realpathSync(APP);
++        if (file.startsWith(APP + path.sep) && fs.lstatSync(file).isFile() && fs.realpathSync(file).startsWith(real + path.sep)) body = fs.readFileSync(file);
++      } catch { body = null; }
++      if (body !== null) {
++        res.writeHead(200, { 'Content-Type': type, 'Content-Length': body.length });
++        res.end(req.method === 'HEAD' ? undefined : body);
++        return;
++      }
++    }
++  }
+   res.writeHead(404, { 'Content-Length': 0 });
+   res.end();
+ }
