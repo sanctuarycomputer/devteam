@@ -1,6 +1,6 @@
 // The kit's tests in the generated tree (kit-893, cutover-tree@1 Tests in the tree, What a test change
 // may do): the overlay's tests area (test/split/overlay/tests/) writes test/lib/cli-source.mjs, rewires
-// every node:fs read of a test that names the CLI through cliRead (and, beside the gateway's area, each
+// every node:fs read in every test file through cliRead (and, beside the gateway's area, each
 // read of the gateway's text through gatewaySource) by one rule, writes the rules test
 // test/cli-modules.test.mjs, and its finding.mjs is the test-change check the parity run calls. Three
 // trees are generated at this checkout's HEAD, in parallel, from the manifests and the areas named:
@@ -89,6 +89,17 @@ const rewireReads = (...a) => need(rules, 'rewireReads')(...a);
 const sameBeyondFinding = (...a) => need(finding, 'sameBeyondFinding')(...a);
 const CLI_HELPER = 'test/lib/cli-source.mjs';
 const helperOf = async (T) => (await import(pathToFileURL(path.join(T.out, CLI_HELPER)).href)).cliSource;
+
+const expectItems = () => ['rule cli-source', 'rule test-reads', 'file test/cli-modules.test.mjs'];
+
+test('W1: in both trees the tests area is applied whole, nothing of it stale, no conflict naming it', () => {
+  for (const [n, T] of [['A', A], ['B', B]]) {
+    assert.equal(T.status, 0, `tree ${n}: ${T.err}`);
+    assert.deepEqual(items(mine(T, 'applied')), expectItems(), `tree ${n}: every item of the tests area is applied`);
+    assert.deepEqual(mine(T, 'stale'), [], `tree ${n}: nothing of the tests area is stale`);
+    assert.deepEqual((T.j.overlay?.conflicts ?? []).filter((c) => c.areas.includes('tests')), [], `tree ${n}: no conflict names the tests area`);
+  }
+});
 
 test('W2: in tree A, cliSource() is the single file\'s source byte for byte', async () => {
   const cliSource = await helperOf(A);
@@ -308,6 +319,8 @@ test('W8: sameBeyondFinding accepts a test that differs only in how it finds its
   assert.equal(sameBeyondFinding(src, src.replace("includes('cmdMerge')", "includes('cmdDone')"), file), false, 'an assertion changed with no finding change');
   assert.equal(sameBeyondFinding(src, tree, 'docs/devteam/scripts/devteam.mjs'), false, 'not a test');
 });
+// W9's source is this checkout and tree B is HEAD's, so a kit test edited and not yet committed shows here
+// as a changed test the check does not accept; commit it (CI's checkout is HEAD's, so CI never sees this).
 test('W9: with the parity run\'s own differing(), every test the tests area changed in tree B is accepted; only added files are left', async () => {
   const { differing, findingChecks } = await import(pathToFileURL(path.join(root, 'test', 'split', 'parity.mjs')).href);
   const without = differing({ source: root, tree: B.out });
@@ -316,3 +329,37 @@ test('W9: with the parity run\'s own differing(), every test the tests area chan
   assert.deepEqual(left.filter((d) => d.change === 'changed').map((d) => d.file), [], 'changed tests the check does not accept');
 });
 
+// ---- the rules test, in tree B, and each of its rules seen failing ----
+// A copy of what the rules test reads (the CLI's folder, the split tool's lib, the test itself), with a
+// change made to one module.
+function rulesCopy(name, change) {
+  const d = path.join(tmp, `rules-${name}`);
+  for (const p of ['docs/devteam/scripts', 'test/split/lib', 'test/cli-modules.test.mjs']) fs.cpSync(path.join(B.out, p), path.join(d, p), { recursive: true });
+  if (change) change(path.join(d, 'docs/devteam/scripts/lib'));
+  return d;
+}
+const rulesRun = (cwd, pattern) => {
+  const r = run(process.execPath, ['--test', '--test-reporter=tap', '--test-concurrency=1', ...(pattern ? [`--test-name-pattern=${pattern}`] : []), 'test/cli-modules.test.mjs'], { cwd, env: quiet, timeout: 280e3 });
+  return { r, top: new Map([...r.stdout.matchAll(/^(ok|not ok) \d+ - (M\d) /gm)].map((m) => [m[2], m[1]])) };
+};
+test('W10: in tree B, test/cli-modules.test.mjs passes M1 to M5', { timeout: 300e3 }, () => {
+  const { r, top } = rulesRun(B.out);
+  assert.deepEqual(['M1', 'M2', 'M3', 'M4', 'M5'].map((m) => [m, top.get(m) ?? 'did not run']), ['M1', 'M2', 'M3', 'M4', 'M5'].map((m) => [m, 'ok']), r.stdout.slice(-3000));
+  assert.equal(r.status, 0);
+});
+const append = (f, s) => (lib) => fs.appendFileSync(path.join(lib, f), s);
+const MUTANTS = [
+  ['M1', 'a module that prints while it loads', append('links.mjs', "console.log('loaded');\n")],
+  ['M2', 'import.meta.url in a module but state and settings', append('links.mjs', 'export const mutantWhereM2 = import.meta.url;\n')],
+  ['M3', 'an import region with a line its module does not need', (lib) => { const f = path.join(lib, 'links.mjs'); const t = fs.readFileSync(f, 'utf8'); fs.writeFileSync(f, t.replace('/* imports end */', "import { notAName } from './base.mjs';\n/* imports end */")); }],
+  ['M4', 'a module of 2,001 lines', append('links.mjs', '//\n'.repeat(2001))],
+  ['M5', 'a lib module that imports the entry', append('links.mjs', "export const mutantLaterM5 = () => import('../cli.mjs');\n")],
+];
+for (const [m, what, change] of MUTANTS) {
+  test(`W11: the rules test fails ${m} alone on ${what}`, { timeout: 300e3 }, () => {
+    // M1 is the slow one (a Node per module): run it alone on its own mutant, the rest without it
+    const { r, top } = rulesRun(rulesCopy(m, change), m === 'M1' ? '^M1 ' : '^M[2-5] ');
+    const want = (m === 'M1' ? ['M1'] : ['M2', 'M3', 'M4', 'M5']).map((x) => [x, x === m ? 'not ok' : 'ok']);
+    assert.deepEqual(want.map(([x]) => [x, top.get(x) ?? 'did not run']), want, r.stdout.slice(-3000));
+  });
+}

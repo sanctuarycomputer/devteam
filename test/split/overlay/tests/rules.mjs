@@ -9,7 +9,7 @@
 //               runs; and (when the gateway's area wrote its helper) each read of cloud/gateway.mjs's
 //               text becomes gatewaySource(). The rewrites are rewireCliReads and rewireGatewayReads
 //               (kit-894's, moved here); finding.mjs replays them for the parity run's test-change check.
-// The rule refuses nothing, so a test it can't match would need a patch here; there is none.
+// The CLI's rewrite refuses nothing; the gateway's still refuses a read of its text it can't place.
 import path from 'node:path';
 import { items, scan } from '../../lib/js.mjs';
 import { importPath } from '../../lib/split.mjs';
@@ -91,8 +91,8 @@ function cliHelperText(files, sp, strip) {
   return `// The CLI's source as the single file had it, from the generated tree's modules (written by
 // test/split/overlay/tests, kit-893): the shebang, the header, the import lines as written, then every
 // module's body in the manifest's order with its imports region and each export the split added taken
-// off. The kit's tests make every node:fs read through cliRead (or
-// cliReadAsync), which answers a read of the tree's devteam.mjs with this text.
+// off. The kit's tests make every node:fs read through cliRead or its async, callback and value
+// forms, which answer a read of the tree's devteam.mjs with this text.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -154,7 +154,7 @@ export const cliReaderAsync = (fn, self) => (p, opts, ...rest) => cliReadAsync(f
 `;
 }
 
-// ---- the CLI's reads: every node:fs read call in a test that names the CLI goes through cliRead ----
+// ---- the CLI's reads: every node:fs read in every test file goes through cliRead or its forms ----
 
 // The names a file binds to node:fs: { ns: names of the module (default or namespace import of 'fs' or
 // 'node:fs'), sync: bare readFileSync locals, promises: names of 'fs/promises' modules, async: bare
