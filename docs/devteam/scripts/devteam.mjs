@@ -29621,6 +29621,96 @@ function dashRoutesApp(D, req, res, q) {
   if (req.method !== 'GET' && req.method !== 'HEAD') return DASH_NEXT;
   return servePageAsset(req, res, 'dashboard');
 }
+// alpha@1 (kit-961): the live alpha at /next/ on a project's dashboard and the laptop hub, served from
+// the project's own verified install (kit-install@1), by serveAppFiles. alphaState(app, project) is
+// what /next/, GET /api/alpha (the dashboard) and GET /alpha.json (the hub) read: { on, verified,
+// release, why, folder }. project is false for a hub with no project (cmdHub's): nothing is installed
+// for it. Otherwise the install is main's checkout's docs/devteam/.kit/current, as packageStatus reads
+// it (a real folder; a current that is a relative symlink or a one-line file naming a real folder
+// beside it); verified as packageStatus says (its record and its pair), and its node_modules/<name>/
+// must resolve inside the folder, a package.json there (a regular file, at most 1 MiB) naming the
+// record's name and version. on is false only when main's settings say alpha: false. release is the
+// verified record's version (X.Y.Z, no v), else null. why is the first of 'off', 'no-install' (no
+// current), 'unverified' and 'no-pages' (no folder node_modules/<name>/docs/devteam/alpha/<app>/
+// whose real path is inside the package's), else null; folder is that real path only when why is
+// null. One read per app and project is kept 2 s, so a page's many files cost one git show.
+const alphaState = (() => {
+  const kept = new Map();
+  const read = (app, project) => {
+    let on = true;
+    if (project) {
+      const main = mainRef();
+      const s = main ? settingsAt(main, { orNull: true }) : null;
+      on = s?.alpha !== false;
+    }
+    const out = (why, verified = false, release = null, folder = null) => ({ on, verified, release, why: on ? why : 'off', folder: on && !why ? folder : null });
+    if (!project) return out('no-install');
+    const tree = path.join(mainRoot, 'docs', 'devteam', '.kit');
+    const t = packageStatus({ tree });
+    if (!t.current) return out('no-install');
+    const one = t.installs.find((i) => i.folder === t.current);
+    if (!one?.verified) return out('unverified');
+    const r = one.record;
+    let pkg;
+    try {
+      const top = fs.realpathSync(path.join(tree, t.current));
+      pkg = fs.realpathSync(path.join(top, 'node_modules', ...r.name.split('/')));
+      if (!pkg.startsWith(top + path.sep)) throw new Error('outside');
+      const f = path.join(pkg, 'package.json');
+      const st = fs.lstatSync(f);
+      if (!st.isFile() || st.size > 1048576) throw new Error('not a file');
+      const pj = JSON.parse(fs.readFileSync(f, 'utf8'));
+      if (pj?.name !== r.name || pj?.version !== r.version) throw new Error('another package');
+    } catch { return out('unverified'); }
+    let folder = null;
+    try {
+      const f = fs.realpathSync(path.join(pkg, 'docs', 'devteam', 'alpha', app));
+      if (f.startsWith(pkg + path.sep) && fs.statSync(f).isDirectory()) folder = f;
+    } catch {}
+    return out(folder ? null : 'no-pages', true, r.version, folder);
+  };
+  return (app, project) => {
+    const key = `${app}\0${project ? 1 : 0}`;
+    const k = kept.get(key);
+    if (k && Date.now() - k.at < 2000) return k.state;
+    const state = read(app, project);
+    kept.set(key, { at: Date.now(), state });
+    return state;
+  };
+})();
+// A /next/ page's policy: the server's own policy for that page with script-src 'self' and the
+// page's hashes (no 'unsafe-inline'), style-src 'self' 'unsafe-inline' (no hash: a hash would make
+// browsers drop 'unsafe-inline' and the export's style attributes), and font-src 'self'; each in
+// place when the policy has it, else added at its end in that order. A policy whose default-src is
+// 'none' and has no img-src (the laptop hub's) also gains img-src 'self' data: at its end, so the
+// app's own images load (kit-package-apps.md's rule; ruling m-20261127-130542042). Every other
+// directive is kept as it is. A hash that is not 'sha256-' and 43 base64 characters and '=' throws.
+function alphaCsp(policy, hashes) {
+  for (const h of hashes) if (typeof h !== 'string' || !/^sha256-[A-Za-z0-9+/]{43}=$/.test(h)) throw new Error(`alphaCsp: ${JSON.stringify(h)} is not a sha256 hash`);
+  const set = { 'script-src': ['script-src', "'self'", ...hashes.map((h) => `'${h}'`)].join(' '), 'style-src': "style-src 'self' 'unsafe-inline'", 'font-src': "font-src 'self'" };
+  const done = new Set();
+  const out = policy.split(';').map((d) => d.trim()).filter(Boolean).map((d) => {
+    const name = d.split(/\s+/)[0].toLowerCase();
+    if (!Object.hasOwn(set, name)) return d;
+    done.add(name);
+    return set[name];
+  });
+  for (const name of Object.keys(set)) if (!done.has(name)) out.push(set[name]);
+  const names = out.map((d) => d.split(/\s+/)[0].toLowerCase());
+  if (out.includes("default-src 'none'") && !names.includes('img-src')) out.push("img-src 'self' data:");
+  return out.join('; ');
+}
+// The page /next/ answers in place of the alpha, a string here and never a file of the install: no
+// script, one sentence on why in plain words, and a link back to the stable page at /.
+function alphaWhyPage(why, release) {
+  const words = {
+    off: 'The alpha is turned off for this project: its alpha setting is false.',
+    'no-install': 'There is no install of the alpha here yet: no verified kit release is installed where this page is served.',
+    unverified: 'The installed release didn’t pass its checks (integrity and provenance), so none of it is served.',
+    'no-pages': `Release ${String(release).replace(/[^0-9.]/g, '')} has no alpha pages yet.`,
+  }[why] ?? 'The alpha isn’t available here.';
+  return `<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>The alpha isn’t here</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:32em;margin:3em auto;padding:0 1em}</style></head><body><h1>The alpha isn’t here</h1><p>${words}</p><p><a href="/">Back to the stable page</a></p></body></html>\n`;
+}
 /* cmdDashboard start */
 /* dashboardRoutes start */
 // What a route group returns when none of its routes matched the request.
