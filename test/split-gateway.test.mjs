@@ -56,7 +56,7 @@ const verifyTree = () => {
 
 test('G1a: the gateway area is applied whole, and nothing of it is stale', () => {
   assert.equal(made.status, 0, `split: ${made.stderr}`);
-  assert.deepEqual(gwItems, ['rule here', 'rule gateway-source', 'rule entry', 'rule test-reads', 'patch dockerfile-gateway-modules.patch'], 'every item of the gateway area is applied');
+  assert.deepEqual(gwItems, ['rule here', 'rule gateway-source', 'rule entry', 'patch dockerfile-gateway-modules.patch'], 'every item of the gateway area is applied');
   assert.deepEqual((report.stale ?? []).filter((s) => /gateway/.test(`${s.area} ${s.name}`)), [], 'nothing of the gateway is stale');
 });
 
@@ -249,7 +249,7 @@ test('G7d: templates that is not a list of names is a problem', () => {
 // import goes after the last import statement, never into the code after it; a const named with a $ is
 // rewired like any other; a read whose arguments name the gateway but that the rule can't rewrite is refused.
 test('G8: rewireGatewayReads puts its import after the imports, rewires a $ const, and refuses a read it can\'t rewrite', async () => {
-  const { rewireGatewayReads } = await import(pathToFileURL(path.join(root, 'test', 'split', 'overlay', 'gateway', 'rules.mjs')).href);
+  const { rewireGatewayReads } = await import(pathToFileURL(path.join(root, 'test', 'split', 'overlay', 'tests', 'rules.mjs')).href);
   const file = 'test/some.test.mjs';
   const placed = rewireGatewayReads(file, [
     "import fs from 'node:fs';",
