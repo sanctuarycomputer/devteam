@@ -98,8 +98,13 @@ export function writeCatalog(ui, out) {
   if (fs.existsSync(out) && fs.readFileSync(out, 'utf8') === text) return false;
   fs.mkdirSync(path.dirname(out), { recursive: true });
   const tmp = `${out}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, text);
-  fs.renameSync(tmp, out);
+  try {
+    fs.writeFileSync(tmp, text);
+    fs.renameSync(tmp, out);
+  } catch (e) {
+    fs.rmSync(tmp, { force: true });
+    throw e;
+  }
   return true;
 }
 
@@ -138,6 +143,18 @@ export function outermost(src) {
     }
     return n;
   };
+  // a type parameter list at j (`<T,>`, `<T extends X>`, `<T = X>`: an arrow function's generics, which TSX
+  // writes so, while `<T>` is JSX): the index after its '>', or -1 when j starts none
+  const typeParams = (j) => {
+    if (!/^<\s*[A-Za-z_$][\w$]*\s*(?:,|extends\b|=(?!>))/.test(src.slice(j, j + 200))) return -1;
+    let depth = 0;
+    for (; j < n; j++) {
+      if (src[j] === '=' && src[j + 1] === '>') { j++; continue; }
+      if (src[j] === '<') depth++;
+      else if (src[j] === '>' && --depth === 0) return j + 1;
+    }
+    return n;
+  };
   // code from j to the '}' that closes it (or the end): the index after that '}'
   function code(j, record) {
     let prev = '';
@@ -150,7 +167,13 @@ export function outermost(src) {
       if (/\s/.test(c)) { j++; continue; }
       if (c === '/' && START.test(prev)) { j = regex(j); prev = 'x'; continue; }
       if (c === '{') { j = code(j + 1, record); prev = '}'; continue; }
-      if (c === '<' && START.test(prev) && /[A-Za-z>]/.test(src[j + 1] ?? '')) { j = element(j, record); prev = 'x'; continue; }
+      if (c === '<' && START.test(prev) && /[A-Za-z>]/.test(src[j + 1] ?? '')) {
+        const t = typeParams(j);
+        if (t >= 0) { j = t; prev = '>'; continue; }
+        j = element(j, record);
+        prev = 'x';
+        continue;
+      }
       const w = /^[A-Za-z_$][\w$]*/.exec(src.slice(j, j + 64));
       if (w) { prev = w[0]; j += w[0].length; continue; }
       if (c === '=' && src[j + 1] === '>') { prev = '=>'; j += 2; continue; }
@@ -233,7 +256,14 @@ export function duplicates(apps) {
       if (parts[0] === 'views' && parts.length > 2) folder = `${a}/src/views/${parts[1]}`;
       else if (parts[0] === 'shared' && parts[1] !== 'ui') folder = `${a}/src/shared/${parts.length > 2 ? parts[1] : parts[1].replace(/\.tsx$/, '')}`;
       if (!folder) continue;
-      for (const el of outermost(fs.readFileSync(f, 'utf8'))) for (const c of el.classes) {
+      let els;
+      try {
+        els = outermost(fs.readFileSync(f, 'utf8'));
+      } catch (e) {
+        process.stderr.write(`ui-catalog: ${rel(f)} not scanned: ${e.message}\n`);
+        continue;
+      }
+      for (const el of els) for (const c of el.classes) {
         const by = seen.get(c) ?? seen.set(c, new Map()).get(c);
         (by.get(folder) ?? by.set(folder, new Set()).get(folder)).add(rel(f));
       }
@@ -263,6 +293,7 @@ function main(argv) {
     return 0;
   } catch (e) {
     if (e instanceof Refused) { process.stderr.write(`ui-catalog: refused: ${e.message}\n`); return 1; }
+    if (e && typeof e.code === 'string' && e.syscall) { process.stderr.write(`ui-catalog: refused: ${e.path ? `${rel(e.path)}: ` : ''}${e.code} (${e.syscall})\n`); return 1; }
     throw e;
   }
 }
