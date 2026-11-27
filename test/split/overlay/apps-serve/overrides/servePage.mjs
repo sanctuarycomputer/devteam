@@ -2,7 +2,8 @@
 // apps@1 Serving (kit-984): a page is its route's index.html in the built app at docs/devteam/apps/<app>/,
 // sent under the caller's policy with script-src 'self' plus the route's hashes from the build's
 // csp-hashes.json, and style-src with 'self' (the browser view's: 'self' alone, on browser.html's own
-// policy). No build: a 503 notice under the same policy with no hashes. A build whose hashes can't be
+// policy). The dashboard's style-src (and font-src where it has one) also names the shell's font and
+// icon origins (kit-1033). No build: a 503 notice under the same policy with no hashes. A build whose hashes can't be
 // read, or hold anything but sha256-<44 base64>, is a 500: never a page without its hashes. D.keep (the
 // browser view's) holds the first good build for the server's life; with no res, at the server's
 // creation, it only tries to read one, and never throws for a missing build.
@@ -13,8 +14,10 @@ function servePage(D, req, res, page, policy, headers = {}) {
   // policy builder start
   // base with script-src 'self' plus the hashes, style-src with 'self' first ('self' alone for the
   // browser view), each appended if absent; under default-src 'none', font-src 'self' and img-src
-  // 'self' data: appended if absent, but never on the browser view
-  const build = (base, hashes, browser) => {
+  // 'self' data: appended if absent, but never on the browser view; a dashboard route's style-src, and its
+  // font-src where it has one, also name the shell's font and icon origins (kit-1033)
+  const ORIGINS = { 'style-src': ['https://fonts.googleapis.com', 'https://cdn.jsdelivr.net'], 'font-src': ['https://fonts.gstatic.com', 'https://cdn.jsdelivr.net'] };
+  const build = (base, hashes, browser, dashboard = false) => {
     const ds = base.split(';').map((d) => d.trim()).filter(Boolean);
     const has = (n) => ds.some((d) => d.split(/\s+/)[0] === n);
     const script = ['script-src', "'self'", ...hashes.map((h) => `'${h}'`)].join(' ');
@@ -30,6 +33,7 @@ function servePage(D, req, res, page, policy, headers = {}) {
       if (!has('font-src')) out.push("font-src 'self'");
       if (!has('img-src')) out.push("img-src 'self' data:");
     }
+    if (dashboard) for (let i = 0; i < out.length; i++) { const [n, ...v] = out[i].split(/\s+/); if (ORIGINS[n]) out[i] = [n, ...v, ...ORIGINS[n].filter((o) => !v.includes(o))].join(' '); }
     return out.join('; ');
   };
   // a route's hashes from a build's csp-hashes.json text, or null when they can't be trusted
@@ -65,9 +69,9 @@ function servePage(D, req, res, page, policy, headers = {}) {
   }
   if (got === 'none') {
     const body = Buffer.from("<!doctype html><meta charset=\"utf-8\"><title>devteam</title><p>This kit's pages aren't installed. They return at its next sync.</p>");
-    res.writeHead(503, { 'content-type': 'text/html; charset=utf-8', 'content-length': body.length, ...headers, 'content-security-policy': build(base, [], page === 'browser') });
+    res.writeHead(503, { 'content-type': 'text/html; charset=utf-8', 'content-length': body.length, ...headers, 'content-security-policy': build(base, [], page === 'browser', page === 'dashboard') });
     return res.end(req.method === 'HEAD' ? undefined : body);
   }
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': got.html.length, ...headers, 'content-security-policy': build(base, got.hashes, page === 'browser') });
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': got.html.length, ...headers, 'content-security-policy': build(base, got.hashes, page === 'browser', page === 'dashboard') });
   return res.end(req.method === 'HEAD' ? undefined : got.html);
 }
