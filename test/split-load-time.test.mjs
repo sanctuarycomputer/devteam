@@ -211,7 +211,8 @@ const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })
 if (fs.existsSync(lib)) walk(lib);
 const site = (rule) => J.overlay?.applied?.find((a) => a.area === 'load-time' && a.kind === 'rule' && a.name === rule)?.sites ?? [];
 // --count at the base: the load-time statements, import.meta.url uses and let sites it finds
-const count = run(process.execPath, [tool, '--count', '--at', sha], { cwd: tmp }).stdout;
+// --count prints a section per manifest (each opens `K1 count at <sha> (<source>: …`): this area's is devteam.mjs's
+const count = (run(process.execPath, [tool, '--count', '--at', sha], { cwd: tmp }).stdout.split(/^(?=K1 count at )/m).find((x) => /^K1 count at \S+ \(docs\/devteam\/scripts\/devteam\.mjs:/.test(x)) ?? '');
 
 test('T1: in the tree, importing every lib module alone in a fresh node process prints nothing, writes no file, spawns nothing and never reads process.argv', () => {
   const harness = path.join(tmp, 'alone.mjs');
