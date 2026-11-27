@@ -672,7 +672,7 @@ test('C11 a careful server passes the whole table on both apps; a careless one f
 
 // ---- the package command ----------------------------------------------------------------------
 
-test('C15 devteam.mjs package prints usage naming pin, install and status; install and status are not built yet', () => {
+test('C15 devteam.mjs package prints usage naming pin, install and status; install and status are built (kit-956)', () => {
   const root = bareProject(scratch('cli'), 'pkg');
   const home = scratch('home');
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('DEVTEAM_') || /^DEVTEAM_(TEST_.*|CGROUP|MEMINFO)$/.test(k)));
@@ -683,11 +683,13 @@ test('C15 devteam.mjs package prints usage naming pin, install and status; insta
     assert.equal(r.status, 1, `C15 ${args.join(' ')}: exit 1`);
     assert.match(r.stderr, /usage: package pin <tag> \| package install \[--version v\] \[--into <dir>\] \| package status \[--json\]/, `C15 ${args.join(' ')}: the usage names pin, install and status`);
   }
-  for (const sub of ['install', 'status']) {
-    const r = dt(['package', sub]);
-    assert.equal(r.status, 1, `C15 package ${sub}: exit 1`);
-    assert.match(r.stderr, new RegExp(`package ${sub}: not built yet`), `C15 package ${sub}: not built yet`);
-  }
+  // built: with no main yet (nothing committed), install says so and status reports no pin
+  const i = dt(['package', 'install']);
+  assert.equal(i.status, 1, 'C15 package install with no pin: exit 1');
+  assert.match(i.stderr, /package install: no main branch to read the pin from; nothing installed/, 'C15 package install: no main, named');
+  const s = dt(['package', 'status']);
+  assert.equal(s.status, 0, `C15 package status: exit 0 (${s.stderr})`);
+  assert.match(s.stdout, /^pin: none on main$/m, 'C15 package status: no pin on main');
 });
 
 // ---- the contract's text ----------------------------------------------------------------------
