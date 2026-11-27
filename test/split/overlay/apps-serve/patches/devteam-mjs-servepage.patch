@@ -1,0 +1,218 @@
+diff --git a/docs/devteam/scripts/devteam.mjs b/docs/devteam/scripts/devteam.mjs
+index 9539f7c6432ea8bdd3199e4980e255dc325e17aa..1d3a8c5fe3004690bb7069747a2d16c637a14b2d 100644
+--- a/docs/devteam/scripts/devteam.mjs
++++ b/docs/devteam/scripts/devteam.mjs
+@@ -29505,55 +29505,171 @@ function artifactRemoteRefs({ root, main, onMoved = () => {}, env = process.env
+ // servePageAsset, and serveAppFiles is the one static server by alpha-build@1's rules. At main they
+ // send today's pages (dashboard/index.html, hub.html, browser.html) exactly as before; the generated
+ // tree overrides only these declarations to serve the apps (designs/kit-package-apps.md).
+-// servePage sends one of today's pages: 'dashboard', 'hub' or 'browser', read from the kit's
+-// dashboard folder on each request, as text/html with the caller's headers and policy, and no body
+-// to a HEAD. A page it can't read is a 500. D.keep, when the caller gives one, holds the page's bytes
+-// for the server's life (the browser view, whose page must match the daemon that serves it): called
+-// with no res, at the server's creation, it only reads the page into D.keep, and throws when it
+-// can't, so that server fails at start.
++// apps@1 Serving (kit-984): a page is its route's index.html in the built app at docs/devteam/apps/<app>/,
++// sent under the caller's policy with script-src 'self' plus the route's hashes from the build's
++// csp-hashes.json, and style-src with 'self' (the browser view's: 'self' alone, on browser.html's own
++// policy). The dashboard's style-src (and font-src where it has one) also names the shell's font and
++// icon origins (kit-1033). No build: a 503 notice under the same policy with no hashes. A build whose hashes can't be
++// read, or hold anything but sha256-<44 base64>, is a 500: never a page without its hashes. D.keep (the
++// browser view's) holds the first good build for the server's life; with no res, at the server's
++// creation, it only tries to read one, and never throws for a missing build.
+ function servePage(D, req, res, page, policy, headers = {}) {
+-  const file = { dashboard: 'index.html', hub: 'hub.html', browser: 'browser.html' }[page];
+-  if (!file) throw new Error(`servePage: no page ${page}`);
+-  if (!res) { D.keep[page] = fs.readFileSync(path.join(kitDir, 'dashboard', file)); return; }
+-  // 'in', not a read: the dashboard's D (dashContext) throws on a name it was not given
++  const at = { dashboard: ['dashboard', '/'], hub: ['hub', '/'], browser: ['dashboard', '/browser/'] }[page];
++  if (!at) throw new Error(`servePage: no page ${page}`);
++  const BROWSER_BASE = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'";
++  // policy builder start
++  // base with script-src 'self' plus the hashes, style-src with 'self' first ('self' alone for the
++  // browser view), each appended if absent; under default-src 'none', font-src 'self' and img-src
++  // 'self' data: appended if absent, but never on the browser view; a dashboard route's style-src, and its
++  // font-src where it has one, also name the shell's font and icon origins (kit-1033)
++  const ORIGINS = { 'style-src': ['https://fonts.googleapis.com', 'https://cdn.jsdelivr.net'], 'font-src': ['https://fonts.gstatic.com', 'https://cdn.jsdelivr.net'] };
++  const build = (base, hashes, browser, dashboard = false) => {
++    const ds = base.split(';').map((d) => d.trim()).filter(Boolean);
++    const has = (n) => ds.some((d) => d.split(/\s+/)[0] === n);
++    const script = ['script-src', "'self'", ...hashes.map((h) => `'${h}'`)].join(' ');
++    const out = ds.map((d) => {
++      const [n, ...v] = d.split(/\s+/);
++      if (n === 'script-src') return script;
++      if (n === 'style-src') return browser ? "style-src 'self'" : ['style-src', "'self'", ...v.filter((x) => x !== "'self'")].join(' ');
++      return d;
++    });
++    if (!has('script-src')) out.push(script);
++    if (!has('style-src')) out.push(browser ? "style-src 'self'" : "style-src 'self' 'unsafe-inline'");
++    if (!browser && ds.includes("default-src 'none'")) {
++      if (!has('font-src')) out.push("font-src 'self'");
++      if (!has('img-src')) out.push("img-src 'self' data:");
++    }
++    if (dashboard) for (let i = 0; i < out.length; i++) { const [n, ...v] = out[i].split(/\s+/); if (ORIGINS[n]) out[i] = [n, ...v, ...ORIGINS[n].filter((o) => !v.includes(o))].join(' '); }
++    return out.join('; ');
++  };
++  // a route's hashes from a build's csp-hashes.json text, or null when they can't be trusted
++  const hashesFor = (text, route) => {
++    let j;
++    try { j = JSON.parse(text); } catch { return null; }
++    const hs = j && j.v === 1 && j.pages && typeof j.pages === 'object' ? j.pages[route] : null;
++    return Array.isArray(hs) && hs.every((h) => typeof h === 'string' && /^sha256-[A-Za-z0-9+/]{43}=$/.test(h)) ? hs : null;
++  };
++  // policy builder end
++  const [app, route] = at;
++  const dir = path.join(kitDir, 'apps', app);
+   const keep = D && 'keep' in D ? D.keep : null;
+-  let body = keep?.[page];
+-  if (!body) {
+-    try { body = fs.readFileSync(path.join(kitDir, 'dashboard', file)); } catch {
+-      res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+-      return res.end('this page could not be read\n');
+-    }
+-    if (keep) keep[page] = body;
++  // the build: { html, hashes }, 'none' (no index.html), or 'bad'
++  const read = () => {
++    let html;
++    try { html = fs.readFileSync(path.join(dir, ...route.split('/').filter(Boolean), 'index.html')); } catch (e) { return e.code === 'ENOENT' ? 'none' : 'bad'; }
++    let text;
++    try { text = fs.readFileSync(path.join(dir, 'csp-hashes.json'), 'utf8'); } catch { return 'bad'; }
++    const hashes = hashesFor(text, route);
++    return hashes ? { html, hashes } : 'bad';
++  };
++  let got = keep?.[page];
++  if (!got) {
++    got = read();
++    if (keep && typeof got === 'object') keep[page] = got;
++  }
++  if (!res) return;
++  const base = page === 'browser' ? `${BROWSER_BASE}; ${policy}` : policy;
++  if (got === 'bad') {
++    res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
++    return res.end('this page could not be read\n');
+   }
+-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': body.length, ...headers, 'content-security-policy': policy });
+-  return res.end(req.method === 'HEAD' ? undefined : body);
++  if (got === 'none') {
++    const body = Buffer.from("<!doctype html><meta charset=\"utf-8\"><title>devteam</title><p>This kit's pages aren't installed. They return at its next sync.</p>");
++    res.writeHead(503, { 'content-type': 'text/html; charset=utf-8', 'content-length': body.length, ...headers, 'content-security-policy': build(base, [], page === 'browser', page === 'dashboard') });
++    return res.end(req.method === 'HEAD' ? undefined : body);
++  }
++  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': got.html.length, ...headers, 'content-security-policy': build(base, got.hashes, page === 'browser', page === 'dashboard') });
++  return res.end(req.method === 'HEAD' ? undefined : got.html);
+ }
+-// The x-devteam-page value of a page: the first 16 hex of the sha256 of its file, or '' when it
+-// can't be read. An open tab compares it with the one it first saw, and offers a reload.
++// apps@1 Serving (kit-984): the x-devteam-page value of a page is the first 16 hex of the sha256 of its
++// route's index.html in the built app (a rebuild changes it: its chunk names are hashed into it), or ''
++// when it can't be read.
+ function pageVersion(page) {
+-  const file = { dashboard: 'index.html', hub: 'hub.html', browser: 'browser.html' }[page];
+-  if (!file) return '';
+-  try { return sha256(fs.readFileSync(path.join(kitDir, 'dashboard', file))).slice(0, 16); } catch { return ''; }
+-}
+-// A page's own file, for a request no route of server ('dashboard', 'hub' or 'browser') took, or
+-// DASH_NEXT, "not mine": the caller's own answer (its 404) follows. At main only the dashboard has
+-// any: the review pages' helpers, /review/<seg>/devteam-ui.css and .js (dashRoutesReviewPage checks
+-// <seg> first), to a GET, as before (a HEAD there is the dashboard's 404). Every other method, and
+-// every other path, is DASH_NEXT; in the tree it may answer GET and HEAD, and nothing else.
++  const at = { dashboard: ['dashboard', '/'], hub: ['hub', '/'], browser: ['dashboard', '/browser/'] }[page];
++  if (!at) return '';
++  try { return sha256(fs.readFileSync(path.join(kitDir, 'apps', at[0], ...at[1].split('/').filter(Boolean), 'index.html'))).slice(0, 16); } catch { return ''; }
++}
++// apps@1 Serving (kit-984): the rest of a built app's export, for a request no route took, GET and
++// HEAD only (anything else is DASH_NEXT). The dashboard: the review pages' helpers from the build's
++// review/ to a GET as before; a reserved first segment (the dashboard's own route prefixes, decoded,
++// any case) is DASH_NEXT, so a static file of that name never answers for a route; every other path is
++// serveAppFiles on the dashboard build under pageCsp()'s base with the route's hashes. The hub: every
++// path, under the hub's / policy (startHub's, built here from PORT_RANGE) with the route's hashes. The
++// browser view: only /_next/…, never a page. A route with no good hashes entry is a 500, through
++// serveAppFiles; with no build it serves 404s. The dashboard's style-src (and font-src where it has one)
++// also names the shell's font and icon origins (kit-1033).
+ function servePageAsset(req, res, server) {
+-  if (req.method !== 'GET' || server !== 'dashboard') return DASH_NEXT;
+-  let p;
+-  try { p = new URL(req.url, 'http://x').pathname; } catch { return DASH_NEXT; }
+-  const m = /^\/review\/[^/]+\/(devteam-ui\.(?:css|js))$/.exec(p);
+-  if (!m) return DASH_NEXT;
+-  // read before any header, so a file that is gone is a 500 (as servePage's), never a throw after a 200
+-  let body;
+-  try { body = fs.readFileSync(path.join(kitDir, 'dashboard', m[1])); } catch {
+-    res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+-    return res.end('this file could not be read\n');
++  if (req.method !== 'GET' && req.method !== 'HEAD') return DASH_NEXT;
++  // policy builder start
++  // base with script-src 'self' plus the hashes, style-src with 'self' first ('self' alone for the
++  // browser view), each appended if absent; under default-src 'none', font-src 'self' and img-src
++  // 'self' data: appended if absent, but never on the browser view; a dashboard route's style-src, and its
++  // font-src where it has one, also name the shell's font and icon origins (kit-1033)
++  const ORIGINS = { 'style-src': ['https://fonts.googleapis.com', 'https://cdn.jsdelivr.net'], 'font-src': ['https://fonts.gstatic.com', 'https://cdn.jsdelivr.net'] };
++  const build = (base, hashes, browser, dashboard = false) => {
++    const ds = base.split(';').map((d) => d.trim()).filter(Boolean);
++    const has = (n) => ds.some((d) => d.split(/\s+/)[0] === n);
++    const script = ['script-src', "'self'", ...hashes.map((h) => `'${h}'`)].join(' ');
++    const out = ds.map((d) => {
++      const [n, ...v] = d.split(/\s+/);
++      if (n === 'script-src') return script;
++      if (n === 'style-src') return browser ? "style-src 'self'" : ['style-src', "'self'", ...v.filter((x) => x !== "'self'")].join(' ');
++      return d;
++    });
++    if (!has('script-src')) out.push(script);
++    if (!has('style-src')) out.push(browser ? "style-src 'self'" : "style-src 'self' 'unsafe-inline'");
++    if (!browser && ds.includes("default-src 'none'")) {
++      if (!has('font-src')) out.push("font-src 'self'");
++      if (!has('img-src')) out.push("img-src 'self' data:");
++    }
++    if (dashboard) for (let i = 0; i < out.length; i++) { const [n, ...v] = out[i].split(/\s+/); if (ORIGINS[n]) out[i] = [n, ...v, ...ORIGINS[n].filter((o) => !v.includes(o))].join(' '); }
++    return out.join('; ');
++  };
++  // a route's hashes from a build's csp-hashes.json text, or null when they can't be trusted
++  const hashesFor = (text, route) => {
++    let j;
++    try { j = JSON.parse(text); } catch { return null; }
++    const hs = j && j.v === 1 && j.pages && typeof j.pages === 'object' ? j.pages[route] : null;
++    return Array.isArray(hs) && hs.every((h) => typeof h === 'string' && /^sha256-[A-Za-z0-9+/]{43}=$/.test(h)) ? hs : null;
++  };
++  // policy builder end
++  const p = String(req.url).split('?')[0];
++  // a route's policy for the build in dir: base with its hashes, or a throw (serveAppFiles' 500)
++  const policyIn = (dir, base, dashboard = false) => (route) => {
++    const hashes = hashesFor(fs.readFileSync(path.join(dir, 'csp-hashes.json'), 'utf8'), route);
++    if (!hashes) throw new Error(`no hashes for ${route}`);
++    return build(base, hashes, false, dashboard);
++  };
++  if (server === 'dashboard') {
++    let u;
++    try { u = new URL(req.url, 'http://x').pathname; } catch { return DASH_NEXT; }
++    const m = req.method === 'GET' ? /^\/review\/[^/]+\/(devteam-ui\.(?:css|js))$/.exec(u) : null;
++    if (m) {
++      // read before any header, so a file that is gone is a 500 (as servePage's), never a throw after a 200
++      let body;
++      try { body = fs.readFileSync(path.join(kitDir, 'apps', 'dashboard', 'review', m[1])); } catch {
++        res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
++        return res.end('this file could not be read\n');
++      }
++      res.writeHead(200, { 'content-type': m[1].endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
++      return res.end(body);
++    }
++    // the first segment as serveAppFiles reads it (decoded once), in any case
++    let first;
++    try { first = decodeURIComponent(p.split('/')[1] ?? '').toLowerCase(); } catch { return DASH_NEXT; }
++    if (['api', 'upload', 'public', 'review', 'view', 'browser', 'artifact', 'public-manifest', 'presence'].includes(first)) return DASH_NEXT;
++    const dir = path.join(kitDir, 'apps', 'dashboard');
++    return serveAppFiles(dir, '', req, res, policyIn(dir, `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}`, true));
++  }
++  if (server === 'hub') {
++    const dir = path.join(kitDir, 'apps', 'hub');
++    return serveAppFiles(dir, '', req, res, policyIn(dir, `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src ${PORT_RANGE.map((x) => `http://127.0.0.1:${x}`).join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`));
+   }
+-  res.writeHead(200, { 'content-type': m[1].endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+-  return res.end(body);
++  if (server === 'browser') {
++    if (!p.startsWith('/_next/')) return DASH_NEXT;
++    return serveAppFiles(path.join(kitDir, 'apps', 'dashboard'), '', req, res, () => { throw new Error('the browser view serves no page here'); });
++  }
++  return DASH_NEXT;
+ }
+ // A static export served from folder at base, by alpha-build@1's rules and
+ // test/fixtures/alpha-serving.json. A caller's mistake throws before any request is read: a base
