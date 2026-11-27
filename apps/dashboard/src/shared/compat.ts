@@ -6,7 +6,7 @@
 // A global COMPAT.md lists as a value (top-level state the page reassigns, such as the hub's box and term)
 // is not exposed: its view defines it at module top level with
 // Object.defineProperty(window, name, { get, set, configurable: false }) over its own variable (APPS.md,
-// Shared code). Like expose(), it does that only when a window exists: guard it with
+// The compatibility surface). Like expose(), it does that only when a window exists: guard it with
 // typeof window !== 'undefined', or the build's prerender on Node throws a ReferenceError.
 
 type Fn = (...args: never[]) => unknown;
@@ -15,12 +15,12 @@ const NAME = /^[A-Za-z_$][\w$]*$/;
 
 /**
  * Sets `target[name] = fn` (target: the page's window). Throws, changing nothing, when the name
- * isn't an identifier, fn isn't a function, or the target already holds the name itself: an earlier
+ * isn't an identifier (or is `__proto__`, which would replace the target's prototype), fn isn't a function, or the target already holds the name itself: an earlier
  * expose(), or one of the window's own properties (`open`, `close`). A second registration is a bug.
  * With no window (the build prerendering the page on Node) it registers nothing.
  */
 export function expose(name: string, fn: Fn, target: object | undefined = (globalThis as { window?: object }).window): void {
-  if (typeof name !== 'string' || !NAME.test(name)) throw new TypeError(`expose: ${JSON.stringify(name)} is not a global name`);
+  if (typeof name !== 'string' || !NAME.test(name) || name === '__proto__') throw new TypeError(`expose: ${JSON.stringify(name)} is not a global name`);
   if (typeof fn !== 'function') throw new TypeError(`expose: ${name} needs a function`);
   if (target === undefined) return;
   // Only a name the window itself already holds is refused. One it only inherits is shadowed: Chrome's

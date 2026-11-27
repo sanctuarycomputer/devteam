@@ -268,6 +268,9 @@ test('B9 lib-dist/ imports on this Node: appPath, expose and POLL_MS do what app
   expose('tlClose', f, w);
   assert.equal(w.tlClose, f, 'expose sets the global');
   assert.throws(() => expose('tlClose', () => 2, w), /tlClose is already registered/, 'a second registration throws');
+  const plain = {};
+  assert.throws(() => expose('__proto__', () => 4, plain), /is not a global name/, '__proto__ is refused');
+  assert.equal(Object.getPrototypeOf(plain), Object.prototype, 'and the target keeps its prototype');
   assert.equal(w.tlClose, f, 'and changes nothing');
   const proto = { when: () => 0 };
   const inherits = Object.create(proto);
