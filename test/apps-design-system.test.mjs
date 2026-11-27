@@ -7,7 +7,8 @@
 // design-system view's chunks and links nowhere to it. In the tree (its CLI serves the built apps), with
 // Chrome, Node 24 and the dashboard installed: a scratch copy of the dashboard with the fixture
 // components in src/shared/ui/, built by its own build script and served by the tree's dashboard server,
-// opened at /#design-system under emulated light and dark, and at / without the hash.
+// opened at /#design-system under emulated light and dark, and at / without the hash, /#design-systemx and
+// /index.html#design-system (the shell at each).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -95,21 +96,99 @@ test('D2 ui-catalog.mjs writes the fixture folder\'s catalog with every componen
     fs.writeFileSync(path.join(odd, 'lone.specimens.tsx'), 'export const specimens = [{ title: "x", render: () => null }];\n');
     assert.match(catalogRun('--ui', odd, '--out', path.join(dir, 'o.ts')).stderr, /refused: .*lone\.specimens\.tsx: no lone\.tsx beside it/, 'specimens with no component are refused');
     assert.equal(catalogRun('--nope').status, 2, 'an unknown option: usage');
+    // apps-src@2's other guards, each with a folder that would go through without it: refused (exit 1),
+    // the file named, nothing written
+    const pair = (d, name, specimens = 'export const specimens = [{ title: "x", render: () => null }];\n') => {
+      fs.writeFileSync(path.join(d, `${name}.tsx`), 'export default function X() { return null; }\n');
+      fs.writeFileSync(path.join(d, `${name}.specimens.tsx`), specimens);
+    };
+    for (const [name, setup, why, what] of [
+      ['kebab', (d) => pair(d, 'Foo'), /kebab\/Foo(?:\.specimens)?\.tsx: the ui folder holds only/, 'a name not in kebab-case (Foo.tsx)'],
+      ['subfolder', (d) => { pair(d, 'extra'); fs.mkdirSync(path.join(d, 'extra.css')); }, /subfolder\/extra\.css: the ui folder holds only/, 'a subfolder (extra.css/, beside its component)'],
+      ['lone-css', (d) => fs.writeFileSync(path.join(d, 'lone.css'), '.lone { color: red; }\n'), /lone-css\/lone\.css: no lone\.tsx beside it/, 'a .css with no component'],
+      ['no-export', (d) => pair(d, 'bare', 'const specimens = [{ title: "x", render: () => null }];\nexport default specimens;\n'), /no-export\/bare\.specimens\.tsx: it doesn't export const specimens/, 'a specimens file without export const specimens'],
+    ]) {
+      const d = path.join(dir, name);
+      fs.mkdirSync(d);
+      setup(d);
+      const out = path.join(dir, `${name}.ts`);
+      const r2 = catalogRun('--ui', d, '--out', out);
+      assert.equal(r2.status, 1, `${what}: refused (exit 1): ${r2.stderr}`);
+      assert.match(r2.stderr, new RegExp(`refused: .*${why.source}`), `${what}: says which file and why`);
+      assert.equal(fs.existsSync(out), false, `${what}: no catalog written`);
+    }
+    const noValue = catalogRun('--ui');
+    assert.equal(noValue.status, 2, `--ui with no value: usage (exit 2): ${noValue.stderr}`);
+    assert.match(noValue.stderr, /incomplete option --ui\nusage: /, '--ui with no value: it says so, with the usage');
+    // and with an option where its value should be: refused, not taken as the folder
+    const optOut = path.join(dir, 'opt.ts');
+    const optValue = catalogRun('--out', optOut, '--ui', '--duplicates');
+    assert.equal(optValue.status, 2, `--ui followed by an option: usage (exit 2): ${optValue.stderr}`);
+    assert.equal(fs.existsSync(optOut), false, '--ui followed by an option: no catalog written');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('D3 --duplicates lists each class rendered outermost in two or more view folders of either app, with its files', () => {
+test('D3 --duplicates lists each class rendered outermost in two or more view folders of either app, with its files sorted; a folder it can\'t read is skipped and named', (t) => {
   const apps = path.join(FIX, 'dupes', 'apps');
   const r = catalogRun('--duplicates', '--apps', apps);
   assert.equal(r.status, 0, r.stderr);
-  const f = (p) => rel(path.join(apps, p));
-  assert.equal(r.stdout, [
-    `.dup: ${f('a/src/views/one/index.tsx')}, ${f('a/src/views/two/panel.tsx')}`,
-    `.dup-cross: ${f('a/src/shared/thing/thing.tsx')}, ${f('b/src/views/three/index.tsx')}`,
-    '',
-  ].join('\n'), 'only .dup (two views) and .dup-cross (a shared module and the other app\'s view): not .solo (one folder), .inner (nested), .via-ui (src/shared/ui/ and one view), .in-text (a string, a comment) or a class no CSS defines');
+  // the fixture's two lines, for an apps folder holding the fixture's apps
+  const expected = (at) => {
+    const f = (p) => rel(path.join(at, p));
+    return [
+      `.dup: ${f('a/src/views/one/index.tsx')}, ${f('a/src/views/two/panel.tsx')}`,
+      `.dup-cross: ${f('a/src/shared/thing/thing.tsx')}, ${f('b/src/views/three/index.tsx')}`,
+      '',
+    ].join('\n');
+  };
+  assert.equal(r.stdout, expected(apps), 'only .dup (two views) and .dup-cross (a shared module and the other app\'s view): not .solo (one folder), .inner (nested), .via-ui (src/shared/ui/ and one view), .in-text (a string, a comment) or a class no CSS defines');
   const none = scratch('d3');
   try { assert.equal(catalogRun('--duplicates', '--apps', none).stdout, 'No duplicates.\n', 'none found: it says so'); } finally { fs.rmSync(none, { recursive: true, force: true }); }
+  // a line's files sorted, though the walk meets them in another order: it goes into v/ before v-a/ (a
+  // folder's entries come sorted), but v-a/index.tsx sorts first ('-' before '/'), and so with w/ and w-a/
+  const order = scratch('d3-order');
+  try {
+    const src = path.join(order, 'a', 'src');
+    fs.mkdirSync(path.join(src, 'shared', 'layout'), { recursive: true });
+    fs.writeFileSync(path.join(src, 'shared', 'layout', 'layout.css'), '.order { color: red; }\n');
+    for (const v of ['w-a', 'w', 'v-a', 'v']) {
+      fs.mkdirSync(path.join(src, 'views', v), { recursive: true });
+      fs.writeFileSync(path.join(src, 'views', v, 'index.tsx'), 'export default function V() { return <div className="order">x</div>; }\n');
+    }
+    const met = walk(path.join(src, 'views')).map(rel);
+    assert.notDeepEqual(met, [...met].sort(), `the walk meets the files out of order here (${met.join(', ')})`);
+    const o = catalogRun('--duplicates', '--apps', order);
+    assert.equal(o.status, 0, o.stderr);
+    assert.equal(o.stdout, `.order: ${[...met].sort().join(', ')}\n`, 'a line\'s files are sorted, whatever order the walk met them in');
+  } finally { fs.rmSync(order, { recursive: true, force: true }); }
+  // a folder under src/ it can't read: skipped, named in one stderr line, and the scan goes on (exit 0)
+  const lockedAt = scratch('d3-locked');
+  const locked = path.join(lockedAt, 'apps', 'a', 'src', 'views', 'locked');
+  const listed = path.join(lockedAt, 'apps', 'a', 'src', 'views', 'listed');
+  try {
+    fs.cpSync(apps, path.join(lockedAt, 'apps'), { recursive: true });
+    fs.mkdirSync(locked);
+    fs.writeFileSync(path.join(locked, 'index.tsx'), 'export default function L() { return <div className="dup">x</div>; }\n');
+    // and one it can list but not enter (mode 0444): its subfolder can't be read either
+    fs.mkdirSync(path.join(listed, 'inner'), { recursive: true });
+    fs.writeFileSync(path.join(listed, 'inner', 'index.tsx'), 'export default function I() { return <div className="dup">x</div>; }\n');
+    fs.chmodSync(locked, 0o000);
+    fs.chmodSync(listed, 0o444);
+    let readable = true;
+    try { fs.readdirSync(locked); } catch { readable = false; }
+    // CI runs as a user a mode-000 folder stops: there the case must run
+    if (readable && process.env.CI) assert.fail('a folder with mode 000 is still readable in CI (root?): the unreadable-folder case would show nothing');
+    if (readable) t.diagnostic('a folder with mode 000 is still readable here (root): the unreadable-folder case shows nothing, and is left out');
+    else {
+      const l = catalogRun('--duplicates', '--apps', path.join(lockedAt, 'apps'));
+      assert.equal(l.status, 0, `an unreadable folder: the scan still exits 0: ${l.stderr}`);
+      assert.deepEqual(l.stderr.split('\n').filter(Boolean).map((x) => x.replace(/ not read: .*$/, ' not read: …')), [`ui-catalog: ${rel(path.join(listed, 'inner'))} not read: …`, `ui-catalog: ${rel(locked)} not read: …`], 'one stderr line names each folder it couldn\'t read');
+      assert.equal(l.stdout, expected(path.join(lockedAt, 'apps')), 'the rest of the scan as before, without the folders');
+    }
+  } finally {
+    for (const d of [locked, listed]) { try { fs.chmodSync(d, 0o755); } catch {} }
+    fs.rmSync(lockedAt, { recursive: true, force: true });
+  }
 });
 
 test('D4 nothing leads to the page: only page.tsx and the view name design-system (a specimens file only in its Specimen type import), and only the catalog imports specimens', () => {
@@ -254,7 +333,7 @@ const procs = () => {
 const WATCHDOG = 300000, F1_TIMEOUT = 240000, TEARDOWN_MAX = 15000, F2_WAIT = 10000, REST = 20000;
 let f1Started = null;
 
-test('F1 in the tree: /#design-system from the dashboard server, light and dark: tokens, every entry under its anchor, the filter, the event list, nothing fetched, no socket, no poll, no error, no violation; an anchor scrolls to its entry; / mounts the shell', { skip: skipChrome, timeout: F1_TIMEOUT }, async (t) => {
+test('F1 in the tree: /#design-system from the dashboard server, light and dark: tokens, every entry under its anchor, the filter, the event list, nothing fetched, no socket, no poll, no error, no violation; an anchor scrolls to its entry; / mounts the shell, and so do /#design-systemx and /index.html#design-system', { skip: skipChrome, timeout: F1_TIMEOUT }, async (t) => {
   assert.ok(node24 && installed, `in CI the tree's Chrome case runs: it needs Node 24 and apps/dashboard/node_modules (Node ${process.versions.node}, installed: ${installed})`);
   const later = cleanup(t);
   // once F1 is out of time its teardown has run, but its body goes on: it starts nothing after that
@@ -389,6 +468,16 @@ test('F1 in the tree: /#design-system from the dashboard server, light and dark:
   assert.equal(await p.ev("document.querySelector('[data-view=\"design-system\"]')"), null, '/ has no design-system view');
   assert.deepEqual((await resources(p)).filter((u) => dsChunks.some((c) => u.endsWith(`/${c}`))), [], '/ fetched none of the view\'s chunks');
   assert.deepEqual((await p.ev('window.__w')).errors, [], '/: no error');
+  // near misses show the plain shell too: a hash that only begins as the page's, and the page's hash on a
+  // path other than / (the server sends the same page at /index.html)
+  for (const at of ['#design-systemx', 'index.html#design-system']) {
+    const q = await open(at, 'light');
+    await until(() => q.ev("(() => { const e = document.querySelector('[data-view=\"shell\"]'); return !!e && Object.keys(e).some((k) => k.startsWith('__reactFiber')); })()"), `/${at} hydrates the shell`);
+    await until(() => q.ev('window.__w.boot === 1'), `/${at}: the shell booted`);
+    assert.equal(await q.ev("document.querySelector('[data-view=\"design-system\"]')"), null, `/${at} has no design-system view`);
+    assert.deepEqual((await resources(q)).filter((u) => dsChunks.some((c) => u.endsWith(`/${c}`))), [], `/${at} fetched none of the view's chunks`);
+    assert.deepEqual((await q.ev('window.__w')).errors, [], `/${at}: no error`);
+  }
 });
 
 test('F2 F1 ended what it started in its teardown: the dashboard server and Chrome, each by its process group, within its own timeout', { skip: skipChrome || (HAS_PROC ? false : 'no /proc here: F2 reads processes from it (Linux)') }, async (t) => {
