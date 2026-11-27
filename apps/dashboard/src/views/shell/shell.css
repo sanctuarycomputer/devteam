@@ -1,0 +1,298 @@
+/* kit-988: the shell's CSS regions of index.html, moved as is, in page order. */
+/* css-base start */
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; background: var(--bg); touch-action: manipulation; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+  a { color: inherit; text-decoration: none; }
+  code { font-family: var(--mono); font-size: 12px; }
+  .muted { color: var(--fg-2); }
+  .dim { color: var(--muted); }
+  .small { font-size: 12px; }
+  .err { color: var(--red-fg); font-size: 12px; }
+  .qcard .moved { margin: 0 0 8px; color: var(--amber-fg); font-size: 13px; }
+  .oa-recs { display: grid; gap: 6px; margin: 8px 0; }
+  .oa-rec { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; min-width: 0; }
+  .oa-rec .oa-what { min-width: 0; overflow-wrap: anywhere; }
+  .refused { margin: 8px 0 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .empty { color: var(--muted); font-size: 12px; margin: 0; }
+  .empty code { font-size: 11px; }
+  .empty a { color: var(--fg-2); text-decoration: underline; text-underline-offset: 2px; }
+  .banner { border: 1px solid color-mix(in srgb, var(--red) 45%, var(--line)); background: color-mix(in srgb, var(--red) 7%, var(--surface)); border-radius: 8px; padding: 10px 14px; margin-bottom: 20px; font-size: 12px; }
+  .banner.updated { border-color: color-mix(in srgb, var(--blue-fg, var(--fg-2)) 45%, var(--line)); background: color-mix(in srgb, var(--blue-fg, var(--fg-2)) 7%, var(--surface)); }
+  .banner.updated button { margin: 0 0 0 8px; }
+  .held { position: fixed; right: 16px; bottom: 64px; z-index: 30; margin: 0; box-shadow: var(--shadow); }
+  /* fixed, so it never moves what is under the cursor; at the top under the page bar, as both bottom corners are taken,
+     over the content, not the nav (below it on a phone, where staleNote measures the nav), under a
+     drawer or review, and never in the way of a click */
+  .stale-note { position: fixed; top: calc(var(--bar-h) + 12px); left: calc(232px + 16px); right: 16px; width: fit-content; margin: 0 auto; z-index: 19; pointer-events: none; padding: 4px 12px; text-align: center; border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--line)); border-radius: 12px; background: color-mix(in srgb, var(--amber) 12%, var(--surface)); color: var(--amber-fg); font-size: 12px; box-shadow: var(--shadow); }
+  .banner b { color: var(--red-fg); }
+  .banner pre { margin: 6px 0 0; max-height: 9em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 var(--mono); color: var(--fg-2); }
+  .banner.stale { border-color: color-mix(in srgb, var(--amber) 45%, var(--line)); background: color-mix(in srgb, var(--amber) 7%, var(--surface)); }
+  .banner.stale b { color: var(--amber-fg); }
+  .loading { color: var(--muted); font-size: 12px; }
+  [hidden] { display: none !important; }
+
+/* css-base end */
+/* css-shell start */
+  /* shell */
+  .app { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; }
+  main.waiting > section { display: none; }
+  .side { position: sticky; top: 0; height: 100vh; overflow-y: auto; border-right: 1px solid var(--line); background: var(--surface); padding: 14px 10px; display: flex; flex-direction: column; gap: 2px; }
+  .brand { display: flex; align-items: center; gap: 8px; padding: 6px 8px 14px; }
+  .brand .dot { width: 8px; height: 8px; border-radius: 2px; background: var(--fg); flex: none; }
+  .brand b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* the kit's release, beside the name: +local in amber when this checkout's kit differs from main */
+  .brand .kit { margin: 0 0 0 auto; flex: none; font-family: var(--mono); font-size: 10.5px; line-height: 16px; padding: 0 6px; }
+  .brand .kit.local { --c: var(--amber-fg); }
+  .nav a { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 8px; border-radius: 6px; color: var(--fg-2); }
+  .nav a:hover { background: var(--hover); color: var(--fg); }
+  .nav .count { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .nav .count.hot { color: var(--red-fg); }
+  :where(.no-shell) .side .foot { margin-top: auto; padding: 12px 8px 4px; font-size: 11px; color: var(--muted); line-height: 1.6; }
+  :where(.no-shell) main { max-width: 1120px; width: 100%; margin: 0 auto; padding: 24px 32px 80px; }
+/* css-shell end */
+/* css-frame start */
+  /* the frame (kit-87): the grouped nav, the settings area at the sidebar's foot, one page shown at a time */
+  .eyebrow { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 14px 8px 4px; }
+  .brand + .eyebrow { padding-top: 4px; }
+  .nav a[aria-current="page"] { background: var(--hover); color: var(--fg); }
+  .settings { margin-top: auto; border-top: 1px solid var(--line); padding: 10px 4px 2px; display: flex; flex-direction: column; gap: 8px; }
+  .settings a.set { display: flex; align-items: center; gap: 8px; padding: 5px 4px; border-radius: 6px; color: var(--fg-2); }
+  .settings a.set:hover { background: var(--hover); color: var(--fg); }
+  .settings a.set[aria-current="page"] { background: var(--hover); color: var(--fg); }
+  .settings a.set i { font-size: 15px; width: 16px; text-align: center; color: var(--muted); }
+  .settings .foot { font-size: 11px; color: var(--muted); line-height: 1.6; padding: 0 4px; }
+  #side-fleet:empty, #side-state:empty { display: none; }
+  .settings .fleet-switch { padding: 0 4px; }
+  .settings .fleet-state { font-size: 11.5px; color: var(--muted); padding: 0 4px; line-height: 1.4; }
+  .settings .fleet-state b { font-weight: 500; color: var(--fg-2); }
+  /* The area sits at the sidebar's foot (margin-top: auto), so a line growing below the switch's buttons
+     pushes them up under the owner's pointer. Every line that comes and goes there keeps its room:
+     the switch's busy or error line, the state line's second line (the reason), the foot's error. */
+  @media (min-width: 901px) {
+    .settings .fleet-switch .msg, .settings .fleet-switch .err { flex-basis: 100%; line-height: 16px; }
+    .settings .fleet-switch:not(:has(> .msg, > .err))::after { content: ''; flex-basis: 100%; height: 16px; }
+    .settings .fleet-state { min-height: 2.8em; }
+    .settings .foot #err { display: block; min-height: 1.6em; }
+  }
+  .main { min-width: 0; }
+  .pagebar .tt { margin-top: 0; }
+  .pagebar .tt .n.q { color: var(--red-fg); }
+  main.page > section[data-page]:not(.on) { display: none; }
+  main.page > section[data-page] { margin-top: 0; }
+/* css-frame end */
+/* css-common start */
+  /* sections */
+  section { margin-top: 36px; scroll-margin-top: 16px; }
+  section:first-of-type { margin-top: 0; }
+  h2 { font-size: 15px; font-weight: 600; margin: 0 0 12px; letter-spacing: -.01em; display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
+  h2 .sub { font-size: 12px; font-weight: 400; color: var(--muted); }
+  h3 { font-size: 12px; font-weight: 600; margin: 0 0 8px; color: var(--fg-2); }
+  .grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  .stat { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; box-shadow: var(--shadow); }
+  .stat span { display: block; font-size: 12px; color: var(--fg-2); }
+  .stat b { display: block; font-size: 20px; font-weight: 600; letter-spacing: -.02em; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  :where(.no-shell) .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin-bottom: 8px; box-shadow: var(--shadow); }
+  :where(.no-shell) .card.small { padding: 10px 12px; }
+  .card[data-open] { cursor: pointer; }
+  .card[data-open]:hover { background: var(--hover); }
+  .card[data-open]:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+  .card a.title-link:not(.linkish):hover { text-decoration: underline; text-underline-offset: 3px; }
+  .place { font-size: 12px; color: var(--fg-2); margin-top: 3px; }
+  .lineage .diagram svg { max-width: 100%; height: auto; }
+  .lineage a.lineage-node { cursor: pointer; }
+  .lineage a.lineage-node:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 2px; }
+  .lineage-list h4 { margin: 8px 0 2px; font-size: 12px; color: var(--fg-2); }
+  .lineage-list ul { margin: 0 0 4px; }
+  .card p { margin: 6px 0; }
+  .two { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); }
+
+  /* badges: a tint of the status colour; the word is always in the badge, never colour alone */
+  .badge { display: inline-flex; align-items: center; font-size: 11px; font-weight: 500; line-height: 18px; padding: 0 7px; border-radius: 999px; margin-right: 6px; vertical-align: middle; white-space: nowrap;
+    --c: var(--fg-2); color: var(--c); background: color-mix(in srgb, var(--c) 9%, transparent); border: 1px solid color-mix(in srgb, var(--c) 22%, transparent); }
+  .badge.high, .badge.critical, .badge.important { --c: var(--red-fg); } .badge.medium, .badge.minor { --c: var(--amber-fg); } .badge.low { --c: var(--blue-fg); } .badge.good { --c: var(--green-fg); }
+
+  /* controls */
+  button { font: inherit; font-size: 12px; font-weight: 500; height: 28px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--fg); background: var(--fg); color: var(--bg); cursor: pointer; margin-top: 6px; transition: opacity .12s, background .12s; }
+  button:hover { opacity: .88; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.ghost, button.opt { background: var(--surface); color: var(--fg); border: 1px solid var(--line-2); margin-top: 0; }
+  button.ghost:hover, button.opt:hover { background: var(--hover); opacity: 1; }
+  button.opt { margin: 6px 6px 0 0; }
+  textarea, input[type=text], select { font: inherit; font-size: 13px; color: var(--fg); background: var(--surface); border: 1px solid var(--line-2); border-radius: 6px; outline: none; }
+  textarea { width: 100%; min-height: 56px; margin-top: 8px; padding: 8px 10px; resize: vertical; }
+  input[type=text] { height: 28px; padding: 0 10px; }
+  select { height: 28px; padding: 0 8px; max-width: 100%; }
+  textarea:focus, input[type=text]:focus, select:focus { border-color: var(--blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent); }
+  .row-inline { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; font-size: 12px; color: var(--fg-2); }
+  .row-inline input[type=text] { flex: 1; min-width: 180px; }
+  /* the row spaces its buttons; a solid button's own top margin would sit it lower than an outlined one */
+  .row-inline > button { margin: 0; }
+  a.card.retro-row { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 12px; color: var(--fg); text-decoration: none; margin-bottom: 8px; font-size: 12.5px; }
+  a.card.retro-row:hover { background: var(--hover); }
+  a.card.retro-row span { color: var(--fg-2); }
+  label { display: inline-flex; align-items: center; gap: 6px; }
+
+  /* tables */
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 11px; color: var(--muted); font-weight: 500; letter-spacing: .02em; background: var(--well); }
+  tr:last-child td { border-bottom: 0; }
+  td { font-variant-numeric: tabular-nums; }
+
+  /* bars (hours and cost by phase) */
+  .bars { padding: 10px 14px; }
+  .bars div { display: grid; grid-template-columns: 96px 1fr 64px; gap: 10px; align-items: center; margin: 6px 0; font-size: 12px; }
+  .bars div span:last-child { text-align: right; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+  .bars span.b { height: 6px; background: var(--series-1); border-radius: 3px; min-width: 2px; }
+
+/* css-common end */
+/* css-chrome start */
+  /* icons, title bars, menus */
+  [class^="icon-"], [class*=" icon-"] { line-height: 1; vertical-align: -2px; }
+  .nav .nl { display: inline-flex; align-items: center; gap: 8px; }
+  .nav .nl i { font-size: 15px; color: var(--muted); width: 16px; text-align: center; }
+  .nav a:hover .nl i { color: var(--fg-2); }
+  :where(.no-shell) .card-head { display: flex; align-items: center; gap: 8px; margin: -14px -16px 10px; padding: 9px 12px 9px 16px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--fg-2); }
+  :where(.no-shell) .card.small .card-head { margin: -10px -12px 8px; padding: 7px 10px 7px 12px; }
+  .card-head i { font-size: 14px; }
+  .card-head .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card-head .badge { margin-right: 0; }
+  .icon-btn { margin: 0; height: 26px; width: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; font-size: 15px; }
+  details.menu { position: relative; }
+  details.menu > summary { list-style: none; cursor: pointer; margin: 0; width: 26px; height: 22px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); }
+  details.menu > summary::-webkit-details-marker { display: none; }
+  details.menu > summary:hover { background: var(--hover); color: var(--fg); }
+  details.menu[open] > .pop { position: absolute; right: 0; top: 26px; z-index: 6; min-width: 240px; background: var(--raised); border: 1px solid var(--line-2); border-radius: 8px; padding: 8px 10px; box-shadow: 0 8px 24px rgba(0,0,0,.18); font-size: 12px; color: var(--fg-2); }
+  .pop .kv { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 4px 8px; align-items: center; }
+  .pop code { overflow-wrap: anywhere; color: var(--fg); }
+  .pop button { height: 22px; font-size: 11px; margin: 6px 0 0; }
+  .card h4 a.title-link { color: inherit; }
+  .card h4 a.title-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+/* css-chrome end */
+/* css-planners start */
+  /* the planners strip above the Board (kit-91): four across, two below 1100px, one below 560px; each card in the
+     dashed outline, a flex column whose attention row sits at the bottom; stuck or held by a question, the dashed
+     outline in red */
+  #planners.planners { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+  @media (max-width: 1100px) { #planners.planners { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 560px) { #planners.planners { grid-template-columns: minmax(0, 1fr); } }
+  #planners:empty { display: none; }
+  .plcard { cursor: pointer; text-align: left; height: auto; margin: 0; padding: 10px 12px; border-radius: 8px; border: 1px dashed var(--line-2); background: var(--surface); color: var(--fg); font-weight: 400; font-size: 12px; display: flex; flex-direction: column; min-width: 0; white-space: normal; }
+  .plcard:hover { background: var(--hover); opacity: 1; }
+  .plcard:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+  .plcard .pl-head { margin: -10px -12px 6px; padding: 6px 12px; border-bottom: 1px dashed var(--line-2); }
+  .plcard.stuck, .plcard.blocked { --pl-red: color-mix(in srgb, var(--red) 45%, var(--line-2)); border: 1px dashed var(--pl-red); }
+  .plcard.stuck .pl-head, .plcard.blocked .pl-head { border-bottom-color: var(--pl-red); }
+  .plcard .pills { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .plcard .pill { margin: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
+  .plcard > .att { margin-top: auto; padding-top: 6px; min-width: 0; }
+  .plcard b { font-size: 12.5px; }
+
+/* css-planners end */
+/* css-acts start */
+  /* acts in plain words */
+  .act-head { font-weight: 500; }
+  .act-detail { color: var(--fg-2); font-size: 12.5px; margin-top: 2px; }
+
+/* css-acts end */
+/* css-misc start */
+  /* a key's tooltip on keyboard focus (the mouse has its title); Escape blurs it */
+  .props dt[title] { position: relative; }
+  /* the fleet line's what-is-left, on focus or a tap (the mouse has its title): one box on the page's top layer, placed by fleetLeftPlace, so no strip clips it and nothing moves */
+  .fleet-state .fleet-left { cursor: help; text-decoration: underline dotted; }
+  #fleet-left-pop { position: fixed; z-index: 1000; box-sizing: border-box; width: min(280px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow-y: auto; padding: 7px 9px; border-radius: 6px; background: var(--raised); color: var(--fg); border: 1px solid var(--line); box-shadow: var(--shadow); font: 400 12px/1.45 var(--sans); }
+  #fleet-left-pop[hidden] { display: none; }
+  .props dt[title]:focus-visible::after { content: attr(title); position: absolute; left: 0; top: calc(100% + 4px); z-index: 5; width: 280px; padding: 7px 9px; border-radius: 6px; background: var(--raised); color: var(--fg); border: 1px solid var(--line); box-shadow: var(--shadow); font: 400 12px/1.45 var(--sans); white-space: normal; }
+  .drawer-body .psect { margin: 0 0 12px; }
+  .drawer-body .psect-body > :first-child { margin-top: 0; }
+  .drawer-body .psect-body > :last-child { margin-bottom: 0; }
+  .drawer h3 { margin: 18px 0 6px; }
+  .mini-chart svg { width: 100%; height: auto; display: block; }
+  .learning { margin-bottom: 14px; }
+  .learn-cols { display: grid; gap: 12px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  @media (max-width: 860px) { .learn-cols { grid-template-columns: minmax(0, 1fr); } }
+  .learn-chart h4 { font-size: 12px; font-weight: 500; margin: 0 0 4px; color: var(--fg-2); }
+  .learn-chart .card { margin-bottom: 2px; padding: 8px 10px; }
+  .learn-chart p { margin: 0 0 10px; }
+  .diagram-wrap { overflow-x: auto; margin: 4px 0 8px; }
+  .diagram-wrap figure { margin: 0; }
+  .md.tldr { font-size: 13px; }
+  .md.tldr ul { margin: 2px 0; }
+  .phase-strip { display: flex; height: 12px; border-radius: 6px; overflow: hidden; background: var(--well); }
+  .phase-strip .ph { display: block; height: 100%; }
+  .ph-think { background: var(--blue); } .ph-make { background: var(--green); } .ph-wait { background: var(--amber); } .ph-stop { background: var(--red); } .ph-other { background: var(--muted); }
+  .phase-legend { margin-top: 6px; } .phase-legend i { border-top: 0; height: 8px; width: 8px; border-radius: 2px; }
+  .gates-table { border-collapse: collapse; font-size: 12px; } .gates-table th, .gates-table td { padding: 3px 10px 3px 0; text-align: left; white-space: nowrap; }
+  .gate-dot.ok { color: var(--green-fg); } .gate-dot.fail { color: var(--red-fg); } .gate-dot.flaky { color: var(--amber-fg); }
+  .nums { border-collapse: collapse; font-size: 12.5px; } .nums th, .nums td { padding: 3px 14px 3px 0; text-align: left; vertical-align: top; }
+  .status-trail { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .handoff pre { white-space: pre-wrap; margin: 0; font-size: 12px; }
+  .tcard.inert { cursor: default; }
+  .down-banner { margin: 0 0 12px; padding: 10px 14px; border-radius: 8px; background: color-mix(in srgb, var(--red) 14%, var(--surface)); border: 1px solid color-mix(in srgb, var(--red) 45%, var(--line)); color: var(--red-fg); font-weight: 500; }
+  .down-banner a { color: inherit; }
+  .mon-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 12px; }
+  .mon-card h4 { margin: 0; display: flex; align-items: center; gap: 8px; }
+  .mon-card .mon-url { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; margin: 2px 0 8px; }
+  .mon-stats { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; margin-bottom: 6px; }
+  .mon-stats b { font-weight: 600; }
+  .fp-row { display: flex; align-items: center; gap: 12px; justify-content: space-between; }
+  .fp-row > div { min-width: 0; overflow-wrap: anywhere; }
+  .spark { flex: none; fill: var(--series-1); }
+  .board.inc { grid-template-columns: repeat(7, minmax(132px, 1fr)); }
+  dl.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; margin: 4px 0 8px; }
+  dl.kv dt { color: var(--muted); }
+  pre.untrusted { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; border-left: 3px solid var(--amber); padding: 6px 10px; font-size: 12px; }
+  .drawer dl:not(.props) dd { margin: 0; }
+  .drawer ul { margin: 4px 0; padding-left: 18px; }
+  .tl { list-style: none; padding: 0; margin: 8px 0; border-left: 1px solid var(--line-2); }
+  .tl li { position: relative; padding: 4px 0 10px 16px; font-size: 12.5px; max-width: var(--measure); }
+  .tl li::before { content: ""; position: absolute; left: -4px; top: 9px; width: 7px; height: 7px; border-radius: 50%; background: var(--line-2); }
+  .tl li.q::before { background: var(--amber); } .tl li.act::before { background: var(--blue); } .tl li.msg::before { background: var(--green); } .tl li.gate.fail::before { background: var(--red); }
+  .tl time { color: var(--muted); font-size: 11.5px; margin-right: 6px; }
+  .viewer pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5px/1.6 var(--mono); max-width: var(--measure); }
+  .viewbar { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; font-size: 12px; color: var(--muted); }
+  .viewbar .grow { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .seg2 { display: inline-flex; border: 1px solid var(--line-2); border-radius: 7px; overflow: hidden; }
+  .seg2 button { margin: 0; height: 24px; border: 0; border-radius: 0; background: var(--surface); color: var(--fg-2); font-weight: 500; padding: 0 10px; }
+  .seg2 button[aria-pressed="true"] { background: var(--well); color: var(--fg); }
+  .holdbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0 2px; }
+  .holdbar .seg2 button[data-mode="drain"][aria-pressed="true"] { background: color-mix(in srgb, var(--amber, #c98a00) 18%, var(--surface)); }
+  .holdbar .seg2 button[data-mode="park"][aria-pressed="true"], .holdbar .seg2 button[data-mode="let-go"][aria-pressed="true"] { background: color-mix(in srgb, var(--red) 14%, var(--surface)); }
+  .holdbar .seg2 button.confirm { color: var(--red); }
+  .holdbar button[data-met-id].confirm { color: var(--green-fg); }
+  /* --measure is in ch, so it would grow with .md's larger type: --body-measure is it resolved once, at
+     the body's 13px (a registered length inherits as px), so rendered markdown keeps the body's measure.
+     Where @property is unsupported, --body-measure inherits unresolved and .md takes the older width (its
+     own ch, about 26px wider): harmless */
+  @property --body-measure { syntax: '<length>'; inherits: true; initial-value: 0px; }
+  body { --body-measure: var(--measure); }
+  .md { max-width: var(--body-measure); font-size: 13.5px; line-height: 1.65; }
+  .md h1 { font-size: 19px; margin: 6px 0 12px; } .md h2 { font-size: 16px; margin: 22px 0 8px; display: block; } .md h3 { font-size: 14px; margin: 18px 0 6px; color: var(--fg); }
+  .md p, .md ul, .md ol { margin: 8px 0; } .md li { margin: 3px 0; }
+  .md code { background: var(--well); padding: 1px 4px; border-radius: 4px; }
+  .md pre { background: var(--well); padding: 10px 12px; border-radius: 8px; overflow-x: auto; }
+  .md pre code { background: none; padding: 0; }
+  .md table { font-size: 12.5px; margin: 10px 0; display: block; overflow-x: auto; }
+  .md blockquote { margin: 8px 0; padding: 2px 12px; border-left: 2px solid var(--line-2); color: var(--fg-2); }
+  .md a { color: var(--blue-fg); text-decoration: underline; }
+  .secrets { display: grid; gap: 10px; margin: 10px 0; }
+  .secret { display: grid; gap: 4px; }
+  .secret textarea.masked { font: 13px var(--mono); -webkit-text-security: disc; text-security: disc; min-height: 0; resize: vertical; }
+  .sink-cmd pre { background: var(--well); padding: 6px 8px; border-radius: 6px; font: 12px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0 0; }
+  .md figure.diagram { margin: 12px 0; padding: 12px; background: var(--well); border-radius: 8px; overflow-x: auto; }
+  .md figure.diagram svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+  div.viewer iframe { width: 100%; height: 70vh; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+  .viewer img { max-width: 100%; border: 1px solid var(--line); border-radius: 8px; }
+  @media (max-width: 900px) { .drawer dl:not(.props) { grid-template-columns: 1fr; } }
+
+/* css-misc end */
+/* css-view-only start */
+  /* View only (kit-250): what the gateway refuses a view-only person looks it, and says why when pressed */
+  body.view-only :is([data-answer], [data-cant], [data-reply], [data-dontuse], [data-post-secrets], [data-overrule-send], [data-correct-send], [data-rv-answer], [data-decline], [data-rv-decline], [data-know], [data-oa-know], [data-oa-goal], [data-hold-id], [data-met-id], [data-goal-move], [data-preview-start], [data-preview-stop], [data-forget], [data-limit-save], [data-limit-none], [data-limit-step], .fleet-switch [data-fleet], [data-checknow], [data-tl-send], [data-tl-accept], [data-tl-notyet], [data-tl-resolve-go], [data-tl-reopen], [data-goal-grip], [data-ask-option], [data-ask-esc], #av-handover, a[href*="/public/"], .dropbox[data-drop] textarea, .dropbox[data-drop] input, #tl-c-text) { opacity: .45; cursor: not-allowed; }
+  .av-head #view-only { margin-left: 6px; }
+  #view-only { color: var(--amber-fg); background: color-mix(in srgb, var(--amber) 16%, transparent); }
+  #view-only-toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 60; max-width: min(90vw, 480px); padding: 8px 14px; border-radius: 8px; background: var(--fg); color: var(--bg); font-size: 13px; box-shadow: 0 4px 16px rgb(0 0 0 / .18); }
+/* css-view-only end */

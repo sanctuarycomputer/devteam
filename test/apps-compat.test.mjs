@@ -174,7 +174,11 @@ function serve(out) {
 }
 
 const WATCH = "window.__cspv = []; document.addEventListener('securitypolicyviolation', (e) => window.__cspv.push(`${e.violatedDirective} ${e.blockedURI || 'inline'}`));";
-const HYDRATED = "(() => { const e = document.querySelector('[data-view]'); return !!e && Object.keys(e).some((k) => k.startsWith('__reactFiber')); })()";
+// React owns the root view: a ported route's own [data-view="<view>"]; a stub route's first [data-view], as before
+const hydrated = (view, ported) => `(() => { const e = document.querySelector('${ported ? `[data-view="${view}"]` : '[data-view]'}'); return !!e && Object.keys(e).some((k) => k.startsWith('__reactFiber')); })()`;
+// a route's own root-view file, and whether it is still the stub (each route on its own: rulings a-20261127-085033872, a-20261127-085501674)
+const rootFile = (a, view) => ['tsx', 'ts'].map((x) => path.join(ROOT, 'apps', a, 'src/views', view, `index.${x}`)).find(fs.existsSync);
+const isStub = (f) => fs.readFileSync(f, 'utf8').startsWith('// apps-src@1 view stub: ');
 
 test('C3 each route of each built app hydrates its root view under its hashed policy, with no violation; COMPAT globals not yet on the page are reported', { skip: skipChrome, timeout: 120000 }, async (t) => {
   const later = cleanup(t);
@@ -192,15 +196,23 @@ test('C3 each route of each built app hydrates its root view under its hashed po
       await p.send('Runtime.enable');
       await p.send('Page.addScriptToEvaluateOnNewDocument', { source: WATCH });
       await p.send('Page.navigate', { url: `${srv.url}${route}` });
+      const view = ROOT_VIEW[route][a];
+      const file = rootFile(a, view);
+      assert.ok(file, `${a}${route}: apps/${a}/src/views/${view}/index.tsx (or .ts) exists`);
+      const stub = isStub(file);
       let ok = false;
       for (let i = 0; i < 150 && !ok; i++) {
-        try { ok = await p.ev(HYDRATED); } catch {}
+        try { ok = await p.ev(hydrated(view, !stub)); } catch {}
         if (!ok) await new Promise((r) => setTimeout(r, 100));
       }
-      const view = ROOT_VIEW[route][a];
-      assert.ok(ok, `${a}${route}: its root view hydrated (React owns [data-view]) within 15 s; violations: ${JSON.stringify(await p.ev('window.__cspv').catch(() => null))}`);
-      assert.equal(await p.ev("document.querySelector('[data-view]').dataset.view"), view, `${a}${route} renders the ${view} view`);
-      assert.equal(await p.ev("document.querySelector('[data-view] h1').textContent"), view, `${a}${route} shows its name`);
+      assert.ok(ok, `${a}${route}: its root view hydrated (React owns ${stub ? '[data-view]' : `[data-view="${view}"]`}) within 15 s; violations: ${JSON.stringify(await p.ev('window.__cspv').catch(() => null))}`);
+      if (stub) {
+        assert.equal(await p.ev("document.querySelector('[data-view]').dataset.view"), view, `${a}${route} renders the ${view} view`);
+        assert.equal(await p.ev("document.querySelector('[data-view] h1').textContent"), view, `${a}${route} shows its name`);
+      } else {
+        assert.equal(await p.ev(`document.querySelector('[data-view="${view}"]') !== null`), true, `${a}${route} renders the ${view} view (ported)`);
+        assert.equal(await p.ev(hydrated(view, true)), true, `${a}${route}: React owns [data-view="${view}"] (ported)`);
+      }
       assert.equal(await p.ev("document.getElementById('alpha-back')"), null, `${a}${route}: no back link at the root`);
       assert.deepEqual(await p.ev('window.__cspv'), [], `${a}${route}: no policy violation`);
       const globals = globalsOf(md, page);
