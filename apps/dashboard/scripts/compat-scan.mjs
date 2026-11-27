@@ -620,7 +620,11 @@ export function objectKeys(src, obj) {
     else if (')]}'.includes(c) || (c === '>' && src[i - 1] !== '=')) depth--;
     else if (c === '=' && depth === 0 && src[i + 1] !== '>') break;
   }
-  i = src.indexOf('{', i) + 1;
+  // the value is an object literal: "{" first after the "="
+  i++;
+  while (i < src.length && /\s/.test(src[i])) i++;
+  if (src[i] !== '{') return null;
+  i++;
   depth = 1;
   const keys = [];
   let start = true;
@@ -629,7 +633,11 @@ export function objectKeys(src, obj) {
     if (src.startsWith('//', i)) { i = src.indexOf('\n', i); if (i < 0) break; continue; }
     if (src.startsWith('/*', i)) { i = src.indexOf('*/', i) + 2; continue; }
     if ('\'"`'.includes(c)) { const q = c; i++; while (i < src.length && src[i] !== q) { if (src[i] === '\\') i++; i++; } i++; start = false; continue; }
-    if ('([{'.includes(c)) depth++;
+    // a type's argument list (`as Map<A, B>`, `new Set<T>()`): a "<" right after a name, before a name or a
+    // bracket, opens one; its ">" closes it
+    if (c === '<' && /[\w$]$/.test(src.slice(0, i)) && /^\s*[\w${[(]/.test(src.slice(i + 1))) depth++;
+    else if (c === '>' && depth > 1 && src[i - 1] !== '=') depth--;
+    else if ('([{'.includes(c)) depth++;
     else if (')]}'.includes(c)) depth--;
     else if (depth === 1 && c === ',') { start = true; i++; continue; }
     if (depth === 1 && start && /[A-Za-z_$]/.test(c)) {
@@ -641,25 +649,17 @@ export function objectKeys(src, obj) {
   }
   return keys;
 }
-// every name a module under apps/dashboard/src exports at its top level
-function srcExports(repo) {
-  const names = new Set();
-  const walk = (dir) => {
-    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-      const p = path.join(dir, e.name);
-      if (e.isDirectory()) walk(p);
-      else if (/\.(ts|tsx|js|mjs)$/.test(e.name)) for (const m of fs.readFileSync(p, 'utf8').matchAll(/^export (?:async )?(?:function\*? ?|const |let |var )([A-Za-z_$][\w$]*)/gm)) names.add(m[1]);
-    }
-  };
-  const src = path.join(repo, 'apps', 'dashboard', 'src');
-  if (fs.existsSync(src)) walk(src);
-  return names;
+// the names one module of apps/dashboard exports at its top level
+function exportsOf(repo, rel) {
+  const f = path.join(repo, 'apps', 'dashboard', rel);
+  return fs.existsSync(f) ? [...fs.readFileSync(f, 'utf8').matchAll(/^export (?:async )?(?:function\*? ?|const |let |var )([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]) : [];
 }
-// what --check finds wrong with the state files: a missing file, or a listed name its object lacks (the shell's
-// names may instead be exported by its modules)
+// what --check finds wrong with the state files: a missing file, or a listed name its object lacks. Four of the
+// shell's names are its modules' exports instead (kit-988: DAY, SHELL_ROUTES, STATE_KEYS, VIEW_WRITES); the rest
+// are on `shell`
+export const SHELL_EXPORTED = { DAY: 'src/lib/shell-page.ts', SHELL_ROUTES: 'src/lib/shell-routes.ts', STATE_KEYS: 'src/shared/shell/shell.ts', VIEW_WRITES: 'src/lib/shell-view-only.ts' };
 export function stateProblems(repo, lists) {
   const out = [];
-  let exported = null;
   for (const [view, list] of Object.entries(lists)) {
     const rel = stateFile(view);
     const file = path.join(repo, rel);
@@ -668,7 +668,7 @@ export function stateProblems(repo, lists) {
     const keys = objectKeys(fs.readFileSync(file, 'utf8'), obj);
     if (!keys) { out.push(`${rel} exports no ${obj}`); continue; }
     let lacks = list.map((x) => x.name).filter((n) => !keys.includes(n));
-    if (view === 'shell' && lacks.length) { exported ??= srcExports(repo); lacks = lacks.filter((n) => !exported.has(n)); }
+    if (view === 'shell') lacks = lacks.filter((n) => !(SHELL_EXPORTED[n] && exportsOf(repo, SHELL_EXPORTED[n]).includes(n)));
     if (lacks.length) out.push(`${rel}'s ${obj} lacks ${lacks.join(', ')}`);
   }
   return out;

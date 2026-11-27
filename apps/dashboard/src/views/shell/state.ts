@@ -16,7 +16,7 @@ export const shell: { DATA: unknown; INBOX_D: unknown; PAGE_VERSION: string | nu
   PREVIEWS: false,
   drafts: {},
   // the page shown (showPage sets it; kit-989: on shell, since data's router reads it). undefined until the first, as
-  // index.html's let read
+  // page.ts's var read (index.html's let started null; nothing tells the two apart)
   PAGE_NOW: undefined,
 };
 
