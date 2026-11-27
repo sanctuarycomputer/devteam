@@ -261,9 +261,18 @@ function transform(policy, hashes, { browser = false } = {}) {
 
 // ---- the source's answers, recorded first on the same ports, then the tree's servers ----
 // Every request a check compares with main: { server, method, path, headers }.
-const REQS = [];
+const LINK0 = 'kit-984-probe';
+const REQS = [
+  // D1-D3, H1: the page routes' policies at main (the tree's are these, transformed)
+  { server: 'dash', method: 'GET', path: '/' },
+  { server: 'dash', method: 'GET', path: '/index.html' },
+  { server: 'dash', method: 'GET', path: `/view/artifact/${LINK0}` },
+  { server: 'dash', method: 'GET', path: '/view/artifact/!' },
+  { server: 'dash', method: 'GET', path: '/view/preview/apps-serve' },
+  { server: 'dash', method: 'GET', path: '/view/preview/nonexistent-name' },
+  { server: 'hub', method: 'GET', path: '/' },
+];
 const SRC = {};
-const LINK = 'kit-984-probe';
 const PREVIEW = 'apps-serve';
 // a preview record, in both projects, for /view/preview/<name> (readPreviews' shape)
 function writePreviewRecord(dir) {
@@ -297,4 +306,134 @@ test('A3: the policy builder is the same text in the servePage and servePageAsse
     return m[1].replace(/^[ \t]+/gm, '');
   };
   assert.equal(cut('servePageAsset.mjs'), cut('servePage.mjs'));
+});
+
+// ---- the pages (servePage, pageVersion) ----
+const src = (server, p, headers) => { const a = SRC[keyOf(server, 'GET', p, headers)]; assert.ok(a, `the source answered ${server} ${p}`); return a; };
+const readApp = (rel) => fs.readFileSync(path.join(APPS, rel));
+const scriptSrcs = (csp) => csp.split('; ').filter((d) => d.startsWith('script-src '));
+// one script-src, no 'unsafe-inline' in it
+const shapeOk = (csp) => { const s = scriptSrcs(csp); assert.equal(s.length, 1, `one script-src in ${csp}`); assert.doesNotMatch(s[0], /unsafe-inline/); };
+const NOTICE = "<!doctype html><meta charset=\"utf-8\"><title>devteam</title><p>This kit's pages aren't installed. They return at its next sync.</p>";
+
+test('D1: the dashboard serves the build\'s index.html at / and /index.html, under today\'s policy with script-src \'self\' and the route\'s hashes', { skip: skipFor('D1') }, async () => {
+  for (const p of ['/', '/index.html']) {
+    const r = await req(DASH_PORT, p);
+    assert.equal(r.status, 200, `${p}: ${r.body}`);
+    assert.equal(r.headers['content-type'], 'text/html; charset=utf-8');
+    assert.equal(r.headers['cache-control'], 'no-store');
+    assert.deepEqual(r.body, readApp('dashboard/index.html'), `${p} is the build's page`);
+    assert.equal(r.headers['content-security-policy'], transform(src('dash', p).csp, hashesOf('dashboard', '/')));
+    shapeOk(r.headers['content-security-policy']);
+    assert.match(r.headers['content-security-policy'], /^frame-src 'self'.*; frame-ancestors 'self' http:\/\/127\.0\.0\.1:\d+; script-src 'self' 'sha256-[^']+'; style-src 'self' 'unsafe-inline'$/);
+  }
+});
+
+test('D2: /view/artifact/<id> serves the build\'s index.html under the viewer\'s policy with the / hashes; a bad id is today\'s 404', { skip: skipFor('D2') }, async () => {
+  const p = `/view/artifact/${LINK0}`;
+  const r = await req(DASH_PORT, p);
+  assert.equal(r.status, 200, String(r.body));
+  assert.deepEqual(r.body, readApp('dashboard/index.html'));
+  assert.equal(r.headers['referrer-policy'], 'no-referrer');
+  assert.equal(r.headers['content-security-policy'], transform(src('dash', p).csp, hashesOf('dashboard', '/')));
+  const bad = await req(DASH_PORT, '/view/artifact/!');
+  assert.deepEqual(answerOf(bad), src('dash', '/view/artifact/!'));
+});
+
+test('D3: /view/preview/<name> serves the build\'s index.html under the preview\'s policy with the / hashes; an unknown name is today\'s 404', { skip: skipFor('D3') }, async () => {
+  const p = `/view/preview/${PREVIEW}`;
+  const r = await req(DASH_PORT, p);
+  assert.equal(r.status, 200, String(r.body));
+  assert.deepEqual(r.body, readApp('dashboard/index.html'));
+  assert.equal(r.headers['content-security-policy'], transform(src('dash', p).csp, hashesOf('dashboard', '/')));
+  assert.deepEqual(answerOf(await req(DASH_PORT, '/view/preview/nonexistent-name')), src('dash', '/view/preview/nonexistent-name'));
+});
+
+test('D4: /api/data\'s x-devteam-page is the first 16 hex of the sha256 of the build\'s index.html, read again after it changes', { skip: skipFor('D4') }, async () => {
+  const f = path.join(APPS, 'dashboard/index.html');
+  const was = fs.readFileSync(f);
+  try {
+    assert.equal((await req(DASH_PORT, '/api/data')).headers['x-devteam-page'], sha256(was).slice(0, 16));
+    fs.appendFileSync(f, '<!-- x -->');
+    assert.equal((await req(DASH_PORT, '/api/data')).headers['x-devteam-page'], sha256(fs.readFileSync(f)).slice(0, 16));
+  } finally { fs.writeFileSync(f, was); }
+});
+
+test('H1: the laptop hub serves the hub build\'s index.html under today\'s hub policy with script-src \'self\' and its hashes, style-src \'self\', font-src and img-src', { skip: skipFor('H1') }, async () => {
+  const r = await req(HUB_PORT, '/');
+  assert.equal(r.status, 200, String(r.body));
+  assert.deepEqual(r.body, readApp('hub/index.html'));
+  const csp = r.headers['content-security-policy'];
+  assert.equal(csp, transform(src('hub', '/').csp, hashesOf('hub', '/')));
+  shapeOk(csp);
+  assert.match(csp, /^default-src 'none'; /);
+  assert.match(csp, /; font-src 'self'; img-src 'self' data:$/);
+});
+
+// needs no split: the checkout's browser.html against the override's copy of its base
+test("B0: the override's browser base is browser.html's meta policy, its hashes aside", () => {
+  const meta = /http-equiv="Content-Security-Policy" content="([^"]+)"/.exec(fs.readFileSync(path.join(root, 'docs/devteam/dashboard/browser.html'), 'utf8'))?.[1];
+  assert.ok(meta, 'browser.html has a meta policy');
+  const f = path.join(AREA_DIR, 'overrides', 'servePage.mjs');
+  const base = fs.existsSync(f) ? /^\s*const BROWSER_BASE = "([^"]+)";$/m.exec(fs.readFileSync(f, 'utf8'))?.[1] : undefined;
+  assert.ok(base, 'servePage.mjs holds const BROWSER_BASE = "…"; on one line');
+  // script-src and style-src with their sources dropped ('self' in the base, the hashes in the meta)
+  const bare = (p, drop) => p.split(';').map((d) => d.trim().split(/\s+/)).map(([n, ...v]) => [n, ...(/^(script|style)-src$/.test(n) ? v.filter((t) => !drop.test(t)) : v)].join(' ')).join('; ');
+  assert.equal(bare(base, /^'self'$/), bare(meta, /^'sha256-/));
+});
+
+test("B1: browserViewServer serves the build's browser/index.html at / under browser.html's policy with script-src 'self' and its hash, style-src 'self'", { skip: skipFor('B1') }, async () => {
+  assert.match(view?.out ?? '', /ready/, `the browser view started: ${view?.out.slice(-400)}`);
+  const r = await req(VIEW_PORT, '/');
+  assert.equal(r.status, 200, String(r.body));
+  assert.equal(r.body.toString(), BROWSER_HTML);
+  assert.equal(r.headers['content-security-policy'], `default-src 'none'; script-src 'self' '${BROWSER_HASH}'; style-src 'self'; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'`);
+});
+
+// N1 to S8 move or change the build; each puts it back
+test('N1: with no build, every page route serves the notice (503) under its policy with no hashes, and the browser view starts; a build copied in later is served', { skip: skipFor('N1') }, async () => {
+  const aside = `${APPS}.aside`;
+  fs.renameSync(APPS, aside);
+  try {
+    await startTree();
+    assert.match(view.out, /ready/, `the browser view starts with no build: ${view.out.slice(-400)}`);
+    const notice = async (port, p, policy) => {
+      const r = await req(port, p);
+      assert.equal(r.status, 503, `${p}: ${r.body}`);
+      assert.equal(r.headers['content-type'], 'text/html; charset=utf-8');
+      assert.equal(r.body.toString(), NOTICE);
+      assert.equal(r.headers['content-security-policy'], policy, p);
+    };
+    for (const p of ['/', '/index.html', `/view/artifact/${LINK0}`, `/view/preview/${PREVIEW}`]) await notice(DASH_PORT, p, transform(src('dash', p).csp, []));
+    await notice(HUB_PORT, '/', transform(src('hub', '/').csp, []));
+    await notice(VIEW_PORT, '/', "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'");
+    assert.equal((await req(DASH_PORT, '/api/data')).headers['x-devteam-page'], '');
+  } finally { fs.renameSync(aside, APPS); }
+  const r = await req(VIEW_PORT, '/');
+  assert.equal(r.status, 200, 'the browser view serves the build once it is there');
+  assert.equal(r.body.toString(), BROWSER_HTML);
+});
+
+test('N2: a build whose csp-hashes.json is missing or not v1 serves 500, never a page without its hashes', { skip: skipFor('N2') }, async () => {
+  const f = path.join(APPS, 'dashboard/csp-hashes.json');
+  const was = fs.readFileSync(f);
+  try {
+    for (const bad of [null, '{"v":2,"pages":{"/":[]}}', 'not json']) {
+      if (bad === null) fs.rmSync(f); else fs.writeFileSync(f, bad);
+      const r = await req(DASH_PORT, '/');
+      assert.equal(r.status, 500, `${bad ?? 'missing'}: ${r.status}`);
+      assert.equal(r.body.toString(), 'this page could not be read\n');
+    }
+  } finally { fs.writeFileSync(f, was); }
+});
+
+test('S8 (pages): a hash that is not sha256-<44 base64> makes the page a 500, so a build never writes into the policy', { skip: skipFor('S8') }, async () => {
+  const f = path.join(APPS, 'dashboard/csp-hashes.json');
+  const was = fs.readFileSync(f);
+  try {
+    const h = JSON.parse(was);
+    h.pages['/'] = ["sha256-x'; script-src *"];
+    fs.writeFileSync(f, JSON.stringify(h));
+    assert.equal((await req(DASH_PORT, '/')).status, 500);
+  } finally { fs.writeFileSync(f, was); }
 });
