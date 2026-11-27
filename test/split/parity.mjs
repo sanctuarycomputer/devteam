@@ -310,9 +310,9 @@ export const FIRST_DATA = `(() => {
   XMLHttpRequest.prototype.send = function (...a) { this.addEventListener('load', () => { if (this.getResponseHeader('x-parity-data')) done(); }); return send.apply(this, a); };
 })();`;
 // median ms to first data over `loads` loads, or null when no data request came in `wait` ms
-// Each load gets a tab of its own: today's dashboard, loaded a second time in the same tab (about:blank,
-// then the page), leaves Page.navigate unanswered for good, which stopped parity-build on the first PR
-// with apps built.
+// Each load gets a tab of its own, closed (Page.close) when the load ends, even when it throws. Today's
+// dashboard, loaded a second time in the same tab (about:blank, then the page), leaves Page.navigate
+// unanswered for good, which stopped parity-build on the first PR with apps built.
 export async function firstData(chrome, url, { loads = 5, wait = 10000 } = {}) {
   const times = [];
   for (let i = 0; i < loads; i++) {
@@ -333,7 +333,11 @@ export async function firstData(chrome, url, { loads = 5, wait = 10000 } = {}) {
       }
       if (typeof t !== 'number') return null;
       times.push(t);
-    } finally { p.close(); }
+    } finally {
+      // the page's close() only drops its socket: Page.close ends the tab, so no load runs beside the next
+      await p.send('Page.close').catch(() => {});
+      p.close();
+    }
   }
   return median(times);
 }

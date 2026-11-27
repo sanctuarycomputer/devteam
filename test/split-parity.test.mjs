@@ -506,42 +506,55 @@ test('C15: time to first data, today and in the app; a page that asks for no dat
   assert.equal(await firstData(chrome, `${quiet.origin}/`, { loads: 1, wait: 1500 }), null);
 });
 
-// a stand-in for lib/chrome.mjs: each newPage() is a tab that records what it was sent and whether it was closed
+// a stand-in for lib/chrome.mjs: each newPage() is a tab that records what it was sent. As in lib/chrome.mjs,
+// the page's close() only drops its socket (socketClosed); the tab ends only once it was sent Page.close.
 function fakeChrome({ navigate = () => {} } = {}) {
   const tabs = [];
   return {
     tabs,
     async newPage() {
-      const tab = { sent: [], closed: false };
+      const tab = { sent: [], socketClosed: false };
       tabs.push(tab);
       return {
-        async send(method, params) { tab.sent.push([method, params?.url]); if (method === 'Page.navigate') await navigate(tabs.length, params.url); return {}; },
+        async send(method, params) {
+          if (tab.socketClosed) throw new Error('socket closed');
+          tab.sent.push([method, params?.url]);
+          if (method === 'Page.navigate') await navigate(tabs.length, params.url);
+          return {};
+        },
         async ev() { return 100 + tabs.length; },
-        close() { tab.closed = true; },
+        close() { tab.socketClosed = true; },
       };
     },
   };
 }
-test('C42: first data opens a tab per load, navigates it to the page once, and closes every tab, even when a load throws', async () => {
+const pageClosed = (tab) => tab.sent.some(([m]) => m === 'Page.close');
+test('C42: first data opens a tab per load, navigates it to the page once, and ends every tab with Page.close, even when a load throws', async () => {
   const chrome = fakeChrome();
   assert.equal(await firstData(chrome, 'http://127.0.0.1:1/', { loads: 3 }), 102);
   assert.equal(chrome.tabs.length, 3, 'one tab per load');
   for (const tab of chrome.tabs) {
     assert.deepEqual(tab.sent.filter(([m]) => m === 'Page.navigate'), [['Page.navigate', 'http://127.0.0.1:1/']], 'one navigate, to the page, with no about:blank');
-    assert.ok(tab.closed, 'each tab is closed');
+    assert.ok(pageClosed(tab), 'each tab is sent Page.close before its socket drops');
+    assert.ok(tab.socketClosed, 'each socket is closed');
   }
   const failing = fakeChrome({ navigate: (n) => { if (n === 2) throw new Error('Page.navigate: no answer from Chrome in 30 s'); } });
   await assert.rejects(firstData(failing, 'http://127.0.0.1:1/', { loads: 3 }), /no answer from Chrome/);
   assert.equal(failing.tabs.length, 2, 'no load after the one that threw');
-  assert.ok(failing.tabs.every((tab) => tab.closed), 'the tab that threw is closed too');
+  assert.ok(failing.tabs.every((tab) => pageClosed(tab) && tab.socketClosed), 'the tab that threw is sent Page.close too');
 });
 
-test('C43: today\'s dashboard, which leaves a second load in one tab unanswered, is measured over two loads', { skip: canDrive ? false : 'needs Chrome and Node 22+ (lib/chrome.mjs canDrive)' }, async (t) => {
+test('C43: today\'s dashboard, which leaves a second load in one tab unanswered, is measured over two loads, and no tab of it is left', { skip: canDrive ? false : 'needs Chrome and Node 22+ (lib/chrome.mjs canDrive)' }, async (t) => {
   const chrome = await openChrome();
   t.after(() => chrome.close());
   const today = await pageServer({ route: '/', html: fs.readFileSync(path.join(root, 'docs/devteam/dashboard/index.html')) });
   t.after(() => today.close());
   assert.equal(typeof await firstData(chrome, `${today.origin}/`, { loads: 2 }), 'number');
+  const q = await chrome.newPage();
+  let left;
+  try { left = (await q.send('Target.getTargets')).targetInfos.filter((x) => x.type === 'page' && x.url.startsWith(today.origin)).map((x) => x.url); }
+  finally { await q.send('Page.close').catch(() => {}); q.close(); }
+  assert.deepEqual(left, [], 'no tab at the page\'s origin is left');
 });
 
 // ---- Y: the workflows ----
