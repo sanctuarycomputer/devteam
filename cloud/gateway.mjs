@@ -1230,6 +1230,32 @@ export function alphaHashes(folder, route) {
   return Object.hasOwn(m.pages, route) ? m.pages[route] : [];
 }
 
+// --- page-seam@1: the hub page (kit-985; designs/kit-package-apps.md, "Contract page-seam@1") -----------
+// The box's hub page goes through these three names and nothing else, so the generated tree overrides
+// only them to serve the built hub app. At main they are the gateway's own code, unchanged.
+// gatewayHubPage(opts): the hub page's bytes, read once, from the first of opts.hubPage,
+// DEVTEAM_HUB_PAGE, hub.html beside the gateway (the box's image) and the kit's
+// docs/devteam/dashboard/hub.html (a checkout) that exists; none at all throws, as createGateway did.
+// What it gives is the `hub` the other two take.
+export function gatewayHubPage(opts = {}) {
+  const firstFile = (...c) => c.find((f) => f && fs.existsSync(f));
+  return fs.readFileSync(firstFile(opts.hubPage, env.DEVTEAM_HUB_PAGE, path.join(here, 'hub.html'), path.join(here, '..', 'docs', 'devteam', 'dashboard', 'hub.html')));
+}
+// serveGatewayHub(req, res, hub, policy): the hub route's answer (a signed-in GET of / or /index.html on
+// the box's name): 200 and the hub, with the headers every gateway answer has, policy.hsts (the box's,
+// {} on http), then policy.csp (hubCsp), x-frame-options DENY and no referrer.
+export function serveGatewayHub(req, res, hub, policy) {
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...policy.hsts, 'content-security-policy': policy.csp, 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' });
+  res.end(hub);
+}
+// serveGatewayAsset(req, res, hub, policy): asked for a signed-in GET on the box's name that no route
+// took, just before its 404, with the hub route's policy as it is for this request ({ csp, hsts }, as
+// serveGatewayHub takes it); true when it has answered. At main the hub page has no files of its own,
+// so it answers nothing and the 404 is sent as before.
+export function serveGatewayAsset(req, res, hub, policy) {
+  return false;
+}
+
 // --- the server ---------------------------------------------------------------------------------
 export function createGateway(opts = {}) {
   const PUB = publicUrl(opts.publicUrl);
@@ -1284,8 +1310,7 @@ export function createGateway(opts = {}) {
   // every write is followed by a look at the open presence and canvas sockets (endPresence), in the same turn
   let afterSave = () => {};
   const store = { load: stored.load, save: (s) => { stored.save(s); afterSave(); } };
-  const firstFile = (...c) => c.find((f) => f && fs.existsSync(f));
-  const hubPage = fs.readFileSync(firstFile(opts.hubPage, env.DEVTEAM_HUB_PAGE, path.join(here, 'hub.html'), path.join(here, '..', 'docs', 'devteam', 'dashboard', 'hub.html')));
+  const hubPage = gatewayHubPage(opts);
   const ttydPage = () => fs.readFileSync(opts.ttydPage ?? env.DEVTEAM_TTYD_PAGE ?? path.join(here, 'ttyd.html'));
   const log = opts.log ?? ((m) => process.stdout.write(`gateway: ${m}\n`));
   const uploadsRoot = opts.uploadsDir ?? env.DEVTEAM_UPLOADS_DIR ?? '/data/uploads';
@@ -3552,7 +3577,7 @@ export function createGateway(opts = {}) {
       if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
         // a project listed a moment ago is framed at once: one shared read first, a second at most
         await refreshWithin(1000);
-        return send(res, 200, 'text/html; charset=utf-8', hubPage, { 'content-security-policy': hubCsp(), 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' });
+        return serveGatewayHub(req, res, hubPage, { csp: hubCsp(), hsts });
       }
       // The owner's wrapper of a published page, on the box's own name (ownerWrapper). Anything it
       // can't bind answers as any other unknown path here does.
@@ -3721,6 +3746,8 @@ export function createGateway(opts = {}) {
         catch (e) { return json(res, 200, { ok: true, recorded: false, note: `${e.message}; the Library's Forget clears it` }); }
       }
       if (req.method === 'GET' && (p === '/public' || p === '/public/')) return page(res, PAGES.publicList(store.load().public ?? {}, (n, s) => (hostable(n) ? publicAddress(n, s) : null)));
+      // page-seam@1: a file of the hub's own (none at main), before the 404
+      if (req.method === 'GET' && serveGatewayAsset(req, res, hubPage, { csp: hubCsp(), hsts })) return;
       return send(res, 404, 'text/plain', 'not found');
     } catch (e) {
       if (res.headersSent) return res.destroy();
