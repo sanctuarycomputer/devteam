@@ -377,6 +377,66 @@ console.log(JSON.stringify({ stale: [{ area: 'tests', kind: 'hash conflict', nam
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(work, 'build.json'), 'utf8')).split.stale, b.split.stale);
 });
 
+// a split stand-in like C35's that also logs each call's argv, one JSON line each, to <stub>.argv;
+// it reports two stale items, an object and a string (the summary prints each kind its own way)
+const STALE = [{ area: 'tests', kind: 'hash conflict', name: 'x' }, 'a stale string'];
+function argvStub(name) {
+  const stub = path.join(tmp, `${name}-split.mjs`);
+  write(stub, `import fs from 'node:fs';
+const a = process.argv.slice(2);
+fs.appendFileSync(process.argv[1] + '.argv', JSON.stringify(a) + '\\n');
+if (a.includes('--verify')) { console.log(JSON.stringify({ clean: true, report: [] })); process.exit(0); }
+const out = a[a.indexOf('--out') + 1];
+fs.mkdirSync(out, { recursive: true });
+fs.writeFileSync(out + '/README.md', 'tree');
+console.log(JSON.stringify({ stale: ${JSON.stringify(STALE)} }));
+`);
+  return { stub, calls: () => fs.readFileSync(`${stub}.argv`, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) };
+}
+
+test('C39: split\'s stale items reach the report end to end: parity.json lists them, the summary counts them, not clean', async () => {
+  const { stub } = argvStub('c39');
+  const work = path.join(tmp, 'c39-work');
+  await build({ sha: LSHA, repo: L, work, startupRuns: 1, files: ['test/a.test.mjs'], split: stub });
+  // the files part as a test stage writes it, with no tests either side, so no part is missing
+  write(path.join(work, 'parts/files.json'), JSON.stringify({ part: 'files', source: { files: [], tests: [] }, tree: { files: [], tests: [] } }));
+  const r = await report({ sha: LSHA, repo: L, work, mainRef: 'main' });
+  assert.deepEqual(r.stale, STALE, 'the report carries split\'s stale items');
+  assert.equal(r.counts.stale, 2);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(work, 'parity.json'), 'utf8')).stale, STALE);
+  const md = fs.readFileSync(path.join(work, 'parity.md'), 'utf8');
+  assert.ok(md.includes('- Stale items: 2\n'), 'parity.md counts the stale items');
+  assert.ok(md.includes(`## Stale items (2)\n\n- ${JSON.stringify(STALE[0])}\n- a stale string\n`), 'parity.md lists the stale items');
+  assert.equal(r.clean, false);
+});
+
+test('C40: build() given no split dir calls split with no --split-dir; given one, passes it', async () => {
+  const none = argvStub('c40-none');
+  await build({ sha: LSHA, repo: L, work: path.join(tmp, 'c40-none-work'), startupRuns: 1, files: ['test/a.test.mjs'], split: none.stub });
+  const calls = none.calls();
+  assert.equal(calls.length, 2, 'split ran to build and to verify');
+  for (const a of calls) assert.ok(!a.includes('--split-dir'), `split got --split-dir with none given: ${JSON.stringify(a)}`);
+  const sd = path.join(tmp, 'c40-dir');
+  const given = argvStub('c40-given');
+  await build({ sha: LSHA, repo: L, splitDir: sd, work: path.join(tmp, 'c40-given-work'), startupRuns: 1, files: ['test/a.test.mjs'], split: given.stub });
+  assert.equal(given.calls().length, 2, 'split ran to build and to verify');
+  for (const a of given.calls()) assert.equal(a[a.indexOf('--split-dir') + 1], sd, `split got the dir given: ${JSON.stringify(a)}`);
+});
+
+test('C41: the build stage given no --split-dir (test-stress\'s command) leaves split on its own manifests, test/split\'s', () => {
+  // the fixture holds none of the kit's sources, so split refuses on the first manifest it reads, and names it
+  const work = path.join(tmp, 'c41-work');
+  const home = path.join(tmp, 'c41-home');
+  fs.mkdirSync(home);
+  const r = run(process.execPath, [tool, 'build', '--at', LSHA, '--repo', L, '--work', work, '--startup-runs', '1'], { cwd: tmp, env: { ...env, HOME: home }, timeout: 120000 });
+  assert.equal(r.status, 0, r.stderr);
+  const b = JSON.parse(fs.readFileSync(path.join(work, 'build.json'), 'utf8'));
+  assert.equal(b.split.ok, false);
+  const m = /^split: (manifest[^:/]*\.json): /.exec(b.split.error ?? '');
+  assert.ok(m, `split read no manifest of its own dir: ${b.split.error}`);
+  assert.ok(fs.existsSync(path.join(root, 'test', 'split', m[1])), `${m[1]} is test/split's`);
+});
+
 test('C9: page commits after the baseline need a ledger entry; one names its tickets; before the baseline none count', () => {
   const pc = pageCommits({ git: lgit, mainline: LSHA, read, hist });
   assert.equal(pc.baseline, merges['kit-895-parity-run']);
