@@ -30,12 +30,17 @@ const MINE = ['apps-serve', 'apps-tests'];
 const AREA_DIR = path.join(splitSrc, 'overlay', 'apps-serve');
 const HUB_PORT = PORTS + 30, PORT_BASE = PORTS + 31, DASH_PORT = PORTS + 32, VIEW_PORT = PORTS + 33;
 const sha256 = (b) => crypto.createHash('sha256').update(b).digest('hex');
-const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(GIT_|DEVTEAM_|TMUX)/.test(k)));
+// PATH and nothing else: no GIT_*, DEVTEAM_*, TMUX* or real HOME reaches git, the split or a server
+const clean = { PATH: process.env.PATH };
 const run = (cmd, args, o = {}) => spawnSync(cmd, args, { encoding: 'utf8', env: clean, maxBuffer: 1 << 28, timeout: 180000, ...o });
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'split-apps-serve-'));
 const kids = new Set();
+const killKids = () => { for (const k of kids) try { process.kill(-k.pid, 'SIGKILL'); } catch {} };
+// after() never runs when the top level throws: exit kills them all the same (and a signal exits)
+process.on('exit', killKids);
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => process.exit(130));
 after(() => {
-  for (const k of kids) try { process.kill(-k.pid, 'SIGKILL'); } catch {}
+  killKids();
   fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 const git = (cwd, ...a) => run('git', ['-C', cwd, '-c', 'user.name=t', '-c', 'user.email=t@t', ...a]);
@@ -93,8 +98,12 @@ const MANIFEST_SKIP = splitRun.status === 1 && splitLines.length > 0 && splitLin
 // failure (a wrong pin, a broken patch), never a skip.
 const lastCommitOf = (rel) => run('git', ['-C', root, 'log', '-1', '--format=%H', '--', rel]).stdout.trim();
 const SOURCE_OF = { IMAGE_RUNS: 'docs/devteam/scripts/devteam.mjs' };
+const SHALLOW = run('git', ['-C', root, 'rev-parse', '--is-shallow-repository']).stdout.trim() === 'true';
 function driftOf(s) {
   if (s.kind === 'override' && /^the original changed/.test(s.why)) {
+    // no history to read (test.yml checks out at depth 1): skip, naming it; a run with history (the
+    // box, the parity run) judges a wrong pin
+    if (SHALLOW) return `${s.area}'s override ${s.name} is stale and this checkout is shallow, so drift on main can't be told from a wrong pin (${s.why.slice(0, 160)})`;
     const at = lastCommitOf(`test/split/overlay/${s.area}/overrides/${s.name}.mjs`);
     const src = SOURCE_OF[s.name] ?? 'docs/devteam/scripts/devteam.mjs';
     return at && run('git', ['-C', root, 'diff', '--quiet', at, sha, '--', src]).status === 1 ? `${s.area}'s override ${s.name} is stale: its original changed on main since it was pinned (${s.why.slice(0, 160)})` : false;
@@ -296,14 +305,22 @@ function writePreviewRecord(dir) {
   const far = new Date(Date.now() + 86400000).toISOString();
   fs.writeFileSync(path.join(d, `${PREVIEW}.json`), `${JSON.stringify({ name: PREVIEW, port: 39999, project: 'p', session: 's', label: 'x', cwd: dir, at: new Date().toISOString(), expires: far }, null, 2)}\n`);
 }
+// why the servers didn't start, for every check that needs them
+let startError = null;
 if (treeMade && !MANIFEST_SKIP) {
-  for (const d of [SRCDIR, TREE]) writePreviewRecord(d);
-  const s = await startDashboard(SRCDIR, 'docs/devteam/scripts/devteam.mjs', 'source');
-  for (const q of REQS) SRC[keyOf(q.server, q.method, q.path, q.headers)] = answerOf(await req(PORT_OF[q.server], q.path, q));
-  await stopAll([s], [DASH_PORT, HUB_PORT]);
   copyBuild();
-  await startTree();
+  if (!READS.D()) {
+    try {
+      for (const d of [SRCDIR, TREE]) writePreviewRecord(d);
+      // the source first, on the same ports (its own project: the tree's build is not in it)
+      const s = await startDashboard(SRCDIR, 'docs/devteam/scripts/devteam.mjs', 'source');
+      for (const q of REQS) SRC[keyOf(q.server, q.method, q.path, q.headers)] = answerOf(await req(PORT_OF[q.server], q.path, q));
+      await stopAll([s], [DASH_PORT, HUB_PORT]);
+      await startTree();
+    } catch (e) { startError = e; killKids(); }
+  }
 }
+const started = () => { if (startError) throw new Error(`the servers didn't start: ${startError.message}`); };
 
 test("A1: HEAD's split applies exactly apps-serve's and apps-tests' items, none of either stale, no conflict naming them", { skip: skipFor('A1') }, () => {
   assert.equal(split.status, 0, split.stderr);
@@ -318,7 +335,7 @@ test('A3: the policy builder is the same text in the servePage and servePageAsse
     const t = fs.readFileSync(path.join(AREA_DIR, 'overrides', f), 'utf8');
     const m = /\n([ \t]*\/\/ policy builder start\n[\s\S]*?\n[ \t]*\/\/ policy builder end)\n/.exec(t);
     assert.ok(m, `${f} has the policy builder between its marker lines`);
-    return m[1].replace(/^[ \t]+/gm, '');
+    return m[1];
   };
   assert.equal(cut('servePageAsset.mjs'), cut('servePage.mjs'));
 });
@@ -332,6 +349,7 @@ const shapeOk = (csp) => { const s = scriptSrcs(csp); assert.equal(s.length, 1, 
 const NOTICE = "<!doctype html><meta charset=\"utf-8\"><title>devteam</title><p>This kit's pages aren't installed. They return at its next sync.</p>";
 
 test('D1: the dashboard serves the build\'s index.html at / and /index.html, under today\'s policy with script-src \'self\' and the route\'s hashes', { skip: skipFor('D1') }, async () => {
+  started();
   for (const p of ['/', '/index.html']) {
     const r = await req(DASH_PORT, p);
     assert.equal(r.status, 200, `${p}: ${r.body}`);
@@ -345,6 +363,7 @@ test('D1: the dashboard serves the build\'s index.html at / and /index.html, und
 });
 
 test('D2: /view/artifact/<id> serves the build\'s index.html under the viewer\'s policy with the / hashes; a bad id is today\'s 404', { skip: skipFor('D2') }, async () => {
+  started();
   const p = `/view/artifact/${LINK0}`;
   const r = await req(DASH_PORT, p);
   assert.equal(r.status, 200, String(r.body));
@@ -356,6 +375,7 @@ test('D2: /view/artifact/<id> serves the build\'s index.html under the viewer\'s
 });
 
 test('D3: /view/preview/<name> serves the build\'s index.html under the preview\'s policy with the / hashes; an unknown name is today\'s 404', { skip: skipFor('D3') }, async () => {
+  started();
   const p = `/view/preview/${PREVIEW}`;
   const r = await req(DASH_PORT, p);
   assert.equal(r.status, 200, String(r.body));
@@ -365,6 +385,7 @@ test('D3: /view/preview/<name> serves the build\'s index.html under the preview\
 });
 
 test('D4: /api/data\'s x-devteam-page is the first 16 hex of the sha256 of the build\'s index.html, read again after it changes', { skip: skipFor('D4') }, async () => {
+  started();
   const f = path.join(APPS, 'dashboard/index.html');
   const was = fs.readFileSync(f);
   try {
@@ -375,6 +396,7 @@ test('D4: /api/data\'s x-devteam-page is the first 16 hex of the sha256 of the b
 });
 
 test('H1: the laptop hub serves the hub build\'s index.html under today\'s hub policy with script-src \'self\' and its hashes, style-src \'self\', font-src and img-src', { skip: skipFor('H1') }, async () => {
+  started();
   const r = await req(HUB_PORT, '/');
   assert.equal(r.status, 200, String(r.body));
   assert.deepEqual(r.body, readApp('hub/index.html'));
@@ -398,6 +420,7 @@ test("B0: the override's browser base is browser.html's meta policy, its hashes 
 });
 
 test("B1: browserViewServer serves the build's browser/index.html at / under browser.html's policy with script-src 'self' and its hash, style-src 'self'", { skip: skipFor('B1') }, async () => {
+  started();
   assert.match(view?.out ?? '', /ready/, `the browser view started: ${view?.out.slice(-400)}`);
   const r = await req(VIEW_PORT, '/');
   assert.equal(r.status, 200, String(r.body));
@@ -407,6 +430,7 @@ test("B1: browserViewServer serves the build's browser/index.html at / under bro
 
 // N1 to S8 move or change the build; each puts it back
 test('N1: with no build, every page route serves the notice (503) under its policy with no hashes, and the browser view starts; a build copied in later is served', { skip: skipFor('N1') }, async () => {
+  started();
   const aside = `${APPS}.aside`;
   fs.renameSync(APPS, aside);
   try {
@@ -430,6 +454,7 @@ test('N1: with no build, every page route serves the notice (503) under its poli
 });
 
 test('N2: a build whose csp-hashes.json is missing or not v1 serves 500, never a page without its hashes', { skip: skipFor('N2') }, async () => {
+  started();
   const f = path.join(APPS, 'dashboard/csp-hashes.json');
   const was = fs.readFileSync(f);
   try {
@@ -443,6 +468,7 @@ test('N2: a build whose csp-hashes.json is missing or not v1 serves 500, never a
 });
 
 test('S8 (pages): a hash that is not sha256-<44 base64> makes the page a 500, so a build never writes into the policy', { skip: skipFor('S8') }, async () => {
+  started();
   const f = path.join(APPS, 'dashboard/csp-hashes.json');
   const was = fs.readFileSync(f);
   try {
@@ -459,6 +485,7 @@ const dashBase = `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HU
 const srcOf = (server, method, p, headers) => { const a = SRC[keyOf(server, method, p, headers)]; assert.ok(a, `the source answered ${server} ${method} ${p}`); return a; };
 
 test("R3: the review helpers come from the build's review/, to a GET, as main serves them", { skip: skipFor('R3') }, async () => {
+  started();
   for (const [p, f, type] of [['/review/preview/devteam-ui.js', 'devteam-ui.js', 'text/javascript; charset=utf-8'], ['/review/q-20261127-000000000-probe/devteam-ui.css', 'devteam-ui.css', 'text/css; charset=utf-8']]) {
     const r = await req(DASH_PORT, p);
     assert.equal(r.status, 200, `${p}: ${r.body}`);
@@ -471,6 +498,7 @@ test("R3: the review helpers come from the build's review/, to a GET, as main se
 });
 
 test("H2: the hub serves its build's files, and its own routes still answer", { skip: skipFor('H2') }, async () => {
+  started();
   const r = await req(HUB_PORT, '/_next/static/chunks/app.js');
   assert.equal(r.status, 200);
   assert.equal(r.headers['content-type'], 'text/javascript; charset=utf-8');
@@ -481,6 +509,7 @@ test("H2: the hub serves its build's files, and its own routes still answer", { 
 });
 
 test("H3: the hub's route pages carry the hub's / policy with that route's hashes; a route with no entry is a 500", { skip: skipFor('H3') }, async () => {
+  started();
   const r = await req(HUB_PORT, '/threads/one/');
   assert.equal(r.status, 200, String(r.body));
   assert.deepEqual(r.body, readApp('hub/threads/one/index.html'));
@@ -496,6 +525,7 @@ test("H3: the hub's route pages carry the hub's / policy with that route's hashe
 });
 
 test('S1: the dashboard serves its build by alpha-serving.json at the root', { skip: skipFor('S1') }, async () => {
+  started();
   const T = JSON.parse(fs.readFileSync(SERVING, 'utf8'));
   for (const c of T.cases) {
     if (c.path === '/next') continue;
@@ -510,12 +540,14 @@ test('S1: the dashboard serves its build by alpha-serving.json at the root', { s
 });
 
 test("S2: a dashboard route's page carries pageCsp()'s base with that route's hashes", { skip: skipFor('S2') }, async () => {
+  started();
   const r = await req(DASH_PORT, '/threads/one/');
   assert.equal(r.status, 200);
   assert.equal(r.headers['content-security-policy'], transform(dashBase, hashesOf('dashboard', '/threads/one/')));
 });
 
 test('S3: a static file under a reserved first segment never answers for a route', { skip: skipFor('S3') }, async () => {
+  started();
   const d = path.join(APPS, 'dashboard');
   const made = [];
   try {
@@ -542,12 +574,14 @@ test('S3: a static file under a reserved first segment never answers for a route
 });
 
 test('S4: a POST to an export file is answered as main answers it', { skip: skipFor('S4') }, async () => {
+  started();
   const r = await req(DASH_PORT, '/logo.svg', { method: 'POST' });
   const s = srcOf('dash', 'POST', '/logo.svg');
   assert.deepEqual([r.status, r.headers['content-type'] ?? null], [s.status, s.type]);
 });
 
 test("S5: the routes' answers and policies are main's", { skip: skipFor('S5') }, async () => {
+  started();
   const H = { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' };
   const cases = [...['/api/hello', '/api/data', '/upload/x', '/nothing.js'].map((p) => ['dash', p, {}]), ['dash', '/review/preview/', H], ...['/instances.json', '/nothing'].map((p) => ['hub', p, {}])];
   for (const [server, p, headers] of cases) {
@@ -558,6 +592,7 @@ test("S5: the routes' answers and policies are main's", { skip: skipFor('S5') },
 });
 
 test("S6: the dashboard serves no /view/ or /browser/ page from its export; the browser view serves /_next/ only", { skip: skipFor('S6') }, async () => {
+  started();
   const canvas = path.join(APPS, 'dashboard/view/canvas');
   fs.mkdirSync(canvas, { recursive: true });
   fs.writeFileSync(path.join(canvas, 'index.html'), '<!doctype html><p>canvas');
@@ -571,6 +606,7 @@ test("S6: the dashboard serves no /view/ or /browser/ page from its export; the 
 });
 
 test("S7: HEAD /, /?_rsc= and /index.html?x are the root page under the base with / hashes", { skip: skipFor('S7') }, async () => {
+  started();
   const policy = transform(dashBase, hashesOf('dashboard', '/'));
   const h = await req(DASH_PORT, '/', { method: 'HEAD' });
   assert.equal(h.status, 200);
@@ -585,6 +621,7 @@ test("S7: HEAD /, /?_rsc= and /index.html?x are the root page under the base wit
 });
 
 test('S8 (assets): a bad hash under /threads/one/ makes /threads/one/ a 500', { skip: skipFor('S8') }, async () => {
+  started();
   const f = path.join(APPS, 'dashboard/csp-hashes.json');
   const was = fs.readFileSync(f);
   try {

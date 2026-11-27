@@ -46,7 +46,7 @@ function servePage(D, req, res, page, policy, headers = {}) {
   // the build: { html, hashes }, 'none' (no index.html), or 'bad'
   const read = () => {
     let html;
-    try { html = fs.readFileSync(path.join(dir, ...route.split('/').filter(Boolean), 'index.html')); } catch (e) { return e.code === 'ENOENT' || e.code === 'ENOTDIR' ? 'none' : 'bad'; }
+    try { html = fs.readFileSync(path.join(dir, ...route.split('/').filter(Boolean), 'index.html')); } catch (e) { return e.code === 'ENOENT' ? 'none' : 'bad'; }
     let text;
     try { text = fs.readFileSync(path.join(dir, 'csp-hashes.json'), 'utf8'); } catch { return 'bad'; }
     const hashes = hashesFor(text, route);
