@@ -146,7 +146,7 @@ export function buildProps(): void {
   if (state.session !== null) out.push(editFields(state.sel, n));
   box.replaceChildren(...out);
   if (was !== null && was !== '\u0000\u0000\u0000') {
-    const again = [...box.querySelectorAll<HTMLButtonElement>('input, select, textarea, button')].find((e) => controlKey(e) === was);
+    const again = [...box.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLButtonElement>('input, select, textarea, button')].find((e) => controlKey(e) === was);
     if (again && !again.disabled) again.focus({ preventScroll: true });
   }
 }
