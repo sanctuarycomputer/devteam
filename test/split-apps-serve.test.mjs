@@ -236,7 +236,11 @@ function copyBuild() {
   fs.writeFileSync(path.join(d, 'csp-hashes.json'), `${JSON.stringify(h, null, 2)}\n`);
   fs.mkdirSync(path.join(d, 'review'));
   for (const [f, t] of Object.entries(REVIEW)) fs.writeFileSync(path.join(d, 'review', f), t);
+  const T = JSON.parse(fs.readFileSync(SERVING, 'utf8'));
+  fs.writeFileSync(path.resolve(d, T.outside.at), T.outside.text);
+  for (const c of T.cases) if (c.symlink) fs.symlinkSync(c.symlink.to, path.join(d, c.symlink.at));
 }
+const SERVING = path.join(root, 'test/fixtures/alpha-serving.json');
 const hashesOf = (app, route) => JSON.parse(fs.readFileSync(path.join(APPS, app, 'csp-hashes.json'), 'utf8')).pages[route];
 
 // The spec's §Policies rule, the test's own copy (never the tree's): script-src becomes 'self' plus the
@@ -262,6 +266,9 @@ function transform(policy, hashes, { browser = false } = {}) {
 // ---- the source's answers, recorded first on the same ports, then the tree's servers ----
 // Every request a check compares with main: { server, method, path, headers }.
 const LINK0 = 'kit-984-probe';
+// S3: a path per reserved first segment that a route passes through (GET-only, exact-match routes)
+const S3_PATHS = ['/api/hello', '/api/hello?x', '/api/hi/', '/upload', '/public/x.txt', '/review/a/b/c', '/review/preview/', '/view/artifact/x/', '/artifact/x.txt', '/public-manifest/x.txt', '/presence'];
+const S3_PLANT = ['api/hello', 'api/hi/index.html', 'upload', 'public/x.txt', 'review/a/b/c', 'review/preview/index.html', 'view/artifact/x/index.html', 'artifact/x.txt', 'public-manifest/x.txt', 'presence'];
 const REQS = [
   // D1-D3, H1: the page routes' policies at main (the tree's are these, transformed)
   { server: 'dash', method: 'GET', path: '/' },
@@ -271,6 +278,14 @@ const REQS = [
   { server: 'dash', method: 'GET', path: '/view/preview/apps-serve' },
   { server: 'dash', method: 'GET', path: '/view/preview/nonexistent-name' },
   { server: 'hub', method: 'GET', path: '/' },
+  // R3, S3-S5: main's answers to what the export must not change
+  { server: 'dash', method: 'GET', path: '/review/preview/other.js' },
+  { server: 'dash', method: 'HEAD', path: '/review/preview/devteam-ui.js' },
+  ...S3_PATHS.flatMap((p) => ['GET', 'HEAD'].map((method) => ({ server: 'dash', method, path: p }))),
+  { server: 'dash', method: 'POST', path: '/logo.svg' },
+  ...['/api/hello', '/api/data', '/upload/x', '/nothing.js'].map((p) => ({ server: 'dash', method: 'GET', path: p })),
+  { server: 'dash', method: 'GET', path: '/review/preview/', headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' } },
+  ...['/instances.json', '/nothing'].map((p) => ({ server: 'hub', method: 'GET', path: p })),
 ];
 const SRC = {};
 const PREVIEW = 'apps-serve';
@@ -435,5 +450,147 @@ test('S8 (pages): a hash that is not sha256-<44 base64> makes the page a 500, so
     h.pages['/'] = ["sha256-x'; script-src *"];
     fs.writeFileSync(f, JSON.stringify(h));
     assert.equal((await req(DASH_PORT, '/')).status, 500);
+  } finally { fs.writeFileSync(f, was); }
+});
+
+// ---- the rest of the export (servePageAsset) ----
+const hubBase = () => src('hub', '/').csp;
+const dashBase = `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}`;
+const srcOf = (server, method, p, headers) => { const a = SRC[keyOf(server, method, p, headers)]; assert.ok(a, `the source answered ${server} ${method} ${p}`); return a; };
+
+test("R3: the review helpers come from the build's review/, to a GET, as main serves them", { skip: skipFor('R3') }, async () => {
+  for (const [p, f, type] of [['/review/preview/devteam-ui.js', 'devteam-ui.js', 'text/javascript; charset=utf-8'], ['/review/q-20261127-000000000-probe/devteam-ui.css', 'devteam-ui.css', 'text/css; charset=utf-8']]) {
+    const r = await req(DASH_PORT, p);
+    assert.equal(r.status, 200, `${p}: ${r.body}`);
+    assert.equal(r.headers['content-type'], type);
+    assert.equal(r.body.toString(), REVIEW[f]);
+  }
+  assert.deepEqual(answerOf(await req(DASH_PORT, '/review/preview/other.js')), srcOf('dash', 'GET', '/review/preview/other.js'));
+  const h = await req(DASH_PORT, '/review/preview/devteam-ui.js', { method: 'HEAD' });
+  assert.equal(h.status, srcOf('dash', 'HEAD', '/review/preview/devteam-ui.js').status, 'a HEAD is not served the helper');
+});
+
+test("H2: the hub serves its build's files, and its own routes still answer", { skip: skipFor('H2') }, async () => {
+  const r = await req(HUB_PORT, '/_next/static/chunks/app.js');
+  assert.equal(r.status, 200);
+  assert.equal(r.headers['content-type'], 'text/javascript; charset=utf-8');
+  assert.deepEqual(r.body, readApp('hub/_next/static/chunks/app.js'));
+  const i = await req(HUB_PORT, '/instances.json');
+  assert.equal(i.status, 200);
+  assert.equal(JSON.parse(i.body).hub, 1);
+});
+
+test("H3: the hub's route pages carry the hub's / policy with that route's hashes; a route with no entry is a 500", { skip: skipFor('H3') }, async () => {
+  const r = await req(HUB_PORT, '/threads/one/');
+  assert.equal(r.status, 200, String(r.body));
+  assert.deepEqual(r.body, readApp('hub/threads/one/index.html'));
+  assert.equal(r.headers['content-security-policy'], transform(hubBase(), hashesOf('hub', '/threads/one/')));
+  const f = path.join(APPS, 'hub/csp-hashes.json');
+  const was = fs.readFileSync(f);
+  try {
+    const h = JSON.parse(was);
+    delete h.pages['/threads/one/'];
+    fs.writeFileSync(f, JSON.stringify(h));
+    assert.equal((await req(HUB_PORT, '/threads/one/')).status, 500);
+  } finally { fs.writeFileSync(f, was); }
+});
+
+test('S1: the dashboard serves its build by alpha-serving.json at the root', { skip: skipFor('S1') }, async () => {
+  const T = JSON.parse(fs.readFileSync(SERVING, 'utf8'));
+  for (const c of T.cases) {
+    if (c.path === '/next') continue;
+    const p = c.path.slice('/next'.length);
+    const r = await req(DASH_PORT, p);
+    const what = `${c.name} (${p.slice(0, 80)})`;
+    assert.equal(r.status, c.status, `${what}: status`);
+    assert.equal(r.headers['content-type'] ?? null, c.type, `${what}: type`);
+    if (c.status === 301) assert.equal(r.headers.location, c.location.slice('/next'.length), `${what}: location`);
+    if (c.file) assert.deepEqual(r.body, readApp(`dashboard/${c.file}`), `${what}: bytes`);
+  }
+});
+
+test("S2: a dashboard route's page carries pageCsp()'s base with that route's hashes", { skip: skipFor('S2') }, async () => {
+  const r = await req(DASH_PORT, '/threads/one/');
+  assert.equal(r.status, 200);
+  assert.equal(r.headers['content-security-policy'], transform(dashBase, hashesOf('dashboard', '/threads/one/')));
+});
+
+test('S3: a static file under a reserved first segment never answers for a route', { skip: skipFor('S3') }, async () => {
+  const d = path.join(APPS, 'dashboard');
+  const made = [];
+  try {
+    for (const f of S3_PLANT) {
+      const at = path.join(d, f);
+      if (fs.existsSync(at)) continue;
+      fs.mkdirSync(path.dirname(at), { recursive: true });
+      fs.writeFileSync(at, `planted ${f}`);
+      made.push(at);
+    }
+    for (const p of S3_PATHS) for (const method of ['GET', 'HEAD']) {
+      const r = await req(DASH_PORT, p, { method });
+      assert.ok(!(r.status === 200 && /^planted /.test(r.body.toString())), `${method} ${p} served the planted file`);
+      const s = srcOf('dash', method, p);
+      assert.deepEqual([r.status, r.headers['content-type'] ?? null], [s.status, s.type], `${method} ${p}`);
+    }
+  } finally {
+    for (const at of made) fs.rmSync(at, { force: true });
+    for (const top of ['api', 'upload', 'public', 'view', 'artifact', 'public-manifest', 'presence', 'review/a', 'review/preview']) {
+      const at = path.join(d, top);
+      if (fs.existsSync(at) && fs.statSync(at).isDirectory() && !fs.readdirSync(at, { recursive: true }).some((x) => fs.statSync(path.join(at, x)).isFile())) fs.rmSync(at, { recursive: true, force: true });
+    }
+  }
+});
+
+test('S4: a POST to an export file is answered as main answers it', { skip: skipFor('S4') }, async () => {
+  const r = await req(DASH_PORT, '/logo.svg', { method: 'POST' });
+  const s = srcOf('dash', 'POST', '/logo.svg');
+  assert.deepEqual([r.status, r.headers['content-type'] ?? null], [s.status, s.type]);
+});
+
+test("S5: the routes' answers and policies are main's", { skip: skipFor('S5') }, async () => {
+  const H = { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' };
+  const cases = [...['/api/hello', '/api/data', '/upload/x', '/nothing.js'].map((p) => ['dash', p, {}]), ['dash', '/review/preview/', H], ...['/instances.json', '/nothing'].map((p) => ['hub', p, {}])];
+  for (const [server, p, headers] of cases) {
+    const r = await req(PORT_OF[server], p, { headers });
+    const s = srcOf(server, 'GET', p, headers);
+    assert.deepEqual([r.status, r.headers['content-security-policy'] ?? null], [s.status, s.csp], `${server} ${p}`);
+  }
+});
+
+test("S6: the dashboard serves no /view/ or /browser/ page from its export; the browser view serves /_next/ only", { skip: skipFor('S6') }, async () => {
+  const canvas = path.join(APPS, 'dashboard/view/canvas');
+  fs.mkdirSync(canvas, { recursive: true });
+  fs.writeFileSync(path.join(canvas, 'index.html'), '<!doctype html><p>canvas');
+  try {
+    for (const p of ['/view/canvas/', '/browser/']) assert.equal((await req(DASH_PORT, p)).status, 404, p);
+  } finally { fs.rmSync(path.join(APPS, 'dashboard/view'), { recursive: true, force: true }); }
+  const a = await req(VIEW_PORT, '/_next/static/chunks/app.js');
+  assert.equal(a.status, 200);
+  assert.deepEqual(a.body, readApp('dashboard/_next/static/chunks/app.js'));
+  for (const p of ['/threads/one/', '/index.txt', '/socket']) assert.equal((await req(VIEW_PORT, p)).status, 404, `view ${p}`);
+});
+
+test("S7: HEAD /, /?_rsc= and /index.html?x are the root page under the base with / hashes", { skip: skipFor('S7') }, async () => {
+  const policy = transform(dashBase, hashesOf('dashboard', '/'));
+  const h = await req(DASH_PORT, '/', { method: 'HEAD' });
+  assert.equal(h.status, 200);
+  assert.equal(h.body.length, 0);
+  assert.equal(h.headers['content-security-policy'], policy);
+  for (const p of ['/?_rsc=x', '/index.html?x']) {
+    const r = await req(DASH_PORT, p);
+    assert.equal(r.status, 200, p);
+    assert.deepEqual(r.body, readApp('dashboard/index.html'), p);
+    assert.equal(r.headers['content-security-policy'], policy, p);
+  }
+});
+
+test('S8 (assets): a bad hash under /threads/one/ makes /threads/one/ a 500', { skip: skipFor('S8') }, async () => {
+  const f = path.join(APPS, 'dashboard/csp-hashes.json');
+  const was = fs.readFileSync(f);
+  try {
+    const h = JSON.parse(was);
+    h.pages['/threads/one/'] = ['sha256-short'];
+    fs.writeFileSync(f, JSON.stringify(h));
+    assert.equal((await req(DASH_PORT, '/threads/one/')).status, 500);
   } finally { fs.writeFileSync(f, was); }
 });
