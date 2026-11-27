@@ -30290,10 +30290,21 @@ async function dashRoutesOwner(D, req, res, q) {
 const DASHBOARD_ROUTES = [dashRoutesUpload, dashRoutesPage, dashRoutesViewer, dashRoutesThreads, dashRoutesReads, dashRoutesFiles, dashRoutesArtifacts, dashRoutesReviewPage, dashRoutesApp, dashRoutesOwner];
 /* dashboardRoutes end */
 // A request whose handling threw, one no guard foresaw: logged with its method and path (the query
-// cut, at most 200 characters) and the error, then a 500 when no header is out yet. Once headers are
-// out, a response still open is destroyed, so a cut body looks cut; one already ended is left as it is.
+// cut, at most 200 characters) and the error's class and code, then a 500 when no header is out yet.
+// Never the error's message or stack, which can quote the request (execFile's names the bad value):
+// a class or code that is no plain name is left out, a thrown non-object is named by its type, and
+// an object whose reads throw is just "object". The filter keeps out odd text, not a plain word: no
+// route may put a request's value in an error's code or class. Once headers are out, a response
+// still open is destroyed, so a cut body looks cut; one already ended is left as it is.
 function dashRequestFailed(log, req, res, e) {
-  log(`request failed: ${req.method} ${String(req.url).split('?')[0].slice(0, 200)}: ${e?.stack ?? e}`);
+  let what = e === null ? 'null' : typeof e;
+  if (what === 'object' || what === 'function') {
+    try {
+      const name = [e.constructor?.name, e.code].filter((v) => typeof v === 'string' && /^[A-Za-z_$][\w$]{0,63}$/.test(v));
+      if (name.length) what = name.join(' ');
+    } catch {}
+  }
+  log(`request failed: ${req.method} ${String(req.url).split('?')[0].slice(0, 200)}: ${what}`);
   if (!res.headersSent) {
     res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
     return res.end('this request failed');
