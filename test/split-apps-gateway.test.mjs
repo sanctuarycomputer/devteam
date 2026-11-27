@@ -659,10 +659,14 @@ const EXPECT = {
   },
   'gateway.test.mjs': {
     minus: ["    assert.equal(hub.body, cliRead(fs.readFileSync, fs, path.join(kit, 'dashboard', 'hub.html'), 'utf8'), 'the gateway\\'s own copy of the page');",
-      "    assert.equal(dash.headers['content-security-policy'], `frame-src 'self'; frame-ancestors 'self' ${gw.publicUrl}`);"],
+      "    assert.equal(dash.headers['content-security-policy'], `frame-src 'self'; frame-ancestors 'self' ${gw.publicUrl}`);",
+      "const KIT_GUARD = /<script>\\n\\/\\/ Framed by a page of its own origin[\\s\\S]*?<\\/script>/.exec(cliRead(fs.readFileSync, fs, path.join(kit, 'dashboard', 'index.html'), 'utf8'))?.[0];",
+      "const AV_SANDBOX = /<iframe id=\"av-frame\"[^>]*\\bsandbox=\"([^\"]+)\"/.exec(cliRead(fs.readFileSync, fs, path.join(kit, 'dashboard', 'index.html'), 'utf8'))?.[1];"],
     plus: ["    assert.equal(hub.body, cliRead(fs.readFileSync, fs, path.join(kit, 'apps', 'hub', 'index.html'), 'utf8'), 'the gateway\\'s own copy of the page');",
       "    assert.ok(hcsp.split('; ').includes(`script-src 'self'${JSON.parse(cliRead(fs.readFileSync, fs, path.join(kit, 'apps', 'hub', 'csp-hashes.json'), 'utf8')).pages['/'].map((h) => ` '${h}'`).join('')}`), hcsp);",
-      "    assert.equal(dash.headers['content-security-policy'], `frame-src 'self'; frame-ancestors 'self' ${gw.publicUrl}; script-src 'self'${JSON.parse(cliRead(fs.readFileSync, fs, path.join(kit, 'apps', 'dashboard', 'csp-hashes.json'), 'utf8')).pages['/'].map((h) => ` '${h}'`).join('')}; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net`);"],
+      "    assert.equal(dash.headers['content-security-policy'], `frame-src 'self'; frame-ancestors 'self' ${gw.publicUrl}; script-src 'self'${JSON.parse(cliRead(fs.readFileSync, fs, path.join(kit, 'apps', 'dashboard', 'csp-hashes.json'), 'utf8')).pages['/'].map((h) => ` '${h}'`).join('')}; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net`);",
+      "const KIT_GUARD = /<script>\\n\\/\\/ Framed by a page of its own origin[\\s\\S]*?<\\/script>/.exec(fs.existsSync(path.join(kit, 'dashboard', 'index.html')) ? cliRead(fs.readFileSync, fs, path.join(kit, 'dashboard', 'index.html'), 'utf8') : '')?.[0]; // no dashboard/index.html in the tree (pages-docs): C45 fails on its own assertion (kit-1021 carry-over)",
+      "const AV_SANDBOX = /<iframe id=\"av-frame\"[^>]*\\bsandbox=\"([^\"]+)\"/.exec(fs.existsSync(path.join(kit, 'dashboard', 'index.html')) ? cliRead(fs.readFileSync, fs, path.join(kit, 'dashboard', 'index.html'), 'utf8') : '')?.[1]; // no dashboard/index.html in the tree (pages-docs): C5l and C5m fail on their own assertion (kit-1021 carry-over)"],
   },
 };
 // a patch's removed and added lines, in its order, hunk by hunk, and the files its headers name

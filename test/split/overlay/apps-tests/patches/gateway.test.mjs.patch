@@ -1,5 +1,5 @@
 diff --git a/test/gateway.test.mjs b/test/gateway.test.mjs
-index e2e0c2c49f5ac3816e7a5ae398fd38451cb92827..6910ecfd47184aa206ff9bb91bfb24c6b59a6f39 100644
+index e2e0c2c49f5ac3816e7a5ae398fd38451cb92827..0d2a36da4fd7ce26dd622d5ee79349ce543fa9a6 100644
 --- a/test/gateway.test.mjs
 +++ b/test/gateway.test.mjs
 @@ -389,7 +389,8 @@ test('behind the gateway the kit runs as on a laptop: hub, dashboard, owner acti
@@ -21,3 +21,21 @@ index e2e0c2c49f5ac3816e7a5ae398fd38451cb92827..6910ecfd47184aa206ff9bb91bfb24c6
      assert.equal((await gw.req('GET', '/api/hello', { on: 'alpha' })).json.port, P);
      assert.equal((await gw.req('GET', '/api/file?path=README.md', { on: 'alpha' })).status === 403, false, 'a committed file is served by path, as a review page asks for it');
      // an owner action passes the kit's own same-origin check, as from the page
+@@ -3838,7 +3839,7 @@ on('C46 /w/ for an unknown project or an unpublished slug answers as any other u
+ });
+ // C45 in Chrome: a stand-in viewer carrying the kit's own guard (index.html's first script, which stops
+ // a dashboard framed by its own origin) and the kit's policy, framing an artifact at the published tree.
+-const KIT_GUARD = /<script>\n\/\/ Framed by a page of its own origin[\s\S]*?<\/script>/.exec(cliRead(fs.readFileSync, fs, path.join(kit, 'dashboard', 'index.html'), 'utf8'))?.[0];
++const KIT_GUARD = /<script>\n\/\/ Framed by a page of its own origin[\s\S]*?<\/script>/.exec(fs.existsSync(path.join(kit, 'dashboard', 'index.html')) ? cliRead(fs.readFileSync, fs, path.join(kit, 'dashboard', 'index.html'), 'utf8') : '')?.[0]; // no dashboard/index.html in the tree (pages-docs): C45 fails on its own assertion (kit-1021 carry-over)
+ test('C45 in Chrome, the owner\'s visit lands on the hub\'s /w/ page, the viewer and the artifact render; a bad grant\'s frame is blocked', { skip: !canDrive, timeout: 90000 }, async () => {
+   assert.ok(KIT_GUARD && KIT_GUARD.includes('window.frameElement'), 'the kit\'s own frame guard');
+   const b = await box();
+@@ -3998,7 +3999,7 @@ on('C25 the viewer is no longer frameable from public.<box>', undefined, async (
+ // that runs and stopped when the second is done, so the ports it holds (the hub's, P, P + 1 and
+ // P + 23) are free for every test after them.
+ const DRAFT_SEG = 'ticket%2Fe2e-1';
+-const AV_SANDBOX = /<iframe id="av-frame"[^>]*\bsandbox="([^"]+)"/.exec(cliRead(fs.readFileSync, fs, path.join(kit, 'dashboard', 'index.html'), 'utf8'))?.[1];
++const AV_SANDBOX = /<iframe id="av-frame"[^>]*\bsandbox="([^"]+)"/.exec(fs.existsSync(path.join(kit, 'dashboard', 'index.html')) ? cliRead(fs.readFileSync, fs, path.join(kit, 'dashboard', 'index.html'), 'utf8') : '')?.[1]; // no dashboard/index.html in the tree (pages-docs): C5l and C5m fail on their own assertion (kit-1021 carry-over)
+ const draftPage = (body) => `<!doctype html><html><head><title>d</title><script>top.postMessage('draft:' + location.pathname.split('/').pop() + ':' + (window.name || ''), '*')</script></head><body>${body}</body></html>`;
+ const DRAFT_FILES = {
+   'artifact.json': JSON.stringify({ v: 1, title: 'nav', summary: 'a draft that moves its own frame', by: 'supervisor', for: [] }),
