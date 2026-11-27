@@ -1,0 +1,13 @@
+diff --git a/package.json b/package.json
+index dd479782859e21c3c5bb6fecf684d7aa4d1b5487..9204d8ba1289badc62eb864e992ea9f708c9d9ed 100644
+--- a/package.json
++++ b/package.json
+@@ -14,4 +14,7 @@
+   "dependencies": {},
++  "bin": {
++    "devteam": "docs/devteam/scripts/cli.mjs"
++  },
+   "devteam": {
+-    "layout": 1
++    "layout": 2
+   }
