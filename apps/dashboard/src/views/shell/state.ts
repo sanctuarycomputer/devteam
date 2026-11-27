@@ -3,7 +3,7 @@
 import { appPath } from '../../shared/paths';
 import { viewerOf } from '../../lib/shell-page';
 
-export const shell: { DATA: unknown; INBOX_D: unknown; PAGE_VERSION: string | null; PUBLIC: unknown; PREVIEWS: boolean; drafts: Record<string, string> } = {
+export const shell: { DATA: unknown; INBOX_D: unknown; PAGE_VERSION: string | null; PUBLIC: unknown; PREVIEWS: boolean; drafts: Record<string, string>; PAGE_NOW: string | null | undefined } = {
   DATA: null,
   // the data inboxTitle last counted (inboxCount)
   INBOX_D: null,
@@ -15,6 +15,9 @@ export const shell: { DATA: unknown; INBOX_D: unknown; PAGE_VERSION: string | nu
   // Whether this box's gateway serves previews (x-devteam-previews, set only by the release that does).
   PREVIEWS: false,
   drafts: {},
+  // the page shown (showPage sets it; kit-989: on shell, since data's router reads it). undefined until the first, as
+  // index.html's let read
+  PAGE_NOW: undefined,
 };
 
 // The viewer (spec §7): index.html's VIEWER, read once from this page's path within the app and its search.
