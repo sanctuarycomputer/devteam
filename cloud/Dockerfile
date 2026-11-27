@@ -821,7 +821,7 @@ ENV DEVTEAM_MEMORY_COUNTS_CACHE=1
 # What this image is, for the gateway's /box.json and box-status: the kit release it was cut at (the
 # release-prep PR sets it, and box-pins verify checks it) and the tools' pins above. Late, so a new
 # stamp rebuilds only what follows: the alpha's install for that release.
-ARG DEVTEAM_RELEASE=v0.105.0
+ARG DEVTEAM_RELEASE=v0.106.0
 ENV DEVTEAM_KIT_RELEASE=$DEVTEAM_RELEASE \
     DEVTEAM_BOX_TOOLS="claude-code=$CLAUDE_CODE_VERSION claude-swap=$CLAUDE_SWAP_VERSION gh=$GH_VERSION ttyd=$TTYD_VERSION mise=$MISE_VERSION uv=$UV_VERSION"
 
