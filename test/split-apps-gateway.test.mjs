@@ -9,9 +9,13 @@
 // answers are the expected values for every route this ticket keeps.
 // Skips, each naming its cause, never fail a regular PR: manifest drift that stops HEAD's split, and
 // an apps-gateway override or a gateway-area item that went stale because its original changed on
-// main (the parity run reports it, and the next apps ticket re-pins it). Another ticket's stale
-// apps-tests item is printed, not failed. Anything else stale of this area or this ticket's patches,
-// any conflict, or a crash fails.
+// main (the parity run reports it, and the next apps ticket re-pins it); and one of this ticket's
+// test patches that no longer applies because its file changed since the patch was made, which skips
+// A1 and that patch's part of K1, naming it. Another ticket's stale apps-tests item is printed, not
+// failed. Anything else stale of apps-gateway, the gateway area or this ticket's patches (a gateway-area
+// item stale with no drift included), any conflict, or a crash fails.
+// K1 holds this ticket's fourteen test patches in apps-tests to the lines the spec names, each with its
+// test-ledger entry.
 // A scratch HOME and DEVTEAM_GATEWAY_DIR, ports away from 4320/4321, every other DEVTEAM_* unset.
 // Ports: +2 the stand-in hub, +50 the stand-in project dashboard (its scan block +50..+74); each
 // gateway listens on a port freePort finds.
@@ -112,6 +116,21 @@ function driftOf(s) {
   return false;
 }
 const DRIFT_SKIP = STALE.map(driftOf).find(Boolean) ?? false;
+// One of this ticket's test patches that no longer applies is drift when the tree's text of its file
+// (unpatched, as the patch failed) is no longer the blob the patch's index line names: the file changed
+// on main, or in the tests area's rewrite, since the patch was made. Its name -> the skip, naming it.
+// A patch that fails on the very text it was made from is broken: no skip, A1 and K1 fail.
+const PATCH_SKIP = {};
+for (const s of STALE) {
+  if (s.area !== 'apps-tests' || s.kind !== 'patch' || !PATCHES.includes(s.name) || !/^no longer applies/.test(s.why)) continue;
+  const p = path.join(splitSrc, 'overlay', 'apps-tests', 'patches', s.name);
+  const text = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
+  const file = text.match(/^diff --git a\/(\S+) /m)?.[1];
+  const blob = text.match(/^index ([0-9a-f]{40})\.\./m)?.[1];
+  const abs = file ? path.join(TREE, file) : null;
+  const now = abs && fs.existsSync(abs) ? run('git', ['hash-object', abs]).stdout.trim() : '';
+  if (blob && now && blob !== now) PATCH_SKIP[s.name] = `this ticket's patch ${s.name} no longer applies: ${file} changed since the patch was made (${s.why.slice(0, 160)})`;
+}
 const skip = () => MANIFEST_SKIP || DRIFT_SKIP;
 
 // ---- the gateways ----
@@ -325,14 +344,18 @@ async function both(p, method, route, o = {}) {
 }
 const sourceCsp = async (p) => (await p.source.req('GET', '/', { headers: NAV })).headers['content-security-policy'];
 
-test("A1: HEAD's split applies exactly apps-gateway's three overrides; nothing of apps-gateway or this ticket's patches is stale, and no conflict", { skip: skip() }, (t) => {
+test("A1: HEAD's split applies exactly apps-gateway's three overrides; nothing of apps-gateway, the gateway area or this ticket's patches is stale, and no conflict", { skip: skip() }, (t) => {
   assert.equal(splitRun.status, 0, `split: ${splitRun.stderr.slice(0, 1200)}`);
   assert.ok(treeMade, 'the tree is written');
   assert.deepEqual(itemsOf('apps-gateway'), OVERRIDES.map((o) => `override ${o}`), 'applied apps-gateway');
-  const mine = STALE.filter((s) => s.area === 'apps-gateway' || s.area === 'gateway' || (s.area === 'apps-tests' && PATCHES.includes(s.name)));
+  const ours = STALE.filter((s) => s.area === 'apps-gateway' || s.area === 'gateway' || (s.area === 'apps-tests' && PATCHES.includes(s.name)));
+  // one of this ticket's patches that no longer applies because its file changed skips, as in K1
+  const drifted = ours.filter((s) => s.area === 'apps-tests' && PATCH_SKIP[s.name]);
+  const mine = ours.filter((s) => !drifted.includes(s));
   assert.deepEqual(mine, [], "nothing of apps-gateway, the gateway area or this ticket's patches is stale");
-  for (const s of STALE.filter((x) => !mine.includes(x))) t.diagnostic(`stale, another area's or ticket's (its own test judges it): ${s.area} ${s.kind} ${s.name}: ${String(s.why).slice(0, 200)}`);
+  for (const s of STALE.filter((x) => !ours.includes(x))) t.diagnostic(`stale, another area's or ticket's (its own test judges it): ${s.area} ${s.kind} ${s.name}: ${String(s.why).slice(0, 200)}`);
   assert.deepEqual(CONFLICTS, [], 'no conflict');
+  if (drifted.length) t.skip(drifted.map((s) => PATCH_SKIP[s.name]).join('; '));
 });
 
 test("H1: the hub route serves the build's index.html under hubCsp with script-src 'self' and the / hashes, style-src 'self', font-src 'self'; headers the source's with content-length", { skip: skip() }, async () => {
@@ -522,5 +545,151 @@ test("S5: the box's other pages, and the project's /sw.js, keep their policy and
   for (const [what, extra] of [['', {}], [' (serviceworker)', { 'sec-fetch-dest': 'serviceworker' }]]) {
     const on = (x) => ({ ...FETCH, ...extra, host: `proj.${x.box}` });
     same({ r: await g.req('GET', '/sw.js', { headers: on(g) }), g }, { r: await p.source.req('GET', '/sw.js', { headers: on(p.source) }), g: p.source }, `the project's GET /sw.js${what}`);
+  }
+});
+
+// ---- this ticket's test patches (apps-tests), each with its ledger entry ----
+// Each patch's removed and added lines, in its order, as §The test patches makes them on the tree's
+// text (the tests area's cliRead rewrite included). The four stand-in hubs (hub-tab-bar,
+// hub-permalinks, hub-project-hosts, pull-refresh) each add one serveBuild block, byte for byte this.
+const SERVE_BUILD = [
+  "// The built hub's other files, as the gateway's asset hook serves the export (kit-1021): a regular",
+  "// file under dir, no '..' or NUL, by a type from its extension; else false, and the caller answers.",
+  "const BUILD_TYPES = Object.assign(Object.create(null), { html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', txt: 'text/plain; charset=utf-8', json: 'application/json', svg: 'image/svg+xml', png: 'image/png', ico: 'image/x-icon', webp: 'image/webp', woff2: 'font/woff2' });",
+  "function serveBuild(s, dir, pathname) {",
+  "  let rel;",
+  "  try { rel = decodeURIComponent(pathname); } catch { return false; }",
+  "  const type = BUILD_TYPES[path.extname(rel).slice(1)];",
+  "  if (!type || rel.includes('\\0') || rel.split('/').includes('..')) return false;",
+  "  const file = path.join(dir, rel);",
+  "  try { if (!fs.lstatSync(file).isFile()) return false; } catch { return false; }",
+  "  s.writeHead(200, { 'content-type': type });",
+  "  s.end(cliRead(fs.readFileSync, fs, file));",
+  "  return true;",
+  "}",
+];
+const EXPECT = {
+  'canvas-gateway.test.mjs': {
+    minus: ["  const g = G.createGateway({ publicUrl: `http://box.localhost:${port}`, dir, ttydPort, ttydPage, uploadsDir, hubPage: path.join(repo, 'docs/devteam/dashboard/hub.html'), log: () => {}, ...opts });"],
+    plus: ["  const g = G.createGateway({ publicUrl: `http://box.localhost:${port}`, dir, ttydPort, ttydPage, uploadsDir, hubApp: path.join(repo, 'docs/devteam/apps/hub'), log: () => {}, ...opts });"],
+  },
+  'presence-gateway.test.mjs': {
+    minus: ["  const g = G.createGateway({ publicUrl: `http://box.localhost:${port}`, dir, ttydPort, ttydPage, uploadsDir, hubPage: path.join(repo, 'docs/devteam/dashboard/hub.html'), log: () => {}, ...opts });"],
+    plus: ["  const g = G.createGateway({ publicUrl: `http://box.localhost:${port}`, dir, ttydPort, ttydPage, uploadsDir, hubApp: path.join(repo, 'docs/devteam/apps/hub'), log: () => {}, ...opts });"],
+  },
+  'org-access.admins.test.mjs': {
+    minus: ["const HUB_PAGE = path.join(repo, 'docs', 'devteam', 'dashboard', 'hub.html');",
+      "  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubPage: HUB_PAGE, log: (m) => logs.push(m), ...opts });"],
+    plus: ["const HUB_APP = path.join(repo, 'docs', 'devteam', 'apps', 'hub');",
+      "  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubApp: HUB_APP, log: (m) => logs.push(m), ...opts });"],
+  },
+  'org-access.admins.chrome.test.mjs': {
+    minus: ["const HUB_PAGE = path.join(repo, 'docs', 'devteam', 'dashboard', 'hub.html');",
+      "  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubPage: HUB_PAGE, log: (m) => logs.push(m), ...opts });"],
+    plus: ["const HUB_APP = path.join(repo, 'docs', 'devteam', 'apps', 'hub');",
+      "  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubApp: HUB_APP, log: (m) => logs.push(m), ...opts });"],
+  },
+  'org-access.invites.test.mjs': {
+    minus: ["const HUB_PAGE = path.join(repo, 'docs', 'devteam', 'dashboard', 'hub.html');",
+      "  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubPage: HUB_PAGE, log: (m) => logs.push(m), ...opts });",
+      "    const again = G.createGateway({ publicUrl: gw.publicUrl, dir: gw.dir, ttydPort: await freePort(), ttydPage: path.join(tmp, 'pre-people-ttyd.html'), uploadsDir: fs.mkdtempSync(path.join(tmp, 'pre-people-up-')), hubPage: HUB_PAGE, log: () => {} });"],
+    plus: ["const HUB_APP = path.join(repo, 'docs', 'devteam', 'apps', 'hub');",
+      "  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubApp: HUB_APP, log: (m) => logs.push(m), ...opts });",
+      "    const again = G.createGateway({ publicUrl: gw.publicUrl, dir: gw.dir, ttydPort: await freePort(), ttydPage: path.join(tmp, 'pre-people-ttyd.html'), uploadsDir: fs.mkdtempSync(path.join(tmp, 'pre-people-up-')), hubApp: HUB_APP, log: () => {} });"],
+  },
+  'org-access.methods.test.mjs': {
+    minus: ["const HUB_PAGE = path.join(repo, 'docs', 'devteam', 'dashboard', 'hub.html');",
+      "  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubPage: HUB_PAGE, log: (m) => logs.push(m), methodTypes: { stub }, ...opts });",
+      "    try { g = G.createGateway({ publicUrl: `http://box.localhost:${await freePort()}`, dir: path.join(tmp, tag), ttydPort: await freePort(), ttydPage, uploadsDir, hubPage: HUB_PAGE, log: () => {}, methodTypes }); } catch (e) { return e; }"],
+    plus: ["const HUB_APP = path.join(repo, 'docs', 'devteam', 'apps', 'hub');",
+      "  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubApp: HUB_APP, log: (m) => logs.push(m), methodTypes: { stub }, ...opts });",
+      "    try { g = G.createGateway({ publicUrl: `http://box.localhost:${await freePort()}`, dir: path.join(tmp, tag), ttydPort: await freePort(), ttydPage, uploadsDir, hubApp: HUB_APP, log: () => {}, methodTypes }); } catch (e) { return e; }"],
+  },
+  'org-access.people-page.test.mjs': {
+    minus: ["const HUB_PAGE = path.join(repo, 'docs', 'devteam', 'dashboard', 'hub.html');",
+      "  const g = G.createGateway({ publicUrl, dir, ttydPort: TTYD, ttydPage, uploadsDir, hubPage: HUB_PAGE, log: (m) => logs.push(m) });"],
+    plus: ["const HUB_APP = path.join(repo, 'docs', 'devteam', 'apps', 'hub');",
+      "  const g = G.createGateway({ publicUrl, dir, ttydPort: TTYD, ttydPage, uploadsDir, hubApp: HUB_APP, log: (m) => logs.push(m) });"],
+  },
+  'org-access.people-state.test.mjs': {
+    minus: ["const HUB_PAGE = path.join(repo, 'docs', 'devteam', 'dashboard', 'hub.html');",
+      "  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubPage: HUB_PAGE, log: (m) => logs.push(m), ...opts });"],
+    plus: ["const HUB_APP = path.join(repo, 'docs', 'devteam', 'apps', 'hub');",
+      "  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubApp: HUB_APP, log: (m) => logs.push(m), ...opts });"],
+  },
+  'org-access.view.test.mjs': {
+    minus: ["const HUB_PAGE = path.join(repo, 'docs', 'devteam', 'dashboard', 'hub.html');",
+      "  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubPage: HUB_PAGE, log: (m) => logs.push(m), methodTypes: { stub }, ...opts });"],
+    plus: ["const HUB_APP = path.join(repo, 'docs', 'devteam', 'apps', 'hub');",
+      "  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubApp: HUB_APP, log: (m) => logs.push(m), methodTypes: { stub }, ...opts });"],
+  },
+  'hub-tab-bar.test.mjs': {
+    minus: ["const hubHtml = () => cliRead(fs.readFileSync, fs, path.join(kit, 'dashboard', 'hub.html'), 'utf8');"],
+    plus: ["const hubHtml = () => cliRead(fs.readFileSync, fs, path.join(kit, 'apps', 'hub', 'index.html'), 'utf8');",
+      ...SERVE_BUILD,
+      "      if (q.method === 'GET' && serveBuild(s, path.join(kit, 'apps', 'hub'), u.pathname)) return;"],
+  },
+  'hub-permalinks.test.mjs': {
+    minus: ["const hubHtml = () => cliRead(fs.readFileSync, fs, path.join(kit, 'dashboard', 'hub.html'), 'utf8');"],
+    plus: ["const hubHtml = () => cliRead(fs.readFileSync, fs, path.join(kit, 'apps', 'hub', 'index.html'), 'utf8');",
+      ...SERVE_BUILD,
+      "      if (q.method === 'GET' && serveBuild(s, path.join(kit, 'apps', 'hub'), u.pathname)) return;"],
+  },
+  'hub-project-hosts.test.mjs': {
+    minus: ["const hubHtml = () => cliRead(fs.readFileSync, fs, path.join(kit, 'dashboard', 'hub.html'), 'utf8');"],
+    plus: ["const hubHtml = () => cliRead(fs.readFileSync, fs, path.join(kit, 'apps', 'hub', 'index.html'), 'utf8');",
+      ...SERVE_BUILD,
+      "      if (q.method === 'GET' && serveBuild(s, path.join(kit, 'apps', 'hub'), u.pathname)) return;"],
+  },
+  'pull-refresh.test.mjs': {
+    minus: ["    if (u.pathname === '/') { s.writeHead(200, { 'content-type': 'text/html' }); return s.end(cliRead(fs.readFileSync, fs, path.join(kit, 'dashboard', 'hub.html'), 'utf8')); }"],
+    plus: [...SERVE_BUILD,
+      "",
+      "    if (u.pathname === '/') { s.writeHead(200, { 'content-type': 'text/html' }); return s.end(cliRead(fs.readFileSync, fs, path.join(kit, 'apps', 'hub', 'index.html'), 'utf8')); }",
+      "    if (q.method === 'GET' && serveBuild(s, path.join(kit, 'apps', 'hub'), u.pathname)) return;"],
+  },
+  'gateway.test.mjs': {
+    minus: ["    assert.equal(hub.body, cliRead(fs.readFileSync, fs, path.join(kit, 'dashboard', 'hub.html'), 'utf8'), 'the gateway\\'s own copy of the page');",
+      "    assert.equal(dash.headers['content-security-policy'], `frame-src 'self'; frame-ancestors 'self' ${gw.publicUrl}`);"],
+    plus: ["    assert.equal(hub.body, cliRead(fs.readFileSync, fs, path.join(kit, 'apps', 'hub', 'index.html'), 'utf8'), 'the gateway\\'s own copy of the page');",
+      "    assert.ok(hcsp.split('; ').includes(`script-src 'self'${JSON.parse(cliRead(fs.readFileSync, fs, path.join(kit, 'apps', 'hub', 'csp-hashes.json'), 'utf8')).pages['/'].map((h) => ` '${h}'`).join('')}`), hcsp);",
+      "    assert.equal(dash.headers['content-security-policy'], `frame-src 'self'; frame-ancestors 'self' ${gw.publicUrl}; script-src 'self'${JSON.parse(cliRead(fs.readFileSync, fs, path.join(kit, 'apps', 'dashboard', 'csp-hashes.json'), 'utf8')).pages['/'].map((h) => ` '${h}'`).join('')}; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net`);"],
+  },
+};
+// a patch's removed and added lines, in its order, hunk by hunk, and the files its headers name
+function patchLines(text) {
+  const minus = [], plus = [], files = [];
+  let hunk = false;
+  for (const l of text.split('\n')) {
+    if (l.startsWith('diff --git ')) { files.push(l); hunk = false; continue; }
+    if (l.startsWith('@@')) { hunk = true; continue; }
+    if (!hunk) continue;
+    if (l.startsWith('-')) minus.push(l.slice(1));
+    else if (l.startsWith('+')) plus.push(l.slice(1));
+  }
+  return { minus, plus, files };
+}
+const hex = (b) => crypto.createHash('sha256').update(b).digest('hex');
+test("K1: this ticket's fourteen test patches apply, change only the lines the spec names, and each test has its ledger entry", { skip: skip() }, async (t) => {
+  assert.deepEqual(Object.keys(EXPECT).map((f) => `${f}.patch`), PATCHES, 'EXPECT names the fourteen');
+  const applied = itemsOf('apps-tests');
+  for (const name of PATCHES) {
+    const f = name.replace(/\.patch$/, '');
+    await t.test(f, { skip: PATCH_SKIP[name] ?? false }, () => {
+      const rel = `test/split/overlay/apps-tests/patches/${name}`;
+      const abs = path.join(root, rel);
+      assert.ok(fs.existsSync(abs), `${f}: no such patch ${rel}`);
+      assert.ok(applied.includes(`patch ${name}`), `${f}: the split applies ${name} (stale: ${JSON.stringify(STALE.filter((s) => s.name === name))})`);
+      const r = run('git', ['apply', '-R', '--check', abs], { cwd: TREE });
+      assert.equal(r.status, 0, `${f}: git apply -R --check ${name} in the tree: ${r.stderr.trim()}`);
+      const got = patchLines(fs.readFileSync(abs, 'utf8'));
+      assert.deepEqual(got.files, [`diff --git a/test/${f} b/test/${f}`], `${f}: ${name} changes test/${f} alone`);
+      assert.deepEqual(got.minus, EXPECT[f].minus, `${f}: ${name} removes exactly the lines the spec names`);
+      assert.deepEqual(got.plus, EXPECT[f].plus, `${f}: ${name} adds exactly the lines the spec names`);
+      const entry = path.join(root, 'test/split/ledger/tests', `${f}.json`);
+      assert.ok(fs.existsSync(entry), `${f}: a ledger entry`);
+      const head = run('git', ['-C', root, 'show', `${sha}:test/${f}`]).stdout;
+      assert.deepEqual(JSON.parse(fs.readFileSync(entry, 'utf8')), { file: `test/${f}`, ticket: 'kit-1021-hub-gateway-tree', sha256: hex(fs.readFileSync(path.join(TREE, 'test', f))), source_sha256: hex(head) }, `${f}: its ledger entry`);
+    });
   }
 });

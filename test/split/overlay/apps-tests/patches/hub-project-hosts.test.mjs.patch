@@ -1,0 +1,35 @@
+diff --git a/test/hub-project-hosts.test.mjs b/test/hub-project-hosts.test.mjs
+index 42b381f9e277486df7edbe5ba6b8f26b4720240d..cd07af90c48dc651a836e411c0001410716c5891 100644
+--- a/test/hub-project-hosts.test.mjs
++++ b/test/hub-project-hosts.test.mjs
+@@ -12,7 +12,21 @@ import { canDrive, openChrome } from './lib/chrome.mjs';
+ import { cliRead } from './lib/cli-source.mjs';
+ 
+ const FIX = JSON.parse(cliRead(fs.readFileSync, fs, path.join(testDir, 'fixtures', 'project-hosts.json'), 'utf8'));
+-const hubHtml = () => cliRead(fs.readFileSync, fs, path.join(kit, 'dashboard', 'hub.html'), 'utf8');
++const hubHtml = () => cliRead(fs.readFileSync, fs, path.join(kit, 'apps', 'hub', 'index.html'), 'utf8');
++// The built hub's other files, as the gateway's asset hook serves the export (kit-1021): a regular
++// file under dir, no '..' or NUL, by a type from its extension; else false, and the caller answers.
++const BUILD_TYPES = Object.assign(Object.create(null), { html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', txt: 'text/plain; charset=utf-8', json: 'application/json', svg: 'image/svg+xml', png: 'image/png', ico: 'image/x-icon', webp: 'image/webp', woff2: 'font/woff2' });
++function serveBuild(s, dir, pathname) {
++  let rel;
++  try { rel = decodeURIComponent(pathname); } catch { return false; }
++  const type = BUILD_TYPES[path.extname(rel).slice(1)];
++  if (!type || rel.includes('\0') || rel.split('/').includes('..')) return false;
++  const file = path.join(dir, rel);
++  try { if (!fs.lstatSync(file).isFile()) return false; } catch { return false; }
++  s.writeHead(200, { 'content-type': type });
++  s.end(cliRead(fs.readFileSync, fs, file));
++  return true;
++}
+ const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+ 
+ // A test's cleanup: the last step added runs first, every step runs, each bounded; the first error is thrown.
+@@ -78,6 +92,7 @@ async function fixture(t, { box = null, csp = false, standIns = [], hold = 0 } =
+       if (u.pathname === '/instances.json') { s.writeHead(200, { 'content-type': 'application/json' }); return s.end(JSON.stringify({ hub: 1, kit: 'v0.57.0', instances: F.list })); }
+       const b = u.pathname === '/box.json' && box ? box(F) : null;
+       if (b) { s.writeHead(200, { 'content-type': 'application/json' }); return s.end(JSON.stringify(b)); }
++      if (q.method === 'GET' && serveBuild(s, path.join(kit, 'apps', 'hub'), u.pathname)) return;
+       s.writeHead(404, { 'content-type': 'application/json' });
+       return s.end('{}');
+     }

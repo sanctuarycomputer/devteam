@@ -1,0 +1,23 @@
+diff --git a/test/gateway.test.mjs b/test/gateway.test.mjs
+index e2e0c2c49f5ac3816e7a5ae398fd38451cb92827..6910ecfd47184aa206ff9bb91bfb24c6b59a6f39 100644
+--- a/test/gateway.test.mjs
++++ b/test/gateway.test.mjs
+@@ -389,7 +389,8 @@ test('behind the gateway the kit runs as on a laptop: hub, dashboard, owner acti
+     const list = (await gw.req('GET', '/instances.json', { headers: { 'sec-fetch-site': 'same-origin' } })).json.instances;
+     assert.ok(hcsp.split('; ').includes(`frame-src ${gw.term} ${list.map((x) => gw.inst(x.name)).join(' ')}`), hcsp);
+     assert.ok(hcsp.split('; ').includes("frame-ancestors 'none'"), hcsp);
+-    assert.equal(hub.body, cliRead(fs.readFileSync, fs, path.join(kit, 'dashboard', 'hub.html'), 'utf8'), 'the gateway\'s own copy of the page');
++    assert.equal(hub.body, cliRead(fs.readFileSync, fs, path.join(kit, 'apps', 'hub', 'index.html'), 'utf8'), 'the gateway\'s own copy of the page');
++    assert.ok(hcsp.split('; ').includes(`script-src 'self'${JSON.parse(cliRead(fs.readFileSync, fs, path.join(kit, 'apps', 'hub', 'csp-hashes.json'), 'utf8')).pages['/'].map((h) => ` '${h}'`).join('')}`), hcsp);
+     assert.ok(!hcsp.includes('127.0.0.1'), hcsp);
+     assert.deepEqual(list.map((x) => [x.name, x.port]).sort(), [['alpha', P], ['echo', P + 5]]);
+     const boxJson = (await gw.req('GET', '/box.json')).json;
+@@ -399,7 +400,7 @@ test('behind the gateway the kit runs as on a laptop: hub, dashboard, owner acti
+     // a dashboard on its own subdomain, exactly as the kit serves it, its policy pointed at the box
+     const dash = await gw.req('GET', '/', { on: 'alpha' });
+     assert.equal(dash.status, 200);
+-    assert.equal(dash.headers['content-security-policy'], `frame-src 'self'; frame-ancestors 'self' ${gw.publicUrl}`);
++    assert.equal(dash.headers['content-security-policy'], `frame-src 'self'; frame-ancestors 'self' ${gw.publicUrl}; script-src 'self'${JSON.parse(cliRead(fs.readFileSync, fs, path.join(kit, 'apps', 'dashboard', 'csp-hashes.json'), 'utf8')).pages['/'].map((h) => ` '${h}'`).join('')}; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net`);
+     assert.equal((await gw.req('GET', '/api/hello', { on: 'alpha' })).json.port, P);
+     assert.equal((await gw.req('GET', '/api/file?path=README.md', { on: 'alpha' })).status === 403, false, 'a committed file is served by path, as a review page asks for it');
+     // an owner action passes the kit's own same-origin check, as from the page

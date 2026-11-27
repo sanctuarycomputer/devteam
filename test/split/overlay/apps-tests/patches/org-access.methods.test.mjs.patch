@@ -1,0 +1,31 @@
+diff --git a/test/org-access.methods.test.mjs b/test/org-access.methods.test.mjs
+index a73de66bdbdbcebff8352165c5bbec57f72e0c4b..3d6385fbe84e66b87cd2c31fef5a59f2ce2f6436 100644
+--- a/test/org-access.methods.test.mjs
++++ b/test/org-access.methods.test.mjs
+@@ -22,7 +22,7 @@ import { cliRead } from './lib/cli-source.mjs';
+ 
+ const here = path.dirname(fileURLToPath(import.meta.url));
+ const repo = path.resolve(here, '..');
+-const HUB_PAGE = path.join(repo, 'docs', 'devteam', 'dashboard', 'hub.html');
++const HUB_APP = path.join(repo, 'docs', 'devteam', 'apps', 'hub');
+ delete process.env.DEVTEAM_CLAIM_TOKEN;
+ // imported after lib/kit.mjs has set the ports the gateway reads at load
+ const G = await import(pathToFileURL(path.join(repo, 'cloud', 'gateway.mjs')).href);
+@@ -157,7 +157,7 @@ async function gateway(name, extra = {}) {
+   fs.mkdirSync(uploadsDir, { recursive: true, mode: 0o750 });
+   const logs = [];
+   const dir = opts.dir ?? path.join(tmp, tag);
+-  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubPage: HUB_PAGE, log: (m) => logs.push(m), methodTypes: { stub }, ...opts });
++  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubApp: HUB_APP, log: (m) => logs.push(m), methodTypes: { stub }, ...opts });
+   await new Promise((r) => g.server.listen(port, '127.0.0.1', r));
+   const token = /claim#([\w-]+)/.exec(logs.join('\n'))?.[1];
+   const file = path.join(dir, 'state.json');
+@@ -984,7 +984,7 @@ test('org-access A17: the table\'s seam: no replacing the passkey row, no bad na
+     const ttydPage = path.join(tmp, `${tag}-ttyd.html`);
+     fs.writeFileSync(ttydPage, 'ttyd');
+     let g;
+-    try { g = G.createGateway({ publicUrl: `http://box.localhost:${await freePort()}`, dir: path.join(tmp, tag), ttydPort: await freePort(), ttydPage, uploadsDir, hubPage: HUB_PAGE, log: () => {}, methodTypes }); } catch (e) { return e; }
++    try { g = G.createGateway({ publicUrl: `http://box.localhost:${await freePort()}`, dir: path.join(tmp, tag), ttydPort: await freePort(), ttydPage, uploadsDir, hubApp: HUB_APP, log: () => {}, methodTypes }); } catch (e) { return e; }
+     g.server.close();
+     return null;
+   };
