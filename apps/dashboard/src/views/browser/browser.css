@@ -1,0 +1,42 @@
+/* The browser view's style (browser.html 9-51): its route's only stylesheet, served from 'self'. */
+:root { color-scheme: light dark; --bg: #fafafa; --surface: #ffffff; --fg: #171717; --fg-2: #666666; --line: #ebebeb; --chip: #f2f2f2; --red: #e5484d; --green: #2e9e5b; --focus: #0070f3;
+  --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; --mono: ui-monospace, SFMono-Regular, Menlo, monospace; --page: 1200px; --text: 600px; }
+@media (prefers-color-scheme: dark) { :root { --bg: #000000; --surface: #0a0a0a; --fg: #ededed; --fg-2: #a1a1a1; --line: #1f1f1f; --chip: #161616; --red: #ff6369; --green: #4cc38a; --focus: #52a8ff; } }
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--fg); font: 14px/1.5 var(--sans); }
+main { max-width: var(--page); margin: 0 auto; padding: 8px 12px 8px; }
+.bar { display: flex; gap: 8px; align-items: center; padding: 6px 0; }
+.bar input { flex: 1; min-width: 0; font: 13px var(--mono); padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--fg); }
+.btn { font: inherit; font-size: 13px; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); cursor: pointer; white-space: nowrap; }
+.btn:focus-visible, .bar input:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.btn.danger { color: var(--red); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.note { margin: 0; min-height: 0; max-width: var(--text); color: var(--red); font-size: 13px; }
+.note:empty { display: none; }
+.area { position: relative; display: flex; justify-content: center; align-items: flex-start; min-height: 120px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow: hidden; }
+canvas { display: block; touch-action: none; cursor: default; }
+canvas.empty { display: none; }
+canvas:focus { outline: 2px solid var(--focus); outline-offset: -2px; }
+.area.down canvas { opacity: 0.5; }
+.waiting { margin: 40px 16px; max-width: var(--text); color: var(--fg-2); text-align: center; }
+.waiting[hidden] { display: none; }
+.bye { position: absolute; inset: 0; display: grid; place-items: center; padding: 20px; text-align: center; background: color-mix(in srgb, var(--surface) 92%, transparent); }
+.bye[hidden] { display: none; }
+.bye > div { max-width: var(--text); }
+.bye p { margin: 0 0 8px; }
+.bye .why { font-size: 15px; font-weight: 600; }
+.bye .sub { color: var(--fg-2); }
+.foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 6px 0 0; font-size: 13px; color: var(--fg-2); }
+.foot span:first-child { max-width: var(--text); }
+.chip { font: 12px var(--mono); padding: 1px 8px; border-radius: 999px; background: var(--chip); }
+.chip.live { color: var(--green); }
+dialog { width: min(var(--text), calc(100vw - 32px)); max-width: none; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--fg); padding: 16px; }
+dialog::backdrop { background: rgba(0, 0, 0, 0.4); }
+dialog p { margin: 0 0 14px; }
+#ask { overscroll-behavior: contain; }
+#ask .from { font-weight: 600; overflow-wrap: anywhere; }
+#ask .said { max-height: 40vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; unicode-bidi: isolate; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--chip); }
+#ask input { width: 100%; font: inherit; margin: 0 0 14px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--fg); }
+#ask [hidden] { display: none; }
+.actions { display: flex; justify-content: flex-end; gap: 8px; }
