@@ -18609,6 +18609,38 @@ function goalMetPlan(v, answer) {
   if (questionView(logGet(v.id)).status !== 'open') die(`${v.id} is no longer open (it changed while ${g.id}'s check ran); nothing was written`);
   return { g: now, m: measureOf(now), r };
 }
+// A goal just turned met (goalMetApply, goal status met): the kit archives the Library items drawn
+// for it itself, as the supervisor (kit-935, d-20261126-041538308: no question, no class). One
+// kit-934 artifact line per item archivableArtifacts(goal, now) names, {archived: true, goal,
+// reason: why}, under artifact archive's lock (an item archived by hand before gets the goal's line
+// too). It leaves alone an item the owner set (the fold's rank rule would set the line aside) and
+// one the log shows archived by a met turn before (a line with archived true and a goal, any goal:
+// only this writes one, kit-934's commands write goal null), so a rerun or a later met turn of any
+// goal it is drawn for never archives a restored item again, whatever the clocks say.
+// artifact restore brings any item back; no file moves. The words for the caller's output, or ''
+// when nothing was written.
+function archiveOnMet(goalId, why) {
+  logCache = null;
+  const g = logGet(goalId);
+  if (g?.type !== 'goal' || g.status !== 'met') return '';
+  const list = archivableArtifacts(goalId).map((a) => a.slug);
+  if (!list.length) return '';
+  fs.mkdirSync(runDir, { recursive: true });
+  const done = withLock(runPath('artifact-archive'), () => {
+    logCache = null;
+    const rec = archiveRecords();
+    const before = new Set(readLog().lines.filter((l) => l.type === 'artifact' && l.archived === true && typeof l.goal === 'string' &&['supervisor', 'owner'].includes(l.by) && typeof l.id === 'string').map((l) => l.id.slice('artifact:'.length)));
+    const wrote = [];
+    for (const slug of list) {
+      const cur = rec.get(slug);
+      if (cur?.by === 'owner' || before.has(slug)) continue;
+      appendLog({ type: 'artifact', ...(cur ? { op: 'set' } : {}), id: `artifact:${slug}`, archived: true, goal: goalId, reason: why }, 'supervisor');
+      wrote.push(slug);
+    }
+    return wrote;
+  });
+  return done.length ? `archived ${plural(done.length, 'Library item')} drawn for it: ${done.join(', ')} (artifact restore <slug> brings one back)` : '';
+}
 function goalMetApply(v, plan, by, chan) {
   if (!plan.g) return plan.why;
   const { g, m, r } = plan;
@@ -18618,7 +18650,8 @@ function goalMetApply(v, plan, by, chan) {
   else appendLog({ type: 'observation', source: 'owner', subject: g.id, kind: 'reading', detail: `the owner said yes to ${v.id}`, measure: { value: 1, unit }, approved: v.id, refs: [g.id, v.id] }, 'supervisor');
   if (r && !reached(g, m.target, r.value)) return `${g.id} keeps running: its check reads ${r.value}${unit ? ` ${unit}` : ''} now${r.sha ? ` (${r.on} at ${r.sha.slice(0, 12)})` : ''}, not its target ${m.target}`;
   appendLog({ type: 'goal', op: 'set', id: g.id, status: 'met', decision: { verdict: 'met', question: v.id }, ...chan }, by);
-  return `${g.id} is met${r ? ` (its check reads ${r.value}${unit ? ` ${unit}` : ''}${r.sha ? ` on ${r.on} at ${r.sha.slice(0, 12)}` : ''})` : ''}`;
+  const archived = archiveOnMet(g.id, `${g.id} is met (the owner's Yes to ${v.id})`);
+  return `${g.id} is met${r ? ` (its check reads ${r.value}${unit ? ` ${unit}` : ''}${r.sha ? ` on ${r.on} at ${r.sha.slice(0, 12)}` : ''})` : ''}${archived ? `; ${archived}` : ''}`;
 }
 // How a goal-met reading reads in the question's context: the value, when, and where it came from.
 function goalMetReadingWords(g, r) {
@@ -19113,10 +19146,12 @@ function cmdGoal() {
     if (to === 'met' && !flags.force && m.source === 'owner' && !goalReadings(id).some((x) => x.measure.value >= 1)) die(`${id} is met when the owner says so: answer its goal-met question, or record it with goal reading ${id} --value 1 --owner; --force to set it met anyway`);
     // marking it met answers its open goal-met question (Yes), as goal decide answers an approval
     const ask = to === 'met' ? questions().find((q) => q.class === 'goal-met' && q.goal === id && q.status === 'open') : null;
-    appendLog({ type: 'goal', op: 'set', id, status: to, ...(to === 'met' ? { decision: { verdict: 'met', ...(ask ? { question: ask.id } : {}) } } : {}) }, by);
+    const set = appendLog({ type: 'goal', op: 'set', id, status: to, ...(to === 'met' ? { decision: { verdict: 'met', ...(ask ? { question: ask.id } : {}) } } : {}) }, by);
     if (ask) appendLog({ type: 'question', op: 'set', id: ask.id, answer: GOAL_MET_CHOICES[0].label }, by);
     out(`${id} is ${to}${ask ? ` (and ${ask.id} is answered Yes)` : ''}`);
     if (ask) resolveQuestionThreads(ask.id, GOAL_MET_CHOICES[0].label, by);
+    const archived = to === 'met' ? archiveOnMet(id, `${id} is met (goal status met, ${set.at}${ask ? `, answering ${ask.id}` : ''})`) : '';
+    if (archived) out(archived);
     return;
   }
   if (sub === 'forecast') {
