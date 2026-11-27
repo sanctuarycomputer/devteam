@@ -1,0 +1,13 @@
+{
+  "what": "a real actions/attest-build-provenance bundle (SLSA v1, public-good Sigstore) for one GitHub release asset, recorded for kit-1050 (kit-install@2)",
+  "repo": "cli/cli",
+  "tag": "v2.106.0",
+  "asset": "gh_2.106.0_linux_arm64.tar.gz",
+  "asset_sha256": "5e8a0c51e1a8345f36bd0b8bb88604b6a5388df16f3ab3e3b9b6d794fa223a67",
+  "commands": [
+    "gh release download v2.106.0 --repo cli/cli --pattern gh_2.106.0_linux_arm64.tar.gz",
+    "gh attestation download gh_2.106.0_linux_arm64.tar.gz --repo cli/cli --predicate-type https://slsa.dev/provenance/v1"
+  ],
+  "file": "bundle.jsonl, the one line gh wrote to sha256:5e8a0c51e1a8345f36bd0b8bb88604b6a5388df16f3ab3e3b9b6d794fa223a67.jsonl",
+  "recorded": "2026-11-27"
+}

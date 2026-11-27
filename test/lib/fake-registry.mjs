@@ -212,7 +212,7 @@ function makeCa(tag) {
 // key (its id is the SHA-256 of its public key, as Rekor's is)
 export function trustRoot(ca) {
   const spki = crypto.createPublicKey(ca.logKey).export({ type: 'spki', format: 'der' });
-  return { v: 1, fulcio: [ca.intermediate, ca.root], rekor: { keyId: crypto.createHash('sha256').update(spki).digest('hex'), spki: spki.toString('base64') } };
+  return { v: 1, fulcio: [ca.intermediate, ca.root], rekor: { keyId: crypto.createHash('sha256').update(spki).digest('hex'), spki: spki.toString('base64'), name: LOG_NAME } };
 }
 // What a forger can serve (FORGERIES), one at a time, beside FAILURES (whose list kit-952 fixed):
 //   no-slsa    the bundle holds npm's publish attestation only, no SLSA provenance
@@ -234,7 +234,9 @@ export function trustRoot(ca) {
 //              another signature or another certificate than the bundle's
 export const FORGERIES = ['no-slsa', 'forged', 'other-ca', 'expired', 'bad-set', 'no-tlog', 'san', 'impostor-ca', 'leaf-ca', 'early', 'entry-payload', 'entry-sig', 'entry-cert', 'san-repo', 'san-ref', 'san-ref-prefix'];
 const PAE = (type, body) => Buffer.concat([Buffer.from(`DSSEv1 ${Buffer.byteLength(type)} ${type} ${body.length} `), body]);
-function signedEnvelope(st, ca, other, forge, impostor) {
+// gh (kit-install@2): the tlog entry as Rekor v1 writes it for a GitHub attestation: a global logIndex,
+// the signed entry timestamp over it, and an inclusion proof at the shard-local index with a checkpoint
+function signedEnvelope(st, ca, other, forge, impostor, gh = null) {
   const now = Date.now();
   const leafKey = newKey();
   const w = st.predicate.buildDefinition.externalParameters.workflow;
@@ -257,8 +259,9 @@ function signedEnvelope(st, ca, other, forge, impostor) {
   const canonicalizedBody = Buffer.from(JSON.stringify(entry)).toString('base64');
   const integratedTime = Math.floor(now / 1000);
   const { keyId } = trustRoot(ca).rekor;
-  const set = JSON.stringify({ body: canonicalizedBody, integratedTime: forge === 'bad-set' ? integratedTime - 1 : integratedTime, logID: keyId, logIndex: 1 });
-  const tlog = { logIndex: '1', logId: { keyId: Buffer.from(keyId, 'hex').toString('base64') }, kindVersion: { kind: 'dsse', version: '0.0.1' }, integratedTime: String(integratedTime), inclusionPromise: { signedEntryTimestamp: crypto.sign('sha256', Buffer.from(set), crypto.createPrivateKey(ca.logKey)).toString('base64') }, canonicalizedBody };
+  const logIndex = gh ? GLOBAL_BASE + SHARD_INDEX : 1;
+  const set = JSON.stringify({ body: canonicalizedBody, integratedTime: forge === 'bad-set' ? integratedTime - 1 : integratedTime, logID: keyId, logIndex });
+  const tlog = { logIndex: String(logIndex), logId: { keyId: Buffer.from(keyId, 'hex').toString('base64') }, kindVersion: { kind: 'dsse', version: '0.0.1' }, integratedTime: String(integratedTime), inclusionPromise: { signedEntryTimestamp: crypto.sign('sha256', Buffer.from(set), crypto.createPrivateKey(ca.logKey)).toString('base64') }, ...(gh && gh.fail !== 'no-inclusion-proof' ? { inclusionProof: inclusionProof(canonicalizedBody, ca, gh) } : {}), canonicalizedBody };
   return {
     mediaType: 'application/vnd.dev.sigstore.bundle.v0.3+json',
     verificationMaterial: { certificate: { rawBytes: leaf.toString('base64') }, tlogEntries: forge === 'no-tlog' ? [] : [tlog], timestampVerificationData: { rfc3161Timestamps: [] } },
@@ -271,6 +274,184 @@ function attestations(p, fail, state) {
   return { attestations: [{ predicateType: PUBLISH, bundle: envelope(pub) }, { predicateType: SLSA, bundle: signedEnvelope(st, state.ca, state.otherCa, state.forge, state.impostorCa) }].filter((a) => !(state.forge === 'no-slsa' && a.predicateType === SLSA)) };
 }
 
+// ---- the fake GitHub (kit-install@2) ------------------------------------------------------------
+// A release v<version> of the provenance's repository has two assets, as release.yml attaches them:
+// <pack>, npm pack's file name (the registry's tarball, the same bytes), and <pack>.sigstore.json, the
+// bundle actions/attest-build-provenance makes for it. Downloads go through a redirect to a stand-in for
+// release-assets.githubusercontent.com, as GitHub's do; githubAsset, given DEVTEAM_GITHUB_DOWNLOAD, sends
+// https://github.com/<p> to <url><p> and https://<h>.githubusercontent.com/<p> to
+// <url>-/githubusercontent/<h>.githubusercontent.com/<p>.
+//
+// GitHub's failures (GITHUB_FAILURES), one at a time, beside FAILURES (whose unreachable and server-error
+// stop these routes too):
+//   no-asset, no-bundle  the pack, or the bundle, is a 404
+//   digest               the statement's subject digest is another file's sha256
+//   repo, workflow, ref, commit
+//                        the statement names another repository, workflow file, ref (so does the leaf's
+//                        SAN, which follows the statement) or commit
+//   inclusion-proof      one hash of the inclusion proof is flipped: it no longer leads to its root
+//   checkpoint-key       the checkpoint is signed by another key, under the log's name and key hint
+//   checkpoint-root      the checkpoint, signed by the log, carries another root hash
+//   checkpoint-size      the checkpoint, signed by the log, carries another tree size (the proof's + 1)
+//   checkpoint-origin    the checkpoint, signed by the log's key, names another log (rekor.other.test)
+//   no-inclusion-proof   the tlog entry has no inclusion proof (Rekor v2's shape, which the design refuses)
+//   two-subjects         the statement has two subjects, the pack's and another file's
+//   replaced             another pack (the same package in other bytes) with a bundle rightly made for
+//                        those bytes: a replaced pair (W1), which only a pin's integrity refuses
+//   rate-limited         every GitHub request is a 429
+//   forbidden            the stand-in answers 403 (as for an expired signed URL)
+//   no-answer            the asset's request is held open and never answered
+//   drip                 the asset answers 200 at once, then one byte a second, never ending
+//   hops-5, hops-6       5 or 6 redirects (through hop<k>.githubusercontent.com) before the asset
+//   redirect-elsewhere   the redirect goes to https://evil.example/…
+//   redirect-http        it goes to http://release-assets.githubusercontent.com/…
+//   redirect-lookalike   it goes to https://githubusercontent.com.evil.example/…
+//   redirect-loopback    it goes to the fake's own http://127.0.0.1:<port>/…
+//   big-pack             the pack is 64 MiB and one byte, chunked, with no content-length
+//   big-bundle           the bundle declares a content-length of 1 MiB and one byte
+//   bundle-at-cap        the bundle is exactly 1 MiB (its JSON padded with spaces)
+//   pack-at-cap          the pack is exactly 64 MiB, with its content-length
+//   short-body           the pack declares its length, sends half of it, and closes the connection
+// FORGERIES apply to the bundle as to npm's; no-slsa serves npm's publish attestation as the asset, so
+// its predicateType isn't SLSA's.
+export const GITHUB_FAILURES = ['no-asset', 'no-bundle', 'digest', 'repo', 'workflow', 'ref', 'commit', 'inclusion-proof', 'checkpoint-key', 'checkpoint-root', 'checkpoint-size', 'checkpoint-origin', 'no-inclusion-proof', 'two-subjects', 'replaced', 'rate-limited', 'forbidden', 'no-answer', 'drip', 'hops-5', 'hops-6', 'redirect-elsewhere', 'redirect-http', 'redirect-lookalike', 'redirect-loopback', 'big-pack', 'big-bundle', 'bundle-at-cap', 'pack-at-cap', 'short-body'];
+// the log's name in its checkpoints (the trust root's rekor.name), its tree, and where the entry sits:
+// Rekor v1's inclusion proof indexes the entry in its shard (SHARD_INDEX, in a tree of TREE_SIZE leaves,
+// so the proof has inner and border hashes), while logIndex and the signed entry timestamp use the global
+// index, GLOBAL_BASE + SHARD_INDEX
+export const LOG_NAME = 'rekor.devteam.test';
+// the repository whose releases the fake serves: the kit's upstream, as the fixture's provenance names it
+// (0.99.0's statement names another, as on the registry: its provenance is the fixture's bad one)
+export const GITHUB_REPO = 'sanctuarycomputer/devteam';
+const TREE_ID = '1';
+const TREE_SIZE = 11, SHARD_INDEX = 9, GLOBAL_BASE = 1000000;
+export const MIB = 1024 * 1024;
+// npm pack's file name for a package: the name without its @, its / as -, then -<version>.tgz
+export const packName = (name, version) => `${name.replace(/^@/, '').replace('/', '-')}-${version}.tgz`;
+// the asset's URL on github.com, as packagePinPair's GitHub form has it
+export const releaseUrl = (repo, version, file) => `https://github.com/${repo}/releases/download/v${version}/${file}`;
+const H = (...p) => crypto.createHash('sha256').update(Buffer.concat(p)).digest();
+const leafHash = (b) => H(Buffer.from([0]), b);
+const nodeHash = (l, r) => H(Buffer.from([1]), l, r);
+const split = (n) => { let k = 1; while (k * 2 < n) k *= 2; return k; };
+// RFC 6962 §2.1: the tree hash of leaves, and the audit path of leaf m (from the leaf up)
+const mth = (ls) => (ls.length === 1 ? leafHash(ls[0]) : nodeHash(mth(ls.slice(0, split(ls.length))), mth(ls.slice(split(ls.length)))));
+function auditPath(m, ls) {
+  if (ls.length === 1) return [];
+  const k = split(ls.length);
+  return m < k ? [...auditPath(m, ls.slice(0, k)), mth(ls.slice(k))] : [...auditPath(m - k, ls.slice(k)), mth(ls.slice(0, k))];
+}
+// the entry's inclusion proof and checkpoint; gh.fail breaks one part
+function inclusionProof(body, ca, gh) {
+  const leaves = Array.from({ length: TREE_SIZE }, (_, i) => (i === SHARD_INDEX ? Buffer.from(body, 'base64') : Buffer.from(`another entry ${i}`)));
+  const root = mth(leaves);
+  const hashes = auditPath(SHARD_INDEX, leaves);
+  if (gh.fail === 'inclusion-proof') hashes[0] = Buffer.from(hashes[0].map((b, i) => (i === 0 ? b ^ 1 : b)));
+  const noteRoot = gh.fail === 'checkpoint-root' ? H(Buffer.from('another root')) : root;
+  const origin = gh.fail === 'checkpoint-origin' ? 'rekor.other.test' : LOG_NAME;
+  const note = `${origin} - ${TREE_ID}\n${gh.fail === 'checkpoint-size' ? TREE_SIZE + 1 : TREE_SIZE}\n${noteRoot.toString('base64')}\n`;
+  const key = gh.fail === 'checkpoint-key' ? newKey() : crypto.createPrivateKey(ca.logKey);
+  const hint = Buffer.from(trustRoot(ca).rekor.keyId, 'hex').subarray(0, 4);
+  const sig = Buffer.concat([hint, crypto.sign('sha256', Buffer.from(note), key)]).toString('base64');
+  return { logIndex: String(SHARD_INDEX), rootHash: root.toString('base64'), treeSize: String(TREE_SIZE), hashes: hashes.map((h) => h.toString('base64')), checkpoint: { envelope: `${note}\n— ${LOG_NAME} ${sig}\n` } };
+}
+// the statement actions/attest-build-provenance signs for one file, in the shape of the recorded real one
+// (test/fixtures/github-attestation/): one subject, the file's name and sha256
+export function githubStatement(p, gfail) {
+  const pv = p.provenance;
+  const repo = gfail === 'repo' ? 'someone-else/devteam' : pv.repo;
+  const workflow = gfail === 'workflow' ? '.github/workflows/other.yml' : pv.workflow;
+  const ref = gfail === 'ref' ? 'refs/heads/main' : pv.ref;
+  const commit = gfail === 'commit' ? crypto.createHash('sha1').update(`another commit ${p.version}`).digest('hex') : pv.commit;
+  const bytes = gfail === 'replaced' ? p.other : p.tgz;
+  const sha256 = crypto.createHash('sha256').update(gfail === 'digest' ? Buffer.from(`another file ${p.version}`) : bytes).digest('hex');
+  return {
+    _type: 'https://in-toto.io/Statement/v1',
+    subject: [{ name: packName(NAME, p.version), digest: { sha256 } }, ...(gfail === 'two-subjects' ? [{ name: 'another.tgz', digest: { sha256: crypto.createHash('sha256').update(`another file ${p.version}`).digest('hex') } }] : [])],
+    predicateType: SLSA,
+    predicate: {
+      buildDefinition: {
+        buildType: 'https://actions.github.io/buildtypes/workflow/v1',
+        externalParameters: { workflow: { ref, repository: `https://github.com/${repo}`, path: workflow } },
+        internalParameters: { github: { event_name: 'release', repository_id: '1', repository_owner_id: '1', runner_environment: 'github-hosted' } },
+        resolvedDependencies: [{ uri: `git+https://github.com/${repo}@${ref}`, digest: { gitCommit: commit } }],
+      },
+      runDetails: { builder: { id: `https://github.com/${repo}/${workflow}@${ref}` }, metadata: { invocationId: `https://github.com/${repo}/actions/runs/1/attempts/1` } },
+    },
+  };
+}
+function githubBundle(p, state) {
+  const st = githubStatement(p, state.githubFail);
+  if (state.forge === 'no-slsa') return envelope({ _type: 'https://in-toto.io/Statement/v0.1', subject: st.subject, predicateType: PUBLISH, predicate: { name: NAME, version: p.version, registry: 'https://registry.npmjs.org' } });
+  return signedEnvelope(st, state.ca, state.otherCa, state.forge, state.impostorCa, { fail: state.githubFail });
+}
+
+// GitHub's routes; true when the request was one of them (answered, or held open)
+function github(req, res, p, state, pkgs) {
+  const gf = state.githubFail;
+  const repo = GITHUB_REPO;
+  const STAND = '/-/githubusercontent/';
+  const dl = p.startsWith(`/${repo}/releases/download/`) ? /^\/[^/]+\/[^/]+\/releases\/download\/v(\d+\.\d+\.\d+)\/([^/]+)$/.exec(p) : null;
+  const stand = p.startsWith(STAND) ? /^\/-\/githubusercontent\/([a-z0-9.-]+\.githubusercontent\.com)\/(?:hop\/(\d+)\/)?github-production-release-asset\/(\d+\.\d+\.\d+)\/([^/]+)$/.exec(p) : null;
+  if (!dl && !stand && !p.startsWith(STAND)) return false;
+  const send = (status, headers, body) => { res.writeHead(status, headers); res.end(body); };
+  if (gf === 'rate-limited') { send(429, { 'content-type': 'application/json' }, '{"message":"rate limited"}\n'); return true; }
+  if (!dl && !stand) { send(404, { 'content-type': 'text/plain' }, 'Not Found'); return true; }
+  const [version, file] = dl ? [dl[1], dl[2]] : [stand[3], stand[4]];
+  const pk = pkgs.get(version);
+  const pack = packName(NAME, version);
+  const kind = file === pack ? 'pack' : file === `${pack}.sigstore.json` ? 'bundle' : null;
+  if (!pk || !kind) { send(404, { 'content-type': 'text/plain' }, 'Not Found'); return true; }
+  const host = req.headers.host;
+  const asset = (h, hop) => `https://${h}/${hop ? `hop/${hop}/` : ''}github-production-release-asset/${version}/${file}?sig=x`;
+  if (dl) {
+    if ((gf === 'no-asset' && kind === 'pack') || (gf === 'no-bundle' && kind === 'bundle')) { send(404, { 'content-type': 'text/plain' }, 'Not Found'); return true; }
+    const to = { 'redirect-elsewhere': `https://evil.example/${version}/${file}`, 'redirect-http': asset('release-assets.githubusercontent.com').replace('https:', 'http:'), 'redirect-lookalike': `https://githubusercontent.com.evil.example/${version}/${file}`, 'redirect-loopback': `http://${host}${STAND}release-assets.githubusercontent.com/github-production-release-asset/${version}/${file}` }[gf]
+      ?? (gf === 'hops-5' || gf === 'hops-6' ? asset('hop1.githubusercontent.com', 1) : asset('release-assets.githubusercontent.com'));
+    send(302, { location: to }, '');
+    return true;
+  }
+  // a hop: on to the next, until the count is reached (the github.com redirect was the first)
+  const hop = Number(stand[2] ?? 0);
+  const hops = gf === 'hops-5' ? 5 : gf === 'hops-6' ? 6 : 1;
+  if (hop && hop + 1 < hops) { send(302, { location: asset(`hop${hop + 1}.githubusercontent.com`, hop + 1) }, ''); return true; }
+  if (hop) { send(302, { location: asset('release-assets.githubusercontent.com') }, ''); return true; }
+  if (stand[1] !== 'release-assets.githubusercontent.com') { send(404, { 'content-type': 'text/plain' }, 'Not Found'); return true; }
+  if (gf === 'forbidden') { send(403, { 'content-type': 'application/xml' }, '<Error><Code>AuthenticationFailed</Code></Error>'); return true; }
+  if (gf === 'no-answer') return true;
+  if (gf === 'drip') {
+    res.writeHead(200, { 'content-type': 'application/octet-stream' });
+    const t = setInterval(() => res.write(Buffer.from([0])), 1000);
+    res.on('close', () => clearInterval(t));
+    return true;
+  }
+  // a long body of zeros, written as the reader takes it
+  const zeros = (n, headers) => {
+    res.writeHead(200, { 'content-type': 'application/octet-stream', ...headers });
+    const chunk = Buffer.alloc(64 * 1024);
+    let left = n;
+    const more = () => { while (left > 0) { const c = chunk.subarray(0, Math.min(chunk.length, left)); left -= c.length; if (!res.write(c)) return res.once('drain', more); } res.end(); };
+    res.on('close', () => { left = 0; });
+    more();
+  };
+  if (kind === 'pack') {
+    if (gf === 'big-pack') { zeros(64 * MIB + 1, {}); return true; }
+    if (gf === 'pack-at-cap') { zeros(64 * MIB, { 'content-length': 64 * MIB }); return true; }
+    if (gf === 'short-body') {
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': pk.tgz.length });
+      res.write(pk.tgz.subarray(0, pk.tgz.length >> 1), () => res.destroy());
+      return true;
+    }
+    send(200, { 'content-type': 'application/octet-stream', 'content-length': (gf === 'replaced' ? pk.other : pk.tgz).length }, gf === 'replaced' ? pk.other : pk.tgz);
+    return true;
+  }
+  if (gf === 'big-bundle') { zeros(MIB + 1, { 'content-length': MIB + 1 }); return true; }
+  let body = Buffer.from(JSON.stringify(githubBundle(pk, state)));
+  if (gf === 'bundle-at-cap') body = Buffer.concat([body, Buffer.alloc(MIB - body.length, ' ')]);
+  send(200, { 'content-type': 'application/json', 'content-length': body.length }, body);
+  return true;
+}
+
 // ---- the server -------------------------------------------------------------------------------
 // The registry runs in a process of its own, so a test that blocks on spawnSync (running the kit, or npm)
 // is still answered. The parent writes the state file and tells the child to read it again.
@@ -279,13 +460,14 @@ function serve(stateFile) {
   const pkgs = packages(state.commits);
   const server = http.createServer((req, res) => {
     // every request, in order, for a test that counts what the kit asked (kit-974: the bundle once)
-    fs.appendFileSync(state.requests, `${JSON.stringify({ method: req.method, url: req.url })}\n`);
+    fs.appendFileSync(state.requests, `${JSON.stringify({ method: req.method, url: req.url, authorization: req.headers.authorization ?? null, 'user-agent': req.headers['user-agent'] ?? null })}\n`);
     const send = (status, type, body) => { res.writeHead(status, { 'content-type': type }); res.end(body); };
     const notFound = () => send(404, 'application/json', '{"error":"Not found"}\n');
     if (req.method !== 'GET') return notFound();
     if (state.fail === 'server-error') return send(503, 'application/json', '{"error":"Service Unavailable"}\n');
     let p;
     try { p = decodeURIComponent(new URL(req.url, 'http://x').pathname); } catch { return notFound(); }
+    if (github(req, res, p, state, pkgs)) return;
     // where the redirect failure points: the same answer, served live
     const moved = p.startsWith('/-/moved/');
     if (moved) p = p.slice('/-/moved'.length);
@@ -328,9 +510,10 @@ function serve(stateFile) {
   server.listen(0, '127.0.0.1', () => process.send({ ready: true, port: server.address().port }));
 }
 
-export async function startFakeRegistry({ fail = null, commits = {}, forge = null } = {}) {
+export async function startFakeRegistry({ fail = null, commits = {}, forge = null, githubFail = null } = {}) {
   if (fail !== null && !FAILURES.includes(fail)) throw new Error(`fake registry: no failure called ${fail}`);
   if (forge !== null && !FORGERIES.includes(forge)) throw new Error(`fake registry: no forgery called ${forge}`);
+  if (githubFail !== null && !GITHUB_FAILURES.includes(githubFail)) throw new Error(`fake registry: no GitHub failure called ${githubFail}`);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-fake-registry-'));
   const bin = path.join(dir, 'bin');
   fs.mkdirSync(bin);
@@ -345,7 +528,7 @@ export async function startFakeRegistry({ fail = null, commits = {}, forge = nul
   const caFile = path.join(dir, 'test-ca.json');
   fs.writeFileSync(caFile, JSON.stringify(trustRoot(ca)));
   const requestsFile = path.join(dir, 'requests.jsonl');
-  const state = { url: null, fail, commits, calls: callsFile, scratch: dir, forge, ca, otherCa, impostorCa, requests: requestsFile };
+  const state = { url: null, fail, commits, calls: callsFile, scratch: dir, forge, githubFail, ca, otherCa, impostorCa, requests: requestsFile };
   const save = () => fs.writeFileSync(stateFile, JSON.stringify(state));
   save();
   const child = fork(SELF, ['serve', stateFile], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
@@ -381,7 +564,7 @@ export async function startFakeRegistry({ fail = null, commits = {}, forge = nul
     // base's variables with this npm first on PATH and the registry named for the kit (a loopback URL,
     // the only kind DEVTEAM_NPM_REGISTRY may name); hostile-env adds npm config that points elsewhere
     env(baseEnv = process.env) {
-      const e = { ...baseEnv, PATH: `${bin}${path.delimiter}${baseEnv.PATH ?? ''}`, DEVTEAM_NPM_REGISTRY: state.url, DEVTEAM_SIGSTORE_TEST_CA: caFile, HOME: home };
+      const e = { ...baseEnv, PATH: `${bin}${path.delimiter}${baseEnv.PATH ?? ''}`, DEVTEAM_NPM_REGISTRY: state.url, DEVTEAM_GITHUB_DOWNLOAD: state.url, DEVTEAM_SIGSTORE_TEST_CA: caFile, HOME: home };
       if (state.fail === 'hostile-env') {
         const evil = path.join(dir, 'evil-npmrc');
         fs.writeFileSync(evil, 'registry=http://127.0.0.1:9/\nignore-scripts=false\n');
@@ -392,6 +575,13 @@ export async function startFakeRegistry({ fail = null, commits = {}, forge = nul
     // the test CA's trust root (test-ca.json), as env() names it in DEVTEAM_SIGSTORE_TEST_CA
     caFile,
     // another forgery from now on (null: none); resolves once the registry has it
+    // another GitHub failure from now on (null: none); resolves once the registry has it
+    async githubFail(name) {
+      if (name !== null && !GITHUB_FAILURES.includes(name)) throw new Error(`fake registry: no GitHub failure called ${name}`);
+      state.githubFail = name;
+      save();
+      await tell();
+    },
     async forge(name) {
       if (name !== null && !FORGERIES.includes(name)) throw new Error(`fake registry: no forgery called ${name}`);
       state.forge = name;

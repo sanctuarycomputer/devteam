@@ -179,6 +179,27 @@ test('C5 packagePinPair refuses bad input, guards in order, quoting nothing it w
   assert.equal(fn({ ...pin, name: 'devteam', resolved: `${PUBLIC}devteam/-/devteam-0.101.0.tgz` })['package.json'].includes('"devteam": "0.101.0"'), true, 'C5 an unscoped name');
 });
 
+// ---- kit-install@2 (kit-1050) -------------------------------------------------------------------
+
+test('C19 the comment above packagePinPair states kit-install@2', () => {
+  const c = prose(contractComment());
+  for (const [what, re] of [
+    ['its name', /kit-install@2/],
+    ['the setting and its default', /package_source is github or npm, an owner setting \(governance-edit\)[\s\S]*Its default is npm, and it never changes/],
+    ['the release URL', /https:\/\/github\.com\/<upstream_repo>\/releases\/download\/v<version>\/<pack>/],
+    ['the pack name', /<pack> is npm pack's file name: the name without its @, its \/ as -, then -<version>\.tgz/],
+    ['only resolved differs', /Only resolved differs between the forms/],
+    ['the fetcher\'s rules', /githubAsset[\s\S]*empty environment[\s\S]*at most 5 redirects[\s\S]*github\.com or a host ending in \.githubusercontent\.com[\s\S]*15 s from its creation to its headers[\s\S]*120 s[\s\S]*64 MiB for a pack and 1 MiB for a bundle[\s\S]*no Authorization header or token/],
+    ['what an answer means', /a 404 is unpublished; no answer in time, a network error, a 5xx or 429 is unreachable/],
+    ['the test origin', /DEVTEAM_GITHUB_DOWNLOAD[\s\S]*exactly http:\/\/127\.0\.0\.1:<port>\/[\s\S]*EDEVTEAMGITHUB[\s\S]*<base>-\/githubusercontent\/<host>\/<p>/],
+    ['the test trust root', /DEVTEAM_SIGSTORE_TEST_CA[\s\S]*only beside a loopback DEVTEAM_NPM_REGISTRY or DEVTEAM_GITHUB_DOWNLOAD/],
+    ['the pack\'s manifest', /packManifest\(bytes\) reads a pack's package\/package\.json[\s\S]*only what npm pack writes[\s\S]*refused, never misread/],
+    ['its files and bins', /files is every file as \{ path, size, sha256 \} and bins each key npm links in node_modules\/\.bin\//],
+    ['the second check after install', /The second check after install[\s\S]*kit-1054[\s\S]*exactly files and bins[\s\S]*refuses the install and removes it/],
+    ['the fake GitHub', /The fake GitHub is in test\/lib\/fake-registry\.mjs/],
+  ]) assert.match(c, re, `C19 the comment states ${what}`);
+});
+
 // ---- kit-install@1: the trees -----------------------------------------------------------------
 
 const TARBALLS = Object.fromEntries(fs.readdirSync(path.join(KI, 'registry')).filter((f) => f.endsWith('.tgz')).map((f) => [/^devteam-(.+)\.tgz$/.exec(f)[1], fs.readFileSync(path.join(KI, 'registry', f))]));

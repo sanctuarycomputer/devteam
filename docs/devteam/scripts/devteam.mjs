@@ -34568,6 +34568,46 @@ function cmdRecurring() {
 // test/lib/fake-registry.mjs (a loopback registry and an npm that keeps these rules or says which it saw
 // broken). packagePinPair is loaded alone by its test: it names nothing outside its body, and no line of
 // it is a bare closing brace but its last.
+// kit-install@2 (kit-1050, design kit-package-dist revision 4): a second source, GitHub's release files,
+// until npm is set up. Every kit-install@1 rule stays; this adds:
+// - The setting. package_source is github or npm, an owner setting (governance-edit) read from main's
+//   committed settings as package_name is. Its default is npm, and it never changes. Any other value is
+//   withheld, and what reads it checks it where it is used.
+// - The pair's GitHub form. packagePinPair takes resolved as the registry's tarball URL or as exactly
+//   https://github.com/<upstream_repo>/releases/download/v<version>/<pack>. <pack> is npm pack's file name:
+//   the name without its @, its / as -, then -<version>.tgz. Each part of the repository matches
+//   [A-Za-z0-9_.-]+ and is not only dots, and the string is compared whole. Only resolved differs between
+//   the forms; which repository is right is each caller's check against main's upstream_repo.
+// - githubAsset(url, kind) fetches one release asset (kind pack or bundle) in a child with an empty
+//   environment, through node's https with no agent. The url must be https://github.com/..., exactly its own
+//   href. It follows at most 5 redirects, each https, with no user or port, to github.com or a host ending
+//   in .githubusercontent.com. Each request has 15 s from its creation to its headers, and the whole call
+//   120 s (the child is killed at 130 s). The cap is 64 MiB for a pack and 1 MiB for a bundle: a larger
+//   length or body is refused, and a body cut short is never ok. It sends exactly user-agent devteam,
+//   accept application/octet-stream and accept-encoding identity, and no Authorization header or token,
+//   ever. It returns { ok, unreachable, unpublished, refused, why, bytes, url, redirects }: a 404 is
+//   unpublished; no answer in time, a network error, a 5xx or 429 is unreachable; any other answer is
+//   refused, by name. GitHub's hosts are trusted for availability only: what the bytes are is checked by
+//   their pinned integrity and their signed bundle.
+// - Tests. DEVTEAM_GITHUB_DOWNLOAD, set and not empty, must be exactly http://127.0.0.1:<port>/ (as
+//   DEVTEAM_NPM_REGISTRY is), or githubAsset throws EDEVTEAMGITHUB before any request. Set, every rule
+//   above still holds over the https URLs; only the transport changes: https://github.com/<p> goes to
+//   <base><p> and https://<host>/<p> under githubusercontent.com to <base>-/githubusercontent/<host>/<p>.
+//   DEVTEAM_SIGSTORE_TEST_CA, a test trust root, is taken only beside a loopback DEVTEAM_NPM_REGISTRY or
+//   DEVTEAM_GITHUB_DOWNLOAD.
+// - packManifest(bytes) reads a pack's package/package.json in a child, as npm would install it. It takes
+//   only what npm pack writes (one whole gzip member, ustar headers in node-tar's own encoding, files,
+//   directories and pax path records) and refuses anything else, so an archive npm's reader could decode
+//   another way is refused, never misread. A pax-named entry is held to every rule under both of its names.
+//   It returns { ok, manifest: { name, version, layout, dependencies }, files, bins } or { ok: false,
+//   refused, why }: files is every file as { path, size, sha256 } and bins each key npm links in
+//   node_modules/.bin/ with its file. The name, version, layout and dependencies are each caller's check.
+// - The second check after install. Whoever installs a pack (kit-1054) then reads the installed tree
+//   without following links, and it must be exactly files and bins with that manifest; any difference
+//   refuses the install and removes it. So what lands is what packManifest read, whatever npm's reader did.
+// The fake GitHub is in test/lib/fake-registry.mjs, on the fake registry's port: each release's pack and
+// bundle (an attest-build-provenance bundle signed by the fake's test CA, with an inclusion proof and a
+// checkpoint) and the failures GITHUB_FAILURES names.
 function packagePinPair(pin) {
   const no = (why) => { throw new Error(`packagePinPair: ${why}`); };
   const KEYS = ['name', 'version', 'integrity', 'resolved', 'layout'];
