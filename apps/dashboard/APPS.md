@@ -77,9 +77,11 @@ export function <name>(..._args: unknown[]): never {
 }
 ```
 
-until the view's port replaces the folder. A port that needs one imports it from the stub. The shell tickets (`shell`, `hub-shell`, `canvas`) create, the same way, a stub `src/views/<view>/index.tsx` (or `.ts`) for every other view of their page, mounted from a fixed path, with the functions other views call from it. A port replaces only its own folder.
+until the view's port replaces the folder. A port that needs one imports it from the stub. A stub's first line is exactly `// apps-src@1 view stub: <view>`; that line is what marks the file a stub, and a port removes it. The shell tickets (`shell`, `hub-shell`, `canvas`) create, the same way and with that first line, a stub `src/views/<view>/index.tsx` (or `.ts`) for every other view of their page, mounted from a fixed path, with the functions other views call from it, listed by the rule below at this contract's base `8ea96ace`; each adds its stubs' lists to this file, under the version-1 exception (Version). A port replaces only its own folder.
 
-The lists below are the scan's (`node apps/dashboard/scripts/compat-scan.mjs --base <base> --stubs` prints the export blocks; `--check` fails when a stub's exported functions differ from them). A function is listed when a line owned by another view of the same page calls it, by its name, at the base.
+A ported view's `index.tsx` (or `.ts`) still exports every name its list gives, each as a top-level `export function`, `export const` or `export let` in that file (a re-export such as `export { esc } from './esc'` is not counted), with the same call shape; it may export more.
+
+The lists below are the scan's (`node apps/dashboard/scripts/compat-scan.mjs --base 8ea96ace --stubs` prints the root stubs' export blocks). `--check` fails while a file still has the stub line and its exported functions differ from its list, and once ported when any listed name is missing from them. A function is listed when a line owned by another view of the same page calls it, by its name, at the base.
 
 ## Shared code
 
@@ -105,7 +107,7 @@ What the kit's tests read of a page stays readable after its port, until the cut
   export function expose(name: string, fn: (...args: never[]) => unknown, target?: object): void;
   ```
 
-  sets `window[name] = fn` (or on `target`) once. It throws when the window already holds the name itself (a second registration, or one of its own properties), when the name is not an identifier, or when `fn` is not a function. A name the window only inherits is shadowed: Chrome's `window.when` comes from `EventTarget.prototype`, and the pages' own top-level `const when`, which a test calls as `when(…)`, is registered over it. Every global `COMPAT.md` lists as a function is registered with it by the view that owns it, at the top level of its module: evaluated once per page load, before a test can call it (a global that opens a view, such as `showArtifact`, exists before the view mounts), and never again on a remount. A function that needs a component's state reads it through a module-level ref the component sets. A global listed as a value (`let`/`const` state a test reads or sets) is kept by its view on `window` under the same name, set the same way. With no window (the build prerendering a page on Node) `expose()` registers nothing.
+  sets `window[name] = fn` (or on `target`) once. It throws when the window already holds the name itself (a second registration, or one of its own properties), when the name is not an identifier, or when `fn` is not a function. A name the window only inherits is shadowed: Chrome's `window.when` comes from `EventTarget.prototype`, and the pages' own top-level `const when`, which a test calls as `when(…)`, is registered over it. Every global `COMPAT.md` lists as a function is registered with it by the view that owns it, at the top level of its module: evaluated once per page load, before a test can call it (a global that opens a view, such as `showArtifact`, exists before the view mounts), and never again on a remount. A function that needs a component's state reads it through a module-level ref the component sets. A global listed as a value (`let`/`const` state a test reads or sets, such as the hub's `box` and `term`, which the page reassigns) is defined by its view at the top level of its module, once, as `Object.defineProperty(window, name, { get, set, configurable: false })` over the module's own variable, so a test reads the current value and a test's assignment reaches the view. With no window (the build prerendering a page on Node) `expose()` registers nothing.
 - **The poll.** `src/shared/poll.ts` exports `POLL_MS = 10000`, passed directly to `setInterval(fn, POLL_MS)`: tests speed the poll up by wrapping `setInterval` and matching the delay `10000`.
 - **`window.__polls`** is counted by the data loop, as today.
 - **Ids, classes, roles and texts** that `COMPAT.md` lists stay on the element its view renders, with the same text.
@@ -119,10 +121,10 @@ One per app, `apps/dashboard/COMPAT.md` and `apps/hub/COMPAT.md`, written once b
 
 Port tickets don't edit it. An item a later regular test adds is a carry-over, named in that test's ticket. The files, as written (`test/apps-compat.test.mjs` checks each against its hash, so an edit is a new version of this contract):
 
-- `apps/dashboard/COMPAT.md`: sha256 `392fd85d60295befca3f609ca83decacef2486f08e53735ef4bd58b9f3022bab`
-- `apps/hub/COMPAT.md`: sha256 `332a5fccaeb6db3a76f8f8310fa24daba307d4797e332b330f638880e76d314e`
+- `apps/dashboard/COMPAT.md`: sha256 `d8ebee942e52a127e0259ae5f58d0910fb6381cb454fc0ab383f899c971a9cff`
+- `apps/hub/COMPAT.md`: sha256 `5de826cc8444a7cd05d52532f5d30765e3392a13d7f33c5ef70247c072eb9282`
 
-`--check` re-runs the scan at the same base and fails on any difference, in either file or in a root stub's exports.
+`--check` re-runs the scan at the same base and fails on any difference in either file, or in a root stub's exports as The view stubs says.
 
 ## The back link
 

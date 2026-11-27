@@ -12,7 +12,7 @@ A scan, not a parser. It reads each test's string, template and regex literals (
 
 ## Globals: `hub.html`
 
-Each is on `window`, registered once by the view named: a function with `expose()` (`src/shared/compat.ts`), a value (a table or a constant the page declares at its top level) by plain assignment. `test/apps-compat.test.mjs` reports each function that is not a function on `window`, and each value that is missing.
+Each is on `window`, registered once by the view named: a function with `expose()` (`src/shared/compat.ts`), a value (state the page declares at its top level, reassigned or not) as a `window` property with a getter and a setter over the variable of the view (APPS.md, Shared code). `test/apps-compat.test.mjs` reports each function that is not a function on `window`, and each value that is missing.
 
 | item | kind | view | read by |
 |---|---|---|---|
