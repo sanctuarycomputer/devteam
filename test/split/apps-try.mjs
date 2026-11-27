@@ -5,9 +5,9 @@
 // The tree lives in the checkout's own .apps-try/ (which the repository's info/exclude ignores) and is
 // generated again only when HEAD, or the split tool's own folder as it is on disk (its manifests and
 // overlay, which split.mjs reads from where it runs), changes: split.mjs writes it outside the checkout, it becomes a
-// repository of its own (parity's snapshot), and it is copied in. An app is built again only when its
-// sources changed (its folder, and the shared code and build scripts every app uses); otherwise its
-// out/, lib-dist/ and node_modules/ move over from the last tree. One apps-try at a time on the machine:
+// repository of its own (parity's snapshot, with git's automatic maintenance off), and it is copied in.
+// An app is built again only when its sources changed (its folder, and the shared code and build scripts
+// every app uses); otherwise its out/, lib-dist/ and node_modules/ move over from the last tree. One apps-try at a time on the machine:
 // it holds <os tmpdir>/devteam-apps-try.lock while it builds and runs. The named files, and nothing else,
 // run as `node --test --test-concurrency=2 <files>` in the tree, with a scratch HOME, DEVTEAM_HUB_PORT
 // 4987 and every inherited DEVTEAM_*, GIT_*, TMUX and NODE_TEST_CONTEXT variable unset.
@@ -163,6 +163,14 @@ export function ensureTree({ repo, head, split, tmpdir, env, say }) {
     const stale = Array.isArray(js?.stale) ? js.stale : [];
     if (stale.length) say(`apps-try: the tree is stale (${stale.length} overlay items, the parity run reports each): ${stale.slice(0, 5).map((s) => `${s.area} ${s.kind} ${s.name}`).join('; ')}`);
     const o = gitIn(repo, ['remote', 'get-url', 'origin'], env);
+    // the tree's repository is made here, with maintenance.auto false, before parity's snapshot commits in
+    // it: git 2.47 and later starts that commit's automatic maintenance detached (maintenance run --auto
+    // --detach), and the process, which holds .git/objects/maintenance.lock and may pack and delete loose
+    // objects, outlives the commit and races the copy into tree.new and the removal of tmp (kit-1060)
+    for (const a of [['init', '-q', '-b', 'main'], ['config', 'maintenance.auto', 'false']]) {
+      const g = gitIn(out, a, env);
+      if (g.status !== 0) throw new Failure(`git ${a[0]} in the tree failed: ${tail(g.stderr, 3)}`);
+    }
     snapshot(out, `apps-try: the tree at ${head}`, o.status === 0 ? o.stdout.trim() || null : null);
     // from here the old tree is being replaced: without a state, an interrupted run starts over
     fs.rmSync(stateFile, { force: true });
