@@ -10349,9 +10349,10 @@ function cmdMerge() {
     for (const s of pinned.skips) warn(`pin: can't verify ${pinned.pin.name}@${pinned.pin.version} (${s.cause}): ${s.why}; a layout-1 pin merges anyway, as a finding, and the install after the merge verifies it`);
     if (pinned.verified) out(`pin: ${pinned.pin.name}@${pinned.pin.version} (layout ${pinned.pin.layout}) is the registry's, with its provenance; it installs ${pinned.install} the merge`);
   }
-  // package install as a command of its own (a die in it, withLock's wait, never ends merge)
+  // package install as a command of its own (a die in it never ends merge); 40 minutes, past its own
+  // worst case (a 20-minute lock wait and its steps' bounds), then killed outright
   const pkgRun = (args) => {
-    const p = spawnSync(process.execPath, [fileURLToPath(import.meta.url), 'package', ...args], { cwd: mainRoot, encoding: 'utf8', timeout: 1800000, stdio: ['ignore', 'pipe', 'pipe'] });
+    const p = spawnSync(process.execPath, [fileURLToPath(import.meta.url), 'package', ...args], { cwd: mainRoot, encoding: 'utf8', timeout: 2400000, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'] });
     const said = `${p.stdout ?? ''}${p.stderr ?? ''}`.trim().replace(/^devteam: /, '');
     return { exit: p.status ?? 1, line: said || `package ${args[0]} ended without a word (${p.error?.code ?? p.signal ?? `exit ${p.status}`})` };
   };
@@ -10462,7 +10463,7 @@ function cmdMerge() {
     const p = pinned.pin;
     const folder = `${p.version}-${Buffer.from(p.integrity.slice(7), 'base64').toString('hex').slice(0, 12)}`;
     const i = pkgRun(['install', '--version', p.version, '--into', path.join(mainRoot, 'docs', 'devteam', '.kit', folder)]);
-    if (i.exit !== 0) die(`the install of ${p.name}@${p.version} (layout 2) before the merge failed, so nothing merged: ${i.line}`);
+    if (i.exit !== 0) die(`the install of ${p.name}@${p.version} (layout 2) before the merge failed, so ${relanded || recOwn ? `the merge stops where an earlier run left it (its ${relanded ? 'code' : 'records'} already on ${S.main_branch}; nothing more lands until it installs)` : 'nothing merged'}: ${i.line}`);
     out(i.line);
   }
   const mainBranch = S.main_branch;
