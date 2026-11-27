@@ -34382,6 +34382,214 @@ function packagePinFindings(add, now = Date.now()) {
     add('medium', 'package-pin-skipped', tag, String(o.detail ?? '').slice(0, 300), `the sync's pin was left as it was: fix the cause, then devteam.mjs package pin ${tag} in .worktrees/chore-devteam-sync-${tag} and chore pr it; before layout 2 the sync may merge without it`);
   }
 }
+// packageProvenance (kit-install@1's Provenance; kit-974): the release <name>@<version> whose tarball is
+// <integrity> was built by upstream's own release.yml at its tag. It returns
+//   { ok: true, provenance: { repo, workflow, ref, commit }, read }
+//   { ok: false, unreachable: true, why }                  the registry or upstream gave no answer
+//   { ok: false, refused: <guard>, why, read }             the first guard that fails, by name
+// and throws only what npmRun throws for a bad DEVTEAM_NPM_REGISTRY (code EDEVTEAMREGISTRY). read is
+// what the signed statement says ({ digest, repo, workflow, ref, commit }, repo as owner/name when it is
+// a github.com URL), or null before it is parsed. Unreachable is never a pass: its caller decides what
+// it means (a finding before layout 2, a stop from it). The guards, in order:
+//  1 the trust root: Sigstore's public-good one, pinned below (Fulcio's intermediate and root, Rekor's
+//    key: trusted_root.json as npm 10.9.9's @sigstore/tuf seeds ship it). DEVTEAM_SIGSTORE_TEST_CA, for
+//    tests, names a file holding another ({ v: 1, fulcio: [intermediate, root], rekor: { keyId, spki } },
+//    base64 DER, at most 64 KiB) and replaces it only beside a loopback DEVTEAM_NPM_REGISTRY (npmRun's
+//    rule); set without one, or unreadable, every call is refused (test-ca), never checked against the
+//    public root instead.
+//  2 input: name, version X.Y.Z and one sha512 integrity.
+//  3 upstream: upstream_repo from main's committed settings (settingsAt(mainRef())), owner/name.
+//  4 the bundle <registry>-/npm/v1/attestations/<name with / as %2f>@<version>, fetched once, in a child
+//    (so the call stays synchronous for merge): 15 s, no redirect followed. No answer, a 3xx, a 5xx or
+//    any status but 200 and 404 is unreachable; 404 is no-attestation; a body over 1 MiB is too-big.
+//  5 bundle: JSON with an attestations list; exactly one entry whose predicateType is SLSA v1 (slsa).
+//  6 statement: its bundle.dsseEnvelope has payloadType application/vnd.in-toto+json and a payload
+//    that is base64 of a JSON in-toto statement of that predicateType. read is taken here.
+//  7 certificate: the leaf (verificationMaterial.certificate, or x509CertificateChain's first) is no CA
+//    and is issued by the trust root's intermediate, itself a CA issued by the root.
+//  8 signature: exactly one, and it verifies over the envelope's DSSE PAE with the leaf's key: a
+//    statement changed after signing (a forged predicate) fails here.
+//  9 tlog: exactly one entry from the trust root's log; its signed entry timestamp verifies with the
+//    log's key; its body is a dsse entry naming this payload's SHA-256, this signature and this leaf;
+//    certificate-time: its time is within the leaf's validity and the chain's. The Merkle inclusion
+//    proof and an RFC 3161 time are not read (npm audit signatures checks the bundle in full; a bundle
+//    that carries only an RFC 3161 time, as Rekor v2's will, is refused here until the kit reads one).
+// 10 digest: exactly one subject, whose digest.sha512 is the integrity's, in hex.
+// 11 repo: externalParameters.workflow.repository is https://github.com/<upstream_repo>.
+// 12 workflow: its path is .github/workflows/release.yml.  13 ref: its ref is refs/tags/v<version>.
+// 14 identity: the leaf's SAN is exactly the URI https://github.com/<upstream_repo>/.github/workflows/
+//    release.yml@refs/tags/v<version>, so the key that signed is that workflow's at that tag.
+//    It trusts that no other workflow runs under release.yml's identity: release.yml has no
+//    workflow_call (a caller of a reusable workflow signs as the called file). Adding one needs this
+//    check to read Fulcio's Source Repository and Build Signer extensions first.
+// 15 commit: resolvedDependencies[0].digest.gitCommit is 40 hex and is the tag's commit at
+//    https://github.com/<upstream_repo>.git (git ls-remote: no answer is unreachable, no such tag is
+//    tag); default-branch: that commit is an ancestor of upstream's HEAD, fetched (commits only) into a
+//    bare repository of its own under os.tmpdir(), removed after, so home's refs never change.
+function packageProvenance({ name, version, integrity } = {}) {
+  const SLSA = 'https://slsa.dev/provenance/v1';
+  const WORKFLOW = '.github/workflows/release.yml';
+  const SIGSTORE = {
+    fulcio: [
+      'MIICGjCCAaGgAwIBAgIUALnViVfnU0brJasmRkHrn/UnfaQwCgYIKoZIzj0EAwMwKjEVMBMGA1UEChMMc2lnc3RvcmUuZGV2MREwDwYDVQQDEwhzaWdzdG9yZTAeFw0yMjA0MTMyMDA2MTVaFw0zMTEwMDUxMzU2NThaMDcxFTATBgNVBAoTDHNpZ3N0b3JlLmRldjEeMBwGA1UEAxMVc2lnc3RvcmUtaW50ZXJtZWRpYXRlMHYwEAYHKoZIzj0CAQYFK4EEACIDYgAE8RVS/ysH+NOvuDZyPIZtilgUF9NlarYpAd9HP1vBBH1U5CV77LSS7s0ZiH4nE7Hv7ptS6LvvR/STk798LVgMzLlJ4HeIfF3tHSaexLcYpSASr1kS0N/RgBJz/9jWCiXno3sweTAOBgNVHQ8BAf8EBAMCAQYwEwYDVR0lBAwwCgYIKwYBBQUHAwMwEgYDVR0TAQH/BAgwBgEB/wIBADAdBgNVHQ4EFgQU39Ppz1YkEZb5qNjpKFWixi4YZD8wHwYDVR0jBBgwFoAUWMAeX5FFpWapesyQoZMi0CrFxfowCgYIKoZIzj0EAwMDZwAwZAIwPCsQK4DYiZYDPIaDi5HFKnfxXx6ASSVmERfsynYBiX2X6SJRnZU84/9DZdnFvvxmAjBOt6QpBlc4J/0DxvkTCqpclvziL6BCCPnjdlIB3Pu3BxsPmygUY7Ii2zbdCdliiow=',
+      'MIIB9zCCAXygAwIBAgIUALZNAPFdxHPwjeDloDwyYChAO/4wCgYIKoZIzj0EAwMwKjEVMBMGA1UEChMMc2lnc3RvcmUuZGV2MREwDwYDVQQDEwhzaWdzdG9yZTAeFw0yMTEwMDcxMzU2NTlaFw0zMTEwMDUxMzU2NThaMCoxFTATBgNVBAoTDHNpZ3N0b3JlLmRldjERMA8GA1UEAxMIc2lnc3RvcmUwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAAT7XeFT4rb3PQGwS4IajtLk3/OlnpgangaBclYpsYBr5i+4ynB07ceb3LP0OIOZdxexX69c5iVuyJRQ+Hz05yi+UF3uBWAlHpiS5sh0+H2GHE7SXrk1EC5m1Tr19L9gg92jYzBhMA4GA1UdDwEB/wQEAwIBBjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBRYwB5fkUWlZql6zJChkyLQKsXF+jAfBgNVHSMEGDAWgBRYwB5fkUWlZql6zJChkyLQKsXF+jAKBggqhkjOPQQDAwNpADBmAjEAj1nHeXZp+13NWBNa+EDsDP8G1WWg1tCMWP/WHPqpaVo0jhsweNFZgSs0eE7wYI4qAjEA2WB9ot98sIkoF3vZYdd3/VtWB5b9TNMea7Ix/stJ5TfcLLeABLE4BNJOsQ4vnBHJ',
+    ],
+    rekor: { keyId: 'c0d23d6ad406973f9559f3ba2d1ca01f84147d8ffc5b8445c224f98b9591801d', spki: 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2G2Y+2tabdTV5BcGiBIx0a9fAFwrkBbmLSGtks4L3qX6yYY0zufBnhC8Ur/iy55GhWP/9A/bY2LhC30M9+RYtw==' },
+  };
+  let read = null;
+  const refuse = (guard, why) => ({ ok: false, unreachable: false, refused: guard, why, read });
+  const down = (why) => ({ ok: false, unreachable: true, refused: null, why, read });
+  const cut = (v) => JSON.stringify(String(v ?? '')).slice(0, 120);
+  // 1. the registry (npmRun's rule) and the trust root
+  const set = process.env.DEVTEAM_NPM_REGISTRY ?? '';
+  const port = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/$/.exec(set)?.[1];
+  if (set !== '' && !(Number(port) <= 65535)) {
+    const e = new Error(`DEVTEAM_NPM_REGISTRY is ${JSON.stringify(set.slice(0, 200))}: it may only be http://127.0.0.1:<port>/ (a test's registry), or unset for the public one`);
+    e.code = 'EDEVTEAMREGISTRY';
+    throw e;
+  }
+  const registry = set === '' ? 'https://registry.npmjs.org/' : set;
+  let trust = SIGSTORE;
+  const testCa = process.env.DEVTEAM_SIGSTORE_TEST_CA ?? '';
+  if (testCa !== '') {
+    if (set === '') return refuse('test-ca', 'DEVTEAM_SIGSTORE_TEST_CA is set without a test registry (a loopback DEVTEAM_NPM_REGISTRY): a test trust root is never used against the public registry, and the public one is never used in its place');
+    try {
+      if (!fs.statSync(testCa).isFile() || fs.statSync(testCa).size > 65536) throw new Error('not a file of at most 64 KiB');
+      const t = JSON.parse(fs.readFileSync(testCa, 'utf8'));
+      if (t?.v !== 1 || !Array.isArray(t.fulcio) || t.fulcio.length !== 2 || !t.fulcio.every((c) => typeof c === 'string') || typeof t.rekor?.keyId !== 'string' || typeof t.rekor?.spki !== 'string') throw new Error('not { v: 1, fulcio: [intermediate, root], rekor: { keyId, spki } }');
+      trust = t;
+    } catch (e) { return refuse('test-ca', `DEVTEAM_SIGSTORE_TEST_CA (${cut(testCa)}) can't be read as a trust root: ${e.message}`); }
+  }
+  // 2. input
+  if (typeof name !== 'string' || name.length > 214 || !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(name)) return refuse('input', `${cut(name)} is not an npm package name`);
+  if (typeof version !== 'string' || !/^(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})$/.test(version)) return refuse('input', `${cut(version)} is not a version X.Y.Z`);
+  if (typeof integrity !== 'string' || !/^sha512-[A-Za-z0-9+/]{86}==$/.test(integrity)) return refuse('input', `${cut(integrity)} is not one sha512 integrity`);
+  const want = Buffer.from(integrity.slice(7), 'base64').toString('hex');
+  // 3. upstream, from main's committed settings
+  const main = mainRef();
+  const up = main ? settingsAt(main)?.upstream_repo : null;
+  if (typeof up !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(up)) return refuse('upstream', `upstream_repo in main's settings${main ? ` (${main})` : ' (no main branch)'} is ${cut(up ?? null)}, not owner/name on github.com`);
+  const ref = `refs/tags/v${version}`;
+  // 4. the bundle, fetched once
+  const url = `${registry}-/npm/v1/attestations/${name.replace('/', '%2f')}@${version}`;
+  // the child's code: every line indented, so no line of this function but its first and last is at column 0
+  const code = `
+    const url = ${JSON.stringify(url)};
+    let r;
+    try {
+      const res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(15000), headers: { accept: 'application/json' } });
+      if (res.status !== 200) r = { status: res.status };
+      else {
+        const parts = []; let n = 0;
+        for await (const c of res.body) { n += c.length; if (n > 1048576) break; parts.push(Buffer.from(c)); }
+        r = n > 1048576 ? { status: 200, big: true } : { status: 200, body: Buffer.concat(parts).toString('base64') };
+      }
+    } catch (e) { r = { down: String(e?.cause?.code ?? e?.name ?? 'error') }; }
+    process.stdout.write(JSON.stringify(r));`;
+  const f = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 4 * 1024 * 1024 });
+  let got = null;
+  try { got = JSON.parse(f.stdout); } catch {}
+  if (!got || got.down || typeof got.status !== 'number') return down(`the registry ${registry} can't be reached (${got?.down ?? f.error?.code ?? f.signal ?? `exit ${f.status}`})`);
+  if (got.status === 404) return refuse('no-attestation', `${name}@${version} has no attestations on ${registry} (404): it was not published with provenance`);
+  if (got.status !== 200) return down(`the registry ${registry} answered ${got.status} for ${name}@${version}'s attestations`);
+  if (got.big) return refuse('too-big', `${name}@${version}'s attestations are over 1 MiB`);
+  // 5. one SLSA provenance
+  let bundle = null;
+  try { bundle = JSON.parse(Buffer.from(got.body, 'base64').toString('utf8')); } catch {}
+  if (!Array.isArray(bundle?.attestations)) return refuse('bundle', `${name}@${version}'s attestations are not JSON with an attestations list`);
+  const slsa = bundle.attestations.filter((a) => a?.predicateType === SLSA);
+  if (slsa.length !== 1) return refuse('slsa', `${name}@${version}'s attestations hold ${slsa.length} SLSA provenance entries, not exactly one`);
+  // 6. the statement
+  const b = slsa[0].bundle;
+  const env = b?.dsseEnvelope;
+  const b64 = (s) => typeof s === 'string' && s.length > 0 && s.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(s);
+  if (env?.payloadType !== 'application/vnd.in-toto+json' || !b64(env.payload)) return refuse('statement', 'the provenance has no base64 in-toto payload');
+  const payload = Buffer.from(env.payload, 'base64');
+  let st = null;
+  try { st = JSON.parse(payload.toString('utf8')); } catch {}
+  if (!st || typeof st !== 'object' || st.predicateType !== SLSA) return refuse('statement', 'the provenance payload is not a JSON SLSA in-toto statement');
+  const w = st.predicate?.buildDefinition?.externalParameters?.workflow;
+  const repoUrl = typeof w?.repository === 'string' ? w.repository : null;
+  read = {
+    digest: st.subject?.[0]?.digest?.sha512 ?? null,
+    repo: repoUrl && /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+$/.test(repoUrl) ? repoUrl.slice('https://github.com/'.length) : repoUrl,
+    workflow: w?.path ?? null,
+    ref: w?.ref ?? null,
+    commit: st.predicate?.buildDefinition?.resolvedDependencies?.[0]?.digest?.gitCommit ?? null,
+  };
+  // 7. the certificate chain
+  const vm = b.verificationMaterial ?? {};
+  const x509 = (s) => new crypto.X509Certificate(Buffer.from(s, 'base64'));
+  let leaf, int, root;
+  try {
+    leaf = x509(vm.certificate?.rawBytes ?? vm.x509CertificateChain?.certificates?.[0]?.rawBytes);
+    [int, root] = trust.fulcio.map(x509);
+  } catch { return refuse('certificate', "the provenance's signing certificate (or the trust root's) does not parse"); }
+  const issued = (c, by) => c.checkIssued(by) && c.verify(by.publicKey);
+  if (leaf.ca || !int.ca || !root.ca || !issued(leaf, int) || !issued(int, root) || !issued(root, root)) return refuse('certificate', `the provenance's signing certificate is not issued by ${trust === SIGSTORE ? "Sigstore's Fulcio" : 'the test trust root'}`);
+  // 8. the signature, over the DSSE PAE
+  const sigs = env.signatures;
+  if (!Array.isArray(sigs) || sigs.length !== 1 || !b64(sigs[0]?.sig)) return refuse('signature', 'the provenance does not carry exactly one signature');
+  const hash = { 'prime256v1': 'sha256', 'secp384r1': 'sha384' }[leaf.publicKey.asymmetricKeyDetails?.namedCurve] ?? 'sha256';
+  const pae = Buffer.concat([Buffer.from(`DSSEv1 ${Buffer.byteLength(env.payloadType)} ${env.payloadType} ${payload.length} `), payload]);
+  let good = false;
+  try { good = crypto.verify(hash, pae, leaf.publicKey, Buffer.from(sigs[0].sig, 'base64')); } catch {}
+  if (!good) return refuse('signature', "the provenance's signature does not verify: its statement is not what was signed");
+  // 9. the log's signed entry, and the leaf valid at its time
+  const keyHex = (e) => { try { return Buffer.from(e?.logId?.keyId ?? '', 'base64').toString('hex'); } catch { return ''; } };
+  const ents = Array.isArray(vm.tlogEntries) ? vm.tlogEntries.filter((e) => keyHex(e) === trust.rekor.keyId) : [];
+  if (ents.length !== 1) return refuse('tlog', `the provenance carries ${ents.length} entries from ${trust === SIGSTORE ? "Rekor's log" : "the test trust root's log"}, not exactly one`);
+  const t = ents[0];
+  let entry = null, setOk = false;
+  try {
+    if (!/^\d{1,12}$/.test(String(t.integratedTime)) || !/^\d{1,15}$/.test(String(t.logIndex)) || !b64(t.canonicalizedBody)) throw new Error('shape');
+    const set = JSON.stringify({ body: t.canonicalizedBody, integratedTime: Number(t.integratedTime), logID: trust.rekor.keyId, logIndex: Number(t.logIndex) });
+    const logKey = crypto.createPublicKey({ key: Buffer.from(trust.rekor.spki, 'base64'), format: 'der', type: 'spki' });
+    setOk = crypto.verify('sha256', Buffer.from(set), logKey, Buffer.from(t.inclusionPromise?.signedEntryTimestamp ?? '', 'base64'));
+    entry = JSON.parse(Buffer.from(t.canonicalizedBody, 'base64').toString('utf8'));
+  } catch {}
+  if (!setOk) return refuse('tlog', "the log's signed entry timestamp does not verify");
+  let verifier = null;
+  try { verifier = new crypto.X509Certificate(Buffer.from(entry.spec.signatures[0].verifier, 'base64')); } catch {}
+  if (entry?.kind !== 'dsse' || entry.spec?.payloadHash?.algorithm !== 'sha256' || entry.spec.payloadHash.value !== crypto.createHash('sha256').update(payload).digest('hex')
+    || entry.spec.signatures?.length !== 1 || entry.spec.signatures[0]?.signature !== sigs[0].sig || !verifier?.raw.equals(leaf.raw)) return refuse('tlog', "the log's entry is not for this statement, signature and certificate");
+  const at = Number(t.integratedTime) * 1000;
+  const during = (c) => Date.parse(c.validFrom) <= at && at <= Date.parse(c.validTo);
+  if (![leaf, int, root].every(during)) return refuse('certificate-time', `the signing certificate was not valid at the log's time, ${new Date(at).toISOString()} (valid ${leaf.validFrom} to ${leaf.validTo})`);
+  // 10-14. what the statement and the certificate claim
+  if (!Array.isArray(st.subject) || st.subject.length !== 1 || typeof read.digest !== 'string' || !/^[0-9a-f]{128}$/.test(read.digest) || read.digest !== want) return refuse('digest', `the statement's subject is not exactly one digest equal to the integrity ${integrity.slice(0, 19)}…`);
+  if (repoUrl !== `https://github.com/${up}`) return refuse('repo', `the statement names the repository ${cut(repoUrl)}, not https://github.com/${up} (upstream_repo in main's settings)`);
+  if (read.workflow !== WORKFLOW) return refuse('workflow', `the statement names the workflow ${cut(read.workflow)}, not ${WORKFLOW}`);
+  if (read.ref !== ref) return refuse('ref', `the statement names the ref ${cut(read.ref)}, not ${ref}`);
+  const san = `URI:https://github.com/${up}/${WORKFLOW}@${ref}`;
+  if (leaf.subjectAltName !== san) return refuse('identity', `the signing certificate names ${cut(leaf.subjectAltName)}, not ${san.slice(4)}`);
+  // 15. the commit: the tag's at upstream, on its default branch
+  const commit = read.commit;
+  if (typeof commit !== 'string' || !/^[0-9a-f]{40}$/.test(commit)) return refuse('commit', `the statement's commit ${cut(commit)} is not 40 hex`);
+  const src = `https://github.com/${up}.git`;
+  const genv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_(DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|COMMON_DIR|NAMESPACE)$/.test(k)));
+  genv.GIT_TERMINAL_PROMPT = '0';
+  const gitx = (args, cwd) => spawnSync('git', args, { cwd, env: genv, encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'pipe'] });
+  let bare;
+  try { bare = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-provenance-')); } catch (e) { return down(`can't make a folder under ${os.tmpdir()} to ask upstream (${e.code ?? e.message})`); }
+  try {
+    // the bare repository first, so no git call here reads a repository around the temp folder (its config)
+    if (gitx(['init', '--quiet', '--bare'], bare).status !== 0) return down(`can't make a repository under ${os.tmpdir()} to ask upstream`);
+    const ls = gitx(['ls-remote', src, ref, `${ref}^{}`], bare);
+    if (ls.status !== 0) return down(`upstream ${src} can't be reached (${(ls.stderr || ls.error?.code || `exit ${ls.status}`).trim().split('\n')[0].slice(0, 200)})`);
+    const refs = Object.fromEntries(ls.stdout.split('\n').filter(Boolean).map((l) => l.split('\t').reverse()));
+    const tagged = refs[`${ref}^{}`] ?? refs[ref];
+    if (!tagged) return refuse('tag', `upstream ${src} has no tag v${version}`);
+    if (tagged !== commit) return refuse('commit', `the statement's commit ${commit.slice(0, 12)} is not the tag v${version}'s at upstream (${tagged.slice(0, 12)})`);
+    const fetched = gitx(['fetch', '--quiet', '--no-tags', '--filter=tree:0', src, `+${ref}:refs/t`, '+HEAD:refs/d'], bare);
+    if (fetched.status !== 0) return down(`upstream ${src} can't be fetched (${(fetched.stderr || fetched.error?.code || `exit ${fetched.status}`).trim().split('\n').pop().slice(0, 200)})`);
+    if (gitx(['rev-parse', '--verify', '--quiet', 'refs/t^{commit}'], bare).stdout.trim() !== commit) return refuse('commit', `the tag v${version} fetched from upstream is not ${commit.slice(0, 12)}`);
+    const anc = gitx(['merge-base', '--is-ancestor', commit, 'refs/d'], bare);
+    if (anc.status === 1) return refuse('default-branch', `the tag v${version}'s commit ${commit.slice(0, 12)} is not on upstream's default branch`);
+    if (anc.status !== 0) return down(`can't tell whether ${commit.slice(0, 12)} is on upstream's default branch (${(anc.stderr || `exit ${anc.status}`).trim().split('\n')[0].slice(0, 200)})`);
+  } finally { try { fs.rmSync(bare, { recursive: true, force: true }); } catch { /* a folder left in the temp folder changes no answer */ } }
+  return { ok: true, unreachable: false, refused: null, why: null, read, provenance: { repo: up, workflow: WORKFLOW, ref, commit } };
+}
 // package pin|install|status (kit-install@1). Until each is built, it says so.
 function cmdPackage() {
   const sub = positional[0];
