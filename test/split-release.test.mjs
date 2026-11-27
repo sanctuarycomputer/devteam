@@ -47,7 +47,9 @@ const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 function splitDir(name, areas) {
   const d = path.join(scratch(name), 'split');
   fs.mkdirSync(path.join(d, 'overlay'), { recursive: true });
-  for (const m of fs.readdirSync(splitSrc).filter((f) => /^manifest.*\.json$/.test(f))) fs.copyFileSync(path.join(splitSrc, m), path.join(d, m));
+  // everything the split source holds but its overlay (the manifests, and lib/ that an area's rules.mjs
+  // imports, as gateway's does: final-1 F1), then only the named areas
+  for (const e of fs.readdirSync(splitSrc).filter((f) => f !== 'overlay')) fs.cpSync(path.join(splitSrc, e), path.join(d, e), { recursive: true });
   for (const a of areas) if (fs.existsSync(path.join(splitSrc, 'overlay', a))) fs.cpSync(path.join(splitSrc, 'overlay', a), path.join(d, 'overlay', a), { recursive: true });
   return d;
 }
@@ -324,7 +326,8 @@ function tgz(entries) {
   }
   return zlib.gzipSync(Buffer.concat([...blocks, Buffer.alloc(1024)]));
 }
-// a fake npm first on PATH: it runs the real npm, and after a real pack puts $FAKE_NPM_TGZ in its place
+// a fake npm first on PATH: it runs the real npm; after a real pack it puts $FAKE_NPM_TGZ in its place, and with
+// $FAKE_NPM_OMIT (a package path) it leaves that file out of both the dry run's list and the packed tarball
 function fakeNpm(d) {
   const bin = path.join(d, 'bin');
   fs.mkdirSync(bin, { recursive: true });
@@ -335,6 +338,26 @@ const fs = require('node:fs');
 const path = require('node:path');
 const a = process.argv.slice(2);
 const r = spawnSync(${JSON.stringify(realNpm)}, a, { encoding: 'utf8', env: process.env });
+const omit = process.env.FAKE_NPM_OMIT;
+if (omit && a[0] === 'pack' && a.includes('--dry-run') && r.status === 0) { const j = JSON.parse(r.stdout); j[0].files = j[0].files.filter((x) => x.path !== omit); j[0].entryCount = j[0].files.length; r.stdout = JSON.stringify(j); }
+if (omit && a[0] === 'pack' && !a.includes('--dry-run') && r.status === 0) {
+  const zlib = require('node:zlib');
+  const d = a[a.indexOf('--pack-destination') + 1];
+  for (const f of fs.readdirSync(d)) {
+    if (!f.endsWith('.tgz')) continue;
+    const buf = zlib.gunzipSync(fs.readFileSync(path.join(d, f)));
+    const keep = [];
+    for (let o = 0; o + 512 <= buf.length;) {
+      const h = buf.subarray(o, o + 512);
+      if (h.every((b) => b === 0)) { keep.push(buf.subarray(o)); break; }
+      const size = parseInt(h.subarray(124, 136).toString().replace(/\0.*$/s, '').trim() || '0', 8);
+      const end = o + 512 + Math.ceil(size / 512) * 512;
+      if (h.subarray(0, 100).toString().replace(/\0.*$/s, '') !== 'package/' + omit) keep.push(buf.subarray(o, end));
+      o = end;
+    }
+    fs.writeFileSync(path.join(d, f), zlib.gzipSync(Buffer.concat(keep)));
+  }
+}
 if (process.env.FAKE_NPM_TGZ && a[0] === 'pack' && !a.includes('--dry-run') && r.status === 0) { const d = a[a.indexOf('--pack-destination') + 1]; for (const f of fs.readdirSync(d)) if (f.endsWith('.tgz')) fs.copyFileSync(process.env.FAKE_NPM_TGZ, path.join(d, f)); }
 process.stdout.write(r.stdout ?? ''); process.stderr.write(r.stderr ?? ''); process.exit(r.status ?? 1);
 `, { mode: 0o755 });
@@ -401,6 +424,14 @@ test('S6 the tree\'s package check refuses a layout-2 package whose bin or apps 
     assert.equal(r.status, 1, `S6 ${what}: refused (${r.err})`);
     assert.match(r.err, want, `S6 ${what}`);
     assert.ok(!fs.existsSync(path.join(fx.d, 'out', 'package.tgz')), `S6 ${what}: no package.tgz`);
+  }
+  // a staged apps file that npm leaves out of both the dry run and the tarball, so the two agree (final-1b F2)
+  {
+    const fx = treeRepo('apps-file-left-out');
+    const r = check(fx, ['--alpha', built(fx.d, 'alpha'), '--apps', built(fx.d, 'apps')], { PATH: `${fakeNpm(fx.d)}${path.delimiter}${env.PATH}`, FAKE_NPM_OMIT: 'docs/devteam/apps/dashboard/index.html' });
+    assert.equal(r.status, 1, `S6 a staged apps file packed by neither: refused (${r.err})`);
+    assert.match(r.err, /^package-check: refusing: the tarball is missing docs\/devteam\/apps\/dashboard\/index\.html$/m, 'S6 a staged apps file packed by neither');
+    assert.ok(!fs.existsSync(path.join(fx.d, 'out', 'package.tgz')), 'S6 a staged apps file packed by neither: no package.tgz');
   }
 });
 
