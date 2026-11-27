@@ -3,7 +3,7 @@
 import { appPath } from '../../shared/paths';
 import { viewerOf } from '../../lib/shell-page';
 
-export const shell: { DATA: unknown; INBOX_D: unknown; PAGE_VERSION: string | null; PUBLIC: boolean; PREVIEWS: unknown; drafts: Record<string, string> } = {
+export const shell: { DATA: unknown; INBOX_D: unknown; PAGE_VERSION: string | null; PUBLIC: unknown; PREVIEWS: boolean; drafts: Record<string, string> } = {
   DATA: null,
   // the data inboxTitle last counted (inboxCount)
   INBOX_D: null,
@@ -11,7 +11,7 @@ export const shell: { DATA: unknown; INBOX_D: unknown; PAGE_VERSION: string | nu
   PAGE_VERSION: null,
   // What the cloud box serves to the public (x-devteam-public, set only by its gateway): { project:
   // { port, root, artifacts: { slug: tree } } }. null on a laptop.
-  PUBLIC: null as unknown as boolean,
+  PUBLIC: null,
   // Whether this box's gateway serves previews (x-devteam-previews, set only by the release that does).
   PREVIEWS: false,
   drafts: {},

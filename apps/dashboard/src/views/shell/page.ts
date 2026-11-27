@@ -1,7 +1,9 @@
 // kit-988: the shell's DOM glue (spec, Where each part goes): index.html's page code around the registry, and view
 // only's DOM side. It calls four views' functions (spec, Calls into views not ported yet), so it is in the shell's
 // cycle once they are ported: it exports function declarations only, and touches the DOM and calls those views
-// only inside its functions. bootShell() runs what the old script ran at its top level, once the markup exists.
+// only inside its functions. Its module flags are vars, so a view's top-level call during the import cycle reads
+// undefined (falsy, as their initial values are) instead of throwing on a let's TDZ.
+// bootShell() runs what the old script ran at its top level, once the markup exists.
 import './pages';
 import { shellPages } from '../../shared/shell/shell';
 import { VIEW_TOAST, writes } from '../../lib/shell-view-only';
@@ -15,7 +17,7 @@ export function $(id: string): HTMLElement | null {
   return document.getElementById(id);
 }
 
-let PAGE_NOW: string | null = null; // the page shown
+var PAGE_NOW: string | null = null; // the page shown
 // Show one page: its section alone, its title in the page bar, its nav item current; a change of
 // page starts at the top, unless the route scrolls to a target on it (keepScroll).
 export function showPage(id: string, { keepScroll = false }: { keepScroll?: boolean } = {}): void {
@@ -75,7 +77,7 @@ export function ttPeekPlace(): void {
 // /api/hello's level for the viewer tab, which reads no /api/data), the page says "View only" beside the kit badge
 // and greys the writes, and a press on one shows why instead of sending it. The gateway refuses those writes
 // anyway; this is so nobody presses and waits. Navigation is left alone: tabs, filters, links, Back, peeks, copy.
-let viewToastAt = 0;
+var viewToastAt = 0;
 export function viewToast(): void {
   if (Date.now() - viewToastAt < 2000) return;
   viewToastAt = Date.now();
@@ -105,7 +107,7 @@ export function viewStop(e: Event): void {
   viewToast();
 }
 
-let viewListening = false;
+var viewListening = false;
 export function viewOnly(level?: string | null): void {
   const view = level === 'view';
   document.body.classList.toggle('view-only', view);
@@ -129,7 +131,7 @@ export function viewOnly(level?: string | null): void {
 
 // What the old script ran at its top level, once: after hydration (ShellClient's effect), when every mounted
 // view's markup is in the DOM.
-let booted = false;
+var booted = false;
 export function bootShell(): void {
   if (booted) return;
   booted = true;
