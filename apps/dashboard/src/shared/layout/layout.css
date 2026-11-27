@@ -1,0 +1,180 @@
+/* kit-988: index.html's devteam-ui tokens and devteam-layout regions, moved as is (the hub imports this file too). */
+  /* devteam-ui tokens start */
+  :root {
+    color-scheme: light;
+    --bg: #fafafa; --surface: #ffffff; --raised: #ffffff; --hover: #f2f2f2; --well: #f2f2f2;
+    --fg: #171717; --fg-2: #666666; --muted: #8f8f8f; --line: #ebebeb; --line-2: #dcdcdc;
+    --blue: #0070f3; --blue-fg: #0068d6; --red: #ee0000; --red-fg: #cb2a2f; --amber: #f5a623; --amber-fg: #a35200; --green: #45a557; --green-fg: #297a3a;
+    --series-1: #0070f3; --grid: #ebebeb; --shadow: 0 1px 2px rgba(0,0,0,.04);
+    --sans: 'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; --mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) { :root {
+    color-scheme: dark;
+    --bg: #000000; --surface: #0a0a0a; --raised: #111111; --hover: #1a1a1a; --well: #111111;
+    --fg: #ededed; --fg-2: #a1a1a1; --muted: #7d7d7d; --line: #1f1f1f; --line-2: #2e2e2e;
+    --blue: #52a8ff; --blue-fg: #52a8ff; --red: #ff6166; --red-fg: #ff6166; --amber: #ffb224; --amber-fg: #ffb224; --green: #3cd58c; --green-fg: #62c073;
+    --series-1: #52a8ff; --grid: #1f1f1f; --shadow: none;
+  } }
+  /* devteam-ui tokens end */
+  /* devteam-layout start */
+  /* dashboard-shell@1 (test/contracts/shell.md): the layout both pages share, byte-identical in
+     index.html and hub.html. Tokens on :root. Every rule styles only inside a .shell element and outside
+     any .no-shell region in it (:where(.shell) … :not(:where(.no-shell, .no-shell *))), at the specificity
+     of its bare selector: nothing changes on a page until it adopts the shell, region by region. */
+  :root {
+    --page-max: 1200px; --page-top: 42px; --page-pad: 32px; --header-pad: 16px; --panel-pad: 16px; --head-h: 41px; --bar-h: 49px;
+    --gap: 16px; --ease: cubic-bezier(.32, .72, 0, 1); --dur: 280ms; --threads-w: 380px; --backdrop: rgba(0, 0, 0, .7);
+    --measure: calc((var(--page-max) - 2 * var(--page-pad) - 11 * var(--gap)) / 2 + 5 * var(--gap));
+  }
+  @media (max-width: 900px) { :root { --threads-w: 100vw; } }
+  /* the page bar: the full window wide, the title --header-pad from the left, the Inbox button (.tt) as far from the right */
+  :where(.shell) .pagebar:not(:where(.no-shell, .no-shell *)) { position: sticky; top: 0; z-index: 4; height: var(--bar-h); box-sizing: border-box; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 12px; padding: 0 var(--header-pad); }
+  :where(.shell) .pagebar h1:not(:where(.no-shell, .no-shell *)) { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -.01em; white-space: nowrap; }
+  :where(.shell) .pagebar .extra:not(:where(.no-shell, .no-shell *)) { display: inline-flex; align-items: center; gap: 8px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  :where(.shell) .pagebar .tt:not(:where(.no-shell, .no-shell *)) { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; flex: none; }
+  :where(.shell) .tt .n:not(:where(.no-shell, .no-shell *)) { color: var(--blue-fg); font-variant-numeric: tabular-nums; } :where(.shell) .tt .n.hot:not(:where(.no-shell, .no-shell *)) { color: var(--red-fg); }
+  /* the page: at most --page-max, its first content --page-top below the bar, measured to what the eye sees first */
+  :where(.shell) .page:not(:where(.no-shell, .no-shell *)) { max-width: var(--page-max); margin: 0 auto; box-sizing: border-box; padding: var(--page-top) var(--page-pad) 96px; position: relative; }
+  :where(.shell) .page > :first-child:not(:where(.no-shell, .no-shell *)) { margin-top: 0; }
+  :where(.shell) .page > .tabbar:first-child:not(:where(.no-shell, .no-shell *)) { margin-top: -8px; }
+  :where(.shell) .page > .ov-head:first-child:not(:where(.no-shell, .no-shell *)) { margin-top: -3px; }
+  @media (max-width: 900px) { :where(.shell) .page:not(:where(.no-shell, .no-shell *)) { padding-left: 16px; padding-right: 16px; } }
+  /* the grid: 12 columns, spans fold to 6 and 12 below 1100px and to one column below 560px */
+  :where(.shell) .g12:not(:where(.no-shell, .no-shell *)) { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--gap); align-items: start; }
+  :where(.shell) .c2:not(:where(.no-shell, .no-shell *)) { grid-column: span 2; } :where(.shell) .c3:not(:where(.no-shell, .no-shell *)) { grid-column: span 3; } :where(.shell) .c4:not(:where(.no-shell, .no-shell *)) { grid-column: span 4; } :where(.shell) .c5:not(:where(.no-shell, .no-shell *)) { grid-column: span 5; } :where(.shell) .c6:not(:where(.no-shell, .no-shell *)) { grid-column: span 6; } :where(.shell) .c7:not(:where(.no-shell, .no-shell *)) { grid-column: span 7; }
+  :where(.shell) .c8:not(:where(.no-shell, .no-shell *)) { grid-column: span 8; } :where(.shell) .c9:not(:where(.no-shell, .no-shell *)) { grid-column: span 9; } :where(.shell) .c10:not(:where(.no-shell, .no-shell *)) { grid-column: span 10; } :where(.shell) .c11:not(:where(.no-shell, .no-shell *)) { grid-column: span 11; } :where(.shell) .c12:not(:where(.no-shell, .no-shell *)) { grid-column: span 12; }
+  @media (max-width: 1100px) { :where(.shell) .c2:not(:where(.no-shell, .no-shell *)), :where(.shell) .c3:not(:where(.no-shell, .no-shell *)) { grid-column: span 4; } :where(.shell) .c4:not(:where(.no-shell, .no-shell *)), :where(.shell) .c5:not(:where(.no-shell, .no-shell *)), :where(.shell) .c6:not(:where(.no-shell, .no-shell *)), :where(.shell) .c7:not(:where(.no-shell, .no-shell *)) { grid-column: span 6; } :where(.shell) .c8:not(:where(.no-shell, .no-shell *)), :where(.shell) .c9:not(:where(.no-shell, .no-shell *)) { grid-column: span 12; } }
+  @media (max-width: 560px) { :where(.shell) .g12 > *:not(:where(.no-shell, .no-shell *)) { grid-column: span 12; } }
+  /* cards that hold running text: more cards on a wide screen, not wider ones; side by side, the same height */
+  :where(.shell) .cards:not(:where(.no-shell, .no-shell *)) { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(22rem, 100%), 1fr)); gap: var(--gap); align-items: stretch; }
+  :where(.shell) .cards > .wide:not(:where(.no-shell, .no-shell *)) { grid-column: 1 / -1; }
+  :where(.shell) .g12 > .card:not(:where(.no-shell, .no-shell *)), :where(.shell) .cards > .card:not(:where(.no-shell, .no-shell *)) { margin: 0; min-width: 0; align-self: stretch; display: flex; flex-direction: column; }
+  :where(.shell) .card > .foot:not(:where(.no-shell, .no-shell *)) { margin-top: auto; }
+  /* a card, and its thin-rule head: --head-h tall in every card, small ones too; trailing actions pin right */
+  :where(.shell) .card:not(:where(.no-shell, .no-shell *)) { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; box-shadow: var(--shadow); min-width: 0; box-sizing: border-box; }
+  :where(.shell) .card.click:not(:where(.no-shell, .no-shell *)) { cursor: pointer; } :where(.shell) .card.click:hover:not(:where(.no-shell, .no-shell *)) { background: var(--hover); }
+  :where(.shell) .card h3:not(:where(.no-shell, .no-shell *)) { margin: 0 0 6px; font-size: 13.5px; font-weight: 600; letter-spacing: -.005em; }
+  :where(.shell) .card.small:not(:where(.no-shell, .no-shell *)) { padding: 10px 12px; }
+  :where(.shell) .card-head:not(:where(.no-shell, .no-shell *)) { display: flex; align-items: center; gap: 8px; margin: -14px -16px 10px; height: var(--head-h); box-sizing: border-box; padding: 0 12px 0 16px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--fg-2); }
+  :where(.shell) .card.small > .card-head:not(:where(.no-shell, .no-shell *)) { margin: -10px -12px 8px; padding: 0 10px 0 12px; }
+  :where(.shell) .card.flush:not(:where(.no-shell, .no-shell *)) { padding: 0; overflow: hidden; } :where(.shell) .card.flush > .card-head:not(:where(.no-shell, .no-shell *)) { margin: 0; }
+  :where(.shell) .card-head i:not(:where(.no-shell, .no-shell *)) { font-size: 14px; }
+  :where(.shell) .card-head .grow:not(:where(.no-shell, .no-shell *)) { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  :where(.shell) .card-head > .end:not(:where(.no-shell, .no-shell *)) { margin-left: auto; flex: none; }
+  /* a table in a card starts below the head's border, never over it */
+  :where(.shell) .card-head + .db-t:not(:where(.no-shell, .no-shell *)), :where(.shell) .card-head + .props:not(:where(.no-shell, .no-shell *)) { margin-top: 0; }
+  /* the sectioned status: a header, then ruled sections with monospace labels, rows, dots and pills */
+  :where(.shell) .ov-head:not(:where(.no-shell, .no-shell *)) { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
+  :where(.shell) .ov-head h2:not(:where(.no-shell, .no-shell *)) { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -.015em; }
+  :where(.shell) .ov-head .sum:not(:where(.no-shell, .no-shell *)) { color: var(--fg-2); }
+  :where(.shell) .ov-head .acts:not(:where(.no-shell, .no-shell *)) { margin-left: auto; display: flex; gap: 8px; }
+  :where(.shell) .sec:not(:where(.no-shell, .no-shell *)) { border-top: 1px solid var(--line); padding: 14px 0; display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 16px; }
+  :where(.shell) .sec:last-child:not(:where(.no-shell, .no-shell *)) { border-bottom: 1px solid var(--line); }
+  @media (max-width: 560px) { :where(.shell) .sec:not(:where(.no-shell, .no-shell *)) { grid-template-columns: minmax(0, 1fr); gap: 6px; } }
+  :where(.shell) .sec .lbl:not(:where(.no-shell, .no-shell *)) { font: 500 11.5px/1.5 var(--mono); letter-spacing: .02em; text-transform: uppercase; color: var(--muted); padding-top: 2px; }
+  :where(.shell) .rows:not(:where(.no-shell, .no-shell *)) { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  :where(.shell) .rowline:not(:where(.no-shell, .no-shell *)) { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  :where(.shell) .rowline .t:not(:where(.no-shell, .no-shell *)) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  :where(.shell) .dot:not(:where(.no-shell, .no-shell *)) { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+  :where(.shell) .dot.green:not(:where(.no-shell, .no-shell *)) { background: var(--green); } :where(.shell) .dot.blue:not(:where(.no-shell, .no-shell *)) { background: var(--blue); } :where(.shell) .dot.amber:not(:where(.no-shell, .no-shell *)) { background: var(--amber); } :where(.shell) .dot.red:not(:where(.no-shell, .no-shell *)) { background: var(--red); }
+  :where(.shell) .dot.red.pulse:not(:where(.no-shell, .no-shell *)) { box-shadow: 0 0 0 0 color-mix(in srgb, var(--red) 50%, transparent); animation: shell-ring 2s var(--ease) infinite; }
+  @keyframes shell-ring { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--red) 50%, transparent); } 70% { box-shadow: 0 0 0 6px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+  :where(.shell) .pill:not(:where(.no-shell, .no-shell *)) { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 500; white-space: nowrap; background: var(--well); color: var(--fg-2); }
+  :where(.shell) .pill:not(:where(.no-shell, .no-shell *))::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  :where(.shell) .pill.green:not(:where(.no-shell, .no-shell *)) { color: var(--green-fg); background: color-mix(in srgb, var(--green) 14%, transparent); } :where(.shell) .pill.blue:not(:where(.no-shell, .no-shell *)) { color: var(--blue-fg); background: color-mix(in srgb, var(--blue) 12%, transparent); }
+  :where(.shell) .pill.amber:not(:where(.no-shell, .no-shell *)) { color: var(--amber-fg); background: color-mix(in srgb, var(--amber) 16%, transparent); } :where(.shell) .pill.red:not(:where(.no-shell, .no-shell *)) { color: var(--red-fg); background: color-mix(in srgb, var(--red) 12%, transparent); }
+  /* the tab bar: counts, a disabled state; the active tab's underline appears with no motion */
+  :where(.shell) .tabbar:not(:where(.no-shell, .no-shell *)) { display: flex; align-items: stretch; gap: 2px; border-bottom: 1px solid var(--line); min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  :where(.shell) .tabbar:not(:where(.no-shell, .no-shell *))::-webkit-scrollbar { display: none; }
+  :where(.shell) .tabbar [role="tab"]:not(:where(.no-shell, .no-shell *)) { all: unset; position: relative; display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 10px; color: var(--fg-2); cursor: pointer; white-space: nowrap; font-size: 13px; font-weight: 500; transition: none; }
+  :where(.shell) .tabbar [role="tab"]:hover:not(:where(.no-shell, .no-shell *)) { color: var(--fg); }
+  :where(.shell) .tabbar [role="tab"]:focus-visible:not(:where(.no-shell, .no-shell *)) { outline: 2px solid var(--blue-fg); outline-offset: -2px; border-radius: 4px; }
+  :where(.shell) .tabbar [role="tab"][aria-selected="true"]:not(:where(.no-shell, .no-shell *)) { color: var(--fg); }
+  :where(.shell) .tabbar [role="tab"]:not(:where(.no-shell, .no-shell *))::after { content: ''; position: absolute; left: 8px; right: 8px; bottom: -1px; height: 2px; border-radius: 2px; background: var(--fg); visibility: hidden; transition: none; }
+  :where(.shell) .tabbar [role="tab"][aria-selected="true"]:not(:where(.no-shell, .no-shell *))::after { visibility: visible; }
+  :where(.shell) .tabbar [role="tab"][aria-disabled="true"]:not(:where(.no-shell, .no-shell *)) { opacity: .45; cursor: default; }
+  :where(.shell) .tabbar .n:not(:where(.no-shell, .no-shell *)) { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+  :where(.shell) .tabbar .n.blue:not(:where(.no-shell, .no-shell *)) { color: var(--blue-fg); font-weight: 500; }
+  :where(.shell) .tabbar .spacer:not(:where(.no-shell, .no-shell *)) { flex: 1; }
+  :where(.shell) .tabbar.sub [role="tab"]:not(:where(.no-shell, .no-shell *)) { height: 30px; font-size: 12px; padding: 0 8px; }
+  /* the record table: sortable monospace headers, every row opens its record, "None" when empty */
+  :where(.shell) .db-t:not(:where(.no-shell, .no-shell *)) { width: 100%; border-collapse: collapse; }
+  :where(.shell) .db-t th:not(:where(.no-shell, .no-shell *)), :where(.shell) .db-t td:not(:where(.no-shell, .no-shell *)) { text-align: left; border-bottom: 1px solid var(--line); }
+  :where(.shell) .db-t td:not(:where(.no-shell, .no-shell *)) { padding: 8px 14px; font-size: 12.5px; vertical-align: top; }
+  :where(.shell) .db-t th:not(:where(.no-shell, .no-shell *)) { padding: 0; background: var(--well); }
+  :where(.shell) .db-t th button.sort:not(:where(.no-shell, .no-shell *)) { all: unset; display: block; width: 100%; box-sizing: border-box; padding: 8px 14px; cursor: pointer; font: 500 11px/16px var(--mono); color: var(--muted); }
+  :where(.shell) .db-t th button.sort:hover:not(:where(.no-shell, .no-shell *)) { color: var(--fg); background: var(--hover); }
+  :where(.shell) .db-t th button.sort:focus-visible:not(:where(.no-shell, .no-shell *)), :where(.shell) .db-t tr.click:focus-visible:not(:where(.no-shell, .no-shell *)) { outline: 2px solid var(--blue-fg); outline-offset: -2px; }
+  :where(.shell) .db-t tr:last-child td:not(:where(.no-shell, .no-shell *)) { border-bottom: 0; }
+  :where(.shell) .db-t tr.click:not(:where(.no-shell, .no-shell *)) { cursor: pointer; } :where(.shell) .db-t tr.click:hover td:not(:where(.no-shell, .no-shell *)) { background: var(--hover); }
+  :where(.shell) .db-t tr.none td:not(:where(.no-shell, .no-shell *)) { color: var(--muted); font-size: 12px; }
+  :where(.shell) .db-t .cell:not(:where(.no-shell, .no-shell *)) { min-width: 0; overflow-wrap: anywhere; }
+  /* the properties table: monospace keys, rules between rows only, no line above the first */
+  :where(.shell) .props:not(:where(.no-shell, .no-shell *)) { display: grid; grid-template-columns: 150px minmax(0, 1fr); margin: 0 0 16px; font-size: 12.5px; }
+  :where(.shell) .props dt:not(:where(.no-shell, .no-shell *)), :where(.shell) .props dd:not(:where(.no-shell, .no-shell *)) { margin: 0; padding: 7px 8px; border-bottom: 1px solid var(--line); min-width: 0; overflow-wrap: anywhere; }
+  :where(.shell) .props dt:not(:where(.no-shell, .no-shell *)) { color: var(--muted); padding-left: 0; font-family: var(--mono); font-size: 11.5px; }
+  :where(.shell) .props dt[title]:not(:where(.no-shell, .no-shell *)) { cursor: help; }
+  :where(.shell) .props dt:last-of-type:not(:where(.no-shell, .no-shell *)), :where(.shell) .props dd:last-of-type:not(:where(.no-shell, .no-shell *)) { border-bottom: 0; }
+  @media (max-width: 560px) { :where(.shell) .props:not(:where(.no-shell, .no-shell *)) { grid-template-columns: 110px minmax(0, 1fr); } }
+  /* the segmented control: one for every pick-one set, every button 28px tall */
+  :where(.shell) .seg:not(:where(.no-shell, .no-shell *)) { display: inline-flex; border: 1px solid var(--line-2); border-radius: 7px; overflow: hidden; flex: none; }
+  :where(.shell) .seg button:not(:where(.no-shell, .no-shell *)) { margin: 0; height: 28px; box-sizing: border-box; border: 0; border-radius: 0; background: var(--surface); color: var(--fg-2); font: 500 12px/1 var(--sans); padding: 0 10px; cursor: pointer; }
+  :where(.shell) .seg button + button:not(:where(.no-shell, .no-shell *)) { border-left: 1px solid var(--line-2); }
+  :where(.shell) .seg button:hover:not(:disabled):not(:where(.no-shell, .no-shell *)) { color: var(--fg); background: var(--hover); }
+  :where(.shell) .seg button[aria-pressed="true"]:not(:where(.no-shell, .no-shell *)) { background: var(--well); color: var(--fg); }
+  :where(.shell) .seg button:disabled:not(:where(.no-shell, .no-shell *)) { cursor: default; opacity: .6; }
+  /* the fleet switch: Run, Drain, Park for the project, a hub row or the machine */
+  :where(.shell) .fleet-switch:not(:where(.no-shell, .no-shell *)) { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  :where(.shell) .fleet-switch .k:not(:where(.no-shell, .no-shell *)) { font-size: 12px; color: var(--fg-2); display: inline-flex; align-items: center; gap: 6px; }
+  :where(.shell) .fleet-switch[data-scope="row"] .k:not(:where(.no-shell, .no-shell *)) { display: none; }
+  :where(.shell) .fleet-switch [data-fleet="drain"][aria-pressed="true"]:not(:where(.no-shell, .no-shell *)) { background: color-mix(in srgb, var(--amber) 18%, var(--surface)); }
+  :where(.shell) .fleet-switch [data-fleet="park"][aria-pressed="true"]:not(:where(.no-shell, .no-shell *)) { background: color-mix(in srgb, var(--red) 14%, var(--surface)); }
+  :where(.shell) .fleet-switch button.confirm:not(:where(.no-shell, .no-shell *)) { color: var(--red-fg); }
+  :where(.shell) .fleet-switch .msg:not(:where(.no-shell, .no-shell *)) { font-size: 12px; color: var(--muted); } :where(.shell) .fleet-switch .err:not(:where(.no-shell, .no-shell *)) { font-size: 12px; color: var(--red-fg); }
+  /* the step bar (today's look): finished steps in --series-1, the current one amber, a status line under Built and Met */
+  :where(.shell) .steps:not(:where(.no-shell, .no-shell *)) { display: flex; gap: 0; list-style: none; padding: 0; margin: 10px 0 6px; font-size: 11.5px; color: var(--muted); }
+  :where(.shell) .steps li:not(:where(.no-shell, .no-shell *)) { flex: 1; padding-top: 8px; margin-right: 3px; position: relative; --seg: var(--line-2); --fill: 0%; min-width: 0; }
+  :where(.shell) .steps li:last-child:not(:where(.no-shell, .no-shell *)) { margin-right: 0; }
+  :where(.shell) .steps li:not(:where(.no-shell, .no-shell *))::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; border-radius: 2px; background: linear-gradient(to right, var(--seg) var(--fill), var(--line-2) var(--fill)); }
+  :where(.shell) .steps li.done:not(:where(.no-shell, .no-shell *)) { --seg: var(--series-1); --fill: 100%; color: var(--fg-2); }
+  :where(.shell) .steps li.now:not(:where(.no-shell, .no-shell *)) { --seg: var(--amber); color: var(--fg); font-weight: 500; }
+  :where(.shell) .steps li.now:not([style*="--fill"]):not(:where(.no-shell, .no-shell *)) { --fill: 100%; }
+  :where(.shell) .steps li.part:not(:where(.no-shell, .no-shell *)) { --seg: var(--series-1); }
+  :where(.shell) .steps .step-sub:not(:where(.no-shell, .no-shell *)) { display: block; margin-top: 2px; font-weight: 400; color: var(--muted); font-size: 11px; line-height: 1.35; }
+  /* Upkeep's heartbeat: a cell a day in the step bar's styling, today at the right */
+  :where(.shell) .heartbeat:not(:where(.no-shell, .no-shell *)) { display: grid; grid-template-columns: repeat(var(--hb-n, 14), minmax(0, 1fr)); gap: 3px; margin: 10px 0 0; }
+  :where(.shell) .heartbeat i:not(:where(.no-shell, .no-shell *)) { display: block; height: 3px; border-radius: 2px; background: var(--line-2); }
+  :where(.shell) .heartbeat i.l1:not(:where(.no-shell, .no-shell *)) { background: color-mix(in srgb, var(--series-1) 35%, var(--line-2)); } :where(.shell) .heartbeat i.l2:not(:where(.no-shell, .no-shell *)) { background: color-mix(in srgb, var(--series-1) 60%, var(--line-2)); }
+  :where(.shell) .heartbeat i.l3:not(:where(.no-shell, .no-shell *)) { background: color-mix(in srgb, var(--series-1) 80%, var(--line-2)); } :where(.shell) .heartbeat i.l4:not(:where(.no-shell, .no-shell *)) { background: var(--series-1); } :where(.shell) .heartbeat i.bad:not(:where(.no-shell, .no-shell *)) { background: var(--red); }
+  :where(.shell) .heartbeat i:hover:not(:where(.no-shell, .no-shell *)) { outline: 2px solid color-mix(in srgb, var(--series-1) 30%, transparent); outline-offset: 2px; }
+  :where(.shell) .hb-labels:not(:where(.no-shell, .no-shell *)) { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); margin: 8px 0 6px; }
+  /* the peek frame: it slides in with --ease, its header --bar-h tall, both panels padded --panel-pad; one backdrop */
+  :where(.shell) .scrim:not(:where(.no-shell, .no-shell *)) { position: fixed; inset: 0; background: var(--backdrop); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); z-index: 20; opacity: 0; pointer-events: none; transition: opacity var(--dur) var(--ease); }
+  :where(.shell) .drawer:not(:where(.no-shell, .no-shell *)) { position: fixed; top: 0; bottom: 0; right: 0; width: min(720px, 100vw); box-sizing: border-box; background: var(--surface); border-left: 1px solid var(--line); z-index: 21; overflow-y: auto; box-shadow: -8px 0 32px rgba(0, 0, 0, .16); transform: translateX(104%); visibility: hidden; transition: transform var(--dur) var(--ease), right var(--dur) var(--ease), visibility 0s linear var(--dur); }
+  :where(.shell).peek-open .scrim:not(:where(.no-shell, .no-shell *)) { opacity: 1; pointer-events: auto; }
+  :where(.shell).peek-open .drawer:not(:where(.no-shell, .no-shell *)) { transform: none; visibility: visible; transition: transform var(--dur) var(--ease), right var(--dur) var(--ease), visibility 0s; }
+  :where(.shell) .drawer-head:not(:where(.no-shell, .no-shell *)) { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 10px; height: var(--bar-h); box-sizing: border-box; padding: 0 var(--panel-pad); background: var(--surface); border-bottom: 1px solid var(--line); }
+  :where(.shell) .drawer-head h2:not(:where(.no-shell, .no-shell *)) { margin: 0; font-size: 15px; display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+  :where(.shell) .drawer-head .end:not(:where(.no-shell, .no-shell *)) { margin-left: auto; display: flex; gap: 6px; align-items: center; flex: none; }
+  :where(.shell) .drawer-body:not(:where(.no-shell, .no-shell *)) { padding: 18px var(--panel-pad) 60px; }
+  :where(.shell) .drawer-body > .card:not(:where(.no-shell, .no-shell *)) { margin-bottom: 12px; }
+  /* the frame: .main holds the page bar and the page. peek-open and threads-open go on the .shell element itself;
+     while Threads is open, the page and the peek stop at its edge (below 900px each panel takes the full width) */
+  :where(.shell) .main:not(:where(.no-shell, .no-shell *)) { transition: margin-right var(--dur) var(--ease); }
+  :where(.shell).threads-open .main:not(:where(.no-shell, .no-shell *)) { margin-right: var(--threads-w); }
+  :where(.shell).threads-open .drawer:not(:where(.no-shell, .no-shell *)), :where(.shell).threads-open .scrim:not(:where(.no-shell, .no-shell *)) { right: var(--threads-w); }
+  @media (max-width: 900px) { :where(.shell).threads-open .main:not(:where(.no-shell, .no-shell *)) { margin-right: 0; } :where(.shell).threads-open .drawer:not(:where(.no-shell, .no-shell *)), :where(.shell).threads-open .scrim:not(:where(.no-shell, .no-shell *)) { right: 0; } }
+  /* the Threads sidebar: full height, --threads-w wide, sliding with --ease; its tab bar --bar-h tall, in line with the page bar's */
+  :where(.shell) .threads:not(:where(.no-shell, .no-shell *)) { position: fixed; top: 0; right: 0; bottom: 0; width: var(--threads-w); box-sizing: border-box; background: var(--surface); border-left: 1px solid var(--line); z-index: 22; display: flex; flex-direction: column; transform: translateX(100%); visibility: hidden; transition: transform var(--dur) var(--ease), visibility 0s linear var(--dur); }
+  :where(.shell).threads-open .threads:not(:where(.no-shell, .no-shell *)) { transform: none; visibility: visible; transition: transform var(--dur) var(--ease), visibility 0s; }
+  :where(.shell) .threads-head:not(:where(.no-shell, .no-shell *)) { display: flex; align-items: stretch; gap: 8px; height: var(--bar-h); box-sizing: border-box; padding: 0 var(--panel-pad); border-bottom: 1px solid var(--line); flex: none; }
+  :where(.shell) .threads-head .tabbar:not(:where(.no-shell, .no-shell *)) { border-bottom: 0; flex: 1; align-items: flex-end; }
+  :where(.shell) .threads-head .end:not(:where(.no-shell, .no-shell *)) { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: none; }
+  :where(.shell) .threads-body:not(:where(.no-shell, .no-shell *)) { flex: 1; min-height: 0; overflow-y: auto; padding: 12px var(--panel-pad); }
+  /* the Threads list: a --line-2 rule between threads, none after the last */
+  :where(.shell) .thread-list > * + *:not(:where(.no-shell, .no-shell *)) { border-top: 1px solid var(--line-2); }
+  /* running text: never wider than half the grid at full desktop width */
+  :where(.shell) p:not(:where(.no-shell, .no-shell *)), :where(.shell) .ctx:not(:where(.no-shell, .no-shell *)) { max-width: var(--measure); }
+  /* reduced motion: nothing slides, and the red dot doesn't pulse (last, and as specific as the pulse) */
+  @media (prefers-reduced-motion: reduce) { :root { --dur: 0ms; } :where(.shell) .dot.red.pulse:not(:where(.no-shell, .no-shell *)) { animation: none; } }
+  /* devteam-layout end */
