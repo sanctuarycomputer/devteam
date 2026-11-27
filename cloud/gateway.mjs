@@ -11,6 +11,8 @@
 // page, and its own pages. Only the hub's JSON (its list, and the owner's threads with the operator)
 // and the terminal's socket come from behind it. An agent's page can exist only on a project's or a
 // preview's host. The gateway also sends the hub's notifications, by Web Push.
+// The box's name also serves the alpha hub at /next/, from the image's own verified install of the
+// kit's package, and /alpha.json, both behind the session (alpha@1: alphaState, alphaServe below).
 // Behind it the kit runs unchanged: every proxied request looks to the kit like a local browser's,
 // and the kit's loopback origins in its response headers are mapped to the public ones.
 // A file the owner drops on the terminal is the one thing it stores for the agents' side: under a
@@ -1055,6 +1057,177 @@ export function dropNote(paths, verb = 'Sent') {
   const images = paths.filter(isDropImage).length;
   const how = images === paths.length ? 'images arrive as attachments' : images ? 'images arrive as attachments, PDFs and other files as a path' : 'PDFs and other files arrive as a path';
   return `${verb} to the focused pane. In Claude Code, ${how}.\n${paths.join('\n')}`;
+}
+
+// --- the alpha hub (alpha@1 step 4, kit-962) ----------------------------------------------------
+// <box>/next/ serves the alpha hub from the image's own install of the kit's package: the folder
+// `package install --into` makes (kit-install@1), DEVTEAM_ALPHA_DIR, /opt/devteam/alpha on the box,
+// holding verified.json, the pin pair and node_modules/<name>/, whose docs/devteam/alpha/hub/ is the
+// hub's static export (alpha-build@1). It serves only while DEVTEAM_ALPHA is not 0 and the folder's
+// record says both checks passed and agrees with its pair; anything else serves the why-page.
+export const ALPHA_BASE = '/next';
+const NPM_NAME = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
+const SEMVER = /^(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})$/;
+// A regular file (never a symlink) of at most max bytes, parsed; a throw for anything else.
+const smallJson = (f, max) => {
+  const st = fs.lstatSync(f);
+  if (!st.isFile() || st.size > max) throw new Error(`${f}: not a regular file of at most ${max} bytes`);
+  return JSON.parse(fs.readFileSync(f, 'utf8'));
+};
+// What an alpha folder holds: { ok: true, version, pages } with pages the hub export's real path or
+// null, or { ok: false, why } with why 'no-install' (no folder, or one holding neither verified.json
+// nor node_modules) or 'unverified'. Verified means: verified.json is a regular file of at most 4 KiB
+// with every field of kit-install@1's record and its type, both _ok true; its name, version, layout
+// and integrity agree with package.json, package-lock.json and node_modules/<name>/package.json; the
+// package's folder is inside the alpha folder (symlinks followed); and, when the image names its
+// release (boxImage's release, vX.Y.Z), the version is that release. The pages are the package's
+// docs/devteam/alpha/hub/, when that is a folder inside it.
+export function alphaInstall(dir, stamp) {
+  const no = (why) => ({ ok: false, why });
+  let top;
+  try { if (!fs.lstatSync(dir).isDirectory()) return no('no-install'); top = fs.realpathSync(dir); } catch { return no('no-install'); }
+  if (!fs.existsSync(path.join(top, 'verified.json')) && !fs.existsSync(path.join(top, 'node_modules'))) return no('no-install');
+  let rec;
+  try { rec = smallJson(path.join(top, 'verified.json'), 4096); } catch { return no('unverified'); }
+  const text = (x) => typeof x === 'string' && x.length > 0 && x.length <= 512;
+  const P = rec?.provenance;
+  const fields = rec && typeof rec === 'object' && !Array.isArray(rec) && rec.v === 1
+    && typeof rec.name === 'string' && rec.name.length <= 214 && NPM_NAME.test(rec.name)
+    && typeof rec.version === 'string' && SEMVER.test(rec.version)
+    && (rec.layout === 1 || rec.layout === 2)
+    && typeof rec.integrity === 'string' && /^sha512-[A-Za-z0-9+/]{86}==$/.test(rec.integrity)
+    && rec.integrity_ok === true && rec.provenance_ok === true
+    && P && typeof P === 'object' && !Array.isArray(P) && ['repo', 'workflow', 'ref', 'commit'].every((k) => text(P[k]))
+    && text(rec.at);
+  if (!fields) return no('unverified');
+  const s = String(stamp ?? '').trim();
+  if (s && s !== `v${rec.version}`) return no('unverified');
+  const own = (o, k) => (o && typeof o === 'object' && Object.hasOwn(o, k) ? o[k] : undefined);
+  let pkg, lock, inner, pkgDir;
+  try {
+    pkg = smallJson(path.join(top, 'package.json'), 64 * 1024);
+    lock = smallJson(path.join(top, 'package-lock.json'), 64 * 1024);
+    pkgDir = fs.realpathSync(path.join(top, 'node_modules', ...rec.name.split('/')));
+    if (!pkgDir.startsWith(top + path.sep)) return no('unverified');
+    inner = smallJson(path.join(pkgDir, 'package.json'), 1024 * 1024);
+  } catch { return no('unverified'); }
+  const entry = own(own(lock, 'packages'), `node_modules/${rec.name}`);
+  const agrees = own(own(pkg, 'dependencies'), rec.name) === rec.version && own(own(pkg, 'devteam'), 'layout') === rec.layout
+    && own(entry, 'version') === rec.version && own(entry, 'integrity') === rec.integrity
+    && own(inner, 'name') === rec.name && own(inner, 'version') === rec.version;
+  if (!agrees) return no('unverified');
+  let pages = null;
+  try {
+    const hub = fs.realpathSync(path.join(pkgDir, 'docs', 'devteam', 'alpha', 'hub'));
+    if (hub.startsWith(pkgDir + path.sep) && fs.statSync(hub).isDirectory()) pages = hub;
+  } catch { /* no pages yet */ }
+  return { ok: true, version: rec.version, pages };
+}
+// The gateway's alpha, from its environment: { on, verified, release, why, folder }. on unless
+// DEVTEAM_ALPHA is 0; why null only when /next/ serves files (folder), else 'off', 'no-install',
+// 'unverified' or 'no-pages', in that order. GET /alpha.json gives all but folder. stamp is the
+// image's release as boxImage gives it (BOX_IMAGE.release): null (none, or one boxImage drops) checks
+// no release.
+export function alphaState(e, stamp) {
+  const on = String(e.DEVTEAM_ALPHA ?? '').trim() !== '0';
+  const got = alphaInstall(e.DEVTEAM_ALPHA_DIR || '/opt/devteam/alpha', stamp);
+  const why = !on ? 'off' : !got.ok ? got.why : got.pages ? null : 'no-pages';
+  return { on, verified: got.ok, release: got.ok ? got.version : null, why, folder: why ? null : got.pages };
+}
+// The page /next/ serves when it serves no files: a string here, never a file of the install, no
+// script, and a link back to the hub.
+const ALPHA_WHY = {
+  off: 'The alpha is turned off on this box.',
+  'no-install': 'This box\'s image has no install of the alpha: its release wasn\'t published yet, or the registry couldn\'t be reached when the image was built.',
+  unverified: 'This box\'s install of the alpha didn\'t pass its checks (integrity and provenance), so none of it is served.',
+  'no-pages': 'The alpha has no pages yet in this release.',
+};
+export const ALPHA_WHY_CSP = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+export function alphaWhyPage(why, release) {
+  const words = (ALPHA_WHY[why] ?? ALPHA_WHY.unverified).replace('this release', release ? `release ${release}` : 'this release');
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>The alpha</title><style>body{font:16px/1.5 system-ui,sans-serif;margin:2rem auto;padding:0 1rem;max-width:36rem}</style></head><body><h1>The alpha isn't here</h1><p>${words}</p><p><a href="/">Back to the hub</a></p></body></html>`;
+}
+// A page's policy under /next/: the hub page's own (hubCsp) with script-src 'self' and the page's
+// hashes, no 'unsafe-inline', and style-src with 'self' added; and font-src 'self' after img-src, since
+// default-src 'none' would block the export's own fonts (ruling a-20261127-062049575-supervisor);
+// every other directive as it is.
+export function alphaCsp(policy, hashes) {
+  return policy.split('; ').flatMap((d) => (d.startsWith('script-src ') ? [`script-src 'self'${hashes.map((h) => ` '${h}'`).join('')}`] : d.startsWith('style-src ') ? [d.replace(/^style-src /, "style-src 'self' ")] : d.startsWith('img-src ') ? [d, "font-src 'self'"] : [d])).join('; ');
+}
+// The gateway's copy of the kit's serveAppFiles (page-seam@1; devteam.mjs), held to the same table
+// (test/fixtures/alpha-serving.json): a static export served from folder at base. A caller's mistake
+// throws before any request is read: a base that is not '' or '/<name>[/<name>…]', or a folder that is
+// not a non-empty string. false for a method
+// but GET and HEAD, or a path (the query cut off, and ignored from here on) neither base nor under
+// base/; inside it, it always answers. A 404 (text/plain, 'not found') for a request over 2048 bytes;
+// a segment that does not decode (each is decoded once), an empty segment but the last, '.', '..', or
+// a decoded '/', '\' or NUL; a real path (symlinks followed) missing or outside the folder's real
+// path; a file asked for with a trailing slash; a folder's index.html whose real path is missing or
+// outside; anything not a regular file; a type not in the known list. A 301 for base itself (to
+// base/) and for a folder without its slash (to the path with one, no query). A folder is its
+// index.html. A 200 carries the type, content-length, no-store and nosniff, and no body to a HEAD.
+// An .html file carries policyFor(<route>), <route> its folder as csp-hashes.json keys a route ('/',
+// '/threads/one/'); a policy that is not a non-empty string, or a throw, is a 500. head goes on every
+// answer.
+export function alphaServe(folder, base, req, res, policyFor, head = {}) {
+  if (typeof base !== 'string' || (base !== '' && !/^\/[^/?#]+(?:\/[^/?#]+)*$/.test(base))) throw new Error(`alphaServe: base ${JSON.stringify(base)} is not '' or /<name>`);
+  if (typeof folder !== 'string' || !folder) throw new Error('alphaServe: no folder');
+  const KNOWN = { html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', txt: 'text/plain; charset=utf-8', json: 'application/json', svg: 'image/svg+xml', png: 'image/png', ico: 'image/x-icon', webp: 'image/webp', woff2: 'font/woff2' };
+  if (req.method !== 'GET' && req.method !== 'HEAD') return false;
+  const raw = String(req.url);
+  const p = raw.split('?')[0];
+  if (p !== base && !p.startsWith(`${base}/`)) return false;
+  const answer = (code, headers, body) => { res.writeHead(code, { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...head, ...headers }); res.end(req.method === 'HEAD' ? undefined : body); return true; };
+  const none = () => answer(404, { 'content-type': 'text/plain; charset=utf-8' }, 'not found\n');
+  if (Buffer.byteLength(raw) > 2048) return none();
+  if (p === base) return answer(301, { location: `${base}/` });
+  const segs = p.slice(base.length + 1).split('/');
+  const parts = [];
+  for (const [i, s] of segs.entries()) {
+    let d;
+    try { d = decodeURIComponent(s); } catch { return none(); }
+    if (d === '') { if (i === segs.length - 1) continue; return none(); }
+    if (d === '.' || d === '..' || /[/\\\0]/.test(d)) return none();
+    parts.push(d);
+  }
+  let top, real, st;
+  try { top = fs.realpathSync(folder); real = fs.realpathSync(path.join(top, ...parts)); st = fs.statSync(real); } catch { return none(); }
+  const inside = (f) => f === top || f.startsWith(top + path.sep);
+  if (!inside(real)) return none();
+  if (!st.isDirectory() && parts.length && p.endsWith('/')) return none();
+  if (st.isDirectory()) {
+    if (!p.endsWith('/')) return answer(301, { location: `${p}/` });
+    try { real = fs.realpathSync(path.join(real, 'index.html')); st = fs.statSync(real); } catch { return none(); }
+    if (!inside(real)) return none();
+  }
+  if (!st.isFile()) return none();
+  const ext = path.extname(real).slice(1).toLowerCase();
+  const type = Object.hasOwn(KNOWN, ext) ? KNOWN[ext] : null;
+  if (!type) return none();
+  let body;
+  try { body = fs.readFileSync(real); } catch { return none(); }
+  const headers = { 'content-type': type, 'content-length': body.length };
+  if (ext === 'html') {
+    const rel = path.relative(top, path.dirname(real)).split(path.sep).join('/');
+    const route = rel ? `/${rel}/` : '/';
+    let policy;
+    try { policy = policyFor(route); } catch { policy = null; }
+    if (typeof policy !== 'string' || !policy) return answer(500, { 'content-type': 'text/plain; charset=utf-8' }, 'no policy for this page\n');
+    headers['content-security-policy'] = policy;
+  }
+  return answer(200, headers, body);
+}
+// A page's hashes under the export's csp-hashes.json ({ v: 1, pages: { <route>: ['sha256-…'] } }), a
+// regular file of at most 1 MiB: [] for a route it doesn't list; a throw (so a 500) for a manifest
+// that isn't one, or a hash anywhere in it that isn't a sha256 source.
+export function alphaHashes(folder, route) {
+  const m = smallJson(path.join(folder, 'csp-hashes.json'), 1024 * 1024);
+  if (m?.v !== 1 || !m.pages || typeof m.pages !== 'object' || Array.isArray(m.pages)) throw new Error('csp-hashes.json: not { v: 1, pages }');
+  // every route's list is checked, not only this one's: a manifest with one bad source is no manifest
+  for (const [r, list] of Object.entries(m.pages)) {
+    if (!Array.isArray(list) || list.length > 256 || !list.every((h) => typeof h === 'string' && /^sha256-[A-Za-z0-9+/]{43}=$/.test(h))) throw new Error(`csp-hashes.json: ${r} is not a list of sha256 sources`);
+  }
+  return Object.hasOwn(m.pages, route) ? m.pages[route] : [];
 }
 
 // --- the server ---------------------------------------------------------------------------------
@@ -3359,6 +3532,21 @@ export function createGateway(opts = {}) {
           return json(res, 200, { ok: true });
         }
         return send(res, 404, 'text/plain', 'not found');
+      }
+      // The alpha hub (alpha@1, kit-962): every raw path at or under /next, before the hub page (whose
+      // match is on the parsed path, which /next/.. would reach), from the image's own verified install,
+      // else the why-page; and what the hub's link reads, /alpha.json. Both behind the session, as here.
+      if (['GET', 'HEAD'].includes(req.method) && (rawPath === ALPHA_BASE || rawPath.startsWith(`${ALPHA_BASE}/`))) {
+        const a = alphaState(opts.env ?? env, BOX_IMAGE?.release);
+        const head = { 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', ...hsts };
+        if (a.why) return send(res, 200, 'text/html; charset=utf-8', alphaWhyPage(a.why, a.release), { 'content-security-policy': ALPHA_WHY_CSP, ...head });
+        // a page load reads the list first, as the hub page does, so its frame-src frames a project listed a moment ago
+        if (rawPath.endsWith('/') || rawPath.endsWith('.html')) await refreshWithin(1000);
+        return alphaServe(a.folder, ALPHA_BASE, req, res, (route) => alphaCsp(hubCsp(), alphaHashes(a.folder, route)), head);
+      }
+      if (['GET', 'HEAD'].includes(req.method) && p === '/alpha.json') {
+        const { on, verified, release, why } = alphaState(opts.env ?? env, BOX_IMAGE?.release);
+        return json(res, 200, { on, verified, release, why });
       }
       // The box's own name: the gateway's copy of the hub page, what it needs to know, and the list.
       if (req.method === 'GET' && (p === '/' || p === '/index.html')) {

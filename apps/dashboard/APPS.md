@@ -83,6 +83,8 @@ A ported view's `index.tsx` (or `.ts`) still exports every name its list gives, 
 
 The lists below are the scan's (`node apps/dashboard/scripts/compat-scan.mjs --base 8ea96ace --stubs` prints the root stubs' export blocks). `--check` fails while a file still has the stub line and its exported functions differ from its list, and once ported when any listed name is missing from them. A function is listed when a line owned by another view of the same page calls it, by its name, at the base.
 
+**The shell's cycle (kit-988).** The shell imports every dashboard view to mount it, and a ported view imports its shell names from `../shell`. Each name the shell exports is a hoisted `export function` that delegates to modules importing no view, so a view may call it anywhere, at its top level too. A view reads or assigns the shell's page state (`DATA`, `INBOX_D`, `PAGE_VERSION`, `PUBLIC`, `PREVIEWS`, `drafts`) only as `shell.<name>` from `../shell/state`, and calls `viewer()` where `index.html` reads `VIEWER`.
+
 ## Shared code
 
 `apps/dashboard/src/shared/` holds what more than one view or both apps use: the layout CSS and tokens, the shell, the router, the thread layer and the plain-words helpers, as the ports move them in; and from this contract `paths.ts`, `compat.ts`, `poll.ts` and `back-link.tsx`.
@@ -184,6 +186,450 @@ The shell view (index.html at 8ea96ace). Its 34 functions other views call:
 - `viewOnly`: line 9567; called by data
 - `viewToast`: line 9529; called by viewer
 - `withPage`: line 1897; called by board, threads-panel
+
+### `apps/dashboard/src/views/attachments/index.tsx`
+
+The attachments view (index.html at 8ea96ace). Its 13 functions other views call:
+
+- `avUploadOff`: line 8558; called by viewer
+- `chipsHtml`: line 8433; called by thread, words
+- `drawPills`: line 8313; called by thread
+- `dropBox`: line 8312; called by threads-panel, words
+- `filesWords`: line 8330; called by data, thread
+- `isFilled`: line 8447; called by thread, words
+- `markAnswered`: line 8632; called by data, review
+- `moveAttach`: line 8322; called by thread
+- `putAttach`: line 8345; called by data, thread
+- `qcardOf`: line 8631; called by data, words
+- `seenHash`: line 8621; called by data, review, viewer
+- `sendable`: line 8333; called by data, thread
+- `takeAttach`: line 8339; called by data, thread
+
+### `apps/dashboard/src/views/autonomy/index.tsx`
+
+The autonomy view (index.html at 8ea96ace). Its 17 functions other views call:
+
+- `bindPageTables`: line 2300; called by loop, peek-kinds, settings
+- `effNum`: line 2110; called by overview
+- `fpRow`: line 5797; called by peek-kinds
+- `govBlockAt`: line 2572; called by threads-core, threads-panel
+- `loadGovernance`: line 2526; called by data
+- `navCounts`: line 2282; called by data
+- `openClass`: line 2455; called by data, peeks
+- `openSensor`: line 5854; called by data, peeks
+- `pageTable`: line 2296; called by loop, peek-kinds, settings
+- `renderAwareness`: line 2513; called by data
+- `renderEfficiency`: line 2089; called by data
+- `renderGovernance`: line 2556; called by data
+- `renderMonitoring`: line 5840; called by data
+- `renderTrust`: line 2421; called by data
+- `retroCards`: line 2690; called by data
+- `spark`: line 2115; called by overview
+- `suggPageOf`: line 2479; called by threads-panel
+
+### `apps/dashboard/src/views/board/index.tsx`
+
+The board view (index.html at 8ea96ace). Its 15 functions other views call:
+
+- `attLine`: line 2940; called by goals
+- `boardCols`: line 2946; called by peek-kinds, peeks
+- `burnup`: line 2753; called by peeks
+- `drawFilterPage`: line 3063; called by data, overview
+- `drawFilters`: line 3023; called by data
+- `filterHead`: line 3074; called by data
+- `filtersNow`: line 2988; called by library, loop
+- `filterTickets`: line 2719; called by peek-kinds
+- `forecast`: line 2731; called by overview, peeks
+- `meterRow`: line 2830; called by peeks
+- `needsAttention`: line 2897; called by goals
+- `pillsOf`: line 2936; called by goals
+- `renderBoard`: line 3086; called by data
+- `renderProgress`: line 3110; called by data
+- `setFilters`: line 3010; called by overview
+
+### `apps/dashboard/src/views/data/index.tsx`
+
+The data view (index.html at 8ea96ace). Its 17 functions other views call:
+
+- `answerPress`: line 8273; called by review
+- `cardFields`: line 8222; called by review
+- `drawOrHold`: line 12284; called by settings
+- `goHead`: line 8020; called by peeks, threads-panel
+- `inboxCount`: line 12389; called by shell, threads-panel
+- `inboxTitle`: line 12401; called by shell, threads-panel
+- `letGo`: line 12270; called by goals
+- `load`: line 12322; called by library, overview, peek-kinds, peeks
+- `ownerLesson`: line 12383; called by peek-kinds, words
+- `press`: line 8183; called by goals, review, settings, thread, viewer
+- `putBackCard`: line 8225; called by review
+- `redrawNow`: line 8174; called by goals, settings
+- `render`: line 9589; called by autonomy, settings, shell
+- `route`: line 8056; called by shell, viewer
+- `showHead`: line 8027; called by threads-panel
+- `staleNote`: line 12371; called by library, shell
+- `typingIn`: line 12256; called by peeks, threads-panel, viewer
+
+### `apps/dashboard/src/views/goals/index.tsx`
+
+The goals view (index.html at 8ea96ace). Its 16 functions other views call:
+
+- `activeGoalOrder`: line 4742; called by data
+- `ago`: line 4878; called by autonomy, overview, peek-kinds, threads-core
+- `drawFleet`: line 4388; called by data, settings
+- `fleetLeftPlace`: line 4361; called by settings, shell
+- `fleetMode`: line 4337; called by settings
+- `fleetStateLine`: line 4340; called by settings
+- `goalBlock`: line 4200; called by overview
+- `goalState`: line 4227; called by overview, peek-kinds
+- `goalStepsOf`: line 4303; called by overview, peek-kinds
+- `heartbeatDays`: line 4222; called by peek-kinds
+- `holdConfirming`: line 4307; called by data
+- `holdControl`: line 4308; called by peek-kinds
+- `moveGoal`: line 4764; called by data
+- `plannerCards`: line 4883; called by board
+- `planningFor`: line 4877; called by peek-kinds
+- `renderGoals`: line 4672; called by data, loop
+
+### `apps/dashboard/src/views/library/index.tsx`
+
+The library view (index.html at 8ea96ace). Its 15 functions other views call:
+
+- `avKindDraw`: line 9240; called by attachments, viewer
+- `avPopsClose`: line 9261; called by attachments, viewer
+- `avPubDraw`: line 9310; called by attachments, viewer
+- `avRunDraw`: line 9326; called by attachments, viewer
+- `avRunErr`: line 9335; called by attachments, viewer
+- `avVerDraw`: line 9248; called by viewer
+- `hostHere`: line 8654; called by terminal
+- `openLib`: line 9171; called by data, peeks
+- `pageHello`: line 8644; called by terminal
+- `PEEK_ART_CTX`: line 8888; called by peek-kinds
+- `peekArtifacts`: line 8859; called by peek-kinds
+- `peekArtSection`: line 8876; called by peek-kinds
+- `previewHere`: line 8663; called by words
+- `previewLinkHtml`: line 8677; called by words
+- `renderLibrary`: line 8894; called by board, data, overview
+
+### `apps/dashboard/src/views/loop/index.tsx`
+
+The loop view (index.html at 8ea96ace). Its 10 functions other views call:
+
+- `correctBtn`: line 5004; called by peeks
+- `decideRows`: line 4973; called by peeks
+- `fromWords`: line 6467; called by peek-kinds
+- `lineageList`: line 6506; called by peek-kinds
+- `lineChart`: line 5632; called by autonomy, peek-kinds, peeks
+- `loopPlace`: line 6487; called by peek-kinds
+- `matchedWords`: line 4950; called by peek-kinds
+- `recordHref`: line 6484; called by peek-kinds
+- `renderLoop`: line 5088; called by board
+- `renderOoda`: line 4900; called by data
+
+### `apps/dashboard/src/views/overview/index.tsx`
+
+The overview view (index.html at 8ea96ace). Its 3 functions other views call:
+
+- `helloLoad`: line 9405; called by data
+- `NEXT_ID`: line 9398; called by words
+- `renderOverview`: line 9457; called by data
+
+### `apps/dashboard/src/views/peek-kinds/index.tsx`
+
+The peek-kinds view (index.html at 8ea96ace). Its 33 functions other views call:
+
+- `hoursWords`: line 6560; called by loop
+- `openAct`: line 6330; called by data, peeks
+- `openBuiltin`: line 6129; called by data, peeks
+- `openDecision`: line 6367; called by data, peeks
+- `openFeature`: line 6259; called by data, peeks
+- `openFile`: line 6770; called by data, peeks, review
+- `openGoal`: line 6195; called by data, peeks
+- `openJob`: line 6069; called by data, peeks
+- `openLearning`: line 6606; called by data, peeks
+- `openLesson`: line 6431; called by data, peeks
+- `openMilestone`: line 6312; called by data, peeks
+- `openObservation`: line 6561; called by data, peeks
+- `openPlanner`: line 6692; called by data, peeks
+- `openProblem`: line 6653; called by data, peeks
+- `openQuestion`: line 6714; called by data, peeks
+- `openRelease`: line 6283; called by data, peeks
+- `openRetro`: line 6397; called by data, peeks
+- `openSignal`: line 6582; called by data, peeks
+- `openStory`: line 6276; called by data, peeks
+- `openThread`: line 6672; called by data, peeks
+- `openTicket`: line 5891; called by data, peeks
+- `openWave`: line 6304; called by data, peeks
+- `recEvery`: line 5956; called by settings
+- `recKind`: line 5965; called by settings
+- `recLast`: line 5969; called by settings
+- `recList`: line 5944; called by settings
+- `recNext`: line 5967; called by settings
+- `recProposals`: line 5977; called by settings
+- `recWord`: line 5949; called by settings
+- `refetchFile`: line 6759; called by peeks
+- `renderMermaid`: line 6867; called by peeks
+- `retroDate`: line 6386; called by autonomy
+- `signalTitle`: line 6581; called by loop
+
+### `apps/dashboard/src/views/peeks/index.tsx`
+
+The peeks view (index.html at 8ea96ace). Its 36 functions other views call:
+
+- `attrRow`: line 5176; called by autonomy, library, peek-kinds
+- `attrs`: line 5288; called by autonomy, peek-kinds
+- `closeDrawer`: line 5517; called by data
+- `decisionTitle`: line 5205; called by peek-kinds
+- `depGraph`: line 5607; called by peek-kinds
+- `designBlock`: line 5619; called by peek-kinds
+- `diagram`: line 5599; called by peek-kinds
+- `drawerFor`: line 5529; called by autonomy, library, peek-kinds
+- `fetchPeek`: line 5381; called by data, peek-kinds
+- `fmtDay`: line 5203; called by autonomy, peek-kinds
+- `fmtObj`: line 5191; called by autonomy, peek-kinds
+- `focusBack`: line 5441; called by board, data, words
+- `focusMark`: line 5436; called by board, data, words
+- `gateTable`: line 5761; called by peek-kinds
+- `historySection`: line 5584; called by autonomy, peek-kinds
+- `howItChanges`: line 5320; called by peek-kinds
+- `list`: line 5200; called by attachments, autonomy, goals, library, peek-kinds, review, settings, shell, threads-panel, viewer, words
+- `loadSchemaDocs`: line 5127; called by data
+- `notFound`: line 5739; called by autonomy, library, peek-kinds
+- `peekFor`: line 5416; called by board, viewer
+- `peekHide`: line 5487; called by data, review
+- `peekIsOpen`: line 5476; called by data, viewer
+- `peekKey`: line 5373; called by autonomy, data, library, peek-kinds
+- `peekOf`: line 5374; called by autonomy, peek-kinds, words
+- `phaseStrip`: line 5741; called by peek-kinds
+- `progressBlock`: line 5724; called by peek-kinds
+- `psect`: line 5307; called by autonomy, library, peek-kinds
+- `redraw`: line 5425; called by data, peek-kinds
+- `refreshDrawer`: line 5400; called by data
+- `reviewList`: line 5625; called by peek-kinds
+- `share`: line 5202; called by autonomy, shell
+- `showDrawer`: line 5450; called by autonomy, library, peek-kinds
+- `spendChart`: line 5779; called by peek-kinds
+- `threadOn`: line 5313; called by peek-kinds
+- `uniq`: line 5738; called by peek-kinds
+- `unitOf`: line 5204; called by peek-kinds
+
+### `apps/dashboard/src/views/review/index.tsx`
+
+The review view (index.html at 8ea96ace). Its 13 functions other views call:
+
+- `closeReview`: line 3922; called by data
+- `emptyVal`: line 3745; called by peeks
+- `fleetMoveReady`: line 4191; called by goals
+- `holdState`: line 4192; called by goals, peek-kinds
+- `lsDel`: line 3743; called by thread
+- `lsGet`: line 3741; called by data, thread, viewer
+- `lsSet`: line 3742; called by data, thread, viewer
+- `openReview`: line 3868; called by data
+- `renderReviewPreview`: line 4021; called by data
+- `reviewAnswer`: line 4138; called by data
+- `reviewCard`: line 3752; called by words
+- `reviewDecline`: line 4165; called by data
+- `sitesKey`: line 4079; called by data
+
+### `apps/dashboard/src/views/settings/index.tsx`
+
+The settings view (index.html at 8ea96ace). Its 3 functions other views call:
+
+- `drawSettings`: line 4563; called by data, shell, thread
+- `loadFleet`: line 4459; called by data, shell
+- `renderJobs`: line 6150; called by data
+
+### `apps/dashboard/src/views/terminal/index.tsx`
+
+The terminal view (index.html at 8ea96ace). Its 4 functions other views call:
+
+- `isTermTab`: line 11862; called by threads-panel
+- `termRender`: line 11930; called by threads-panel
+- `termSync`: line 11948; called by threads-panel
+- `termTabsOff`: line 11878; called by threads-panel
+
+### `apps/dashboard/src/views/thread/index.tsx`
+
+The thread view (index.html at 8ea96ace). Its 18 functions other views call:
+
+- `askDraw`: line 10834; called by threads-panel
+- `askSet`: line 10843; called by threads-panel
+- `askShown`: line 10807; called by data
+- `avFrameLoad`: line 11756; called by viewer
+- `thAdopt`: line 11597; called by threads-panel
+- `tlCard`: line 10731; called by data, threads-panel
+- `tlDraftPrune`: line 10724; called by threads-panel
+- `tlDraw`: line 10780; called by threads-panel, viewer
+- `tlHeld`: line 11102; called by threads-panel
+- `tlMarkRow`: line 10782; called by threads-panel
+- `tlPins`: line 11117; called by data, shell, threads-panel
+- `tlPinsInto`: line 11143; called by threads-panel
+- `tlReplace`: line 10713; called by threads-panel
+- `tsFrame`: line 11648; called by threads-panel, viewer
+- `tsOn`: line 11649; called by threads-panel, viewer
+- `tsPost`: line 11652; called by threads-panel, viewer
+- `tsRaise`: line 11657; called by attachments, threads-panel
+- `tState`: line 11168; called by threads-panel
+
+### `apps/dashboard/src/views/threads-core/index.tsx`
+
+The threads-core view (index.html at 8ea96ace). Its 22 functions other views call:
+
+- `parseSettingView`: line 9738; called by threads-panel
+- `parseSuggView`: line 9744; called by autonomy, threads-panel
+- `suggView`: line 9743; called by autonomy
+- `tArtPath`: line 10051; called by thread
+- `tBytes`: line 9729; called by autonomy, thread
+- `tCardState`: line 9864; called by thread
+- `tCut`: line 9730; called by autonomy, loop, threads-panel
+- `tFit`: line 9827; called by threads-panel
+- `tFrameOn`: line 10068; called by threads-panel, viewer
+- `tFrameTitle`: line 10058; called by thread
+- `tGoRoute`: line 10039; called by threads-panel
+- `tKey`: line 9966; called by thread, threads-panel, viewer
+- `tLanded`: line 9999; called by threads-panel
+- `tLensMessage`: line 10012; called by thread
+- `tLine`: line 9735; called by attachments, autonomy, loop, thread, threads-panel
+- `tOverlay`: line 9982; called by threads-panel
+- `tPendId`: line 9998; called by thread, threads-panel
+- `tPendingTurn`: line 9978; called by thread
+- `tPins`: line 9969; called by thread, threads-panel, viewer
+- `tPlace`: line 9943; called by thread
+- `tSubjectAt`: line 9749; called by autonomy, threads-panel
+- `tWhere`: line 9952; called by threads-panel
+
+### `apps/dashboard/src/views/threads-panel/index.tsx`
+
+The threads-panel view (index.html at 8ea96ace). Its 47 functions other views call:
+
+- `dataAnswered`: line 10532; called by thread
+- `inboxAt`: line 10270; called by data
+- `inboxGo`: line 10262; called by data
+- `inboxTyping`: line 10097; called by data
+- `inInbox`: line 10089; called by thread
+- `tArtFpNow`: line 10502; called by thread
+- `tHad`: line 10948; called by thread
+- `thBack`: line 11561; called by thread
+- `thButton`: line 11236; called by data
+- `thCarry`: line 11438; called by data
+- `thDraw`: line 11259; called by data, terminal, thread
+- `thEscapePage`: line 11522; called by data
+- `thFreshness`: line 11432; called by data
+- `thGo`: line 11314; called by shell, thread
+- `thOpenRow`: line 11576; called by thread
+- `thRemember`: line 11414; called by data
+- `thRoute`: line 11347; called by data
+- `thWidth`: line 11536; called by terminal, thread
+- `tlCardFrame`: line 10507; called by thread
+- `tlClose`: line 10912; called by data, thread
+- `tlCtx`: line 10512; called by thread
+- `tlCursor`: line 10119; called by thread
+- `tlEl`: line 10085; called by thread
+- `tlFloating`: line 10101; called by data, thread
+- `tlHide`: line 10147; called by attachments, thread
+- `tlHome`: line 10283; called by thread
+- `tlInboxHome`: line 10293; called by thread
+- `tlInPanel`: line 11541; called by thread
+- `tlLeave`: line 10438; called by data
+- `tlMark`: line 10127; called by thread
+- `tlOpen`: line 10929; called by data, thread, viewer
+- `tlOwn`: line 10090; called by thread
+- `tlPinMode`: line 10154; called by attachments, thread
+- `tlRef`: line 10518; called by thread
+- `tlRefresh`: line 10875; called by data, thread, viewer
+- `tlRelay`: line 10904; called by thread
+- `tlRoute`: line 10405; called by data
+- `tlRowOf`: line 10308; called by thread
+- `tlSection`: line 10103; called by autonomy
+- `tlSettingOf`: line 10303; called by thread
+- `tlShowing`: line 10098; called by attachments, thread
+- `tlStart`: line 10214; called by autonomy, loop, thread
+- `tlSuggOf`: line 10306; called by thread
+- `tlTargetRect`: line 10309; called by thread
+- `tlVisible`: line 10304; called by thread
+- `tsPins`: line 10486; called by attachments, thread, viewer
+- `tsWatch`: line 10473; called by thread
+
+### `apps/dashboard/src/views/viewer/index.tsx`
+
+The viewer view (index.html at 8ea96ace). Its 23 functions other views call:
+
+- `artSrc`: line 6920; called by library
+- `artViewer`: line 6922; called by library, words
+- `avFpSeen`: line 7009; called by data
+- `avFreshFrame`: line 6903; called by attachments
+- `avHeader`: line 6910; called by library
+- `avHint`: line 6993; called by attachments
+- `avNotes`: line 7241; called by thread
+- `avRecipient`: line 7726; called by threads-core
+- `avShowMe`: line 7607; called by thread, threads-panel
+- `avStep`: line 7327; called by shell, thread
+- `closeArtifact`: line 7913; called by attachments, data
+- `leaveArtifact`: line 7959; called by data, thread
+- `openArtifact`: line 7201; called by data, threads-panel
+- `openPreview`: line 7180; called by data, threads-panel
+- `previewInfo`: line 7178; called by data
+- `pvViewer`: line 7115; called by library
+- `showArtifact`: line 6951; called by data, library
+- `showPreview`: line 7131; called by data
+- `tNoteState`: line 7234; called by thread, threads-core, threads-panel
+- `tsBar`: line 7117; called by data, thread
+- `tsForget`: line 6933; called by attachments, thread
+- `tShot`: line 7631; called by thread, threads-panel
+- `tsSet`: line 6939; called by attachments
+
+### `apps/dashboard/src/views/words/index.tsx`
+
+The words view (index.html at 8ea96ace). Its 49 functions other views call:
+
+- `actUnder`: line 3171; called by peek-kinds
+- `actView`: line 3225; called by loop, peek-kinds, peeks
+- `allQuestions`: line 3135; called by peek-kinds
+- `answeredCard`: line 3646; called by data, peek-kinds
+- `approvedBy`: line 3178; called by peek-kinds, peeks
+- `artHref`: line 3553; called by library, threads-panel, viewer
+- `authorityWords`: line 3158; called by loop, peek-kinds
+- `cap`: line 3128; called by autonomy, board, data, goals, overview, peek-kinds, peeks, review, viewer
+- `cardHead`: line 3521; called by autonomy, data, goals, review, settings
+- `cardMenu`: line 3515; called by autonomy, board
+- `choicesOf`: line 3273; called by data, peek-kinds
+- `dlink`: line 3169; called by peek-kinds, peeks, threads-panel
+- `featureTitle`: line 3139; called by board, peek-kinds
+- `fileHref`: line 3526; called by library, peeks
+- `flink`: line 3140; called by board, library, peek-kinds, peeks
+- `glink`: line 3146; called by peek-kinds, peeks, threads-panel
+- `goalOf`: line 3144; called by board, peek-kinds
+- `isOa`: line 3297; called by data
+- `keepSecretDrafts`: line 3418; called by data
+- `linkify`: line 3180; called by autonomy, data, library, loop, peek-kinds, peeks, settings, thread
+- `linkOf`: line 3560; called by peek-kinds, peeks, review
+- `menuOf`: line 3513; called by library
+- `milestonesOf`: line 3145; called by board, peek-kinds
+- `mlink`: line 3147; called by peek-kinds, peeks
+- `nextChip`: line 3455; called by review
+- `nextTime`: line 3435; called by review
+- `oaConfirming`: line 3318; called by data
+- `oaOpen`: line 3351; called by data
+- `oaPaint`: line 3373; called by data, peeks
+- `oaSig`: line 3388; called by thread
+- `oaState`: line 3320; called by data
+- `qblock`: line 3613; called by peek-kinds, review, thread
+- `qinline`: line 3589; called by peek-kinds, review, thread
+- `qlink`: line 3138; called by goals, loop, peek-kinds, peeks, threads-panel
+- `qplain`: line 3644; called by review
+- `questionCard`: line 3456; called by data, peek-kinds, thread
+- `rankWhy`: line 3439; called by review
+- `restoreSecretDrafts`: line 3424; called by data
+- `rlink`: line 3142; called by board, peek-kinds, peeks
+- `scopeWords`: line 3156; called by data, loop, peek-kinds, peeks
+- `slink`: line 3141; called by board, peek-kinds, peeks
+- `subjectLink`: line 3155; called by peeks
+- `ticketMap`: line 3134; called by autonomy, board, library, peek-kinds, peeks, thread, viewer
+- `tlink`: line 3137; called by peek-kinds, peeks, review, threads-panel
+- `toB64`: line 3432; called by data
+- `when`: line 3124; called by autonomy, board, data, goals, library, loop, peek-kinds, peeks, review, settings, shell, thread, threads-core
+- `who`: line 3136; called by autonomy, data, loop, peek-kinds, peeks, review, thread, threads-core, viewer
+- `wlink`: line 3143; called by board, peek-kinds
+- `words`: line 3129; called by autonomy, board, goals, library, loop, overview, peek-kinds, peeks, review, shell, thread, threads-core, threads-panel, viewer
 
 ### `apps/dashboard/src/views/canvas/index.tsx`
 
