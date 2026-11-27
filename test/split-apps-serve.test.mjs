@@ -277,9 +277,10 @@ function transform(policy, hashes, { browser = false } = {}) {
 // ---- the source's answers, recorded first on the same ports, then the tree's servers ----
 // Every request a check compares with main: { server, method, path, headers }.
 const LINK0 = 'kit-984-probe';
-// S3: a path per reserved first segment that a route passes through (GET-only, exact-match routes)
-const S3_PATHS = ['/api/hello', '/api/hello?x', '/api/hi/', '/upload', '/public/x.txt', '/review/a/b/c', '/review/preview/', '/view/artifact/x/', '/artifact/x.txt', '/public-manifest/x.txt', '/presence'];
-const S3_PLANT = ['api/hello', 'api/hi/index.html', 'upload', 'public/x.txt', 'review/a/b/c', 'review/preview/index.html', 'view/artifact/x/index.html', 'artifact/x.txt', 'public-manifest/x.txt', 'presence'];
+// S3: a path per reserved first segment that a route passes through (GET-only, exact-match routes);
+// the last three reach the reserved check encoded or in upper case (final-1 F1)
+const S3_PATHS = ['/api/hello', '/api/hello?x', '/api/hi/', '/upload', '/public/x.txt', '/review/a/b/c', '/review/preview/', '/view/artifact/x/', '/artifact/x.txt', '/public-manifest/x.txt', '/presence', '/%61rtifact/x.txt', '/%61pi/hello', '/API/hello'];
+const S3_PLANT = ['api/hello', 'api/hi/index.html', 'upload', 'public/x.txt', 'review/a/b/c', 'review/preview/index.html', 'view/artifact/x/index.html', 'artifact/x.txt', 'public-manifest/x.txt', 'presence', 'API/hello'];
 const REQS = [
   // D1-D3, H1: the page routes' policies at main (the tree's are these, transformed)
   { server: 'dash', method: 'GET', path: '/' },
@@ -570,7 +571,7 @@ test('S3: a static file under a reserved first segment never answers for a route
     }
   } finally {
     for (const at of made) fs.rmSync(at, { force: true });
-    for (const top of ['api', 'upload', 'public', 'view', 'artifact', 'public-manifest', 'presence', 'review/a', 'review/preview']) {
+    for (const top of ['api', 'API', 'upload', 'public', 'view', 'artifact', 'public-manifest', 'presence', 'review/a', 'review/preview']) {
       const at = path.join(d, top);
       if (fs.existsSync(at) && fs.statSync(at).isDirectory() && !fs.readdirSync(at, { recursive: true }).some((x) => fs.statSync(path.join(at, x)).isFile())) fs.rmSync(at, { recursive: true, force: true });
     }
