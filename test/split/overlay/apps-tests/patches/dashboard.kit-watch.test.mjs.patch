@@ -1,0 +1,20 @@
+diff --git a/test/dashboard.kit-watch.test.mjs b/test/dashboard.kit-watch.test.mjs
+index b4520560d8d854a3cf433bda5850277feeb237b5..b1fffad33ceb85167dc6c5fe8d9d41b0357022af 100644
+--- a/test/dashboard.kit-watch.test.mjs
++++ b/test/dashboard.kit-watch.test.mjs
+@@ -137,11 +137,11 @@ test("kit watch: a dashboard page file restarts it too; the project's files do n
+   await kwSleep(2000);
+   assert.doesNotMatch(d.log(), /restarting/, "the project's own files restart nothing");
+   assert.ok(kwAlive(first) && (await kwHello(port)), 'the first dashboard still answers');
+-  fs.appendFileSync(path.join(F.root, 'docs/devteam/dashboard/index.html'), '<!-- b -->\n');
+-  await until(() => /restarting: kit files changed \(dashboard\/index\.html\)/.test(d.log()) && d.starts().length === 2 && d.starts()[1].pid !== first, 'a restart for the page');
++  fs.mkdirSync(path.join(F.root, 'docs/devteam/apps/dashboard'), { recursive: true }); fs.appendFileSync(path.join(F.root, 'docs/devteam/apps/dashboard/index.html'), '<!-- b -->\n');
++  await until(() => /restarting: kit files changed \(apps\/dashboard\/index\.html\)/.test(d.log()) && d.starts().length === 2 && d.starts()[1].pid !== first, 'a restart for the page');
+   await until(async () => (await kwHello(port))?.kit, 'the second dashboard with its kit');
+-  write(path.join(F.root, 'docs/devteam/dashboard/extra.css'), 'body {}\n');
+-  await until(() => /restarting: kit files changed \(dashboard\/extra\.css\)/.test(d.log()) && d.starts().length === 3, 'a restart for a new stylesheet');
++  write(path.join(F.root, 'docs/devteam/apps/hub/index.html'), '<!-- hub -->\n');
++  await until(() => /restarting: kit files changed \(apps\/hub\/index\.html\)/.test(d.log()) && d.starts().length === 3, 'a restart for the hub page');
+ });
+ 
+ test('kit watch: a kit that does not parse is not started', { timeout: 180000 }, async (t) => {

@@ -1,0 +1,13 @@
+diff --git a/.github/workflows/box-image.yml b/.github/workflows/box-image.yml
+index 3f649ccb04bd62bbf8e29ba9e275abe3ac29704e..b706ad3b498ae40af4bbaa423739d3e4e919cc8c 100644
+--- a/.github/workflows/box-image.yml
++++ b/.github/workflows/box-image.yml
+@@ -4,7 +4,7 @@
+ name: box-image
+ on:
+   pull_request:
+-    paths: ['cloud/**', 'docs/devteam/dashboard/hub.html', 'docs/devteam/process/operator.md', 'docs/devteam/scripts/**', 'docs/devteam/schema/**', '.github/workflows/box-image.yml']
++    paths: ['cloud/**', 'apps/hub/**', 'apps/dashboard/src/shared/**', 'docs/devteam/process/operator.md', 'docs/devteam/scripts/**', 'docs/devteam/schema/**', '.github/workflows/box-image.yml']
+ permissions:
+   contents: read
+ jobs:
