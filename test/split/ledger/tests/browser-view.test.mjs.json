@@ -1,0 +1,6 @@
+{
+  "file": "test/browser-view.test.mjs",
+  "ticket": "kit-986-csp-tests",
+  "sha256": "b49da3ed5e582580592c4e943fb3654832008897c4f2ff83bc25568ec2c91ad7",
+  "source_sha256": "5703d5b7641066d4149d8f52dabb63d0b223962fb55e79b4b6d9ff62494ea489"
+}
