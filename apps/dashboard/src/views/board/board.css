@@ -1,0 +1,90 @@
+/* kit-993: the Progress and Board pages' CSS, index.html's css-progress and css-board regions, byte for byte. */
+/* css-progress start */
+  /* progress */
+  .filters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 10px; font-size: 12px; color: var(--fg-2); }
+  /* a select is as wide as its longest option, unless its label can shrink too */
+  .filters label { max-width: 100%; min-width: 0; } .filters select { min-width: 0; }
+  /* kit-91: the Board's and Progress's filters in the page bar */
+  .pagebar .extra select { min-width: 0; max-width: 220px; font-size: 12px; }
+  .pagebar .extra button[data-f="att"] { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 12px; }
+  .pagebar .extra button[data-f="att"][aria-pressed="true"] { background: var(--well); color: var(--fg); border-color: var(--fg-2); }
+  /* Progress on the shell (kit-91): a .g12 of a .c8 and a .c4 column, each a stack of cards; the forecast at the
+     burn-up head's right, cut short rather than overflowing it; the No goal line under Features */
+  #progress .pg-col { display: flex; flex-direction: column; gap: var(--gap); min-width: 0; }
+  #progress .pg-col > .card { margin: 0; }
+  #progress #forecast { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #progress .card-head > .grow { flex: 1 0 auto; } /* the title never gives way: a long forecast shortens instead */
+  #progress .nogoal { font-size: 12px; color: var(--fg-2); border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
+  .chart { position: relative; }
+  .chart svg { width: 100%; height: auto; display: block; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--fg-2); margin-bottom: 6px; }
+  .legend i { display: inline-block; width: 18px; height: 0; border-top: 2px solid var(--muted); vertical-align: middle; margin-right: 6px; }
+  .legend i.done { border-top-color: var(--series-1); } .legend i.scope { border-top-style: dashed; } .legend i.fc { border-top-color: var(--series-1); border-top-style: dotted; }
+  .tip { position: absolute; pointer-events: none; background: var(--raised); border: 1px solid var(--line-2); border-radius: 6px; padding: 6px 8px; font-size: 12px; display: none; white-space: nowrap; box-shadow: 0 4px 16px rgba(0,0,0,.12); }
+  .meter { height: 6px; background: var(--well); border-radius: 3px; overflow: hidden; }
+  .meter span { display: block; height: 100%; background: var(--series-1); border-radius: 3px; }
+  .row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; margin: 8px 0; font-size: 12px; }
+  .row .muted { font-variant-numeric: tabular-nums; }
+  .row .meter { grid-column: 1 / -1; }
+  .throughput { display: flex; align-items: flex-end; gap: 4px; height: 56px; }
+  .throughput span { flex: 1; background: var(--series-1); border-radius: 3px 3px 0 0; min-height: 2px; }
+
+/* css-progress end */
+/* css-board start */
+  /* board */
+  /* every column the same width, full or empty; the board scrolls sideways when they don't fit */
+  .board { display: grid; grid-template-columns: repeat(7, minmax(132px, 1fr)); gap: 8px; overflow-x: auto; padding-bottom: 6px; }
+  .board-peek { grid-template-columns: repeat(var(--cols), minmax(150px, 1fr)); margin-top: 6px; }
+  .col { min-width: 0; background: var(--well); border: 1px solid var(--line); border-radius: 8px; padding: 8px; min-height: 80px; }
+  .col.none h3 { color: var(--muted); }
+  /* a Board or incident card: a div[role=button] (its ⋯ menu can't nest in a button), styled as the button it was; an inert card (a planner's draft) keeps the plain .tcard look */
+  .tcard:not(.inert) { box-sizing: border-box; cursor: pointer; text-align: left; width: 100%; height: auto; margin: 0 0 6px; font: inherit; font-size: 12px; font-weight: 400; color: var(--fg); background: var(--surface); border: 1px solid var(--line); display: block; white-space: normal; transition: none; }
+  .tcard:not(.inert):hover { border-color: var(--line-2); background: var(--hover); opacity: 1; }
+  .tcard:not(.inert) .t b { font-family: var(--sans); font-size: 12.5px; font-weight: 600; }
+  .drawer dd a, .drawer p a { color: var(--blue-fg); text-decoration: underline; text-underline-offset: 2px; }
+  .tcard:not(.inert) .pills { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .tcard:not(.inert) .pill { margin: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
+  .tcard:not(.inert).blocked { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
+  .tcard:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+  .tcard .t a.title-link { color: inherit; text-decoration: none; }
+  .tcard .t a.title-link:hover { text-decoration: underline; }
+  /* a record card's ⋯ (cardMenu): top right; on the board's first column its menu opens to the right, inside the board */
+  .tcard > details.menu { float: right; margin: -5px -7px 0 4px; }
+  .col:first-child .tcard > details.menu[open] > .pop { right: auto; left: 0; }
+  .card > details.menu { float: right; margin: -6px -8px 0 6px; }
+  .card-side { display: flex; align-items: flex-start; gap: 6px; }
+  details.menu .pop > button + button { margin-left: 6px; }
+  /* a Progress row that opens its record */
+  .row[data-open] { cursor: pointer; border-radius: 4px; }
+  .row[data-open]:hover { background: var(--hover); }
+  .row[data-open]:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 2px; }
+  .col h3 { display: flex; justify-content: space-between; align-items: center; margin: 2px 4px 8px; }
+  .col h3 span:last-child { color: var(--muted); font-weight: 500; }
+  .tcard { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; font-size: 12px; box-shadow: var(--shadow); }
+  .tcard b { font-family: var(--mono); font-weight: 500; font-size: 11.5px; overflow-wrap: anywhere; }
+  .tcard.blocked { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
+  .more { font-size: 12px; color: var(--muted); padding: 2px 4px; }
+  /* the Board on the shell and the boards in peeks (kit-91, the owner's mock): seven columns of at least 180px on the
+     Board; a column head's rule is the column's own --line and runs to its edges; a card's head holds its id in
+     mono and its ⋯ menu above a --line rule; its pills are .badge.pill (the shell's dot off), alike inside and
+     outside a .no-shell fence; a card that needs attention has the red outline and its attention row */
+  #board .board { grid-template-columns: repeat(7, minmax(180px, 1fr)); }
+  :is(#board, .board-peek) .col h3 { margin: -8px -8px 8px; padding: 8px 12px 7px; font-size: 12px; font-weight: 600; color: var(--fg-2); border-bottom: 1px solid var(--line); }
+  :is(#board, .board-peek) .col.none h3 { color: var(--muted); }
+  .tcard > .tc-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-height: 29px; box-sizing: border-box; margin: -8px -10px 6px; padding: 2px 4px 2px 10px; border-bottom: 1px solid var(--line); }
+  .tcard > .tc-head > b { min-width: 0; }
+  .tcard > .tc-head > details.menu { flex: none; margin: 0; }
+  .col:first-child .tcard > .tc-head > details.menu[open] > .pop { right: auto; left: 0; }
+  .tcard .pills { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .tcard .pill::before, .plcard .pill::before { content: none; }
+  .tcard .pill i, .plcard .pill i { margin-right: 4px; font-size: 11px; vertical-align: -1px; }
+  :is(#board, .board-peek) .tcard.blocked { border: 1px solid var(--red); box-shadow: 0 0 0 1px color-mix(in srgb, var(--red) 25%, transparent); }
+  .tcard > .att { margin-top: 6px; min-width: 0; }
+  .att-q { display: flex; gap: 6px; align-items: flex-start; font-size: 12px; color: var(--blue-fg); min-width: 0; text-decoration: none; }
+  .att-q span { text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
+  .att-q i { flex: none; margin-top: 2px; }
+  .att .badge { margin-right: 0; }
+
+/* css-board end */
+/* restated from index.html:786 (css-misc), which board.css would otherwise override (m-20261127-231855624-supervisor) */
+  .phase-legend { margin-top: 6px; } .phase-legend i { border-top: 0; height: 8px; width: 8px; border-radius: 2px; }
