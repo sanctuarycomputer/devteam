@@ -106,6 +106,7 @@ test('B5 the hash step reads scripts as the HTML parser does, and refuses what i
   assert.equal(hashOf(three), sha(three), 'the hash is base64 SHA-256 of the UTF-8 bytes');
   assert.throws(() => scanHtml('<p>x</p><script>never ends'), Refused, 'a script with no end tag is refused');
   assert.throws(() => scanHtml('<script'), Refused, 'a tag with no ">" is refused');
+  assert.throws(() => scanHtml('<script>a()\r\nb()</script>'), Refused, 'a carriage return in a script body is refused');
   assert.equal(routeOf('index.html'), '/');
   assert.equal(routeOf(path.join('view', 'canvas', 'index.html')), '/view/canvas/');
   assert.equal(routeOf('404.html'), null, 'the export\'s 404.html is no route');
@@ -123,6 +124,7 @@ test('B5 the hash step reads scripts as the HTML parser does, and refuses what i
     const bad = spawnSync(process.execPath, [HASH, dir], { encoding: 'utf8' });
     assert.equal(bad.status, 1, 'a page it cannot read fails the build');
     assert.match(bad.stderr, /refused: b\/index\.html: a <script> at \d+ has no <\/script>/);
+    assert.equal(fs.existsSync(path.join(dir, 'csp-hashes.json')), false, 'a refused run leaves no csp-hashes.json, not the earlier one');
     assert.equal(spawnSync(process.execPath, [HASH], { encoding: 'utf8' }).status, 2, 'no folder: usage');
     assert.equal(spawnSync(process.execPath, [HASH, path.join(dir, 'none')], { encoding: 'utf8' }).status, 2, 'a missing folder: usage');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }

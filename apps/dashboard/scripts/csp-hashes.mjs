@@ -59,6 +59,8 @@ export function scanHtml(html) {
       const close = rawTextEnd(html, lower, name, j + 1);
       if (close < 0) throw new Refused(`a <${name}> at ${lt} has no </${name}>`);
       const body = html.slice(j + 1, close);
+      // the parser turns CR and CRLF into LF before a script runs, so a hash of these bytes would never match
+      if (body.includes('\r')) throw new Refused(`a <${name}> at ${lt} has a carriage return in its body`);
       if (name === 'script' && !/\ssrc\s*=/i.test(tag)) scripts.push(body);
       if (name === 'style') styles.push({ kind: 'element', tag: tag.slice(0, 120), bytes: Buffer.byteLength(body) });
       i = close + name.length + 2;
@@ -104,6 +106,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const dir = process.argv[2];
   if (!dir || process.argv.length > 3) { console.error('usage: node scripts/csp-hashes.mjs <out dir>'); process.exit(2); }
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) { console.error(`csp-hashes: ${dir} is not a folder`); process.exit(2); }
+  // fail closed: a refused run leaves no csp-hashes.json, not an earlier build's
+  fs.rmSync(path.join(dir, 'csp-hashes.json'), { force: true });
   try {
     const { manifest, styles } = hashExport(dir);
     fs.writeFileSync(path.join(dir, 'csp-hashes.json'), `${JSON.stringify(manifest, null, 2)}\n`);
