@@ -1,0 +1,13 @@
+diff --git a/test/dashboard.kit-watch-pane.test.mjs b/test/dashboard.kit-watch-pane.test.mjs
+index 96edc6d17418f8219cc1d250a0b7d0724a02ce90..aff60600493e819113562048778a333205afdfb6 100644
+--- a/test/dashboard.kit-watch-pane.test.mjs
++++ b/test/dashboard.kit-watch-pane.test.mjs
+@@ -162,7 +162,7 @@ test('kit watch: a failed respawn listens again on the old code', { skip: hasTmu
+   await until(async () => !!(await kwHello(port)), 'the address answers again');
+   assert.ok(kwAlive(first), 'from the first process');
+   assert.ok(!/started \(kit B\)/.test(log()), 'on the old code');
+-  fs.appendFileSync(path.join(F.root, 'docs/devteam/dashboard/index.html'), '<!-- c -->\n');
++  fs.mkdirSync(path.join(F.root, 'docs/devteam/apps/dashboard'), { recursive: true }); fs.appendFileSync(path.join(F.root, 'docs/devteam/apps/dashboard/index.html'), '<!-- c -->\n');
+   await until(() => kwCount(log(), /restarting: kit files changed/) === 2, 'a new change noticed again: its timers came back');
+ });
+ 
