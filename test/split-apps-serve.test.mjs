@@ -631,3 +631,45 @@ test('S8 (assets): a bad hash under /threads/one/ makes /threads/one/ a 500', { 
     assert.equal((await req(DASH_PORT, '/threads/one/')).status, 500);
   } finally { fs.writeFileSync(f, was); }
 });
+
+// ---- the kit watch and the image's runs ----
+test("W1: kitWatched watches self and each build's route index.html that exists", { skip: skipFor('W1') }, () => {
+  const rel = (w) => w.slice(1).map((f) => path.relative(path.join(TREE, 'docs/devteam'), f));
+  const w = treeCall('hub/image.mjs', "kitWatched('/x/cli.mjs')");
+  assert.equal(w[0], '/x/cli.mjs');
+  assert.deepEqual(rel(w), ['apps/dashboard/index.html', 'apps/dashboard/browser/index.html', 'apps/hub/index.html']);
+  const hub = path.join(APPS, 'hub');
+  fs.renameSync(hub, `${hub}.aside`);
+  try { assert.deepEqual(rel(treeCall('hub/image.mjs', "kitWatched('/x/cli.mjs')")), ['apps/dashboard/index.html', 'apps/dashboard/browser/index.html']); } finally { fs.renameSync(`${hub}.aside`, hub); }
+});
+
+test('I1: a commit to the hub app or the shared code it imports is a minor for the image', { skip: skipFor('I1') }, () => {
+  const A = git(TREE, 'rev-parse', 'HEAD').stdout.trim();
+  for (const f of ['apps/dashboard/src/shared/probe.ts', 'apps/hub/src/x.tsx']) {
+    try {
+      fs.mkdirSync(path.dirname(path.join(TREE, f)), { recursive: true });
+      fs.appendFileSync(path.join(TREE, f), '// kit-984 probe\n');
+      assert.equal(git(TREE, 'add', '--', f).status, 0);
+      assert.equal(git(TREE, 'commit', '-qm', `probe ${f}`).status, 0);
+      const B = git(TREE, 'rev-parse', 'HEAD').stdout.trim();
+      const r = run(process.execPath, ['docs/devteam/scripts/cli.mjs', 'box-pins', 'changed', '--since', A, '--to', B], { cwd: TREE, env: envOf('tree'), timeout: 120000 });
+      assert.match(r.stdout, /^kind: minor/m, `${f}: ${r.stdout}${r.stderr}`);
+    } finally { git(TREE, 'reset', '-q', '--hard', A); }
+  }
+});
+
+// main's IMAGE_RUNS.parts, read as machine.box-pins.changed.test.mjs reads them
+function sourceParts() {
+  const t = fs.readFileSync(path.join(root, 'docs/devteam/scripts/devteam.mjs'), 'utf8');
+  const at = t.indexOf('\nconst IMAGE_RUNS = {');
+  assert.ok(at !== -1, 'IMAGE_RUNS is declared');
+  const end = t.indexOf('\n};\n', at);
+  return new Function(`return ${t.slice(at + '\nconst IMAGE_RUNS = '.length, end + 2)}`)().parts;
+}
+test("I2: IMAGE_RUNS names the hub app and the shared code as files, and serveAppFiles beside the seam", { skip: skipFor('I2') }, () => {
+  const R = treeCall('box-pins.mjs', 'IMAGE_RUNS');
+  assert.deepEqual(R.files, ['cloud/**', 'apps/hub/**', 'apps/dashboard/src/shared/**', 'docs/devteam/process/operator.md']);
+  for (const p of ['servePage', 'servePageAsset', 'serveAppFiles', 'startHub']) assert.ok(R.parts.includes(p), p);
+  assert.deepEqual(sourceParts().filter((p) => !R.parts.includes(p)), [], "every part of main's");
+  assert.equal(R.parts.indexOf('serveAppFiles'), R.parts.indexOf('servePageAsset') + 1);
+});
