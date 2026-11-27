@@ -274,7 +274,8 @@ test('W5: in tree A every node:fs read in a test file goes through the helper, b
 // module, an environment-chosen path), and two that read through a path imported from a fixture and never
 // name the CLI. A row whose file, or whose named test, is gone at HEAD is skipped.
 const RUNS = [
-  ['test/pane-question.parse.test.mjs'], ['test/box-health-claude.test.mjs'], ['test/dashboard-loop.test.mjs'], ['test/dashboard-copy.test.mjs'],
+  // dashboard-loop's test that reads the CLI's text alone: its Chrome tests run the CLI, which a stand-in can't
+  ['test/pane-question.parse.test.mjs'], ['test/box-health-claude.test.mjs'], ['test/dashboard-loop.test.mjs', 'explanatory copy is gone'], ['test/dashboard-copy.test.mjs'],
   ['test/box-health-park.test.mjs'], ['test/box-health-room.test.mjs'],
   ['test/project-hosts-contract.test.mjs', 'every first segment the dashboard server answers is reserved'],
   ['test/browser-lock.test.mjs', 'the function is cut from devteam.mjs'],
