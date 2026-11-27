@@ -310,17 +310,19 @@ export const FIRST_DATA = `(() => {
   XMLHttpRequest.prototype.send = function (...a) { this.addEventListener('load', () => { if (this.getResponseHeader('x-parity-data')) done(); }); return send.apply(this, a); };
 })();`;
 // median ms to first data over `loads` loads, or null when no data request came in `wait` ms
+// Each load gets a tab of its own: today's dashboard, loaded a second time in the same tab (about:blank,
+// then the page), leaves Page.navigate unanswered for good, which stopped parity-build on the first PR
+// with apps built.
 export async function firstData(chrome, url, { loads = 5, wait = 10000 } = {}) {
-  const p = await chrome.newPage();
-  try {
-    await p.send('Page.enable');
-    await p.send('Network.enable');
-    // the server is plain http on 127.0.0.1: every https request (CDN fonts, scripts) fails at once
-    await p.send('Network.setBlockedURLs', { urls: ['https://*'] });
-    await p.send('Page.addScriptToEvaluateOnNewDocument', { source: FIRST_DATA });
-    const times = [];
-    for (let i = 0; i < loads; i++) {
-      await p.send('Page.navigate', { url: 'about:blank' });
+  const times = [];
+  for (let i = 0; i < loads; i++) {
+    const p = await chrome.newPage();
+    try {
+      await p.send('Page.enable');
+      await p.send('Network.enable');
+      // the server is plain http on 127.0.0.1: every https request (CDN fonts, scripts) fails at once
+      await p.send('Network.setBlockedURLs', { urls: ['https://*'] });
+      await p.send('Page.addScriptToEvaluateOnNewDocument', { source: FIRST_DATA });
       await p.send('Page.navigate', { url });
       const end = Date.now() + wait;
       let t = null;
@@ -331,9 +333,9 @@ export async function firstData(chrome, url, { loads = 5, wait = 10000 } = {}) {
       }
       if (typeof t !== 'number') return null;
       times.push(t);
-    }
-    return median(times);
-  } finally { p.close(); }
+    } finally { p.close(); }
+  }
+  return median(times);
 }
 
 // ---- the stages ----
