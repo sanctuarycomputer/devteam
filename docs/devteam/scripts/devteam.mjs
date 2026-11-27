@@ -34502,7 +34502,7 @@ function packageProvenance({ name, version, integrity } = {}) {
   const want = Buffer.from(integrity.slice(7), 'base64').toString('hex');
   // 3. upstream, from main's committed settings
   const main = mainRef();
-  const up = main ? settingsAt(main)?.upstream_repo : null;
+  const up = main ? settingsAt(main)?.upstream_repo : commonDir ? null : SETTINGS_DEFAULTS.upstream_repo;
   if (typeof up !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(up)) return refuse('upstream', `upstream_repo in main's settings${main ? ` (${main})` : ' (no main branch)'} is ${cut(up ?? null)}, not owner/name on github.com`);
   const ref = `refs/tags/v${version}`;
   // 4. the bundle, fetched once
@@ -34625,7 +34625,336 @@ function packageProvenance({ name, version, integrity } = {}) {
   } finally { try { fs.rmSync(bare, { recursive: true, force: true }); } catch { /* a folder left in the temp folder changes no answer */ } }
   return { ok: true, unreachable: false, refused: null, why: null, read, provenance: { repo: up, workflow: WORKFLOW, ref, commit } };
 }
-// package pin|install|status (kit-install@1). Until each is built, it says so.
+// package install (kit-install@1's one verified install step; kit-956). With no options it installs
+// main's pin (docs/devteam/package.json and package-lock.json at main, which must be packagePinPair's
+// bytes for package_name from main's settings) into docs/devteam/.kit/<version>-<12 hex>/ of home's main
+// checkout; with { version, into } it installs <package_name>@<version>, its pin made from the
+// registry's manifest, into the folder <into> itself, with no project needed (the box's case: no repo
+// at all takes package_name from SETTINGS_DEFAULTS). It returns { exit, line } and throws nothing but
+// withLock's die past its wait. The step, the same for .kit, the hub tree and --into:
+//   npm --version is 9.5 or newer (no npm: no-npm; older: old-npm), once per run;
+//   in a folder of its own beside the destination (.new-<name>-<pid>-<rand>) the pair is written, then
+//   npm ci (EINTEGRITY, or a node_modules/<name> that isn't name@version: integrity), then npm audit
+//   signatures, which must pass and report a verified attestation (audit), then packageProvenance
+//   (provenance:<its guard>), each through npmRun; then verified.json, written last by a rename, and the
+//   folder renamed into place. A registry that gives no answer (a network code, E5xx, E429, the
+//   provenance's unreachable) is unreachable; E404 is unpublished. Any failure removes the new folder and
+//   changes nothing else: no verified.json, current as it was, exit 1 naming the cause.
+// The .kit tree and the hub tree are each changed only under withLock(<tree>/.lock), waited for up to
+// 20 minutes (a crashed holder's lock is taken once 30 minutes old): the pin's folder, current and
+// verified for this very pin (name, version, integrity, layout), is left as it is; verified for it but
+// not current, it is switched to; anything else under its name is moved aside, removed, and installed
+// again. current is switched by renaming a new symlink (where the file system takes none, a one-line
+// file) over it, then packagePrune keeps the new current and the one before. After a verified layout-2
+// install in .kit, the same step installs it into ~/.devteam/hub/ and switches the hub's current,
+// unless the hub's current is verified and names another package or a version not older; an
+// unverified current holds nothing. A layout-1 install never touches the hub. A hub refusal after .kit
+// switched is exit 2. --into's folder must be missing or empty (or a verified install of that same
+// pin, left as it is), is locked by withLock(<into>), has a stopped run's .new-* beside it removed,
+// and has no current, no pruning and no hub step.
+function packageInstall({ version = null, into = null } = {}) {
+  const VER = /^(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})$/;
+  // an install's longest run is npm ci 120 s, audit 120 s, the bundle 30 s and five git calls of 120 s:
+  // 870 s, so a lock is stale only past 30 minutes, and a second install waits up to 20
+  const LOCK = { staleMs: 30 * 60000, waitMs: 20 * 60000 };
+  const NET = /^(ECONN[A-Z]*|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|ENETUNREACH|EHOSTUNREACH|E5[0-9][0-9]|E429)$/;
+  const rand = () => `${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+  const hex12 = (integrity) => Buffer.from(integrity.slice(7), 'base64').toString('hex').slice(0, 12);
+  const older = (a, b) => { const x = a.split('.').map(Number), y = b.split('.').map(Number); for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i]; return false; };
+  const first = (r) => (r.stderr.trim() || r.stdout.trim()).split('\n')[0].slice(0, 200);
+  const npmCode = (r) => (r.error === 'ETIMEDOUT' ? 'ETIMEDOUT' : /^npm (?:error|ERR!) code (\S+)/m.exec(r.stderr)?.[1] ?? null);
+  const refused = (what, cause, why, left) => ({ exit: 1, line: `package install ${what}: refused (${cause}): ${why}; ${left}` });
+  // the folder made beside dest, checked, then renamed to dest: { ok, record } or { ok: false, cause, why }
+  const step = (dest, p) => {
+    const stage = path.join(path.dirname(dest), `.new-${path.basename(dest)}-${rand()}`);
+    const fail = (cause, why) => { try { fs.rmSync(stage, { recursive: true, force: true }); } catch {} return { ok: false, cause, why }; };
+    try {
+      fs.mkdirSync(stage);
+      const pair = packagePinPair(p);
+      for (const f of ['package.json', 'package-lock.json']) fs.writeFileSync(path.join(stage, f), pair[f], { flag: 'wx' });
+    } catch (e) { return fail('write', `can't make ${stage} (${e.code ?? e.message})`); }
+    const npm = (args) => { try { return npmRun(args, { cwd: stage }); } catch (e) { return { thrown: e }; } };
+    const ci = npm(['ci']);
+    if (ci.thrown) return fail('registry', ci.thrown.message);
+    if (ci.status !== 0 || ci.error) {
+      const c = npmCode(ci);
+      if (c === 'EINTEGRITY') return fail('integrity', `the tarball npm fetched is not the lockfile's integrity ${p.integrity.slice(0, 19)}… (${first(ci)})`);
+      if (c && NET.test(c)) return fail('unreachable', `the registry ${ci.registry} can't be reached (${c})`);
+      if (c === 'E404') return fail('unpublished', `${p.name}@${p.version} is not published on ${ci.registry} (E404)`);
+      return fail('npm-failed', `npm ci failed (${c ?? ci.error ?? `exit ${ci.status}`}: ${first(ci)})`);
+    }
+    let got = null;
+    try { got = JSON.parse(fs.readFileSync(path.join(stage, 'node_modules', ...p.name.split('/'), 'package.json'), 'utf8')); } catch {}
+    if (got?.name !== p.name || got?.version !== p.version) return fail('integrity', `npm ci did not install ${p.name}@${p.version}`);
+    const au = npm(['audit', 'signatures']);
+    if (au.thrown) return fail('registry', au.thrown.message);
+    if (au.status !== 0 || au.error || !/\b(?:has a verified attestation|have verified attestations)\b/.test(au.stdout.replace(/\x1b\[[0-9;]*m/g, ''))) {
+      const c = npmCode(au);
+      if (c && NET.test(c)) return fail('unreachable', `the registry ${au.registry} can't be reached (${c})`);
+      return fail('audit', `npm audit signatures did not verify ${p.name}@${p.version}'s attestation (${au.status === 0 ? 'registry signatures only' : `${c ?? au.error ?? `exit ${au.status}`}: ${first(au)}`})`);
+    }
+    let pv;
+    try { pv = packageProvenance({ name: p.name, version: p.version, integrity: p.integrity }); } catch (e) { return fail('registry', e.message); }
+    if (pv.unreachable) return fail('unreachable', pv.why);
+    if (!pv.ok) return fail(`provenance:${pv.refused}`, pv.why);
+    const record = { v: 1, name: p.name, version: p.version, layout: p.layout, integrity: p.integrity, integrity_ok: true, provenance_ok: true, provenance: pv.provenance, at: new Date().toISOString() };
+    try {
+      const t = path.join(stage, `.verified.json.${rand()}.tmp`);
+      fs.writeFileSync(t, `${JSON.stringify(record, null, 2)}\n`, { flag: 'wx' });
+      fs.renameSync(t, path.join(stage, 'verified.json'));
+      fs.renameSync(stage, dest);
+    } catch (e) { return fail('write', `can't put ${dest} in place (${e.code ?? e.message})`); }
+    return { ok: true, record };
+  };
+  // a real folder (lstat), made when missing: true, or why not
+  const realDir = (d) => {
+    try { fs.mkdirSync(d, { recursive: true }); } catch (e) { return `can't make ${d} (${e.code ?? e.message})`; }
+    const st = fs.lstatSync(d, { throwIfNoEntry: false });
+    return st?.isDirectory() && !st.isSymbolicLink() ? true : `${d} is not a real folder (a symlink or a file)`;
+  };
+  // one tree (.kit or the hub): { ok, folder, was, changed } or { ok: false, cause, why }
+  const inTree = (tree, p, { onlyNewer = false } = {}) => {
+    const made = realDir(tree);
+    if (made !== true) return { ok: false, cause: 'tree', why: made };
+    return withLock(`${tree}${path.sep}`, () => {
+      const now = packageStatus({ tree });
+      const folder = `${p.version}-${hex12(p.integrity)}`;
+      const was = now.current;
+      // the hub: a verified current of another package, or of this one and not older, holds it; an
+      // unverified current holds nothing
+      const cur = was && now.installs.find((i) => i.folder === was);
+      if (onlyNewer && cur?.verified && (cur.record.name !== p.name || !older(cur.record.version, p.version))) return { ok: true, folder: was, was, changed: false, kept: true };
+      // a folder already there is this pin only when its record is verified and names this pin in full
+      const have = now.installs.find((i) => i.folder === folder);
+      const fits = !!have?.verified && have.record.name === p.name && have.record.version === p.version && have.record.integrity === p.integrity && have.record.layout === p.layout;
+      if (was === folder && fits) return { ok: true, folder, was, changed: false };
+      if (!fits) {
+        // anything else under the name is moved out of it first, so a stop or a failed removal never
+        // leaves a part of it under the name; packagePrune removes what is left
+        const aside = path.join(tree, `.gone-${folder}-${rand()}`);
+        try { fs.renameSync(path.join(tree, folder), aside); } catch (e) { if (e.code !== 'ENOENT') return { ok: false, cause: 'write', why: `can't move ${path.join(tree, folder)} aside (${e.code ?? e.message})` }; }
+        try { fs.rmSync(aside, { recursive: true, force: true }); } catch {}
+        const r = step(path.join(tree, folder), p);
+        // current named the folder moved aside (it didn't fit): say so, never "as it was"
+        if (!r.ok) return was === folder ? { ...r, why: `${r.why}; current named ${folder}, which did not fit the pin and was moved aside, so there is no current now` } : r;
+      }
+      const link = path.join(tree, `.current-${rand()}`);
+      try {
+        try { fs.symlinkSync(folder, link); } catch { fs.writeFileSync(link, `${folder}\n`, { flag: 'wx' }); }
+        fs.renameSync(link, path.join(tree, 'current'));
+      } catch (e) {
+        try { fs.rmSync(link, { force: true }); } catch {}
+        return { ok: false, cause: 'write', why: `can't switch ${path.join(tree, 'current')} (${e.code ?? e.message})` };
+      }
+      packagePrune(tree, [folder, was].filter(Boolean));
+      return { ok: true, folder, was, changed: true };
+    }, LOCK);
+  };
+  // npm, once: on PATH and 9.5 or newer
+  const npmCheck = () => {
+    let v;
+    let d = null;
+    try {
+      d = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-npm-version-'));
+      v = npmRun(['--version'], { cwd: d, timeout: 30000 });
+    } catch (e) { return { cause: 'registry', why: e.syscall ? `can't make a folder under ${os.tmpdir()} (${e.code ?? e.message})` : e.message }; } finally { if (d) fs.rmSync(d, { recursive: true, force: true }); }
+    if (v.error === 'ENOENT') return { cause: 'no-npm', why: 'no npm on PATH' };
+    const nv = /^(\d+)\.(\d+)\.(\d+)/.exec(v.stdout.trim());
+    if (v.status !== 0 || !nv) return { cause: 'npm-failed', why: `npm --version failed (${v.error ?? `exit ${v.status}`}: ${first(v)})` };
+    if (Number(nv[1]) < 9 || (Number(nv[1]) === 9 && Number(nv[2]) < 5)) return { cause: 'old-npm', why: `npm ${nv[0]} is older than 9.5, which can't verify attestations` };
+    return null;
+  };
+  const main = commonDir ? mainRef() : null;
+  if (into === null && !main) return { exit: 1, line: 'package install: no main branch to read the pin from; nothing installed' };
+  const name = commonDir ? (main ? settingsAt(main)?.package_name : null) : SETTINGS_DEFAULTS.package_name;
+  if (typeof name !== 'string' || !name) return { exit: 1, line: `package install: can't read package_name from main's settings${main ? ` (${main})` : ' (no main branch)'}; nothing installed` };
+  if (into !== null) {
+    // --into: the registry's manifest of name@version is the pin
+    const v = String(version ?? '').replace(/^v/, '');
+    if (!VER.test(v)) return { exit: 1, line: `package install: --version ${JSON.stringify(String(version).slice(0, 40))} is not X.Y.Z; nothing installed` };
+    const dest = path.resolve(String(into));
+    const what = `${name}@${v} into ${dest}`;
+    const left = `${dest} left as it was`;
+    const bad = npmCheck();
+    if (bad) return refused(what, bad.cause, bad.why, left);
+    let view = null;
+    let man = null;
+    try {
+      view = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-npm-view-'));
+      fs.writeFileSync(path.join(view, 'package.json'), '{}\n');
+      const r = npmRun(['view', `${name}@${v}`, '--json'], { cwd: view });
+      if (r.status !== 0 || r.error) {
+        let c = npmCode(r);
+        if (!c) { try { c = JSON.parse(r.stdout)?.error?.code ?? null; } catch {} }
+        if (c && NET.test(c)) return refused(what, 'unreachable', `the registry ${r.registry} can't be reached (${c})`, left);
+        if (c === 'E404') return refused(what, 'unpublished', `${name}@${v} is not published on ${r.registry} (E404)`, left);
+        return refused(what, 'npm-failed', `npm view failed (${c ?? r.error ?? `exit ${r.status}`})`, left);
+      }
+      try { man = JSON.parse(r.stdout); } catch {}
+    } catch (e) { return refused(what, 'registry', e.message, left); } finally { if (view) fs.rmSync(view, { recursive: true, force: true }); }
+    let p;
+    try {
+      if (man?.name !== name || man?.version !== v) throw new Error(`the manifest names ${String(man?.name).slice(0, 80)}@${String(man?.version).slice(0, 40)}`);
+      p = { name, version: v, integrity: man.dist?.integrity, resolved: `https://registry.npmjs.org/${name}/-/${name.slice(name.indexOf('/') + 1)}-${v}.tgz`, layout: man.devteam?.layout };
+      packagePinPair(p);
+    } catch (e) { return refused(what, 'manifest', `the registry's manifest isn't a pin (${e.message})`, left); }
+    const parent = realDir(path.dirname(dest));
+    if (parent !== true) return refused(what, 'into', parent, left);
+    return withLock(dest, () => {
+      const st = fs.lstatSync(dest, { throwIfNoEntry: false });
+      if (st) {
+        const same = packageStatus({ folder: dest });
+        if (same.verified && same.record.integrity === p.integrity && same.record.version === v && same.record.name === name) return { exit: 0, line: `package install: ${what}: installed and verified already` };
+        if (!st.isDirectory() || st.isSymbolicLink() || fs.readdirSync(dest).length) return refused(what, 'into', `${dest} is not an empty folder`, left);
+      }
+      // what a stopped run left beside it; the step's rename then replaces an empty folder in one move
+      try { for (const n of fs.readdirSync(path.dirname(dest))) if (n.startsWith(`.new-${path.basename(dest)}-`)) fs.rmSync(path.join(path.dirname(dest), n), { recursive: true, force: true }); } catch {}
+      const r = step(dest, p);
+      if (!r.ok) return refused(what, r.cause, r.why, left);
+      return { exit: 0, line: `package install: installed ${what} (layout ${p.layout}), verified` };
+    }, LOCK);
+  }
+  // main's pin, in .kit
+  const show = (f) => { const r = spawnSync('git', ['show', `${main}:docs/devteam/${f}`], { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); return r.status === 0 ? r.stdout : null; };
+  const pj = show('package.json'), lk = show('package-lock.json');
+  if (pj === null || lk === null) return { exit: 1, line: `package install: ${main} has no pin (docs/devteam/package.json and package-lock.json); nothing installed` };
+  let p;
+  try {
+    const a = JSON.parse(pj), b = JSON.parse(lk);
+    const e = b.packages?.[`node_modules/${name}`];
+    p = { name, version: a.dependencies?.[name], integrity: e?.integrity, resolved: e?.resolved, layout: a.devteam?.layout };
+    const pair = packagePinPair(p);
+    if (pair['package.json'] !== pj || pair['package-lock.json'] !== lk) throw new Error("its bytes are not packagePinPair's");
+  } catch (e) { return { exit: 1, line: `package install: refused (pin): ${main}'s pin of ${name} isn't a pin (${e.message}); nothing installed` }; }
+  const kit = path.join(mainRoot, 'docs', 'devteam', '.kit');
+  const what = `${name}@${p.version}`;
+  const bad = npmCheck();
+  if (bad) return refused(what, bad.cause, bad.why, 'current left as it was');
+  const r = inTree(kit, p);
+  if (!r.ok) return refused(what, r.cause, r.why, 'current left as it was');
+  let line = r.changed ? `package install: installed ${what} (layout ${p.layout}) in docs/devteam/.kit/${r.folder}, verified; current was ${r.was ?? 'nothing'}` : `package install: ${what} is installed, verified and current already`;
+  if (p.layout !== 2) return { exit: 0, line };
+  const hub = path.join(os.homedir(), '.devteam', 'hub');
+  const h = inTree(hub, p, { onlyNewer: true });
+  // exit 2: .kit switched, the hub refused (a caller tells the two apart without reading the line)
+  if (!h.ok) return { exit: 2, line: `${line}; hub: refused (${h.cause}): ${h.why}; ${hub}/current left as it was` };
+  line += h.kept ? `; hub: its current ${h.folder} is not older, left as it is` : h.changed ? `; hub: installed ${h.folder} in ${hub}, current was ${h.was ?? 'nothing'}` : `; hub: ${h.folder} is current already`;
+  return { exit: 0, line };
+}
+// package status (kit-install@1): what is pinned and installed, read only. packageStatus() is the
+// command's report, { registry, pin, kit: { path, current, installs }, hub: { path, current, installs } }
+// (pin: main's { name, version, layout, integrity }, or null); packageStatus({ tree }) one tree's
+// { current, installs: [{ folder, verified, record }] } (every real folder named <X.Y.Z>-<12 hex>, by
+// name); packageStatus({ folder }) one folder's { verified, record }. current is read as kit-install@1
+// says: a relative symlink, or a file of at most 64 bytes holding one name and a newline, naming a real
+// folder <X.Y.Z>-<12 hex> beside it; anything else, or a tree that isn't a real folder, is no current.
+// A folder is verified only when its verified.json (at most 4 KiB) parses, holds every field with its
+// type, both _ok are true, and its name, version, layout and integrity agree with the folder's name
+// (when it is <X.Y.Z>-<12 hex>) and with its pair, packagePinPair's bytes; record is what it parsed to.
+function packageStatus({ tree = null, folder = null } = {}) {
+  const NAME = /^((?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8}))-([0-9a-f]{12})$/;
+  const realDir = (d) => { const st = fs.lstatSync(d, { throwIfNoEntry: false }); return !!st?.isDirectory() && !st.isSymbolicLink(); };
+  const one = (dir) => {
+    let record = null;
+    try {
+      const f = path.join(dir, 'verified.json');
+      const st = fs.lstatSync(f);
+      if (st.isFile() && st.size <= 4096) record = JSON.parse(fs.readFileSync(f, 'utf8'));
+    } catch {}
+    const r = record;
+    const pv = r?.provenance;
+    const typed = !!r && typeof r === 'object' && r.v === 1 && typeof r.name === 'string' && typeof r.version === 'string' && (r.layout === 1 || r.layout === 2) && typeof r.integrity === 'string'
+      && r.integrity_ok === true && r.provenance_ok === true && !!pv && typeof pv === 'object' && ['repo', 'workflow', 'ref', 'commit'].every((k) => typeof pv[k] === 'string') && typeof r.at === 'string';
+    let verified = false;
+    if (typed) {
+      const m = NAME.exec(path.basename(dir));
+      const named = !m || (m[1] === r.version && /^sha512-/.test(r.integrity) && Buffer.from(r.integrity.slice(7), 'base64').toString('hex').slice(0, 12) === m[2]);
+      try {
+        const pair = packagePinPair({ name: r.name, version: r.version, integrity: r.integrity, resolved: `https://registry.npmjs.org/${r.name}/-/${r.name.slice(r.name.indexOf('/') + 1)}-${r.version}.tgz`, layout: r.layout });
+        verified = named && ['package.json', 'package-lock.json'].every((f) => fs.readFileSync(path.join(dir, f), 'utf8') === pair[f]);
+      } catch {}
+    }
+    return { verified, record };
+  };
+  if (folder !== null) return one(folder);
+  const readTree = (t) => {
+    if (!realDir(t)) return { current: null, installs: [] };
+    let current = null;
+    const c = path.join(t, 'current');
+    try {
+      const st = fs.lstatSync(c);
+      let n = null;
+      if (st.isSymbolicLink()) n = fs.readlinkSync(c);
+      else if (st.isFile() && st.size <= 64) { const s = fs.readFileSync(c, 'utf8'); if (/^[^\n]+\n$/.test(s)) n = s.slice(0, -1); }
+      if (n !== null && NAME.test(n) && realDir(path.join(t, n))) current = n;
+    } catch {}
+    let names = [];
+    try { names = fs.readdirSync(t).filter((n) => NAME.test(n) && realDir(path.join(t, n))).sort(); } catch {}
+    return { current, installs: names.map((n) => ({ folder: n, ...one(path.join(t, n)) })) };
+  };
+  if (tree !== null) return readTree(tree);
+  const set = process.env.DEVTEAM_NPM_REGISTRY ?? '';
+  const main = mainRef();
+  let pin = null;
+  if (main) {
+    const name = settingsAt(main)?.package_name;
+    const show = (f) => { const r = spawnSync('git', ['show', `${main}:docs/devteam/${f}`], { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); return r.status === 0 ? r.stdout : null; };
+    try {
+      const a = JSON.parse(show('package.json')), b = JSON.parse(show('package-lock.json'));
+      const e = b.packages?.[`node_modules/${name}`];
+      if (typeof a.dependencies?.[name] === 'string') pin = { name, version: a.dependencies[name], layout: a.devteam?.layout ?? null, integrity: e?.integrity ?? null };
+    } catch {}
+  }
+  const kit = path.join(mainRoot, 'docs', 'devteam', '.kit');
+  const hub = path.join(os.homedir(), '.devteam', 'hub');
+  return { registry: set === '' ? 'https://registry.npmjs.org/' : set, pin, kit: { path: kit, ...readTree(kit) }, hub: { path: hub, ...readTree(hub) } };
+}
+// packagePrune(tree, keep): in an install tree (.kit or the hub), held by its lock, removes every real
+// folder named <X.Y.Z>-<12 hex> not in keep (moved out of its name first, then removed), and what a
+// stopped step or prune left (.new-*, .current-*, .gone-*), except a folder a live process holds: one
+// whose cwd, an open file or a word of its command line (resolved against its cwd, as written and
+// through any symlink as it leads now) is in it, read from /proc. A process started through current
+// that has since moved is not seen: a launcher starts from the folder's own name. Where /proc can't be
+// read (no Linux), every such folder is held and kept. Returns the names it removed.
+function packagePrune(tree, keep) {
+  const NAME = /^(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})-[0-9a-f]{12}$/;
+  let names;
+  try { names = fs.readdirSync(tree); } catch { return []; }
+  const gone = names.filter((n) => !keep.includes(n) && (NAME.test(n) || /^\.(?:new|current|gone)-/.test(n)));
+  if (!gone.length) return [];
+  const real = (() => { try { return fs.realpathSync(tree); } catch { return tree; } })();
+  // every path a live process holds, or null when /proc can't tell
+  let held = null;
+  try {
+    held = [];
+    for (const pid of fs.readdirSync('/proc').filter((d) => /^\d+$/.test(d))) {
+      const at = (p) => { try { return fs.readlinkSync(`/proc/${pid}/${p}`); } catch { return null; } };
+      const cwd = at('cwd');
+      if (cwd) held.push(cwd);
+      try { for (const fd of fs.readdirSync(`/proc/${pid}/fd`)) { const l = at(`fd/${fd}`); if (l?.startsWith('/')) held.push(l); } } catch {}
+      // a word as written, and where it leads now (a path through current names its folder only so)
+      try { for (const w of fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0')) if (w.includes('/')) { const q = path.resolve(cwd ?? '/', w); held.push(q); try { held.push(fs.realpathSync(q)); } catch {} } } catch {}
+    }
+  } catch { held = null; }
+  const removed = [];
+  for (const n of gone) {
+    const p = path.join(tree, n);
+    const st = fs.lstatSync(p, { throwIfNoEntry: false });
+    if (!st) continue;
+    if (st.isDirectory() && !st.isSymbolicLink()) {
+      const inside = (h) => [p, path.join(real, n)].some((d) => h === d || h.startsWith(`${d}/`));
+      if (held === null || held.some(inside)) continue;
+    } else if (NAME.test(n)) continue;
+    // an install is moved out of its name first, so a stop or a failed removal never leaves a part of it
+    // that still reads as that version; a .gone-* left is removed by the next prune
+    let q = p;
+    if (NAME.test(n)) { q = path.join(tree, `.gone-${n}-${process.pid}-${crypto.randomBytes(4).toString('hex')}`); try { fs.renameSync(p, q); } catch { continue; } }
+    removed.push(n);
+    try { fs.rmSync(q, { recursive: true, force: true }); } catch {}
+  }
+  return removed;
+}
+// package pin|install|status (kit-install@1).
 function cmdPackage() {
   const sub = positional[0];
   if (sub === 'pin') {
@@ -34637,7 +34966,23 @@ function cmdPackage() {
     if (r.exit) { process.stderr.write(`devteam: ${r.line}\n`); process.exit(r.exit); }
     return out(r.line);
   }
-  if (['install', 'status'].includes(sub)) die(`package ${sub}: not built yet`);
+  if (sub === 'install') {
+    if (positional.length !== 1) die('usage: package install [--version v --into <dir>]');
+    const version = flagStr('version') ?? null, into = flagStr('into') ?? null;
+    if ((version === null) !== (into === null) || flags.version === true || flags.into === true) die('package install: --version v and --into <dir> go together (the box\'s case); with neither it installs main\'s pin');
+    if (into === null && (!commonDir || !projectInRepo)) die('package install installs main\'s pin in a project: run it in one of home\'s checkouts, or give --version v --into <dir>');
+    const r = packageInstall({ version, into });
+    if (r.exit) { process.stderr.write(`devteam: ${r.line}\n`); process.exit(r.exit); }
+    return out(r.line);
+  }
+  if (sub === 'status') {
+    if (positional.length !== 1) die('usage: package status [--json]');
+    if (!commonDir || !projectInRepo) die('package status runs in a project: run it in one of home\'s checkouts');
+    const st = packageStatus();
+    if (flags.json) return json(st);
+    const tree = (label, t) => [`${label} (${t.path}): current ${t.current ?? 'none'}`, ...t.installs.map((i) => `  ${i.folder}: ${i.verified ? `verified ${i.record.at}` : 'unverified'}`)];
+    return out([`registry: ${st.registry}`, `pin: ${st.pin ? `${st.pin.name}@${st.pin.version} (layout ${st.pin.layout}, ${String(st.pin.integrity).slice(0, 19)}…)` : 'none on main'}`, ...tree('.kit', st.kit), ...tree('hub', st.hub)].join('\n'));
+  }
   die('usage: package pin <tag> | package install [--version v] [--into <dir>] | package status [--json]');
 }
 
