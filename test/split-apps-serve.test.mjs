@@ -36,7 +36,8 @@ const run = (cmd, args, o = {}) => spawnSync(cmd, args, { encoding: 'utf8', env:
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'split-apps-serve-'));
 const kids = new Set();
 const killKids = () => { for (const k of kids) try { process.kill(-k.pid, 'SIGKILL'); } catch {} };
-// after() never runs when the top level throws: exit kills them all the same (and a signal exits)
+// a last resort on a normal exit or a signal; a top-level throw skips both this and after(), so every
+// server start is inside the try below, whose catch kills them
 process.on('exit', killKids);
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => process.exit(130));
 after(() => {
@@ -541,6 +542,8 @@ test('S1: the dashboard serves its build by alpha-serving.json at the root', { s
 
 test("S2: a dashboard route's page carries pageCsp()'s base with that route's hashes", { skip: skipFor('S2') }, async () => {
   started();
+  // the base is main's pageCsp() as served, not a copy of it: /view/artifact/<id> is pageCsp() with no frames
+  assert.equal(src('dash', `/view/artifact/${LINK0}`).csp, dashBase, "the export's base is main's pageCsp()");
   const r = await req(DASH_PORT, '/threads/one/');
   assert.equal(r.status, 200);
   assert.equal(r.headers['content-security-policy'], transform(dashBase, hashesOf('dashboard', '/threads/one/')));
