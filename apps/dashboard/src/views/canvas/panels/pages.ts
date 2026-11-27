@@ -98,10 +98,8 @@ export function movePage(id: string, dir: number): void {
 export function usedElsewhere(id: string): boolean {
   const d = state.doc;
   const inside = new Set<Json>(subtreeIds(d, id));
-  // @ts-ignore -- nodeIn is canvas-sync's stub (typed never) until kit-1015 ports it; the line is the page's
   const comps = new Set([...inside].filter((x) => nodeIn(d, x)?.type === 'component'));
   if (comps.size === 0) return false;
-  // @ts-ignore -- nodeIn is canvas-sync's stub (typed never) until kit-1015 ports it; the line is the page's
   return Object.keys(d.nodes).some((x) => !inside.has(x) && nodeIn(d, x)?.type === 'instance' && comps.has(d.nodes[x].component));
 }
 // A page deleted, and the page before it shown (the next one, for the first); never the only page,
