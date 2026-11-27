@@ -258,7 +258,9 @@ const hashesOf = (app, route) => JSON.parse(fs.readFileSync(path.join(APPS, app,
 // hashes; style-src gets 'self' first (the browser view's is 'self' alone); a missing script-src or
 // style-src is appended; with default-src 'none', font-src 'self' and img-src 'self' data: are appended
 // if absent (never on the browser view).
-function transform(policy, hashes, { browser = false } = {}) {
+// the shell's font and icon origins a dashboard route's style-src and font-src (where it has one) name (kit-1033)
+const ORIGINS = { 'style-src': ['https://fonts.googleapis.com', 'https://cdn.jsdelivr.net'], 'font-src': ['https://fonts.gstatic.com', 'https://cdn.jsdelivr.net'] };
+function transform(policy, hashes, { browser = false, dashboard = false } = {}) {
   const ds = policy.split(';').map((d) => d.trim()).filter(Boolean);
   const H = hashes.map((h) => `'${h}'`);
   const has = (n) => ds.some((d) => d.split(/\s+/)[0] === n);
@@ -271,6 +273,7 @@ function transform(policy, hashes, { browser = false } = {}) {
   if (!has('script-src')) out.push(['script-src', "'self'", ...H].join(' '));
   if (!has('style-src')) out.push(browser ? "style-src 'self'" : "style-src 'self' 'unsafe-inline'");
   if (!browser && ds.includes("default-src 'none'")) { if (!has('font-src')) out.push("font-src 'self'"); if (!has('img-src')) out.push("img-src 'self' data:"); }
+  if (dashboard) for (let i = 0; i < out.length; i++) { const [n, ...v] = out[i].split(/\s+/); if (ORIGINS[n]) out[i] = [n, ...v, ...ORIGINS[n].filter((o) => !v.includes(o))].join(' '); }
   return out.join('; ');
 }
 
@@ -344,6 +347,39 @@ test('A3: the policy builder is the same text in the servePage and servePageAsse
   assert.equal(cut('servePageAsset.mjs'), cut('servePage.mjs'));
 });
 
+// needs no split: the policy builder's text from each override, run on its own (kit-1033)
+const builders = () => ['servePage.mjs', 'servePageAsset.mjs'].map((f) => {
+  const t = fs.readFileSync(path.join(AREA_DIR, 'overrides', f), 'utf8');
+  const text = /\n[ \t]*\/\/ policy builder start\n([\s\S]*?)\n[ \t]*\/\/ policy builder end\n/.exec(t)?.[1];
+  assert.ok(text, `${f} has the policy builder between its marker lines`);
+  return [f, new Function(`${text}\nreturn build;`)()];
+});
+const HASH = `sha256-${'A'.repeat(43)}=`;
+const DASH_STYLE = "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net";
+
+test("A4: on a dashboard route the builder's style-src names the shell's two style origins", () => {
+  for (const [f, build] of builders()) assert.equal(build("frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:1", [HASH], false, true), `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:1; script-src 'self' '${HASH}'; ${DASH_STYLE}`, f);
+});
+
+test("A5: on a dashboard route under default-src 'none', the appended font-src names the shell's two font origins", () => {
+  for (const [f, build] of builders()) assert.equal(build("default-src 'none'", [], false, true), `default-src 'none'; script-src 'self'; ${DASH_STYLE}; font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net; img-src 'self' data:`, f);
+});
+
+test('A6: an origin the base already names is not repeated', () => {
+  for (const [f, build] of builders()) assert.equal(build('style-src https://cdn.jsdelivr.net; font-src data: https://fonts.gstatic.com', [], false, true), "style-src 'self' https://cdn.jsdelivr.net https://fonts.googleapis.com; font-src data: https://fonts.gstatic.com https://cdn.jsdelivr.net; script-src 'self'", f);
+});
+
+test('A7: a dashboard policy with no font-src gets none', () => {
+  for (const [f, build] of builders()) assert.doesNotMatch(build("frame-src 'self'", [], false, true), /font-src/, f);
+});
+
+test("A8: the hub's and the browser view's policies name none of the origins", () => {
+  for (const [f, build] of builders()) {
+    assert.equal(build("default-src 'none'; style-src 'unsafe-inline'", [], false), "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self'; img-src 'self' data:", `${f}: the hub's`);
+    assert.equal(build("default-src 'none'; style-src 'self'", [], true), "default-src 'none'; style-src 'self'; script-src 'self'", `${f}: the browser view's`);
+  }
+});
+
 // ---- the pages (servePage, pageVersion) ----
 const src = (server, p, headers) => { const a = SRC[keyOf(server, 'GET', p, headers)]; assert.ok(a, `the source answered ${server} ${p}`); return a; };
 const readApp = (rel) => fs.readFileSync(path.join(APPS, rel));
@@ -360,9 +396,9 @@ test('D1: the dashboard serves the build\'s index.html at / and /index.html, und
     assert.equal(r.headers['content-type'], 'text/html; charset=utf-8');
     assert.equal(r.headers['cache-control'], 'no-store');
     assert.deepEqual(r.body, readApp('dashboard/index.html'), `${p} is the build's page`);
-    assert.equal(r.headers['content-security-policy'], transform(src('dash', p).csp, hashesOf('dashboard', '/')));
+    assert.match(r.headers['content-security-policy'], /^frame-src 'self'.*; frame-ancestors 'self' http:\/\/127\.0\.0\.1:\d+; script-src 'self' 'sha256-[^']+'; style-src 'self' 'unsafe-inline' https:\/\/fonts\.googleapis\.com https:\/\/cdn\.jsdelivr\.net$/, `${p} names the shell's style origins`);
+    assert.equal(r.headers['content-security-policy'], transform(src('dash', p).csp, hashesOf('dashboard', '/'), { dashboard: true }));
     shapeOk(r.headers['content-security-policy']);
-    assert.match(r.headers['content-security-policy'], /^frame-src 'self'.*; frame-ancestors 'self' http:\/\/127\.0\.0\.1:\d+; script-src 'self' 'sha256-[^']+'; style-src 'self' 'unsafe-inline'$/);
   }
 });
 
@@ -373,7 +409,7 @@ test('D2: /view/artifact/<id> serves the build\'s index.html under the viewer\'s
   assert.equal(r.status, 200, String(r.body));
   assert.deepEqual(r.body, readApp('dashboard/index.html'));
   assert.equal(r.headers['referrer-policy'], 'no-referrer');
-  assert.equal(r.headers['content-security-policy'], transform(src('dash', p).csp, hashesOf('dashboard', '/')));
+  assert.equal(r.headers['content-security-policy'], transform(src('dash', p).csp, hashesOf('dashboard', '/'), { dashboard: true }));
   const bad = await req(DASH_PORT, '/view/artifact/!');
   assert.deepEqual(answerOf(bad), src('dash', '/view/artifact/!'));
 });
@@ -384,7 +420,7 @@ test('D3: /view/preview/<name> serves the build\'s index.html under the preview\
   const r = await req(DASH_PORT, p);
   assert.equal(r.status, 200, String(r.body));
   assert.deepEqual(r.body, readApp('dashboard/index.html'));
-  assert.equal(r.headers['content-security-policy'], transform(src('dash', p).csp, hashesOf('dashboard', '/')));
+  assert.equal(r.headers['content-security-policy'], transform(src('dash', p).csp, hashesOf('dashboard', '/'), { dashboard: true }));
   assert.deepEqual(answerOf(await req(DASH_PORT, '/view/preview/nonexistent-name')), src('dash', '/view/preview/nonexistent-name'));
 });
 
@@ -447,7 +483,7 @@ test('N1: with no build, every page route serves the notice (503) under its poli
       assert.equal(r.body.toString(), NOTICE);
       assert.equal(r.headers['content-security-policy'], policy, p);
     };
-    for (const p of ['/', '/index.html', `/view/artifact/${LINK0}`, `/view/preview/${PREVIEW}`]) await notice(DASH_PORT, p, transform(src('dash', p).csp, []));
+    for (const p of ['/', '/index.html', `/view/artifact/${LINK0}`, `/view/preview/${PREVIEW}`]) await notice(DASH_PORT, p, transform(src('dash', p).csp, [], { dashboard: true }));
     await notice(HUB_PORT, '/', transform(src('hub', '/').csp, []));
     await notice(VIEW_PORT, '/', "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'");
     assert.equal((await req(DASH_PORT, '/api/data')).headers['x-devteam-page'], '');
@@ -549,7 +585,8 @@ test("S2: a dashboard route's page carries pageCsp()'s base with that route's ha
   assert.equal(src('dash', `/view/artifact/${LINK0}`).csp, dashBase, "the export's base is main's pageCsp()");
   const r = await req(DASH_PORT, '/threads/one/');
   assert.equal(r.status, 200);
-  assert.equal(r.headers['content-security-policy'], transform(dashBase, hashesOf('dashboard', '/threads/one/')));
+  assert.match(r.headers['content-security-policy'], /; style-src 'self' 'unsafe-inline' https:\/\/fonts\.googleapis\.com https:\/\/cdn\.jsdelivr\.net$/, "/threads/one/ names the shell's style origins");
+  assert.equal(r.headers['content-security-policy'], transform(dashBase, hashesOf('dashboard', '/threads/one/'), { dashboard: true }));
 });
 
 test('S3: a static file under a reserved first segment never answers for a route', { skip: skipFor('S3') }, async () => {
@@ -613,7 +650,7 @@ test("S6: the dashboard serves no /view/ or /browser/ page from its export; the 
 
 test("S7: HEAD /, /?_rsc= and /index.html?x are the root page under the base with / hashes", { skip: skipFor('S7') }, async () => {
   started();
-  const policy = transform(dashBase, hashesOf('dashboard', '/'));
+  const policy = transform(dashBase, hashesOf('dashboard', '/'), { dashboard: true });
   const h = await req(DASH_PORT, '/', { method: 'HEAD' });
   assert.equal(h.status, 200);
   assert.equal(h.body.length, 0);
