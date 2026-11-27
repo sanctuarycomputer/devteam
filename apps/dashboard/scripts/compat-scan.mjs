@@ -97,7 +97,7 @@ export function hubRoot(text) {
 }
 export const SIGNALS = {
   index: [/dashboard['"]?\s*,\s*['"]index\.html|dashboard\/index\.html|\bINDEX\b\s*=|\bdashboardOnFreePort\b|\bstartDashboard\b|['"]dashboard['"]\s*,\s*['"]--port|devteam\.mjs['"]\s*,\s*['"]dashboard['"]/],
-  // a URL to a hub port's root loads hub.html (spec-3 F3-1, spec-4 F4-1): see hubRoot
+  // a URL to a hub port's root loads hub.html: see hubRoot
   hub: [/\bhub\.html\b|\bhubPage\b|\bstartHub\b/, (t) => hubRoot(t)],
   canvas: [/\bcanvas\.html\b|\/view\/canvas\//],
   browser: [/\bbrowser\.html\b|\bbrowserViewServer\b/],
@@ -203,7 +203,6 @@ export function readPage(text, page) {
       return;
     }
     for (const m of l.matchAll(/\bid=\\?["']([A-Za-z_][\w:-]*)(\$\{)?/g)) { if (m[2]) first(found.idPrefixes, m[1], ln); else first(found.ids, m[1], ln); }
-    for (const m of l.matchAll(/\bid=\\?["']\$\{/g)) void m;
     // an id the script builds: `n-${tab}` on a line that looks elements up by id (getElementById, the page's $)
     if (/getElementById\(|(?<![\w$.])\$\(/.test(l)) for (const m of l.matchAll(/`([A-Za-z_][\w:]*-)\$\{/g)) first(found.idPrefixes, m[1], ln);
     // every hyphenated id-shaped string the script holds ({ library: 'n-library' }): an id only if a test looks
@@ -555,11 +554,20 @@ const byKeyOf = (res, k) => res.pages.find((p) => p.key === k);
 // ---- the command ----
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
+  const USAGE = 'usage: node apps/dashboard/scripts/compat-scan.mjs --base <sha> [--repo <kit>] [--check | --json | --stubs]';
+  const usage = (why) => { console.error(`compat-scan: ${why}\n${USAGE}`); process.exit(2); };
+  // refuse what it doesn't know before anything runs: a mistyped --check must never fall through to writing
+  const MODES = ['--check', '--json', '--stubs'];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--base' || args[i] === '--repo') { if (!args[i + 1] || args[i + 1].startsWith('--')) usage(`${args[i]} needs a value`); i++; continue; }
+    if (!MODES.includes(args[i])) usage(`unknown argument ${JSON.stringify(args[i])}`);
+  }
+  if (args.filter((a) => MODES.includes(a)).length > 1) usage('one of --check, --json, --stubs');
   const opt = (n) => { const i = args.indexOf(`--${n}`); return i < 0 ? undefined : args[i + 1]; };
   const here = path.dirname(fileURLToPath(import.meta.url));
   const repo = path.resolve(opt('repo') ?? path.join(here, '..', '..', '..'));
   const base = opt('base');
-  if (!base || base.startsWith('--')) { console.error('usage: node apps/dashboard/scripts/compat-scan.mjs --base <sha> [--repo <kit>] [--check | --json | --stubs]'); process.exit(2); }
+  if (!base) usage('--base is required');
   let res;
   try {
     const sha = git(repo, ['rev-parse', '--verify', '--quiet', `${base}^{commit}`]).trim();

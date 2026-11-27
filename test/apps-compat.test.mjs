@@ -82,12 +82,22 @@ test('C1 each COMPAT.md has its parts, its pages, and only the port plan\'s view
 
 const baseOf = (md) => /at kit `([0-9a-f]{40})`/.exec(md)?.[1];
 const base = baseOf(compatOf('dashboard'));
-const hasBase = !!base && spawnSync('git', ['cat-file', '-e', `${base}^{commit}`], { cwd: ROOT }).status === 0;
+const hasCommit = (c) => spawnSync('git', ['cat-file', '-e', `${c}^{commit}`], { cwd: ROOT }).status === 0;
+const hasBase = !!base && hasCommit(base);
+// the scan also reads the design's view ranges at 3088ac1e (RANGES_AT): a checkout without it skips C2 too
+const hasRanges = hasCommit('3088ac1e');
 
-test('C2 the scan at COMPAT.md\'s commit writes both files as they are, and each root stub exports what other views call', { skip: hasBase ? false : `git has no ${base?.slice(0, 12) ?? 'base'} here (a shallow clone): the scan needs the tests at the commit it was written from`, timeout: 100000 }, () => {
+test('C2 the scan at COMPAT.md\'s commit writes both files as they are, and each root stub exports what other views call', { skip: hasBase && !hasRanges ? 'git has no 3088ac1e here (the design\'s view ranges): the scan needs it' : hasBase ? false : `git has no ${base?.slice(0, 12) ?? 'base'} here (a shallow clone): the scan needs the tests at the commit it was written from`, timeout: 100000 }, () => {
   assert.equal(baseOf(compatOf('hub')), base, 'both files are from the same commit');
   const r = spawnSync(process.execPath, ['--max-old-space-size=2048', path.join(ROOT, 'apps', 'dashboard', 'scripts', 'compat-scan.mjs'), '--base', base, '--repo', ROOT, '--check'], { cwd: ROOT, encoding: 'utf8', timeout: 90000, maxBuffer: 1 << 26 });
   assert.equal(r.status, 0, `compat-scan --check: ${r.stderr.trim().split('\n').slice(0, 6).join(' | ')}`.slice(0, 2000));
+  // a mistyped mode or two modes: usage, exit 2, and neither file written
+  const before = APP_NAMES.map((a) => fs.readFileSync(path.join(ROOT, 'apps', a, 'COMPAT.md')));
+  for (const bad of [['--chek'], ['--check', '--json'], ['--repo']]) {
+    const u = spawnSync(process.execPath, [path.join(ROOT, 'apps', 'dashboard', 'scripts', 'compat-scan.mjs'), '--base', base, ...bad], { cwd: ROOT, encoding: 'utf8', timeout: 30000 });
+    assert.equal(u.status, 2, `compat-scan --base … ${bad.join(' ')}: usage, exit 2 (${(u.stderr || '').trim().split('\n')[0]})`);
+  }
+  assert.deepEqual(APP_NAMES.map((a) => fs.readFileSync(path.join(ROOT, 'apps', a, 'COMPAT.md'))), before, 'a refused run writes neither COMPAT.md');
 });
 
 // A second reading, apart from the scan's and simpler: every id or class a test looks up by name
@@ -132,7 +142,8 @@ test('C4 every id and class a test looks up by name, which its page writes, is i
 
 const builtAt = (a) => [path.join(ROOT, 'docs', 'devteam', 'apps', a), path.join(ROOT, 'apps', a, 'out')].find((d) => fs.existsSync(path.join(d, 'csp-hashes.json')));
 const built = APP_NAMES.every((a) => builtAt(a));
-const skipChrome = !built ? 'no app is built here: run `npm ci --ignore-scripts && npm run build` in apps/dashboard and apps/hub (the parity run builds them)' : canDrive ? false : 'no Chrome here';
+const someBuilt = APP_NAMES.filter((a) => builtAt(a));
+const skipChrome = !built ? (someBuilt.length ? 'only ' + someBuilt.join(', ') + ' is built here' : 'no app is built here') + ': run `npm ci --ignore-scripts && npm run build` in apps/dashboard and apps/hub (the parity run builds them)' : canDrive ? false : 'no Chrome here';
 const STRICT = process.env.DEVTEAM_APPS_COMPAT_STRICT === '1';
 
 const TYPES = { html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', txt: 'text/plain; charset=utf-8', json: 'application/json', svg: 'image/svg+xml', png: 'image/png', ico: 'image/x-icon', webp: 'image/webp', woff2: 'font/woff2' };
