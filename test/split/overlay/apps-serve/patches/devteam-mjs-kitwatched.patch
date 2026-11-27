@@ -1,0 +1,28 @@
+diff --git a/docs/devteam/scripts/devteam.mjs b/docs/devteam/scripts/devteam.mjs
+index ffb2b355eeca9a0698b6054e983a037fa9adad55..7049fdf10ee111be9d71bb0dcd6a405082f4962f 100644
+--- a/docs/devteam/scripts/devteam.mjs
++++ b/docs/devteam/scripts/devteam.mjs
+@@ -28815,16 +28815,13 @@ async function cmdBoxPins() {
+ // dashboard whose hub port it names leaves the hub to the image; a project still on an older kit can
+ // take the port in the second the image's hub restarts, until it adopts this release.
+ const imageHub = () => (/^\d+$/.test(process.env.DEVTEAM_IMAGE_HUB ?? '') ? Number(process.env.DEVTEAM_IMAGE_HUB) : null);
+-// The kit a dashboard runs (kit-288): the script Node loaded and the dashboard's own pages, scripts and
+-// styles. A print of them, by path: size and mtime from a stat, and the sha256 of the bytes, read again
+-// only for a file whose stat moved since prev. The project's files (project/, run/, its own code) are
+-// not in it: they never restart a dashboard.
+-const kitWatched = (self) => {
+-  const dir = path.join(kitDir, 'dashboard');
+-  let names = [];
+-  try { names = fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isFile() && /\.(html|js|css)$/.test(e.name)).map((e) => path.join(dir, e.name)); } catch {}
+-  return [self, ...names.sort()];
+-};
++// The kit a dashboard runs (kit-288). A print of it, by path: size and mtime from a stat, and the sha256
++// of the bytes, read again only for a file whose stat moved since prev. The project's files (project/,
++// run/, its own code) are not in it: they never restart a dashboard.
++// apps@1 Serving (kit-984, R1): the kit a dashboard runs is the script Node loaded and each built page's
++// route index.html that exists (a rebuild changes it: its chunk names are hashed into it), in place of
++// the old dashboard/ files. kitPrint skips a file that is gone.
++const kitWatched = (self) => [self, ...['apps/dashboard/index.html', 'apps/dashboard/browser/index.html', 'apps/hub/index.html'].map((f) => path.join(kitDir, ...f.split('/'))).filter((f) => fs.existsSync(f))];
+ function kitPrint(self, prev = new Map()) {
+   const print = new Map();
+   for (const f of kitWatched(self)) {

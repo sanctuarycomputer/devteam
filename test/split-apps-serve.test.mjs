@@ -131,6 +131,7 @@ const READS = {
   W: () => driftBy('override', 'kitWatched') || LOAD_TIME_SKIP,
   I: () => driftBy('override', 'IMAGE_RUNS') || LOAD_TIME_SKIP,
   G1: () => driftBy('patch', 'gitignore.patch'),
+  W2: () => driftBy('patch', 'devteam-mjs-kitwatched.patch'),
   G2: () => driftBy('patch', 'box-image-yml.patch'),
   G3: () => driftBy('patch', 'test-yml.patch'),
   K: () => ['dashboard.kit-watch.test.mjs.patch', 'dashboard.kit-watch-pane.test.mjs.patch'].map((p) => driftBy('patch', p, 'apps-tests')).find(Boolean) ?? false,
@@ -325,7 +326,7 @@ const started = () => { if (startError) throw new Error(`the servers didn't star
 
 test("A1: HEAD's split applies exactly apps-serve's and apps-tests' items, none of either stale, no conflict naming them", { skip: skipFor('A1') }, () => {
   assert.equal(split.status, 0, split.stderr);
-  assert.deepEqual(area('apps-serve').applied, ['override IMAGE_RUNS', 'override kitWatched', 'override pageVersion', 'override servePage', 'override servePageAsset', 'patch box-image-yml.patch', 'patch gitignore.patch', 'patch test-yml.patch']);
+  assert.deepEqual(area('apps-serve').applied, ['override IMAGE_RUNS', 'override kitWatched', 'override pageVersion', 'override servePage', 'override servePageAsset', 'patch box-image-yml.patch', 'patch devteam-mjs-kitwatched.patch', 'patch gitignore.patch', 'patch test-yml.patch']);
   assert.deepEqual(area('apps-tests').applied, ['patch dashboard.kit-watch-pane.test.mjs.patch', 'patch dashboard.kit-watch.test.mjs.patch']);
   assert.deepEqual([...area('apps-serve').stale, ...area('apps-tests').stale], []);
   assert.deepEqual((J.overlay?.conflicts ?? []).filter((c) => c.areas.some((a) => MINE.includes(a))), []);
@@ -644,6 +645,17 @@ test("W1: kitWatched watches self and each build's route index.html that exists"
   const hub = path.join(APPS, 'hub');
   fs.renameSync(hub, `${hub}.aside`);
   try { assert.deepEqual(rel(treeCall('hub/image.mjs', "kitWatched('/x/cli.mjs')")), ['apps/dashboard/index.html', 'apps/dashboard/browser/index.html']); } finally { fs.renameSync(`${hub}.aside`, hub); }
+});
+
+// The tree's devteam.mjs is still the whole script until the entry cutover, and the kit-watch tests run
+// it (ruling a-20261127-064041006): its kitWatched is the override's, so the watch follows the build there too
+test("W2: the tree's devteam.mjs declares kitWatched as the override does", { skip: skipFor('W2') }, () => {
+  const decl = (t, what) => {
+    const m = /^const kitWatched = \(self\) => [^\n]*\n/m.exec(t);
+    assert.ok(m, `${what} declares kitWatched on one line`);
+    return m[0];
+  };
+  assert.equal(decl(fs.readFileSync(path.join(TREE, 'docs/devteam/scripts/devteam.mjs'), 'utf8'), "the tree's devteam.mjs"), decl(fs.readFileSync(path.join(AREA_DIR, 'overrides/kitWatched.mjs'), 'utf8'), 'the override'));
 });
 
 test('I1: a commit to the hub app or the shared code it imports is a minor for the image', { skip: skipFor('I1') }, () => {

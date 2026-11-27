@@ -15,11 +15,12 @@ In the tree, the CLI's servers serve the built apps (`apps@1` Serving, `page-sea
   - `IMAGE_RUNS`: `apps/hub/**` and `apps/dashboard/src/shared/**` replace `hub.html` in `files`, and `serveAppFiles` joins `parts`, so a change to the hub or to the code it shares is a minor.
 - **`patches/`**, each made with `git diff -U3 --full-index` from an edited copy:
   - `gitignore.patch`: `docs/devteam/.gitignore` ignores `apps/`;
+  - `devteam-mjs-kitwatched.patch`: the tree's `docs/devteam/scripts/devteam.mjs` is still the whole script until the entry cutover, and the kit-watch tests run it, so its `kitWatched` is the override's text too (ruling `a-20261127-064041006-supervisor`). W2 holds the two equal. It goes stale when the lines around `kitWatched` change on main; remake it as the others, from the override's text;
   - `box-image-yml.patch`: the path filter names both folders in place of `hub.html`;
   - `test-yml.patch`: a `build-apps` job (Node 24) builds both apps once, and every `kit` shard needs it and places `out/` and `lib-dist/` before it runs (a shard that places no build fails there).
 - The policy builder is written twice, inside `servePage` and inside `servePageAsset`, between `// policy builder start` and `// policy builder end`. An override replaces one declaration, so there is no shared helper. `test/split-apps-serve.test.mjs` A3 holds the two copies equal.
 
-**When it goes stale** (a regular PR changes one of these declarations, `.gitignore`, `box-image.yml` or `test.yml` on main):
+**When it goes stale** (a regular PR changes one of these declarations, `.gitignore`, `box-image.yml`, `test.yml` or the lines around `kitWatched` in `devteam.mjs` on main):
 - The parity run reports it, and `test/split-apps-serve.test.mjs` skips the checks that read it, naming the drift.
 - To re-pin an override, merge main and look at the declaration's new text. Carry the change into the override, then set its pin to 64 zeros, split, and copy the `it is now sha256:<x>` value from the stale report.
 - To remake a patch, edit a copy of the file at HEAD and run `git diff -U3 --full-index`.
