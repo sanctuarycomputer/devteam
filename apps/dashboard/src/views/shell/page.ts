@@ -7,14 +7,13 @@
 import './pages';
 import { shellPages } from '../../shared/shell/shell';
 import { VIEW_TOAST, writes } from '../../lib/shell-view-only';
-import { viewer } from './state';
+import { shell, viewer } from './state';
 import { drawSettings, loadFleet } from '../settings';
 import { tlPins } from '../thread';
 import { thGo } from '../threads-panel';
 import { avStep } from '../viewer';
 
 // Declared without initializers: in the import cycle a view's top-level call may set one before this body runs.
-var PAGE_NOW: string | null | undefined; // the page shown
 var viewToastAt: number | undefined; // when the view-only toast last showed
 var viewListening: boolean | undefined; // viewStop's listeners are on
 var booted: boolean | undefined; // bootShell() has run
@@ -27,8 +26,8 @@ export function $(id: string): HTMLElement | null {
 // page starts at the top, unless the route scrolls to a target on it (keepScroll).
 export function showPage(id: string, { keepScroll = false }: { keepScroll?: boolean } = {}): void {
   const pg = shellPages().find((x) => x.id === id) ?? shellPages()[0];
-  const changed = PAGE_NOW !== pg.id;
-  PAGE_NOW = pg.id;
+  const changed = shell.PAGE_NOW !== pg.id;
+  shell.PAGE_NOW = pg.id;
   for (const sec of document.querySelectorAll<HTMLElement>('main.page > section[data-page]')) sec.classList.toggle('on', sec.dataset.page === pg.id);
   const title = $('page-title');
   if (title) title.textContent = pg.title;
