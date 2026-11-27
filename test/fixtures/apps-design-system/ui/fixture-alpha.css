@@ -1,0 +1,2 @@
+.fixture-alpha { font: inherit; color: var(--fg); background: var(--raised); border: 1px solid var(--line-2); border-radius: 6px; padding: 4px 10px; }
+.fixture-alpha:disabled { color: var(--muted); }

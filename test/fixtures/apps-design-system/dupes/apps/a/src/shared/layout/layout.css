@@ -1,0 +1,7 @@
+/* the fixture's classes: .dup and .dup-cross are outermost in two view folders; .solo in one; .inner only nested;
+   .via-ui outermost only in shared/ui/ and one view; .in-text only in a string */
+.dup, .solo { display: block; }
+.inner > .x { color: red; }
+.via-ui:hover { color: blue; }
+@media (max-width: 500px) { .dup-cross { display: none; } }
+.in-text { content: ".not-a-class"; }
