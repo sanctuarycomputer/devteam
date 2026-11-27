@@ -130,6 +130,9 @@ test('D4 nothing leads to the page: only page.tsx and the view name design-syste
   const gate = read(path.join(VIEW, 'gate.tsx'));
   assert.match(gate, /import\('\.\/index'\)/, 'the gate loads the view by a dynamic import');
   assert.doesNotMatch(gate, /^import [^;]*from '\.\/index'/m, 'and never statically');
+  const view = read(path.join(VIEW, 'index.tsx'));
+  assert.match(view, /<Contain><Draw specimen=\{s\} on=\{/, 'each specimen renders as its own component inside its boundary');
+  assert.doesNotMatch(view, /\.render\(on[A-Z]/, 'and never in the page\'s own render, where a throw would take the page');
 });
 
 test('D5 apps-src@2: APPS.md, the build and predev scripts, and the ignored catalog', () => {

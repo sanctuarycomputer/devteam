@@ -37,12 +37,12 @@ function readTokens(): Token[] {
   });
 }
 
-// A specimen that throws shows its error in place, and the rest of the page still renders.
-// a specimen drawn as its own component, so a render that throws is caught by the Contain around it
+// A specimen drawn as its own component, so a render that throws is caught by the Contain around it.
 function Draw({ specimen, on }: { specimen: Specimen; on: On }) {
   return <>{specimen.render(on)}</>;
 }
 
+// A specimen that throws shows its error in place, and the rest of the page still renders.
 class Contain extends Component<{ children: ReactNode }, { error: string | null }> {
   state = { error: null as string | null };
   static getDerivedStateFromError(e: unknown) { return { error: e instanceof Error ? e.message : String(e) }; }
