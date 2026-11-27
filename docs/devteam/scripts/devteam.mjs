@@ -30986,10 +30986,10 @@ async function cmdDashboard() {
     };
     look();
   });
-  const restart = async (files, key) => {
+  const restart = async (what, key) => {
     const how = kitHandOver();
     const to = await newKit();
-    const changed = `kit files changed (${files.join(', ')}) from ${startKit ?? 'unknown'} to ${to}`;
+    const changed = `${what} from ${startKit ?? 'unknown'} to ${to}`;
     if (how.how === 'stay') return sayOnce(key, `${changed}: this dashboard runs older code than its files; restart it to run them (${how.why})`);
     restarting = true;
     draining = true;
@@ -31016,22 +31016,140 @@ async function cmdDashboard() {
     startTimers();
     startHubOnce();
   };
+  // ----- the package (kit-958; kit-install@1, design kit-package-dist decision 5). Each tick reads
+  // main's pin off the loop (git ls-tree, then cat-file only when a blob moved). When main's lockfile
+  // or package.json moves from what the first read found (or from the last install that passed), it
+  // runs `package install` once, as a child the tick never waits for; after a failure it tries that
+  // same pin again only once ten minutes have passed on its clock (DEVTEAM_TEST_KIT_WATCH_CLOCK, a
+  // file of ms added to it, read only while DEVTEAM_TEST is set), and a pin that moves on goes at once.
+  // With main pinning layout 2, .kit/current is part of what the watch compares (so a switch restarts
+  // it), and a restart goes ahead only when current names main's pin, verified, layout 2; until
+  // then it holds, saying why once. With layout 1 or nothing, current is not looked at: today's watch.
+  const kitTree = path.join(mainRoot, 'docs', 'devteam', '.kit');
+  const INSTALL_BACKOFF_MS = 10 * 60000;
+  const watchNow = () => {
+    const f = process.env.DEVTEAM_TEST ? process.env.DEVTEAM_TEST_KIT_WATCH_CLOCK : '';
+    let off = 0;
+    if (f) { try { off = Number(fs.readFileSync(f, 'utf8').trim()) || 0; } catch {} }
+    return Date.now() + off;
+  };
+  const currentName = () => packageStatus({ tree: kitTree }).current;
+  const startCurrent = currentName();
+  // main's pin: undefined until first read; null for none (or no main); else { blobs, label, version,
+  // layout, integrity, folder }, the last three null when the pair isn't one
+  let pin;
+  let pinReading = false;
+  let installed;
+  let installing = false;
+  let failed = null;
+  const maybeInstall = () => {
+    if (installing || restarting || !pin) return;
+    if (pin.blobs === installed) return;
+    if (failed?.blobs === pin.blobs && watchNow() - failed.at < INSTALL_BACKOFF_MS) return;
+    const { blobs, label } = pin;
+    installing = true;
+    log(`kit watch: installing main's pin ${label} (package install)`);
+    // detached, in a process group of its own, its output in a file, and never tracked: a restart
+    // neither waits for it with the server closed nor takes it down (a pane's respawn, the loop's exit);
+    // it finishes or fails on its own, under .kit/.lock, and the next process starts from main's pin
+    const outFile = path.join(runDir, 'kit-watch-install.out');
+    let fd = null;
+    let over = false;
+    const ended = (code, why) => {
+      if (over) return;
+      over = true;
+      installing = false;
+      let text = why ?? '';
+      if (!text) { try { text = fs.readFileSync(outFile, 'utf8'); } catch {} }
+      const first = (text.split('\n').find((l) => l.trim()) ?? `exit ${code}`).replace(/^devteam: /, '');
+      if (code === 0) { installed = blobs; failed = null; return log(`kit watch: ${first}`); }
+      failed = { blobs, at: watchNow() };
+      log(`kit watch: package install failed for ${label} (${first}); trying it again in 10 minutes, or at once for another pin`);
+    };
+    let child;
+    try {
+      fd = fs.openSync(outFile, 'w');
+      child = spawn(process.execPath, [self, 'package', 'install'], { cwd: mainRoot, env: ownerEnv, detached: true, stdio: ['ignore', fd, fd] });
+    } catch (e) { if (fd !== null) try { fs.closeSync(fd); } catch {} return ended(1, `can't start it: ${e.code ?? e.message}`); }
+    fs.closeSync(fd);
+    child.unref();
+    const stop = setTimeout(() => { try { process.kill(-child.pid, 'SIGTERM'); } catch {} }, 45 * 60000);
+    stop.unref();
+    child.once('error', (e) => { clearTimeout(stop); ended(1, `can't start it: ${e.code ?? e.message}`); });
+    child.once('exit', (code, signal) => { clearTimeout(stop); ended(code ?? 1, code === null ? `stopped by ${signal}` : null); });
+  };
+  const readPin = () => {
+    const ref = mainRef();
+    const no = ++readsStarted;
+    if (!ref) { pin = null; installed = null; pinReadNo = no; return; }
+    if (pinReading) { readsStarted--; return; }
+    pinReading = true;
+    // a read that failed keeps the pin it had, and counts as no read
+    const done = (p) => { pinReading = false; if (p !== undefined) { pin = p; pinReadNo = no; } if (installed === undefined && pin !== undefined) installed = pin?.blobs ?? null; if (pin === null) installed = null; maybeInstall(); };
+    execFile('git', ['ls-tree', ref, '--', 'docs/devteam/package.json', 'docs/devteam/package-lock.json'], { cwd: mainRoot, encoding: 'utf8', timeout: 10000 }, (err, out) => {
+      if (err) { sayOnce('pin-read', `kit watch: can't read main's pin (${String(err.message).split('\n')[0]})`); return done(undefined); }
+      const blob = (f) => new RegExp(`^\\d+ blob ([0-9a-f]+)\\tdocs/devteam/${f.replace('.', '\\.')}$`, 'm').exec(out)?.[1] ?? null;
+      const pj = blob('package.json'), lk = blob('package-lock.json');
+      if (!pj || !lk) return done(null);
+      const blobs = `${pj} ${lk}`;
+      if (pin?.blobs === blobs) return done(pin);
+      const cat = (sha) => new Promise((resolve) => execFile('git', ['cat-file', 'blob', sha], { cwd: mainRoot, encoding: 'utf8', timeout: 10000, maxBuffer: 1024 * 1024 }, (e, o) => resolve(e ? null : o)));
+      Promise.all([cat(pj), cat(lk)]).then(([a, b]) => {
+        if (a === null || b === null) return done(undefined);
+        let p = { blobs, label: 'its pair', version: null, layout: null, integrity: null, folder: null };
+        try {
+          const j = JSON.parse(a), l = JSON.parse(b);
+          const names = Object.keys(j.dependencies ?? {});
+          const name = names.length === 1 ? names[0] : null;
+          const version = name ? j.dependencies[name] : null;
+          const integrity = name ? l.packages?.[`node_modules/${name}`]?.integrity : null;
+          if (typeof version === 'string' && typeof integrity === 'string' && /^sha512-[A-Za-z0-9+/]{86}==$/.test(integrity)) {
+            p = { blobs, label: `${name}@${version}`, version, layout: j.devteam?.layout ?? null, integrity, folder: `${version}-${Buffer.from(integrity.slice(7), 'base64').toString('hex').slice(0, 12)}` };
+          }
+        } catch {}
+        done(p);
+      });
+    });
+  };
+  // why a restart waits (main pins layout 2 and current isn't its pin), or null
+  const restartHold = () => {
+    if (pin?.layout !== 2) return null;
+    const st = packageStatus({ tree: kitTree });
+    const c = st.current ? st.installs.find((i) => i.folder === st.current) : null;
+    if (c?.verified && st.current === pin.folder && c.record.layout === 2 && c.record.version === pin.version && c.record.integrity === pin.integrity) return null;
+    return `waiting for docs/devteam/.kit/current to name main's pin ${pin.folder} (it names ${st.current ? `${st.current}${c?.verified ? '' : ', unverified'}` : 'nothing'}) before restarting; an install of that pin (by merge, this watcher or package install) switches it`;
+  };
   const watchTick = () => {
-    if (checking || restarting) return;
+    readPin();
+    if (checking || restarting || pin === undefined) return;
     const print = kitPrint(self, lastPrint);
-    const key = kitPrintKey(print);
-    const same = key === kitPrintKey(lastPrint);
+    const two = pin?.layout === 2;
+    const cur = two ? currentName() : null;
+    const key = `${kitPrintKey(print)}\0current\0${cur ?? ''}`;
+    const same = key === `${kitPrintKey(lastPrint)}\0current\0${lastCur ?? ''}`;
     lastPrint = print;
-    if (key === kitPrintKey(startPrint)) { pending = null; return; }
-    // settled: the same print two polls running
-    if (!same || pending !== key) { pending = key; if (!same) return; }
+    lastCur = cur;
+    if (key === `${kitPrintKey(startPrint)}\0current\0${two ? startCurrent ?? '' : ''}`) { pending = null; return; }
+    // settled: the same print (and current) two polls running
+    if (!same || pending !== key) { pending = key; seenNo = readsStarted; if (!same) return; }
     if (said.has(key)) return;
+    // judged only on a pin read that started after the change was first seen: main's pin moves with
+    // the kit's files (a sync), and a restart judged on the pin before it would skip the hold
+    if (pinReadNo <= seenNo) return;
+    const files = kitPrintDiff(startPrint, print);
+    const what = [files.length ? `kit files changed (${files.join(', ')})` : null, two && cur !== startCurrent ? `docs/devteam/.kit/current switched to ${cur ?? 'nothing'} (main's pin is ${pin.folder}) from ${startCurrent ?? 'nothing'}` : null].filter(Boolean).join(' and ');
+    const hold = restartHold();
+    if (hold) return sayOnce(`hold\0${key}`, `kit watch: ${what}: ${hold}; staying on ${startKit ?? 'unknown'}`);
     checking = true;
     execFile(process.execPath, ['--check', self], { timeout: 20000, maxBuffer: 1024 * 1024 }, (err, _o, stderr) => {
       if (err) { checking = false; return sayOnce(key, `kit files changed but scripts/devteam.mjs does not parse: ${String(stderr || err.message).split('\n').find((l) => l.trim()) ?? ''}; staying on ${startKit ?? 'unknown'}`); }
-      restart(kitPrintDiff(startPrint, print), key).catch((e) => log(`kit watch: ${e?.stack ?? e}`)).finally(() => { checking = false; });
+      restart(what, key).catch((e) => log(`kit watch: ${e?.stack ?? e}`)).finally(() => { checking = false; });
     });
   };
+  let lastCur = null;
+  let readsStarted = 0;
+  let pinReadNo = 0;
+  let seenNo = 0;
   every(watchTick, watchMs);
   server.listen(port, host);
 }
