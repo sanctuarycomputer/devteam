@@ -466,6 +466,8 @@ test('S1: every alpha-serving.json case but "bare /next", at the root, against t
 test("S2: /threads/one/ through the hook is 200 under the hub's policy with /threads/one/'s hash", { skip: skip() }, async () => {
   for (const scheme of ['http', 'https']) {
     const p = await pair[scheme]();
+    // the hook frames the last list read (it has no refreshWithin): the hub route reads it first
+    await p.tree.req('GET', '/', { headers: NAV });
     const r = await p.tree.req('GET', '/threads/one/', { headers: NAV });
     const src = await sourceCsp(p);
     assert.equal(r.status, 200, `${scheme}: 200`);
