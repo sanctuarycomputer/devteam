@@ -41,10 +41,11 @@ jobs:
           - { node: 20, part: rest 4/5, key: rest-4, groups: 'rest,chrome', shard: 4/5, gitleaks: true }
           - { node: 20, part: rest 5/5, key: rest-5, groups: 'rest,chrome', shard: 5/5, gitleaks: true }
           - { node: 22, part: chain, key: chain, groups: chain, shard: '' }
-          - { node: 22, part: rest 1/4, key: rest-1, groups: rest, shard: 1/4, alone: true, gitleaks: true }
-          - { node: 22, part: rest 2/4, key: rest-2, groups: rest, shard: 2/4, gitleaks: true }
-          - { node: 22, part: rest 3/4, key: rest-3, groups: rest, shard: 3/4, gitleaks: true }
-          - { node: 22, part: rest 4/4, key: rest-4, groups: rest, shard: 4/4, gitleaks: true }
+          - { node: 22, part: rest 1/5, key: rest-1, groups: rest, shard: 1/5, alone: true, gitleaks: true }
+          - { node: 22, part: rest 2/5, key: rest-2, groups: rest, shard: 2/5, gitleaks: true }
+          - { node: 22, part: rest 3/5, key: rest-3, groups: rest, shard: 3/5, gitleaks: true }
+          - { node: 22, part: rest 4/5, key: rest-4, groups: rest, shard: 4/5, gitleaks: true }
+          - { node: 22, part: rest 5/5, key: rest-5, groups: rest, shard: 5/5, gitleaks: true }
           - { node: 22, part: chrome 1/4, key: chrome-1, groups: chrome, shard: 1/4 }
           - { node: 22, part: chrome 2/4, key: chrome-2, groups: chrome, shard: 2/4 }
           - { node: 22, part: chrome 3/4, key: chrome-3, groups: chrome, shard: 3/4 }
