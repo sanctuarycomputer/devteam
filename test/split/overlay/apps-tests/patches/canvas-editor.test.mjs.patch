@@ -1,18 +1,18 @@
 diff --git a/test/canvas-editor.test.mjs b/test/canvas-editor.test.mjs
-index 2bcf140c77762868ee24946c6982a5f0b95443e0..974bd3a96e14cf51546fc8f2e7b1f8f41f649bf5 100644
+index 425a2a8eb168273ea22e3f4ec511c31325626739..654b63f7faf481090da4d21fc9e8d64285f0712b 100644
 --- a/test/canvas-editor.test.mjs
 +++ b/test/canvas-editor.test.mjs
-@@ -14,7 +14,8 @@ import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
- import { until } from './lib/kit.mjs';
+@@ -15,7 +15,8 @@ import { until } from './lib/kit.mjs';
+ import { cliRead } from './lib/cli-source.mjs';
  
  const here = path.dirname(fileURLToPath(import.meta.url));
 -const PAGE_FILE = path.join(here, '..', 'docs', 'devteam', 'dashboard', 'canvas.html');
 +const PAGE_FILE = path.join(here, '..', 'docs', 'devteam', 'apps', 'dashboard', 'view', 'canvas', 'index.html');
 +const APP = path.join(here, '..', 'docs', 'devteam', 'apps', 'dashboard');
  const FIX = path.join(here, 'fixtures', 'canvas');
- const fixture = (name) => JSON.parse(fs.readFileSync(path.join(FIX, name), 'utf8'));
+ const fixture = (name) => JSON.parse(cliRead(fs.readFileSync, fs, path.join(FIX, name), 'utf8'));
  const IMG_FILE = '429be16d0a91e377.png';
-@@ -34,6 +35,27 @@ function serve(req, res) {
+@@ -35,6 +36,27 @@ function serve(req, res) {
        return;
      }
    }
@@ -28,7 +28,7 @@ index 2bcf140c77762868ee24946c6982a5f0b95443e0..974bd3a96e14cf51546fc8f2e7b1f8f4
 +      let body = null;
 +      try {
 +        const real = fs.realpathSync(APP);
-+        if (file.startsWith(APP + path.sep) && fs.lstatSync(file).isFile() && fs.realpathSync(file).startsWith(real + path.sep)) body = fs.readFileSync(file);
++        if (file.startsWith(APP + path.sep) && fs.lstatSync(file).isFile() && fs.realpathSync(file).startsWith(real + path.sep)) body = cliRead(fs.readFileSync, fs, file);
 +      } catch { body = null; }
 +      if (body !== null) {
 +        res.writeHead(200, { 'Content-Type': type, 'Content-Length': body.length });
