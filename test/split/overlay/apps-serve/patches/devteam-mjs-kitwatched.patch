@@ -1,8 +1,8 @@
 diff --git a/docs/devteam/scripts/devteam.mjs b/docs/devteam/scripts/devteam.mjs
-index ffb2b355eeca9a0698b6054e983a037fa9adad55..7049fdf10ee111be9d71bb0dcd6a405082f4962f 100644
+index 9539f7c6432ea8bdd3199e4980e255dc325e17aa..6e550de9bb44168192e3d460038d40f2a70dfa15 100644
 --- a/docs/devteam/scripts/devteam.mjs
 +++ b/docs/devteam/scripts/devteam.mjs
-@@ -28815,16 +28815,13 @@ async function cmdBoxPins() {
+@@ -28896,16 +28896,13 @@ async function cmdBoxPins() {
  // dashboard whose hub port it names leaves the hub to the image; a project still on an older kit can
  // take the port in the second the image's hub restarts, until it adopts this release.
  const imageHub = () => (/^\d+$/.test(process.env.DEVTEAM_IMAGE_HUB ?? '') ? Number(process.env.DEVTEAM_IMAGE_HUB) : null);

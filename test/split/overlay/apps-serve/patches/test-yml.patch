@@ -1,5 +1,5 @@
 diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
-index 091e3213536805d03c3f58b9ddf85f576f656320..400d89e4eca5065afdb5debfbf5fe447c527fcb6 100644
+index 7ef3a824f59121488b768dc681fcbadc75bf0ad1..ae4a3c2b814494106d77f61ee9747eb25b6081e7 100644
 --- a/.github/workflows/test.yml
 +++ b/.github/workflows/test.yml
 @@ -10,10 +10,33 @@ concurrency:
@@ -36,7 +36,7 @@ index 091e3213536805d03c3f58b9ddf85f576f656320..400d89e4eca5065afdb5debfbf5fe447
      # Projects run the kit on whatever Node they pin, so every supported major is tested. Every job
      # runs test/run.mjs, which runs each file in a process of its own under a per-file watchdog (300 s,
      # 600 s for the chain and the files it lists as long): a hung file fails in at most its timeout,
-@@ -73,6 +96,17 @@ jobs:
+@@ -74,6 +97,17 @@ jobs:
        - uses: actions/setup-node@v5
          with:
            node-version: ${{ matrix.node }}

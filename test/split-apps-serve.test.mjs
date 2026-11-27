@@ -2,12 +2,19 @@
 // checkout's HEAD, the CLI's dashboard, laptop hub and browser view serve the built apps from
 // docs/devteam/apps/<app>/ under each page's own policy with hashed scripts, and every other route is
 // as main serves it. The tree is split once, with the manifests and the areas load-time (so it runs),
-// pages-docs (so the old pages are gone), apps-serve and apps-tests; test/fixtures/alpha-build/ is
-// copied in as the root build. The source's own dashboard and hub answer first, on the same ports, and
-// their answers are the expected values for every route this ticket keeps; then the tree's start.
+// pages-docs (so the old pages are gone), apps-serve and apps-tests (A1 splits again, with the tests
+// area too); test/fixtures/alpha-build/ is copied in as the root build. The source's own dashboard and
+// hub answer first, on the same ports, and their answers are the expected values for every route this
+// ticket keeps; then the tree's start.
 // Skips, each naming its cause, never fail a regular PR: manifest drift that stops HEAD's split, and an
 // item a check reads that went stale because its original changed on main (the parity run reports it,
 // and the next apps ticket re-pins it). Anything else stale, any conflict, refusal or crash fails.
+// A1 reads a second split of HEAD, of its own two areas and the tests area, since apps-tests' patch of a
+// test file is written on the text that area's rule makes of it (kit-1013 T5). The other two areas
+// change no text A1's items meet, and leaving them out makes that split a third as long. It skips only on drift
+// there: an override whose original changed, or a patch whose base moved (rule D2, at A1_SKIP); a patch
+// that fails on the text it was written on turns it red. A3 reads the overrides' text, not the split,
+// and never skips (kit-1034).
 // Ports: +30/31 the hub and base, +32 the dashboard, +33 the browser view (the source's servers first,
 // stopped before the tree's start on the same ports); +60 the browser view of the tree's devteam.mjs (M3)
 import { test, after } from 'node:test';
@@ -47,15 +54,36 @@ after(() => {
 const git = (cwd, ...a) => run('git', ['-C', cwd, '-c', 'user.name=t', '-c', 'user.email=t@t', ...a]);
 const commitAll = (d, msg = 'x') => { for (const a of [['add', '-A'], ['commit', '-qm', msg]]) assert.equal(git(d, ...a).status, 0, `git ${a.join(' ')} in ${d}`); };
 
-// ---- the split dir: the manifests, the split's lib, and the areas under test ----
-const splitDir = path.join(tmp, 'split');
-fs.mkdirSync(path.join(splitDir, 'overlay'), { recursive: true });
-for (const m of fs.readdirSync(splitSrc).filter((f) => /^manifest.*\.json$/.test(f))) fs.copyFileSync(path.join(splitSrc, m), path.join(splitDir, m));
-fs.cpSync(path.join(splitSrc, 'lib'), path.join(splitDir, 'lib'), { recursive: true });
-for (const a of AREAS) if (fs.existsSync(path.join(splitSrc, 'overlay', a))) fs.cpSync(path.join(splitSrc, 'overlay', a), path.join(splitDir, 'overlay', a), { recursive: true });
+// ---- a split dir: the manifests, the split's lib, and the areas named ----
+function splitDirOf(name, areas) {
+  const d = path.join(tmp, name);
+  fs.mkdirSync(path.join(d, 'overlay'), { recursive: true });
+  for (const m of fs.readdirSync(splitSrc).filter((f) => /^manifest.*\.json$/.test(f))) fs.copyFileSync(path.join(splitSrc, m), path.join(d, m));
+  fs.cpSync(path.join(splitSrc, 'lib'), path.join(d, 'lib'), { recursive: true });
+  for (const a of areas) if (fs.existsSync(path.join(splitSrc, 'overlay', a))) fs.cpSync(path.join(splitSrc, 'overlay', a), path.join(d, 'overlay', a), { recursive: true });
+  return d;
+}
+const splitDir = splitDirOf('split', AREAS);
 
 // ---- the source, as a project its own init made (the source's servers run from it) ----
 const sha = run('git', ['-C', root, 'rev-parse', 'HEAD']).stdout.trim();
+// A1's own split, with the tests area too (the header says why). It starts here and runs beside the
+// file's setup, its own split and the servers' start, and takes less time than they do. Its JSON
+// and stderr go to files, not pipes, so it never waits on this process; it is read just before A1, and
+// killed past 180 s, as run() bounds a spawnSync, or when this process exits. It isn't one of kids: a
+// server start that fails kills those, and A1 must still read its split.
+const A1_OUT = path.join(tmp, 'split-a1.json'), A1_ERR = path.join(tmp, 'split-a1.err');
+const a1Fds = [fs.openSync(A1_OUT, 'w'), fs.openSync(A1_ERR, 'w')];
+const a1Child = spawn(process.execPath, [tool, '--repo', root, '--split-dir', splitDirOf('split-a1', [...MINE, 'tests']), '--at', sha, '--out', path.join(tmp, 'tree-a1'), '--json'], { cwd: tmp, env: clean, detached: true, stdio: ['ignore', ...a1Fds] });
+for (const fd of a1Fds) fs.closeSync(fd);
+const killA1 = () => { try { process.kill(-a1Child.pid, 'SIGKILL'); } catch {} };
+process.on('exit', killA1);
+const a1Exit = new Promise((resolve) => {
+  const kill = setTimeout(killA1, 180000);
+  a1Child.on('exit', (status, signal) => { clearTimeout(kill); resolve({ status, signal }); });
+  // a spawn that fails never exits: A1 names the error (A1_SKIP needs status 0)
+  a1Child.on('error', (e) => { clearTimeout(kill); resolve({ status: null, signal: null, error: String(e?.message ?? e) }); });
+});
 const SRCDIR = path.join(tmp, 'source');
 fs.mkdirSync(SRCDIR);
 const tar = run('git', ['-C', root, 'archive', sha], { encoding: 'buffer' });
@@ -74,7 +102,6 @@ const TREE = path.join(tmp, 'tree');
 const splitRun = run(process.execPath, [tool, '--repo', root, '--split-dir', splitDir, '--at', sha, '--out', TREE, '--json'], { cwd: tmp });
 let J = {};
 try { J = JSON.parse(splitRun.stdout); } catch { /* A1 names it */ }
-const split = { status: splitRun.status, json: J, stderr: splitRun.stderr };
 const treeMade = splitRun.status === 0 && fs.existsSync(path.join(TREE, 'docs/devteam/scripts/cli.mjs'));
 if (treeMade) {
   for (const f of PROJECT) fs.cpSync(path.join(SRCDIR, f), path.join(TREE, f), { recursive: true });
@@ -82,9 +109,9 @@ if (treeMade) {
   git(TREE, 'remote', 'add', 'origin', 'https://github.com/sanctuarycomputer/devteam.git');
   commitAll(TREE);
 }
-// an area's applied and stale items, as 'kind name' strings, sorted
+// an area's applied and stale items in a split's --json (this file's split by default), as 'kind name' strings, sorted
 const itemsOf = (list, a) => (list ?? []).filter((x) => x.area === a).map((x) => `${x.kind} ${x.name}`).sort();
-const area = (a) => ({ applied: itemsOf(J.overlay?.applied, a), stale: (J.overlay?.stale ?? []).filter((x) => x.area === a) });
+const area = (a, j = J) => ({ applied: itemsOf(j.overlay?.applied, a), stale: (j.overlay?.stale ?? []).filter((x) => x.area === a) });
 
 // ---- skips ----
 // HEAD drifted from the manifest, as split-tool's H tests judge it: the split writes nothing
@@ -126,7 +153,6 @@ const loadTimeStale = STALE.filter((s) => s.area === 'load-time');
 const LOAD_TIME_SKIP = loadTimeStale.length ? `load-time is stale in HEAD's split (the parity run reports it): ${loadTimeStale.map((s) => `${s.kind} ${s.name}`).join(', ')}` : false;
 // the items each check reads, by the first letter(s) of its id
 const READS = {
-  A: () => STALE.filter((s) => MINE.includes(s.area)).map(driftOf).find(Boolean) ?? false,
   D: () => SERVE.map((n) => driftBy('override', n)).find(Boolean) || LOAD_TIME_SKIP,
   W: () => driftBy('override', 'kitWatched') || LOAD_TIME_SKIP,
   I: () => driftBy('override', 'IMAGE_RUNS') || LOAD_TIME_SKIP,
@@ -146,6 +172,40 @@ function skipFor(id) {
   if (!treeMade && !/^A/.test(id)) return false; // the test fails on it (A1 names the split's error)
   const k = Object.keys(READS).filter((x) => id.startsWith(x)).sort((a, b) => b.length - a.length)[0];
   return k ? READS[k]() : false;
+}
+// A1's skip (kit-1034, rule D2): A1 skips only when every stale apps-serve and apps-tests item in its
+// split is drift and none conflicts. An override is drift as driftOf judges it. A patch that no longer
+// applies is drift only when its base moved: the pre-image its index line names is neither the text it
+// really met (A1's tree's file with every later patch to it taken back off, newest first) nor HEAD's
+// blob of the file. A patch that fails on the text it was written on is broken: A1 is red. This holds
+// while each patch's index names one of those two; a patch whose base moves but which still applies by
+// offset is drift from then on, even broken, until it is re-pinned on its new base.
+const patchAt = (a, n) => path.join(splitSrc, 'overlay', a, 'patches', n);
+// the split's patch order: folder, then file name (code units)
+const later = (x, s) => x.area > s.area || (x.area === s.area && x.name > s.name);
+function metBlob(s, file) {
+  const at = path.join(tmp, 'tree-a1', file);
+  if (!fs.existsSync(at)) return null;
+  const d = fs.mkdtempSync(path.join(tmp, 'met-'));
+  // its own repository, so git apply reads the paths from d whatever holds tmp
+  if (run('git', ['init', '-q', d]).status !== 0) return null;
+  fs.mkdirSync(path.dirname(path.join(d, file)), { recursive: true });
+  fs.copyFileSync(at, path.join(d, file));
+  const after = (A1J.overlay?.applied ?? []).filter((x) => x.kind === 'patch' && (x.sites ?? []).includes(file) && later(x, s)).sort((x, y) => (later(x, y) ? -1 : 1));
+  for (const x of after) if (run('git', ['apply', '-R', '--whitespace=nowarn', patchAt(x.area, x.name)], { cwd: d }).status !== 0) return null;
+  return run('git', ['hash-object', path.join(d, file)]).stdout.trim();
+}
+function baseMoved(s) {
+  const p = patchAt(s.area, s.name);
+  const text = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
+  const file = text.match(/^diff --git a\/(\S+) /m)?.[1];
+  const idx = text.match(/^index ([0-9a-f]{7,40})\.\./m)?.[1];
+  // one file, changed in place; a patch that adds, deletes or spans files isn't decided here, so red
+  if (!file || !idx || /^0+$/.test(idx) || (text.match(/^diff --git /gm) ?? []).length !== 1 || /^(new|deleted) file mode /m.test(text)) return false;
+  const met = metBlob(s, file);
+  const head = run('git', ['-C', root, 'rev-parse', `${sha}:${file}`]).stdout.trim();
+  if (!met || met.startsWith(idx) || head.startsWith(idx)) return false;
+  return `${s.area}'s patch ${s.name} no longer applies, and the text it was written on (${idx.slice(0, 12)}) is neither the text it meets (${met.slice(0, 12)}) nor HEAD's ${file} (${head.slice(0, 12)}): its base moved, or it was written beside an area A1's split leaves out (${s.why.slice(0, 160)})`;
 }
 
 // ---- requests ----
@@ -331,16 +391,29 @@ if (treeMade && !MANIFEST_SKIP) {
 }
 const started = () => { if (startError) throw new Error(`the servers didn't start: ${startError.message}`); };
 
-test("A1: HEAD's split applies exactly apps-serve's items and, among apps-tests', kit-984's two patches; none of either stale, no conflict naming them", { skip: skipFor('A1') }, () => {
-  assert.equal(split.status, 0, split.stderr);
-  assert.deepEqual(area('apps-serve').applied, ['override IMAGE_RUNS', 'override kitWatched', 'override pageVersion', 'override servePage', 'override servePageAsset', 'patch box-image-yml.patch', 'patch devteam-mjs-kitwatched.patch', 'patch devteam-mjs-servepage.patch', 'patch gitignore.patch', 'patch test-yml.patch']);
+// A1's split, started at the top, read here: after the servers start, so it runs beside all of the
+// file's setup. Awaiting it doesn't block the loop that drains the servers' pipes. A1_SKIP is rule D2
+// (above baseMoved)
+const a1Run = await a1Exit.then((x) => ({ ...x, stdout: fs.readFileSync(A1_OUT, 'utf8'), stderr: `${x.error ? `spawn: ${x.error}\n` : ''}${fs.readFileSync(A1_ERR, 'utf8')}` }));
+let A1J = {};
+try { A1J = JSON.parse(a1Run.stdout); } catch { /* A1 names it */ }
+const A1_STALE = (A1J.overlay?.stale ?? []).filter((s) => MINE.includes(s.area));
+const A1_DRIFT = A1_STALE.map((s) => (s.kind === 'patch' && /^no longer applies/.test(s.why) ? baseMoved(s) : s.kind === 'override' ? driftOf(s) : false));
+const A1_CONFLICTS = (A1J.overlay?.conflicts ?? []).filter((c) => c.areas.some((a) => MINE.includes(a)));
+const A1_SKIP = MANIFEST_SKIP || (a1Run.status === 0 && A1_STALE.length > 0 && !A1_CONFLICTS.length && A1_DRIFT.every(Boolean) ? A1_DRIFT.join('; ') : false);
+
+test("A1: HEAD's split applies exactly apps-serve's items and, among apps-tests', kit-984's two patches; none of either stale, no conflict naming them", { skip: A1_SKIP }, () => {
+  assert.equal(splitRun.status, 0, `this file's split: ${splitRun.stderr}`);
+  assert.equal(a1Run.status, 0, `A1's split: ${a1Run.stderr}`);
+  const j = JSON.parse(a1Run.stdout);
+  assert.deepEqual(area('apps-serve', j).applied, ['override IMAGE_RUNS', 'override kitWatched', 'override pageVersion', 'override servePage', 'override servePageAsset', 'patch box-image-yml.patch', 'patch devteam-mjs-kitwatched.patch', 'patch devteam-mjs-servepage.patch', 'patch gitignore.patch', 'patch test-yml.patch']);
   // apps-tests is shared: later ports add their own items, so A1 asks only for kit-984's
-  for (const p of ['patch dashboard.kit-watch-pane.test.mjs.patch', 'patch dashboard.kit-watch.test.mjs.patch']) assert.ok(area('apps-tests').applied.includes(p), `apps-tests applies ${p}: ${area('apps-tests').applied.join(', ')}`);
-  assert.deepEqual([...area('apps-serve').stale, ...area('apps-tests').stale], []);
-  assert.deepEqual((J.overlay?.conflicts ?? []).filter((c) => c.areas.some((a) => MINE.includes(a))), []);
+  for (const p of ['patch dashboard.kit-watch-pane.test.mjs.patch', 'patch dashboard.kit-watch.test.mjs.patch']) assert.ok(area('apps-tests', j).applied.includes(p), `apps-tests applies ${p}: ${area('apps-tests', j).applied.join(', ')}`);
+  assert.deepEqual([...area('apps-serve', j).stale, ...area('apps-tests', j).stale], []);
+  assert.deepEqual((j.overlay?.conflicts ?? []).filter((c) => c.areas.some((a) => MINE.includes(a))), []);
 });
 
-test('A3: the policy builder is the same text in the servePage and servePageAsset overrides', { skip: skipFor('A3') }, () => {
+test('A3: the policy builder is the same text in the servePage and servePageAsset overrides', () => {
   const cut = (f) => {
     const t = fs.readFileSync(path.join(AREA_DIR, 'overrides', f), 'utf8');
     const m = /\n([ \t]*\/\/ policy builder start\n[\s\S]*?\n[ \t]*\/\/ policy builder end)\n/.exec(t);
