@@ -8,7 +8,8 @@
 //     prints each class defined in the apps' CSS that is the className of a JSX tree's outermost element
 //     in two or more view folders (src/views/<view>/, src/shared/<module>/ but ui/) of either app.
 // Exit 0 done; 1 refused (a component and its specimens don't pair, a file the folder doesn't allow);
-// 2 usage. Node 18+, built-ins only: it runs before anything is installed.
+// 2 usage. --duplicates exits 0: a file or folder under src/ it can't read is skipped, named on stderr.
+// Node 18+, built-ins only: it runs before anything is installed.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -248,7 +249,18 @@ export function cssClasses(css) {
   return set;
 }
 
-const walk = (d) => (fs.existsSync(d) ? fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : e.isFile() ? [path.join(d, e.name)] : [])) : []);
+// Every file under d: a missing folder holds none, and one it can't read (or enter) is skipped, named on
+// stderr.
+const walk = (d) => {
+  let entries;
+  try {
+    entries = fs.readdirSync(d, { withFileTypes: true });
+  } catch (e) {
+    if (e.code !== 'ENOENT') process.stderr.write(`ui-catalog: ${rel(d)} not read: ${e.message}\n`);
+    return [];
+  }
+  return entries.flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : e.isFile() ? [path.join(d, e.name)] : []));
+};
 
 // The scan over an apps folder: [{ class, files }], by class.
 export function duplicates(apps) {
@@ -257,7 +269,9 @@ export function duplicates(apps) {
   const seen = new Map(); // class → Map(folder → Set(file))
   for (const a of appsList) {
     const src = path.join(apps, a, 'src');
-    for (const f of walk(src).filter((f) => f.endsWith('.css'))) {
+    // walked once: an unreadable folder is named once
+    const files = walk(src);
+    for (const f of files.filter((f) => f.endsWith('.css'))) {
       let css;
       try {
         css = fs.readFileSync(f, 'utf8');
@@ -267,7 +281,7 @@ export function duplicates(apps) {
       }
       for (const c of cssClasses(css)) defined.add(c);
     }
-    for (const f of walk(src).filter((f) => f.endsWith('.tsx'))) {
+    for (const f of files.filter((f) => f.endsWith('.tsx'))) {
       const parts = posix(path.relative(src, f)).split('/');
       let folder = null;
       if (parts[0] === 'views' && parts.length > 2) folder = `${a}/src/views/${parts[1]}`;
