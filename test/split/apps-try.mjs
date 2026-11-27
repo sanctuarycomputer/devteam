@@ -7,10 +7,11 @@
 // overlay, which split.mjs reads from where it runs), changes: split.mjs writes it outside the checkout, it becomes a
 // repository of its own (parity's snapshot, with git's automatic maintenance off), and it is copied in.
 // An app is built again only when its sources changed (its folder, and the shared code and build scripts
-// every app uses); otherwise its out/, lib-dist/ and node_modules/ move over from the last tree. One apps-try at a time on the machine:
-// it holds <os tmpdir>/devteam-apps-try.lock while it builds and runs. The named files, and nothing else,
-// run as `node --test --test-concurrency=2 <files>` in the tree, with a scratch HOME, DEVTEAM_HUB_PORT
-// 4987 and every inherited DEVTEAM_*, GIT_*, TMUX and NODE_TEST_CONTEXT variable unset.
+// every app uses); otherwise its out/, lib-dist/ and node_modules/ move over from the last tree. One
+// apps-try at a time on the machine: it holds <os tmpdir>/devteam-apps-try.lock while it builds and
+// runs. The named files, and nothing else, run as `node --test --test-concurrency=2 <files>` in the tree,
+// with a scratch HOME, DEVTEAM_HUB_PORT 4987 and every inherited DEVTEAM_*, GIT_*, TMUX and
+// NODE_TEST_CONTEXT variable unset.
 // Exit: the test run's own status; 1 when the split or a build failed; 2 refused (no file named, an
 // option, a file outside the checkout or not in the tree). Apps build on Node 24 only (parity's rule);
 // the tests run on the Node that runs this.
