@@ -1,7 +1,8 @@
-// project-hosts@1: the address of a project on a box (<project>.<box>), held in three places that
-// must agree: the section of cloud/gateway.mjs's header comment that defines it, the cases in
-// test/fixtures/project-hosts.json that the gateway's, the hub's and the dashboard's tests read, and
-// the routes the dashboard server answers, which a published page must never shadow.
+// project-hosts@2: the address of a project on a box (<project>.<box>), held in places that must
+// agree: the section of cloud/gateway.mjs's header comment that defines it, the cases in
+// test/fixtures/project-hosts.json that the gateway's, the hub's and the dashboard's tests read, the
+// routes the dashboard server answers, which a published page must never shadow, and the reserved
+// first segments the gateway's Publish and the CLI's `artifact manifest` each hold. @2 reserved `next`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -12,15 +13,17 @@ const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (...p) => fs.readFileSync(path.join(root, ...p), 'utf8');
 const F = JSON.parse(read('test', 'fixtures', 'project-hosts.json'));
 const OLD_ADDRESS = /public\.box\.example\.com|(?:[0-9]+|<port>)\.box\.example\.com/;
+const G = await import('../cloud/gateway.mjs');
+const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-// The header's project-hosts@1 section: only the lines between its first and last line, as text.
+// The header's project-hosts@2 section: only the lines between its first and last line, as text.
 function section() {
   const src = read('cloud', 'gateway.mjs');
   const header = src.slice(0, src.search(/^import /m)).split('\n');
-  const start = header.findIndex((l) => /^\/\/ project-hosts@1\b/.test(l));
-  const end = header.findIndex((l) => /^\/\/ end project-hosts@1\s*$/.test(l));
-  assert.ok(start > 0, "the gateway's header has a line '// project-hosts@1'");
-  assert.ok(end > start, "the section ends at a line '// end project-hosts@1'");
+  const start = header.findIndex((l) => /^\/\/ project-hosts@2\b/.test(l));
+  const end = header.findIndex((l) => /^\/\/ end project-hosts@2\s*$/.test(l));
+  assert.ok(start > 0, "the gateway's header has a line '// project-hosts@2'");
+  assert.ok(end > start, "the section ends at a line '// end project-hosts@2'");
   const lines = header.slice(start + 1, end);
   assert.ok(lines.every((l) => l.startsWith('//')), 'the section is comment lines only');
   return lines.map((l) => l.replace(/^\/\/ ?/, ''));
@@ -64,7 +67,7 @@ function answerOf(href, label = headerLabelRule()) {
 }
 
 test('the fixture names its contract, and its reserved labels and segments are distinct, lowercase and non-empty', () => {
-  assert.equal(F.contract, 'project-hosts@1');
+  assert.equal(F.contract, 'project-hosts@2');
   for (const [what, list] of [['reservedLabels', F.reservedLabels], ['reservedSegments', F.reservedSegments]]) {
     assert.ok(Array.isArray(list) && list.length > 0, `${what} is a list`);
     assert.equal(new Set(list).size, list.length, `${what} are distinct`);
@@ -73,7 +76,7 @@ test('the fixture names its contract, and its reserved labels and segments are d
   for (const l of ['term', 'public', 'www']) assert.ok(F.reservedLabels.includes(l), `${l} is reserved`);
 });
 
-test("the header's project-hosts@1 section says the whole definition, each item in a sentence of its own", () => {
+test("the header's project-hosts@2 section says the whole definition, each item in a sentence of its own", () => {
   // a sentence ends at '.' and a space, so two items can't share one phrase between them
   const sentences = sectionText().split(/(?<=\.)\s+/);
   const reservedLabels = F.reservedLabels.map((l) => new RegExp(`\`${l}\``));
@@ -130,6 +133,39 @@ test('box.json box: 2 names the project template in place of instance', () => {
   assert.ok(!('instance' in F.boxJson), 'no instance');
   for (const k of ['terminal', 'passkeys', 'previews', 'push', 'image']) assert.ok(k in F.boxJson, `box: 2 keeps ${k}`);
   assert.equal(new URL(F.boxJson.project.replace('{project}', 'alpha')).hostname, `alpha.${F.box.name}`);
+});
+
+// The CLI's own copy (cmdArtifact's `artifact manifest`): the one list literal its slug check reads.
+function cliReservedSegments() {
+  const src = read('docs', 'devteam', 'scripts', 'devteam.mjs');
+  const at = src.indexOf("if (sub === 'manifest')");
+  assert.ok(at > 0, "cmdArtifact has its manifest branch");
+  const branch = src.slice(at, src.indexOf('if (sub ===', at + 1));
+  const lists = [...branch.matchAll(/\[((?:\s*'[^']*',?)+)\s*\]\.includes\(m\.slug\)/g)];
+  assert.equal(lists.length, 1, 'the manifest branch checks the slug against one list');
+  return lists[0][1].split(',').map((x) => x.trim()).filter(Boolean).map((x) => x.slice(1, -1));
+}
+const sorted = (l) => [...l].sort();
+
+test('next is reserved, and the fixture, the gateway and the CLI\'s artifact manifest reserve the same first segments', () => {
+  assert.ok(F.reservedSegments.includes('next'), 'the fixture reserves next');
+  assert.deepEqual(sorted(G.RESERVED_SEGMENTS), sorted(F.reservedSegments), "the gateway's RESERVED_SEGMENTS are the fixture's");
+  assert.deepEqual(sorted(cliReservedSegments()), sorted(F.reservedSegments), "cmdArtifact's artifact manifest list is the fixture's");
+});
+
+test("the gateway's Publish refuses a page named next, and one named after any reserved segment", () => {
+  for (const slug of ['next', ...F.reservedSegments]) {
+    assert.match(G.addressProblem({ slug, project: 'alpha' }) ?? '', new RegExp(`^${esc(slug)} is a path of the dashboard, so a page can't be published under it: rename the artifact$`), slug);
+  }
+  assert.equal(G.addressProblem({ slug: 'launch-notes', project: 'alpha' }), null, 'a page of any other name has an address');
+  assert.equal(G.addressProblem({ slug: 'nextpage', project: 'alpha' }), null, 'only the whole segment is reserved');
+  // the slug is said first, then the project, as before the check moved
+  assert.match(G.addressProblem({ slug: 'next', project: 'my.app' }) ?? '', /^next is a path of the dashboard/, 'both wrong: the slug first');
+  assert.equal(G.addressProblem({ slug: 'notes', project: 'my.app' }), "my.app can't be a host name, so a page of it would have no address: rename the project (settings.md's project)");
+  // Publish uses this check: the gateway defines it once; publishProblem (POST, before and inside the queue) and the Publish page call it
+  const gw = read('cloud', 'gateway.mjs');
+  assert.equal(gw.match(/\baddressProblem\s*=/g)?.length ?? 0, 1, 'the gateway defines addressProblem once, the export');
+  assert.equal(gw.match(/\baddressProblem\(m\)/g)?.length ?? 0, 2, "publishProblem and the Publish page call it");
 });
 
 test("every first segment the dashboard server answers is reserved, so no published page can shadow it", () => {
