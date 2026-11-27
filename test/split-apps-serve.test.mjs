@@ -1,0 +1,300 @@
+// The overlay's apps-serve area (kit-984, apps@1 Serving, page-seam@1): in a tree generated at this
+// checkout's HEAD, the CLI's dashboard, laptop hub and browser view serve the built apps from
+// docs/devteam/apps/<app>/ under each page's own policy with hashed scripts, and every other route is
+// as main serves it. The tree is split once, with the manifests and the areas load-time (so it runs),
+// pages-docs (so the old pages are gone), apps-serve and apps-tests; test/fixtures/alpha-build/ is
+// copied in as the root build. The source's own dashboard and hub answer first, on the same ports, and
+// their answers are the expected values for every route this ticket keeps; then the tree's start.
+// Skips, each naming its cause, never fail a regular PR: manifest drift that stops HEAD's split, and an
+// item a check reads that went stale because its original changed on main (the parity run reports it,
+// and the next apps ticket re-pins it). Anything else stale, any conflict, refusal or crash fails.
+// Ports: +30/31 the hub and base, +32 the dashboard, +33 the browser view (the source's servers first,
+// stopped before the tree's start on the same ports)
+import { test, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn, spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import http from 'node:http';
+import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { PORTS } from './lib/ports.mjs';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const splitSrc = path.join(root, 'test', 'split');
+const tool = path.join(splitSrc, 'split.mjs');
+const AREAS = ['load-time', 'pages-docs', 'apps-serve', 'apps-tests'];
+const MINE = ['apps-serve', 'apps-tests'];
+const AREA_DIR = path.join(splitSrc, 'overlay', 'apps-serve');
+const HUB_PORT = PORTS + 30, PORT_BASE = PORTS + 31, DASH_PORT = PORTS + 32, VIEW_PORT = PORTS + 33;
+const sha256 = (b) => crypto.createHash('sha256').update(b).digest('hex');
+const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(GIT_|DEVTEAM_|TMUX)/.test(k)));
+const run = (cmd, args, o = {}) => spawnSync(cmd, args, { encoding: 'utf8', env: clean, maxBuffer: 1 << 28, timeout: 180000, ...o });
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'split-apps-serve-'));
+const kids = new Set();
+after(() => {
+  for (const k of kids) try { process.kill(-k.pid, 'SIGKILL'); } catch {}
+  fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+});
+const git = (cwd, ...a) => run('git', ['-C', cwd, '-c', 'user.name=t', '-c', 'user.email=t@t', ...a]);
+const commitAll = (d, msg = 'x') => { for (const a of [['add', '-A'], ['commit', '-qm', msg]]) assert.equal(git(d, ...a).status, 0, `git ${a.join(' ')} in ${d}`); };
+
+// ---- the split dir: the manifests, the split's lib, and the areas under test ----
+const splitDir = path.join(tmp, 'split');
+fs.mkdirSync(path.join(splitDir, 'overlay'), { recursive: true });
+for (const m of fs.readdirSync(splitSrc).filter((f) => /^manifest.*\.json$/.test(f))) fs.copyFileSync(path.join(splitSrc, m), path.join(splitDir, m));
+fs.cpSync(path.join(splitSrc, 'lib'), path.join(splitDir, 'lib'), { recursive: true });
+for (const a of AREAS) if (fs.existsSync(path.join(splitSrc, 'overlay', a))) fs.cpSync(path.join(splitSrc, 'overlay', a), path.join(splitDir, 'overlay', a), { recursive: true });
+
+// ---- the source, as a project its own init made (the source's servers run from it) ----
+const sha = run('git', ['-C', root, 'rev-parse', 'HEAD']).stdout.trim();
+const SRCDIR = path.join(tmp, 'source');
+fs.mkdirSync(SRCDIR);
+const tar = run('git', ['-C', root, 'archive', sha], { encoding: 'buffer' });
+assert.equal(run('tar', ['-x', '-f', '-', '-C', SRCDIR], { input: tar.stdout, encoding: 'buffer' }).status, 0, 'the source extracts');
+assert.equal(git(SRCDIR, 'init', '-q', '-b', 'main').status, 0);
+commitAll(SRCDIR);
+const homeOf = (name) => { const h = path.join(tmp, `home-${name}`); fs.mkdirSync(h, { recursive: true }); return h; };
+const envOf = (name) => ({ ...clean, HOME: homeOf(name), DEVTEAM_OWN_KIT: '1', DEVTEAM_HUB_PORT: String(HUB_PORT), DEVTEAM_PORT_BASE: String(PORT_BASE) });
+const made = run(process.execPath, ['docs/devteam/scripts/devteam.mjs', 'init'], { cwd: SRCDIR, env: envOf('init') });
+assert.equal(made.status, 0, `the source's init makes a project: ${made.stderr}`);
+commitAll(SRCDIR);
+const PROJECT = ['.gitignore', '.gitleaks.toml', 'AGENTS.md', 'docs/devteam/project'];
+
+// ---- the tree at HEAD, the project files copied in, committed before any build is copied ----
+const TREE = path.join(tmp, 'tree');
+const splitRun = run(process.execPath, [tool, '--repo', root, '--split-dir', splitDir, '--at', sha, '--out', TREE, '--json'], { cwd: tmp });
+let J = {};
+try { J = JSON.parse(splitRun.stdout); } catch { /* A1 names it */ }
+const split = { status: splitRun.status, json: J, stderr: splitRun.stderr };
+const treeMade = splitRun.status === 0 && fs.existsSync(path.join(TREE, 'docs/devteam/scripts/cli.mjs'));
+if (treeMade) {
+  for (const f of PROJECT) fs.cpSync(path.join(SRCDIR, f), path.join(TREE, f), { recursive: true });
+  assert.equal(git(TREE, 'init', '-q', '-b', 'main').status, 0);
+  git(TREE, 'remote', 'add', 'origin', 'https://github.com/sanctuarycomputer/devteam.git');
+  commitAll(TREE);
+}
+// an area's applied and stale items, as 'kind name' strings, sorted
+const itemsOf = (list, a) => (list ?? []).filter((x) => x.area === a).map((x) => `${x.kind} ${x.name}`).sort();
+const area = (a) => ({ applied: itemsOf(J.overlay?.applied, a), stale: (J.overlay?.stale ?? []).filter((x) => x.area === a) });
+
+// ---- skips ----
+// HEAD drifted from the manifest, as split-tool's H tests judge it: the split writes nothing
+const DRIFT = [/^split: manifest[\w-]*\.json: manifest: module .+ (?:is not in the source|starts at line \d+, not after .+|must start at line 1)$/,
+  /^split: manifest[\w-]*\.json: module .+ is \d+ lines, over the cap of \d+$/, /^split: manifest[\w-]*\.json: the declaration at line \d+ .* binds names the split can't read whole/,
+  /^split: nothing written$/];
+const splitLines = splitRun.stderr.trim().split('\n').filter(Boolean);
+const MANIFEST_SKIP = splitRun.status === 1 && splitLines.length > 0 && splitLines.every((l) => DRIFT.some((re) => re.test(l))) ? `HEAD's split stopped on manifest drift: ${splitLines.slice(0, 3).join('; ')}` : false;
+// A stale item is drift when its original moved on main since the item was written: an override whose
+// why is "the original changed" and whose source changed since the override's last commit; a patch that
+// "no longer applies" to a file that is no longer the blob its index line names. Anything else is a
+// failure (a wrong pin, a broken patch), never a skip.
+const lastCommitOf = (rel) => run('git', ['-C', root, 'log', '-1', '--format=%H', '--', rel]).stdout.trim();
+const SOURCE_OF = { IMAGE_RUNS: 'docs/devteam/scripts/devteam.mjs' };
+function driftOf(s) {
+  if (s.kind === 'override' && /^the original changed/.test(s.why)) {
+    const at = lastCommitOf(`test/split/overlay/${s.area}/overrides/${s.name}.mjs`);
+    const src = SOURCE_OF[s.name] ?? 'docs/devteam/scripts/devteam.mjs';
+    return at && run('git', ['-C', root, 'diff', '--quiet', at, sha, '--', src]).status === 1 ? `${s.area}'s override ${s.name} is stale: its original changed on main since it was pinned (${s.why.slice(0, 160)})` : false;
+  }
+  if (s.kind === 'patch' && /^no longer applies/.test(s.why)) {
+    const p = path.join(splitSrc, 'overlay', s.area, 'patches', s.name);
+    const text = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
+    const file = text.match(/^diff --git a\/(\S+) /m)?.[1];
+    const blob = text.match(/^index ([0-9a-f]{40})\.\./m)?.[1];
+    const now = file ? run('git', ['-C', root, 'rev-parse', `${sha}:${file}`]).stdout.trim() : '';
+    return blob && now && blob !== now ? `${s.area}'s patch ${s.name} is stale: ${file} changed on main since the patch was made (${s.why.slice(0, 160)})` : false;
+  }
+  return false;
+}
+const STALE = (J.overlay?.stale ?? []);
+const driftBy = (kind, name, a = 'apps-serve') => { for (const s of STALE) if (s.area === a && s.kind === kind && s.name === name) { const d = driftOf(s); if (d) return d; } return false; };
+const SERVE = ['servePage', 'pageVersion', 'servePageAsset'];
+const loadTimeStale = STALE.filter((s) => s.area === 'load-time');
+const LOAD_TIME_SKIP = loadTimeStale.length ? `load-time is stale in HEAD's split (the parity run reports it): ${loadTimeStale.map((s) => `${s.kind} ${s.name}`).join(', ')}` : false;
+// the items each check reads, by the first letter(s) of its id
+const READS = {
+  A: () => STALE.filter((s) => MINE.includes(s.area)).map(driftOf).find(Boolean) ?? false,
+  D: () => SERVE.map((n) => driftBy('override', n)).find(Boolean) || LOAD_TIME_SKIP,
+  W: () => driftBy('override', 'kitWatched') || LOAD_TIME_SKIP,
+  I: () => driftBy('override', 'IMAGE_RUNS') || LOAD_TIME_SKIP,
+  G1: () => driftBy('patch', 'gitignore.patch'),
+  G2: () => driftBy('patch', 'box-image-yml.patch'),
+  G3: () => driftBy('patch', 'test-yml.patch'),
+  K: () => ['dashboard.kit-watch.test.mjs.patch', 'dashboard.kit-watch-pane.test.mjs.patch'].map((p) => driftBy('patch', p, 'apps-tests')).find(Boolean) ?? false,
+};
+// D, H, B, R, N, S all read the seam's three overrides and run the tree
+for (const k of ['H', 'B', 'R', 'N', 'S']) READS[k] = READS.D;
+function skipFor(id) {
+  if (MANIFEST_SKIP) return MANIFEST_SKIP;
+  if (!treeMade && !/^A/.test(id)) return false; // the test fails on it (A1 names the split's error)
+  const k = Object.keys(READS).filter((x) => id.startsWith(x)).sort((a, b) => b.length - a.length)[0];
+  return k ? READS[k]() : false;
+}
+
+// ---- requests ----
+// One request, its path sent as written (no normalising of .. or %2e): { status, headers, body }.
+function req(port, p, { method = 'GET', headers = {} } = {}) {
+  return new Promise((resolve) => {
+    const r = http.request({ host: '127.0.0.1', port, path: p, method, headers: { connection: 'close', ...headers }, timeout: 20000 }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+      res.on('error', () => resolve({ status: 0, headers: {}, body: Buffer.alloc(0) }));
+    });
+    r.on('timeout', () => r.destroy(new Error('timeout')));
+    r.on('error', (e) => resolve({ status: 0, headers: {}, body: Buffer.from(String(e.message)), error: e.message }));
+    r.end();
+  });
+}
+const PORT_OF = { dash: DASH_PORT, hub: HUB_PORT, view: VIEW_PORT };
+const keyOf = (server, method, p, headers = {}) => [server, method, p, ...Object.keys(headers).sort().map((h) => `${h}=${headers[h]}`)].join(' ');
+const answerOf = (r) => ({ status: r.status, type: r.headers['content-type'] ?? null, csp: r.headers['content-security-policy'] ?? null });
+
+// ---- servers ----
+const until = async (f, ms, what) => { const end = Date.now() + ms; for (;;) { if (await f()) return; if (Date.now() > end) throw new Error(`timed out waiting for ${what}`); await new Promise((r) => setTimeout(r, 200)); } };
+const refuses = (port) => new Promise((resolve) => { const s = net.connect(port, '127.0.0.1'); s.on('connect', () => { s.destroy(); resolve(false); }); s.on('error', () => resolve(true)); });
+function child(args, { cwd, env }) {
+  const c = spawn(process.execPath, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  c.out = '';
+  c.stdout.on('data', (b) => { c.out += b; });
+  c.stderr.on('data', (b) => { c.out += b; });
+  kids.add(c);
+  return c;
+}
+async function stopAll(cs, ports) {
+  for (const c of cs) { try { process.kill(-c.pid, 'SIGKILL'); } catch {} kids.delete(c); }
+  for (const p of ports) await until(() => refuses(p), 20000, `port ${p} free`);
+}
+// The dashboard (which starts the laptop hub) of a project: the source's devteam.mjs or the tree's cli.mjs.
+async function startDashboard(dir, script, name) {
+  const d = child([script, 'dashboard', '--port', String(DASH_PORT)], { cwd: dir, env: envOf(name) });
+  await until(async () => (await req(DASH_PORT, '/api/hello')).status === 200, 60000, `${name}'s dashboard (${d.out.slice(-400)})`);
+  await until(async () => (await req(HUB_PORT, '/instances.json')).status === 200, 30000, `${name}'s hub (${d.out.slice(-400)})`);
+  return d;
+}
+// The tree's browserViewServer, in a child that runs init() and then listens on VIEW_PORT.
+const VIEW_CHILD = `const lib = process.argv[2];
+const st = await import(lib + '/state.mjs');
+await st.init();
+const { browserViewServer } = await import(lib + '/browser-view.mjs');
+const s = browserViewServer({});
+s.listen(${VIEW_PORT}, '127.0.0.1', () => console.log('ready'));
+`;
+async function startView() {
+  const f = path.join(tmp, 'view-child.mjs');
+  fs.writeFileSync(f, VIEW_CHILD);
+  const v = child([f, path.join(TREE, 'docs/devteam/scripts/lib')], { cwd: TREE, env: envOf('tree') });
+  // a view that fails to start is B1's and N1's finding, not the harness's: they read view.out
+  await until(() => /ready/.test(v.out) || v.exitCode !== null, 30000, 'the browser view');
+  view = v;
+  return v;
+}
+let treeKids = [];
+let view = null; // the browser view's child: view.out says why it didn't start
+async function startTree() {
+  await stopAll(treeKids, [DASH_PORT, HUB_PORT, VIEW_PORT]);
+  treeKids = [await startDashboard(TREE, 'docs/devteam/scripts/cli.mjs', 'tree'), await startView()];
+}
+const stopTree = () => stopAll(treeKids, [DASH_PORT, HUB_PORT, VIEW_PORT]).then(() => { treeKids = []; });
+// A child that runs the tree's init() and prints JSON.stringify(expr), the module's exports in scope.
+function treeCall(mod, expr) {
+  const f = path.join(tmp, `call-${crypto.randomBytes(4).toString('hex')}.mjs`);
+  fs.writeFileSync(f, [
+    "import path from 'node:path';",
+    'const lib = process.argv[2];',
+    "const st = await import(lib + '/state.mjs');",
+    'await st.init();',
+    `const m = await import(lib + '/${mod}');`,
+    // a Function body is sloppy code, so with () reads the module's exports as names
+    `const value = new Function('m', 'kitDir', 'path', ${JSON.stringify(`with (m) { return (${expr}); }`)})(m, st.kitDir, path);`,
+    'process.stdout.write(JSON.stringify(value));',
+    'process.exit(0);',
+  ].join('\n'));
+  const r = run(process.execPath, [f, path.join(TREE, 'docs/devteam/scripts/lib')], { cwd: TREE, env: envOf('tree'), timeout: 60000 });
+  assert.equal(r.status, 0, `treeCall ${mod}: ${r.stderr}`);
+  return JSON.parse(r.stdout);
+}
+
+// ---- the build ----
+const APPS = path.join(TREE, 'docs/devteam/apps');
+const BROWSER_HTML = '<!doctype html><html><head><script src="/_next/static/chunks/app.js"></script></head><body><script>self.__b=1</script></body></html>';
+const BROWSER_HASH = `sha256-${crypto.createHash('sha256').update('self.__b=1').digest('base64')}`;
+const REVIEW = { 'devteam-ui.css': 'body{--t:1}\n', 'devteam-ui.js': 'window.__ui=1;\n' };
+// test/fixtures/alpha-build/{dashboard,hub}/out as the tree's root build, with a browser route and the
+// review helpers added to the dashboard's copy
+function copyBuild() {
+  fs.rmSync(APPS, { recursive: true, force: true });
+  for (const app of ['dashboard', 'hub']) fs.cpSync(path.join(root, 'test/fixtures/alpha-build', app, 'out'), path.join(APPS, app), { recursive: true });
+  const d = path.join(APPS, 'dashboard');
+  fs.mkdirSync(path.join(d, 'browser'));
+  fs.writeFileSync(path.join(d, 'browser/index.html'), BROWSER_HTML);
+  const h = JSON.parse(fs.readFileSync(path.join(d, 'csp-hashes.json'), 'utf8'));
+  h.pages['/browser/'] = [BROWSER_HASH];
+  fs.writeFileSync(path.join(d, 'csp-hashes.json'), `${JSON.stringify(h, null, 2)}\n`);
+  fs.mkdirSync(path.join(d, 'review'));
+  for (const [f, t] of Object.entries(REVIEW)) fs.writeFileSync(path.join(d, 'review', f), t);
+}
+const hashesOf = (app, route) => JSON.parse(fs.readFileSync(path.join(APPS, app, 'csp-hashes.json'), 'utf8')).pages[route];
+
+// The spec's §Policies rule, the test's own copy (never the tree's): script-src becomes 'self' plus the
+// hashes; style-src gets 'self' first (the browser view's is 'self' alone); a missing script-src or
+// style-src is appended; with default-src 'none', font-src 'self' and img-src 'self' data: are appended
+// if absent (never on the browser view).
+function transform(policy, hashes, { browser = false } = {}) {
+  const ds = policy.split(';').map((d) => d.trim()).filter(Boolean);
+  const H = hashes.map((h) => `'${h}'`);
+  const has = (n) => ds.some((d) => d.split(/\s+/)[0] === n);
+  const out = ds.map((d) => {
+    const [n, ...v] = d.split(/\s+/);
+    if (n === 'script-src') return ['script-src', "'self'", ...H].join(' ');
+    if (n === 'style-src') return browser ? "style-src 'self'" : ['style-src', "'self'", ...v.filter((x) => x !== "'self'")].join(' ');
+    return d;
+  });
+  if (!has('script-src')) out.push(['script-src', "'self'", ...H].join(' '));
+  if (!has('style-src')) out.push(browser ? "style-src 'self'" : "style-src 'self' 'unsafe-inline'");
+  if (!browser && ds.includes("default-src 'none'")) { if (!has('font-src')) out.push("font-src 'self'"); if (!has('img-src')) out.push("img-src 'self' data:"); }
+  return out.join('; ');
+}
+
+// ---- the source's answers, recorded first on the same ports, then the tree's servers ----
+// Every request a check compares with main: { server, method, path, headers }.
+const REQS = [];
+const SRC = {};
+const LINK = 'kit-984-probe';
+const PREVIEW = 'apps-serve';
+// a preview record, in both projects, for /view/preview/<name> (readPreviews' shape)
+function writePreviewRecord(dir) {
+  const d = path.join(dir, 'docs/devteam/run/previews');
+  fs.mkdirSync(d, { recursive: true });
+  const far = new Date(Date.now() + 86400000).toISOString();
+  fs.writeFileSync(path.join(d, `${PREVIEW}.json`), `${JSON.stringify({ name: PREVIEW, port: 39999, project: 'p', session: 's', label: 'x', cwd: dir, at: new Date().toISOString(), expires: far }, null, 2)}\n`);
+}
+if (treeMade && !MANIFEST_SKIP) {
+  for (const d of [SRCDIR, TREE]) writePreviewRecord(d);
+  const s = await startDashboard(SRCDIR, 'docs/devteam/scripts/devteam.mjs', 'source');
+  for (const q of REQS) SRC[keyOf(q.server, q.method, q.path, q.headers)] = answerOf(await req(PORT_OF[q.server], q.path, q));
+  await stopAll([s], [DASH_PORT, HUB_PORT]);
+  copyBuild();
+  await startTree();
+}
+
+test("A1: HEAD's split applies exactly apps-serve's and apps-tests' items, none of either stale, no conflict naming them", { skip: skipFor('A1') }, () => {
+  assert.equal(split.status, 0, split.stderr);
+  assert.deepEqual(area('apps-serve').applied, ['override IMAGE_RUNS', 'override kitWatched', 'override pageVersion', 'override servePage', 'override servePageAsset', 'patch box-image-yml.patch', 'patch gitignore.patch', 'patch test-yml.patch']);
+  assert.deepEqual(area('apps-tests').applied, ['patch dashboard.kit-watch-pane.test.mjs.patch', 'patch dashboard.kit-watch.test.mjs.patch']);
+  assert.deepEqual([...area('apps-serve').stale, ...area('apps-tests').stale], []);
+  assert.deepEqual((J.overlay?.conflicts ?? []).filter((c) => c.areas.some((a) => MINE.includes(a))), []);
+});
+
+test('A3: the policy builder is the same text in the servePage and servePageAsset overrides', { skip: skipFor('A3') }, () => {
+  const cut = (f) => {
+    const t = fs.readFileSync(path.join(AREA_DIR, 'overrides', f), 'utf8');
+    const m = /\n([ \t]*\/\/ policy builder start\n[\s\S]*?\n[ \t]*\/\/ policy builder end)\n/.exec(t);
+    assert.ok(m, `${f} has the policy builder between its marker lines`);
+    return m[1].replace(/^[ \t]+/gm, '');
+  };
+  assert.equal(cut('servePageAsset.mjs'), cut('servePage.mjs'));
+});
