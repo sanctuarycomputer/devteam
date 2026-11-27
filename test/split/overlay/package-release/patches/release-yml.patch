@@ -1,0 +1,119 @@
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index 92cdefd4317463c4bc20e05af8b355e3ffac6b21..ced7fd61e772cef92e1b848e01735de1e9a61757 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -4,14 +4,20 @@
+ # Building and publishing are separate jobs, so nothing that installs or builds can publish (alpha-build@1):
+ # - build, with contents: read and no secrets, builds each apps/<app>/ present (npm ci --ignore-scripts,
+ #   then npm run build with DEVTEAM_BASE_PATH=/next) and hands only its out/ on, as the artifact alpha.
++#   From layout 2 it builds each app again with DEVTEAM_BASE_PATH empty and hands that out/ on as the
++#   artifact apps, which the package carries in docs/devteam/apps/<app>/, served at the root.
+ # - publish, with id-token: write in the npm-publish environment, installs and builds nothing: it runs
+-#   test/release/package-check.mjs on the tag's checkout (the alpha's types, no dependencies, every kit file
+-#   byte for byte the tag's, the version from the tag), then publishes the tarball that check packed. It
+-#   reads no npm token: npm's trusted publisher for this file trusts the run by OIDC and makes the
+-#   provenance itself.
+-# - check, a third job that runs only on a pull request that changes this file, package.json, apps/ or
+-#   test/release/: after build, the same package check with no publish rights, so the PR shows the packed
+-#   file list in its run's summary. On a pull request publish is skipped; on a release, check is.
++#   test/release/package-check.mjs on the tag's checkout (the alpha's and the apps' types, no dependencies,
++#   the bin layout 2 names, every kit file byte for byte the tag's, the version from the tag), then
++#   publishes the tarball that check packed. It reads no npm token: npm's trusted publisher for this file
++#   trusts the run by OIDC and makes the provenance itself.
++# - deploy, after publish succeeds, calls box-deploy.yml as a reusable job (its only trigger): the
++#   called workflow sees this run's release event, its payload and its commit, so a minor deploys the box
++#   once, and only once its package is published. It passes the box's deploy hook by name, since GitHub
++#   gives a called workflow an environment's secret only when the caller passes it.
++# - check, a fourth job that runs only on a pull request that changes this file, box-deploy.yml,
++#   package.json, apps/ or test/release/: after build, the same package check with no publish rights, so the PR shows the packed
++#   file list in its run's summary. On a pull request publish and deploy are skipped; on a release, check is.
+ #
+ # The owner's one-time setup, before the first release that carries this file:
+ # 1. In this repository's settings, the environment npm-publish, limited to tags matching v*: a run
+@@ -33,6 +39,7 @@ on:
+   pull_request:
+     paths:
+       - .github/workflows/release.yml
++      - .github/workflows/box-deploy.yml
+       - package.json
+       - apps/**
+       - test/release/**
+@@ -57,12 +64,16 @@ jobs:
+         shell: bash
+         run: |
+           set -euo pipefail
+-          mkdir -p "$RUNNER_TEMP/alpha"
++          mkdir -p "$RUNNER_TEMP/alpha" "$RUNNER_TEMP/apps"
+           for pj in apps/*/package.json; do
+             [ -f "$pj" ] || continue
+             app=$(basename "$(dirname "$pj")")
+             (cd "apps/$app" && npm ci --ignore-scripts && DEVTEAM_BASE_PATH=/next npm run build)
+             cp -R "apps/$app/out" "$RUNNER_TEMP/alpha/$app"
++            # layout 2: the same app at the root, from a fresh out/
++            rm -rf "apps/$app/out"
++            (cd "apps/$app" && DEVTEAM_BASE_PATH= npm run build)
++            cp -R "apps/$app/out" "$RUNNER_TEMP/apps/$app"
+           done
+       - uses: actions/upload-artifact@v4
+         with:
+@@ -70,6 +81,12 @@ jobs:
+           path: ${{ runner.temp }}/alpha/
+           if-no-files-found: ignore
+           retention-days: 1
++      - uses: actions/upload-artifact@v4
++        with:
++          name: apps
++          path: ${{ runner.temp }}/apps/
++          if-no-files-found: ignore
++          retention-days: 1
+   check:
+     if: github.event_name == 'pull_request'
+     needs: build
+@@ -91,11 +108,16 @@ jobs:
+           pattern: alpha
+           merge-multiple: true
+           path: ${{ runner.temp }}/alpha
++      - uses: actions/download-artifact@v4
++        with:
++          pattern: apps
++          merge-multiple: true
++          path: ${{ runner.temp }}/apps
+       - name: Check the package
+         shell: bash
+         run: |
+           set -euo pipefail
+-          node test/release/package-check.mjs --tag v0.0.0 --tree HEAD --alpha "$RUNNER_TEMP/alpha" --out "$RUNNER_TEMP/pack" --min-npm 11.5.1
++          node test/release/package-check.mjs --tag v0.0.0 --tree HEAD --alpha "$RUNNER_TEMP/alpha" --apps "$RUNNER_TEMP/apps" --out "$RUNNER_TEMP/pack" --min-npm 11.5.1
+           { echo '### Packed files'; echo; echo '```'; cat "$RUNNER_TEMP/pack/files.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+   publish:
+     if: github.event_name == 'release' && github.repository == 'sanctuarycomputer/devteam' && !github.event.release.prerelease
+@@ -121,14 +143,28 @@ jobs:
+           pattern: alpha
+           merge-multiple: true
+           path: ${{ runner.temp }}/alpha
++      - uses: actions/download-artifact@v4
++        with:
++          pattern: apps
++          merge-multiple: true
++          path: ${{ runner.temp }}/apps
+       - name: Check the package
+         shell: bash
+         env:
+           TAG: ${{ github.event.release.tag_name }}
+         run: |
+           set -euo pipefail
+-          node test/release/package-check.mjs --tag "$TAG" --alpha "$RUNNER_TEMP/alpha" --out "$RUNNER_TEMP/pack" --min-npm 11.5.1
++          node test/release/package-check.mjs --tag "$TAG" --alpha "$RUNNER_TEMP/alpha" --apps "$RUNNER_TEMP/apps" --out "$RUNNER_TEMP/pack" --min-npm 11.5.1
+           { echo '### Packed files'; echo; echo '```'; cat "$RUNNER_TEMP/pack/files.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+       - name: Publish
+         shell: bash
+         run: npm publish "$RUNNER_TEMP/pack/package.tgz" --access public --provenance --ignore-scripts
++  deploy:
++    if: github.event_name == 'release' && github.repository == 'sanctuarycomputer/devteam' && !github.event.release.prerelease
++    needs: publish
++    permissions:
++      contents: read
++      actions: read
++    uses: ./.github/workflows/box-deploy.yml
++    secrets:
++      RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}

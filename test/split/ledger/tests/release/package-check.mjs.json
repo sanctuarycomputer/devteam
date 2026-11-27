@@ -1,0 +1,6 @@
+{
+  "file": "test/release/package-check.mjs",
+  "ticket": "kit-969-overlay-release",
+  "sha256": "bafbe963d48cd2d715fc54760d4d834a9dba75912177ffa3b05457e74b9df2f8",
+  "source_sha256": "394ff68c4410bf6ccac7058c70d8128a88801325dcf9791d061682d20d822c40"
+}

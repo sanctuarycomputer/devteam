@@ -2221,6 +2221,100 @@
         "Postwick",
         "Dunmore"
       ]
+    },
+    {
+      "file": "names/setext-dash-first.md",
+      "shows": "a setext heading's text (over ---), its first word too, counts",
+      "words": [
+        "Self",
+        "Fernwick"
+      ]
+    },
+    {
+      "file": "names/setext-equals-first.md",
+      "shows": "a setext heading's text (over ===), every line of it, counts",
+      "words": [
+        "Self",
+        "Gullhaven"
+      ]
+    },
+    {
+      "file": "names/setext-dash-space-first.md",
+      "shows": "a setext heading's text over - and a space (an underline, not a list item) counts",
+      "words": [
+        "Self",
+        "Pentreath"
+      ]
+    },
+    {
+      "file": "names/table-after-first.md",
+      "shows": "a table row with no | (a line after a table row, up to a blank one) counts",
+      "words": [
+        "Self",
+        "Ravensworth"
+      ]
+    },
+    {
+      "file": "names/quote-first.md",
+      "shows": "a word first in a quote line, and on its lazy next line, counts",
+      "words": [
+        "Self",
+        "Ashcombe",
+        "Ivybridge"
+      ]
+    },
+    {
+      "file": "names/quote-list-first.md",
+      "shows": "a word first in a list item inside a quote counts",
+      "words": [
+        "Self",
+        "Brindlemoor"
+      ]
+    },
+    {
+      "file": "names/image-first.md",
+      "shows": "an image's alt text at a paragraph's start counts, each sentence's first word too",
+      "words": [
+        "Self",
+        "Calderon",
+        "Kelmscott"
+      ]
+    },
+    {
+      "file": "names/reference-first.md",
+      "shows": "a reference-style link's words at a paragraph's start count",
+      "words": [
+        "Self",
+        "Dunholt"
+      ]
+    },
+    {
+      "file": "names/bold-first.md",
+      "shows": "a bold first word, at a paragraph's start or a sentence's, counts",
+      "words": [
+        "Self",
+        "Eastwold",
+        "Lymington"
+      ]
+    },
+    {
+      "file": "names/italic-first.md",
+      "shows": "an italic first word, at a paragraph's start or a sentence's, counts",
+      "words": [
+        "Self",
+        "Farrowdale",
+        "Mardale"
+      ]
+    },
+    {
+      "file": "names/quoted-first.md",
+      "shows": "a quoted first word, straight or curly, counts",
+      "words": [
+        "Self",
+        "Glenmarsh",
+        "Northleach",
+        "Ottery"
+      ]
     }
   ]
 }

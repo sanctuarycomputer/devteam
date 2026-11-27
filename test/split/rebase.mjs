@@ -31,6 +31,127 @@ const exported = (L, it) => { const ls = bareLines(L, it); if (it.kind === 'decl
 const byKey = (L) => { const m = new Map(); for (const it of L.items) { const k = keyOf(it); if (!m.has(k)) m.set(k, []); m.get(k).push(it); } return m; };
 const label = (it) => (it.kind === 'decl' ? it.names.join(', ') : keyOf(it));
 
+// The names a declaration's code assigns (kit-1025), in blanked code (lib/js.mjs: no strings or
+// comments): plain and update assignments (the name and the = may be on different lines; a postfix
+// ++ or -- is on the name's line, as JavaScript reads it), destructuring targets, and for-of and
+// for-in heads. Declarations, members and parameter defaults assign nothing outside and are left out.
+const ASSIGN = /([A-Za-z_$][\w$]*)\s*(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*\/%&|^])?=(?![=>])|([A-Za-z_$][\w$]*)[^\S\n]*(?:\+\+|--)|(?:\+\+|--)\s*([A-Za-z_$][\w$]*)/g;
+const NAME = /^[A-Za-z_$][\w$]*$/;
+const IDENT_CH = /[\w$]/;
+const DECLS = new Set(['const', 'let', 'var']);
+const KEYWORDS = new Set(['return', 'typeof', 'case', 'in', 'of', 'void', 'delete', 'throw', 'new', 'else', 'do', 'yield', 'await', 'instanceof']);
+// a ( after one of these opens a statement's head, never a parameter list
+const CONTROL = new Set(['for', 'if', 'while', 'switch', 'with']);
+// a { after one of these, or after ), =>, ;, { or }, is a block or a body (an assignment inside it is one)
+const BLOCK_AFTER = new Set(['else', 'do', 'try', 'finally']);
+const CLASS_BODY = /(?<![\w$])class(?:\s+[A-Za-z_$][\w$]*)?(?:\s+extends\s+[^{};]+)?\s*$/;
+// what stands before offset i, past whitespace: { word } or { ch } (or {} at the start)
+const before = (t, i) => {
+  let k = i - 1;
+  while (k >= 0 && /\s/.test(t[k])) k--;
+  if (k < 0) return {};
+  if (!IDENT_CH.test(t[k])) return { ch: t[k], at: k };
+  let s = k;
+  while (s > 0 && IDENT_CH.test(t[s - 1])) s--;
+  return { word: t.slice(s, k + 1), at: s };
+};
+// a single = (no ==, =>, <=, >=, !=) at offset k
+const isEq = (s, k) => s[k] === '=' && s[k + 1] !== '=' && s[k + 1] !== '>' && !'=!<>'.includes(s[k - 1] ?? '');
+// the first offset at bracket depth 0 where at(s, k) holds, or -1
+const topAt = (s, at) => {
+  let d = 0;
+  for (let k = 0; k < s.length; k++) {
+    const c = s[k];
+    if (d === 0 && at(s, k)) return k;
+    if (c === '(' || c === '[' || c === '{') d++;
+    else if (c === ')' || c === ']' || c === '}') d--;
+  }
+  return -1;
+};
+// whether s is one [ or { group, brackets included
+const whole = (s) => (s[0] === '[' || s[0] === '{') && topAt(s.slice(1), (x, k) => x[k] === ')' || x[k] === ']' || x[k] === '}') === s.length - 2;
+const topSplit = (s) => { const out = []; for (;;) { const k = topAt(s, (x, i) => x[i] === ','); if (k < 0) return [...out, s]; out.push(s.slice(0, k)); s = s.slice(k + 1); } };
+// the names a pattern (its text, brackets included) assigns
+function patternNames(p) {
+  const out = [];
+  for (let el of topSplit(p.slice(1, -1))) {
+    el = el.trim().replace(/^\.\.\./, '').trim();
+    if (!el) continue;
+    if (p[0] === '{') {
+      const c = topAt(el, (s, k) => s[k] === ':'), e = topAt(el, isEq);
+      if (c >= 0 && (e < 0 || c < e)) el = el.slice(c + 1).trim();
+    }
+    // a name with a default (name = …) is read already, as a plain assignment
+    const e = topAt(el, isEq);
+    if (e >= 0) el = el.slice(0, e).trim();
+    if (whole(el)) out.push(...patternNames(el));
+    else if (NAME.test(el) && e < 0) out.push(el);
+  }
+  return out;
+}
+export function assigned(t) {
+  const out = [];
+  for (const x of t.matchAll(ASSIGN)) {
+    const nm = x[1] ?? x[2] ?? x[3];
+    const b = before(t, x.index + x[0].indexOf(nm));
+    if (b.ch === '.' && t[b.at - 1] !== '.') continue;
+    out.push(nm);
+  }
+  // every bracket's partner and the bracket around it, in one pass
+  const close = new Map(), open = new Map(), parent = new Map(), stack = [];
+  for (let k = 0; k < t.length; k++) {
+    const c = t[k];
+    if (c === '(' || c === '[' || c === '{') { parent.set(k, stack.length ? stack[stack.length - 1] : -1); stack.push(k); }
+    else if ((c === ')' || c === ']' || c === '}') && stack.length) { const o = stack.pop(); close.set(o, k); open.set(k, o); }
+  }
+  // whether the group at i binds names rather than assigns them: inside a declaration's pattern, a
+  // parameter list (its ) followed by => or {; a catch's parameter too), or a class body (a
+  // computed field). The walk goes out through the [ and { around it, and stops at a block or a body.
+  const binds = (i) => {
+    let p = parent.get(i);
+    if (p >= 0 && t[p] === '{' && CLASS_BODY.test(t.slice(Math.max(0, p - 200), p))) return true;
+    while (p >= 0 && t[p] !== '(') {
+      const b = before(t, p);
+      if (b.word && DECLS.has(b.word)) return true;
+      if (t[p] === '{' && ((!b.word && !b.ch) || (b.ch && ')>;{}'.includes(b.ch)) || BLOCK_AFTER.has(b.word))) return false;
+      p = parent.get(p);
+    }
+    if (p < 0) return false;
+    if (CONTROL.has(before(t, p).word)) return false;
+    return /^\s*(?:=>|\{)/.test(t.slice(close.get(p) + 1, close.get(p) + 40));
+  };
+  // destructuring: a [ or { group followed by a single =, not a declaration, member, parameter
+  // default or class field
+  const EQ = /\s*=(?![=>])/y;
+  let done = -1;
+  for (const [i, j] of [...close].sort((a, b) => a[0] - b[0])) {
+    if (i <= done || t[i] === '(') continue;
+    EQ.lastIndex = j + 1;
+    if (!EQ.test(t)) continue;
+    done = j;
+    const b = before(t, i);
+    if (b.word && DECLS.has(b.word)) continue;
+    // a [ after a name, ] or ) is a member (o[x] = …), unless the name starts an expression or the )
+    // closes an if, while, for or with head
+    if (t[i] === '[' && ((b.word && !KEYWORDS.has(b.word)) || b.ch === ']' || (b.ch === ')' && !CONTROL.has(before(t, open.get(b.at) ?? 0).word)))) continue;
+    if (binds(i)) continue;
+    out.push(...patternNames(t.slice(i, j + 1)));
+  }
+  // for (<target> of|in …): a name or a pattern (a declaration, const x or let [x], is neither)
+  for (const m of t.matchAll(/(?<![\w$])for\s*(?:await\s*)?\(/g)) {
+    if (before(t, m.index).ch === '.') continue;
+    const o = m.index + m[0].length - 1;
+    if (!close.has(o)) continue;
+    const head = t.slice(o + 1, close.get(o));
+    const k = topAt(head, (s, i) => s[i] === ';' || (/^(?:of|in)\b/.test(s.slice(i, i + 3)) && !IDENT_CH.test(s[i - 1] ?? ' ')));
+    if (k < 0 || head[k] === ';') continue;
+    const target = head.slice(0, k).trim();
+    if (NAME.test(target)) out.push(target);
+    else if (whole(target)) out.push(...patternNames(target));
+  }
+  return out;
+}
+
 // The plan for one manifest source: base and head texts, the tree's modules ({ file, text }), the
 // manifest. Pure. { modules: Map(file -> new text), carried: [..], conflicts: [..] }.
 export function carry(baseSrc, headSrc, M, treeModules) {
@@ -136,17 +257,10 @@ export function carry(baseSrc, headSrc, M, treeModules) {
   // runs at load (no function) newly naming another module's declaration
   const lets = new Map();
   for (const p of parsed) for (const it of p.U.items) if (it.kind === 'decl' && (it.decl === 'let' || it.decl === 'var')) for (const nm of it.names) lets.set(nm, p.m.file);
-  const ASSIGN = /([A-Za-z_$][\w$]*)\s*(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*\/%&|^])?=(?![=>])|([A-Za-z_$][\w$]*)\s*(?:\+\+|--)|(?:\+\+|--)\s*([A-Za-z_$][\w$]*)/g;
   const code = (L, it) => L.codeLines.slice(it.from - 1, it.to);
   const sites = (cl, file) => {
     const meta = cl.join('\n').split(/\bimport\s*\.\s*meta\b/).length - 1;
-    const assigns = [];
-    for (const c of cl) for (const x of c.matchAll(ASSIGN)) {
-      const nm = x[1] ?? x[2] ?? x[3];
-      const at = x.index + (x[0].indexOf(nm));
-      if (c[at - 1] === '.' && c[at - 2] !== '.') continue;
-      if (lets.has(nm) && lets.get(nm) !== file) assigns.push(nm);
-    }
+    const assigns = assigned(cl.join('\n')).filter((nm) => lets.has(nm) && lets.get(nm) !== file);
     const reads = [...mentioned(cl)].filter((nm) => owner.has(nm) && owner.get(nm) !== file);
     return { meta, assigns, reads };
   };
