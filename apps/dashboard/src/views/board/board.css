@@ -86,5 +86,6 @@
   .att .badge { margin-right: 0; }
 
 /* css-board end */
-/* restated from index.html:786 (css-misc), which board.css would otherwise override (m-20261127-231855624-supervisor) */
+/* restated from index.html:786 at f98e01ac (css-misc's .phase-legend and .phase-legend i), which board's .legend i (index.html:511)
+   would otherwise override, board.css loading after shell.css (m-20261127-231855624-supervisor) */
   .phase-legend { margin-top: 6px; } .phase-legend i { border-top: 0; height: 8px; width: 8px; border-radius: 2px; }

@@ -24,6 +24,7 @@ export default function View() {
             <div className="card chart" id="burnup-card">
               {/* ui-candidate: card-head */}
               <div className="card-head"><i className="icon-chart-line" aria-hidden="true"></i><span className="grow">Burn-up</span><span className="end" id="forecast"></span></div>
+              {/* ui-candidate: legend */}
               <div className="legend" id="legend"><span><i className="done"></i>done</span><span><i className="scope"></i>scope</span><span><i className="fc"></i>forecast</span><span className="dim">points: S = 1, M = 2</span></div>
               <div id="burnup"></div>
               <div className="tip" id="tip"></div>
@@ -34,8 +35,11 @@ export default function View() {
           <div className="c4 pg-col">
             {/* ui-candidate: card */}
             <div className="card"><div className="card-head"><i className="icon-layers" aria-hidden="true"></i><span className="grow">Features</span></div><div id="w-features"></div><div className="nogoal" id="w-nogoal"></div></div>
+            {/* ui-candidate: card */}
             <div className="card"><div className="card-head"><i className="icon-tag" aria-hidden="true"></i><span className="grow">Releases</span></div><div id="w-releases"></div></div>
+            {/* ui-candidate: card */}
             <div className="card"><div className="card-head"><i className="icon-waves" aria-hidden="true"></i><span className="grow">Waves</span></div><div id="w-waves"></div></div>
+            {/* ui-candidate: card */}
             <div className="card"><div className="card-head"><i className="icon-chart-column" aria-hidden="true"></i><span className="grow">Points per week</span></div><div className="throughput" id="w-throughput"></div><div className="dim small" id="w-throughput-note" style={{ marginTop: '4px' }}></div></div>
           </div>
         </div>
