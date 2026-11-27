@@ -147,17 +147,18 @@ const skipChrome = !built ? (someBuilt.length ? 'only ' + someBuilt.join(', ') +
 const STRICT = process.env.DEVTEAM_APPS_COMPAT_STRICT === '1';
 
 const TYPES = { html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', txt: 'text/plain; charset=utf-8', json: 'application/json', svg: 'image/svg+xml', png: 'image/png', ico: 'image/x-icon', webp: 'image/webp', woff2: 'font/woff2' };
-// The route's policy as apps@1 serves it: script-src 'self' plus its hashes; the browser view's style-src 'self' alone.
-const policyFor = (route, hashes) => [
+// The route's policy as apps@1 serves it: script-src 'self' plus its hashes; the browser view's style-src 'self' alone;
+// the dashboard app's routes but /browser/ also name the shell's font and icon origins (kit-1033).
+const policyFor = (route, hashes, app) => [
   "default-src 'none'",
   `script-src 'self' ${hashes.map((h) => `'${h}'`).join(' ')}`,
-  route === '/browser/' ? "style-src 'self'" : "style-src 'self' 'unsafe-inline'",
+  route === '/browser/' ? "style-src 'self'" : `style-src 'self' 'unsafe-inline'${app === 'dashboard' ? ' https://fonts.googleapis.com https://cdn.jsdelivr.net' : ''}`,
   route === '/browser/' ? "img-src 'none'" : "img-src 'self' data:",
-  "font-src 'self'", "connect-src 'self'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
+  route === '/browser/' ? "font-src 'self'" : `font-src 'self'${app === 'dashboard' ? ' https://fonts.gstatic.com https://cdn.jsdelivr.net' : ''}`, "connect-src 'self'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
 ].join('; ');
 
 // A server for one built app at the root: a route's index.html under its policy, every other exported file as is.
-function serve(out) {
+function serve(out, app) {
   const hashes = JSON.parse(fs.readFileSync(path.join(out, 'csp-hashes.json'), 'utf8')).pages;
   const server = http.createServer((req, res) => {
     const p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
@@ -166,7 +167,7 @@ function serve(out) {
     const file = path.join(out, rel);
     if (rel.split('/').includes('..') || !fs.existsSync(file) || !fs.statSync(file).isFile()) { res.writeHead(404, { 'content-type': TYPES.txt }); res.end('not found'); return; }
     const head = { 'content-type': TYPES[path.extname(file).slice(1)] ?? 'application/octet-stream' };
-    if (route) head['content-security-policy'] = policyFor(route, hashes[route] ?? []);
+    if (route) head['content-security-policy'] = policyFor(route, hashes[route] ?? [], app);
     res.writeHead(200, head);
     res.end(fs.readFileSync(file));
   });
@@ -186,7 +187,7 @@ test('C3 each route of each built app hydrates its root view under its hashed po
   later(() => chrome.close());
   const missing = [];
   for (const a of APP_NAMES) {
-    const srv = await serve(builtAt(a));
+    const srv = await serve(builtAt(a), a);
     later(() => srv.close());
     const md = compatOf(a);
     for (const [page, route] of Object.entries(PAGES[a])) {
@@ -227,4 +228,16 @@ test('C3 each route of each built app hydrates its root view under its hashed po
   }
   t.diagnostic(`${missing.length} COMPAT globals not on their page yet${missing.length ? `: ${missing.slice(0, 12).join(', ')}${missing.length > 12 ? ', …' : ''}` : ''}`);
   if (STRICT) assert.deepEqual(missing, [], 'DEVTEAM_APPS_COMPAT_STRICT=1: every COMPAT global is on its page');
+});
+
+// policyFor's origins are the tree's: the apps-serve policy builder's own text, run for a dashboard route, the
+// browser view and the hub, names in style-src and font-src exactly the https origins policyFor names (kit-1033)
+test("C5 policyFor names exactly the origins the tree's policy builder gives the dashboard, the browser view and the hub", () => {
+  const t = fs.readFileSync(path.join(ROOT, 'test', 'split', 'overlay', 'apps-serve', 'overrides', 'servePage.mjs'), 'utf8');
+  const text = /\n[ \t]*\/\/ policy builder start\n([\s\S]*?)\n[ \t]*\/\/ policy builder end\n/.exec(t)?.[1];
+  assert.ok(text, 'servePage.mjs has the policy builder between its marker lines');
+  const build = new Function(`${text}\nreturn build;`)();
+  const origins = (csp, n) => (csp.split(';').map((d) => d.trim().split(/\s+/)).find((d) => d[0] === n) ?? []).filter((x) => x.startsWith('https://'));
+  const cases = [['dashboard', '/', build("default-src 'none'", [], false, true)], ['dashboard', '/browser/', build("default-src 'none'", [], true, false)], ['hub', '/', build("default-src 'none'", [], false, false)]];
+  for (const [a, route, tree] of cases) for (const n of ['style-src', 'font-src']) assert.deepEqual(origins(policyFor(route, [], a), n), origins(tree, n), `${a}${route}: ${n}'s origins are the tree's`);
 });
