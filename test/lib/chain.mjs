@@ -1847,7 +1847,11 @@ http.createServer((req, res) => {
     assert.deepEqual(added4.map((l) => /fourth sync/.test(l)), [true], 'the extended branch carries only the new line');
     git(['config', 'receive.denyNonFastForwards', 'false'], origin);
     const shaL = git(['rev-parse', 'HEAD'], wt('chore-log'));
-    const syncWt = must(['chore', 'start', 'devteam-sync-v0.2.1'], { role: 'sup' }).trim();
+    // chore start's pin (kit-955, on since kit-957) is refused before any npm call by a registry that isn't
+    // a test's (localhost), so no chain run reaches the public registry; the chore goes on
+    process.env.DEVTEAM_NPM_REGISTRY = 'http://localhost:1/';
+    let syncWt;
+    try { syncWt = must(['chore', 'start', 'devteam-sync-v0.2.1'], { role: 'sup' }).trim(); } finally { delete process.env.DEVTEAM_NPM_REGISTRY; }
     assert.ok(fs.existsSync(syncWt), 'a sync chore is named by its tag (supervisor.md §9)');
     assert.ok(fs.existsSync(path.join(syncWt, 'config/master.key')) && fs.existsSync(path.join(syncWt, '.setup-ran')), 'chore start seeds worktree_files and runs worktree_setup, so gates run there');
     git(['worktree', 'remove', '--force', wt('chore-devteam-sync-v0.2.1')]);
