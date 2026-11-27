@@ -58,11 +58,13 @@ const clean = (home) => {
   return { ...e, ...HARNESS, HOME: home, DEVTEAM_HUB_PORT: String(HUB), DEVTEAM_PORT_BASE: String(PORTS + 1) };
 };
 // E8's guard: each environment a server or an install starts with has HOME under tmp and no DEVTEAM_*
-// but this file's; the hub port is in this file's block and no port is 4320 or 4321
+// but this file's, and none of the config folders the kit reads before HOME (CONFIG_DIRS); the hub port is
+// in this file's block and no port is 4320 or 4321
 function guard(envs, ports) {
   for (const [what, env] of envs) {
     const extra = Object.keys(env).filter((k) => k.startsWith('DEVTEAM_') && !ALLOWED.includes(k));
     assert.deepEqual(extra, [], `E8 ${what}: no DEVTEAM_* but the ones this file sets`);
+    assert.deepEqual(Object.keys(env).filter((k) => CONFIG_DIRS.test(k)), [], `E8 ${what}: no config folder the kit reads before HOME (CLAUDE_CONFIG_DIR, CODEX_HOME, XDG_*)`);
     assert.ok(String(env.HOME).startsWith(`${tmp}${path.sep}`), `E8 ${what}: HOME under the scratch folder (${env.HOME})`);
   }
   assert.ok(HUB >= PORTS && HUB < PORTS + 100, 'E8 the hub port is in the block');
