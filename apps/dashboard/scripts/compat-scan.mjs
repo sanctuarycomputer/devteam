@@ -5,10 +5,11 @@
 // reads, the poll), and which views it needs. A view is the port that owns a page line, by the line ranges in
 // PAGES (lines at RANGES_AT, from the port plan); a line at the base is carried back to RANGES_AT through git's
 // diff, so a line added since goes with the line above it.
-//   node apps/dashboard/scripts/compat-scan.mjs --base <sha> [--repo <kit checkout>] [--check | --json | --stubs]
-// --check compares the two files with what it would write, and each root view's stub's exported functions
-// with the cross-view functions it finds (exit 1 when any differs); --json prints the scan; --stubs prints
-// each stub's export block. Exit 0 ok, 1 differs or a test it can't place, 2 usage or git refused.
+//   node apps/dashboard/scripts/compat-scan.mjs --base <sha> [--repo <kit checkout>] [--check | --json | --stubs | --state [--json]]
+// --check compares the two files with what it would write, each root view's stub's exported functions with the
+// cross-view functions it finds, and each owning view's state.ts with its cross-view state (exit 1 when any
+// differs); --json prints the scan; --stubs prints each stub's export block; --state prints the cross-view state
+// by owning view (--json: { <view>: [{ name, line }] }). Exit 0 ok, 1 differs or a test it can't place, 2 usage or git refused.
 //
 // It is a scan, not a parser: it reads a test's string literals (page-evaluated code is a string to the test)
 // for selectors, getElementById calls and global names, and keeps only what the page itself has (an id, class
@@ -551,18 +552,141 @@ export function render(res, app) {
 }
 const byKeyOf = (res, k) => res.pages.find((p) => p.key === k);
 
+// ---- the cross-view state (kit-989; APPS.md, Cross-view state) ----
+// index.html's top-level let/const/var values that a code line of another view names: each owning view keeps
+// them on one object in its state.ts, since an import can't be assigned. A value that is a function, or a bare
+// name (an alias of one: const layerField = tlOwn), isn't state. The router's five lines from `let ROUTED =
+// false;` (8014-8018 at the port's base) are data's, by ruling (kit-989).
+function declarators(rest) {
+  const out = [];
+  let depth = 0, i = 0, expectName = true;
+  while (i < rest.length) {
+    const c = rest[i];
+    if ('\'"`'.includes(c)) { const q = c; i++; while (i < rest.length && rest[i] !== q) { if (rest[i] === '\\') i++; i++; } i++; continue; }
+    if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c)) depth--;
+    else if (depth === 0 && c === ',') expectName = true;
+    else if (depth === 0 && c === ';') break;
+    if (expectName && depth === 0 && /[A-Za-z_$]/.test(c)) {
+      const m = /^([A-Za-z_$][\w$]*)\s*(=)?/.exec(rest.slice(i));
+      const after = m[2] ? rest.slice(i + m[0].length) : '';
+      out.push({ name: m[1], fn: /^\s*(async\s+)?(\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>|^\s*(async\s+)?function\b|^\s*(?!(?:null|true|false|undefined)\b)[A-Za-z_$][\w$]*\s*(;|$)/.test(after) });
+      expectName = false;
+      i += m[1].length;
+      continue;
+    }
+    i++;
+  }
+  return out;
+}
+export function stateLists(page) {
+  const text = page.model.text.split('\n');
+  const routed = text.indexOf('let ROUTED = false;');
+  const viewAt = (ln) => (routed >= 0 && ln > routed && ln <= routed + 5 ? 'data' : page.view(ln));
+  const first = text.findIndex((l, i) => i > 1500 && /^<script>/.test(l)) + 1;
+  const decl = new Map();
+  text.forEach((l, i) => {
+    if (i < first) return;
+    const m = /^(let|const|var)\s+(.+)/.exec(l);
+    if (m) for (const d of declarators(m[2])) if (!d.fn && !decl.has(d.name)) decl.set(d.name, { view: viewAt(i + 1), line: i + 1 });
+  });
+  const used = new Map();
+  text.forEach((l, i) => {
+    if (i < first || /^\s*(\/\/|\/\*|\*)/.test(l)) return;
+    const v = viewAt(i + 1);
+    const codeOnly = l.replace(/\/\/.*$/, '').replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"/g, "''");
+    for (const m of codeOnly.matchAll(/(^|[^\w$.])([A-Za-z_$][\w$]*)(?![\w$])(?!\s*:(?!:))/g)) {
+      const d = decl.get(m[2]);
+      if (d && d.view !== v && d.line !== i + 1) used.set(m[2], d);
+    }
+  });
+  const out = {};
+  for (const [name, d] of used) (out[d.view] ??= []).push({ name, line: d.line });
+  for (const v of Object.keys(out)) out[v].sort((a, b) => a.line - b.line || a.name.localeCompare(b.name));
+  return Object.fromEntries(Object.entries(out).sort(([a], [b]) => a.localeCompare(b)));
+}
+// a view's state file and object; the shell's page state is its `shell` object (kit-988)
+export const stateFile = (view) => `apps/dashboard/src/views/${view}/state.ts`;
+export const stateObject = (view) => (view === 'shell' ? 'shell' : `${view.replace(/-([a-z])/g, (_, c) => c.toUpperCase())}State`);
+// the keys of `export const <obj> … = { … }` at its own depth (comments and strings skipped)
+export function objectKeys(src, obj) {
+  const at = src.search(new RegExp(`^export const ${obj}\\b`, 'm'));
+  if (at < 0) return null;
+  let i = at, depth = 0;
+  // the "=" at depth 0 (a type annotation may hold braces, and "=>")
+  for (; i < src.length; i++) {
+    const c = src[i];
+    if ('([{<'.includes(c)) depth++;
+    else if (')]}'.includes(c) || (c === '>' && src[i - 1] !== '=')) depth--;
+    else if (c === '=' && depth === 0 && src[i + 1] !== '>') break;
+  }
+  // the value is an object literal: "{" first after the "="
+  i++;
+  while (i < src.length && /\s/.test(src[i])) i++;
+  if (src[i] !== '{') return null;
+  i++;
+  depth = 1;
+  const keys = [];
+  let start = true;
+  while (i < src.length && depth > 0) {
+    const c = src[i];
+    if (src.startsWith('//', i)) { i = src.indexOf('\n', i); if (i < 0) break; continue; }
+    if (src.startsWith('/*', i)) { i = src.indexOf('*/', i) + 2; continue; }
+    if ('\'"`'.includes(c)) { const q = c; i++; while (i < src.length && src[i] !== q) { if (src[i] === '\\') i++; i++; } i++; start = false; continue; }
+    // a type's argument list (`as Map<A, B>`, `new Set<T>()`): a "<" right after a name, before a name or a
+    // bracket, opens one; its ">" closes it
+    if (c === '<' && /[\w$]$/.test(src.slice(0, i)) && /^\s*[\w${[(]/.test(src.slice(i + 1))) depth++;
+    else if (c === '>' && depth > 1 && src[i - 1] !== '=') depth--;
+    else if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c)) depth--;
+    else if (depth === 1 && c === ',') { start = true; i++; continue; }
+    if (depth === 1 && start && /[A-Za-z_$]/.test(c)) {
+      const m = /^([A-Za-z_$][\w$]*)\s*[:,}]/.exec(src.slice(i));
+      if (m) keys.push(m[1]);
+      start = false;
+    } else if (!/\s/.test(c)) start = false;
+    i++;
+  }
+  return keys;
+}
+// the names one module of apps/dashboard exports at its top level
+function exportsOf(repo, rel) {
+  const f = path.join(repo, 'apps', 'dashboard', rel);
+  return fs.existsSync(f) ? [...fs.readFileSync(f, 'utf8').matchAll(/^export (?:async )?(?:function\*? ?|const |let |var )([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]) : [];
+}
+// what --check finds wrong with the state files: a missing file, or a listed name its object lacks. Four of the
+// shell's names are its modules' exports instead (kit-988: DAY, SHELL_ROUTES, STATE_KEYS, VIEW_WRITES); the rest
+// are on `shell`
+export const SHELL_EXPORTED = { DAY: 'src/lib/shell-page.ts', SHELL_ROUTES: 'src/lib/shell-routes.ts', STATE_KEYS: 'src/shared/shell/shell.ts', VIEW_WRITES: 'src/lib/shell-view-only.ts' };
+export function stateProblems(repo, lists) {
+  const out = [];
+  for (const [view, list] of Object.entries(lists)) {
+    const rel = stateFile(view);
+    const file = path.join(repo, rel);
+    if (!fs.existsSync(file)) { out.push(`${rel} is missing (it holds ${list.map((x) => x.name).join(', ')})`); continue; }
+    const obj = stateObject(view);
+    const keys = objectKeys(fs.readFileSync(file, 'utf8'), obj);
+    if (!keys) { out.push(`${rel} exports no ${obj}`); continue; }
+    let lacks = list.map((x) => x.name).filter((n) => !keys.includes(n));
+    if (view === 'shell') lacks = lacks.filter((n) => !(SHELL_EXPORTED[n] && exportsOf(repo, SHELL_EXPORTED[n]).includes(n)));
+    if (lacks.length) out.push(`${rel}'s ${obj} lacks ${lacks.join(', ')}`);
+  }
+  return out;
+}
+
 // ---- the command ----
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
-  const USAGE = 'usage: node apps/dashboard/scripts/compat-scan.mjs --base <sha> [--repo <kit>] [--check | --json | --stubs]';
+  const USAGE = 'usage: node apps/dashboard/scripts/compat-scan.mjs --base <sha> [--repo <kit>] [--check | --json | --stubs | --state [--json]]';
   const usage = (why) => { console.error(`compat-scan: ${why}\n${USAGE}`); process.exit(2); };
   // refuse what it doesn't know before anything runs: a mistyped --check must never fall through to writing
-  const MODES = ['--check', '--json', '--stubs'];
+  const MODES = ['--check', '--json', '--stubs', '--state'];
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--base' || args[i] === '--repo') { if (!args[i + 1] || args[i + 1].startsWith('--')) usage(`${args[i]} needs a value`); i++; continue; }
     if (!MODES.includes(args[i])) usage(`unknown argument ${JSON.stringify(args[i])}`);
   }
-  if (args.filter((a) => MODES.includes(a)).length > 1) usage('one of --check, --json, --stubs');
+  const modes = args.filter((a) => MODES.includes(a));
+  if (modes.length > 1 && !(modes.length === 2 && modes.includes('--state') && modes.includes('--json'))) usage('one of --check, --json, --stubs, --state (--state may add --json)');
   const opt = (n) => { const i = args.indexOf(`--${n}`); return i < 0 ? undefined : args[i + 1]; };
   const here = path.dirname(fileURLToPath(import.meta.url));
   const repo = path.resolve(opt('repo') ?? path.join(here, '..', '..', '..'));
@@ -577,6 +701,12 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   if (res.unplaced.length) { console.error(`compat-scan: Chrome tests the scan can't place on a page (add each to PLACED):\n${res.unplaced.join('\n')}`); process.exit(1); }
   if (args.includes('--stubs')) {
     for (const [k, cv] of Object.entries(res.crossView)) console.log(`// ---- ${STUBS[k]} (${cv.view}): ${cv.fns.length} ----\n${stubExports(cv)}`);
+    process.exit(0);
+  }
+  if (args.includes('--state')) {
+    const lists = stateLists(byKeyOf(res, 'index'));
+    if (args.includes('--json')) console.log(JSON.stringify(lists, null, 1));
+    else for (const [view, list] of Object.entries(lists)) console.log(`${stateFile(view)} (${stateObject(view)}): ${list.map((x) => `${x.name} ${x.line}`).join(', ')}`);
     process.exit(0);
   }
   if (args.includes('--json')) {
@@ -599,5 +729,6 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     const ok = have && (isStub(text) ? JSON.stringify(have) === JSON.stringify(want) : want.every((n) => have.includes(n)));
     if (!ok) { differ = 1; console.error(`compat-scan: ${STUBS[k]} exports ${have ? have.join(', ') || 'no function' : 'nothing (no file)'}; the scan wants ${want.join(', ') || 'none'}`); }
   }
+  if (args.includes('--check')) for (const p of stateProblems(repo, stateLists(byKeyOf(res, 'index')))) { differ = 1; console.error(`compat-scan: ${p}`); }
   process.exit(differ);
 }
