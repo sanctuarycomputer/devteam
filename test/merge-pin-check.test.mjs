@@ -238,6 +238,12 @@ test('M4 a pin of another version than the head\'s upstream_base, and a deleted 
   assert.notEqual(t.status, 0, 'M4 a number upstream_base: refused');
   assert.doesNotMatch(t.out, /TypeError|    at /, `M4 a number upstream_base: no throw (${t.out.slice(0, 600)})`);
   assert.match(t.out, /pins @sanctuarycomputer\/devteam@0\.101\.0, but upstream_base at its head is 5/, 'M4 a number upstream_base: named');
+  // a DEVTEAM_NPM_REGISTRY npmRun refuses (not http://127.0.0.1:<port>/): the merge is refused, never a layout-1 skip (final-1 F2)
+  const X = I.pr('pin-bad-registry', { pin: '0.101.0', set: 'v0.101.0' });
+  const x = I.dt([...X.args, '--approved', q, '--dry-run'], { DEVTEAM_NPM_REGISTRY: 'http://localhost:1/' });
+  assert.notEqual(x.status, 0, `M4 a bad DEVTEAM_NPM_REGISTRY: refused (${x.out})`);
+  assert.match(x.out, /can't check the pin @sanctuarycomputer\/devteam@0\.101\.0: .*DEVTEAM_NPM_REGISTRY/, 'M4 a bad DEVTEAM_NPM_REGISTRY: named');
+  assert.doesNotMatch(x.out, /pin: can't verify/, 'M4 a bad DEVTEAM_NPM_REGISTRY: not a skip');
   // a branch with no merge base with main: refused, never unchecked
   const w = path.join(path.dirname(I.root), 'wt-orphan');
   g(['worktree', 'add', '-q', '--detach', w, 'origin/main'], I.root);
