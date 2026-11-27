@@ -29711,6 +29711,67 @@ function alphaWhyPage(why, release) {
   }[why] ?? 'The alpha isn’t available here.';
   return `<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>The alpha isn’t here</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:32em;margin:3em auto;padding:0 1em}</style></head><body><h1>The alpha isn’t here</h1><p>${words}</p><p><a href="/">Back to the stable page</a></p></body></html>\n`;
 }
+// /next and everything under it, to a GET or a HEAD, on the dashboard (app 'dashboard') or the
+// laptop hub ('hub'); DASH_NEXT for anything else. With alphaState's why set, every such path is
+// alphaWhyPage under its own policy (script-src 'none'). Otherwise serveAppFiles serves the folder
+// at /next, each page under alphaCsp(policy(), its route's hashes): policy() is the server's own
+// policy for the page, asked only for a page. The hashes are csp-hashes.json's in the folder, read
+// per page: { v: 1, pages: { <route>: [hash…] } }, a regular file of at most 1 MiB, every list at
+// most 256 hashes, each a sha256 source; a route it doesn't list has none. A file that is missing or
+// is anything else makes every page a 500 (serveAppFiles' "no policy"), never a looser policy.
+function alphaServe(app, req, res, policy, project) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return DASH_NEXT;
+  const p = String(req.url).split('?')[0];
+  if (p !== '/next' && !p.startsWith('/next/')) return DASH_NEXT;
+  const st = alphaState(app, project);
+  if (st.why) {
+    const body = Buffer.from(alphaWhyPage(st.why, st.release));
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': body.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'" });
+    return res.end(req.method === 'HEAD' ? undefined : body);
+  }
+  const hashes = (route) => {
+    const f = path.join(st.folder, 'csp-hashes.json');
+    const s = fs.lstatSync(f);
+    if (!s.isFile() || s.size > 1048576) throw new Error('csp-hashes.json is not a file of at most 1 MiB');
+    const j = JSON.parse(fs.readFileSync(f, 'utf8'));
+    if (!j || j.v !== 1 || !j.pages || typeof j.pages !== 'object' || Array.isArray(j.pages)) throw new Error('csp-hashes.json is not { v: 1, pages }');
+    for (const list of Object.values(j.pages)) if (!Array.isArray(list) || list.length > 256 || list.some((h) => typeof h !== 'string' || !/^sha256-[A-Za-z0-9+/]{43}=$/.test(h))) throw new Error('csp-hashes.json holds a list that is not sha256 hashes');
+    return Object.hasOwn(j.pages, route) ? j.pages[route] : [];
+  };
+  return serveAppFiles(st.folder, '/next', req, res, (route) => alphaCsp(policy(), hashes(route)));
+}
+// The dashboard's alpha routes: GET /api/alpha, { on, verified, release, why }; and /next/ by
+// alphaServe under the dashboard's own policy, as / has it (pageCsp(stageFrames())). The viewer's
+// paths under it, /next/view/artifact/<id> and /next/view/preview/<name>, are the / route's
+// index.html (alphaServe asked for /next/), checked and with the policy and referrer-policy that
+// /view/artifact/<id> and /view/preview/<name> have today; a bad id or no such preview is a 404.
+// A plain function, not an async dashRoutes* group, so it sits here with the seam, outside the
+// dashboardRoutes region (as dashRoutesApp); a preview's answer is a promise the route loop awaits.
+function dashRoutesAlpha(D, req, res, q) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return DASH_NEXT;
+  const p = String(req.url).split('?')[0];
+  if (p === '/api/alpha') {
+    if (req.method !== 'GET') return DASH_NEXT;
+    const { on, verified, release, why } = alphaState('dashboard', true);
+    return D.send(res, 200, 'application/json', JSON.stringify({ on, verified, release, why }));
+  }
+  if (p !== '/next' && !p.startsWith('/next/')) return DASH_NEXT;
+  const { pageCsp, stageFrames, previewStage, send } = D;
+  const vw = /^\/next\/view\/artifact\/([^/]+)$/.exec(p);
+  const vp = /^\/next\/view\/preview\/([^/]+)$/.exec(p);
+  if ((vw || vp) && !alphaState('dashboard', true).why) {
+    const root = { method: req.method, url: '/next/' };
+    const viewer = (policy) => { res.setHeader('referrer-policy', 'no-referrer'); return alphaServe('dashboard', root, res, policy, true); };
+    if (vw) {
+      if (!LINK_ID.test(vw[1]) || !ARTIFACT_AT.test(q.u.searchParams.get('at') || 'main')) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
+      return viewer(() => pageCsp());
+    }
+    const rec = PREVIEW_NAME.test(vp[1]) ? readPreviews().find((r) => r.name === vp[1]) : null;
+    if (!rec) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
+    return previewStage(rec).then(({ origin }) => viewer(() => pageCsp(origin ? [origin] : [])));
+  }
+  return alphaServe('dashboard', req, res, () => pageCsp(stageFrames()), true);
+}
 /* cmdDashboard start */
 /* dashboardRoutes start */
 // What a route group returns when none of its routes matched the request.
@@ -30452,7 +30513,7 @@ async function dashRoutesOwner(D, req, res, q) {
   });
   return;
 }
-const DASHBOARD_ROUTES = [dashRoutesUpload, dashRoutesPage, dashRoutesViewer, dashRoutesThreads, dashRoutesReads, dashRoutesFiles, dashRoutesArtifacts, dashRoutesReviewPage, dashRoutesApp, dashRoutesOwner];
+const DASHBOARD_ROUTES = [dashRoutesUpload, dashRoutesPage, dashRoutesViewer, dashRoutesThreads, dashRoutesReads, dashRoutesFiles, dashRoutesArtifacts, dashRoutesReviewPage, dashRoutesAlpha, dashRoutesApp, dashRoutesOwner];
 /* dashboardRoutes end */
 // A request whose handling threw, one no guard foresaw: logged with its method and path (the query
 // cut, at most 200 characters) and the error's class and code, then a 500 when no header is out yet.
