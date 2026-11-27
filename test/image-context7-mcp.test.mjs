@@ -22,12 +22,19 @@ function box() {
 printf '%s|' "$@" >> "$HOME/calls"; echo >> "$HOME/calls"
 case "$2" in
   get) [ -e "$HOME/has-c7" ] && echo "  Scope: $(cat "$HOME/has-c7")" ;;
-  add) [ -z "$NO_ADD" ] && echo 'User config (available in all your projects)' > "$HOME/has-c7" && echo added-to-log ;;
+  add) [ -n "$HANG" ] && sleep 60
+     echo "added-to-log $*"; echo "stderr $*" >&2
+     [ -z "$NO_ADD" ] && echo 'User config (available in all your projects)' > "$HOME/has-c7" ;;
 esac
+`, { mode: 0o755 });
+  // the block's 30 s limit, as 1 s, so a hung claude is a quick test
+  fs.writeFileSync(path.join(bin, 'timeout'), `#!/bin/sh
+shift; exec ${JSON.stringify(spawnSync('sh', ['-c', 'command -v timeout'], { encoding: 'utf8' }).stdout.trim())} 1 "$@"
 `, { mode: 0o755 });
   const boot = (env = {}) => {
     const r = spawnSync('sh', ['-c', `note() { echo "$*" >> "$HOME/notes"; }\n${block}\necho "after:\${c7key-unset}" >> "$HOME/ran"`], { cwd: home, encoding: 'utf8', env: { PATH: `${bin}:${process.env.PATH}`, HOME: home, ...env } });
     assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stdout + r.stderr, /ctx7sk/, 'nothing of the key on the boot\'s own output');
     assert.equal(fs.readFileSync(path.join(home, 'ran'), 'utf8').trim(), 'after:unset', 'the boot went on past the block, with the key unset');
     fs.rmSync(path.join(home, 'ran'));
   };
@@ -41,7 +48,7 @@ test('the block comes before the first session, holds no key of its own, and eve
   assert.ok(df.indexOf('# figma-mcp end') < df.indexOf('# context7-mcp start'), 'after .box is made, beside Figma');
   assert.doesNotMatch(block, /ctx7sk|Bearer/i, 'no key in the image');
   assert.equal([...block.matchAll(/claude mcp/g)].length, [...block.matchAll(/timeout 30 claude mcp/g)].length);
-  assert.match(df, /\nContext7: every session can look up current library docs\./, 'the welcome text says how to add a key');
+  assert.match(df, /\nContext7: every session can look up current library docs \(a lookup sends Context7 what the session writes\)\./, 'the welcome text says how to add a key');
 });
 
 test('added once without a key, and a server the owner removed stays removed', () => {
@@ -63,11 +70,45 @@ test("with the owner's key, it goes as the header, trimmed, and never into box.l
     fs.writeFileSync(path.join(K.home, '.box/context7-key'), ' ctx7sk-test-123 \nignored second line\n');
     K.boot();
     assert.deepEqual(K.calls()[1], `mcp|add|--transport|http|--scope|user|context7|${URL}|--header|CONTEXT7_API_KEY: ctx7sk-test-123|`);
-    for (const f of ['box.log', 'notes']) {
-      const p = path.join(K.home, f);
-      if (fs.existsSync(p)) assert.doesNotMatch(fs.readFileSync(p, 'utf8'), /ctx7sk/);
-    }
+    noKeyIn(K.home);
   } finally { K.done(); }
+});
+
+// the fake claude echoes its whole command line, header included, on stdout and stderr, as a future CLI might
+function noKeyIn(home) {
+  for (const f of ['box.log', 'notes']) {
+    const p = path.join(home, f);
+    if (fs.existsSync(p)) assert.doesNotMatch(fs.readFileSync(p, 'utf8'), /ctx7sk/, `no key in ${f}`);
+  }
+}
+
+test('a keyed add that fails, or a claude that hangs, is noted without the key and tried at the next boot', () => {
+  for (const env of [{ NO_ADD: '1' }, { HANG: '1' }]) {
+    const K = box();
+    try {
+      fs.writeFileSync(path.join(K.home, '.box/context7-key'), 'ctx7sk-test-123\n');
+      const t = Date.now();
+      K.boot(env);
+      assert.ok(Date.now() - t < 20000, 'the time limit holds the boot to it');
+      assert.ok(!fs.existsSync(path.join(K.home, '.box/context7-mcp')), 'no mark');
+      assert.match(fs.readFileSync(path.join(K.home, 'notes'), 'utf8'), /could not add the Context7 MCP/);
+      noKeyIn(K.home);
+    } finally { K.done(); }
+  }
+});
+
+test('a key file with no key on its first line is noted, and nothing is added or marked', () => {
+  for (const body of ['', '   \n', '\nctx7sk-on-line-two\n']) {
+    const W = box();
+    try {
+      fs.writeFileSync(path.join(W.home, '.box/context7-key'), body);
+      W.boot();
+      assert.deepEqual(W.calls(), [], 'no claude call');
+      assert.ok(!fs.existsSync(path.join(W.home, '.box/context7-mcp')), 'no mark, so the next boot tries again');
+      assert.match(fs.readFileSync(path.join(W.home, 'notes'), 'utf8'), /context7-key has no key on its first line/);
+      noKeyIn(W.home);
+    } finally { W.done(); }
+  }
 });
 
 test('one already there is marked and left alone; a failed add is noted and tried at the next boot', () => {
