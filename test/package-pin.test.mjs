@@ -30,17 +30,15 @@ function pinPairFn() {
 const packagePinPair = pinPairFn();
 
 // A fixture instance: the kit copied in, init run, main pushed to a bare origin of its own.
-// { syncOn }: the fixture's kit with chore start's pin turned on (SYNC_PINS, which kit-957 sets; kit-955
-// ships it false)
+// { syncOn }: a fixture whose kit has chore start's pin on, as the kit ships it since kit-957 (SYNC_PINS
+// true; kit-955 shipped it false)
 function instance(name, { syncOn = false } = {}) {
   const base = scratch(name);
   const origin = path.join(base, 'origin.git');
   const root = bareProject(base, 'pkg');
   if (syncOn) {
     const f = path.join(root, 'docs', 'devteam', 'scripts', 'devteam.mjs');
-    const src = fs.readFileSync(f, 'utf8');
-    assert.equal(src.split('const SYNC_PINS = false;').length, 2, 'the kit declares SYNC_PINS false, once');
-    fs.writeFileSync(f, src.replace('const SYNC_PINS = false;', 'const SYNC_PINS = true;'));
+    assert.equal(fs.readFileSync(f, 'utf8').split('const SYNC_PINS = true;').length, 2, 'the kit declares SYNC_PINS true, once');
   }
   const g = (args, cwd = root) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin]);
@@ -322,16 +320,16 @@ test('C8 a pin that fails never stops the chore from starting', async () => {
   } finally { await reg.close(); }
 });
 
-test('C9 the kit as shipped (SYNC_PINS false): chore start devteam-sync-<tag> starts, pins nothing, asks npm nothing', async () => {
-  assert.equal(SRC.split('const SYNC_PINS = false;').length, 2, 'C9 the kit ships SYNC_PINS false, once');
+test('C9 the kit as shipped (SYNC_PINS true since kit-957): chore start devteam-sync-<tag> pins in the new worktree', async () => {
+  assert.equal(SRC.split('const SYNC_PINS = true;').length, 2, 'C9 the kit ships SYNC_PINS true, once');
+  assert.equal(SRC.split('const SYNC_PINS = false;').length, 1, 'C9 and never false');
   const I = instance('c8b');
   const reg = await startFakeRegistry();
   try {
     const r = I.dt(['chore', 'start', 'devteam-sync-v0.101.0'], { ...reg.env(I.clean), DEVTEAM_ROLE: 'supervisor' });
     assert.equal(r.status, 0, `C9 the chore starts: ${r.stderr}`);
-    assert.doesNotMatch(r.stderr, /package pin/, 'C9 no pin line');
-    assert.equal(reg.calls().length, 0, 'C9 no npm call');
-    assert.deepEqual(I.pair(path.join(I.root, '.worktrees', 'chore-devteam-sync-v0.101.0', 'docs', 'devteam')), { 'package.json': null, 'package-lock.json': null }, 'C9 no pair in the sync\'s worktree');
+    assert.match(r.stderr, /package pin v0\.101\.0: pinned/, "C9 the pin's line");
+    assert.notDeepEqual(I.pair(path.join(I.root, '.worktrees', 'chore-devteam-sync-v0.101.0', 'docs', 'devteam')), { 'package.json': null, 'package-lock.json': null }, "C9 a pair in the sync's worktree");
   } finally { await reg.close(); }
 });
 
