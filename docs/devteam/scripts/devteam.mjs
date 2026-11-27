@@ -34919,6 +34919,165 @@ function packagePrune(tree, keep) {
   }
   return removed;
 }
+// pinCheck (kit-sync@2's checks, kit-install@1; kit-957): what merge checks of a home PR from main's
+// merge-base `base` to its head `sha`, on every PR and whatever the approval (no flag skips it). It
+// returns { fails, skips, pin, strict, launcher, tag, verified, install } and throws nothing.
+// - docs/devteam/.kit is never committed: a PR that adds or changes it, or any path under it, is
+//   refused, each of a path's first three components compared as git compares .git (any case, NFC, the
+//   code points HFS+ ignores removed, a trailing run of dots and spaces dropped, cut at ':', '\' a
+//   separator, DEVTEA~<n> and KIT~<n> the 8.3 short names). Deleting one is not refused.
+// - The launcher-tag rule. A tag is read from main's upstream_repo (a bounded fetch into a ref removed
+//   after) for its docs/devteam/scripts/devteam.mjs's second line: for a devteam-sync-* chore its tag
+//   (the upstream_base it sets, else its slug's), and for any PR that changes the pin, v<the pinned
+//   version>. A sync whose tag, or whose own copy, carries the launcher's marker must hold a pin of that
+//   tag that verifies in full (strict), changed or already main's, or it is refused; any pin whose tag
+//   carries it is strict too. A tag that can't be read is a warning: for a sync, the PR's own copy
+//   decides; for a pinned release, the registry's manifest does (its layout, and the pair it makes).
+// - The pin (a PR that changes either pin file, or a launcher sync): both files must be at its head (a
+//   deleted pair is refused, with both fixes), be packagePinPair's bytes for main's package_name, and
+//   name upstream_base at its head without its v. Then the registry, as kit-install@1 says: npm 9.5 or
+//   newer, npm view's manifest (name, version, devteam.layout 1 or 2 agreeing with the tag's marker when
+//   it was read, no dependencies of any kind, dist.integrity the pin's, the pair packagePinPair makes of
+//   it byte for byte), and packageProvenance. A registry that answers and differs (an npm view error
+//   that isn't a network or socket code or E404 included: a TLS or certificate error too) refuses,
+//   whatever the layout. No npm, an old npm or one
+//   that can't say its version, an unreachable registry or an unpublished version is a skip for a
+//   layout-1 pin (the merge goes on; merge logs it as a finding) and a refusal for a strict one.
+// install: 'before' for a strict pin (merge installs it into its own folder in .kit before landing),
+// 'after' for any other pin that isn't refused; null when no pin is checked.
+function pinCheck({ base, sha, chore = null } = {}) {
+  const MARK = '// devteam-launcher: kit-package@1';
+  const FILES = ['docs/devteam/package.json', 'docs/devteam/package-lock.json'];
+  // kit-install@1's network codes, and the socket faults that also mean no answer came (plan-2 P2-3); a TLS
+  // or certificate error is not here: an answer from a registry that isn't the one named is refused
+  const NET = /^(ECONN[A-Z]*|ETIMEDOUT|ESOCKETTIMEDOUT|ERR_SOCKET_TIMEOUT|EAI_AGAIN|EAI_FAIL|ENOTFOUND|ENETUNREACH|ENETDOWN|EHOSTUNREACH|EHOSTDOWN|EPIPE|EPROTO|E5[0-9][0-9]|E429)$/;
+  const r = { fails: [], skips: [], pin: null, strict: false, launcher: false, tag: null, verified: false, install: null };
+  try {
+    const main = mainRef();
+    if (!main) return r;
+    if (!base) { r.fails.push(`can't find where ${sha.slice(0, 12)} meets ${main}, so its pin and docs/devteam/.kit can't be checked`); return r; }
+    const some = (l) => `${l.slice(0, 6).join(', ')}${l.length > 6 ? ', …' : ''}`;
+    // the exact bytes at a commit (git() drops a final newline), or null
+    const show = (ref, f) => { const x = spawnSync('git', ['show', `${ref}:${f}`], { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 256 * 1024 * 1024 }); return x.status === 0 ? x.stdout : null; };
+    const marked = (text) => text !== null && text.split('\n')[1] === MARK;
+    const diff = (filter) => git(['diff', '-z', '--name-only', '--no-renames', ...filter, base, sha]);
+    const all = diff([]), kept = diff(['--diff-filter=d']);
+    if (all === null || kept === null) { r.fails.push(`can't read what ${sha.slice(0, 12)} changes against ${main}, so its pin and docs/devteam/.kit can't be checked`); return r; }
+    const changed = all.split('\0').filter(Boolean);
+    const fold = (c) => c.split(':')[0].normalize('NFC').replace(/[\u200c-\u200f\u202a-\u202e\u206a-\u206f\ufeff]/g, '').replace(/[. ]+$/, '').toLowerCase();
+    const named = (c, name, short) => { const x = fold(c); return x === name || (!!short && new RegExp(`^${short}~[0-9]$`).test(x)); };
+    const kit = kept.split('\0').filter(Boolean).filter((f) => { const p = f.split(/[\\/]/); return p.length >= 3 && named(p[0], 'docs') && named(p[1], 'devteam', 'devtea') && named(p[2], '.kit', 'kit'); });
+    if (kit.length) r.fails.push(`adds or changes ${some(kit)}: docs/devteam/.kit holds this machine's installs and is never committed (kit-install@1); take it out of the branch (git rm -r --cached) and ask again`);
+    const ms = settingsAt(main);
+    const up = typeof ms?.upstream_repo === 'string' ? ms.upstream_repo : null;
+    const src = /^[\w.-]+\/[\w.-]+$/.test(up ?? '') ? `https://github.com/${up}.git` : up;
+    // whether a tag's devteam.mjs carries the marker: true, false, or null (not read)
+    const tagMarks = new Map();
+    const tagMarked = (tag) => {
+      if (!tagMarks.has(tag)) {
+        let m = null;
+        const ref = `refs/devteam-pin/${tag}`;
+        if (src) {
+          try {
+            if (recurringRegistry.git(['fetch', '--quiet', '--no-tags', src, `+refs/tags/${tag}:${ref}`], { cwd: mainRoot }).ok) m = marked(show(ref, 'docs/devteam/scripts/devteam.mjs'));
+          } finally { git(['update-ref', '-d', ref], mainRoot); }
+        }
+        if (m === null) warn(`pin: can't read ${tag} from ${redactUrl(up ?? 'upstream_repo')}, so whether it carries the launcher is ${r.tag === tag ? "read from the PR's own copy" : "left to the registry's manifest (its layout and the pair it makes)"}`);
+        tagMarks.set(tag, m);
+      }
+      return tagMarks.get(tag);
+    };
+    if (typeof chore === 'string' && chore.startsWith('devteam-sync-')) {
+      const headMarked = marked(show(sha, 'docs/devteam/scripts/devteam.mjs'));
+      const setBase = settingsAt(sha)?.upstream_base;
+      const raw = typeof setBase === 'string' && setBase && setBase !== settingsAt(base)?.upstream_base ? setBase : chore.slice('devteam-sync-'.length);
+      r.tag = [raw, raw.replace(/^(v\d+)-(\d+)-(\d+)$/, '$1.$2.$3')].find((t) => releaseParts(t)) ?? null;
+      if (!r.tag) warn(`pin: ${chore} names no release tag, so whether it carries the launcher is read from the PR's own copy`);
+      r.launcher = (r.tag ? tagMarked(r.tag) === true : false) || headMarked;
+    }
+    const pinChanged = changed.some((f) => FILES.includes(f));
+    const want = r.tag ?? '<tag>';
+    const mustPin = `${want} carries the launcher (layout 2), so its sync must pin it: run devteam.mjs package pin ${want} in the sync's worktree, commit ${FILES.join(' and ')}, and ask again`;
+    if (!pinChanged && !r.launcher) return r;
+    const expected = settingsAt(sha)?.upstream_base;
+    const fixes = `restore main's pair (git checkout ${main} -- ${FILES.join(' ')}, which needs no registry) or run devteam.mjs package pin ${typeof expected === 'string' && releaseParts(expected) ? expected : '<tag>'}, and ask again`;
+    const pj = show(sha, FILES[0]), lk = show(sha, FILES[1]);
+    if (pj === null || lk === null) { r.fails.push(pinChanged ? `deletes the pin pair (${FILES.filter((f, i) => [pj, lk][i] === null).join(', ')} missing at its head): ${fixes}` : mustPin); return r; }
+    const name = ms?.package_name;
+    if (typeof name !== 'string' || !name) { r.fails.push(`can't read package_name from main's settings (${main}), so its pin can't be checked`); return r; }
+    let pin;
+    try {
+      const a = JSON.parse(pj), b = JSON.parse(lk);
+      const e = b?.packages?.[`node_modules/${name}`];
+      pin = { name, version: a?.dependencies?.[name], integrity: e?.integrity, resolved: e?.resolved, layout: a?.devteam?.layout };
+      const pair = packagePinPair(pin);
+      if (pair['package.json'] !== pj || pair['package-lock.json'] !== lk) throw new Error("its bytes are not packagePinPair's");
+    } catch (e) { r.fails.push(pinChanged ? `its pin isn't a pin of ${name}, main's package_name (${e.message}): ${fixes}` : mustPin); return r; }
+    // a launcher sync whose pair is main's already: checked only when it pins the tag
+    if (r.launcher && r.tag && `v${pin.version}` !== r.tag) { r.fails.push(pinChanged ? `${r.tag} carries the launcher (layout 2), so its sync must pin it, not ${pin.version}: run devteam.mjs package pin ${r.tag} in the sync's worktree, and ask again` : mustPin); return r; }
+    r.pin = pin;
+    if (`v${pin.version}` !== expected) { r.fails.push(`pins ${name}@${pin.version}, but upstream_base at its head is ${JSON.stringify(expected ?? null)}: the pin names the release its kit came from; ${fixes}`); return r; }
+    // the pinned release's own tag: its marker makes the pin strict, whatever the PR is
+    const pinTag = `v${pin.version}`;
+    const pinMark = pinTag === r.tag ? tagMarks.get(pinTag) ?? null : tagMarked(pinTag);
+    r.strict = pin.layout === 2 || r.launcher || pinMark === true;
+    const what = `${name}@${pin.version}`;
+    const skip = (cause, why) => {
+      if (r.strict) r.fails.push(`can't verify the layout-2 pin ${what} (${cause}): ${why}; from layout 2 a pin merges only verified, so fix the cause and ask again`);
+      else { r.skips.push({ cause, why }); r.install = 'after'; }
+      return r;
+    };
+    const differs = (why) => { r.fails.push(`the pin ${what} differs from the registry: ${why}; it is never merged (a tampering signal): ${fixes}`); return r; };
+    let view = null;
+    try {
+      let v, m;
+      try {
+        view = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-npm-view-'));
+        fs.writeFileSync(path.join(view, 'package.json'), '{}\n');
+        v = npmRun(['--version'], { cwd: view, timeout: 30000 });
+      } catch (e) { r.fails.push(`can't check the pin ${what}: ${e.syscall ? `can't make a folder under ${os.tmpdir()} (${e.code ?? e.message})` : e.message}`); return r; }
+      if (v.error === 'ENOENT') return skip('no-npm', 'no npm on PATH');
+      const nv = /^(\d+)\.(\d+)\.(\d+)/.exec(v.stdout.trim());
+      if (v.status !== 0 || !nv) return skip('npm-failed', `npm --version failed (${v.error ?? `exit ${v.status}`})`);
+      if (Number(nv[1]) < 9 || (Number(nv[1]) === 9 && Number(nv[2]) < 5)) return skip('old-npm', `npm ${nv[0]} is older than 9.5, which can't verify attestations`);
+      try { m = npmRun(['view', what, '--json'], { cwd: view }); } catch (e) { r.fails.push(`can't check the pin ${what}: ${e.message}`); return r; }
+      if (m.status !== 0 || m.error) {
+        let code = /^npm (?:error|ERR!) code (\S+)/m.exec(m.stderr)?.[1] ?? null;
+        if (!code) { try { code = JSON.parse(m.stdout)?.error?.code ?? null; } catch {} }
+        if (m.error === 'ETIMEDOUT') code = 'ETIMEDOUT';
+        if (typeof code === 'string' && NET.test(code)) return skip('unreachable', `the registry ${m.registry} can't be reached (${code})`);
+        if (code === 'E404') return skip('unpublished', `${what} is not published on ${m.registry} (E404)`);
+        return differs(`npm view ${what} failed (${code ?? m.error ?? `exit ${m.status}`}), an answer that is neither the manifest nor a network failure`);
+      }
+      let man = null;
+      try { man = JSON.parse(m.stdout); } catch {}
+      if (!man || typeof man !== 'object' || Array.isArray(man)) return differs('its manifest is not one JSON object');
+      if (man.name !== name || man.version !== pin.version) return differs(`its manifest names ${String(man.name).slice(0, 80)}@${String(man.version).slice(0, 40)}`);
+      const deps = ['dependencies', 'optionalDependencies', 'peerDependencies', 'bundleDependencies', 'bundledDependencies'].filter((k) => man[k] && (typeof man[k] !== 'object' || Object.keys(man[k]).length));
+      if (deps.length) return differs(`the package has dependencies (${deps.join(', ')}), and the kit's has none`);
+      const layout = man.devteam?.layout;
+      if (layout !== 1 && layout !== 2) return differs('its manifest has no devteam.layout of 1 or 2');
+      const tagMark = r.launcher ? true : pinMark;
+      if (tagMark !== null && (layout === 2) !== tagMark) return differs(`its manifest says layout ${layout}, but ${pinTag} ${tagMark ? 'carries' : 'lacks'} the launcher's marker`);
+      if (man.dist?.integrity !== pin.integrity) return differs(`its integrity is ${String(man.dist?.integrity).slice(0, 30)}…, not the pin's ${pin.integrity.slice(0, 30)}…`);
+      let pair;
+      try { pair = packagePinPair({ name, version: pin.version, integrity: man.dist.integrity, resolved: pin.resolved, layout }); } catch (e) { return differs(`its manifest isn't a pin (${e.message})`); }
+      if (pair['package.json'] !== pj || pair['package-lock.json'] !== lk) return differs(`the pair isn't the one its manifest makes (layout ${layout} there, ${pin.layout} in the pin)`);
+    } finally { if (view) fs.rmSync(view, { recursive: true, force: true }); }
+    let pv;
+    try { pv = packageProvenance({ name, version: pin.version, integrity: pin.integrity }); } catch (e) { r.fails.push(`can't check the pin ${what}: ${e.message}`); return r; }
+    if (pv.unreachable) return skip('unreachable', pv.why);
+    if (!pv.ok) return differs(`its provenance is refused (${pv.refused}): ${pv.why}`);
+    r.verified = true;
+    r.install = r.strict ? 'before' : 'after';
+    return r;
+  } catch (e) {
+    // a setting or a call shaped as nothing above expects: a refusal line, never a throw out of merge
+    Object.assign(r, { verified: false, install: null });
+    r.fails.push(`can't check the pin and docs/devteam/.kit: ${String(e?.message ?? e).split('\n')[0].slice(0, 300)}`);
+    return r;
+  }
+}
 // package pin|install|status (kit-install@1).
 function cmdPackage() {
   const sub = positional[0];
