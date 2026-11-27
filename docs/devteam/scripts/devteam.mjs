@@ -18574,8 +18574,9 @@ function goalMetPlan(v, answer) {
 // kit-934 artifact line per item archivableArtifacts(goal, now) names, {archived: true, goal,
 // reason: why}, under artifact archive's lock (an item archived by hand before gets the goal's line
 // too). It leaves alone an item the owner set (the fold's rank rule would set the line aside) and
-// one the log shows archived for this goal before (a line with archived true and this goal), so a
-// rerun or a later met turn never archives a restored item again, whatever the clocks say.
+// one the log shows archived by a met turn before (a line with archived true and a goal, any goal:
+// only this writes one, kit-934's commands write goal null), so a rerun or a later met turn of any
+// goal it is drawn for never archives a restored item again, whatever the clocks say.
 // artifact restore brings any item back; no file moves. The words for the caller's output, or ''
 // when nothing was written.
 function archiveOnMet(goalId, why) {
@@ -18588,7 +18589,7 @@ function archiveOnMet(goalId, why) {
   const done = withLock(runPath('artifact-archive'), () => {
     logCache = null;
     const rec = archiveRecords();
-    const before = new Set(readLog().lines.filter((l) => l.type === 'artifact' && l.archived === true && l.goal === goalId && ['supervisor', 'owner'].includes(l.by) && typeof l.id === 'string').map((l) => l.id.slice('artifact:'.length)));
+    const before = new Set(readLog().lines.filter((l) => l.type === 'artifact' && l.archived === true && typeof l.goal === 'string' &&['supervisor', 'owner'].includes(l.by) && typeof l.id === 'string').map((l) => l.id.slice('artifact:'.length)));
     const wrote = [];
     for (const slug of list) {
       const cur = rec.get(slug);

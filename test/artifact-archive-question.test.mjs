@@ -2,9 +2,10 @@
 // the owner's Yes to its goal-met question or by 'goal status <id> met', the kit itself writes, as
 // the supervisor, one kit-934 artifact line {archived: true, goal, reason} for each item
 // archivableArtifacts(goal, now) names. No question is asked and no class is added. An item the
-// owner has set is left as the owner set it; one whose archived was set since the goal first turned
-// met (restored after it, or archived already) is left alone, so a rerun or a later met turn never
-// archives a restored item again. Nothing under project/artifacts/ changes.
+// owner has set is left as the owner set it; one the log shows archived by a met turn (a line with
+// archived true and a goal, any goal) is never archived again, so a rerun or a later met turn of
+// any goal it is drawn for never archives a restored item again; an item archived by hand (goal
+// null) gets the goal's line. Nothing under project/artifacts/ changes.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -133,6 +134,31 @@ test('A4: an item restored after the goal met is not archived again, by a rerun 
   F.owner(['goal', 'status', F.goal, 'met', '--force']);
   assert.equal(artLines(F).length, was, 'a later met turn writes nothing');
   assert.deepEqual(archivedNow(F), ['g-early', 'g-two'], 'g-one stays restored');
+  F.sup(['log-check']);
+});
+
+test('A4b: an item drawn for two goals, archived by one\'s met turn and restored, is not archived again by the other\'s rerun, in either order', (t) => {
+  const { F, H } = fixture(t, 'aq-cross');
+  const K = F.sup(['goal', 'add', '--title', 'Third goal', '--outcome', 'x', '--measure', 'm', '--target', '1', '--source', 'owner', '--question', 'Done?']);
+  drawn(F.old, 'gk-both', [`goal:${F.goal}`, `goal:${K}`]);
+  land(F);
+  // G met (gh-both waits on H), then H met: gh-both archived with goal H; restored; G again
+  F.owner(['goal', 'status', F.goal, 'met', '--force']);
+  F.owner(['goal', 'status', H, 'met', '--force']);
+  assert.equal(artLines(F).filter((x) => x.id === 'artifact:gh-both').at(-1).goal, H);
+  F.sup(['artifact', 'restore', 'gh-both']);
+  let was = artLines(F).length;
+  F.owner(['goal', 'status', F.goal, 'met', '--force']);
+  assert.equal(artLines(F).length, was, "G's rerun writes nothing for gh-both, restored after H's archive");
+  // K met after G: gk-both archived with goal K; restored; G again, then K again
+  F.owner(['goal', 'status', K, 'met', '--force']);
+  assert.equal(artLines(F).filter((x) => x.id === 'artifact:gk-both').at(-1).goal, K);
+  F.sup(['artifact', 'restore', 'gk-both']);
+  was = artLines(F).length;
+  F.owner(['goal', 'status', F.goal, 'met', '--force']);
+  F.owner(['goal', 'status', K, 'met', '--force']);
+  assert.equal(artLines(F).length, was, 'neither rerun archives gk-both again');
+  assert.equal(archivedNow(F).includes('gh-both') || archivedNow(F).includes('gk-both'), false);
   F.sup(['log-check']);
 });
 
