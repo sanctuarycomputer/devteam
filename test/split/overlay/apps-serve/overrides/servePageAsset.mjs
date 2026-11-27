@@ -6,14 +6,17 @@
 // serveAppFiles on the dashboard build under pageCsp()'s base with the route's hashes. The hub: every
 // path, under the hub's / policy (startHub's, built here from PORT_RANGE) with the route's hashes. The
 // browser view: only /_next/…, never a page. A route with no good hashes entry is a 500, through
-// serveAppFiles; with no build it serves 404s.
+// serveAppFiles; with no build it serves 404s. The dashboard's style-src (and font-src where it has one)
+// also names the shell's font and icon origins (kit-1033).
 function servePageAsset(req, res, server) {
   if (req.method !== 'GET' && req.method !== 'HEAD') return DASH_NEXT;
   // policy builder start
   // base with script-src 'self' plus the hashes, style-src with 'self' first ('self' alone for the
   // browser view), each appended if absent; under default-src 'none', font-src 'self' and img-src
-  // 'self' data: appended if absent, but never on the browser view
-  const build = (base, hashes, browser) => {
+  // 'self' data: appended if absent, but never on the browser view; a dashboard route's style-src, and its
+  // font-src where it has one, also name the shell's font and icon origins (kit-1033)
+  const ORIGINS = { 'style-src': ['https://fonts.googleapis.com', 'https://cdn.jsdelivr.net'], 'font-src': ['https://fonts.gstatic.com', 'https://cdn.jsdelivr.net'] };
+  const build = (base, hashes, browser, dashboard = false) => {
     const ds = base.split(';').map((d) => d.trim()).filter(Boolean);
     const has = (n) => ds.some((d) => d.split(/\s+/)[0] === n);
     const script = ['script-src', "'self'", ...hashes.map((h) => `'${h}'`)].join(' ');
@@ -29,6 +32,7 @@ function servePageAsset(req, res, server) {
       if (!has('font-src')) out.push("font-src 'self'");
       if (!has('img-src')) out.push("img-src 'self' data:");
     }
+    if (dashboard) for (let i = 0; i < out.length; i++) { const [n, ...v] = out[i].split(/\s+/); if (ORIGINS[n]) out[i] = [n, ...v, ...ORIGINS[n].filter((o) => !v.includes(o))].join(' '); }
     return out.join('; ');
   };
   // a route's hashes from a build's csp-hashes.json text, or null when they can't be trusted
@@ -41,10 +45,10 @@ function servePageAsset(req, res, server) {
   // policy builder end
   const p = String(req.url).split('?')[0];
   // a route's policy for the build in dir: base with its hashes, or a throw (serveAppFiles' 500)
-  const policyIn = (dir, base) => (route) => {
+  const policyIn = (dir, base, dashboard = false) => (route) => {
     const hashes = hashesFor(fs.readFileSync(path.join(dir, 'csp-hashes.json'), 'utf8'), route);
     if (!hashes) throw new Error(`no hashes for ${route}`);
-    return build(base, hashes, false);
+    return build(base, hashes, false, dashboard);
   };
   if (server === 'dashboard') {
     let u;
@@ -65,7 +69,7 @@ function servePageAsset(req, res, server) {
     try { first = decodeURIComponent(p.split('/')[1] ?? '').toLowerCase(); } catch { return DASH_NEXT; }
     if (['api', 'upload', 'public', 'review', 'view', 'browser', 'artifact', 'public-manifest', 'presence'].includes(first)) return DASH_NEXT;
     const dir = path.join(kitDir, 'apps', 'dashboard');
-    return serveAppFiles(dir, '', req, res, policyIn(dir, `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}`));
+    return serveAppFiles(dir, '', req, res, policyIn(dir, `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}`, true));
   }
   if (server === 'hub') {
     const dir = path.join(kitDir, 'apps', 'hub');
