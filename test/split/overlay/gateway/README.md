@@ -15,8 +15,8 @@ This area makes the tree's gateway run from its modules:
   - `entry`: `cloud/gateway.mjs` becomes the entry. It holds the source's header, loads every module in the
     manifest's order, and re-exports exactly what the single file exported. It also runs the command line,
     moved out of `PAGES`'s module, so its main-module check is the entry's own.
-  - `test-reads`: each test's read of the gateway's text goes through `gatewaySource()`. The rewrite is
-    `rewireGatewayReads`, exported for kit-893's rule, which rewires the CLI's reads in the same files.
+  - The tests' reads of the gateway's text go through `gatewaySource()` by the tests' area's one rule
+    (`test/split/overlay/tests/`, kit-893), which rewires the CLI's reads in the same files.
 - `patches/dockerfile-gateway-modules.patch`: the image copies `cloud/gateway/` beside `gateway.mjs`.
 
 `test/split-gateway.test.mjs` checks all of it.
