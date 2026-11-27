@@ -3,7 +3,14 @@
 // view of the page calls from it (APPS.md, The view stubs).
 import '../../shared/layout/layout.css';
 import './shell.css';
-import { PAGES, PAGE_COUNT_ID } from '../../lib/shell-page';
+import * as ShellJs from '../../shared/shell/shell';
+import '../../lib/shell-routes';
+import * as Page from '../../lib/shell-page';
+import '../../lib/shell-view-only';
+import './state';
+import './pages';
+import * as Glue from './page';
+import ShellClient from './client';
 import Overview from '../overview';
 import Goals from '../goals';
 import Board from '../board';
@@ -47,10 +54,10 @@ document.body.classList.add('shell');
 function Nav({ group }: { group: string }) {
   return (
     <nav className="nav" data-group={group}>
-      {PAGES.filter((pg) => pg.group === group).map((pg) => (
+      {Page.PAGES.filter((pg) => pg.group === group).map((pg) => (
         <a key={pg.id} href={`#${pg.id}`}>
           <span className="nl"><i className={`icon-${pg.icon}`} aria-hidden="true"></i>{pg.title}</span>
-          {PAGE_COUNT_ID[pg.id] ? <>{' '}<span className="count" id={PAGE_COUNT_ID[pg.id]}></span></> : null}
+          {Page.PAGE_COUNT_ID[pg.id] ? <>{' '}<span className="count" id={Page.PAGE_COUNT_ID[pg.id]}></span></> : null}
         </a>
       ))}
     </nav>
@@ -112,143 +119,146 @@ export default function Shell() {
       <ThreadsCore />
       <Thread />
       <Terminal />
+      <ShellClient />
     </>
   );
 }
 
-// ---- called by other views (compat-scan --stubs) ----
-export function bindDbTable(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+// ---- called by other views (APPS.md): hoisted function declarations, bound before any module body runs, so a
+// view in the cycle (spec, The cycle) may call them at its top level; each delegates to a module importing no view
+// (or, for page.ts, calling views only inside its functions) ----
+export function bindDbTable(...a: Parameters<typeof ShellJs.bindDbTable>): ReturnType<typeof ShellJs.bindDbTable> {
+  return ShellJs.bindDbTable(...a);
 }
 
-export function bindFleetSwitch(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function bindFleetSwitch(...a: Parameters<typeof ShellJs.bindFleetSwitch>): ReturnType<typeof ShellJs.bindFleetSwitch> {
+  return ShellJs.bindFleetSwitch(...a);
 }
 
-export function bindTabBar(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function bindTabBar(...a: Parameters<typeof ShellJs.bindTabBar>): ReturnType<typeof ShellJs.bindTabBar> {
+  return ShellJs.bindTabBar(...a);
 }
 
-export function closeTarget(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function closeTarget(...a: Parameters<typeof ShellJs.closeTarget>): ReturnType<typeof ShellJs.closeTarget> {
+  return ShellJs.closeTarget(...a);
 }
 
-export function dbTable(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function dbTable(...a: Parameters<typeof ShellJs.dbTable>): ReturnType<typeof ShellJs.dbTable> {
+  return ShellJs.dbTable(...a);
 }
 
-export function decSubject(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function decSubject(...a: Parameters<typeof Page.decSubject>): ReturnType<typeof Page.decSubject> {
+  return Page.decSubject(...a);
 }
 
-export function dur(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function dur(...a: Parameters<typeof Page.dur>): ReturnType<typeof Page.dur> {
+  return Page.dur(...a);
 }
 
-export function empty(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function empty(...a: Parameters<typeof Page.empty>): ReturnType<typeof Page.empty> {
+  return Page.empty(...a);
 }
 
-export function esc(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function esc(...a: Parameters<typeof Page.esc>): ReturnType<typeof Page.esc> {
+  return Page.esc(...a);
 }
 
-export function fleetSwitch(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function fleetSwitch(...a: Parameters<typeof ShellJs.fleetSwitch>): ReturnType<typeof ShellJs.fleetSwitch> {
+  return ShellJs.fleetSwitch(...a);
 }
 
-export function fmtDate(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function fmtDate(...a: Parameters<typeof Page.fmtDate>): ReturnType<typeof Page.fmtDate> {
+  return Page.fmtDate(...a);
 }
 
-export function goalSteps(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function goalSteps(...a: Parameters<typeof ShellJs.goalSteps>): ReturnType<typeof ShellJs.goalSteps> {
+  return ShellJs.goalSteps(...a);
 }
 
-export function headFor(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function headFor(...a: Parameters<typeof ShellJs.headFor>): ReturnType<typeof ShellJs.headFor> {
+  return ShellJs.headFor(...a);
 }
 
-export function heartbeat(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function heartbeat(...a: Parameters<typeof ShellJs.heartbeat>): ReturnType<typeof ShellJs.heartbeat> {
+  return ShellJs.heartbeat(...a);
 }
 
-export function isDone(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function isDone(...a: Parameters<typeof Page.isDone>): ReturnType<typeof Page.isDone> {
+  return Page.isDone(...a);
 }
 
-export function nextSort(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function nextSort(...a: Parameters<typeof ShellJs.nextSort>): ReturnType<typeof ShellJs.nextSort> {
+  return ShellJs.nextSort(...a);
 }
 
-export function parseHead(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function parseHead(...a: Parameters<typeof ShellJs.parseHead>): ReturnType<typeof ShellJs.parseHead> {
+  return ShellJs.parseHead(...a);
 }
 
-export function pct(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function pct(...a: Parameters<typeof Page.pct>): ReturnType<typeof Page.pct> {
+  return Page.pct(...a);
 }
 
-export function props(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function props(...a: Parameters<typeof ShellJs.props>): ReturnType<typeof ShellJs.props> {
+  return ShellJs.props(...a);
 }
 
-export function rememberedFilters(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function rememberedFilters(...a: Parameters<typeof ShellJs.rememberedFilters>): ReturnType<typeof ShellJs.rememberedFilters> {
+  return ShellJs.rememberedFilters(...a);
 }
 
-export function saveFilters(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function saveFilters(...a: Parameters<typeof ShellJs.saveFilters>): ReturnType<typeof ShellJs.saveFilters> {
+  return ShellJs.saveFilters(...a);
 }
 
-export function sectionPage(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function sectionPage(...a: Parameters<typeof Glue.sectionPage>): ReturnType<typeof Glue.sectionPage> {
+  return Glue.sectionPage(...a);
 }
 
-export function shellPages(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function shellPages(...a: Parameters<typeof ShellJs.shellPages>): ReturnType<typeof ShellJs.shellPages> {
+  return ShellJs.shellPages(...a);
 }
 
-export function shellText(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function shellText(...a: Parameters<typeof ShellJs.shellText>): ReturnType<typeof ShellJs.shellText> {
+  return ShellJs.shellText(...a);
 }
 
-export function showPage(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function showPage(...a: Parameters<typeof Glue.showPage>): ReturnType<typeof Glue.showPage> {
+  return Glue.showPage(...a);
 }
 
-export function stampFor(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function stampFor(...a: Parameters<typeof ShellJs.stampFor>): ReturnType<typeof ShellJs.stampFor> {
+  return ShellJs.stampFor(...a);
 }
 
-export function statusPill(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function statusPill(...a: Parameters<typeof ShellJs.statusPill>): ReturnType<typeof ShellJs.statusPill> {
+  return ShellJs.statusPill(...a);
 }
 
-export function storedFilters(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function storedFilters(...a: Parameters<typeof ShellJs.storedFilters>): ReturnType<typeof ShellJs.storedFilters> {
+  return ShellJs.storedFilters(...a);
 }
 
-export function subj(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function subj(...a: Parameters<typeof Page.subj>): ReturnType<typeof Page.subj> {
+  return Page.subj(...a);
 }
 
-export function tabBar(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function tabBar(...a: Parameters<typeof ShellJs.tabBar>): ReturnType<typeof ShellJs.tabBar> {
+  return ShellJs.tabBar(...a);
 }
 
-export function ttPeekPlace(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function ttPeekPlace(...a: Parameters<typeof Glue.ttPeekPlace>): ReturnType<typeof Glue.ttPeekPlace> {
+  return Glue.ttPeekPlace(...a);
 }
 
-export function viewOnly(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function viewOnly(...a: Parameters<typeof Glue.viewOnly>): ReturnType<typeof Glue.viewOnly> {
+  return Glue.viewOnly(...a);
 }
 
-export function viewToast(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function viewToast(...a: Parameters<typeof Glue.viewToast>): ReturnType<typeof Glue.viewToast> {
+  return Glue.viewToast(...a);
 }
 
-export function withPage(..._args: unknown[]): never {
-  throw new Error('not ported: shell');
+export function withPage(...a: Parameters<typeof ShellJs.withPage>): ReturnType<typeof ShellJs.withPage> {
+  return ShellJs.withPage(...a);
 }
