@@ -95,7 +95,14 @@ export function catalogText(list, out) {
 
 export function writeCatalog(ui, out) {
   const text = catalogText(components(ui), out);
-  if (fs.existsSync(out) && fs.readFileSync(out, 'utf8') === text) return false;
+  let old = null;
+  try {
+    old = fs.existsSync(out) ? fs.readFileSync(out, 'utf8') : null;
+  } catch (e) {
+    e.path ??= out;
+    throw e;
+  }
+  if (old === text) return false;
   fs.mkdirSync(path.dirname(out), { recursive: true });
   const tmp = `${out}.${process.pid}.tmp`;
   try {
@@ -143,10 +150,11 @@ export function outermost(src) {
     }
     return n;
   };
-  // a type parameter list at j (`<T,>`, `<T extends X>`, `<T = X>`: an arrow function's generics, which TSX
-  // writes so, while `<T>` is JSX): the index after its '>', or -1 when j starts none
+  // a type parameter list at j (`<T,>`, `<T extends X>`, `<T = X>`, each maybe `const T`: an arrow function's
+  // generics, which TSX writes so, while `<T>` and `<a extends=…>` are JSX): the index after its '>', or -1
+  // when j starts none. A string type in it is read as text, so a '>' in one ends it early.
   const typeParams = (j) => {
-    if (!/^<\s*[A-Za-z_$][\w$]*\s*(?:,|extends\b|=(?!>))/.test(src.slice(j, j + 200))) return -1;
+    if (!/^<\s*(?:const\s+)?[A-Za-z_$][\w$]*\s*(?:,|extends\b(?!\s*[=>/])|=(?!>))/.test(src.slice(j, j + 200))) return -1;
     let depth = 0;
     for (; j < n; j++) {
       if (src[j] === '=' && src[j + 1] === '>') { j++; continue; }
@@ -249,7 +257,16 @@ export function duplicates(apps) {
   const seen = new Map(); // class → Map(folder → Set(file))
   for (const a of appsList) {
     const src = path.join(apps, a, 'src');
-    for (const f of walk(src).filter((f) => f.endsWith('.css'))) for (const c of cssClasses(fs.readFileSync(f, 'utf8'))) defined.add(c);
+    for (const f of walk(src).filter((f) => f.endsWith('.css'))) {
+      let css;
+      try {
+        css = fs.readFileSync(f, 'utf8');
+      } catch (e) {
+        process.stderr.write(`ui-catalog: ${rel(f)} not read: ${e.message}\n`);
+        continue;
+      }
+      for (const c of cssClasses(css)) defined.add(c);
+    }
     for (const f of walk(src).filter((f) => f.endsWith('.tsx'))) {
       const parts = posix(path.relative(src, f)).split('/');
       let folder = null;
