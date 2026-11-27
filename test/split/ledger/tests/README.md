@@ -22,4 +22,4 @@ An entry is accepted only when both hashes match, the ticket is merged on main's
 (or `…/patches/test/<f>.patch`), `<f>` the path under `test/`. Otherwise the report names the first
 rule unmet. An entry over 64 KB, not JSON, short of a field, or for another file is a bad entry.
 
-The ticket that changes the test (directly or through the overlay) writes its entry. There are none yet.
+The ticket that changes the test (directly or through the overlay) writes its entry.

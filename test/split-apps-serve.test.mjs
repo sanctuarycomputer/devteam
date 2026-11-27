@@ -711,3 +711,35 @@ test("G3: test.yml builds the apps once in build-apps, and every kit shard place
   const firstTest = k.findIndex((l) => /^\s+(- )?run: .*test\/run\.mjs/.test(l));
   assert.ok(firstTest !== -1 && place < firstTest, 'the build is placed before the first test step');
 });
+
+// ---- the kit-watch tests the tree changes (apps-tests), each with its ledger entry ----
+// each file's changed lines, HEAD's text → the tree's, one for one
+const KW = {
+  'dashboard.kit-watch.test.mjs': [
+    ["  fs.appendFileSync(path.join(F.root, 'docs/devteam/dashboard/index.html'), '<!-- b -->\\n');",
+      "  fs.mkdirSync(path.join(F.root, 'docs/devteam/apps/dashboard'), { recursive: true }); fs.appendFileSync(path.join(F.root, 'docs/devteam/apps/dashboard/index.html'), '<!-- b -->\\n');"],
+    ["  await until(() => /restarting: kit files changed \\(dashboard\\/index\\.html\\)/.test(d.log()) && d.starts().length === 2 && d.starts()[1].pid !== first, 'a restart for the page');",
+      "  await until(() => /restarting: kit files changed \\(apps\\/dashboard\\/index\\.html\\)/.test(d.log()) && d.starts().length === 2 && d.starts()[1].pid !== first, 'a restart for the page');"],
+    ["  write(path.join(F.root, 'docs/devteam/dashboard/extra.css'), 'body {}\\n');",
+      "  write(path.join(F.root, 'docs/devteam/apps/hub/index.html'), '<!-- hub -->\\n');"],
+    ["  await until(() => /restarting: kit files changed \\(dashboard\\/extra\\.css\\)/.test(d.log()) && d.starts().length === 3, 'a restart for a new stylesheet');",
+      "  await until(() => /restarting: kit files changed \\(apps\\/hub\\/index\\.html\\)/.test(d.log()) && d.starts().length === 3, 'a restart for the hub page');"],
+  ],
+  'dashboard.kit-watch-pane.test.mjs': [
+    ["  fs.appendFileSync(path.join(F.root, 'docs/devteam/dashboard/index.html'), '<!-- c -->\\n');",
+      "  fs.mkdirSync(path.join(F.root, 'docs/devteam/apps/dashboard'), { recursive: true }); fs.appendFileSync(path.join(F.root, 'docs/devteam/apps/dashboard/index.html'), '<!-- c -->\\n');"],
+  ],
+};
+test('K1: the tree changes only the kit-watch lines the spec names, and each test has its ledger entry', { skip: skipFor('K1') }, () => {
+  for (const [f, changes] of Object.entries(KW)) {
+    const head = run('git', ['-C', root, 'show', `${sha}:test/${f}`]).stdout;
+    const tree = treeText(`test/${f}`);
+    const [h, t] = [head.split('\n'), tree.split('\n')];
+    assert.equal(t.length, h.length, `${f}: line for line`);
+    const diff = h.map((l, i) => [l, t[i]]).filter(([a, b]) => a !== b);
+    assert.deepEqual(diff, changes, `${f}: only the named lines change`);
+    const entry = path.join(root, 'test/split/ledger/tests', `${f}.json`);
+    assert.ok(fs.existsSync(entry), `${f}: a ledger entry`);
+    assert.deepEqual(JSON.parse(fs.readFileSync(entry, 'utf8')), { file: `test/${f}`, ticket: 'kit-984-apps-serve', sha256: sha256(tree), source_sha256: sha256(head) });
+  }
+});
