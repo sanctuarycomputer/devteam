@@ -85,6 +85,37 @@ The lists below are the scan's (`node apps/dashboard/scripts/compat-scan.mjs --b
 
 **The shell's cycle (kit-988).** The shell imports every dashboard view to mount it, and a ported view imports its shell names from `../shell`. Each name the shell exports is a hoisted `export function` that delegates to modules importing no view, so a view may call it anywhere, at its top level too. A view reads or assigns the shell's page state (`DATA`, `INBOX_D`, `PAGE_VERSION`, `PUBLIC`, `PREVIEWS`, `drafts`) only as `shell.<name>` from `../shell/state`, and calls `viewer()` where `index.html` reads `VIEWER`.
 
+## Cross-view state
+
+`index.html`'s top-level `let`/`const`/`var` values that another view's lines read or assign (kit-989). An import can't be assigned, so each owning view's are one object in `src/views/<view>/state.ts`, `export const <camel>State = { NAME: <value>, … }`, and every view, its owner's port too, reads and writes `<camel>State.NAME`. A state file imports no view. `node apps/dashboard/scripts/compat-scan.mjs --base 8ea96ace --state` prints the names (`--json`: `{ <view>: [{ name, line }] }`); `--check` fails when an owning view's `state.ts` is missing or its object lacks a listed name.
+
+- **Values are copied as `index.html` has them.** A value that names a function can't live in a file that imports no view. Two do: `ATTR` (peeks) and `LOOP_ROWS` (loop). Each starts `null`, typed as its eventual shape; its view's port assigns it once, at its module's top level; until then a read of it fails like a stub's call.
+- **`const` objects stay the same object.** Their properties are mutated in place, as in `index.html` (`TL.threads = …`, `PEEKS.set`). A `let` becomes an assignable property.
+- **A port uses its own state through its object too** (`viewerState.AV`, never a second local `AV`), so every reader sees one value.
+- **Types:** an object or array literal keeps its inferred shape. A `null` or empty value that `index.html` later fills with data is typed loosely (`Loose`, a `type Loose = any` alias in each state file, commented): the untyped page's own contract; `strict` stays on.
+- **The exception to "A port replaces only its own folder" (The view stubs).** kit-989 created `state.ts` in 16 other views' folders. Each later port of such a view keeps its folder's `state.ts` and its object, and adds and drops none of its names; its own code reads and writes them through the object.
+- **The shell:** its page state is `shell` (`src/views/shell/state.ts`, The view stubs), which holds `PAGE_NOW` too; its other names are exported by its modules.
+
+The state files:
+
+- `src/views/attachments/state.ts` (`attachmentsState`)
+- `src/views/autonomy/state.ts` (`autonomyState`)
+- `src/views/board/state.ts` (`boardState`)
+- `src/views/data/state.ts` (`dataState`)
+- `src/views/goals/state.ts` (`goalsState`)
+- `src/views/library/state.ts` (`libraryState`)
+- `src/views/loop/state.ts` (`loopState`)
+- `src/views/overview/state.ts` (`overviewState`)
+- `src/views/peek-kinds/state.ts` (`peekKindsState`)
+- `src/views/peeks/state.ts` (`peeksState`)
+- `src/views/review/state.ts` (`reviewState`)
+- `src/views/settings/state.ts` (`settingsState`)
+- `src/views/thread/state.ts` (`threadState`)
+- `src/views/threads-core/state.ts` (`threadsCoreState`; also `T_TYPES`, which `T_REF`'s value reads)
+- `src/views/threads-panel/state.ts` (`threadsPanelState`)
+- `src/views/viewer/state.ts` (`viewerState`)
+- `src/views/words/state.ts` (`wordsState`)
+
 ## Shared code
 
 `apps/dashboard/src/shared/` holds what more than one view or both apps use: the layout CSS and tokens, the shell, the router, the thread layer and the plain-words helpers, as the ports move them in; and from this contract `paths.ts`, `compat.ts`, `poll.ts` and `back-link.tsx`.
