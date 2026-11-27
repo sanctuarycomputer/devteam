@@ -7728,7 +7728,9 @@ function upstreamSyncCheck(chore, sha, changed) {
     if (problem) return { problem: `settings.upstream_sync "adopt" covers only a whole newer release: ${problem}. The owner's answer is needed: --approved <qid>` };
   }
   const differ = [];
-  for (const f of changed) {
+  // the pin pair (kit-sync@2) is generated, not copied: pinCheck checks it on every PR, whatever the approval
+  const pinPair = [`${kitRel}/package.json`, `${kitRel}/package-lock.json`];
+  for (const f of changed.filter((x) => !pinPair.includes(x))) {
     if (!f.startsWith(`${kitRel}/`)) { differ.push(`${f} (outside the kit)`); continue; }
     if (blob(sha, f) !== blob(`refs/devteam-upstream/${tag}`, `docs/devteam/${f.slice(kitRel.length + 1)}`)) differ.push(f);
   }
@@ -7752,7 +7754,10 @@ function adoptProblem({ tag, sha, mb, main, changed, src }) {
   const set = settingsAt(sha)?.upstream_base;
   if (set !== tag) return `the PR sets upstream_base to ${JSON.stringify(set ?? null)}, not ${tag}`;
   if (git(['fetch', '--quiet', '--no-tags', src, `+refs/tags/${base}:refs/devteam-upstream/${base}`], mainRoot) === null) return `can't fetch main's upstream_base ${base} from upstream`;
-  const released = changedFiles(`refs/devteam-upstream/${base}`, `refs/devteam-upstream/${tag}`).filter((f) => f.startsWith('docs/devteam/') && !/^docs\/devteam\/(project|run)\//.test(f)).map((f) => `${kitRel}/${f.slice('docs/devteam/'.length)}`);
+  // the pin pair (kit-sync@2) is generated, not copied: pinCheck checks it, so it is neither missing nor extra here
+  const pinPair = [`${kitRel}/package.json`, `${kitRel}/package-lock.json`];
+  changed = changed.filter((f) => !pinPair.includes(f));
+  const released = changedFiles(`refs/devteam-upstream/${base}`, `refs/devteam-upstream/${tag}`).filter((f) => f.startsWith('docs/devteam/') && !/^docs\/devteam\/(project|run)\//.test(f)).map((f) => `${kitRel}/${f.slice('docs/devteam/'.length)}`).filter((f) => !pinPair.includes(f));
   const unlike = (a, b) => a.filter((f) => !b.includes(f));
   const missing = unlike(released, changed), extra = unlike(changed, released);
   const some = (l) => `${l.slice(0, 6).join(', ')}${l.length > 6 ? ', …' : ''}`;
@@ -34314,12 +34319,12 @@ function npmRun(args, { cwd, timeout = 120000 } = {}) {
 // is logged as a skip too, so it shows); a failed write exits 1 with its temp files removed, and a stop
 // between the two renames leaves the new lock beside the old package.json, which merge refuses.
 // With { sync: <the worktree> } it is chore start's call for a kit sync: while SYNC_PINS is false it
-// does nothing and returns null (kit-955 ships the call dormant: until merge's checks take the pair,
-// kit-957, a sync PR carrying it would need an owner's answer); kit-957 sets it true. On, it runs
+// does nothing and returns null (kit-955 shipped the call dormant until merge's checks took the pair;
+// kit-957 set it true with pinCheck and the pair's exemptions in the sync checks). On, it runs
 // `package pin <tag>` as a command of its own in that worktree, so nothing the pin does (a die in its
 // log write included) ends the start, and returns { exit, line } from what that command printed.
 function packagePin(kitDir, tag, { sync = null } = {}) {
-  const SYNC_PINS = false;
+  const SYNC_PINS = true;
   if (sync !== null) {
     if (!SYNC_PINS) return null;
     const p = spawnSync(process.execPath, [fileURLToPath(import.meta.url), 'package', 'pin', String(tag)], { cwd: sync, encoding: 'utf8', timeout: 300000, stdio: ['ignore', 'pipe', 'pipe'] });
