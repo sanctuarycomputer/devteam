@@ -2,7 +2,7 @@
 // it runs the install step once per change of main's lockfile, off its tick, backing off ten minutes
 // after a failure; with main pinning layout 1 or nothing it restarts on a kit file change as today;
 // with main pinning layout 2 it restarts only once .kit/current names main's pin, and once when
-// current switches to it. Checks are numbered as in the ticket's spec (W1 to W5).
+// current switches to it. Checks are numbered as in the ticket's spec (W1 to W6).
 // Every dashboard here runs under a while loop (it exits to restart, as the box's does) in a fixture
 // instance with an origin, a HOME of the fake registry's own (test/lib/fake-registry.mjs: a loopback
 // registry and a fake npm first on PATH), its hub and ports in this file's block, every DEVTEAM_* of
@@ -163,6 +163,12 @@ test('W1 main\'s lockfile changing to another version runs the install step once
   fs.mkdirSync(path.join(t.kitTree, '.lock'), { recursive: true });
   t.pinTo(L1);
   await within(() => t.reg.calls().some((c) => c.argv[0] === '--version'), 'W1 the install step started for main\'s new pin');
+  // detached: the install is in a process group of its own, so a pane's respawn-pane -k, which ends the
+  // dashboard's group, leaves it (Linux /proc: field 5 of stat is the group)
+  const group = (pid) => Number(fs.readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /s, '').split(' ')[2]);
+  const installs = fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x)).filter((pid) => { try { return fs.readlinkSync(`/proc/${pid}/cwd`) === fs.realpathSync(t.root) && fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes('package\0install'); } catch { return false; } });
+  assert.equal(installs.length, 1, 'W1 one install process');
+  assert.notEqual(group(installs[0]), group(d.starts()[0].pid), 'W1 the install runs in a process group of its own');
   for (let i = 0; i < 5; i++) {
     const at = Date.now();
     assert.ok((await hello(d.port, 2000))?.kit, 'W1 the dashboard answers while the install waits');
@@ -271,17 +277,32 @@ test('W5 with main pinning layout 2, current switching to main\'s pin restarts t
   const d = await dashboard(t);
   await sleep(2000);
   assert.equal(d.count(/restarting: /), 0, 'W5 nothing changed: no restart');
-  switchCurrent(t, verifiedInstall(t, L2));
+  // current names main's pin's folder, but its record isn't verified (integrity_ok false): hold
+  const f2 = verifiedInstall(t, L2);
+  const rec = path.join(t.kitTree, f2, 'verified.json');
+  fs.writeFileSync(rec, fs.readFileSync(rec, 'utf8').replace('"integrity_ok": true', '"integrity_ok": false'));
+  switchCurrent(t, f2);
+  await sleep(3000);
+  assert.equal(d.count(/restarting: /), 0, 'W5 current names main\'s pin unverified: no restart');
+  assert.equal(d.count(new RegExp(`it names ${F2.replace(/\./g, '\\.')}, unverified`)), 1, 'W5 unverified: why, said once');
+  // the same folder, verified, but its record and pair say layout 1: hold
+  assert.equal(verifiedInstall(t, L2, { layout: 1 }), f2);
+  await sleep(3000);
+  assert.equal(d.count(/restarting: /), 0, 'W5 current names main\'s pin with a layout-1 record: no restart');
+  assert.equal(d.count(/waiting for docs\/devteam\/\.kit\/current to name main's pin/), 1, 'W5 still the one why');
+  // its valid record written: once
+  verifiedInstall(t, L2);
   await within(() => d.count(/restarting: /) === 1 && d.starts().length === 2, 'W5 restarted when current switched to main\'s pin', 20000);
   assert.match(d.log(), new RegExp(`restarting: docs/devteam/\\.kit/current switched to ${F2.replace(/\./g, '\\.')}`), 'W5 the restart names the switch');
   await within(async () => (await hello(d.port))?.kit, 'W5 the new process answers');
   await sleep(3000);
   assert.equal(d.count(/restarting: /), 1, 'W5 once: the new process starts on that current');
   // a layout-2 install that is not main's pin
+  const why = d.count(/waiting for docs\/devteam\/\.kit\/current to name main's pin/);
   switchCurrent(t, verifiedInstall(t, L2, { integrity: `sha512-${crypto.randomBytes(64).toString('base64')}` }));
   await sleep(3000);
   assert.equal(d.count(/restarting: /), 1, 'W5 current names another install: no restart');
-  assert.equal(d.count(/waiting for docs\/devteam\/\.kit\/current to name main's pin/), 1, 'W5 why, said once');
+  assert.equal(d.count(/waiting for docs\/devteam\/\.kit\/current to name main's pin/), why + 1, 'W5 why, said once');
 });
 
 test('W6 kit files and main\'s pin moving together to layout 2 hold the restart even with a pin read in flight', { timeout: 240000 }, async () => {
