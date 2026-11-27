@@ -93,6 +93,15 @@ const PKG_OUTSIDE = alphaFolder('package-outside', '0.101.0-63959e27d616', {
     fs.symlinkSync(elsewhere, PKG(dir));
   },
 });
+// The hub export a symlink to a folder outside the package: no pages, never the outside folder's files.
+const HUB_OUTSIDE = alphaFolder('hub-outside', '0.101.0-63959e27d616', {
+  edit: (dir) => {
+    const hub = path.join(PKG(dir), 'docs', 'devteam', 'alpha', 'hub');
+    const elsewhere = path.join(scratch, 'alpha', 'hub-elsewhere');
+    fs.renameSync(hub, elsewhere);
+    fs.symlinkSync(elsewhere, hub);
+  },
+});
 const LAYOUT_DIFFERS = alphaFolder('layout-differs', '0.101.0-63959e27d616', {
   edit: (dir) => { const f = path.join(dir, 'package.json'); const o = json(f); o.devteam.layout = 2; put(f, o); },
 });
@@ -107,6 +116,14 @@ const BAD_HASH = alphaFolder('bad-hash', '0.101.0-63959e27d616');
 put(manifestOf(BAD_HASH.hub), { v: 1, pages: { ...HASHES, '/': [...HASHES['/'], "unsafe-inline' 'unsafe-eval"] } });
 const UNLISTED = alphaFolder('unlisted', '0.101.0-63959e27d616');
 put(manifestOf(UNLISTED.hub), { v: 1, pages: { '/': HASHES['/'] } });
+// A manifest over 1 MiB (valid, its routes padded with unlisted ones), and one that is a symlink to a
+// good copy outside the export: neither is read.
+const MANIFEST_BIG = alphaFolder('manifest-big', '0.101.0-63959e27d616');
+put(manifestOf(MANIFEST_BIG.hub), { v: 1, pages: { ...HASHES, ...Object.fromEntries(Array.from({ length: 20000 }, (_, i) => [`/pad/${i}/`, HASHES['/']])) } });
+assert.ok(fs.statSync(manifestOf(MANIFEST_BIG.hub)).size > 1024 * 1024, 'the padded manifest is over 1 MiB');
+const MANIFEST_LINK = alphaFolder('manifest-link', '0.101.0-63959e27d616');
+fs.renameSync(manifestOf(MANIFEST_LINK.hub), path.join(scratch, 'alpha', 'manifest-elsewhere.json'));
+fs.symlinkSync(path.join(scratch, 'alpha', 'manifest-elsewhere.json'), manifestOf(MANIFEST_LINK.hub));
 
 // --- a software authenticator (as test/gateway.test.mjs has it: a claim needs one) --------------
 function cbor(v) {
@@ -269,6 +286,10 @@ test('A3: /next/ pages carry hubCsp with only script-src (\'self\' and the page\
     assert.ok(HASHES[route].length > 0, 'the page has hashes');
     assert.doesNotMatch(r.headers['content-security-policy'].split('; ').find((d) => d.startsWith('script-src ')), /unsafe-inline/, 'no unsafe-inline in script-src');
   }
+  // another fresh gateway whose first request is an .html page: it reads the list first too
+  const html = await gateway(t, alphaEnv(GOOD.dir));
+  const first = await html.req('GET', '/next/threads/one/index.html', { headers: NAV });
+  assert.equal(first.headers['content-security-policy'], alphaPolicy(html, '/threads/one/'), 'an .html first load: the exact policy');
 });
 
 test('A4: the hub page\'s and every other route\'s policy is byte-identical to before', async (t) => {
@@ -298,6 +319,7 @@ const WHY = [
   ['DEVTEAM_ALPHA=0', alphaEnv(GOOD.dir, { DEVTEAM_ALPHA: '0' }), /turned off/, { on: false, verified: true, release: '0.101.0', why: 'off' }],
   ['DEVTEAM_ALPHA=" 0 " (trimmed)', alphaEnv(GOOD.dir, { DEVTEAM_ALPHA: ' 0 ' }), /turned off/, { on: false, verified: true, release: '0.101.0', why: 'off' }],
   ['a verified install with no hub pages', alphaEnv(NO_PAGES.dir), /no pages yet/, { on: true, verified: true, release: '0.101.0', why: 'no-pages' }],
+  ['a hub export that resolves outside the package', alphaEnv(HUB_OUTSIDE.dir), /no pages yet/, { on: true, verified: true, release: '0.101.0', why: 'no-pages' }],
 ];
 
 test('A5: an unverified install, no install and DEVTEAM_ALPHA=0 each serve the why-page, never a file of the install', async (t) => {
@@ -358,7 +380,7 @@ test('A7: <project>.<box>/next/ still reaches the project\'s dashboard behind th
 });
 
 test('A8: the export\'s hash manifest: missing or holding a source that isn\'t a sha256 hash, every page is a 500 and no policy is loosened; a route it doesn\'t list gets script-src \'self\' alone', async (t) => {
-  for (const [what, folder] of [['no csp-hashes.json', NO_MANIFEST], ['a source that isn\'t a sha256 hash', BAD_HASH]]) {
+  for (const [what, folder] of [['no csp-hashes.json', NO_MANIFEST], ['a source that isn\'t a sha256 hash', BAD_HASH], ['a csp-hashes.json over 1 MiB', MANIFEST_BIG], ['a csp-hashes.json that is a symlink', MANIFEST_LINK]]) {
     const gw = await gateway(t, alphaEnv(folder.dir));
     for (const p of ['/next/', '/next/threads/one/']) {
       const r = await gw.req('GET', p, { headers: NAV });
