@@ -59,7 +59,8 @@ const sources = (app) => walk(APP(app, 'src')).filter((f) => /\.(?:ts|tsx|css)$/
 const joined = (files) => files.map((f) => f.text).join('\n');
 const SRC_FILES = sources('dashboard');
 const SRC = joined(SRC_FILES);
-const HUB_SRC = joined(sources('hub'));
+const HUB_FILES = sources('hub');
+const HUB_SRC = joined(HUB_FILES);
 const srcOf = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 const SHELL_TS = 'apps/dashboard/src/shared/shell/shell.ts';
 const LAYOUT_CSS = srcOf('apps/dashboard/src/shared/layout/layout.css');
@@ -83,6 +84,8 @@ const builtCss = (app) => {
 // the shell view's delegating wrappers (export function <n>(…) { return <Ns>.<n>(…); }, Ns a namespace
 // import): the block's own function under the name APPS.md requires, not a second definition
 const SHELL_VIEW = 'apps/dashboard/src/views/shell/index.tsx';
+// apps-src@1: a view stub's typed throwing functions are the contract's placeholders, not declarations
+const isViewStub = (f) => f.text.startsWith('// apps-src@1 view stub: ');
 const wrappersOut = (src) => {
   const ns = new Set([...src.matchAll(/^import \* as ([A-Za-z_$][\w$]*) from /gm)].map((m) => m[1]));
   return src.replace(/^export function ([A-Za-z_$][\w$]*)\s*\([^)]*\)(?:\s*:\s*[^{;]+)?\s*\{\s*return\s+([A-Za-z_$][\w$]*)\.\1\s*\([^)]*\)\s*;?\s*\}/gm, (w, _n, o) => (ns.has(o) ? '' : w));
@@ -229,9 +232,9 @@ test("every layout rule is scoped to .shell: index adopts it with its old region
 test("the JS block's names are its own: neither page declares one outside it", async () => {
   const names = [...JS.matchAll(/^(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]);
   assert.ok(names.includes('tabBar') && names.includes('parseHead') && names.includes('goalSteps'), 'its names were read');
-  // any source but shell.ts; the shell view's delegating wrappers are the block's own functions
-  const decl = joined(SRC_FILES.filter((f) => f.file !== SHELL_TS).map((f) => (f.file === SHELL_VIEW ? { ...f, text: wrappersOut(f.text) } : f)));
-  for (const [name, rest] of [["the dashboard's sources", decl], ["the hub's sources", HUB_SRC]]) {
+  // any source but shell.ts and the view stubs; the shell view's delegating wrappers are the block's own functions
+  const decl = joined(SRC_FILES.filter((f) => f.file !== SHELL_TS && !isViewStub(f)).map((f) => (f.file === SHELL_VIEW ? { ...f, text: wrappersOut(f.text) } : f)));
+  for (const [name, rest] of [["the dashboard's sources", decl], ["the hub's sources", joined(HUB_FILES.filter((f) => !isViewStub(f)))]]) {
     for (const n of names) assert.doesNotMatch(rest, new RegExp(`(?:^|[\\s;(])(?:const|let|var|function|class)\\s+${n.replace('$', '\\$')}\\b`, 'm'), `${name} declares ${n} outside the block`);
   }
   // and it runs alone: no page global, no DOM at load
