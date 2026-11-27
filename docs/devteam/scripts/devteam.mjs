@@ -7728,7 +7728,9 @@ function upstreamSyncCheck(chore, sha, changed) {
     if (problem) return { problem: `settings.upstream_sync "adopt" covers only a whole newer release: ${problem}. The owner's answer is needed: --approved <qid>` };
   }
   const differ = [];
-  for (const f of changed) {
+  // the pin pair (kit-sync@2) is generated, not copied: pinCheck checks it on every PR, whatever the approval
+  const pinPair = [`${kitRel}/package.json`, `${kitRel}/package-lock.json`];
+  for (const f of changed.filter((x) => !pinPair.includes(x))) {
     if (!f.startsWith(`${kitRel}/`)) { differ.push(`${f} (outside the kit)`); continue; }
     if (blob(sha, f) !== blob(`refs/devteam-upstream/${tag}`, `docs/devteam/${f.slice(kitRel.length + 1)}`)) differ.push(f);
   }
@@ -7752,7 +7754,10 @@ function adoptProblem({ tag, sha, mb, main, changed, src }) {
   const set = settingsAt(sha)?.upstream_base;
   if (set !== tag) return `the PR sets upstream_base to ${JSON.stringify(set ?? null)}, not ${tag}`;
   if (git(['fetch', '--quiet', '--no-tags', src, `+refs/tags/${base}:refs/devteam-upstream/${base}`], mainRoot) === null) return `can't fetch main's upstream_base ${base} from upstream`;
-  const released = changedFiles(`refs/devteam-upstream/${base}`, `refs/devteam-upstream/${tag}`).filter((f) => f.startsWith('docs/devteam/') && !/^docs\/devteam\/(project|run)\//.test(f)).map((f) => `${kitRel}/${f.slice('docs/devteam/'.length)}`);
+  // the pin pair (kit-sync@2) is generated, not copied: pinCheck checks it, so it is neither missing nor extra here
+  const pinPair = [`${kitRel}/package.json`, `${kitRel}/package-lock.json`];
+  changed = changed.filter((f) => !pinPair.includes(f));
+  const released = changedFiles(`refs/devteam-upstream/${base}`, `refs/devteam-upstream/${tag}`).filter((f) => f.startsWith('docs/devteam/') && !/^docs\/devteam\/(project|run)\//.test(f)).map((f) => `${kitRel}/${f.slice('docs/devteam/'.length)}`).filter((f) => !pinPair.includes(f));
   const unlike = (a, b) => a.filter((f) => !b.includes(f));
   const missing = unlike(released, changed), extra = unlike(changed, released);
   const some = (l) => `${l.slice(0, 6).join(', ')}${l.length > 6 ? ', …' : ''}`;
@@ -10342,6 +10347,20 @@ function cmdMerge() {
       if (prior.length && !landing) fails.push(`${approved} already approved ${declared.length ? `an act for ${target}` : 'an act'}; ask again for this one`);
     }
   }
+  // The pin (kit-sync@2, kit-957): on every home PR, whatever the approval; no flag skips it.
+  const pinned = R.name === 'home' ? pinCheck({ base: mainRef() ? git(['merge-base', mainRef(), sha]) : null, sha, chore }) : null;
+  if (pinned) {
+    fails.push(...pinned.fails);
+    for (const s of pinned.skips) warn(`pin: can't verify ${pinned.pin.name}@${pinned.pin.version} (${s.cause}): ${s.why}; a layout-1 pin merges anyway, as a finding, and the install after the merge verifies it`);
+    if (pinned.verified) out(`pin: ${pinned.pin.name}@${pinned.pin.version} (layout ${pinned.pin.layout}) is the registry's, with its provenance; it installs ${pinned.install} the merge`);
+  }
+  // package install as a command of its own (a die in it never ends merge); 40 minutes, past its own
+  // worst case (a 20-minute lock wait and its steps' bounds), then killed outright
+  const pkgRun = (args) => {
+    const p = spawnSync(process.execPath, [fileURLToPath(import.meta.url), 'package', ...args], { cwd: mainRoot, encoding: 'utf8', timeout: 2400000, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'] });
+    const said = `${p.stdout ?? ''}${p.stderr ?? ''}`.trim().replace(/^devteam: /, '');
+    return { exit: p.status ?? 1, line: said || `package ${args[0]} ended without a word (${p.error?.code ?? p.signal ?? `exit ${p.status}`})` };
+  };
   // Gates: the repo's own commands (never inherited), at the exact head, in a detached
   // worktree of that repo seeded from that repo's settings.
   const gates = Object.entries(S.gates ?? {});
@@ -10443,6 +10462,15 @@ function cmdMerge() {
   if (unpinCode) unpinCode();
   const recWords = rec ? `, records at ${rec.sha.slice(0, 12)} in home${rec.landed ? ' (landed already: only the code lands)' : ''}` : '';
   if (dry) return out(`ok: ${branch} at ${sha.slice(0, 12)} would merge${inR}${recWords}`);
+  // a layout-2 pin: installed and verified into its folder in .kit before anything lands; current
+  // switches to it right after the merge (below)
+  if (pinned?.install === 'before') {
+    const p = pinned.pin;
+    const folder = `${p.version}-${Buffer.from(p.integrity.slice(7), 'base64').toString('hex').slice(0, 12)}`;
+    const i = pkgRun(['install', '--version', p.version, '--into', path.join(mainRoot, 'docs', 'devteam', '.kit', folder)]);
+    if (i.exit !== 0) die(`the install of ${p.name}@${p.version} (layout 2) before the merge failed, so ${relanded || recOwn ? `the merge stops where an earlier run left it (its ${relanded ? 'code' : 'records'} already on ${S.main_branch}; nothing more lands until it installs)` : 'nothing merged'}: ${i.line}`);
+    out(i.line);
+  }
   const mainBranch = S.main_branch;
   // Records first: they land on home's main at exactly the pinned sha (once: a rerun finds them
   // landed), then the code. A code landing that fails after them leaves home with the records and
@@ -10558,7 +10586,7 @@ function cmdMerge() {
   if (R.name === 'home') { mainLogCache = undefined; mergeShaCache.clear(); } else R.resetCaches();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
   // A release-production decision is carried out by the release act, never by the merge act.
-  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${rec ? `; records at ${rec.sha} in home` : ''}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : jobsForced ? ` while its goal is ${jobsForced}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}${coveredNotes.map((n) => `; ${n}`).join('')}`, refs: id ? [id] : plan ? [plan] : [`chore-${chore}`], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
+  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${rec ? `; records at ${rec.sha} in home` : ''}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : jobsForced ? ` while its goal is ${jobsForced}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}${coveredNotes.map((n) => `; ${n}`).join('')}${pinned?.pin ? `; pin ${pinned.pin.name}@${pinned.pin.version} ${pinned.pin.integrity}` : ''}`, refs: id ? [id] : plan ? [plan] : [`chore-${chore}`], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
   // Adding a gate is the supervisor's own act (constitutional gate-add), recorded apart from the merge
   // so the owner sees each new check in the act feed and can correct it.
   if (gateAdds?.length) {
@@ -10568,6 +10596,18 @@ function cmdMerge() {
   if (release) {
     const rel = appendLog({ type: 'act', class: 'release-production', decision: release.decision, rung: release.rung, what: `released ${release.target}${inR} to production by merging ${branch} at ${sha} (release: merge)`, refs: [release.target, act.id], reversible: false, ...onR }, 'supervisor');
     out(`released ${release.target}${inR} to production (${rel.id})`);
+  }
+  // The pin after the merge: main's pin installed (layout 1: verified, unused; layout 2: current switched
+  // to the folder installed before), best effort: a failure is a finding and the merge stays done.
+  if (pinned?.pin) {
+    const p = pinned.pin;
+    const note = (kind, detail, key) => appendLog({ type: 'observation', source: 'supervisor', subject: `package:v${p.version}`, kind, detail: detail.slice(0, 900), severity: kind === 'package-pinned' ? 1 : 2, valence: kind === 'package-pinned' ? 1 : -1, source_key: `package-merge:${sha}:${key}`, refs: [act.id] }, 'supervisor');
+    for (const s of pinned.skips) note('package-pin-skipped', `merge of ${branch} at ${sha.slice(0, 12)}: the pin check of ${p.name}@${p.version} was skipped (${s.cause}): ${s.why}`, s.cause);
+    const i = fetched.ok ? pkgRun(['install']) : { exit: 1, line: `not run: the fetch of ${mainBranch} after the landing failed` };
+    if (i.exit === 0) { out(`pin: ${i.line}`); note('package-pinned', `merge of ${branch} at ${sha.slice(0, 12)}: ${i.line}`, 'installed'); } else {
+      warn(`merged, but the install of ${p.name}@${p.version} after the merge did not finish: ${i.line}`);
+      note('package-pin-skipped', `merge of ${branch} at ${sha.slice(0, 12)}: the install of ${p.name}@${p.version} after the merge failed (install): ${i.line}`, 'install');
+    }
   }
   out(`merged ${branch} at ${sha.slice(0, 12)}${inR} (${act.id})`);
 }
@@ -30986,10 +31026,10 @@ async function cmdDashboard() {
     };
     look();
   });
-  const restart = async (files, key) => {
+  const restart = async (what, key) => {
     const how = kitHandOver();
     const to = await newKit();
-    const changed = `kit files changed (${files.join(', ')}) from ${startKit ?? 'unknown'} to ${to}`;
+    const changed = `${what} from ${startKit ?? 'unknown'} to ${to}`;
     if (how.how === 'stay') return sayOnce(key, `${changed}: this dashboard runs older code than its files; restart it to run them (${how.why})`);
     restarting = true;
     draining = true;
@@ -31016,22 +31056,140 @@ async function cmdDashboard() {
     startTimers();
     startHubOnce();
   };
+  // ----- the package (kit-958; kit-install@1, design kit-package-dist decision 5). Each tick reads
+  // main's pin off the loop (git ls-tree, then cat-file only when a blob moved). When main's lockfile
+  // or package.json moves from what the first read found (or from the last install that passed), it
+  // runs `package install` once, as a child the tick never waits for; after a failure it tries that
+  // same pin again only once ten minutes have passed on its clock (DEVTEAM_TEST_KIT_WATCH_CLOCK, a
+  // file of ms added to it, read only while DEVTEAM_TEST is set), and a pin that moves on goes at once.
+  // With main pinning layout 2, .kit/current is part of what the watch compares (so a switch restarts
+  // it), and a restart goes ahead only when current names main's pin, verified, layout 2; until
+  // then it holds, saying why once. With layout 1 or nothing, current is not looked at: today's watch.
+  const kitTree = path.join(mainRoot, 'docs', 'devteam', '.kit');
+  const INSTALL_BACKOFF_MS = 10 * 60000;
+  const watchNow = () => {
+    const f = process.env.DEVTEAM_TEST ? process.env.DEVTEAM_TEST_KIT_WATCH_CLOCK : '';
+    let off = 0;
+    if (f) { try { off = Number(fs.readFileSync(f, 'utf8').trim()) || 0; } catch {} }
+    return Date.now() + off;
+  };
+  const currentName = () => packageStatus({ tree: kitTree }).current;
+  const startCurrent = currentName();
+  // main's pin: undefined until first read; null for none (or no main); else { blobs, label, version,
+  // layout, integrity, folder }, the last three null when the pair isn't one
+  let pin;
+  let pinReading = false;
+  let installed;
+  let installing = false;
+  let failed = null;
+  const maybeInstall = () => {
+    if (installing || restarting || !pin) return;
+    if (pin.blobs === installed) return;
+    if (failed?.blobs === pin.blobs && watchNow() - failed.at < INSTALL_BACKOFF_MS) return;
+    const { blobs, label } = pin;
+    installing = true;
+    log(`kit watch: installing main's pin ${label} (package install)`);
+    // detached, in a process group of its own, its output in a file, and never tracked: a restart
+    // neither waits for it with the server closed nor takes it down (a pane's respawn, the loop's exit);
+    // it finishes or fails on its own, under .kit/.lock, and the next process starts from main's pin
+    const outFile = path.join(runDir, 'kit-watch-install.out');
+    let fd = null;
+    let over = false;
+    const ended = (code, why) => {
+      if (over) return;
+      over = true;
+      installing = false;
+      let text = why ?? '';
+      if (!text) { try { text = fs.readFileSync(outFile, 'utf8'); } catch {} }
+      const first = (text.split('\n').find((l) => l.trim()) ?? `exit ${code}`).replace(/^devteam: /, '');
+      if (code === 0) { installed = blobs; failed = null; return log(`kit watch: ${first}`); }
+      failed = { blobs, at: watchNow() };
+      log(`kit watch: package install failed for ${label} (${first}); trying it again in 10 minutes, or at once for another pin`);
+    };
+    let child;
+    try {
+      fd = fs.openSync(outFile, 'w');
+      child = spawn(process.execPath, [self, 'package', 'install'], { cwd: mainRoot, env: ownerEnv, detached: true, stdio: ['ignore', fd, fd] });
+    } catch (e) { if (fd !== null) try { fs.closeSync(fd); } catch {} return ended(1, `can't start it: ${e.code ?? e.message}`); }
+    fs.closeSync(fd);
+    child.unref();
+    const stop = setTimeout(() => { try { process.kill(-child.pid, 'SIGTERM'); } catch {} }, 45 * 60000);
+    stop.unref();
+    child.once('error', (e) => { clearTimeout(stop); ended(1, `can't start it: ${e.code ?? e.message}`); });
+    child.once('exit', (code, signal) => { clearTimeout(stop); ended(code ?? 1, code === null ? `stopped by ${signal}` : null); });
+  };
+  const readPin = () => {
+    const ref = mainRef();
+    const no = ++readsStarted;
+    if (!ref) { pin = null; installed = null; pinReadNo = no; return; }
+    if (pinReading) { readsStarted--; return; }
+    pinReading = true;
+    // a read that failed keeps the pin it had, and counts as no read
+    const done = (p) => { pinReading = false; if (p !== undefined) { pin = p; pinReadNo = no; } if (installed === undefined && pin !== undefined) installed = pin?.blobs ?? null; if (pin === null) installed = null; maybeInstall(); };
+    execFile('git', ['ls-tree', ref, '--', 'docs/devteam/package.json', 'docs/devteam/package-lock.json'], { cwd: mainRoot, encoding: 'utf8', timeout: 10000 }, (err, out) => {
+      if (err) { sayOnce('pin-read', `kit watch: can't read main's pin (${String(err.message).split('\n')[0]})`); return done(undefined); }
+      const blob = (f) => new RegExp(`^\\d+ blob ([0-9a-f]+)\\tdocs/devteam/${f.replace('.', '\\.')}$`, 'm').exec(out)?.[1] ?? null;
+      const pj = blob('package.json'), lk = blob('package-lock.json');
+      if (!pj || !lk) return done(null);
+      const blobs = `${pj} ${lk}`;
+      if (pin?.blobs === blobs) return done(pin);
+      const cat = (sha) => new Promise((resolve) => execFile('git', ['cat-file', 'blob', sha], { cwd: mainRoot, encoding: 'utf8', timeout: 10000, maxBuffer: 1024 * 1024 }, (e, o) => resolve(e ? null : o)));
+      Promise.all([cat(pj), cat(lk)]).then(([a, b]) => {
+        if (a === null || b === null) return done(undefined);
+        let p = { blobs, label: 'its pair', version: null, layout: null, integrity: null, folder: null };
+        try {
+          const j = JSON.parse(a), l = JSON.parse(b);
+          const names = Object.keys(j.dependencies ?? {});
+          const name = names.length === 1 ? names[0] : null;
+          const version = name ? j.dependencies[name] : null;
+          const integrity = name ? l.packages?.[`node_modules/${name}`]?.integrity : null;
+          if (typeof version === 'string' && typeof integrity === 'string' && /^sha512-[A-Za-z0-9+/]{86}==$/.test(integrity)) {
+            p = { blobs, label: `${name}@${version}`, version, layout: j.devteam?.layout ?? null, integrity, folder: `${version}-${Buffer.from(integrity.slice(7), 'base64').toString('hex').slice(0, 12)}` };
+          }
+        } catch {}
+        done(p);
+      });
+    });
+  };
+  // why a restart waits (main pins layout 2 and current isn't its pin), or null
+  const restartHold = () => {
+    if (pin?.layout !== 2) return null;
+    const st = packageStatus({ tree: kitTree });
+    const c = st.current ? st.installs.find((i) => i.folder === st.current) : null;
+    if (c?.verified && st.current === pin.folder && c.record.layout === 2 && c.record.version === pin.version && c.record.integrity === pin.integrity) return null;
+    return `waiting for docs/devteam/.kit/current to name main's pin ${pin.folder} (it names ${st.current ? `${st.current}${c?.verified ? '' : ', unverified'}` : 'nothing'}) before restarting; an install of that pin (by merge, this watcher or package install) switches it`;
+  };
   const watchTick = () => {
-    if (checking || restarting) return;
+    readPin();
+    if (checking || restarting || pin === undefined) return;
     const print = kitPrint(self, lastPrint);
-    const key = kitPrintKey(print);
-    const same = key === kitPrintKey(lastPrint);
+    const two = pin?.layout === 2;
+    const cur = two ? currentName() : null;
+    const key = `${kitPrintKey(print)}\0current\0${cur ?? ''}`;
+    const same = key === `${kitPrintKey(lastPrint)}\0current\0${lastCur ?? ''}`;
     lastPrint = print;
-    if (key === kitPrintKey(startPrint)) { pending = null; return; }
-    // settled: the same print two polls running
-    if (!same || pending !== key) { pending = key; if (!same) return; }
+    lastCur = cur;
+    if (key === `${kitPrintKey(startPrint)}\0current\0${two ? startCurrent ?? '' : ''}`) { pending = null; return; }
+    // settled: the same print (and current) two polls running
+    if (!same || pending !== key) { pending = key; seenNo = readsStarted; if (!same) return; }
     if (said.has(key)) return;
+    // judged only on a pin read that started after the change was first seen: main's pin moves with
+    // the kit's files (a sync), and a restart judged on the pin before it would skip the hold
+    if (pinReadNo <= seenNo) return;
+    const files = kitPrintDiff(startPrint, print);
+    const what = [files.length ? `kit files changed (${files.join(', ')})` : null, two && cur !== startCurrent ? `docs/devteam/.kit/current switched to ${cur ?? 'nothing'} (main's pin is ${pin.folder}) from ${startCurrent ?? 'nothing'}` : null].filter(Boolean).join(' and ');
+    const hold = restartHold();
+    if (hold) return sayOnce(`hold\0${key}`, `kit watch: ${what}: ${hold}; staying on ${startKit ?? 'unknown'}`);
     checking = true;
     execFile(process.execPath, ['--check', self], { timeout: 20000, maxBuffer: 1024 * 1024 }, (err, _o, stderr) => {
       if (err) { checking = false; return sayOnce(key, `kit files changed but scripts/devteam.mjs does not parse: ${String(stderr || err.message).split('\n').find((l) => l.trim()) ?? ''}; staying on ${startKit ?? 'unknown'}`); }
-      restart(kitPrintDiff(startPrint, print), key).catch((e) => log(`kit watch: ${e?.stack ?? e}`)).finally(() => { checking = false; });
+      restart(what, key).catch((e) => log(`kit watch: ${e?.stack ?? e}`)).finally(() => { checking = false; });
     });
   };
+  let lastCur = null;
+  let readsStarted = 0;
+  let pinReadNo = 0;
+  let seenNo = 0;
   every(watchTick, watchMs);
   server.listen(port, host);
 }
@@ -34314,12 +34472,12 @@ function npmRun(args, { cwd, timeout = 120000 } = {}) {
 // is logged as a skip too, so it shows); a failed write exits 1 with its temp files removed, and a stop
 // between the two renames leaves the new lock beside the old package.json, which merge refuses.
 // With { sync: <the worktree> } it is chore start's call for a kit sync: while SYNC_PINS is false it
-// does nothing and returns null (kit-955 ships the call dormant: until merge's checks take the pair,
-// kit-957, a sync PR carrying it would need an owner's answer); kit-957 sets it true. On, it runs
+// does nothing and returns null (kit-955 shipped the call dormant until merge's checks took the pair;
+// kit-957 set it true with pinCheck and the pair's exemptions in the sync checks). On, it runs
 // `package pin <tag>` as a command of its own in that worktree, so nothing the pin does (a die in its
 // log write included) ends the start, and returns { exit, line } from what that command printed.
 function packagePin(kitDir, tag, { sync = null } = {}) {
-  const SYNC_PINS = false;
+  const SYNC_PINS = true;
   if (sync !== null) {
     if (!SYNC_PINS) return null;
     const p = spawnSync(process.execPath, [fileURLToPath(import.meta.url), 'package', 'pin', String(tag)], { cwd: sync, encoding: 'utf8', timeout: 300000, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -34953,6 +35111,170 @@ function packagePrune(tree, keep) {
     try { fs.rmSync(q, { recursive: true, force: true }); } catch {}
   }
   return removed;
+}
+// pinCheck (kit-sync@2's checks, kit-install@1; kit-957): what merge checks of a home PR from main's
+// merge-base `base` to its head `sha`, on every PR and whatever the approval (no flag skips it). It
+// returns { fails, skips, pin, strict, launcher, tag, verified, install } and throws nothing.
+// - docs/devteam/.kit is never committed: a PR that adds or changes it, or any path under it, is
+//   refused, each of a path's first three components compared as git compares .git (any case, NFC, the
+//   code points HFS+ ignores removed, a trailing run of dots and spaces dropped, cut at ':', '\' a
+//   separator, DEVTEA~<n> and KIT~<n> the 8.3 short names). Deleting one is not refused.
+// - The launcher-tag rule. A tag is read from main's upstream_repo (a bounded fetch into a ref removed
+//   after) for its docs/devteam/scripts/devteam.mjs's second line: for a devteam-sync-* chore its tag
+//   (the upstream_base it sets, else its slug's), and for any PR that changes the pin, v<the pinned
+//   version>. A sync whose tag, or whose own copy, carries the launcher's marker must hold a pin of that
+//   tag that verifies in full (strict), changed or already main's, or it is refused; any pin whose tag
+//   carries it is strict too. A tag that can't be read is a warning: for a sync, the PR's own copy
+//   decides; for a pinned release, the registry's manifest does (its layout, and the pair it makes).
+// - The pin (a PR that changes either pin file, or a launcher sync): both files must be at its head (a
+//   deleted pair is refused, with both fixes), be packagePinPair's bytes for main's package_name, and
+//   name upstream_base at its head without its v. Then the registry, as kit-install@1 says: npm 9.5 or
+//   newer, npm view's manifest (name, version, devteam.layout 1 or 2 agreeing with the tag's marker when
+//   it was read, no dependencies of any kind, dist.integrity the pin's, the pair packagePinPair makes of
+//   it byte for byte), and packageProvenance. A registry that answers and differs (an npm view error
+//   that isn't a network or socket code or E404 included: a TLS or certificate error too) refuses,
+//   whatever the layout. No npm, an old npm or one
+//   that can't say its version, an unreachable registry or an unpublished version is a skip for a
+//   layout-1 pin (the merge goes on; merge logs it as a finding) and a refusal for a strict one.
+// install: 'before' for a strict pin (merge installs it into its own folder in .kit before landing),
+// 'after' for any other pin that isn't refused; null when no pin is checked.
+function pinCheck({ base, sha, chore = null } = {}) {
+  const MARK = '// devteam-launcher: kit-package@1';
+  const FILES = ['docs/devteam/package.json', 'docs/devteam/package-lock.json'];
+  // kit-install@1's network codes, and the socket faults that also mean no answer came (plan-2 P2-3); a TLS
+  // or certificate error is not here: an answer from a registry that isn't the one named is refused
+  const NET = /^(ECONN[A-Z]*|ETIMEDOUT|ESOCKETTIMEDOUT|ERR_SOCKET_TIMEOUT|EAI_AGAIN|EAI_FAIL|ENOTFOUND|ENETUNREACH|ENETDOWN|EHOSTUNREACH|EHOSTDOWN|EPIPE|EPROTO|E5[0-9][0-9]|E429)$/;
+  const r = { fails: [], skips: [], pin: null, strict: false, launcher: false, tag: null, verified: false, install: null };
+  try {
+    const main = mainRef();
+    if (!main) return r;
+    if (!base) { r.fails.push(`can't find where ${sha.slice(0, 12)} meets ${main}, so its pin and docs/devteam/.kit can't be checked`); return r; }
+    const some = (l) => `${l.slice(0, 6).map((p) => (/[\u0000-\u001f\u007f]/.test(p) ? JSON.stringify(p) : p)).join(', ')}${l.length > 6 ? ', …' : ''}`;
+    // the exact bytes at a commit (git() drops a final newline), or null
+    const show = (ref, f) => { const x = spawnSync('git', ['show', `${ref}:${f}`], { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 256 * 1024 * 1024 }); return x.status === 0 ? x.stdout : null; };
+    const marked = (text) => text !== null && text.split('\n')[1] === MARK;
+    const diff = (filter) => git(['diff', '-z', '--name-only', '--no-renames', ...filter, base, sha]);
+    const all = diff([]), kept = diff(['--diff-filter=d']);
+    if (all === null || kept === null) { r.fails.push(`can't read what ${sha.slice(0, 12)} changes against ${main}, so its pin and docs/devteam/.kit can't be checked`); return r; }
+    const changed = all.split('\0').filter(Boolean);
+    const fold = (c) => c.split(':')[0].normalize('NFC').replace(/[\u200c-\u200f\u202a-\u202e\u206a-\u206f\ufeff]/g, '').replace(/[. ]+$/, '').toLowerCase();
+    const named = (c, name, short) => { const x = fold(c); return x === name || (!!short && new RegExp(`^${short}~[0-9]$`).test(x)); };
+    const kit = kept.split('\0').filter(Boolean).filter((f) => { const p = f.split(/[\\/]/); return p.length >= 3 && named(p[0], 'docs') && named(p[1], 'devteam', 'devtea') && named(p[2], '.kit', 'kit'); });
+    if (kit.length) r.fails.push(`adds or changes ${some(kit)}: docs/devteam/.kit holds this machine's installs and is never committed (kit-install@1); take it out of the branch (git rm -r --cached) and ask again`);
+    const ms = settingsAt(main);
+    const up = typeof ms?.upstream_repo === 'string' ? ms.upstream_repo : null;
+    const src = /^[\w.-]+\/[\w.-]+$/.test(up ?? '') ? `https://github.com/${up}.git` : up;
+    // whether a tag's devteam.mjs carries the marker: true, false, or null (not read)
+    const tagMarks = new Map();
+    const tagMarked = (tag) => {
+      if (!tagMarks.has(tag)) {
+        let m = null;
+        const ref = `refs/devteam-pin/${tag}`;
+        if (src) {
+          try {
+            if (recurringRegistry.git(['fetch', '--quiet', '--no-tags', src, `+refs/tags/${tag}:${ref}`], { cwd: mainRoot, env: { GIT_TERMINAL_PROMPT: '0' } }).ok) {
+              const text = show(ref, 'docs/devteam/scripts/devteam.mjs');
+              if (text !== null) m = marked(text);
+            }
+          } finally { git(['update-ref', '-d', ref], mainRoot); }
+        }
+        if (m === null) warn(`pin: can't read ${tag} from ${redactUrl(up ?? 'upstream_repo')}, so whether it carries the launcher is ${r.tag === tag ? "read from the PR's own copy" : "left to the registry's manifest (its layout and the pair it makes)"}`);
+        tagMarks.set(tag, m);
+      }
+      return tagMarks.get(tag);
+    };
+    if (typeof chore === 'string' && chore.startsWith('devteam-sync-')) {
+      const headMarked = marked(show(sha, 'docs/devteam/scripts/devteam.mjs'));
+      const setBase = settingsAt(sha)?.upstream_base;
+      const raw = typeof setBase === 'string' && setBase && setBase !== settingsAt(base)?.upstream_base ? setBase : chore.slice('devteam-sync-'.length);
+      r.tag = [raw, raw.replace(/^(v\d+)-(\d+)-(\d+)$/, '$1.$2.$3')].find((t) => releaseParts(t)) ?? null;
+      if (!r.tag) warn(`pin: ${chore} names no release tag, so whether it carries the launcher is read from the PR's own copy`);
+      r.launcher = (r.tag ? tagMarked(r.tag) === true : false) || headMarked;
+    }
+    const pinChanged = changed.some((f) => FILES.includes(f));
+    const want = r.tag ?? '<tag>';
+    const mustPin = `${want} carries the launcher (layout 2), so its sync must pin it: run devteam.mjs package pin ${want} in the sync's worktree, commit ${FILES.join(' and ')}, and ask again`;
+    if (!pinChanged && !r.launcher) return r;
+    const expected = settingsAt(sha)?.upstream_base;
+    const fixes = `restore main's pair (git checkout ${main} -- ${FILES.join(' ')}, which needs no registry) or run devteam.mjs package pin ${typeof expected === 'string' && releaseParts(expected) ? expected : '<tag>'}, and ask again`;
+    const pj = show(sha, FILES[0]), lk = show(sha, FILES[1]);
+    if (pj === null || lk === null) { r.fails.push(pinChanged ? `deletes the pin pair (${FILES.filter((f, i) => [pj, lk][i] === null).join(', ')} missing at its head): ${fixes}` : mustPin); return r; }
+    const name = ms?.package_name;
+    if (typeof name !== 'string' || !name) { r.fails.push(`can't read package_name from main's settings (${main}), so its pin can't be checked`); return r; }
+    let pin;
+    try {
+      const a = JSON.parse(pj), b = JSON.parse(lk);
+      const e = b?.packages?.[`node_modules/${name}`];
+      pin = { name, version: a?.dependencies?.[name], integrity: e?.integrity, resolved: e?.resolved, layout: a?.devteam?.layout };
+      const pair = packagePinPair(pin);
+      if (pair['package.json'] !== pj || pair['package-lock.json'] !== lk) throw new Error("its bytes are not packagePinPair's");
+    } catch (e) { r.fails.push(pinChanged ? `its pin isn't a pin of ${name}, main's package_name (${e.message}): ${fixes}` : mustPin); return r; }
+    // a launcher sync whose pair is main's already: checked only when it pins the tag
+    if (r.launcher && r.tag && `v${pin.version}` !== r.tag) { r.fails.push(pinChanged ? `${r.tag} carries the launcher (layout 2), so its sync must pin it, not ${pin.version}: run devteam.mjs package pin ${r.tag} in the sync's worktree, and ask again` : mustPin); return r; }
+    r.pin = pin;
+    if (`v${pin.version}` !== expected) { r.fails.push(!pinChanged ? mustPin : `pins ${name}@${pin.version}, but upstream_base at its head is ${JSON.stringify(expected ?? null)}: the pin names the release its kit came from; ${fixes}`); return r; }
+    // the pinned release's own tag: its marker makes the pin strict, whatever the PR is
+    const pinTag = `v${pin.version}`;
+    const pinMark = pinTag === r.tag ? tagMarks.get(pinTag) ?? null : tagMarked(pinTag);
+    r.strict = pin.layout === 2 || r.launcher || pinMark === true;
+    const what = `${name}@${pin.version}`;
+    const skip = (cause, why) => {
+      if (r.strict) r.fails.push(`can't verify the layout-2 pin ${what} (${cause}): ${why}; from layout 2 a pin merges only verified, so fix the cause and ask again`);
+      else { r.skips.push({ cause, why }); r.install = 'after'; }
+      return r;
+    };
+    const differs = (why) => { r.fails.push(`the pin ${what} differs from the registry: ${why}; it is never merged (a tampering signal): ${fixes}`); return r; };
+    let view = null;
+    try {
+      let v, m;
+      try {
+        view = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-npm-view-'));
+        fs.writeFileSync(path.join(view, 'package.json'), '{}\n');
+        v = npmRun(['--version'], { cwd: view, timeout: 30000 });
+      } catch (e) { r.fails.push(`can't check the pin ${what}: ${e.syscall ? `can't make a folder under ${os.tmpdir()} (${e.code ?? e.message})` : e.message}`); return r; }
+      if (v.error === 'ENOENT') return skip('no-npm', 'no npm on PATH');
+      const nv = /^(\d+)\.(\d+)\.(\d+)/.exec(v.stdout.trim());
+      if (v.status !== 0 || !nv) return skip('npm-failed', `npm --version failed (${v.error ?? `exit ${v.status}`})`);
+      if (Number(nv[1]) < 9 || (Number(nv[1]) === 9 && Number(nv[2]) < 5)) return skip('old-npm', `npm ${nv[0]} is older than 9.5, which can't verify attestations`);
+      try { m = npmRun(['view', what, '--json'], { cwd: view }); } catch (e) { r.fails.push(`can't check the pin ${what}: ${e.message}`); return r; }
+      if (m.status !== 0 || m.error) {
+        let code = /^npm (?:error|ERR!) code (\S+)/m.exec(m.stderr)?.[1] ?? null;
+        if (!code) { try { code = JSON.parse(m.stdout)?.error?.code ?? null; } catch {} }
+        if (m.error === 'ETIMEDOUT') code = 'ETIMEDOUT';
+        if (typeof code === 'string' && NET.test(code)) return skip('unreachable', `the registry ${m.registry} can't be reached (${code})`);
+        if (code === 'E404') return skip('unpublished', `${what} is not published on ${m.registry} (E404)`);
+        return differs(`npm view ${what} failed (${code ?? m.error ?? `exit ${m.status}`}), an answer that is neither the manifest nor a network failure`);
+      }
+      // npm view of a version an existing package doesn't list answers nothing, exit 0: unpublished (task-1 T1-5)
+      if (!m.stdout.trim()) return skip('unpublished', `${what} is not listed on ${m.registry} (npm view answered nothing)`);
+      let man = null;
+      try { man = JSON.parse(m.stdout); } catch {}
+      if (!man || typeof man !== 'object' || Array.isArray(man)) return differs('its manifest is not one JSON object');
+      if (man.name !== name || man.version !== pin.version) return differs(`its manifest names ${String(man.name).slice(0, 80)}@${String(man.version).slice(0, 40)}`);
+      const deps = ['dependencies', 'optionalDependencies', 'peerDependencies', 'bundleDependencies', 'bundledDependencies'].filter((k) => man[k] && (typeof man[k] !== 'object' || Object.keys(man[k]).length));
+      if (deps.length) return differs(`the package has dependencies (${deps.join(', ')}), and the kit's has none`);
+      const layout = man.devteam?.layout;
+      if (layout !== 1 && layout !== 2) return differs('its manifest has no devteam.layout of 1 or 2');
+      const tagMark = r.launcher ? true : pinMark;
+      if (tagMark !== null && (layout === 2) !== tagMark) return differs(`its manifest says layout ${layout}, but ${pinTag} ${tagMark ? 'carries' : 'lacks'} the launcher's marker`);
+      if (man.dist?.integrity !== pin.integrity) return differs(`its integrity is ${String(man.dist?.integrity).slice(0, 30)}…, not the pin's ${pin.integrity.slice(0, 30)}…`);
+      let pair;
+      try { pair = packagePinPair({ name, version: pin.version, integrity: man.dist.integrity, resolved: pin.resolved, layout }); } catch (e) { return differs(`its manifest isn't a pin (${e.message})`); }
+      if (pair['package.json'] !== pj || pair['package-lock.json'] !== lk) return differs(`the pair isn't the one its manifest makes (layout ${layout} there, ${pin.layout} in the pin)`);
+    } finally { if (view) fs.rmSync(view, { recursive: true, force: true }); }
+    let pv;
+    try { pv = packageProvenance({ name, version: pin.version, integrity: pin.integrity }); } catch (e) { r.fails.push(`can't check the pin ${what}: ${e.message}`); return r; }
+    if (pv.unreachable) return skip('unreachable', pv.why);
+    if (!pv.ok) return differs(`its provenance is refused (${pv.refused}): ${pv.why}`);
+    r.verified = true;
+    r.install = r.strict ? 'before' : 'after';
+    return r;
+  } catch (e) {
+    // a setting or a call shaped as nothing above expects: a refusal line, never a throw out of merge
+    Object.assign(r, { verified: false, install: null });
+    r.fails.push(`can't check the pin and docs/devteam/.kit: ${String(e?.message ?? e).split('\n')[0].slice(0, 300)}`);
+    return r;
+  }
 }
 // package pin|install|status (kit-install@1).
 function cmdPackage() {

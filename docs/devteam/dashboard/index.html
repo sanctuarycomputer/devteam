@@ -8725,8 +8725,9 @@ const publicLinks = (me) => ({
 /* library-items start */
 // The Library's items, pure: /api/data in, one card item per thing out, in kind order. Uses only its
 // arguments; the page passes its own href helpers and previewState in ctx, so none is copied here.
-// Each kind: [value, label, Lucide icon], in the grid's order.
-const LIB_KINDS = [['mock', 'Mock', 'layout-dashboard'], ['diagram', 'Diagram', 'workflow'], ['docs', 'Docs', 'book-open'], ['review', 'Review page', 'list-checks'], ['preview', 'Preview', 'monitor-play'], ['link', 'Link', 'link']];
+// Each kind: [value, label, Lucide icon], in the grid's order. Archived (kit-936) is a pseudo-kind no item has:
+// picked in the Kind filter it shows only the archived items, whatever their kind (libraryKeep).
+const LIB_KINDS = [['mock', 'Mock', 'layout-dashboard'], ['diagram', 'Diagram', 'workflow'], ['docs', 'Docs', 'book-open'], ['review', 'Review page', 'list-checks'], ['preview', 'Preview', 'monitor-play'], ['link', 'Link', 'link'], ['archived', 'Archived', 'archive']];
 // A ref's goals: goal:<id> itself, ticket:<id> and a bare ticket id (a session) through its feature,
 // feature:<id> to the goals the roadmap gives it, plan-<feature> (a planner's session) by its feature
 // and its planner row; [] for anything else.
@@ -8790,6 +8791,8 @@ function libraryItems(data, now, ctx) {
       href: art.error ? null : ctx.artHref(slug, art.at), tab: ctx.artViewer(slug, art.at),
       summary: art.error ? null : art.summary ?? null, goals: goals(art.for), at: art.at, art, landed, drafts,
       preview: null, pstate: null, review: null, link: null, host: null, error: art.error ?? null,
+      // the landed row's archived {at, by, goal} (kit-934), only with no draft of its own: a draft shows as today
+      archived: !drafts.length && landed?.archived ? landed.archived : null,
     });
   }
   // a review page: each open review question, opened on its own page
@@ -8798,14 +8801,14 @@ function libraryItems(data, now, ctx) {
     by.review.push({
       id: `review:${q.id}`, kind: 'review', title: q.review?.title ?? q.question, href: `#review/${encodeURIComponent(q.id)}`, tab: null,
       summary: null, goals: q.goal ? [q.goal] : q.ticket ? goalsOf(`ticket:${q.ticket}`) : [], at: null, art: null, landed: null, drafts: [],
-      preview: null, pstate: null, review: q, link: null, host: null, error: null,
+      preview: null, pstate: null, review: q, link: null, host: null, error: null, archived: null,
     });
   }
   for (const p of lib.previews ?? []) {
     by.preview.push({
       id: `preview:${p.name}`, kind: 'preview', title: p.label || p.name, href: `#preview/${encodeURIComponent(p.name)}`, tab: ctx.pvViewer(p.name),
       summary: null, goals: goals([p.session]), at: null, art: null, landed: null, drafts: [],
-      preview: p, pstate: ctx.previewState(p, now), review: null, link: null, host: null, error: null,
+      preview: p, pstate: ctx.previewState(p, now), review: null, link: null, host: null, error: null, archived: null,
     });
   }
   // a link opens its URL, or a path (with no remote) in the file peek, as linkOf does; in a new tab
@@ -8815,13 +8818,16 @@ function libraryItems(data, now, ctx) {
     by.link.push({
       id: `link:${l.id}`, kind: 'link', title: l.title || l.id, href, tab: href || remoteWeb(l.remote) || `#lib/${encodeURIComponent(`link:${l.id}`)}`,
       summary: l.notes ?? null, goals: goals(l.for), at: null, art: null, landed: null, drafts: [],
-      preview: null, pstate: null, review: null, link: l, host: linkHost(l), error: null,
+      preview: null, pstate: null, review: null, link: l, host: linkHost(l), error: null, archived: null,
     });
   }
   return LIB_KINDS.flatMap(([k]) => by[k]);
 }
-// The Kind and Goal filters: an item with no goal is kept only when no goal is picked.
-const libraryKeep = (item, { kind, goal } = {}) => (!kind || item.kind === kind) && (!goal || item.goals.includes(goal));
+// The Kind and Goal filters: an item with no goal is kept only when no goal is picked. An archived item is kept
+// only under Kind Archived, which keeps nothing else (kit-936).
+const libraryKeep = (item, { kind, goal } = {}) => (kind === 'archived' ? !!item.archived : !item.archived && (!kind || item.kind === kind)) && (!goal || item.goals.includes(goal));
+// an archived item's badge, on its card and in a peek's Artifacts list; '' for any other
+const libArchBadge = (x) => (x?.archived ? '<span class="badge lib-arch">Archived</span>' : '');
 // An item's words as HTML, one copy for its card (renderLibrary) and its peek (openLib); these call the page's
 // helpers (esc, linkify, flink, ticketMap, when, artSrc, previewUrl) when called, so the block still loads alone.
 // a preview's state badge
@@ -8854,7 +8860,8 @@ const libThumb = (x, pvHere) => {
 /* library-items end */
 /* peek-artifacts start */
 // The artifacts a goal's, feature's, ticket's or thread's side peek lists (kit-320): kit-92's Library items,
-// tied by the shown row's for refs, compared whole. Uses only its arguments and esc, psect, LIB_KINDS, libraryItems.
+// tied by the shown row's for refs, compared whole, archived ones too (badged). Uses only its arguments and esc, psect,
+// LIB_KINDS, libraryItems, libArchBadge.
 // The artifact items (mock, diagram, docs) tied to ref (goal:<g>, feature:<f>, ticket:<t>), in libraryItems' order; [] for any other ref.
 function peekArtifacts(data, ref, ctx) {
   const m = /^(goal|feature|ticket):(.+)$/.exec(String(ref ?? ''));
@@ -8880,7 +8887,7 @@ function peekArtSection(items) {
     const link = x.error
       ? `<a class="linkish" href="${esc(`#lib/${encodeURIComponent(`artifact:${x.art.slug}`)}`)}">${esc(x.art.slug)}</a> <span class="badge high">broken</span>`
       : `<a class="linkish" href="${esc(x.href)}">${esc(x.title)}</a>`;
-    return `<li>${link} <span class="muted">· ${esc(word)}${x.at !== 'main' ? ` · draft in ${esc(x.at)}` : ''}</span></li>`;
+    return `<li>${link}${x.archived ? ` ${libArchBadge(x)}` : ''} <span class="muted">· ${esc(word)}${x.at !== 'main' ? ` · draft in ${esc(x.at)}` : ''}</span></li>`;
   };
   return psect('Artifacts', `<ul>${items.map(li).join('')}</ul>`).replace(/^<div class="card psect"/, '<div class="card psect" data-peek-arts');
 }
@@ -8893,8 +8900,8 @@ const PEEK_ART_CTX = () => ({ previewState, artHref, artViewer, pvViewer, fileHr
 // when the last fetch of origin failed, that drafts from other machines may be out of date (kit-750).
 function renderLibrary(lib) {
   const items = libraryItems({ ...(DATA ?? {}), library: lib }, Date.now(), { previewState, artHref, artViewer, pvViewer, fileHref });
-  // one per artifact and preview card
-  $('n-library').textContent = items.filter((x) => x.art || x.preview).length || '';
+  // one per artifact and preview card the grid shows with no filter: an archived one isn't counted
+  $('n-library').textContent = items.filter((x) => (x.art || x.preview) && !x.archived).length || '';
   const pvHere = previewHere(location, PREVIEWS);
   const onBoxWithout = !PREVIEWS && /^\d{1,5}\.[a-z]/i.test(location.host);
   const me = PUBLIC ? publicHere(location, lib) : null;
@@ -8933,6 +8940,7 @@ function renderLibrary(lib) {
       libPubBadge(ps),
       x.pstate ? LIB_PV_BADGE[x.pstate.state] : '',
       x.error ? '<span class="badge high">broken</span>' : '',
+      libArchBadge(x),
     ].join('');
     const copy = x.pstate?.actions.includes('copy') ? `<button class="ghost" data-copy="${esc(previewUrl(pvHere, x.preview))}">Copy link</button>` : '';
     const open = x.kind !== 'review' && x.tab ? `<a class="lib-tab av-open" href="${esc(x.tab)}" target="_blank" rel="noopener noreferrer" title="Open it in a tab of its own" aria-label="Open in a new tab"><i class="icon-external-link" aria-hidden="true"></i></a>` : '';

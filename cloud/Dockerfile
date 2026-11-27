@@ -819,11 +819,23 @@ ENV DEVTEAM_IMAGE_HUB=4320
 ENV DEVTEAM_MEMORY_COUNTS_CACHE=1
 
 # What this image is, for the gateway's /box.json and box-status: the kit release it was cut at (the
-# release-prep PR sets it, and box-pins verify checks it) and the tools' pins above. Last, so a new
-# stamp rebuilds nothing.
-ARG DEVTEAM_RELEASE=v0.104.0
+# release-prep PR sets it, and box-pins verify checks it) and the tools' pins above. Late, so a new
+# stamp rebuilds only what follows: the alpha's install for that release.
+ARG DEVTEAM_RELEASE=v0.105.0
 ENV DEVTEAM_KIT_RELEASE=$DEVTEAM_RELEASE \
     DEVTEAM_BOX_TOOLS="claude-code=$CLAUDE_CODE_VERSION claude-swap=$CLAUDE_SWAP_VERSION gh=$GH_VERSION ttyd=$TTYD_VERSION mise=$MISE_VERSION uv=$UV_VERSION"
+
+# The alpha hub (alpha@1): the stamped release's package, installed and checked by the kit's one install
+# step (kit-install@1) into /opt/devteam/alpha, which the gateway serves at the box's /next/ only while
+# its verified.json says both checks passed and names this stamp. It never fails the build: a release not
+# yet published (the release-prep PR's own build), a registry that can't be reached or any refusal leaves
+# no folder, the install's line in the build log says why, and the gateway answers no-install. Run with no
+# DEVTEAM_HOME and outside any repo, so the package's name and upstream are the kit's own. Then root's and
+# readable by all, gw included; a folder that can't be made so is removed. After the stamp, so each stamp
+# installs its own release (a redeploy of the same stamp may reuse this layer: clear the build cache).
+RUN node /opt/devteam/kit/scripts/devteam.mjs package install --version "$DEVTEAM_RELEASE" --into /opt/devteam/alpha \
+ || echo "alpha: not installed; the gateway answers no-install"; \
+ if [ -d /opt/devteam/alpha ]; then { chown -R root:root /opt/devteam/alpha && chmod -R u=rwX,go=rX /opt/devteam/alpha; } || rm -rf /opt/devteam/alpha; fi
 
 VOLUME /data
 EXPOSE 8080
