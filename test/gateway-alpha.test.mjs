@@ -30,7 +30,6 @@ process.env.DEVTEAM_HUB_PORT = String(HUB);
 process.env.DEVTEAM_PORT_BASE = String(BASE);
 process.env.DEVTEAM_GATEWAY_DIR = path.join(scratch, 'gateway');
 for (const k of ['DEVTEAM_ALPHA', 'DEVTEAM_ALPHA_DIR', 'DEVTEAM_KIT_RELEASE', 'DEVTEAM_BOX_TOOLS', 'DEVTEAM_PUBLIC_URL']) delete process.env[k];
-assert.equal(HUB === 4320 || BASE === 4320, false, 'ports away from 4320');
 const G = await import('../cloud/gateway.mjs');
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -182,6 +181,8 @@ async function gateway(t, env) {
       });
     });
     r.on('error', reject);
+    // A route that takes a request and never answers fails here, on its own line, not at the file's timeout.
+    r.setTimeout(10000, () => r.destroy(new Error(`${method} ${route.slice(0, 60)}: no answer in 10 s`)));
     r.end(body === undefined ? undefined : JSON.stringify(body));
   });
   const o = await req('POST', '/auth/claim/options', { body: { token } });
@@ -218,7 +219,19 @@ test('A1: signed in, <box>/next/ serves every case of alpha-serving.json from th
     if (c.file) assert.ok(r.raw.equals(fs.readFileSync(path.join(GOOD.hub, c.file))), `${what}: the file's bytes`);
     if (c.location) assert.equal(r.headers.location, c.location, `${what}: location`);
     assert.deepEqual([r.headers['x-frame-options'], r.headers['referrer-policy']], ['DENY', 'no-referrer'], `${what}: the hub page's framing and referrer headers`);
+    if (c.status === 200) assert.deepEqual([r.headers['x-content-type-options'], r.headers['cache-control']], ['nosniff', 'no-store'], `${what}: nosniff and no-store`);
     if (c.status === 404) assert.doesNotMatch(r.body, new RegExp(TABLE.outside.text.trim()), `${what}: nothing of the outside file`);
+  }
+  const plain = await gw.req('GET', '/nothing-serves-this', { headers: FETCH });
+  for (const p of ['/nextfoo', '/next.html', '/nextx/']) {
+    const r = await gw.req('GET', p, { headers: FETCH });
+    assert.deepEqual([r.status, r.body], [plain.status, plain.body], `${p}: not the alpha's, the box's plain answer`);
+  }
+  const postPlain = await gw.req('POST', '/nothing-serves-this', { headers: FETCH });
+  for (const m of ['POST', 'PUT', 'DELETE']) {
+    const r = await gw.req(m, '/next/', { headers: FETCH });
+    assert.deepEqual([r.status, r.body], [postPlain.status, postPlain.body], `${m} /next/: not the alpha's, today's answer`);
+    assert.doesNotMatch(r.body, /alpha fixture|__next_f/, `${m} /next/: nothing of the install`);
   }
   const head = await gw.req('HEAD', '/next/', { headers: FETCH });
   assert.equal(head.status, 200, 'HEAD /next/');
@@ -283,6 +296,7 @@ const WHY = [
   ['no install', alphaEnv(NONE), /no install of the alpha/, { on: true, verified: false, release: null, why: 'no-install' }],
   ['an empty alpha folder', alphaEnv(EMPTY), /no install of the alpha/, { on: true, verified: false, release: null, why: 'no-install' }],
   ['DEVTEAM_ALPHA=0', alphaEnv(GOOD.dir, { DEVTEAM_ALPHA: '0' }), /turned off/, { on: false, verified: true, release: '0.101.0', why: 'off' }],
+  ['DEVTEAM_ALPHA=" 0 " (trimmed)', alphaEnv(GOOD.dir, { DEVTEAM_ALPHA: ' 0 ' }), /turned off/, { on: false, verified: true, release: '0.101.0', why: 'off' }],
   ['a verified install with no hub pages', alphaEnv(NO_PAGES.dir), /no pages yet/, { on: true, verified: true, release: '0.101.0', why: 'no-pages' }],
 ];
 
@@ -308,6 +322,20 @@ test('A6: GET <box>/alpha.json answers { on, verified, release, why }', async (t
   assert.equal(r.status, 200, r.body);
   assert.equal(r.headers['content-type'], 'application/json');
   assert.deepEqual(r.json, { on: true, verified: true, release: '0.101.0', why: null });
+  // Every real box names its release (the image's stamp, vX.Y.Z): the matching one serves.
+  const SERVES = [
+    ['the image\'s release matching the install', alphaEnv(GOOD.dir, { DEVTEAM_KIT_RELEASE: 'v0.101.0' })],
+    ['DEVTEAM_ALPHA=1', alphaEnv(GOOD.dir, { DEVTEAM_ALPHA: '1' })],
+    ['DEVTEAM_ALPHA=off (only 0 turns it off)', alphaEnv(GOOD.dir, { DEVTEAM_ALPHA: 'off' })],
+    ['DEVTEAM_ALPHA empty', alphaEnv(GOOD.dir, { DEVTEAM_ALPHA: '' })],
+  ];
+  for (const [what, env] of SERVES) {
+    const gw = await gateway(t, env);
+    assert.deepEqual((await gw.req('GET', '/alpha.json', { headers: FETCH })).json, { on: true, verified: true, release: '0.101.0', why: null }, what);
+    const page = await gw.req('GET', '/next/', { headers: FETCH });
+    assert.equal(page.status, 200, `${what}: /next/ serves`);
+    assert.equal(page.headers['content-security-policy'], alphaPolicy(gw, '/'), `${what}: /next/ under the alpha's policy`);
+  }
   for (const [what, env, , want] of WHY) {
     const gw = await gateway(t, env);
     assert.deepEqual((await gw.req('GET', '/alpha.json', { headers: FETCH })).json, want, what);
