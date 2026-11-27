@@ -169,7 +169,7 @@ for (const k of ['H', 'B', 'R', 'N', 'S']) READS[k] = READS.D;
 READS.M = READS.W3;
 function skipFor(id) {
   if (MANIFEST_SKIP) return MANIFEST_SKIP;
-  if (!treeMade && !/^A/.test(id)) return false; // the test fails on it (A1 names the split's error)
+  if (!treeMade) return false; // the test fails on it, naming the shared split's error (A1 and A3 don't call this)
   const k = Object.keys(READS).filter((x) => id.startsWith(x)).sort((a, b) => b.length - a.length)[0];
   return k ? READS[k]() : false;
 }
