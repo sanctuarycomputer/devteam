@@ -108,7 +108,7 @@ async function runStep(name, { release = `v${L1}`, fail = null, chownExit = 0, c
   env.PATH = `${shim}${path.delimiter}${env.PATH ?? ''}`;
   const e = { ...reg.env(env), ...IMAGE_ENV, DEVTEAM_KIT_RELEASE: release, DEVTEAM_RELEASE: release, CHOWN_EXIT: String(chownExit), CHMOD_EXIT: String(chmodExit), DEVTEAM_HUB_PORT: '4999' };
   const text = step().text.replaceAll('/opt/devteam', opt);
-  const r = spawnSync('/bin/sh', ['-c', `umask ${umask}\n${text}`], { cwd, env: e, encoding: 'utf8', timeout: 300000 });
+  const r = spawnSync('/bin/sh', ['-c', `umask ${umask}\n${text}`], { cwd, env: e, encoding: 'utf8', timeout: 120000 });
   const chown = fs.existsSync(chownLog) ? fs.readFileSync(chownLog, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
   return { status: r.status, signal: r.signal, output: `${r.stdout ?? ''}${r.stderr ?? ''}`, alpha: path.join(opt, 'alpha'), chown };
 }
@@ -159,6 +159,8 @@ test('D3 verified.json only for the good release; every other case leaves no /op
   }
   for (const [what, key, opts] of FAILS) {
     const c = await once(key, opts);
+    // the install itself passed, so the folder was there and the step removed it
+    assert.match(c.output, /^package install: installed .* verified$/m, `D3 ${what}: the install passed first (${brief(c)})`);
     assert.equal(fs.existsSync(c.alpha), false, `D3 ${what}: no /opt/devteam/alpha (${brief(c)})`);
   }
 });
