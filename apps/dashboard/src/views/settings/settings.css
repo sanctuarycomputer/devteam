@@ -1,0 +1,53 @@
+/* kit-995: the Settings, Jobs and Retros pages' CSS, index.html's css-settings region, byte for byte; then 7 shell rules it would otherwise override, restated (spec, rulings Q3). */
+/* css-settings start */
+  /* the Settings page (kit-87 spec §8), as the mock at main draws it */
+  .badge.amber { --c: var(--amber-fg); }
+  button.mini { height: 22px; padding: 0 8px; margin: 0; }
+  .stepper { display: inline-flex; align-items: center; } .seg .stepper { border-left: 1px solid var(--line-2); }
+  .stepper button { height: 28px; width: 28px; padding: 0; margin: 0; border: 0; border-radius: 0; }
+  .limit { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; } .limit .stepper b { min-width: 18px; text-align: center; display: inline-block; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .set-key { font: 11px var(--mono); color: var(--muted); margin-left: 6px; } .set-desc { font-size: 12px; margin: -2px 0 8px; max-width: var(--measure); } .set-row .r { text-align: right; max-width: 55%; min-width: 0; white-space: normal; overflow-wrap: anywhere; } .set-row .t { flex: 1 1 auto; min-width: 0; }
+  @media (max-width: 700px) { .set-row { flex-wrap: wrap; } .set-row .t { flex-basis: 100%; white-space: normal; } .set-row .r { flex-basis: 100%; max-width: none; text-align: left; white-space: normal; overflow-wrap: anywhere; margin-top: 2px; } .limit { justify-content: flex-start; } }
+  .ready-card { margin-bottom: 14px; }
+  .ready-card .rowline .t { white-space: normal; overflow-wrap: anywhere; }
+  .ready-card .rowline .r { color: var(--fg-2); flex: none; max-width: 60%; overflow-wrap: anywhere; }
+  @media (max-width: 900px) {
+    /* minmax(0, …): the board's columns must scroll inside it, not widen the page */
+    /* the second row takes the spare height: with no content yet, the nav would get half of it */
+    .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto 1fr; }
+    /* .main spans the three rows on a subgrid, with the nav row laid over its second: the page bar and the
+       page stay inside .main's box (display: contents would leave .main no box to hold them) */
+    .main { grid-column: 1; grid-row: 1 / 4; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: subgrid; }
+    .pagebar { grid-row: 1; }
+    main.page { grid-row: 3; width: 100%; min-width: 0; }
+    .side { grid-column: 1; grid-row: 2; top: var(--bar-h); height: auto; flex-direction: row; align-items: center; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px 12px; gap: 4px; z-index: 5; }
+    .side .eyebrow { display: none; }
+    .settings { flex-direction: row; align-items: center; margin: 0 0 0 auto; border-top: 0; padding: 0 0 0 8px; flex: none; }
+    .settings .foot { display: none; }
+    .settings .fleet-switch, .settings .fleet-state { white-space: nowrap; flex-wrap: nowrap; }
+    .settings a.set { white-space: nowrap; padding: 5px 8px; }
+    .side .brand { padding: 0 8px 0 0; }
+    .side .nav { display: flex; gap: 2px; }
+    :where(.no-shell) .side .foot { display: none; }
+    .stale-note { top: calc(var(--bar-h) + 60px); left: 16px; }
+    .nav a { white-space: nowrap; }
+    /* a long URL or id wraps; it doesn't widen the page */
+    :where(.no-shell) main { padding: 16px 16px 64px; overflow-wrap: anywhere; }
+    main.page { overflow-wrap: anywhere; }
+  }
+
+/* css-settings end */
+/* restated from index.html:363 (css-common), which settings.css would otherwise override; kit-1075's @layer removes it (m-20261128-050743089-supervisor) */
+  button.ghost, button.opt { background: var(--surface); color: var(--fg); border: 1px solid var(--line-2); margin-top: 0; }
+/* restated from index.html:364 (css-common), which settings.css would otherwise override; kit-1075's @layer removes it (m-20261128-050743089-supervisor) */
+  button.ghost:hover, button.opt:hover { background: var(--hover); opacity: 1; }
+/* restated from index.html:365 (css-common), which settings.css would otherwise override; kit-1075's @layer removes it (m-20261128-050743089-supervisor) */
+  button.opt { margin: 6px 6px 0 0; }
+/* restated from index.html:374 (css-common), which settings.css would otherwise override; kit-1075's @layer removes it (m-20261128-050743089-supervisor) */
+  .row-inline > button { margin: 0; }
+/* restated from index.html:699 (css-chrome), which settings.css would otherwise override; kit-1075's @layer removes it (m-20261128-050743089-supervisor) */
+  .pop button { height: 22px; font-size: 11px; margin: 6px 0 0; }
+/* restated from index.html:818 (css-misc), which settings.css would otherwise override; kit-1075's @layer removes it (m-20261128-050743089-supervisor) */
+  .seg2 button { margin: 0; height: 24px; border: 0; border-radius: 0; background: var(--surface); color: var(--fg-2); font-weight: 500; padding: 0 10px; }
+/* restated from index.html:819 (css-misc), which settings.css would otherwise override; kit-1075's @layer removes it (m-20261128-050743089-supervisor) */
+  .seg2 button[aria-pressed="true"] { background: var(--well); color: var(--fg); }
