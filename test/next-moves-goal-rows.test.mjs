@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fleetFixture, hasTmux, json, sessionOf, write } from './lib/kit.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -621,6 +621,113 @@ test('next-moves: planner rows: the owner\'s question, the supervisor\'s answer,
   });
 });
 
+// A planner that isn't alive holds nothing: with its tmux session up, a window gone or an agent back
+// at a shell makes the move the supervisor's resume-planner (P4b), and a live agent silent past
+// stale_after_minutes, its pane not busy, wake-planner; since its last sign of life, and the goal
+// copies it. A session that is missing altogether
+// is a reboot, which the relaunch brings back: the move stays the planner's (every other fixture here).
+test('next-moves: a dead planner\'s move is the supervisor\'s to resume it, and its goal copies that', { skip: !hasTmux && 'no tmux' }, async (t) => {
+  const P = project('dead-planner', { tmux_session: 'nm-dead-planner' });
+  const tmux = (args) => spawnSync('tmux', args, { env: P.F.env() });
+  tmux(['new-session', '-d', '-s', 'nm-dead-planner', '-n', 'main', 'sleep 600']);
+  const window = (f, cmd = 'sleep 600') => tmux(['new-window', '-d', '-t', '=nm-dead-planner:', '-n', `plan-${f}`, cmd]);
+  // its only sign of life, the plan branch's commit, put hours back
+  const silent = (f, hours) => {
+    const at = new Date(Date.now() - hours * 3600000).toISOString();
+    const g = (args) => execFileSync('git', args, { cwd: P.F.old, env: { ...process.env, GIT_COMMITTER_DATE: at }, stdio: 'ignore' });
+    g(['checkout', '-q', `plan/${f}`]); g(['commit', '-q', '--amend', '--no-edit']); g(['checkout', '-q', 'main']);
+  };
+  const seen = (f) => json(P.F.ok(P.F.old, ['dashboard-data'])).planners.find((x) => x.feature === f).last_seen;
+  await t.test('its window gone from a live session: resume-planner, the supervisor\'s, and the goal\'s move via it', () => {
+    const G = P.defined('Gone');
+    P.planner('pgone', G);
+    const p = P.need('planner:pgone');
+    assert.equal(p.move, 'resume-planner');
+    assert.equal(p.holder, 'supervisor');
+    assert.equal(p.since, seen('pgone'));
+    assert.equal(p.command, 'planner pgone --resume');
+    assert.match(p.words, /its window is gone/);
+    assert.deepEqual(p.covered_by, [], 'uncovered: move-owed and move-stalled reach it');
+    const m = goalMove(P, G);
+    assert.equal(m.move, 'resume-planner');
+    assert.equal(m.holder, 'supervisor');
+    assert.equal(m.via, 'planner:pgone');
+  });
+  await t.test('its agent back at a shell: resume-planner', () => {
+    const G = P.defined('Exited');
+    P.planner('pexited', G);
+    window('pexited', 'bash');
+    const p = P.need('planner:pexited');
+    assert.equal(p.move, 'resume-planner');
+    assert.equal(p.holder, 'supervisor');
+    assert.match(p.words, /its agent exited/);
+    assert.equal(p.command, 'planner pexited --resume');
+  });
+  await t.test('a live agent idle at its prompt past stale_after_minutes: wake-planner, a message (--resume refuses a live agent), owed at once', () => {
+    const G = P.defined('Silent');
+    P.planner('psilent', G);
+    silent('psilent', 2);
+    window('psilent');
+    const p = P.need('planner:psilent');
+    assert.equal(p.move, 'wake-planner');
+    assert.equal(p.holder, 'supervisor');
+    assert.equal(p.command, 'send plan-psilent "…"');
+    assert.match(p.words, /silent 1\d\d min/);
+    assert.equal(p.since, seen('psilent'));
+    assert.deepEqual(p.covered_by, []);
+    assert.equal(p.flag, 'owed', 'two hours past its last sign, past next_move_owed_minutes');
+    assert.equal(goalMove(P, G).move, 'wake-planner');
+  });
+  await t.test('silent as long, its pane busy (a long think): planning, and not stale', () => {
+    const G = P.defined('Thinking');
+    P.planner('pbusy', G);
+    silent('pbusy', 2);
+    window('pbusy', "sh -c 'echo \"* Thinking (esc to interrupt)\"; exec sleep 600'");
+    const p = P.need('planner:pbusy');
+    assert.equal(p.move, 'planning');
+    assert.equal(p.holder, 'planner');
+    assert.ok(!json(P.F.ok(P.F.old, ['metrics', '--json'])).findings.some((f) => f.kind === 'stale-planner' && f.subject === 'plan-pbusy'), 'a busy planner is not stale');
+  });
+  await t.test('a window and a recent sign of life: planning, the planner\'s (P4)', () => {
+    const G = P.defined('Alive');
+    P.planner('palive', G);
+    window('palive');
+    const p = P.need('planner:palive');
+    assert.equal(p.move, 'planning');
+    assert.equal(p.holder, 'planner');
+    assert.equal(goalMove(P, G).holder, 'planner');
+  });
+});
+
+// waiting_on_owner counts a question on the planner's goal only when it isn't plainly other work's:
+// one that names only another feature's tickets doesn't hand the planner's move to the owner (P1).
+test('next-moves: a question on a shared goal about another feature\'s ticket is not the planner\'s wait', () => {
+  const P = project('planner-wait');
+  const G = P.ready('Shared');
+  P.feature('other', G);
+  P.ticket('ch-91-other', 'other');
+  P.planner('pmine', G);
+  P.ask(['--goal', G, '--blocks', 'ch-91-other', '--question', 'Which vendor for the other ticket?', '--recommendation', 'the first']);
+  const pl = json(P.F.ok(P.F.old, ['dashboard-data'])).planners.find((x) => x.feature === 'pmine');
+  assert.deepEqual(pl.waiting_on_owner, []);
+  assert.equal(P.need('planner:pmine').move, 'planning');
+  // linking another plan branch, or approving only another feature's tickets: other work's too
+  P.planner('pother', G);
+  P.ask(['--goal', G, '--question', 'Is the other design right?', '--recommendation', 'yes', '--links', JSON.stringify([{ title: 'the other design', path: 'docs/devteam/project/log/plan-pother.jsonl', ref: 'plan/pother' }])]);
+  P.ticket('ch-92-other', 'other');
+  P.ask(['--kind', 'owner-decision', '--goal', G, '--question', 'Ship both other tickets?', '--recommendation', 'yes', '--approves', 'ch-91-other,ch-92-other']);
+  assert.deepEqual(json(P.F.ok(P.F.old, ['dashboard-data'])).planners.find((x) => x.feature === 'pmine').waiting_on_owner, [], 'a linked plan branch and approved tickets of other work');
+  // naming one of its own feature's tickets beside another's: its wait
+  P.feature('pmine', G);
+  P.ticket('ch-93-mine', 'pmine');
+  const M = P.ask(['--goal', G, '--blocks', 'ch-93-mine', 'ch-91-other', '--question', 'Which order for the two?', '--recommendation', 'mine first']);
+  assert.deepEqual(json(P.F.ok(P.F.old, ['dashboard-data'])).planners.find((x) => x.feature === 'pmine').waiting_on_owner, [M], 'one of its own tickets makes it its wait');
+  P.owner(['answer', M, 'mine first']);
+  const Q = P.ask(['--goal', G, '--question', 'Which users first?', '--recommendation', 'admins']);
+  assert.deepEqual(json(P.F.ok(P.F.old, ['dashboard-data'])).planners.find((x) => x.feature === 'pmine').waiting_on_owner, [Q], 'a question on the goal alone is still its wait');
+  assert.equal(P.need('planner:pmine').move, 'answer-question');
+});
+
 test('next-moves: flags come from holder and age alone, with the two settings', async (t) => {
   await t.test('the settings: defaults 60 and 24, on the Settings page', () => {
     const P = project('flag-defaults');
@@ -698,6 +805,9 @@ test('next-moves: the rows and collectMetrics share the predicates', () => {
     assert.ok(caller.includes(`${helper}(`), `the finding's code calls ${helper}`);
     assert.ok(body('goalMovesNow').includes(`${helper}(`), `the goal rows call ${helper}`);
   }
+  // a planner that isn't alive: the findings and P4b ask one predicate
+  assert.ok(region.includes('function plannerDown('), 'plannerDown is defined with the rows');
+  assert.ok(metrics.includes('plannerDown(') && body('plannerMove').includes('plannerDown('), 'collectMetrics and plannerMove both call plannerDown');
 });
 
 test('next-moves: each check this file names is a real test of its own, and no fixture or comment names one', () => {

@@ -8,7 +8,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fleetFixture, json, write } from './lib/kit.mjs';
+import { spawnSync } from 'node:child_process';
+import { fleetFixture, hasTmux, json, write } from './lib/kit.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const DT = path.join(here, '..', 'docs', 'devteam', 'scripts', 'devteam.mjs');
@@ -313,6 +314,63 @@ test('next-moves A5: the lead ticket: a goal takes its move, via it, flag and al
     assert.equal(built.move, 'build');
     assert.ok(built.covered_by.some((c) => c.kind === stuck.kind && c.subject === stuck.subject), JSON.stringify(built.covered_by));
     assert.ok(!ticketMove(P, 'ch-11-build').covered_by.some((c) => c.kind === 'recurring-stuck'), 'a ticket that runs no job lists none');
+  });
+});
+
+// A worker that isn't alive holds nothing: with its tmux session up, a phase in flight whose window is
+// gone or whose agent is back at a shell is the supervisor's resume-worker (T8b), since its last line;
+// awaiting the word with its window gone, the word is still the supervisor's (T5), and says it must be
+// resumed to receive it. A missing session is a reboot (every other fixture here): T8 as before.
+test('next-moves: a dead worker\'s move is the supervisor\'s to resume it', { skip: !hasTmux && 'no tmux' }, async (t) => {
+  const P = project('dead-worker', { tmux_session: 'nm-dead-worker', max_active_tickets: 5 });
+  const tmux = (args) => spawnSync('tmux', args, { env: P.F.env() });
+  tmux(['new-session', '-d', '-s', 'nm-dead-worker', '-n', 'main', 'sleep 600']);
+  const window = (id, cmd) => tmux(['new-window', '-d', '-t', '=nm-dead-worker:', '-n', id, cmd]);
+  const G = readyGoal(P, 'Dead workers', 'dead');
+  const lastSeen = (id) => json(P.F.ok(P.F.old, ['log', '--by', id, '--json'])).map((l) => l.created_at).sort().at(-1);
+  await t.test('building, its window gone: resume-worker, the supervisor\'s, uncovered', () => {
+    addTicket(P, 'ch-71-gone', 'dead');
+    phase(P, 'ch-71-gone', 'build');
+    const m = ticketMove(P, 'ch-71-gone');
+    assert.equal(m.move, 'resume-worker');
+    assert.equal(m.holder, 'supervisor');
+    assert.equal(m.command, 'worker ch-71-gone --resume');
+    assert.match(m.words, /its window is gone/);
+    assert.equal(m.since, lastSeen('ch-71-gone'));
+    assert.deepEqual(m.covered_by, []);
+    assert.equal(goalMove(P, G).via, 'ticket:ch-71-gone', 'the supervisor\'s move leads the goal');
+  });
+  await t.test('building, its agent back at a shell: resume-worker', () => {
+    addTicket(P, 'ch-72-exited', 'dead');
+    phase(P, 'ch-72-exited', 'build');
+    window('ch-72-exited', 'bash');
+    const m = ticketMove(P, 'ch-72-exited');
+    assert.equal(m.move, 'resume-worker');
+    assert.match(m.words, /its agent exited/);
+  });
+  await t.test('building in a live window: the worker\'s phase (T8)', () => {
+    addTicket(P, 'ch-73-alive', 'dead');
+    phase(P, 'ch-73-alive', 'build');
+    window('ch-73-alive', 'sleep 600');
+    const m = ticketMove(P, 'ch-73-alive');
+    assert.equal(m.move, 'build');
+    assert.equal(m.holder, 'worker');
+  });
+  await t.test('awaiting the word, its window gone: give the word (T5), resuming it first', () => {
+    addTicket(P, 'ch-74-word', 'dead');
+    phase(P, 'ch-74-word', 'awaiting-word');
+    const m = ticketMove(P, 'ch-74-word');
+    assert.equal(m.move, 'give-word');
+    assert.equal(m.holder, 'supervisor');
+    assert.match(m.words, /^Give the word, or merge; resume it first, its window is gone$/);
+  });
+  await t.test('blocked with nothing open, its window gone: answer its message (T6), resuming it first', () => {
+    addTicket(P, 'ch-75-blocked', 'dead');
+    phase(P, 'ch-75-blocked', 'blocked');
+    const m = ticketMove(P, 'ch-75-blocked');
+    assert.equal(m.move, 'answer-message');
+    assert.equal(m.holder, 'supervisor');
+    assert.match(m.words, /^Answer its message; resume it first, its window is gone$/);
   });
 });
 
