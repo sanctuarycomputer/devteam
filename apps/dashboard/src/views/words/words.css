@@ -1,0 +1,52 @@
+/* css-inbox start */
+  /* the Inbox is in the kit's order: the first card is the next best step, and each says why it is where it is */
+  .qcard.top { border-left-width: 4px; }
+  .top-why { font-size: 13px; margin: 0 0 8px; }
+  .why { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
+  .why span { font-size: 11px; line-height: 18px; padding: 0 7px; border-radius: 999px; border: 1px solid var(--line-2); color: var(--fg-2); }
+  .why span.muted { color: var(--muted); border-style: dashed; }
+  .choice .closes { font-size: 12px; color: var(--fg-2); margin-top: 2px; }
+  .answered-note { color: var(--green-fg); }
+
+  /* reading width: a line of prose stays near 1.5 alphabets (both cases), about 78 characters */
+  :root { --measure: 78ch; }
+  .measure, .qcard, .goal, .feed .card, .loop-panel .card, #findings .card, .answered .card { max-width: var(--measure); }
+
+  /* questions: the choices are one list; the recommended one is marked in place */
+  .qcard h4 { font-size: 14px; font-weight: 600; margin: 8px 0 4px; line-height: 1.45; }
+  .qcard .ctx { color: var(--fg-2); margin: 4px 0 10px; }
+  .ctx p, .qcard .d p, .qcard .e p { margin: 0 0 6px; }
+  .ctx p:last-child, .qcard .d p:last-child, .qcard .e p:last-child { margin-bottom: 0; }
+  .ctx ul, .ctx ol, .qcard .d ul, .qcard .d ol, .qcard .e ul, .qcard .e ol { margin: 4px 0 8px; padding-left: 20px; }
+  .ctx li, .qcard .d li, .qcard .e li { margin: 2px 0; }
+  .ctx code, .qcard h4 code { font: 12px var(--mono); }
+  .qcard .rewritten { color: var(--red-fg); font-weight: 600; margin: 0 0 8px; }
+  .qcard .again { margin: 0 0 8px; }
+  .choices { display: grid; gap: 6px; margin: 10px 0 8px; }
+  .choice { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 4px 10px; align-items: start; text-align: left; height: auto; margin: 0; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--surface); color: var(--fg); font-weight: 400; cursor: pointer; }
+  .choice:hover { background: var(--hover); opacity: 1; }
+  .choice input { margin: 3px 0 0; accent-color: var(--blue); }
+  .choice b { font-weight: 600; font-size: 13px; }
+  .choice .d { color: var(--fg-2); font-size: 12.5px; }
+  .choice .e { color: var(--fg-2); font-size: 12.5px; }
+  .choice .e::before { content: "For users: "; color: var(--muted); }
+  .choice.rec { border-color: color-mix(in srgb, var(--blue) 45%, var(--line-2)); }
+  .choice.picked { border-color: var(--blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 15%, transparent); }
+  .choice .tag { display: inline-flex; margin-left: 6px; font-size: 11px; font-weight: 500; color: var(--blue-fg); }
+  .links { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+  .links a, .linkish, .qref a { color: var(--blue-fg); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+  .meta { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  details > summary { cursor: pointer; color: var(--fg-2); font-size: 12px; margin: 6px 0; }
+
+  /* the answer button while it posts */
+  button.busy { position: relative; color: transparent !important; pointer-events: none; }
+  button.busy::after { content: ""; position: absolute; inset: 0; margin: auto; width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--bg); border-right-color: transparent; animation: spin .7s linear infinite; }
+  button.ghost.busy::after { border-color: var(--fg); border-right-color: transparent; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { button.busy::after { animation-duration: 2.5s; } }
+
+/* css-inbox end */
+/* kit-990: css-misc's .drawer ul (index.html:808), which index.html's order let win over .ctx ul for a question's
+   context list in the side peek; words.css loads after shell.css, so it is restated here, scoped to that list only
+   (an unscoped one would beat css-misc's later .md ul for markdown lists in the drawer: spec S18) */
+.drawer .ctx ul { margin: 4px 0; padding-left: 18px; }
