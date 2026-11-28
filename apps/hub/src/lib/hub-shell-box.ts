@@ -52,7 +52,8 @@ export function boxFrom(b: unknown, loc: Loc, roles: readonly string[]): Box | n
 // One entry per root: if two answers claim one root, keep the port already shown, else the lowest.
 export function perRoot<X extends { root: string; port: unknown }>(list: unknown, keptPort: (root: string) => unknown): Map<string, X> {
   const out = new Map<string, X>();
-  for (const x of (Array.isArray(list) ? list : []) as X[]) {
+  // H:3298's `data.instances ?? []`: a value that isn't iterable throws, as hub.html's draw does (its tabs kept)
+  for (const x of ((list ?? []) as Iterable<X>)) {
     if (!x || typeof x.root !== 'string' || !Number.isInteger(Number(x.port))) continue;
     const had = out.get(x.root);
     const keep = keptPort(x.root);
