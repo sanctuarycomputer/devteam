@@ -23482,8 +23482,9 @@ function supervisorRecovery(id) {
 // A supervisor in tmux stopped at a limit, on its exact conversation: claude --resume <id> from
 // resume_command, in place of the pane's process, after the same refusals as a worker. Claude Code
 // only; without an id, or for anything else, it isn't guessed at, and the finding says how to resume
-// by hand. The same record and caps as restartPane, under the name "supervisor". A parked or drained
-// fleet's supervisor stays stopped, as recover leaves it.
+// by hand. The same record and caps as restartPane, under the name "supervisor". Whatever the fleet's
+// hold, as recover brings it back: a parked or drained fleet's supervisor still keeps the Inbox and
+// answers threads, and under a move its own prompt has it carry the move on and start nothing.
 const SUPERVISOR_RESTART_PROMPT = 'You were restarted after a usage limit, on this same conversation. Carry on from where you were.';
 // What to restart, null if it isn't due, or { refused } if the process can't be read. A banner in the
 // recorded pane says nothing about whose conversation it is, so the id comes from a transcript that
@@ -23511,7 +23512,6 @@ function supervisorToRestart(until) {
   return { target, id, cmd: startedSkippingPermissions(agent.args) ? cmd : withoutSkipPermissions(cmd) };
 }
 function restartSupervisor(budget) {
-  if (draining() || fleetMode()) return null;
   // a test's smaller budget (DEVTEAM_TEST only): a whole number of ms, 0 only looks
   const cap = process.env.DEVTEAM_TEST ? process.env.DEVTEAM_RESTART_BUDGET_MS : undefined;
   if (/^\d+$/.test(cap ?? '')) budget = Math.min(budget, Number(cap));
@@ -28146,6 +28146,52 @@ function accountsState() {
     return age >= 0 && age < ACCOUNTS_FRESH_MS ? { ...s, active_no_room: s.active_no_room === true, needs_login: Array.isArray(s.needs_login) ? s.needs_login.map(String) : [], restart_gave_up: Array.isArray(s.restart_gave_up) ? s.restart_gave_up.map(String) : [], slot_held: Number.isInteger(s.slot_held) && s.slot_held > 0 ? s.slot_held : 0, slot_held_since: Number.isFinite(Date.parse(s.slot_held_since)) ? s.slot_held_since : null } : null;
   } catch { return null; }
 }
+// The supervisor watchdog. wait is the one loop that acts on findings, and nothing else watched it:
+// a supervisor alive but out of its loop (its turn ended at its prompt, a shell, a dialog) froze the
+// fleet while every finding was still worked out and nobody read it. So the minute tick looks: when
+// its last check (supervisorCheckedAt: a wait, or a tick's host check) is older than two
+// tick_minutes and the goals' moves the last metrics run cached (MOVES_CACHE, flags worked out again
+// by age, as moveFlag does, since a quiet supervisor runs no metrics) hold one owed or stalled, it
+// types one line into the supervisor's pane, at most once a tick_minutes, and only when the pane is
+// idle at an empty input box: never into a running turn, a half-typed line or a dialog. Each such
+// look counts, typed or not (a shell or a dialog can't take the line); at SUPERVISOR_QUIET_LOOKS
+// hello's alert names it for the hub. A newer check starts it over; no owed move ends it.
+// { since: the check it is quiet from, min, owed: words, looks, nudged, at: the last look } or null.
+const SUPERVISOR_QUIET_LOOKS = 3;
+function quietSupervisor(before, now = Date.now()) {
+  const tickMs = (Number(loadSettings().tick_minutes) > 0 ? Number(loadSettings().tick_minutes) : 15) * 60000;
+  const at = supervisorCheckedAt();
+  // another machine supervises this repo, or this one never checked: not a loop that stopped
+  if (!at || hostState().refused === true || now - Date.parse(at) < 2 * tickMs) return null;
+  let cache = null;
+  try { cache = readJson(MOVES_CACHE()); } catch {}
+  const owed = (Array.isArray(cache?.moves) ? cache.moves : []).filter((m) => isObj(m) && typeof m.since === 'string' && ['owed', 'stalled'].includes(moveFlag(m).flag));
+  if (!owed.length) return null;
+  const min = Math.floor((now - Date.parse(at)) / 60000);
+  const prev = before?.supervisor_quiet?.since === at ? before.supervisor_quiet : null;
+  const last = Date.parse(prev?.at) || 0;
+  if (prev && last <= now && now - last < tickMs) return { ...prev, min };
+  const words = `${owed[0].subject} ${owed[0].move}${owed.length > 1 ? ` (and ${owed.length - 1} more)` : ''}`;
+  const busy = (screen) => screen.filter((l) => l.trim()).slice(-15).some((l) => PANE_WORKING.test(l));
+  const { target } = resolvePane(supervisorTarget());
+  let typed = false;
+  if (target) {
+    const screen = paneScreen(target);
+    // its turn is running, or someone is typing a line: it is not out of its loop, so no look counts
+    if (busy(screen) || (paneDraftIn(screen) ?? '') !== '') return prev ? { ...prev, min } : null;
+    const key = paneKey(target);
+    const line = `From the kit: you haven't run wait for ${min} min and ${words} is owed. Run your tick (supervisor.md §3), then keep the loop.`;
+    if (paneReadyIn(screen) && !(key && heldPending(key))) {
+      const held = typeLock.run(target, (outer) => {
+        if (outer && ownerLineOpen(target)) return false;
+        const again = paneScreen(target);
+        return paneReadyIn(again) && paneDraftIn(again) === '' && !busy(again) && typeNow(target, line);
+      });
+      typed = !held.busy && held.value === true;
+    }
+  }
+  return { since: at, min, owed: words, looks: (prev?.looks ?? 0) + 1, nudged: (prev?.nudged ?? 0) + (typed ? 1 : 0), at: new Date(now).toISOString() };
+}
 // Not supervisorOnly: that records this process's pane as the supervisor's, and this runs under the dashboard.
 function cmdAccountsTick() {
   const began = Date.now();
@@ -28269,6 +28315,12 @@ function cmdAccountsTick() {
   // an idle responder with turns queued for it is told so, once a minute (kit-104); a failure here
   // never stops the tick's own record
   try { nudgeResponder(); } catch (e) { warn(`responder nudge: ${e?.message ?? e}`); }
+  // a supervisor out of its wait loop with work owed: not one at a limit or restarted just now,
+  // which has its own report; a failure here never stops the tick's own record
+  state.supervisor_quiet = null;
+  if (!state.supervisor_limit && !supervisorRestarted) {
+    try { state.supervisor_quiet = quietSupervisor(before); } catch (e) { warn(`supervisor watchdog: ${e?.message ?? e}`); }
+  }
   fs.mkdirSync(runDir, { recursive: true });
   const tmp = `${ACCOUNTS_FILE}.${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(state));
@@ -38213,7 +38265,13 @@ const helloAlert = (() => {
     const [x] = xs;
     return `A message in a thread reached no supervisor and has waited ${x.waited_min} min (thread ${x.id}${xs.length > 1 ? `, and ${xs.length - 1} more` : ''}); the supervisor ${x.checked}: resume it`;
   };
-  return () => (memo !== undefined ? memo : (memo = [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, undelivered(), boxAlert()].filter(Boolean).join(' · ') || null));
+  // supervisor-quiet: out of its wait loop with work owed, past the watchdog's looks (quietSupervisor)
+  const quiet = () => {
+    const q = accountsState()?.supervisor_quiet;
+    if (!(q?.looks >= SUPERVISOR_QUIET_LOOKS)) return null;
+    return `supervisor-quiet: the supervisor of ${loadSettings().project ?? path.basename(mainRoot)} has not run wait for ${Number(q.min) || 0} min while ${String(q.owed ?? 'a move').slice(0, 120)} is owed (${plural(Number(q.nudged) || 0, 'nudge')} typed): look at its terminal`;
+  };
+  return () => (memo !== undefined ? memo : (memo = [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, quiet(), undelivered(), boxAlert()].filter(Boolean).join(' · ') || null));
 })();
 // A hello's alert, less the box's alert folded in at its end: the project's own part, or null. Matched
 // as the whole alert or a " · " suffix, never split, so a box alert holding " · " still comes off.
