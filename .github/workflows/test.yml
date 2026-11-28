@@ -29,17 +29,19 @@ jobs:
       matrix:
         include:
           - { node: 18, part: chain, key: chain, groups: chain, shard: '' }
-          - { node: 18, part: rest 1/5, key: rest-1, groups: 'rest,chrome', shard: 1/5, alone: true, gitleaks: true }
-          - { node: 18, part: rest 2/5, key: rest-2, groups: 'rest,chrome', shard: 2/5, gitleaks: true }
-          - { node: 18, part: rest 3/5, key: rest-3, groups: 'rest,chrome', shard: 3/5, gitleaks: true }
-          - { node: 18, part: rest 4/5, key: rest-4, groups: 'rest,chrome', shard: 4/5, gitleaks: true }
-          - { node: 18, part: rest 5/5, key: rest-5, groups: 'rest,chrome', shard: 5/5, gitleaks: true }
+          - { node: 18, part: rest 1/6, key: rest-1, groups: 'rest,chrome', shard: 1/6, alone: true, gitleaks: true }
+          - { node: 18, part: rest 2/6, key: rest-2, groups: 'rest,chrome', shard: 2/6, gitleaks: true }
+          - { node: 18, part: rest 3/6, key: rest-3, groups: 'rest,chrome', shard: 3/6, gitleaks: true }
+          - { node: 18, part: rest 4/6, key: rest-4, groups: 'rest,chrome', shard: 4/6, gitleaks: true }
+          - { node: 18, part: rest 5/6, key: rest-5, groups: 'rest,chrome', shard: 5/6, gitleaks: true }
+          - { node: 18, part: rest 6/6, key: rest-6, groups: 'rest,chrome', shard: 6/6, gitleaks: true }
           - { node: 20, part: chain, key: chain, groups: chain, shard: '' }
-          - { node: 20, part: rest 1/5, key: rest-1, groups: 'rest,chrome', shard: 1/5, alone: true, gitleaks: true }
-          - { node: 20, part: rest 2/5, key: rest-2, groups: 'rest,chrome', shard: 2/5, gitleaks: true }
-          - { node: 20, part: rest 3/5, key: rest-3, groups: 'rest,chrome', shard: 3/5, gitleaks: true }
-          - { node: 20, part: rest 4/5, key: rest-4, groups: 'rest,chrome', shard: 4/5, gitleaks: true }
-          - { node: 20, part: rest 5/5, key: rest-5, groups: 'rest,chrome', shard: 5/5, gitleaks: true }
+          - { node: 20, part: rest 1/6, key: rest-1, groups: 'rest,chrome', shard: 1/6, alone: true, gitleaks: true }
+          - { node: 20, part: rest 2/6, key: rest-2, groups: 'rest,chrome', shard: 2/6, gitleaks: true }
+          - { node: 20, part: rest 3/6, key: rest-3, groups: 'rest,chrome', shard: 3/6, gitleaks: true }
+          - { node: 20, part: rest 4/6, key: rest-4, groups: 'rest,chrome', shard: 4/6, gitleaks: true }
+          - { node: 20, part: rest 5/6, key: rest-5, groups: 'rest,chrome', shard: 5/6, gitleaks: true }
+          - { node: 20, part: rest 6/6, key: rest-6, groups: 'rest,chrome', shard: 6/6, gitleaks: true }
           - { node: 22, part: chain, key: chain, groups: chain, shard: '' }
           - { node: 22, part: rest 1/5, key: rest-1, groups: rest, shard: 1/5, alone: true, gitleaks: true }
           - { node: 22, part: rest 2/5, key: rest-2, groups: rest, shard: 2/5, gitleaks: true }
