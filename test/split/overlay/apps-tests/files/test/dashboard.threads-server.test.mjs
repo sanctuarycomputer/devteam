@@ -263,7 +263,6 @@ test('/api/threads asks tmux nothing on a read: a tmux that logs every call sees
 test("the thread layer's rules: what the pointer is on, a subject that fits, where a card opens, its state, the pins and the dock's words", async () => {
   const A = await threadsCore();
   assert.ok(typeof A.tKey === 'function' && A.T_TYPES.length > 0, 'the threads-core lib is built');
-  vm.runInContext(`${src}\n;globalThis.api = { T_CAPS, T_ANCHOR_CAPS, T_SUBJECT_KEYS, T_ERRORS, T_ERROR_MAX, T_AT_MAX, T_BOX_CAPABILITY, T_BOX_CAPABILITY_TAIL, tUncap, tBox, tAnchor, T_TYPES, T_REF, T_REF_MAX, T_KIND, T_HOME, T_WAIT_MS, T_TURN_MAX, T_ENCODED_MAX, T_SUBJECT_MAX, T_TITLE_MAX, tBytes, tCut, tLine, tSubjectAt, tFit, tCardState, tPlace, tWhere, tPins, tUnread, T_LENS_SAYS, tLensMessage, tArtPath, tFrameTitle, tFrameOn, tKey, tGoRoute, parseSettingView };`, ctx);
   const plain = (x) => JSON.parse(JSON.stringify(x));
   // the page and the kit name the same things, and the page sends no ref the log refuses
   const kitSrc = cliSource();
