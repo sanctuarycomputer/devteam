@@ -515,6 +515,7 @@ devteam box. Window 0 (operator) looks after the box: tell it what you want. Clo
 Add a repo:  cd ~/code && gh repo clone <owner/repo> && cd <repo> && claude "Use github.com/sanctuarycomputer/devteam to set up a fleet in this repo"
 Tools: languages per project with mise (mise install; asdf works too). box-pg 16 starts another Postgres. ~/.box/boot.sh is what starts at boot.
 Figma: in Claude, /mcp, pick figma and log in once; new sessions then have it, with your Figma access. Use an account limited to the files the fleet needs.
+Context7: every session can look up current library docs (a lookup sends Context7 what the session writes). For more than its free rate: a key from context7.com alone on the first line of ~/.box/context7-key (chmod 600), then claude mcp remove -s user context7; rm ~/.box/context7-mcp; the next boot adds it. The key then sits in Claude Code's user config, readable by every agent here.
 Expo: npx expo start --tunnel for your phone; eas build for builds.
 Heroku: heroku login -i, with a token from heroku authorizations:create --expires-in <seconds> --scope <scopes> on your laptop as the password. It lands in ~/.netrc, readable by every agent here, so keep it narrow and short. (The browser login is refused from another IP.)
 tmux: C-b s lists every session (each repo's supervisor and its workers); C-b d leaves one. touch ~/.devteam-quiet hides this.
@@ -549,6 +550,36 @@ if [ ! -e .box/figma-mcp ]; then
   fi
 fi
 # figma-mcp end
+# context7-mcp start
+# Context7's MCP for new sessions on the box: current docs for the libraries a session uses, so it
+# looks an API up instead of writing it from memory. Its hosted server, so nothing to install or pin.
+# What a lookup sends is whatever query text the session writes (meant as a library name and a
+# topic; nothing here limits it), Context7 can change its tools at any time, and its replies go
+# into the session as a third party's text. Without a key it is limited per address, which every
+# session here shares: with a key on the first line of ~/.box/context7-key (the owner makes it at
+# context7.com/dashboard) it goes as a header, and so lands in Claude Code's user config, readable
+# by every agent on the box. A key file with no key on its first line is noted and nothing is
+# added, so it is not quietly added keyless. Once per disk, as Figma's: delete ~/.box/context7-mcp
+# to add it again. Nothing here may stop the boot.
+if [ ! -e .box/context7-mcp ]; then
+  c7key=$(head -n 1 .box/context7-key 2>/dev/null | tr -d '[:space:]')
+  if [ -e .box/context7-key ] && [ -z "$c7key" ]; then
+    note "~/.box/context7-key has no key on its first line: Context7's MCP not added; the next boot tries again"
+  elif timeout 30 claude mcp get context7 2>/dev/null | grep -q 'Scope: User config'; then
+    touch .box/context7-mcp 2>/dev/null || note "could not mark the Context7 MCP as added"
+  # the keyed add's output is dropped, not logged: what a CLI version echoes of its header is its own
+  elif if [ -n "$c7key" ]; then
+      timeout 30 claude mcp add --transport http --scope user context7 https://mcp.context7.com/mcp --header "CONTEXT7_API_KEY: $c7key" >/dev/null 2>&1
+    else
+      timeout 30 claude mcp add --transport http --scope user context7 https://mcp.context7.com/mcp >> box.log 2>&1
+    fi; then
+    touch .box/context7-mcp 2>/dev/null || note "could not mark the Context7 MCP as added"
+  else
+    note "could not add the Context7 MCP; the next boot tries again"
+  fi
+  unset c7key
+fi
+# context7-mcp end
 # Window 0 is the operator (operator.md): the first thing the Terminal shows, and what checks the restore.
 # A window named operator in home is how the box knows it is up: one closed, even on purpose, is back
 # within a minute (the minute loop), and one renamed is no longer seen, so a second starts.
@@ -821,7 +852,7 @@ ENV DEVTEAM_MEMORY_COUNTS_CACHE=1
 # What this image is, for the gateway's /box.json and box-status: the kit release it was cut at (the
 # release-prep PR sets it, and box-pins verify checks it) and the tools' pins above. Late, so a new
 # stamp rebuilds only what follows: the alpha's install for that release.
-ARG DEVTEAM_RELEASE=v0.107.0
+ARG DEVTEAM_RELEASE=v0.108.0
 ENV DEVTEAM_KIT_RELEASE=$DEVTEAM_RELEASE \
     DEVTEAM_BOX_TOOLS="claude-code=$CLAUDE_CODE_VERSION claude-swap=$CLAUDE_SWAP_VERSION gh=$GH_VERSION ttyd=$TTYD_VERSION mise=$MISE_VERSION uv=$UV_VERSION"
 

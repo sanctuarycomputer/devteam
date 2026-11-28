@@ -236,7 +236,6 @@ export function colourField(id: Json, path: string, label: string, none: boolean
     mode = isRef(v) && !chosen ? v.$ref : v === null && none && !chosen ? '@none' : '@hex';
     if (none) opts.push(['@none', 'None']);
   } else {
-    // @ts-ignore -- variantHeld is canvas-sync's stub (typed never) until kit-1015 ports it; the line is the page's
     const held = variantHeld(id, path).held;
     mode = chosen ? '@hex' : !held ? '@base' : isRef(v) ? v.$ref : v === null ? '@none' : '@hex';
     opts.push(['@base', 'From base']);

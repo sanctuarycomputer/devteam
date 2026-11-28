@@ -1,58 +1,23 @@
-// apps-src@1 view stub: canvas-editing
-// Its port replaces this folder. Until then every function another part of the canvas calls from it, and every binding it shares (on `shared`), throws "not ported: canvas-editing".
+// canvas-editing (kit-1016): components, variants and instances, the tools, Move and the resize handles
+// (canvas.html 2630-3572), as modules. Every declaration of each is exported from here, for core and
+// the other sections; `shared` holds the bindings other sections read or assign (kit-1013's rule:
+// `editing.shared.<name>`).
+import { initComponents } from './components';
+import { initTools } from './tools';
+import { initResize } from './resize';
+import { initMove } from './move';
 
-export function addNode(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-editing');
+export * from './held';
+export * from './components';
+export * from './tools';
+export * from './resize';
+export * from './move';
+
+// Its load-time setup: the page's listeners of these lines, in its order. mount() runs it once, after
+// panels' and sync's, before history's, presence's and start().
+export function init(): void {
+  initComponents();
+  initTools();
+  initResize();
+  initMove();
 }
-
-export function dragWaiting(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-editing');
-}
-
-export function drawHandles(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-editing');
-}
-
-export function editFields(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-editing');
-}
-
-export function hasBox(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-editing');
-}
-
-export function keepDrag(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-editing');
-}
-
-export function placeAt(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-editing');
-}
-
-export function setTool(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-editing');
-}
-
-export function toolsOn(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-editing');
-}
-
-export const shared = {
-  get gesture(): any { throw new Error('not ported: canvas-editing'); },
-  set gesture(_v: any) { throw new Error('not ported: canvas-editing'); },
-  get IMAGE_BYTES(): any { throw new Error('not ported: canvas-editing'); },
-  set IMAGE_BYTES(_v: any) { throw new Error('not ported: canvas-editing'); },
-  get IMAGE_SAY(): any { throw new Error('not ported: canvas-editing'); },
-  set IMAGE_SAY(_v: any) { throw new Error('not ported: canvas-editing'); },
-  get pen(): any { throw new Error('not ported: canvas-editing'); },
-  set pen(_v: any) { throw new Error('not ported: canvas-editing'); },
-  get placing(): any { throw new Error('not ported: canvas-editing'); },
-  set placing(_v: any) { throw new Error('not ported: canvas-editing'); },
-  get tool(): any { throw new Error('not ported: canvas-editing'); },
-  set tool(_v: any) { throw new Error('not ported: canvas-editing'); },
-  get toolPress(): any { throw new Error('not ported: canvas-editing'); },
-  set toolPress(_v: any) { throw new Error('not ported: canvas-editing'); },
-};
-
-// Its load-time setup (listeners), run once by the page mount before start().
-export function init(): void {}
