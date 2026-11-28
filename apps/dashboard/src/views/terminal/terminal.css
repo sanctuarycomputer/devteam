@@ -1,0 +1,33 @@
+/* kit-1006: index.html's term-css region, byte for byte (the Supervisor and Shell tabs). The app loads it last, as index.html has it. */
+/* term-css start */
+/* the Supervisor and Shell tabs (kit-614): on a terminal tab the panel's + hides (html.th-term) and Wide widens the
+   panel to half the window above 900px (html.th-wide, over the layout's --threads-w, so the page and a peek move
+   with it); the tab's box fills the panel's body, the screen scrolling sideways below the font's 9 px floor */
+html.th-term .threads-head [data-tl-new] { display: none; }
+@media (min-width: 901px) { html.th-term.th-wide { --threads-w: max(380px, 50vw); } }
+/* a length, so it computes to pixels: thWidth() reads the wide panel back (a new card is placed left of it, not under) */
+@property --threads-w { syntax: '<length>'; inherits: true; initial-value: 380px; }
+#th-wide[aria-pressed="true"] { background: var(--well); color: var(--fg); box-shadow: inset 0 0 0 1px var(--fg-2); }
+html.th-term #th-body { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+html.th-term #th-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.term-box { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.term-bar { display: flex; align-items: center; gap: 8px; padding: 8px var(--panel-pad); border-bottom: 1px solid var(--line); font-size: 12px; color: var(--fg-2); flex: none; }
+.term-bar .where { font-family: var(--mono); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-bar .live { display: inline-flex; align-items: center; gap: 6px; }
+.term-bar .live .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green-fg, var(--green)); display: inline-block; }
+.term-bar .live.off .dot { background: var(--muted); }
+.term-wrap { flex: 1; min-height: 0; overflow: auto; padding: 8px var(--panel-pad); background: var(--surface); }
+.term-wrap:focus-within { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--blue) 45%, transparent); }
+.term-screen .xterm { padding: 0; }
+.term-screen .xterm-viewport { overflow-y: hidden !important; }
+.term-plain { margin: 0; font: 11px/1.35 var(--mono); white-space: pre; color: var(--fg); }
+.term-state { padding: 28px var(--panel-pad); }
+.term-state h3 { margin: 0 0 6px; font-size: 14px; }
+.term-state p { color: var(--fg-2); margin: 0 0 12px; }
+.term-state code { display: inline-block; background: var(--well); border-radius: 4px; padding: 2px 6px; margin-bottom: 12px; }
+.term-ask { flex: none; display: flex; align-items: center; gap: 8px; padding: 8px var(--panel-pad); border-top: 1px solid var(--line); font-size: 13px; }
+.term-ask span { flex: 1; }
+.term-hint { flex: none; padding: 6px var(--panel-pad); border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; }
+.term-hint:empty { display: none; }
+.term-hint kbd { font: 11px var(--mono); border: 1px solid var(--line-2); border-radius: 4px; padding: 0 4px; color: var(--fg-2); }
+/* term-css end */
