@@ -1,0 +1,33 @@
+/* kit-991: the Overview page's CSS, index.html's css-overview region, byte for byte. */
+/* css-overview start */
+  /* Overview (kit-90): a header with the status pill at its far right, then the shell's ruled sections */
+  /* the header is Overview's first content, inside its section, where the shell's first-child header rule
+     doesn't reach: its name's text --page-top below the bar (it sits 2px lower in its 27px line box) */
+  #overview > .ov-head:first-child { margin-top: -2px; }
+  #overview .ov-head { margin-bottom: 14px; }
+  #overview .ov-head .ov-pill { margin-left: auto; display: inline-flex; flex: none; }
+  #overview .sec-b { min-width: 0; }
+  #overview .rowline .r { margin-left: auto; flex: none; color: var(--fg-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  #overview .rows > .rowline { padding: 2px 6px; border-radius: 6px; }
+  #overview a.rowline { color: inherit; text-decoration: none; }
+  #overview a.rowline:hover { background: var(--hover); }
+  #overview a.rowline:focus-visible, #overview a.ov-goal:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 1px; }
+  #overview .stats { row-gap: 14px; }
+  #overview .stats .stat { background: none; border: 0; box-shadow: none; padding: 0; border-radius: 0; min-width: 0; }
+  #overview .stats .stat[title] { cursor: help; }
+  #overview .stat .k { display: block; font-size: 12px; color: var(--fg-2); }
+  #overview .stat .k i { font-size: 12px; color: var(--muted); }
+  #overview .stat .sparkline { display: block; margin-top: 6px; }
+  #overview .ov-goals { align-items: stretch; }
+  .ov-goal { display: block; min-width: 0; box-sizing: border-box; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; color: inherit; text-decoration: none; }
+  .ov-goal:hover { background: var(--hover); }
+  .ov-goal .steps { margin: 6px 0 2px; }
+  .chip-next { display: inline-flex; align-items: center; height: 18px; padding: 0 7px; border-radius: 999px; font-size: 11px; font-weight: 600; background: var(--fg); color: var(--bg); flex: none; }
+  /* Commit history: a column a week, a row a day, each cell 10px tall, the section's body wide */
+  #overview .mosaic { display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, 10px); gap: 3px; width: 100%; }
+  #overview .mosaic i { border-radius: 2px; background: var(--well); min-width: 0; }
+  #overview .mosaic i.l1 { background: color-mix(in srgb, var(--green) 30%, var(--well)); } #overview .mosaic i.l2 { background: color-mix(in srgb, var(--green) 55%, var(--well)); }
+  #overview .mosaic i.l3 { background: color-mix(in srgb, var(--green) 78%, var(--well)); } #overview .mosaic i.l4 { background: var(--green); }
+  .card.goal.blk-full, .ov-goal.blk-full { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
+  .card.goal.blk-partial, .ov-goal.blk-partial { border-color: color-mix(in srgb, var(--amber) 55%, var(--line)); }
+/* css-overview end */
