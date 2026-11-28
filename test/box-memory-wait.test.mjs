@@ -187,7 +187,7 @@ test('a metrics child that fails at startup wakes the wait at once with "metrics
   try {
     const { code, out } = await returned(w, 0);
     assert.equal(code, 0);
-    assert.match(out, /^metrics failed \(exit 1: .*metrics failed \(test\)\): the tick is due; look at why \(devteam\.mjs metrics --json\)/);
+    assert.match(out, /^metrics failed \(exit 1: .*metrics failed \(test, pid \d+\)\): the tick is due; look at why \(devteam\.mjs metrics --json\)/);
     assert.doesNotMatch(out, /nothing new/);
     assert.equal(w.lines().length, 1, 'returned after the startup snapshot');
   } finally { w.kill(); }
@@ -214,7 +214,7 @@ test('a metrics child that hangs is killed at the child timeout and wakes the wa
   } finally { w.kill(); }
 });
 
-test('the same metrics failure wakes once: the next wait waits out the tick and says "still failing"; a run that works resets it', async (t) => {
+test('the same metrics failure wakes once: the next wait waits out the tick and says "still failing", whatever its text; a tick on, it wakes again', async (t) => {
   const X = fixture('mw-metrics-repeat');
   t.after(() => X.F.done());
   const first = await returned(startWait(X, { DEVTEAM_TEST_WAIT_FAIL_METRICS: '0' }), 0);
@@ -229,8 +229,36 @@ test('the same metrics failure wakes once: the next wait waits out the tick and 
     assert.match(out, /^metrics still failing \(exit 1: .*\): the tick is due; look at why/);
     assert.doesNotMatch(out, /nothing new/);
   } finally { w.kill(); }
-  const third = await returned(startWait(X, { DEVTEAM_TEST_WAIT_FAIL_METRICS: '1' }), 1);
-  assert.match(third.out, /^metrics failed \(exit 1: /, 'a run that worked ended the failure, so the next one wakes again');
+  // the test's metrics error names its pid, so the text differed on every run: the kind is what matched
+  const record = path.join(X.F.old, 'docs/devteam/run/wait-metrics-failed');
+  assert.equal(JSON.parse(fs.readFileSync(record, 'utf8')).kind, 'exit 1');
+  write(record, `${JSON.stringify({ kind: 'exit 1', at: Date.now() - 11 * 60000 })}\n`); // reported over a tick (10 min) ago
+  const third = await returned(startWait(X, { DEVTEAM_TEST_WAIT_FAIL_METRICS: '0' }), 0);
+  assert.match(third.out, /^metrics failed \(exit 1: /, 'reported over a tick ago, so it wakes again');
+});
+
+test('a metrics run that flips between failing and working wakes once a tick, and the tick says so', async (t) => {
+  const X = fixture('mw-metrics-flap');
+  t.after(() => X.F.done());
+  const first = await returned(startWait(X, { DEVTEAM_TEST_WAIT_FAIL_METRICS: '1' }), 1);
+  assert.match(first.out, /^metrics failed \(exit 1: /);
+  const t0 = Date.now();
+  const w = startWait(X, { DEVTEAM_TEST_WAIT_FAIL_METRICS: '1' }, 1);
+  try {
+    await until(() => w.child.exitCode !== null, 'the second wait to return');
+    const { out } = await w.done;
+    assert.ok(Date.now() - t0 >= 55000, `the second wait returned after ${Date.now() - t0} ms, not at the tick`);
+    assert.match(out, /^metrics failed 1 time\(s\) in this wait, last \(exit 1: .*\), and its last run worked: the tick is due/);
+  } finally { w.kill(); }
+});
+
+test('a different kind of metrics failure in the same tick wakes again', async (t) => {
+  const X = fixture('mw-metrics-kind');
+  t.after(() => X.F.done());
+  const first = await returned(startWait(X, { DEVTEAM_TEST_WAIT_FAIL_METRICS: '0' }), 0);
+  assert.match(first.out, /^metrics failed \(exit 1: /);
+  const second = await returned(startWait(X, { DEVTEAM_TEST_WAIT_FAIL_METRICS: '0:hang', DEVTEAM_TEST_WAIT_CHILD_TIMEOUT_MS: '3000' }), 0);
+  assert.match(second.out, /^metrics failed \(timed out after 3s\)/);
 });
 
 test('a "metrics failed" report still lists the owner lines that arrived since the last wait', async (t) => {

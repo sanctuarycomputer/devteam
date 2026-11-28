@@ -21348,7 +21348,7 @@ function efficiencyOf(m) {
 function cmdMetrics() {
   // Tests only: wait's fail-closed checks (DEVTEAM_TEST_WAIT_FAIL_METRICS) have this child crash or hang
   if (process.env.DEVTEAM_TEST_METRICS_FAIL === 'hang') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 600000);
-  if (process.env.DEVTEAM_TEST_METRICS_FAIL) die('metrics failed (test)');
+  if (process.env.DEVTEAM_TEST_METRICS_FAIL) die(`metrics failed (test, pid ${process.pid}) `); // text that changes each run, ending in a space
   const since = flagStr('since') ? Date.parse(flagStr('since')) : 0;
   if (Number.isNaN(since)) die('--since must be a date');
   const m = collectMetrics(since, since);
@@ -38113,31 +38113,40 @@ function cmdWait() {
   const childMs = Number(process.env.DEVTEAM_TEST_WAIT_CHILD_TIMEOUT_MS) > 0 ? Number(process.env.DEVTEAM_TEST_WAIT_CHILD_TIMEOUT_MS) : WAIT_CHILD_TIMEOUT_MS;
   const started = []; // the kit children started since the last trace line (cycle 0's include the startup poll)
   // A child that hangs is killed at childMs, so the loop always comes back; why the last child
-  // failed is kept for the report (a failed metrics run wakes the supervisor, it never reads as quiet).
+  // failed is kept for the report (a failed metrics run wakes the supervisor, it never reads as quiet),
+  // with its kind (timeout, exit n, spawn error, not JSON), which doesn't change with the error's text.
   let subFailed = null;
+  let subFailKind = null;
   const sub = (args) => {
     if (trace) started.push(args);
     const env = args[0] === 'metrics' && failsNow(metricsRuns++) ? { ...process.env, DEVTEAM_TEST_METRICS_FAIL: failHow || 'exit' } : process.env;
     const r = spawnSync(process.execPath, [self, ...args], { cwd: mainRoot, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: childMs, killSignal: 'SIGKILL' });
     if (args[0] === 'messages' && failMessages > 0) { failMessages--; return null; }
-    subFailed = r.error?.code === 'ETIMEDOUT' ? `timed out after ${Math.round(childMs / 1000)}s`
+    const errLine = (r.stderr || '').trim().split('\n').pop().replace(/\s+/g, ' ').slice(0, 200).trim();
+    subFailKind = r.error?.code === 'ETIMEDOUT' ? 'timeout' : r.error ? `spawn ${r.error.code ?? 'error'}` : r.status !== 0 ? `exit ${r.status ?? r.signal}` : null;
+    subFailed = subFailKind === 'timeout' ? `timed out after ${Math.round(childMs / 1000)}s`
       : r.error ? r.error.code ?? r.error.message
-      : r.status !== 0 ? `exit ${r.status ?? r.signal}${(r.stderr || '').trim() ? `: ${(r.stderr || '').trim().split('\n').pop().slice(0, 200)}` : ''}`
+      : subFailKind ? `${subFailKind}${errLine ? `: ${errLine}` : ''}`
       : null;
     if (subFailed) return null;
-    try { return JSON.parse(r.stdout); } catch { subFailed = 'its output was not JSON'; return null; }
+    try { return JSON.parse(r.stdout); } catch { subFailKind = 'not JSON'; subFailed = 'its output was not JSON'; return null; }
   };
   // What arrived since the last wait woke the supervisor counts as new, though it is already in the
   // first snapshot: a worker's message that lands during the tick (or while metrics runs, which on a
   // long log takes a while) would otherwise wait out the whole next tick. A message the supervisor
   // leaves open wakes it once, not every time.
   const sinceFile = path.join(runDir, 'wait-since');
-  // A failed metrics run wakes the supervisor once per distinct failure: the reason last reported is
-  // kept here until a run succeeds, and the same failure again waits out the tick (it can't be
-  // acked, so waking on it every call would spin).
+  // A failed metrics run wakes the supervisor at most once a tick for each kind of failure: the kind
+  // last reported and when are kept here, and the same kind again within the tick (a repeat, or a
+  // run that flips between working and failing) waits it out and is said when it is due. It can't
+  // be acked, so waking on it every call would spin.
   const metricsFailFile = path.join(runDir, 'wait-metrics-failed');
-  let metricsReported = readText(metricsFailFile)?.trim() || null;
-  let stillFailing = null;
+  // within a tick of this wait's start: one that held at the start holds to the end of the wait
+  const quietSince = Date.now() - minutes * 60000;
+  let metricsReported = null;
+  try { const j = JSON.parse(readText(metricsFailFile) ?? 'null'); if (j && typeof j.kind === 'string' && Number(j.at) > 0) metricsReported = j; } catch {}
+  let quietFails = 0; // failures this wait that didn't wake, and whether the last run failed
+  let lastFail = null;
   const since = Number(readText(sinceFile)) || null;
   // Sensors are polled on every cycle when one is due (checked here, before spawning anything); a
   // new outage or a severity-4 event wakes the supervisor once. A poll that fails says so once.
@@ -38196,6 +38205,7 @@ function cmdWait() {
     // a metrics run that failed is not "no high findings": it is reported, at startup or mid-wait
     const m = sub(['metrics', '--json']);
     now.metricsFailed = m ? null : subFailed ?? 'no result';
+    now.metricsFailKind = m ? null : subFailKind ?? 'no result';
     now.high = (m?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
     if (trace) {
       const r = readLog.reads ?? 0;
@@ -38243,13 +38253,14 @@ function cmdWait() {
   // the owner's new lines, and a pointer to the threads when one of them is a thread or a turn
   const ownerSaid = (ks) => `${ks.length} new line(s) from the owner: ${ks.slice(-5).join(', ')} (questions --all, history --tail 20${ks.some((k) => /^[tu]-/.test(k)) ? '; a thread: thread list --waiting' : ''})`;
   const report = (why, lines) => { fs.mkdirSync(runDir, { recursive: true }); fs.writeFileSync(sinceFile, `${Date.now()}\n`); out(why); for (const l of lines) out(`  ${l}`); out('then: the tick (supervisor.md §3), and wait again'); };
-  // a run that worked ends the failure; a new one is reported with what else the snapshot has
+  // a new kind of failure, or one not reported this tick, is reported with what else the snapshot has
   const metricsFailed = (now, lines) => {
     const why = now.metricsFailed;
-    if (!why) { if (metricsReported) { try { fs.rmSync(metricsFailFile, { force: true }); } catch {} metricsReported = null; } stillFailing = null; return false; }
-    if (why === metricsReported) { stillFailing = why; return false; }
+    if (!why) { if (lastFail) lastFail.ended = true; return false; }
+    const kind = now.metricsFailKind;
+    if (metricsReported?.kind === kind && metricsReported.at > quietSince) { quietFails++; lastFail = { why }; return false; }
     report(`metrics failed (${why}): the tick is due; look at why (devteam.mjs metrics --json)`, lines);
-    try { fs.writeFileSync(metricsFailFile, `${why}\n`); } catch {}
+    try { fs.writeFileSync(metricsFailFile, `${JSON.stringify({ kind, at: Date.now() })}\n`); } catch {}
     return true;
   };
   if (firstAlerts.length) return report('production needs you (sensor status; supervisor.md, Monitoring):', firstAlerts);
@@ -38274,7 +38285,8 @@ function cmdWait() {
     const lines = [...said, ...fresh('high').map((x) => `finding ${x}`)];
     if (lines.length) return report('something needs you:', lines);
   }
-  if (stillFailing) return report(`metrics still failing (${stillFailing}): the tick is due; look at why (devteam.mjs metrics --json)`, []);
+  if (lastFail && !lastFail.ended) return report(`metrics still failing (${lastFail.why}): the tick is due; look at why (devteam.mjs metrics --json)`, []);
+  if (lastFail) return report(`metrics failed ${quietFails} time(s) in this wait, last (${lastFail.why}), and its last run worked: the tick is due; look at why (devteam.mjs metrics --json)`, []);
   report(`nothing new in ${minutes} min: the tick is due`, []);
 }
 
