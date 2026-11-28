@@ -5921,6 +5921,15 @@ function notSchedulable(t) {
   if (coverageGap(name, repo(name))) return 'unowned files';
   return null;
 }
+// The findings that cover a ticket that can't start (T10): the one about its own repo, for the
+// reason it gives. "In review" has none: an unreachable link elsewhere says nothing about it.
+function cantStartCover(t, why) {
+  const name = repoOfTicketLink(t);
+  // link-unreachable only: repo-unreachable is raised for a repo that reads, never this one
+  if (why === 'repo unreachable') return [{ kind: 'link-unreachable', subject: name }];
+  if (why === 'unowned files') return [{ kind: 'unowned-files', subject: name }];
+  return [];
+}
 // A cap setting as a number to compare against: null, absent or not a positive number is no cap.
 const capOf = (v) => (typeof v === 'number' && v > 0 ? v : Infinity);
 const capWords = (v) => (Number.isFinite(capOf(v)) ? String(v) : 'no cap');
@@ -21255,11 +21264,6 @@ function collectMetrics(since, reviewsSince = 0) {
     }
   }
   linkDutyFindings(settings, now, add);
-  // The move findings come last: a move is covered by what the run raised above (next-moves).
-  const moves = nextMoves();
-  for (const x of moveFindings(moves, f, now)) add(x.severity, x.kind, x.subject, x.detail, x.suggestion);
-  writeMovesCache(moves);
-  const order = { high: 0, medium: 1, low: 2 };
   // A finding someone has looked at and set aside (`ack`) moves to acknowledged until the ack
   // expires or its subject changes; it is never hidden.
   const ackWindow = settings.finding_ack_hours * 3600000;
@@ -21270,6 +21274,12 @@ function collectMetrics(since, reviewsSince = 0) {
   const lasting = (a) => a.source === 'ack' && ['supervisor', 'owner'].includes(writerClass(a.created_by)) && /^merged-without-merge [^\s:]+:[0-9a-f]{12}$/.test(a.subject);
   const acks = logObjects('observation').filter((o) => o.kind === 'finding-ack' && (lasting(o) || now - Date.parse(o.created_at) < ackWindow));
   const ackOf = (x) => acks.filter((a) => a.subject === `${x.kind} ${x.subject}`).sort(byTime).pop();
+  // The move findings come last: a move is covered by what the run raised above (next-moves), but
+  // not by a finding set aside: that ack is on the cover, never on the move.
+  const moves = nextMoves();
+  for (const x of moveFindings(moves, f.filter((x) => !ackOf(x)), now)) add(x.severity, x.kind, x.subject, x.detail, x.suggestion);
+  writeMovesCache(moves);
+  const order = { high: 0, medium: 1, low: 2 };
   const sorted = f.sort((a, b) => order[a.severity] - order[b.severity]);
   m.findings = sorted.filter((x) => !ackOf(x));
   // a windowed run (metrics --since, retro) drops older findings: it counts but keeps no record, so
@@ -21772,7 +21782,7 @@ function ticketMoves() {
       }
       if (notStarted) {
         const why = notSchedulable(t);
-        if (why && why !== 'parked') return at({ move: 'cant-start', words: `Can't start: ${why}`, holder: 'supervisor', since: readySince(t), covered_by: ['link-unreachable', 'repo-unreachable', 'unowned-files'].map((kind) => ({ kind, subject: '*' })) }); // T10
+        if (why && why !== 'parked') return at({ move: 'cant-start', words: `Can't start: ${why}`, holder: 'supervisor', since: readySince(t), covered_by: cantStartCover(t, why) }); // T10
       }
       const goalDrain = mode === 'drain' ? ticketGoals(t).find((x) => goalMode(x) === 'drain') : null;
       if ((notStarted && (goalDrain || fleetDrain)) || (phase === 'parked' && fleetDrain)) {
@@ -21881,16 +21891,24 @@ function cmdMoves() {
 // The three move findings, from the moves and the findings already raised in the same run: a pure
 // function of the two (and the clock), so a test can load it on its own. Only a move's own subject
 // raises one: never a quiet move (it waits on purpose), never a copied one (via: its source raises
-// it). A move is covered when a finding its covered_by names was raised in the run, on that subject
-// or, for "*", on any; a covered move raises nothing, though it keeps its flag. By the move's flag:
-// none (no row knew the state: G20, T14) raises no-next-move, owed (rung 1) move-owed, stalled
-// (rung 2) move-stalled. Each is high, so wait wakes on it, but for a stalled held ticket (T2b) still
-// inside its --until date (wait.until): a known wait, medium; with no date, or past it, high, since
-// nothing else says a hold has lapsed or its causes are done. The finding's subject is
-// "<subject> <move>:<ref id>", so an ack sets aside one move with one ref, and a new move or a new
-// ref is a new finding.
+// it). A covered move raises nothing, though it keeps its flag. Only a high finding its covered_by
+// names, raised in the run on that subject, covers: wait wakes on high only, so a medium one would
+// hold a supervisor's move out of wait for good (a worker waited 80 h for the word under
+// waiting-on-supervisor). A high cover wakes wait itself, so it covers at every rung: a second high
+// finding beside it would only need a second ack. The one exception is "*", any subject:
+// idle-capacity, idle-planning and memory-full are medium and count the moves they stand for, so
+// each ready ticket or goal raising its own high move-owed beside them would only repeat them; they
+// cover while the move is owed (rung 1) and never once it is stalled (rung 2), so it reaches wait
+// then. raised holds no acked finding (collectMetrics): an ack is on the cover, not on the move. By
+// the move's flag: none (no row knew the state: G20, T14) raises no-next-move, owed (rung 1)
+// move-owed, stalled (rung 2) move-stalled. Each is high, so wait wakes on it, but for a stalled
+// held ticket (T2b) still inside its --until date (wait.until): a known wait, medium; with no date,
+// or past it, high, since nothing else says a hold has lapsed or its causes are done. The finding's
+// subject is "<subject> <move>:<ref id>", so an ack sets aside one move with one ref, and a new move
+// or a new ref is a new finding.
 function moveFindings(moves, raised, now = Date.now()) {
-  const covered = (m) => (m.covered_by ?? []).some((c) => raised.some((f) => f.kind === c.kind && (c.subject === '*' || String(f.subject) === c.subject)));
+  const covers = (m, c, f) => f.kind === c.kind && (c.subject === '*' ? m.flag !== 'stalled' : f.severity === 'high' && String(f.subject) === c.subject);
+  const covered = (m) => (m.covered_by ?? []).some((c) => raised.some((f) => covers(m, c, f)));
   const ageOf = (since) => { const t = Date.parse(since); if (Number.isNaN(t)) return 'since ?'; const min = Math.max(0, Math.floor((now - t) / 60000)); return min < 120 ? `${min} min` : min < 2880 ? `${Math.floor(min / 60)} h` : `${Math.floor(min / 1440)} d`; };
   const KIND = { none: 'no-next-move', owed: 'move-owed', stalled: 'move-stalled' };
   const stalledHint = (m) => (m.holder === 'owner' ? 'remind the owner what it holds up; a question that needn\'t be the owner\'s is withdrawn and decided (W1)'

@@ -279,6 +279,8 @@ test('next-moves A13: ticket rows: waits, start, the owner, merge, resume, block
     assert.equal(m.move, 'cant-start');
     assert.equal(m.words, "Can't start: in review");
     assert.equal(m.holder, 'supervisor');
+    // covered only by a finding about its own repo, for its own reason: none says "in review"
+    assert.deepEqual(m.covered_by, []);
   });
 });
 
