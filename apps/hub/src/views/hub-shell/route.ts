@@ -81,7 +81,8 @@ export function hubChoose(root: string) {
 // the address, marked with its key (the hash's first part, as written): a new entry only for a choice that changes it.
 // Written with History's own methods: Next's App Router patches history.pushState and replaceState to copy its
 // router state into every entry (next/dist/client/components/app-router.js), and an entry is the hub's mark alone,
-// as hub.html writes it. The popstate listener below keeps Next's off these entries (Next reloads on one it didn't write).
+// as hub.html writes it. The popstate listener below keeps Next's off these entries (Next reloads on one it didn't write):
+// it is added first, at bubble as hub.html's is, since bootHub runs in an effect of a child of Next's router.
 export function hubAddr(url: string, mayPush = false) {
   nav.hubTyped = null;
   const state = addrState(url);
@@ -185,5 +186,5 @@ export function installRoute() {
     if (it && head && (!it.frame || !keptHead(it.head))) _openAt(root, head);
     else if (root !== hs.selected) select(root);
     nav.hubPopAt = location.hash;
-  }, true);
+  });
 }
