@@ -1,0 +1,39 @@
+/* css-attachments start */
+  /* a box that takes dropped files (kit-171): the box draws the textarea's border and its focus ring, the
+     pills sit inside it under the text; a drag of files over it turns its border dashed blue */
+  .dropbox { margin-top: 8px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--surface); min-width: 0; }
+  .tl-compose .dropbox { margin-top: 6px; }
+  .dropbox textarea, .tl-compose .dropbox textarea { display: block; margin: 0; border: 0; border-radius: 6px; background: transparent; }
+  .dropbox textarea:focus { box-shadow: none; border: 0; }
+  .dropbox:focus-within { border-color: var(--blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent); }
+  .dropbox.drop-over { border: 1px dashed var(--blue); }
+  .dropbox > .pills { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 8px; min-width: 0; }
+  .dropbox > .pills:not(:empty) { padding-bottom: 8px; }
+  .att-pill { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; max-width: 100%; min-width: 0; font-size: 11px; font-weight: 500; line-height: 18px; padding: 0 2px 0 7px; border-radius: 999px; white-space: nowrap;
+    --c: var(--fg-2); color: var(--c); background: color-mix(in srgb, var(--c) 9%, transparent); border: 1px solid color-mix(in srgb, var(--c) 22%, transparent); }
+  .att-pill i { flex: none; }
+  .att-pill .pill-name { min-width: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+  .att-pill .pill-size, .att-pill .pill-up { flex: none; color: var(--muted); }
+  .att-pill button[data-pill-remove] { flex: none; height: 18px; width: 18px; margin: 0; padding: 0; border: 0; border-radius: 50%; background: none; color: inherit; line-height: 18px; font-size: 13px; }
+  .att-pill button[data-pill-remove]:hover { background: var(--hover); opacity: 1; }
+  .att-pill.refused { --c: var(--red-fg); white-space: normal; border-radius: 9px; padding-right: 7px; }
+  .att-pill.refused .pill-why { flex: 1 0 100%; min-width: 0; overflow-wrap: anywhere; padding-bottom: 2px; }
+  /* the files sent, as chips under a turn's words or an answer: a badge-sized pill each, an image's a button that
+     opens the viewer, any other's a download link */
+  .file-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; min-width: 0; }
+  .file-chip { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; min-width: 0; height: auto; margin: 0; padding: 0 7px; border-radius: 999px; font: inherit; font-size: 11px; font-weight: 500; line-height: 18px; white-space: nowrap; text-decoration: none; cursor: pointer;
+    --c: var(--fg-2); color: var(--c); background: color-mix(in srgb, var(--c) 9%, transparent); border: 1px solid color-mix(in srgb, var(--c) 22%, transparent); }
+  .file-chip:hover { opacity: 1; background: color-mix(in srgb, var(--c) 16%, transparent); }
+  span.file-chip { cursor: default; }
+  span.file-chip:hover { background: color-mix(in srgb, var(--c) 9%, transparent); }
+  .file-chip i { flex: none; }
+  .file-chip .chip-name { min-width: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+  .file-chip .chip-size { flex: none; color: var(--muted); }
+  .file-chip.gone { --c: var(--red-fg); cursor: default; }
+  .file-chip.gone .chip-name { color: var(--muted); text-decoration: line-through; }
+  .file-chip .chip-gone { flex: none; }
+  /* a dropped image on the viewer's stage, in the dashboard's own page */
+  #av-img { display: block; margin: auto; min-width: 0; min-height: 0; max-width: 100%; max-height: 100%; object-fit: contain; }
+  /* a viewer tab hides its × (css-viewer); while an image is up it is the way out without a keyboard */
+  .viewer.av-upload #av-close { display: inline-flex !important; }
+/* css-attachments end */
