@@ -21,8 +21,7 @@ import { markAnswered, seenHash } from '../attachments';
 import { peekHide } from '../peeks';
 import { openFile } from '../peek-kinds';
 
-// `Loose` is `any`: the stubs take unknown[] and the ported views' own types differ; the libs' seams are untyped
-type Loose = any;
+// each other view's function is typed by its own signature, so wireReview's typed seams check the arrows
 
 wireBridge({ reviewState, renderReviewPreview, onBridge });
 
