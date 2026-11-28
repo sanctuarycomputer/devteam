@@ -245,12 +245,30 @@ test('on a quiet log, a build that fails marks the served data stale, and one th
   await until(() => builds().slice(n0).every((b) => b.end !== null), 'the late build and its successor to end');
   await sleep(1500);
   fs.writeFileSync(files.fail, '');
+  let stale = null;
   try {
-    let stale = null;
     await until(async () => { const r = await data(url); if (r.stale) stale = r; else await sleep(500); return !!stale; }, 'a read marked stale after a failed build', 60000);
     assert.equal(stale.status, 200, 'still served, from the last good build');
+    // retries that fail too: every read stays marked, through each retry's start (no flicker)
+    for (let i = 0; i < 8; i++) {
+      const r = await data(url);
+      assert.equal(r.stale, 'true', `failing retries: read ${i + 1} stays marked stale`);
+      await sleep(1000);
+    }
   } finally { fs.rmSync(files.fail, { force: true }); }
-  await until(async () => { const r = await data(url); if (r.stale) await sleep(500); return !r.stale; }, 'a read not marked stale once a build succeeds again', 60000);
+  // only a good build clears it: the first unmarked read has a newer build than the marked ones
+  let clear = null;
+  await until(async () => { const r = await data(url); if (r.stale) await sleep(500); else clear = r; return !!clear; }, 'a read not marked stale once a build succeeds again', 60000);
+  assert.ok(generated(clear) > generated(stale), `cleared by a good build (${generated(stale)} -> ${generated(clear)})`);
+
+  // a build that hangs while the log stays quiet: marked once it has run a build's length plus the wait
+  setSleep(60000);
+  await sleep(1500); // past the reuse window: the next read starts the hanging build
+  const hangFrom = Date.now();
+  let hung = null;
+  await until(async () => { const r = await data(url); if (r.stale) hung = r; else await sleep(500); return !!hung; }, 'a read marked stale while a build hangs on a quiet log', 30000);
+  assert.ok(builds().at(-1).end === null && builds().at(-1).start >= hangFrom - 50, 'while the hanging build runs');
+  setSleep(0);
   await running.stop();
   running = null;
 });

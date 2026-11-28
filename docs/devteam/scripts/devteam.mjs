@@ -29919,14 +29919,15 @@ async function dashRoutesPage(D, req, res, q) {
     // A slow project (its last build ran over DATA_QUICK_MS) is answered at once from the last good
     // build, while a newer one runs for the next read: its log moves every few seconds and a build
     // takes a minute, so a read that waited for a current build waited on every load. Not after an
-    // owner action the kept build doesn't show yet: that read waits as below. Marked stale when the
-    // latest build failed, or when it is out of date and its successor is overdue: the build running
-    // has run a build's length plus DATA_WAIT_MS (a build waiting its turn is not late), or, for the
-    // copy kept on disk before any build here ended, it ended a build's length plus DATA_WAIT_MS ago.
+    // owner action the kept build doesn't show yet: that read waits as below. Marked stale while
+    // builds have failed since the last good one, or while the build running has run a build's
+    // length plus DATA_WAIT_MS (hung or late, whether or not the log moved; a build waiting its turn
+    // is not late), or, for the copy kept on disk before any build here ended, when it is out of
+    // date and ended a build's length plus DATA_WAIT_MS ago.
     if (D.lastData && D.lastTook > DATA_QUICK_MS && D.lastEpoch >= D.actedEpoch) {
       void dashboardData().catch(() => {});
       const late = (t) => Date.now() - t > D.lastTook + DATA_WAIT_MS;
-      const overdue = D.lastFailed || (D.lastEpoch !== D.dataEpoch && (D.lastEpoch < 0 ? late(D.lastAsOf + D.lastTook) : D.building !== null && late(D.building)));
+      const overdue = D.failedSince !== null || (D.building !== null && late(D.building)) || (D.lastEpoch < 0 && D.lastEpoch !== D.dataEpoch && late(D.lastAsOf + D.lastTook));
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-devteam-page': pageVersion('dashboard'), ...(overdue ? { 'x-devteam-stale': 'true' } : {}) });
       return res.end(withViewer(D.lastData));
     }
@@ -30940,6 +30941,9 @@ async function cmdDashboard() {
   let lastAsOf = 0;
   let lastTook = 0;
   let lastEpoch = -1;
+  // when builds began failing since the last good one (null: the last one ended was good); only a
+  // good build clears it, so retries that fail too don't let the mark flicker off
+  let failedSince = null;
   try {
     const t = fs.readFileSync(keptFile, 'utf8');
     const nl = t.indexOf('\n');
@@ -30962,7 +30966,7 @@ async function cmdDashboard() {
     lastStart = Date.now();
     const b = { epoch: dataEpoch, started: lastStart, finished: null, r: null };
     b.done = new Promise((resolve) => b.child = execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: DASHBOARD_DATA_TIMEOUT_MS, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
-      if (!err && stdout) { lastData = stdout; lastAsOf = b.started; lastTook = Date.now() - b.started; lastEpoch = b.epoch; keep(stdout, lastAsOf, lastTook); }
+      if (!err && stdout) { lastData = stdout; lastAsOf = b.started; lastTook = Date.now() - b.started; lastEpoch = b.epoch; failedSince = null; keep(stdout, lastAsOf, lastTook); } else failedSince ??= Date.now();
       b.r = { ok: !err, stdout, stderr: err?.killed ? `dashboard-data took over ${DASHBOARD_DATA_TIMEOUT_MS < 120000 ? `${Math.round(DASHBOARD_DATA_TIMEOUT_MS / 1000)} s` : `${Math.round(DASHBOARD_DATA_TIMEOUT_MS / 60000)} minutes`} and was stopped (DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS)` : String(stderr ?? '') };
       b.finished = Date.now();
       resolve(b.r);
@@ -31140,7 +31144,7 @@ async function cmdDashboard() {
   // ms), and the kept /api/data build is stale (dataEpoch)
   const logWatch = presenceChanged(liveLogDir(), () => { dataEpoch += 1; presence.changed(); });
   every(logWatch.tick, 1000);
-  const D = dashContext({ log, page, pageCsp, run, describing, versioning, remote, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, ACTION_JSON, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, sessionPrompts, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get lastAsOf() { return lastAsOf; }, get lastTook() { return lastTook; }, get building() { return build && build.finished === null ? build.started : null; }, get lastFailed() { return !!build && build.finished !== null && !build.r.ok; }, get lastEpoch() { return lastEpoch; }, get actedEpoch() { return actedEpoch; }, set actedEpoch(v) { actedEpoch = v; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
+  const D = dashContext({ log, page, pageCsp, run, describing, versioning, remote, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, ACTION_JSON, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, sessionPrompts, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get lastAsOf() { return lastAsOf; }, get lastTook() { return lastTook; }, get building() { return build && build.finished === null ? build.started : null; }, get failedSince() { return failedSince; }, get lastEpoch() { return lastEpoch; }, get actedEpoch() { return actedEpoch; }, set actedEpoch(v) { actedEpoch = v; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
   // A throw out of any route is that request's failure (dashRequestFailed), never the dashboard's
   // stop: a rejection out of this async handler would reach processLog, which exits.
   const server = http.createServer(async (req, res) => {
