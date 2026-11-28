@@ -28,10 +28,11 @@ expose('select', select);
 expose('viewOnly', viewOnly);
 
 // hub.html's top-level box and term, read and written by the ported tests as the page's own (COMPAT values);
-// items and urlOf too, carry-overs outside COMPAT that kit-1012 folds in (ruling 9)
+// items, urlOf and selected too, carry-overs outside COMPAT that kit-1012 folds in (rulings 9, m-20261128-113317215)
 if (typeof window !== 'undefined') {
   Object.defineProperty(window, 'box', { get: () => hubShellState.box, set: (v) => { hubShellState.box = v; }, configurable: false });
   Object.defineProperty(window, 'items', { get: () => hubShellState.items, set: (v) => { hubShellState.items = v; }, configurable: false });
+  Object.defineProperty(window, 'selected', { get: () => hubShellState.selected, set: (v) => { hubShellState.selected = v; }, configurable: false });
   Object.defineProperty(window, 'urlOf', { get: () => hubShellState.urlOf, set: (v) => { hubShellState.urlOf = v; }, configurable: false });
   Object.defineProperty(window, 'term', { get: getTerm, set: setTerm, configurable: false });
 }
