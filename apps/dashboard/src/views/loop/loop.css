@@ -1,0 +1,40 @@
+/* kit-996: the Loop's CSS, index.html's css-loop, css-loop-tabs and css-loop-tables regions, byte for byte (spec A6). */
+/* css-loop start */
+  /* loop */
+  .why { font-size: 12px; color: var(--fg-2); margin: 4px 0 8px; padding: 4px 10px; border-left: 2px solid var(--line-2); }
+  .feed .card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; align-items: start; }
+  .feed .card.corrected { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
+  .goal { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .goal .gaps { font-size: 12px; color: var(--fg-2); margin: 0; padding-left: 18px; }
+  .qcard { border-left: 2px solid var(--amber); }
+  .qcard.door { border-left-color: var(--red); }
+  .qcard.trust { border-left-color: var(--green); }
+  .qid { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .qcard.done { border-left-color: var(--green); opacity: .85; }
+/* css-loop end */
+/* css-loop-tabs start */
+  /* loop tabs */
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 12px; flex-wrap: wrap; }
+  .tabs button { margin: 0; height: 30px; background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; color: var(--fg-2); padding: 0 10px; }
+  .tabs button:hover { color: var(--fg); opacity: 1; }
+  .tabs button[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--fg); }
+  .tabs .n { color: var(--muted); font-weight: 400; margin-left: 4px; }
+  .loop-intro { color: var(--fg-2); max-width: var(--measure); margin: 0 0 12px; }
+
+/* css-loop-tabs end */
+/* css-loop-tables start */
+  /* Self Improvement's tables (kit-96): each tab one flush card holding its table, at the grid's width */
+  /* the tab bar is the Loop's first content: its tabs' text --page-top below the bar, as Goals' */
+  #loop > .tabbar:first-child { margin-top: -8px; }
+  .loop-panel { margin-top: 12px; }
+  .loop-panel .card.flush { max-width: none; }
+  /* a valence, red to green */
+  .sign { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .sign.s-2 { color: var(--red-fg); } .sign.s-1 { color: color-mix(in srgb, var(--red-fg) 70%, var(--muted)); } .sign.s0 { color: var(--muted); }
+  .sign.s1 { color: color-mix(in srgb, var(--green-fg) 70%, var(--muted)); } .sign.s2 { color: var(--green-fg); }
+  /* the header's toggles (Orient's Needs orienting, Decide's two), pressed as the Board's Needs attention */
+  .pagebar .extra button[data-f="orient"], .pagebar .extra button[data-dec] { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 12px; }
+  .pagebar .extra button[data-f="orient"][aria-pressed="true"], .pagebar .extra button[data-dec][aria-pressed="true"] { background: var(--well); color: var(--fg); border-color: var(--fg-2); }
+/* css-loop-tables end */
+/* index.html:596 (css-inbox, words.css): restated so it again follows css-loop's .why, as in index.html, since loop.css loads after words.css in the app (rulings m-20261127-231855624-supervisor and m-20261128-053344465-supervisor; kit-1075's @layer removes it). */
+  .why { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }

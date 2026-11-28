@@ -351,3 +351,67 @@ test("a login-change stop with someone's text in the input, quoted, as content, 
     assert.deepEqual(F.relaunched(), []);
   } finally { F.done(); }
 });
+
+// The supervisor watchdog: wait is the loop that acts on findings, so one out of it with work owed
+// is told once a tick_minutes, never mid-turn or over a line, and after three looks the hub is told.
+test('a supervisor out of its wait loop with a move owed is nudged once a tick, and the hub told after three', { skip: !hasTmux }, async () => {
+  const F = fixture('quiet');
+  try {
+    const run = path.join(F.root, 'docs/devteam/run');
+    const waited = (minAgo) => write(path.join(run, 'wait-since'), `${Date.now() - minAgo * 60000}\n`);
+    const move = { subject: 'goal:g-1', move: 'merge-it', words: 'merge it', holder: 'supervisor', ref: null, title: 'g-1', since: new Date(Date.now() - 2 * 3600000).toISOString(), command: null, covered_by: [], quiet: null, via: null, flag: null, rung: 0 };
+    const cache = (moves) => write(path.join(run, 'cache/next-moves.json'), JSON.stringify({ next_move: 1, at: new Date().toISOString(), moves }));
+    // a look a tick_minutes ago, as the next due one finds it
+    const age = () => { const f = path.join(run, 'accounts.json'); const s = json(fs.readFileSync(f, 'utf8')); s.supervisor_quiet.at = new Date(Date.now() - 16 * 60000).toISOString(); write(f, JSON.stringify(s)); };
+    const nudges = (keys) => (keys.match(/From the kit: you haven't run wait/g) ?? []).length;
+    const alert = () => json(F.run(['hello', '--json'], { DEVTEAM_ROLE: '' }).stdout).alert ?? '';
+    const s = supPane(F, 'sup', ['⏺ Done for now.', RULE, '❯ ', RULE]);
+    await until(() => s.shows().includes('Done for now'), 'the idle pane');
+    // a fresh wait: nothing
+    waited(1);
+    cache([move]);
+    F.tick();
+    assert.equal(s.keys(), '');
+    assert.equal(F.state().supervisor_quiet, null);
+    // quiet past two ticks, but nothing owed (a quiet move waits on purpose): nothing
+    waited(40);
+    cache([{ ...move, quiet: 'hold' }]);
+    F.tick();
+    assert.equal(s.keys(), '');
+    // quiet with a move owed: one nudge, naming it, with its Enter, and no second inside the tick
+    cache([move]);
+    F.tick();
+    await until(() => nudges(s.keys()) === 1, 'the nudge');
+    assert.match(s.keys(), /haven't run wait for 40 min and goal:g-1 merge-it is owed\. Run your tick \(supervisor\.md §3\), then keep the loop\.\r$/);
+    F.tick();
+    F.tick();
+    assert.equal(nudges(s.keys()), 1, 'at most once a tick_minutes');
+    assert.equal(F.state().supervisor_quiet.looks, 1);
+    assert.doesNotMatch(alert(), /supervisor-quiet/, 'one look is not yet news');
+    age();
+    F.tick();
+    await until(() => nudges(s.keys()) === 2, 'the second nudge');
+    assert.doesNotMatch(alert(), /supervisor-quiet/);
+    age();
+    F.tick();
+    await until(() => nudges(s.keys()) === 3, 'the third nudge');
+    assert.equal(F.state().supervisor_quiet.looks, 3);
+    assert.match(alert(), /supervisor-quiet: the supervisor of \S+ has not run wait for 40 min while goal:g-1 merge-it is owed \(3 nudges typed\)/);
+    // it ran wait: the watchdog is over, and the alert with it
+    waited(0);
+    age();
+    F.tick();
+    assert.equal(F.state().supervisor_quiet, null);
+    assert.doesNotMatch(alert(), /supervisor-quiet/);
+    assert.equal(nudges(s.keys()), 3);
+    // never into a running turn, nor over someone's half-typed line
+    for (const shown of [['⏺ Working.', '✻ Thinking… (esc to interrupt)', RULE, '❯ ', RULE], ['⏺ Done.', RULE, '❯ hold on, I am', RULE]]) {
+      spawnSync('tmux', ['kill-window', '-t', `=${F.session}:sup`]);
+      const b = supPane(F, 'sup', shown);
+      await until(() => b.shows().includes('⏺'), 'the pane');
+      waited(40);
+      F.tick();
+      assert.equal(b.keys(), '', `left alone: ${shown[1]}${shown[3]}`);
+    }
+  } finally { F.done(); }
+});
