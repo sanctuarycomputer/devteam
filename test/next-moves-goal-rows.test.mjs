@@ -517,11 +517,43 @@ test('next-moves: holds, the queue for a planner slot, and a state no row knows'
     const m = P.raw(`goal:${G}`);
     assert.equal(m.move, 'release');
     assert.equal(m.holder, 'supervisor');
-    assert.equal(m.words, 'Release it: what it waited on is done (ch-81-other merged)');
+    assert.equal(m.words, 'Release it: what it waited on is done ("Ticket ch-81-other" merged)');
     assert.equal(m.command, `goal hold ${G} run --reason "…"`);
     assert.equal(m.quiet, null);
     assert.equal(m.flag, 'owed', 'owed at once, before next_move_owed_minutes');
     assert.deepEqual(moveErrors(m), []);
+  });
+  await t.test('the owner\'s drain for a ticket that merges: release, the owner\'s, with no command (G3)', () => {
+    const O = P.ready('More other work');
+    P.feature('moreother', O);
+    P.ticket('ch-82-other', 'moreother');
+    const G = P.defined('Drained by the owner');
+    P.owner(['goal', 'hold', G, 'drain', '--owner', '--reason', 'after the other work', '--for', 'ch-82-other']);
+    assert.equal(P.raw(`goal:${G}`).move, 'draining');
+    P.merge('ch-82-other');
+    const m = P.raw(`goal:${G}`);
+    assert.equal(m.move, 'release');
+    assert.equal(m.holder, 'owner', 'the owner set it, so the owner releases it');
+    assert.equal(m.command, null);
+    assert.equal(m.quiet, null, 'no longer quiet: it stalls like any owner move');
+  });
+  await t.test('a drain whose date has gone by: review-hold, owed at once (G3)', () => {
+    const G = P.defined('Drained until a date');
+    const today = new Date().toISOString().slice(0, 10);
+    const yesterday = new Date(Date.parse(`${today}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
+    P.sup(['goal', 'hold', G, 'drain', '--reason', 'the vendor said next week', '--for', 'external:the vendor', '--until', today]);
+    assert.equal(P.raw(`goal:${G}`).move, 'draining', 'its date is today: not gone by yet');
+    // the hold line as an older hold left it (a hold refuses a past date)
+    const dir = path.join(P.F.old, 'docs/devteam/run/log');
+    const files = fs.readdirSync(dir).map((f) => path.join(dir, f)).filter((f) => fs.readFileSync(f, 'utf8').includes(`"hold_until":"${today}"`));
+    assert.equal(files.length, 1);
+    fs.writeFileSync(files[0], fs.readFileSync(files[0], 'utf8').replace(`"hold_until":"${today}"`, `"hold_until":"${yesterday}"`));
+    const m = P.raw(`goal:${G}`);
+    assert.equal(m.move, 'review-hold');
+    assert.equal(m.words, `Its hold date passed on ${yesterday}: release it or hold it again`);
+    assert.equal(m.holder, 'supervisor');
+    assert.equal(m.command, `goal hold ${G} run --reason "…"`);
+    assert.equal(m.flag, 'owed');
   });
   await t.test('draining with its planner still running: not quiet, the planner\'s move (G9)', () => {
     const G = P.defined('Draining, planned');

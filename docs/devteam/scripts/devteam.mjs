@@ -21410,47 +21410,71 @@ function waitCause(ref) {
   if (kind === null && TICKET.test(ref)) return cause('ticket', ref, `ticket:${ref}`);
   return null;
 }
-// A cause as it stands in the log now: waitCause's reading with its real state and since, and how
-// it ended in words. A question answered or defaulted is resolved, withdrawn failed; a ticket merged is
-// resolved, superseded failed; a goal met is resolved, abandoned failed, and running again after
-// `after` (when the hold was set) resolved: a goal that ran all along is still open, the hold waits on
-// its work. Chores, pr:, run: and external: stay open (a hold on them carries a date instead). since
-// is an ISO time, or null when the log doesn't say when.
+// A cause as it stands in the log now: waitCause's reading with its real state and since, how it
+// ended in words, and its title (what the owner reads, not its id). A question answered or defaulted
+// is resolved, withdrawn failed; a ticket merged is resolved, superseded failed; a chore merged (a
+// merge-chore act since the hold, or its tip in main) is resolved, dropped since the hold failed; a
+// goal met is resolved, abandoned failed, and running again resolved only when it was held (drained,
+// parked) at `after`, when the hold was set: a goal that was running then is still open, the hold
+// waits on its work, and a drain-then-run of it since (a fleet park and unpark among them) ends
+// nothing. pr:, run: and external: stay open (a hold on them carries a date). since is an ISO time,
+// or null when the log doesn't say when.
 function causeNow(ref, after = null) {
   const w = waitCause(ref);
   if (!w) return null;
-  const end = (state, how, at) => ({ ...w, state, since: at ? isoOf(at) : null, how });
+  const end = (state, how, at, title) => ({ ...w, state, since: at ? isoOf(at) : null, how, title: title ?? null });
   if (w.form === 'q') {
     const q = questions().find((x) => x.id === w.id);
-    if (q && ['answered', 'defaulted', 'withdrawn'].includes(q.status)) return end(q.status === 'withdrawn' ? 'failed' : 'resolved', q.status, q.answered_at);
+    const words = q ? `"${q.question.length > 60 ? `${q.question.slice(0, 59)}…` : q.question}"` : null;
+    if (q && ['answered', 'defaulted', 'withdrawn'].includes(q.status)) return end(q.status === 'withdrawn' ? 'failed' : 'resolved', q.status, q.answered_at, words);
   } else if (w.form === 'ticket') {
     const t = tickets().get(w.id);
-    if (mergeShaFor(w.id)) return end('resolved', 'merged', mergedAt(w.id));
-    if (t && !isActive(t)) return end('failed', 'superseded', (t.updates ?? []).filter((u) => u.superseded_by).map((u) => u.at).sort()[0] ?? null);
+    const title = t?.title ? `"${t.title}"` : null;
+    if (mergeShaFor(w.id)) return end('resolved', 'merged', mergedAt(w.id), title);
+    if (t && !isActive(t)) return end('failed', 'superseded', (t.updates ?? []).filter((u) => u.superseded_by).map((u) => u.at).sort()[0] ?? null, title);
+  } else if (w.form === 'chore') {
+    const name = `chore-${w.id}`;
+    const sinceHold = (x) => !after || x.created_at > after;
+    const merged = logObjects('act').filter((x) => x.class === 'merge-chore' && String(x.what ?? '').startsWith(`merged ${name} at `) && sinceHold(x)).at(-1);
+    if (merged) return end('resolved', 'merged', merged.created_at, name);
+    const tip = resolveCommit(`refs/heads/${name}`) || resolveCommit(`refs/remotes/origin/${name}`);
+    if (tip && choreTipMerged(w.id, tip)) return end('resolved', 'merged', null, name);
+    const drop = logObjects('decision').filter((d) => d.class === 'chore-drop' && !correctionOf(d) && ((d.refs ?? []).includes(name) || String(d.what ?? '').includes(name)) && sinceHold(d)).at(-1);
+    if (drop) return end('failed', 'dropped', drop.created_at, name);
   } else if (w.form === 'goal') {
     const g = logGet(w.id);
+    if (g?.type !== 'goal') return w;
     const statusAt = (s) => (g.updates ?? []).filter((u) => u.status === s).at(-1)?.at ?? null;
-    if (g?.status === 'met') return end('resolved', 'met', statusAt('met'));
-    if (g?.status === 'abandoned') return end('failed', 'let go', statusAt('abandoned'));
-    const hv = g?.type === 'goal' && goalMode(g) === 'run' ? holdView(g) : null;
-    if (hv?.since && (!after || hv.since > after)) return end('resolved', 'running again', hv.since);
+    const title = `"${g.title ?? g.id}"`;
+    if (g.status === 'met') return end('resolved', 'met', statusAt('met'), title);
+    if (g.status === 'abandoned') return end('failed', 'let go', statusAt('abandoned'), title);
+    const holds = (g.updates ?? []).filter((u) => u.hold !== undefined);
+    const modeAt = after ? (holds.filter((u) => u.at <= after).at(-1)?.hold?.mode ?? 'run') : 'run';
+    const ran = holds.find((u) => u.at > after && (u.hold?.mode ?? 'run') === 'run');
+    if (after && modeAt !== 'run' && goalMode(g) === 'run' && ran) return end('resolved', 'running again', ran.at, title);
   }
   return w;
 }
-// A hold's end, from its causes and its date: { move: 'release', words, since } once no cause it
-// names is still open (since the last of them ended, or now when the log doesn't say), else
-// { move: 'review-hold', until, since } once its date has gone by (the day after it, UTC), else null.
-// A hold that names no cause (an old one) ends only by its date. at is when the hold was set.
+// A hold's end, from its causes and its date: { move: 'release', done, words, since } once no cause
+// it names is still open, done when each was resolved (none failed), since the last of them ended
+// (the hold's own time for one the log doesn't date, so the move still ages into stalled); else
+// { move: 'review-hold', until, since } once its date has gone by (the day after it, UTC), else
+// null. A hold that names no cause (an old one) ends only by its date. at is when the hold was set.
 function holdEnd(causes, until, at) {
   const now = (Array.isArray(causes) ? causes : []).map((c) => causeNow(c, at));
   if (now.length && now.every((c) => c && c.state !== 'open')) {
-    const since = now.some((c) => !c.since) ? nowIso() : [at, ...now.map((c) => c.since)].filter(Boolean).sort().at(-1);
-    return { move: 'release', words: now.map((c) => `${c.form === 'goal' ? `goal:${c.id}` : c.id} ${c.how}`).join(', '), since };
+    const since = [at, ...now.map((c) => c.since)].filter(Boolean).sort().at(-1) ?? nowIso();
+    // an answer may say to wait longer, and a failed cause is not done: those leave the choice open
+    const done = now.every((c) => c.state === 'resolved' && c.form !== 'q');
+    return { move: 'release', done, words: now.map((c) => `${c.title ?? c.id} ${c.how}`).join(', '), since };
   }
   const due = typeof until === 'string' ? Date.parse(`${until}T00:00:00Z`) + 86400000 : NaN;
   if (Number.isFinite(due) && Date.now() >= due) return { move: 'review-hold', until, since: isoOf(due) };
   return null;
 }
+// The words of a hold's end (T2b, G3).
+const holdEndWords = (e) => (e.move === 'review-hold' ? `Its hold date passed on ${e.until}: release it or hold it again`
+  : e.done ? `Release it: what it waited on is done (${e.words})` : `What it waited on has ended (${e.words}): release it, or hold it again`);
 /* next-moves start */
 // The next-move table. For every running goal, active ticket, planner and open chore branch, exactly
 // one next move: what has to happen, who holds it and since when. Its rows (G goals, T tickets, P
@@ -21619,8 +21643,7 @@ function goalMovesNow() {
         // a drain that names what it waits on ends as a ticket hold does (T2b): its causes done, or its date gone by
         const e = holdEnd(g.hold_for, g.hold_until, hv.since);
         const command = holder === 'supervisor' ? `goal hold ${id} run --reason "…"` : null;
-        if (e?.move === 'release') return at({ move: 'release', words: `Release it: what it waited on is done (${e.words})`, holder, since: e.since, command, owedNow: true }); // G3, its causes done
-        if (e) return at({ move: 'review-hold', words: `Its hold date passed on ${e.until}: release it or hold it again`, holder, since: e.since, command, owedNow: true }); // G3, its date gone by
+        if (e) return at({ move: e.move, words: holdEndWords(e), holder, since: e.since, command, owedNow: true }); // G3, its causes ended or its date gone by
         return at({ move: 'draining', words: 'Draining: nothing new starts', holder, quiet: 'drain', since: hv.since ?? lastChange }); // G3
       }
     }
@@ -21761,8 +21784,7 @@ function ticketMoves() {
         const heldAt = (t.updates ?? []).filter((u) => typeof u.held === 'string' && u.held.trim()).at(-1)?.at ?? t.created_at;
         // a hold ends when what it waits on does, or when its date goes by: then it is owed at once
         const e = holdEnd(t.held_for, t.held_until, heldAt);
-        if (e?.move === 'release') return at({ move: 'release', words: `Release it: what it waited on is done (${e.words})`, holder: 'supervisor', since: e.since, command: `ticket release ${id}`, owedNow: true }); // T2b, its causes done
-        if (e) return at({ move: 'review-hold', words: `Its hold date passed on ${e.until}: release it or hold it again`, holder: 'supervisor', since: e.since, command: `ticket release ${id}`, owedNow: true }); // T2b, its date gone by
+        if (e) return at({ move: e.move, words: holdEndWords(e), holder: 'supervisor', since: e.since, command: `ticket release ${id}`, owedNow: true }); // T2b, its causes ended or its date gone by
         return at({ move: 'held', words: `Held: ${t.held.trim()}. Release it, or ask`, holder: 'supervisor', since: heldAt, command: `ticket release ${id} --reason "…"`, neverOwed: true }); // T2b
       }
       const w = workerState(id);
