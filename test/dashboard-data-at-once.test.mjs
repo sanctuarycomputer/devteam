@@ -208,10 +208,11 @@ test('a moving log with builds slower than DATA_WAIT_MS shows no stale note whil
     // a build that hangs: the reads go on (each starts or shares a build, as a page's poll does), and
     // once the hanging one has run a build's length plus the wait past the last one's end, they say so
     setSleep(120000);
+    const hangFrom = Date.now();
     let stale = null;
     await until(async () => { const r = await data(url); if (r.stale) stale = r; else await sleep(1000); return !!stale; }, 'a read marked stale once a build is overdue', 60000);
     assert.equal(stale.status, 200);
-    assert.ok(builds().at(-1).end === null && builds().at(-1).start > 0, 'while the hanging build runs');
+    assert.ok(builds().at(-1).end === null && builds().at(-1).start >= hangFrom - 50, 'while the hanging build, started after the hang was set, runs');
   } finally {
     clearInterval(appends);
     setSleep(0);
@@ -228,6 +229,21 @@ test('on a quiet log, a build that fails marks the served data stale, and one th
   await until(() => builds().length > n0 && builds().slice(n0).every((b) => b.end !== null), 'its own warm build');
   await sleep(1500); // past the 1 s reuse window: the next read starts a build
   assert.equal((await data(url)).stale, null, 'a good build, nothing logged: not stale');
+  // a build that starts late (no read for a while, here 2 s builds and 9 s quiet) and a log line
+  // landing while it runs: the data is out of date, but its successor is on time, so not stale
+  await until(() => builds().slice(n0).every((b) => b.end !== null), 'no build of its own running');
+  await sleep(9000);
+  const late = await data(url); // starts the late build
+  assert.equal(late.stale, null, 'the read that starts a late build: not stale');
+  await sleep(300);
+  append();
+  for (let i = 0; i < 4; i++) {
+    const r = await data(url);
+    assert.equal(r.stale, null, `a log line during a late build that is on time: read ${i + 1} not stale`);
+    await sleep(400);
+  }
+  await until(() => builds().slice(n0).every((b) => b.end !== null), 'the late build and its successor to end');
+  await sleep(1500);
   fs.writeFileSync(files.fail, '');
   try {
     let stale = null;
