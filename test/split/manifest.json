@@ -51,6 +51,7 @@
     { "name": "fleet", "from": { "decl": "TIDY_FILE" } },
     { "name": "host", "from": { "banner": "the host claim" } },
     { "name": "recurring", "from": { "decl": "recurringEntryProblems" } },
+    { "name": "package", "from": { "decl": "packagePinPair" } },
     { "name": "chores", "from": { "decl": "recurringNextSlot" } },
     { "name": "sensors", "from": { "banner": "sensors:" } },
     { "name": "remediation", "from": { "banner": "remediation:" } },
