@@ -1,0 +1,22 @@
+diff --git a/test/org-access.view.test.mjs b/test/org-access.view.test.mjs
+index 90f67fb49a1f7a2bc201f37ed0b6abf64b047b8d..c35d699b596a7766369781708cae72c53d571c68 100644
+--- a/test/org-access.view.test.mjs
++++ b/test/org-access.view.test.mjs
+@@ -22,7 +22,7 @@ import { PORTS } from './lib/kit.mjs';
+ 
+ const here = path.dirname(fileURLToPath(import.meta.url));
+ const repo = path.resolve(here, '..');
+-const HUB_PAGE = path.join(repo, 'docs', 'devteam', 'dashboard', 'hub.html');
++const HUB_APP = path.join(repo, 'docs', 'devteam', 'apps', 'hub');
+ delete process.env.DEVTEAM_CLAIM_TOKEN;
+ // imported after lib/kit.mjs has set the ports the gateway reads at load
+ const G = await import(pathToFileURL(path.join(repo, 'cloud', 'gateway.mjs')).href);
+@@ -209,7 +209,7 @@ async function gateway(name, extra = {}) {
+   fs.mkdirSync(uploadsDir, { recursive: true, mode: 0o750 });
+   const logs = [];
+   const dir = opts.dir ?? path.join(tmp, tag);
+-  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubPage: HUB_PAGE, log: (m) => logs.push(m), methodTypes: { stub }, ...opts });
++  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubApp: HUB_APP, log: (m) => logs.push(m), methodTypes: { stub }, ...opts });
+   const conns = connectionsOf(g.server);
+   const close = () => closing(g.server, `${tag}'s gateway`, conns);
+   await listening(g.server, port, `${tag}'s gateway`);
