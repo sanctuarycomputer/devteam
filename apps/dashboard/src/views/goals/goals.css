@@ -1,0 +1,37 @@
+/* kit-992: goals's CSS from index.html, byte for byte: the css-goals-old region, then the css-goals region. */
+/* css-goals-old start */
+  /* goals */
+  .goal h4 { font-size: 15px; font-weight: 600; margin: 6px 0 2px; }
+  .goal-top { display: flex; gap: 8px; align-items: center; }
+  /* the step bar (.steps) is the shell's (goalSteps, styled in the layout block); the page keeps no copy (kit-90) */
+  .gate-row { padding: 3px 0; }
+  .goal-next { margin: 8px 0 4px; }
+  .goal .meta a, .qcard .meta a { color: var(--blue-fg); text-decoration: underline; text-underline-offset: 2px; }
+  .goal-let-go, .goal-met { opacity: .75; }
+  fieldset.next { border: 0; padding: 0; margin: 10px 0 0; }
+  fieldset.next legend { font-size: 12px; color: var(--fg-2); padding: 0; margin-bottom: 4px; }
+  :where(.no-shell) .seg { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; margin: 0 14px 4px 0; }
+  .rulebox { display: flex; gap: 8px; font-size: 12.5px; color: var(--fg-2); margin: 6px 0 0; align-items: flex-start; }
+  .rulebox input { margin-top: 3px; }
+
+/* css-goals-old end */
+/* css-goals start */
+  /* Goals (kit-90): the tabs, then the cards two across on the shell's grid; a card spans its columns, its
+     running text keeps the measure */
+  /* the tab bar is Goals' first content, inside its section: the shell's first-child tab bar rule (-8px, its
+     tabs' text --page-top below the bar) doesn't reach it there */
+  #goals-list > .tabbar:first-child { margin-top: -8px; }
+  #goals .goal-grid { margin-top: 14px; }
+  /* kit-234: an active goal card's drag handle, before its icon (a ghost the size of the ⋯), and the card being dragged */
+  .goal-grip { flex: none; width: 22px; height: 22px; margin: 0; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--muted); display: inline-flex; align-items: center; justify-content: center; cursor: grab; touch-action: none; }
+  .goal-grip:hover { background: var(--hover); color: var(--fg); opacity: 1; }
+  .card.goal.dragging { opacity: .6; cursor: grabbing; }
+  /* a long state badge (a held goal's "Draining… (1 still running) · Milestone 2 of 2: being built") ends in
+     an ellipsis inside its head or row, not past it, at 720px and below (its title the whole label); Overview's
+     goal title keeps 40% */
+  #goals .card.goal > .card-head > .badge, #overview .ov-goal > .rowline > .badge { display: block; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  #overview .ov-goal > .rowline > .t { min-width: 40%; }
+  #goals .card.goal { max-width: none; }
+  #goals .goal-next { max-width: var(--measure); }
+  #goals > #unassigned { margin-top: 12px; }
+/* css-goals end */
