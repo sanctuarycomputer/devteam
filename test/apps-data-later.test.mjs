@@ -77,12 +77,21 @@ out.order = order;
 process.stdout.write(JSON.stringify(out) + '\\n');
 `;
 
+// The child runs once: its result, or its failure, is kept for every test, so a child that fails or hangs costs
+// one 60 s timeout, not one per test (the runner's watchdog ends a file at 300 s).
 let cases = null;
+let failed = null;
 const results = () => {
+  if (failed) throw failed;
   if (cases) return cases;
-  const r = spawnSync(process.execPath, ['--input-type=module', '--no-warnings', '-e', CHILD, FILE], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'pipe'] });
-  assert.equal(r.status, 0, `the child ran (status ${r.status}, signal ${r.signal}): ${r.stderr}`);
-  cases = JSON.parse(r.stdout.trim().split('\n').pop());
+  try {
+    const r = spawnSync(process.execPath, ['--input-type=module', '--no-warnings', '-e', CHILD, FILE], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'pipe'] });
+    assert.equal(r.status, 0, `the child ran (status ${r.status}, signal ${r.signal}): ${r.stderr}`);
+    cases = JSON.parse(r.stdout.trim().split('\n').pop());
+  } catch (e) {
+    failed = e;
+    throw e;
+  }
   return cases;
 };
 const skip = MAJOR < 22 ? 'Node 18 and 20 have no node:module stripTypeScriptTypes to read data-later.ts with' : false;
