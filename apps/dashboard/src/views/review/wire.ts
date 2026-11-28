@@ -21,7 +21,7 @@ import { markAnswered, seenHash } from '../attachments';
 import { peekHide } from '../peeks';
 import { openFile } from '../peek-kinds';
 
-// each other view's function is typed by its own signature, so wireReview's typed seams check the arrows
+// each other view's function goes as an arrow typed by that function's own parameters, which spreads its args whole
 
 wireBridge({ reviewState, renderReviewPreview, onBridge });
 
