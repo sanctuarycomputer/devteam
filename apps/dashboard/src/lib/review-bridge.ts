@@ -9,10 +9,12 @@ type Loose = any;
 type Fn = (...a: Loose[]) => Loose;
 let reviewState: Loose;
 const wired: { [k: string]: Fn } = {};
-const BRIDGE_SEAMS = ["renderReviewPreview","onBridge"];
-export function wireBridge(w: Loose): void {
+const BRIDGE_SEAMS = ['renderReviewPreview', 'onBridge'] as const;
+export type BridgeWire = { reviewState: Loose } & { [k in (typeof BRIDGE_SEAMS)[number]]: Fn };
+// each key given replaces that key; the rest keep theirs
+export function wireBridge(w: Partial<BridgeWire>): void {
   if (w.reviewState) reviewState = w.reviewState;
-  for (const k of BRIDGE_SEAMS) if (typeof w[k] === 'function') wired[k] = w[k];
+  for (const k of BRIDGE_SEAMS) { const f = w[k]; if (typeof f === 'function') wired[k] = f; }
 }
 const need = (n: string): Fn => {
   const f = wired[n];
@@ -23,9 +25,13 @@ const renderReviewPreview = (...a: Loose[]) => need('renderReviewPreview')(...a)
 const onBridge = (...a: Loose[]) => need('onBridge')(...a);
 
 /* review-bridge start */
+// Every message from a review frame passes here first. It is accepted only from that frame's own
+// window, with the opaque origin a sandboxed frame has ("null"), as one of the known types, within
+// the size caps; what comes back holds only the fields its type allows. Anything else is dropped,
+// with the reason. The kit's test loads this block by itself.
 export const BRIDGE_MAX = 4 * 1024 * 1024;
 export const BRIDGE_MD_MAX = 64 * 1024;
-export function bridgeAccept(ev: Loose, frameWindow?: Loose) {
+export function bridgeAccept(ev?: Loose, frameWindow?: Loose) {
   if (!ev || !frameWindow || ev.source !== frameWindow) return { drop: 'source' };
   if (ev.origin !== 'null') return { drop: 'origin' };
   const d = ev.data;
@@ -52,6 +58,8 @@ export function bridgeAccept(ev: Loose, frameWindow?: Loose) {
     default: return { drop: 'type' };
   }
 }
+// SHA-256 (FIPS 180-4) for when the page isn't a secure context (a dashboard on another host
+// over plain http has no crypto.subtle); the same bytes, the same hash as the owner's process.
 export function sha256Js(bytes?: Loose) {
   const K: Loose[] = [], H: Loose[] = [];
   for (let n = 2, c = 0; c < 64; n++) {
@@ -69,7 +77,7 @@ export function sha256Js(bytes?: Loose) {
   words[words.length - 1] = len * 8;
   words[words.length - 2] = Math.floor(len / 0x20000000);
   const w = new Uint32Array(64);
-  const rot = (x: Loose, n?: Loose) => (x >>> n) | (x << (32 - n));
+  const rot = (x?: Loose, n?: Loose) => (x >>> n) | (x << (32 - n));
   for (let j = 0; j < words.length; j += 16) {
     let [a, b, c, d, e, f, g, hh] = H;
     for (let i = 0; i < 64; i++) {
@@ -79,13 +87,13 @@ export function sha256Js(bytes?: Loose) {
       const t2 = ((rot(a, 2) ^ rot(a, 13) ^ rot(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) >>> 0;
       [hh, g, f, e, d, c, b, a] = [g, f, e, (d + t1) >>> 0, c, b, a, (t1 + t2) >>> 0];
     }
-    [a, b, c, d, e, f, g, hh].forEach((x: Loose, i?: Loose) => { H[i] = (H[i] + x) >>> 0; });
+    [a, b, c, d, e, f, g, hh].forEach((x?: Loose, i?: Loose) => { H[i] = (H[i] + x) >>> 0; });
   }
   return H.map((x?: Loose) => x.toString(16).padStart(8, '0')).join('');
 }
 /* review-bridge end */
 
-export function bridgeMessage(ev: Loose) {
+export function bridgeMessage(ev?: Loose) {
   if (!reviewState.RV?.frame) return;
   const m = bridgeAccept(ev, reviewState.RV.frame.contentWindow);
   if (m.drop) {

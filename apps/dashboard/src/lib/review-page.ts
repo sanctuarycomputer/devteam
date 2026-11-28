@@ -15,15 +15,17 @@ type Fn = (...a: Loose[]) => Loose;
 declare const marked: Loose, DOMPurify: Loose;
 let shell: Loose, reviewState: typeof ReviewState, peeksState: Loose, viewerState: Loose, goalsState: Loose, wordsState: Loose;
 const wired: { [k: string]: Fn } = {};
-const SEAMS = ["$","esc","subj","empty","cardHead","nextChip","nextTime","rankWhy","tlink","when","who","words","qplain","qinline","qblock","linkOf","rankRow","press","cardFields","putBackCard","answerPress","markAnswered","seenHash","peekHide","openFile","sha256Js"];
-export function wireReview(w: Loose): void {
+const SEAMS = ["$","esc","subj","empty","cardHead","nextChip","nextTime","rankWhy","tlink","when","who","words","qplain","qinline","qblock","linkOf","rankRow","press","cardFields","putBackCard","answerPress","markAnswered","seenHash","peekHide","openFile","sha256Js"] as const;
+export type ReviewWire = { shell: Loose; reviewState: typeof ReviewState; peeksState: Loose; viewerState: Loose; goalsState: Loose; wordsState: Loose } & { [k in (typeof SEAMS)[number]]: Fn };
+// each key given replaces that key; the rest keep theirs
+export function wireReview(w: Partial<ReviewWire>): void {
   if (w.shell) shell = w.shell;
   if (w.reviewState) reviewState = w.reviewState;
   if (w.peeksState) peeksState = w.peeksState;
   if (w.viewerState) viewerState = w.viewerState;
   if (w.goalsState) goalsState = w.goalsState;
   if (w.wordsState) wordsState = w.wordsState;
-  for (const k of SEAMS) if (typeof w[k] === 'function') wired[k] = w[k];
+  for (const k of SEAMS) { const f = w[k]; if (typeof f === 'function') wired[k] = f; }
 }
 const need = (n: string): Fn => {
   const f = wired[n];
@@ -57,6 +59,9 @@ const peekHide = (...a: Loose[]) => need('peekHide')(...a);
 const openFile = (...a: Loose[]) => need('openFile')(...a);
 const sha256Js = (...a: Loose[]) => need('sha256Js')(...a);
 
+// ---- review questions: the agent's page in a sandboxed frame; the answer in the dashboard's own panel ----
+// The page may only propose a result. The panel below it shows that exact result, drawn by this
+// code and not the page's, and posts those same bytes when the owner clicks Answer.
 export const sha256Hex = async (bytes?: Loose) => {
   if (!window.crypto?.subtle) return sha256Js(bytes);
   const d = await crypto.subtle.digest('SHA-256', bytes);
@@ -65,11 +70,12 @@ export const sha256Hex = async (bytes?: Loose) => {
 
 export const RV_MAX = 4 * 1024 * 1024;
 
-export const rvKey = (qid: Loose, sha?: Loose) => `devteam.review.${qid}.${String(sha ?? '').slice(0, 12)}`;
+// Drafts in this browser are keyed on the page's hash, so a page asked again never inherits one.
+export const rvKey = (qid?: Loose, sha?: Loose) => `devteam.review.${qid}.${String(sha ?? '').slice(0, 12)}`;
 
 export const lsGet = (k?: Loose) => { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch { return null; } };
 
-export const lsSet = (k: Loose, v?: Loose) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } };
+export const lsSet = (k?: Loose, v?: Loose) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } };
 
 export const lsDel = (k?: Loose) => { try { localStorage.removeItem(k); } catch {} };
 
@@ -77,14 +83,16 @@ export const isPlainObj = (x?: Loose) => !!x && typeof x === 'object' && !Array.
 
 export const emptyVal = (x?: Loose) => x === null || x === undefined || x === '' || (Array.isArray(x) ? !x.length : typeof x === 'object' && !Object.keys(x).length);
 
+// the owner's process compares values with proposals in this form: sorted keys, no whitespace
 export const canonical = (v?: Loose): Loose => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k?: Loose): Loose => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
 
+// verified at the pinned commit, or on main once a squash merge landed the files and deleted the branch
 export const pinsVerified = (info?: Loose) => !!info && (info.reachable || info.landed) && (info.files || []).length > 0 && info.files.every((f?: Loose) => f.status === 'verified');
 
 export const PIN_WORDS = { page: 'page', data: 'data', result_schema: 'schema' };
 
 // ui-candidate: review-card (apps-src@2: src/shared/ui/ has no component yet, so the port keeps index.html's markup)
-export function reviewCard(q: Loose, o: Loose, reasonText?: Loose) {
+export function reviewCard(q?: Loose, o?: Loose, reasonText?: Loose) {
   const rv = q.review || {};
   const cls = q.class && o.classes[q.class];
   const local = lsGet(rvKey(q.id, rv.page?.sha256));
@@ -111,12 +119,13 @@ export function reviewCard(q: Loose, o: Loose, reasonText?: Loose) {
     </div>`;
 }
 
+// A JSON value as a tree: an object or a list folds; a list says how many items it has.
 // ui-candidate: json-tree (apps-src@2: src/shared/ui/ has no component yet, so the port keeps index.html's markup)
-export function jsonTree(v: Loose, key?: Loose, depth: Loose = 0): Loose {
+export function jsonTree(v?: Loose, key?: Loose, depth: Loose = 0): Loose {
   const k = key === undefined ? '' : `<span class="jk">${esc(key)}</span>: `;
   if (v === null || typeof v !== 'object') return `<div class="jl">${k}<span class="jv ${typeof v}">${esc(JSON.stringify(v))}</span></div>`;
   const arr = Array.isArray(v);
-  const entries = arr ? v.map((x: Loose, i?: Loose) => [i, x]) : Object.entries(v);
+  const entries = arr ? v.map((x?: Loose, i?: Loose) => [i, x]) : Object.entries(v);
   if (!entries.length) return `<div class="jl">${k}<span class="jv">${arr ? '[]' : '{}'}</span></div>`;
   const sum = arr ? `${entries.length} item${entries.length === 1 ? '' : 's'}` : `{ ${entries.slice(0, 6).map(([x]: Loose) => esc(x)).join(', ')}${entries.length > 6 ? ', …' : ''} }`;
   if (depth > 40) return `<div class="jl">${k}<span class="dim">${sum} (nested too deep to show; see the raw JSON)</span></div>`;
@@ -124,7 +133,8 @@ export function jsonTree(v: Loose, key?: Loose, depth: Loose = 0): Loose {
   return `<details ${depth < 1 ? 'open' : ''}><summary>${k}<span class="dim">${sum}</span></summary>${entries.slice(0, cap).map(([kk, x]: Loose) => jsonTree(x, kk, depth + 1)).join('')}${entries.length > cap ? `<div class="jl dim">… ${entries.length - cap} more (see the raw JSON)</div>` : ''}</details>`;
 }
 
-export function rowState(dataRow: Loose, r?: Loose) {
+// The state of one row, by the rule the owner's process applies.
+export function rowState(dataRow?: Loose, r?: Loose) {
   if (!r || r.decided !== true) return 'undecided';
   const values = isPlainObj(r.values) ? r.values : {};
   if (isPlainObj(dataRow.proposal) && canonical(values) === canonical(dataRow.proposal)) return 'kept';
@@ -133,22 +143,24 @@ export function rowState(dataRow: Loose, r?: Loose) {
 
 export function optionLabeler(data?: Loose) {
   const maps = Object.fromEntries(Object.entries(isPlainObj(data?.options) ? data.options : {}).map(([k, list]: Loose) => [k, new Map((Array.isArray(list) ? list : []).map((o?: Loose) => (isPlainObj(o) ? [String(o.id), o.label ?? String(o.id)] : [String(o), String(o)])))]));
-  const one = (key: Loose, x?: Loose) => (maps[key]?.get(String(x)) ?? (typeof x === 'object' ? JSON.stringify(x) : String(x)));
-  return (key: Loose, v?: Loose) => (Array.isArray(v) ? (v.length ? v.map((x?: Loose) => one(key, x)).join(', ') : 'none') : emptyVal(v) ? 'none' : one(key, v));
+  const one = (key?: Loose, x?: Loose) => (maps[key]?.get(String(x)) ?? (typeof x === 'object' ? JSON.stringify(x) : String(x)));
+  return (key?: Loose, v?: Loose) => (Array.isArray(v) ? (v.length ? v.map((x?: Loose) => one(key, x)).join(', ') : 'none') : emptyVal(v) ? 'none' : one(key, v));
 }
 
+// The trusted preview: the standard shape (data rows with proposals, result rows) as a table of
+// what changes, changed rows first; anything else as a JSON tree.
 // ui-candidate: result-table (apps-src@2: src/shared/ui/ has no component yet, so the port keeps index.html's markup)
-export function resultPreview(result: Loose, data?: Loose, fold: Loose = false) {
+export function resultPreview(result?: Loose, data?: Loose, fold: Loose = false) {
   const META = ['v', 'question', 'review_sha256', 'data_sha256', 'answered_at', 'channel', 'summary'];
   const rest = Object.fromEntries(Object.entries(result).filter(([k]: Loose) => !META.includes(k) && k !== 'rows'));
   if (!(Array.isArray(data?.rows) && Array.isArray(result.rows))) return `<div class="jtree">${jsonTree(Object.fromEntries(Object.entries(result).filter(([k]: Loose) => !['v', 'question', 'review_sha256', 'data_sha256'].includes(k))))}</div>`;
   const label = optionLabeler(data);
   const got = new Map(result.rows.filter(isPlainObj).map((r?: Loose) => [r.id, r]));
   const ORDER = { changed: 0, none: 1, undecided: 2, kept: 3 };
-  const rows = data.rows.map((d?: Loose) => ({ d, r: got.get(d.id), state: rowState(d, got.get(d.id)) })).sort((a: Loose, b?: Loose) => (ORDER as Loose)[a.state] - (ORDER as Loose)[b.state]);
+  const rows = data.rows.map((d?: Loose) => ({ d, r: got.get(d.id), state: rowState(d, got.get(d.id)) })).sort((a?: Loose, b?: Loose) => (ORDER as Loose)[a.state] - (ORDER as Loose)[b.state]);
   const n = (s?: Loose) => rows.filter((x?: Loose) => x.state === s).length;
   const strange = result.rows.filter((r?: Loose) => !isPlainObj(r) || !data.rows.some((d?: Loose) => d.id === r.id));
-  const show = (key: Loose, v?: Loose) => esc(label(key, v));
+  const show = (key?: Loose, v?: Loose) => esc(label(key, v));
   const valuesCell = ({ d, r, state }: Loose) => {
     if (state === 'undecided') return '<span class="dim">not decided</span>';
     const values = isPlainObj(r.values) ? r.values : {};
@@ -172,7 +184,8 @@ export function resultPreview(result: Loose, data?: Loose, fold: Loose = false) 
     ${Object.keys(rest).length ? `<h3 style="margin-top:10px">Also in the result</h3><div class="jtree">${jsonTree(rest)}</div>` : ''}`;
 }
 
-export function proposalProblems(p: Loose, info?: Loose) {
+// Why Answer is off, if it is: the checks the owner's process runs, so the button says so first.
+export function proposalProblems(p?: Loose, info?: Loose) {
   const r = p.obj, rv = info.review, out = [];
   if (p.bytes > RV_MAX) out.push(`The result is ${p.bytes} bytes; at most 4 MB.`);
   if (r.v !== 1) out.push('The result does not say "v": 1.');
@@ -274,7 +287,7 @@ export function closeReview() {
 }
 
 // ui-candidate: sandboxed-frame (apps-src@2: src/shared/ui/ has no component yet, so the port keeps index.html's markup)
-export function mountFrame(src: Loose, title?: Loose) {
+export function mountFrame(src?: Loose, title?: Loose) {
   const f = document.createElement('iframe');
   // allow-scripts and nothing else: no same-origin, forms, popups, modals, downloads or top navigation
   f.setAttribute('sandbox', 'allow-scripts');
@@ -327,6 +340,7 @@ export function showProgress() {
   if (el) el.innerHTML = p && p.total ? `<span class="badge ${p.done >= p.total ? 'good' : 'medium'}">${esc(p.done)} of ${esc(p.total)} decided</span>` : '';
 }
 
+// The panel's right side, drawn once per view: autosave status, Answer, Send it back.
 // ui-candidate: review-actions (apps-src@2: src/shared/ui/ has no component yet, so the port keeps index.html's markup)
 export function renderReviewActions() {
   const info = reviewState.RV.info;
@@ -368,10 +382,11 @@ export function updateAnswerButton() {
   $('rv-why').textContent = why;
 }
 
+// The panel's left side: the proposal (or the recorded result), drawn here, never by the page.
 export function renderReviewPreview() {
   const info = reviewState.RV.info;
   const el = $('rv-preview');
-  const raw = (text: Loose, bytes: Loose, sha: Loose, what?: Loose) => `<p class="meta">${what}: <b>${Number(bytes).toLocaleString()}</b> bytes, sha256 <code>${esc(sha.slice(0, 12))}</code>. <a class="linkish" data-rv-raw>${reviewState.RV.rawOpen ? 'Hide' : 'Show'} raw JSON</a></p><pre class="rv-raw" ${reviewState.RV.rawOpen ? '' : 'hidden'}>${esc(text)}</pre>`;
+  const raw = (text?: Loose, bytes?: Loose, sha?: Loose, what?: Loose) => `<p class="meta">${what}: <b>${Number(bytes).toLocaleString()}</b> bytes, sha256 <code>${esc(sha.slice(0, 12))}</code>. <a class="linkish" data-rv-raw>${reviewState.RV.rawOpen ? 'Hide' : 'Show'} raw JSON</a></p><pre class="rv-raw" ${reviewState.RV.rawOpen ? '' : 'hidden'}>${esc(text)}</pre>`;
   if (!reviewState.RV.preview && reviewState.RV.readonly) {
     const doc = info.result_doc;
     el.innerHTML = doc ? `<h3>Your answer, as recorded</h3>${resultPreview(doc, info.data, true)}${raw(JSON.stringify(doc, null, 2), info.result.bytes, info.result.sha256, 'The stored result')}` : `<h3>${info.declined ? 'Sent back, with no result' : 'No result recorded'}</h3>`;
@@ -429,6 +444,8 @@ export async function pushDraft(me?: Loose) {
   if (reviewState.RV === me) showSaved();
 }
 
+// A web link from the page opens only from the owner's own click on the dashboard's bar, the first
+// time per site per question; after that, at once (the owner's click in the page lets it open).
 export const sitesKey = () => `devteam.review.${reviewState.RV?.qid ?? 'preview'}.sites`;
 
 // ui-candidate: link-bar (apps-src@2: src/shared/ui/ has no component yet, so the port keeps index.html's markup)
@@ -458,7 +475,7 @@ export function onBridge(m?: Loose) {
     let draft = null;
     if (live) {
       const local = lsGet(rvKey(reviewState.RV.qid, info.review.page.sha256));
-      const pick = [local, info.draft].filter((x?: Loose) => x && x.state !== undefined && x.state !== null).sort((a: Loose, b?: Loose) => String(b.saved_at || '').localeCompare(String(a.saved_at || '')))[0];
+      const pick = [local, info.draft].filter((x?: Loose) => x && x.state !== undefined && x.state !== null).sort((a?: Loose, b?: Loose) => String(b.saved_at || '').localeCompare(String(a.saved_at || '')))[0];
       draft = pick ? pick.state : null;
     }
     const question = reviewState.RV.preview ? { id: null, preview: true } : { id: info.id, question: info.question, context: info.context, title: info.review.title ?? null, review_sha256: info.review.page.sha256, data_sha256: info.review.data?.sha256 ?? null, allow_partial: !!info.review.allow_partial };
@@ -512,7 +529,7 @@ export async function reviewAnswer(btn?: Loose) {
   });
 }
 
-export async function reviewDecline(id: Loose, note: Loose, errId: Loose, btn?: Loose) {
+export async function reviewDecline(id?: Loose, note?: Loose, errId?: Loose, btn?: Loose) {
   if (!note) { const e = $(`e-${errId}`); if (e) e.textContent = 'Say what should change, so the supervisor can redraw it.'; return; }
   const auto = (document.querySelector(errId === 'rv' ? '#rv-actions input[data-rv-auto]:checked' : `input[data-auto="${CSS.escape(id)}"]:checked`) as Loose)?.value;
   const seen = seenHash(id);
@@ -534,6 +551,11 @@ export async function reviewDecline(id: Loose, note: Loose, errId: Loose, btn?: 
 
 export const fleetMoveReady = () => !!(goalsState.FLEET.data && goalsState.FLEET.data.ready);
 
+// A hold's state in words. Parking and draining are transitions, shown until that goal's own sessions
+// have settled. A goal whose sessions all have is Parked (or Drained) even while the fleet as a whole
+// isn't ready to move yet: what is still left for the move (the log landing, a session of another goal)
+// is the fleet line's to say, with what it is, not every goal card's (one unsettled session used to
+// turn every card into Parking… for days).
 export function holdState(h?: Loose) {
   if (!h) return 'running';
   return h.state;
