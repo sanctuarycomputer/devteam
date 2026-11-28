@@ -1,0 +1,65 @@
+/* css-review start */
+  /* review questions: three bands, the middle one the agent's (sandboxed) page */
+  .qcard.review { border-left-color: var(--blue); }
+  /* the review opens as a wide side panel over the page: a slim header, the agent's page filling
+     the height, and a compact answer bar whose row list scrolls inside it */
+  /* above the Threads panel (22) and its in-panel pins (24), so a review opened from the Inbox tab is full size (kit-100 spec §2.8) */
+  #review-view:not([hidden]) { position: fixed; top: 0; right: 0; bottom: 0; width: min(1600px, 96vw); z-index: 25; background: var(--surface); border-left: 1px solid var(--line); box-shadow: -16px 0 48px rgba(0,0,0,.28); display: flex; flex-direction: column; gap: 6px; padding: 10px 16px 0; overflow: hidden; }
+  @media (max-width: 900px) { #review-view:not([hidden]) { width: 100vw; padding: 8px 10px 0; } }
+  .rv-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .rv-top h4 { flex: 1; min-width: 0; margin: 0; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rv-top .icon-btn { flex: none; margin: 0; }
+  .rv-sub { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; font-size: 11.5px; color: var(--muted); }
+  .rv-sub details { font-size: 12px; color: var(--fg-2); }
+  .rv-sub details[open] { flex-basis: 100%; }
+  .rv-sub details > div { padding: 6px 0 2px; max-height: 22vh; overflow: auto; }
+  #rv-frame-wrap { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  #rv-frame-wrap .rv-frame { flex: 1 1 auto; height: auto; min-height: 200px; }
+  #rv-frame-wrap .rv-frame-label { margin: 0 0 4px; }
+  #review-view .rv-panel { position: static; flex: none; margin: 0 -16px; border-radius: 0; border-width: 1px 0 0; box-shadow: none; max-height: 48vh; grid-template-columns: minmax(0, 1fr) minmax(220px, 280px); padding: 10px 16px 12px; }
+  #review-view #rv-preview { max-height: calc(48vh - 24px); overflow: auto; }
+  @media (max-width: 900px) { #review-view .rv-panel { grid-template-columns: minmax(0, 1fr); overflow: auto; max-height: 45vh; } #review-view #rv-preview { max-height: none; overflow: visible; } }
+  .rv-rows > summary { cursor: pointer; list-style: none; }
+  .rv-rows > summary::-webkit-details-marker { display: none; }
+  #review-view { margin-top: 0; }
+  .rv-back { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--fg-2); margin: 0 0 10px; }
+  .rv-back:hover { color: var(--fg); }
+  .rv-head { max-width: none; }
+  .rv-title { font-size: 12px; color: var(--fg-2); margin-top: 6px; }
+  .rv-pins code { font-size: 11px; }
+  .rv-preview-banner { display: inline-block; font-size: 11px; font-weight: 600; letter-spacing: .04em; color: var(--amber-fg); border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--line)); background: color-mix(in srgb, var(--amber) 9%, var(--surface)); border-radius: 6px; padding: 2px 8px; margin-bottom: 6px; }
+  .rv-frame-label { display: flex; gap: 8px; align-items: center; font-size: 11.5px; color: var(--muted); margin: 14px 0 4px; }
+  .rv-frame { display: block; width: 100%; height: 480px; min-height: 200px; border: 2px dashed var(--line-2); border-radius: 8px; background: var(--bg); }
+  .rv-panel { position: sticky; bottom: 0; z-index: 4; margin-top: 12px; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px 10px 0 0; box-shadow: 0 -8px 28px rgba(0,0,0,.10); padding: 12px 16px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 300px); gap: 10px 18px; max-height: 46vh; }
+  .rv-panel h3 { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin: 0 0 6px; color: var(--fg); }
+  .rv-panel h3 .dim { font-weight: 400; }
+  #rv-preview { overflow: auto; min-width: 0; }
+  #rv-actions { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+  #rv-actions button { margin: 0; }
+  #rv-actions textarea { margin: 0; }
+  #rv-actions fieldset.next { margin: 0; }
+  .rv-why { font-size: 12px; color: var(--fg-2); }
+  .rv-counts { font-size: 12px; color: var(--fg-2); margin: 2px 0 8px; font-variant-numeric: tabular-nums; }
+  .rv-counts b { color: var(--fg); }
+  .rv-table { font-size: 12px; }
+  .rv-table td, .rv-table th { padding: 5px 10px; }
+  .rv-table .arrow { color: var(--muted); padding: 0 4px; }
+  .rv-st { font-size: 11px; font-weight: 500; white-space: nowrap; }
+  .rv-st.kept { color: var(--green-fg); } .rv-st.changed { color: var(--amber-fg); } .rv-st.none { color: var(--blue-fg); } .rv-st.undecided { color: var(--muted); }
+  .rv-note { color: var(--fg-2); font-size: 11.5px; }
+  .rv-raw { background: var(--well); border-radius: 6px; padding: 8px 10px; font: 11.5px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 30vh; overflow: auto; margin: 6px 0 0; }
+  .jtree { font: 12px/1.6 var(--mono); }
+  .jtree details { margin: 0 0 0 14px; }
+  .jtree > details { margin-left: 0; }
+  .jtree summary { margin: 0; color: var(--fg); font-size: 12px; }
+  .jtree .jl { margin-left: 14px; overflow-wrap: anywhere; }
+  .jtree .jk { color: var(--fg-2); }
+  .jtree .jv.string { color: var(--green-fg); } .jtree .jv.number, .jtree .jv.boolean { color: var(--blue-fg); }
+  .rv-link { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin: 10px 0 0; }
+  .rv-link code { overflow-wrap: anywhere; }
+  .rv-link a.go { display: inline-flex; align-items: center; height: 26px; padding: 0 10px; border-radius: 6px; background: var(--fg); color: var(--bg); font-size: 12px; font-weight: 500; }
+  .rv-link button { margin: 0; height: 26px; }
+  /* on a phone the panel follows the page instead of covering it */
+  @media (max-width: 900px) { .rv-panel { position: static; grid-template-columns: minmax(0, 1fr); max-height: none; } #rv-preview { overflow: visible; } }
+
+/* css-review end */
