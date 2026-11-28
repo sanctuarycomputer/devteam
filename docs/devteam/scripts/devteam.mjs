@@ -29920,10 +29920,11 @@ async function dashRoutesPage(D, req, res, q) {
     // build, while a newer one runs for the next read: its log moves every few seconds and a build
     // takes a minute, so a read that waited for a current build waited on every load. Not after an
     // owner action the kept build doesn't show yet: that read waits as below. Marked stale only when
-    // it is out of date and a newer build is overdue (older than a build takes, plus DATA_WAIT_MS).
+    // it is out of date and the build after it is overdue: the next can start only once it has ended,
+    // so that is a build's length plus DATA_WAIT_MS after it ended (its start plus what it took).
     if (D.lastData && D.lastTook > DATA_QUICK_MS && D.lastEpoch >= D.actedEpoch) {
       void dashboardData().catch(() => {});
-      const overdue = D.lastEpoch !== D.dataEpoch && Date.now() - D.lastAsOf > D.lastTook + DATA_WAIT_MS;
+      const overdue = D.lastEpoch !== D.dataEpoch && Date.now() - (D.lastAsOf + D.lastTook) > D.lastTook + DATA_WAIT_MS;
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-devteam-page': pageVersion('dashboard'), ...(overdue ? { 'x-devteam-stale': 'true' } : {}) });
       return res.end(withViewer(D.lastData));
     }

@@ -143,7 +143,7 @@ test('a read has the last good build at once while a newer one runs; after an ow
 
 test('a dashboard that has just started answers from the kept build, marked stale; a copy from another kit or cut short is never read', { timeout: 240000 }, async () => {
   assert.ok(fs.existsSync(kept), 'the first test left a kept build');
-  await sleep(5100); // older than DATA_WAIT_MS, and the last build's copy written
+  await sleep(9000); // ended longer ago than a build (about 2 s) plus DATA_WAIT_MS, and its copy written
   const keptBody = fs.readFileSync(kept, 'utf8');
   // the warm build takes 8 s: the first read must not wait for it
   setSleep(8000);
@@ -152,7 +152,7 @@ test('a dashboard that has just started answers from the kept build, marked stal
   assert.equal(r.status, 200);
   assert.ok(r.took < 4000, `the first read after a start answered from the kept build (${r.took} ms)`);
   assert.equal(r.body, keptBody.slice(keptBody.indexOf('\n') + 1), 'the kept body, as it was');
-  assert.equal(r.stale, 'true', 'marked stale: out of date, and older than a build plus DATA_WAIT_MS');
+  assert.equal(r.stale, 'true', 'marked stale: out of date, and ended longer ago than a build plus DATA_WAIT_MS');
   await until(allEnded, 'the warm build to end');
   await running.stop();
   running = null;
@@ -181,3 +181,38 @@ test('a dashboard that has just started answers from the kept build, marked stal
   assert.ok(!fs.existsSync(litter), 'a dead writer\'s temp copy is gone');
   await until(allEnded, 'the warm build to end');
 });
+
+test('a moving log with builds slower than DATA_WAIT_MS shows no stale note while builds keep up, and one once a build hangs', { timeout: 240000 }, async () => {
+  // builds of 7 s, over the 5 s wait: the served build is always older than the wait, never overdue
+  setSleep(7000);
+  const n0 = builds().length;
+  const url = await start();
+  await until(() => builds().length > n0 && allEnded(), 'its own warm build');
+  await sleep(500);
+  const appends = setInterval(append, 1000);
+  try {
+    const seen = [];
+    const end = Date.now() + 40000;
+    while (Date.now() < end) {
+      const r = await data(url);
+      assert.equal(r.status, 200);
+      assert.ok(r.took < 1500, `answered at once (${r.took} ms)`);
+      seen.push(r.stale ? 'STALE' : '-');
+      await sleep(2000);
+    }
+    assert.ok(builds().length >= 4, `builds kept coming (${builds().length})`);
+    assert.ok(!seen.includes('STALE'), `no read marked stale while builds keep up (${seen.join(' ')})`);
+    // a build that hangs: once it has run a build's length plus the wait past the last one's end, reads say so
+    setSleep(120000);
+    await until(() => builds().at(-1).end === null && builds().at(-1).start > Date.now() - 1000 || false, 'a hanging build to start', 30000);
+    let stale = null;
+    await until(async () => { const r = await data(url); if (r.stale) stale = r; return !!stale; }, 'a read marked stale once the build is overdue', 40000);
+    assert.equal(stale.status, 200);
+  } finally {
+    clearInterval(appends);
+    setSleep(0);
+    await running.stop();
+    running = null;
+  }
+});
+
