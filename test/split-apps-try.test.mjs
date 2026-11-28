@@ -245,15 +245,22 @@ test('B8 the tree\'s commit leaves no git maintenance running, even when git\'s 
   const busy = path.join(tmp, 'busy-home');
   write(path.join(busy, '.gitconfig'), '[maintenance "loose-objects"]\n\tenabled = true\n\tauto = 1\n');
   // three new HEADs in a row (a test file only, so no app builds): the race, where there is one, hits
-  // about half of the regenerations
+  // about half of the regenerations. A fourth runs the commit's maintenance in the foreground
+  // (maintenance.autoDetach, git 2.47 and later; older gits always do), so on any git a maintenance that
+  // ran has packed before the copy, and the no-pack assertion sees it (kit-1072)
   const was = process.env.HOME;
   process.env.HOME = busy;
   try {
-    for (const n of [1, 2, 3]) {
+    for (const n of [1, 2, 3, 4]) {
+      if (n === 4) fs.appendFileSync(path.join(busy, '.gitconfig'), '[maintenance]\n\tautoDetach = false\n');
       write(path.join(repo, 'test/b.test.mjs'), `${probe('b')}// B8 ${n}\n`);
       const head = commit(`B8 ${n}`);
       assert.equal(await tryIt(['test/a.test.mjs']), 0, said.join('\n'));
       assert.equal(lines(splitLog).at(-1).at, head, 'the tree is regenerated');
+      // no pack: this config packs the loose objects whenever the commit's maintenance runs, so a pack
+      // in the tree means maintenance.auto false came after the snapshot's commit, not before (kit-1072);
+      // a new repository's objects/pack is there and empty
+      assert.deepEqual(fs.readdirSync(path.join(tree, '.git', 'objects', 'pack')).filter((f) => f.endsWith('.pack')), [], `the snapshot's commit ran no maintenance: the tree holds no pack (regeneration ${n})`);
     }
   } finally { if (was === undefined) delete process.env.HOME; else process.env.HOME = was; }
   // --local: the tree's own config, so a user's global maintenance.auto doesn't pass it
