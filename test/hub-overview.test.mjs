@@ -196,6 +196,11 @@ test('the pulse: an approved goal with nothing planned is not idle; a goal the o
     // nor its acks, observations and readings, a tick's bookkeeping
     ok(old, ['observe', '--kind', 'note', '--subject', 'fleet', '--detail', 'nothing running'], SUP);
     assert.equal(pulse().state, 'stalled', 'a fresh supervisor observation');
+    // a planner whose progress is commits on its plan branch: moving
+    const sha = execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'design bill'], { cwd: old, encoding: 'utf8' }).trim();
+    execFileSync('git', ['branch', 'plan/bill', sha], { cwd: old });
+    assert.equal(pulse().state, 'moving', 'a plan branch commit just now');
+    execFileSync('git', ['branch', '-D', 'plan/bill'], { cwd: old });
     // a worker that wrote a moment ago: building again
     const ym = new Date().toISOString().slice(0, 7);
     fs.appendFileSync(path.join(dir, 'app-01-bill.jsonl'), line({ v: 1, id: `h-${ym.replace('-', '')}01-000000000-app-01-bill`, type: 'phase', op: 'new', at: new Date().toISOString(), by: 'app-01-bill', from: null, to: 'build' }));

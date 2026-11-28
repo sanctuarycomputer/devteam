@@ -116,6 +116,21 @@ test('fleet-idle: an unparked fleet with no session for half an hour says what t
     // a parked fleet waits on purpose: nothing to say
     fs.writeFileSync(path.join(logDir, 'ch-01-ready.jsonl'), phase('ch-01-ready', { to: 'parked', note: 'parked' }, 3 * 3600000));
     assert.ok(idle(), 'idle again once its last line is three hours old');
+    if (hasTmux) {
+      // a worker waiting on its review word for 70 minutes, its window open: it waits on the
+      // supervisor (waiting-on-supervisor speaks), it isn't the fleet idling
+      fs.writeFileSync(path.join(logDir, 'ch-04-next.jsonl'), phase('ch-04-next', { to: 'awaiting-word', note: 'ready for review' }, 70 * 60000));
+      const tmux = (args) => spawnSync('tmux', args, { env: F.env({}), encoding: 'utf8' });
+      assert.equal(tmux(['new-session', '-d', '-s', sessionOf(old, 'fleet-idle'), '-n', 'ch-04-next', 'sleep 600']).status, 0);
+      try {
+        assert.equal(idle(), undefined, 'a worker at awaiting-word with its window open is running');
+        // its window gone: nothing runs, and 70 minutes is past twice the threshold
+        assert.equal(tmux(['kill-window', '-t', `=${sessionOf(old, 'fleet-idle')}:ch-04-next`]).status, 0);
+        assert.equal(idle()?.severity, 'high', 'the same worker with no window');
+      } finally { tmux(['kill-server']); }
+      fs.unlinkSync(path.join(logDir, 'ch-04-next.jsonl'));
+      assert.ok(idle());
+    }
     ok(old, ['fleet', 'park', '--reason', 'owner away'], SUP);
     assert.equal(idle(), undefined, 'a parked fleet is not idle');
   } finally { F.done(); }

@@ -560,13 +560,18 @@ test('next-moves: holds, the queue for a planner slot, and a state no row knows'
   });
 });
 
-test('next-moves: plan branches with no window fill no planner slot: idle-planning still speaks, the goal is not queued', () => {
+test('next-moves: plan branches with no window fill no planner slot: idle-planning still speaks, the goal is not queued', { skip: hasTmux ? false : 'needs tmux: a session that is up, with the planners\' windows gone' }, () => {
   // two plan branches left behind, their windows gone, at a cap of 2: counted, they filled the cap
   // and turned every unplanned goal into a quiet queue with no finding
   const P = project('deadslots', { max_active_planners: 2 });
   P.planner('deadone', P.defined('Dead one'));
   P.planner('deadtwo', P.defined('Dead two'));
   const G = P.defined('Nobody plans me');
+  // after a reboot the whole session is missing: every planner is windowless until recovery
+  // relaunches it, and each still holds its slot
+  assert.equal(goalMove(P, G).quiet, 'queue', 'no tmux session: the branches hold their slots');
+  // the session is up and their windows alone are gone: dead branches
+  P.window('supervisor');
   const m = goalMove(P, G);
   assert.equal(m.move, 'start-planner');
   assert.equal(m.quiet, null, 'not queued behind dead branches');

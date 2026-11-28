@@ -21007,7 +21007,10 @@ function collectMetrics(since, reviewsSince = 0) {
   // newest line any ticket's worker or any planner wrote (a planner's branch and files too), or the
   // log's first line when no session has ever run. A worker or planner counts as running only
   // while it is alive: its window open with an agent in it, and a sign of life within
-  // stale_after_minutes. A planner waiting on an owner answer doesn't count either. A plan branch
+  // stale_after_minutes, or waiting on the supervisor (a worker at awaiting-word or with a message
+  // to it unanswered, a planner with one): that wait is waiting-on-supervisor's to speak for, and a
+  // high fleet-idle beside it would wake every wait on a fleet that only waits on its reviews. A
+  // worker or planner waiting on an owner answer doesn't count. A plan branch
   // left behind, a design parked on the owner's approval, or a session idle at its prompt for hours
   // is the stuck fleet this finding is for: a window alone kept it quiet however long nothing moved.
   // stale_after_minutes (30 by default, two quiet ticks at the default tick_minutes): the silence
@@ -21017,8 +21020,10 @@ function collectMetrics(since, reviewsSince = 0) {
   const FLEET_IDLE_MS = (settings.stale_after_minutes ?? 30) * 60000;
   const spoken = f.some((x) => ['idle-capacity', 'idle-planning', 'memory-full'].includes(x.kind));
   const freshly = (min) => min != null && min * 60000 <= FLEET_IDLE_MS;
-  const aliveWorker = (t) => countsAsWorker(t) && freshly(workerState(t.id)?.minutes_silent) && !!resolvePane(tmuxTarget(t.id)).target;
-  const alivePlanner = (p) => !p.parked && p.window && !p.waiting_on_owner.length && freshly(p.minutes_silent);
+  const onOwner = (id) => openQs.some((q) => (q.blocks ?? []).includes(id) || q.ticket === id);
+  const onSupervisor = (id) => openMsgs.some((m) => m.created_by === id) || (workerState(id)?.phase === 'awaiting-word' && !onOwner(id));
+  const aliveWorker = (t) => countsAsWorker(t) && (freshly(workerState(t.id)?.minutes_silent) || onSupervisor(t.id)) && !!resolvePane(tmuxTarget(t.id)).target;
+  const alivePlanner = (p) => !p.parked && p.window && !p.waiting_on_owner.length && (freshly(p.minutes_silent) || p.waiting_on_supervisor.length > 0);
   if (!drained && !fleetMode() && !spoken && ![...ts.values()].some(aliveWorker) && !planners().some(alivePlanner)) {
     const lines = readLog().lines;
     const stamps = lines.filter((l) => l.at && (ts.has(l.by) || String(l.by).startsWith('plan-'))).map((l) => l.at);
@@ -21532,11 +21537,12 @@ function needsFeatures(g, c = goalCheck(g)) {
 }
 // The goals that need planning with nobody planning them: a fully defined draft goal with no open
 // question, or a ready goal that needsFeatures, with no planner on it, running, and waiting on no
-// other goal's design; highest priority first. full: the planner slots are all taken, by planners
-// with a window (plannerSlots): a plan branch whose window is gone runs nothing, and counted it
-// filled max_active_planners and queued every unplanned goal quietly behind dead branches
-// (planner-gone speaks for those).
-const plannerSlots = (ps) => ps.filter((p) => p.window).length;
+// other goal's design; highest priority first. full: the planner slots are all taken (plannerSlots):
+// a planner with a window, or one whose whole tmux session is missing (a reboot: every planner is
+// windowless until recovery relaunches it, so it still holds its slot). A plan branch whose window
+// alone is gone, in a session that is up, runs nothing: counted, it filled max_active_planners and
+// queued every unplanned goal quietly behind dead branches (planner-gone speaks for those).
+const plannerSlots = (ps) => ps.filter((p) => p.window || /^no tmux session/.test(p.problem ?? '')).length;
 function idlePlanningGoals(ps = planners()) {
   const busy = new Set(ps.flatMap((p) => p.goals));
   const waiting = logObjects('goal').filter((g) => {
@@ -38279,8 +38285,10 @@ function helloPulse() {
   const phaseBy = new Map();
   // the last time work moved: a line by a ticket's worker or a planner. The supervisor's own lines
   // (its acks, observations, readings, a tick's bookkeeping) are not work moving: counted, a
-  // supervisor ticking over a fleet where nothing runs kept the hub at "moving" for good. Before any
-  // session has run, the log's first line, so a fresh project isn't stalled at once.
+  // supervisor ticking over a fleet where nothing runs kept the hub at "moving" for good. A planner's
+  // progress is mostly commits on its plan branch, so the newest plan/* commit counts too (one git
+  // call for every branch, as hello's budget allows). Before any session has run, the log's first
+  // line, so a fresh project isn't stalled at once.
   const ids = new Set(tickets().keys());
   const isWork = (by) => ids.has(by) || String(by).startsWith('plan-');
   let last = 0;
@@ -38293,6 +38301,10 @@ function helloPulse() {
     if (isWork(l.by) && t > last) last = t;
     if (t > (lastBy.get(l.by) ?? 0)) lastBy.set(l.by, t);
     if (l.type === 'phase' && (!phaseBy.has(l.by) || l.at >= phaseBy.get(l.by).at)) phaseBy.set(l.by, l);
+  }
+  for (const at of (git(['for-each-ref', '--format=%(committerdate:unix)', 'refs/heads/plan/']) ?? '').split('\n')) {
+    const t = Number(at) * 1000;
+    if (t > last && t <= now) last = t;
   }
   if (!last) last = first;
   const ts = [...tickets().values()].filter(isActive);
