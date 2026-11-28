@@ -3,12 +3,14 @@
 // signed bundles, and the shape of a real actions/attest-build-provenance bundle
 // (test/fixtures/github-attestation/). The contract is the comment above packagePinPair in
 // docs/devteam/scripts/devteam.mjs. Checks are numbered as in the ticket's spec.
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { kit, testDir } from './lib/kit.mjs';
+import { spawn, spawnSync } from 'node:child_process';
+import { kit, testDir, bareProject } from './lib/kit.mjs';
 import { startFakeRegistry, GITHUB_FAILURES, FIXTURES, NAME, LOG_NAME, packName, releaseUrl } from './lib/fake-registry.mjs';
 
 const SRC = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
@@ -249,7 +251,7 @@ test('F3 each GitHub failure, driven once, serves what it says', async () => {
       assert.ok(Date.now() - t0 >= 900, 'F3 drip: a byte a second');
     });
     for (const [name, hops] of [['hops-5', 5], ['hops-6', 6]]) await drive(name, async () => { const r = await download(reg, packUrl); assert.deepEqual([r.status, r.hops.length], [200, hops], `F3 ${name}: ${hops} redirects`); assert.ok(r.hops.every((h) => new URL(h).hostname.endsWith('.githubusercontent.com')), `F3 ${name}: each to a stand-in host`); });
-    for (const [name, to] of [['redirect-elsewhere', /^https:\/\/evil\.example\//], ['redirect-http', /^http:\/\/release-assets\.githubusercontent\.com\//], ['redirect-lookalike', /^https:\/\/githubusercontent\.com\.evil\.example\//], ['redirect-loopback', /^http:\/\/127\.0\.0\.1:\d+\//]]) {
+    for (const [name, to] of [['redirect-elsewhere', /^https:\/\/evil\.example\//], ['redirect-http', /^http:\/\/release-assets\.githubusercontent\.com\//], ['redirect-lookalike', /^https:\/\/githubusercontent\.com\.evil\.example\//], ['redirect-loopback', /^http:\/\/127\.0\.0\.1:\d+\//], ['redirect-suffix', /^https:\/\/evilgithubusercontent\.com\//]]) {
       await drive(name, async () => { const r = await fetch(`${reg.url}${REPO}/releases/download/v${v}/${pack}`, { redirect: 'manual' }); assert.match(r.headers.get('location') ?? '', to, `F3 ${name}: the redirect's target`); });
     }
     const stand = `${reg.url}-/githubusercontent/release-assets.githubusercontent.com/github-production-release-asset/${v}/`;
@@ -285,4 +287,224 @@ test('F3 each GitHub failure, driven once, serves what it says', async () => {
     await assert.rejects(reg.githubFail('nope'), /no GitHub failure called nope/, 'F3 an unknown failure throws');
     assert.ok(asked(0).every((q) => 'authorization' in q && 'user-agent' in q), 'F3 each request logs its authorization and user-agent');
   } finally { await reg.close(); }
+});
+
+// ---- githubAsset (A1 to A9) ---------------------------------------------------------------------
+// githubAsset has no command of its own (kit-1052 to kit-1054 call it), so a fixture instance's kit copy
+// gains a probe, `package __github '<json>'`: a list of calls, { asset: [url, kind] } or { manifest:
+// <file> }, each answered in turn, as JSON (bytes as their length and sha256, a throw as { thrown }).
+// The real function, in a real instance, through the real CLI, with a HOME of its own, no DEVTEAM_* of
+// the machine's, the fake's env() and tokens a leak would show.
+const atmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-github-asset-'));
+after(() => fs.rmSync(atmp, { recursive: true, force: true }));
+let an = 0;
+function ghInstance() {
+  const base = path.join(atmp, `${++an}-instance`);
+  fs.mkdirSync(base);
+  const root = bareProject(base, 'gh');
+  const f = path.join(root, 'docs', 'devteam', 'scripts', 'devteam.mjs');
+  const src = fs.readFileSync(f, 'utf8');
+  const at = 'function cmdPackage() {\n';
+  assert.equal(src.split(at).length, 2, 'the kit declares cmdPackage once');
+  const probe = `  if (positional[0] === '__github') {
+    const res = [];
+    for (const c of JSON.parse(positional[1])) {
+      const t0 = Date.now();
+      let r;
+      try {
+        r = c.asset ? githubAsset(...c.asset) : packManifest(fs.readFileSync(c.manifest));
+        if (r && Buffer.isBuffer(r.bytes)) r = { ...r, bytes: { length: r.bytes.length, sha256: crypto.createHash('sha256').update(r.bytes).digest('hex') } };
+      } catch (e) { r = { thrown: e.code ?? null, message: e.message }; }
+      res.push({ ...r, ms: Date.now() - t0 });
+    }
+    return out(JSON.stringify({ res, rss: process.resourceUsage().maxRSS }));
+  }
+`;
+  fs.writeFileSync(f, src.replace(at, () => at + probe));
+  const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('DEVTEAM_') && !/^GIT_/.test(k)));
+  clean.HOME = path.join(base, 'home');
+  fs.mkdirSync(clean.HOME);
+  clean.DEVTEAM_HUB_PORT = '4999';
+  // what a leak would show
+  Object.assign(clean, { GITHUB_TOKEN: 'ghp_leakedtoken1050', GH_TOKEN: 'gho_leakedtoken1050', HTTPS_PROXY: 'http://127.0.0.1:9/' });
+  return { root, f, clean };
+}
+const GH_INST = ghInstance();
+const ghEnv = (reg, extra = {}) => ({ ...reg.env(GH_INST.clean), ...extra });
+const probeArgs = (calls) => [GH_INST.f, 'package', '__github', JSON.stringify(calls)];
+function probe(calls, env) {
+  const r = spawnSync(process.execPath, probeArgs(calls), { cwd: GH_INST.root, env, encoding: 'utf8', timeout: 280000, maxBuffer: 16 * 1024 * 1024 });
+  assert.equal(r.status, 0, `the probe ran: ${r.stderr}`);
+  return JSON.parse(r.stdout);
+}
+const asset = (u, kind = 'pack') => ({ asset: [u, kind] });
+// the fake's requests on the paths githubAsset asks (the release download and the stand-in hosts): the
+// fake listens on a loopback port of a shared machine, where another process may knock on it
+const ghAsked = (reg) => reg.requests().filter((q) => q.url.startsWith(`/${REPO}/releases/download/`) || q.url.startsWith('/-/githubusercontent/'));
+const V = '0.101.0', PACK = packName(NAME, V);
+const PACK_URL = releaseUrl(REPO, V, PACK), BUNDLE_URL = releaseUrl(REPO, V, `${PACK}.sigstore.json`);
+
+// A3: two slow calls, each on a fake of its own, started now and awaited by the file's last test, so
+// their 15 s and 120 s overlap the other checks
+const slow = ['no-answer', 'drip'].map((name) => (async () => {
+  const reg = await startFakeRegistry({ githubFail: name });
+  const t0 = Date.now();
+  const r = await new Promise((resolve) => {
+    const c = spawn(process.execPath, probeArgs([asset(PACK_URL)]), { cwd: GH_INST.root, env: ghEnv(reg), stdio: ['ignore', 'pipe', 'pipe'] });
+    let so = '', se = '';
+    c.stdout.on('data', (d) => { so += d; });
+    c.stderr.on('data', (d) => { se += d; });
+    const kill = setTimeout(() => c.kill('SIGKILL'), 200000);
+    c.on('close', (code) => { clearTimeout(kill); resolve({ code, so, se }); });
+  });
+  await reg.close();
+  return { name, wall: Date.now() - t0, ...r };
+})());
+
+test('A1 githubAsset follows the release download\'s redirect to its stand-in host, and returns the asset\'s bytes', async () => {
+  const reg = await startFakeRegistry();
+  try {
+    const before = ghAsked(reg).length;
+    const [a, b] = probe([asset(PACK_URL), asset(BUNDLE_URL, 'bundle')], ghEnv(reg)).res;
+    assert.equal(a.ok, true, `A1 ok (${JSON.stringify(a).slice(0, 300)})`);
+    assert.deepEqual(a.bytes, { length: tgzOf(V).length, sha256: sha256(tgzOf(V)) }, 'A1 the registry fixture\'s bytes');
+    assert.equal(a.redirects, 1, 'A1 one redirect');
+    assert.match(a.url, /^https:\/\/release-assets\.githubusercontent\.com\//, 'A1 url is the last URL asked, in its https form');
+    for (const k of ['ok', 'unreachable', 'unpublished', 'refused', 'why', 'bytes', 'url', 'redirects']) assert.ok(k in a, `A1 the answer has ${k}`);
+    assert.equal(b.ok, true, 'A1 the bundle too');
+    const seen = ghAsked(reg).slice(before).map((q) => q.url);
+    assert.equal(seen[0], `/${REPO}/releases/download/v${V}/${PACK}`, 'A1 the fake saw the release download first');
+    assert.match(seen[1], /^\/-\/githubusercontent\/release-assets\.githubusercontent\.com\//, 'A1 then the stand-in');
+  } finally { await reg.close(); }
+});
+
+test('A2 githubAsset follows at most 5 redirects', async () => {
+  const reg = await startFakeRegistry();
+  try {
+    await reg.githubFail('hops-5');
+    const [five] = probe([asset(PACK_URL)], ghEnv(reg)).res;
+    assert.deepEqual([five.ok, five.redirects], [true, 5], 'A2 five hops are followed');
+    await reg.githubFail('hops-6');
+    const [six] = probe([asset(PACK_URL)], ghEnv(reg)).res;
+    assert.equal(six.refused, 'redirects', 'A2 a sixth is refused');
+  } finally { await reg.close(); }
+});
+
+test('A4 a redirect anywhere but https to github.com or a githubusercontent.com host is refused, and not followed', async () => {
+  const reg = await startFakeRegistry();
+  try {
+    for (const name of ['redirect-elsewhere', 'redirect-http', 'redirect-lookalike', 'redirect-loopback', 'redirect-suffix']) {
+      await reg.githubFail(name);
+      const before = ghAsked(reg).length;
+      const [r] = probe([asset(PACK_URL)], ghEnv(reg)).res;
+      assert.equal(r.refused, 'redirect', `A4 ${name} is refused`);
+      assert.equal(ghAsked(reg).length - before, 1, `A4 ${name}: no request past the first`);
+    }
+  } finally { await reg.close(); }
+});
+
+test('A5 a URL that isn\'t exactly https on github.com is refused before any request, in test mode too', async () => {
+  const reg = await startFakeRegistry();
+  try {
+    const bad = [
+      `http://github.com/${REPO}/releases/download/v${V}/${PACK}`, `https://evil.example/${REPO}/releases/download/v${V}/${PACK}`,
+      `https://github.com:8443/${REPO}/releases/download/v${V}/${PACK}`, `https://x@github.com/${REPO}/releases/download/v${V}/${PACK}`,
+      `https://GITHUB.com/${REPO}/releases/download/v${V}/${PACK}`, `ftp://github.com/${REPO}/releases/download/v${V}/${PACK}`,
+      `https://github.com/${'a'.repeat(2048)}`, 42,
+    ];
+    const before = ghAsked(reg).length;
+    const res = probe(bad.map((u) => asset(u)), ghEnv(reg)).res;
+    bad.forEach((u, i) => assert.equal(res[i].refused, 'url', `A5 ${String(u).slice(0, 60)} is refused url`));
+    assert.equal(ghAsked(reg).length, before, 'A5 no request for any of them');
+    const [k] = probe([{ asset: [PACK_URL, 'tarball'] }], ghEnv(reg)).res;
+    assert.equal(k.refused, 'input', 'A5 a kind that is not pack or bundle is refused input');
+  } finally { await reg.close(); }
+});
+
+test('A6 no answer, a 5xx or a 429 is unreachable; a 404 is unpublished; any other status is refused', async () => {
+  const reg = await startFakeRegistry();
+  try {
+    const one = () => probe([asset(PACK_URL)], ghEnv(reg)).res[0];
+    await reg.fail('unreachable');
+    assert.equal(one().unreachable, true, 'A6 reset connections are unreachable');
+    await reg.fail('server-error');
+    assert.equal(one().unreachable, true, 'A6 a 503 is unreachable');
+    await reg.fail(null);
+    await reg.githubFail('rate-limited');
+    assert.equal(one().unreachable, true, 'A6 rate-limited is unreachable');
+    await reg.githubFail('no-asset');
+    assert.equal(one().unpublished, true, 'A6 no-asset is unpublished');
+    await reg.githubFail('forbidden');
+    assert.equal(one().refused, 'status', 'A6 a 403 is refused status');
+  } finally { await reg.close(); }
+});
+
+test('A7 a pack is at most 64 MiB and a bundle at most 1 MiB; a body cut short is never ok', async () => {
+  const reg = await startFakeRegistry();
+  try {
+    const one = (kind, u = kind === 'pack' ? PACK_URL : BUNDLE_URL) => probe([asset(u, kind)], ghEnv(reg));
+    const base = one('pack');
+    await reg.githubFail('big-pack');
+    const big = one('pack');
+    assert.equal(big.res[0].refused, 'too-big', 'A7 a pack over 64 MiB is refused too-big');
+    assert.ok(big.rss < base.rss + 32 * 1024, `A7 the probe never holds the body (${big.rss} KiB against ${base.rss})`);
+    await reg.githubFail('pack-at-cap');
+    const cap = one('pack').res[0];
+    assert.deepEqual([cap.ok, cap.bytes?.length, cap.bytes?.sha256], [true, 64 * 1024 * 1024, sha256(Buffer.alloc(64 * 1024 * 1024))], 'A7 a pack of exactly 64 MiB is ok');
+    await reg.githubFail('big-bundle');
+    const bb = one('bundle').res[0];
+    assert.equal(bb.refused, 'too-big', 'A7 a bundle declared over 1 MiB is refused too-big');
+    assert.match(bb.why, /declares/, 'A7 refused by its declared length, before reading');
+    await reg.githubFail('bundle-at-cap');
+    assert.deepEqual([one('bundle').res[0].ok, one('bundle').res[0].bytes.length], [true, 1024 * 1024], 'A7 a bundle of exactly 1 MiB is ok');
+    await reg.githubFail('short-body');
+    const short = one('pack').res[0];
+    assert.deepEqual([short.ok, short.unreachable], [false, true], 'A7 a body cut short is unreachable');
+  } finally { await reg.close(); }
+});
+
+test('A8 no request carries an Authorization header, every one says user-agent devteam, and the fetch\'s child gets an empty environment', async () => {
+  const reg = await startFakeRegistry();
+  try {
+    const marks = path.join(atmp, 'marks.jsonl');
+    const marker = path.join(atmp, 'marker.cjs');
+    fs.writeFileSync(marker, `require('node:fs').appendFileSync(${JSON.stringify(marks)}, JSON.stringify({ argv: process.argv.slice(1, 2), exec: process.execArgv.slice(0, 1) }) + '\\n');\n`);
+    probe([asset(PACK_URL), asset(BUNDLE_URL, 'bundle')], ghEnv(reg));
+    for (const name of ['hops-5', 'redirect-loopback', 'rate-limited', 'forbidden', 'short-body']) { await reg.githubFail(name); probe([asset(PACK_URL)], ghEnv(reg)); }
+    await reg.githubFail(null);
+    const asked = ghAsked(reg);
+    assert.ok(asked.length >= 12, `A8 the fake saw the probes (${asked.length})`);
+    assert.ok(asked.every((q) => q.authorization === null), 'A8 no request carried an Authorization header');
+    assert.ok(asked.every((q) => q['user-agent'] === 'devteam'), 'A8 every request says user-agent devteam');
+    const [r] = probe([asset(PACK_URL)], ghEnv(reg, { NODE_OPTIONS: `--require ${marker}` })).res;
+    assert.equal(r.ok, true, 'A8 the marked run fetched');
+    const seen = fs.readFileSync(marks, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.ok(seen.some((m) => /devteam\.mjs$/.test(m.argv[0] ?? '')), 'A8 the marker saw the CLI\'s process');
+    assert.ok(!seen.some((m) => m.exec[0] === '-e' || m.argv.length === 0), 'A8 the child\'s environment is empty');
+  } finally { await reg.close(); }
+});
+
+test('A9 DEVTEAM_GITHUB_DOWNLOAD must be exactly a loopback http origin, or githubAsset throws before any request', async () => {
+  const reg = await startFakeRegistry();
+  try {
+    const p = reg.port;
+    const before = ghAsked(reg).length;
+    for (const v of [`http://localhost:${p}/`, `http://[::1]:${p}/`, `https://127.0.0.1:${p}/`, `http://127.0.0.1:${p}`, `http://127.0.0.1:${p}/x/`, 'http://127.0.0.1:0/', 'http://127.0.0.1:65536/', 'http://127.0.0.1:080/']) {
+      const [r] = probe([asset(PACK_URL)], ghEnv(reg, { DEVTEAM_GITHUB_DOWNLOAD: v })).res;
+      assert.equal(r.thrown, 'EDEVTEAMGITHUB', `A9 ${v} throws`);
+    }
+    assert.equal(ghAsked(reg).length, before, 'A9 before any request');
+    // empty is the same as unset: github.com itself; a URL refused before any request keeps it off the network
+    const [e] = probe([asset('https://evil.example/x')], ghEnv(reg, { DEVTEAM_GITHUB_DOWNLOAD: '' })).res;
+    assert.deepEqual([e.thrown, e.refused], [undefined, 'url'], 'A9 empty is the same as unset');
+  } finally { await reg.close(); }
+});
+
+test('A3 no answer is unreachable in 15 s, and a body that never ends in 120 s, whatever the caller sets', async () => {
+  const got = Object.fromEntries((await Promise.all(slow)).map((r) => [r.name, r]));
+  for (const name of ['no-answer', 'drip']) assert.equal(got[name].code, 0, `A3 ${name}: the probe ran (${got[name].se.slice(0, 300)})`);
+  const call = (name) => JSON.parse(got[name].so).res[0];
+  const na = call('no-answer'), dr = call('drip');
+  assert.ok(na.unreachable && na.ms >= 15000 && na.ms <= 25000, `A3 no-answer is unreachable in 15 s (${na.ms} ms, ${JSON.stringify(na).slice(0, 200)})`);
+  assert.ok(dr.unreachable && dr.ms >= 120000 && dr.ms <= 127000, `A3 drip is unreachable in 120 s (${dr.ms} ms, ${JSON.stringify(dr).slice(0, 200)})`);
 });

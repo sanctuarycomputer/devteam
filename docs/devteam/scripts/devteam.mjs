@@ -34636,6 +34636,84 @@ function packagePinPair(pin) {
     'package-lock.json': text({ name: 'devteam-instance', lockfileVersion: 3, requires: true, packages: { '': { name: 'devteam-instance', dependencies }, [`node_modules/${name}`]: { version, resolved, integrity } } }),
   };
 }
+// githubAsset (kit-install@2): one GitHub release asset, fetched in a child so its callers stay
+// synchronous. url is https://github.com/…; kind is 'pack' (at most 64 MiB) or 'bundle' (at most 1 MiB).
+// It returns { ok, unreachable, unpublished, refused, why, bytes, url, redirects } (the contract above
+// packagePinPair) and throws only for a DEVTEAM_GITHUB_DOWNLOAD that isn't a test's loopback origin (code
+// EDEVTEAMGITHUB). The child's code is a string whose every line is indented.
+function githubAsset(url, kind) {
+  const set = process.env.DEVTEAM_GITHUB_DOWNLOAD ?? '';
+  const port = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/$/.exec(set)?.[1];
+  if (set !== '' && !(Number(port) <= 65535)) {
+    const e = new Error(`DEVTEAM_GITHUB_DOWNLOAD is ${JSON.stringify(set.slice(0, 200))}: it may only be http://127.0.0.1:<port>/ (a test's fake GitHub), or unset for github.com`);
+    e.code = 'EDEVTEAMGITHUB';
+    throw e;
+  }
+  const base = { ok: false, unreachable: false, unpublished: false, refused: null, why: null, bytes: null, url: null, redirects: 0 };
+  const cut = (v) => JSON.stringify(String(v ?? '')).slice(0, 200);
+  const max = { pack: 64 * 1024 * 1024, bundle: 1024 * 1024 }[kind];
+  if (typeof kind !== 'string' || !max) return { ...base, refused: 'input', why: `kind ${cut(kind)} is not pack or bundle` };
+  let u = null;
+  if (typeof url === 'string' && url.length <= 2048) { try { u = new URL(url); } catch {} }
+  if (!u || u.href !== url || u.protocol !== 'https:' || u.hostname !== 'github.com' || u.username || u.password || u.port !== '') return { ...base, refused: 'url', why: `${cut(url)} is not an https URL on github.com` };
+  let dir;
+  try { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-github-')); } catch (e) { return { ...base, unreachable: true, url, why: `can't make a folder under ${os.tmpdir()} to fetch into (${e.code ?? e.message})` }; }
+  const out = path.join(dir, 'asset');
+  const code = `
+    const https = require('node:https'), http = require('node:http'), fs = require('node:fs');
+    const [start, test, max, out] = ${JSON.stringify([url, set, max, out])};
+    let over = false;
+    const done = (r) => { if (over) return; over = true; process.stdout.write(JSON.stringify(r)); process.exit(0); };
+    setTimeout(() => done({ down: 'no whole answer in 120 s' }), 120000);
+    const ours = (u) => u.protocol === 'https:' && !u.username && !u.password && u.port === '' && (u.hostname === 'github.com' || /^([a-z0-9-]+\\.)+githubusercontent\\.com$/.test(u.hostname));
+    const where = (u) => (test === '' ? u : new URL(u.hostname === 'github.com' ? test + u.pathname.slice(1) + u.search : test + '-/githubusercontent/' + u.hostname + u.pathname + u.search));
+    let hops = 0;
+    const ask = (u) => {
+      const t = where(u);
+      const req = (t.protocol === 'https:' ? https : http).request(t, { method: 'GET', agent: false, headers: { 'user-agent': 'devteam', accept: 'application/octet-stream', 'accept-encoding': 'identity' } });
+      const head = setTimeout(() => { req.destroy(); done({ down: 'no answer in 15 s', url: u.href, hops }); }, 15000);
+      req.on('error', (e) => done({ down: String(e?.code ?? e?.message ?? 'error'), url: u.href, hops }));
+      req.on('response', (res) => {
+        clearTimeout(head);
+        const s = res.statusCode;
+        if ([301, 302, 303, 307, 308].includes(s)) {
+          res.resume();
+          const loc = res.headers.location;
+          let next = null;
+          try { if (typeof loc === 'string' && loc.length <= 2048) next = new URL(loc, u); } catch {}
+          if (!next || !ours(next)) return done({ refused: 'redirect', why: 'a ' + s + ' from ' + u.host + ' to ' + JSON.stringify(String(loc ?? '')).slice(0, 200) + ', not an https URL on github.com or *.githubusercontent.com', url: u.href, hops });
+          if (++hops > 5) return done({ refused: 'redirects', why: 'more than 5 redirects', url: u.href, hops: 5 });
+          return ask(next);
+        }
+        if (s !== 200) { res.resume(); return done({ status: s, url: u.href, hops }); }
+        const len = res.headers['content-length'];
+        if (len !== undefined && Number(len) > max) { req.destroy(); return done({ refused: 'too-big', why: 'it declares ' + len + ' bytes, over ' + max, url: u.href, hops }); }
+        const fd = fs.openSync(out, 'w');
+        let n = 0;
+        res.on('data', (c) => { n += c.length; if (n > max) { req.destroy(); return done({ refused: 'too-big', why: 'it runs past ' + max + ' bytes', url: u.href, hops }); } fs.writeSync(fd, c); });
+        res.on('aborted', () => done({ down: 'the answer was cut off', url: u.href, hops }));
+        res.on('error', (e) => done({ down: String(e?.code ?? 'error'), url: u.href, hops }));
+        res.on('end', () => { fs.closeSync(fd); done({ ok: true, url: u.href, hops, n }); });
+      });
+      req.end();
+    };
+    ask(new URL(start));`;
+  try {
+    const f = spawnSync(process.execPath, ['-e', code], { env: {}, encoding: 'utf8', timeout: 130000, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 1024 * 1024 });
+    let got = null;
+    try { got = JSON.parse(f.stdout); } catch {}
+    const at = { url: got?.url ?? url, redirects: got?.hops ?? 0 };
+    if (!got) return { ...base, ...at, unreachable: true, why: `the fetch of ${cut(url)} gave no answer (${f.error?.code ?? f.signal ?? `exit ${f.status}`})` };
+    if (got.down) return { ...base, ...at, unreachable: true, why: `${cut(at.url)} can't be reached: ${got.down}` };
+    if (got.refused) return { ...base, ...at, refused: got.refused, why: `${cut(at.url)}: ${got.why}` };
+    if (got.status === 404) return { ...base, ...at, unpublished: true, why: `${cut(at.url)} is not there (404)` };
+    if (got.status === 429 || got.status >= 500) return { ...base, ...at, unreachable: true, why: `${cut(at.url)} answered ${got.status}` };
+    if (got.status !== undefined) return { ...base, ...at, refused: 'status', why: `${cut(at.url)} answered ${got.status}` };
+    const bytes = fs.readFileSync(out);
+    if (bytes.length !== got.n || bytes.length > max) return { ...base, ...at, unreachable: true, why: `the fetch of ${cut(at.url)} wrote ${bytes.length} bytes of ${got.n}` };
+    return { ...base, ...at, ok: true, bytes };
+  } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* a folder left in the temp folder changes no answer */ } }
+}
 // npmRun (kit-install@1): the one function every kit npm call goes through. It runs `npm <args>` in cwd
 // (absolute) with --registry=<the registry>, --ignore-scripts, --prefix=<cwd> and --workspaces=false
 // after args, each once; with every variable whose name starts with npm_config_, in any letter case,
