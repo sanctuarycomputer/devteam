@@ -282,21 +282,23 @@ test('a build is stopped past its limit; the next gets twice as long; a slow goo
   running = null;
   fs.rmSync(kept, { force: true });
   const LIMIT = { DEVTEAM_DATA_LIMIT_MIN_MS: '1000' };
-  // no good build known, each takes 2.5 s: stopped at 1 s, then at 2 s, then through in 4 s
-  setSleep(2500);
+  // no good build known, each sleeps 2 s (more with node's start): stopped at 1 s, then at 2 s, then
+  // through in its 4 s
+  setSleep(2000);
   const n0 = builds().length;
   let url = await start(LIMIT);
   let good = null;
   await until(async () => { const r = await data(url); if (r.status === 200) good = r; else await sleep(200); return !!good; }, 'a good build at last', 90000);
   const mine = builds().slice(n0);
   assert.deepEqual(mine.map((b) => b.end !== null), [false, false, true], `stopped twice, then through: ${JSON.stringify(mine)}`);
+  // its copy is written after the read is answered: stopped before then, a dashboard keeps nothing
+  await until(() => fs.existsSync(kept), 'the good build kept');
   await running.stop();
   running = null;
-  // a good build of about 2.5 s is known (kept): a 5 s build is under 3 times it, so it isn't stopped
-  await until(() => fs.existsSync(kept), 'the good build kept');
-  setSleep(5000);
+  // a good build of 2 s or more is known (kept): a 4 s sleep is under 3 times it, so it isn't stopped
+  setSleep(4000);
   const n1 = builds().length;
   url = await start(LIMIT);
-  await until(() => builds().length > n1 && builds().slice(n1).every((b) => b.end !== null), 'the 5 s warm build to end', 30000);
+  await until(() => builds().length > n1 && builds().slice(n1).every((b) => b.end !== null), 'the 4 s warm build to end', 30000);
   assert.equal(builds().length, n1 + 1, 'one build, not stopped');
 });
