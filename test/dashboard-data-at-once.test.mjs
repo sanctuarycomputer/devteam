@@ -19,9 +19,11 @@ const PROBE = `import fs from 'node:fs';
 if (process.argv.slice(2).includes('dashboard-data') && process.env.ZA_BUILDS) {
   let ms = 0;
   try { ms = Number(fs.readFileSync(process.env.ZA_SLEEP, 'utf8')) || 0; } catch {}
-  fs.appendFileSync(process.env.ZA_BUILDS, 'start ' + Date.now() + '\\n');
+  fs.appendFileSync(process.env.ZA_BUILDS, 'start ' + process.pid + ' ' + Date.now() + '\\n');
   if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-  process.on('exit', () => fs.appendFileSync(process.env.ZA_BUILDS, 'end ' + Date.now() + '\\n'));
+  process.on('exit', () => fs.appendFileSync(process.env.ZA_BUILDS, 'end ' + process.pid + ' ' + Date.now() + '\\n'));
+  // a build that fails, while the fail file says so
+  if (fs.existsSync(process.env.ZA_FAIL)) process.exit(3);
 }
 `;
 
@@ -36,7 +38,7 @@ async function until(fn, what, ms = 60000) {
 }
 
 const F = fleetFixture('data-at-once');
-const files = { probe: path.join(F.base, 'probe.mjs'), builds: path.join(F.base, 'builds.txt'), sleep: path.join(F.base, 'sleep.txt') };
+const files = { probe: path.join(F.base, 'probe.mjs'), builds: path.join(F.base, 'builds.txt'), sleep: path.join(F.base, 'sleep.txt'), fail: path.join(F.base, 'fail') };
 write(files.probe, PROBE);
 write(files.builds, '');
 write(files.sleep, '2000');
@@ -50,7 +52,7 @@ const env = F.env({
   // a finished build served again for 1 s (the kit's 20 s): the idle poll below outlives it
   DEVTEAM_DATA_REUSE_MS: '1000',
   NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import ${pathToFileURL(files.probe).href}`].filter(Boolean).join(' '),
-  ZA_BUILDS: files.builds, ZA_SLEEP: files.sleep,
+  ZA_BUILDS: files.builds, ZA_SLEEP: files.sleep, ZA_FAIL: files.fail,
 });
 for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'DEVTEAM_HOME', 'DEVTEAM_PROJECT', 'TMUX', 'TMUX_PANE']) delete env[k];
 const kept = path.join(F.old, 'docs/devteam/run/cache/dashboard-data.last');
@@ -60,9 +62,10 @@ after(async () => { await running?.stop(); F.done(); });
 
 const setSleep = (ms) => fs.writeFileSync(files.sleep, String(ms));
 function builds() {
-  const lines = fs.readFileSync(files.builds, 'utf8').split('\n').filter(Boolean);
-  const ends = lines.filter((l) => l.startsWith('end ')).map((l) => Number(l.slice(4)));
-  return lines.filter((l) => l.startsWith('start ')).map((l, i) => ({ start: Number(l.slice(6)), end: ends[i] ?? null }));
+  // paired by pid: a build killed with its dashboard never says it ended
+  const lines = fs.readFileSync(files.builds, 'utf8').split('\n').filter(Boolean).map((l) => l.split(' '));
+  const ends = new Map(lines.filter(([e]) => e === 'end').map(([, pid, t]) => [pid, Number(t)]));
+  return lines.filter(([e]) => e === 'start').map(([, pid, t]) => ({ start: Number(t), end: ends.get(pid) ?? null }));
 }
 const allEnded = () => builds().every((b) => b.end !== null);
 async function start() {
@@ -215,5 +218,24 @@ test('a moving log with builds slower than DATA_WAIT_MS shows no stale note whil
     await running.stop();
     running = null;
   }
+});
+
+test('on a quiet log, a build that fails marks the served data stale, and one that succeeds clears it', { timeout: 240000 }, async () => {
+  setSleep(2000);
+  const n0 = builds().length;
+  const url = await start();
+  // its own builds only: the last test's hanging build was killed with its dashboard and never said it ended
+  await until(() => builds().length > n0 && builds().slice(n0).every((b) => b.end !== null), 'its own warm build');
+  await sleep(1500); // past the 1 s reuse window: the next read starts a build
+  assert.equal((await data(url)).stale, null, 'a good build, nothing logged: not stale');
+  fs.writeFileSync(files.fail, '');
+  try {
+    let stale = null;
+    await until(async () => { const r = await data(url); if (r.stale) stale = r; else await sleep(500); return !!stale; }, 'a read marked stale after a failed build', 60000);
+    assert.equal(stale.status, 200, 'still served, from the last good build');
+  } finally { fs.rmSync(files.fail, { force: true }); }
+  await until(async () => { const r = await data(url); if (r.stale) await sleep(500); return !r.stale; }, 'a read not marked stale once a build succeeds again', 60000);
+  await running.stop();
+  running = null;
 });
 
