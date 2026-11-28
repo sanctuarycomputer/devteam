@@ -175,12 +175,13 @@ function skipFor(id) {
   return k ? READS[k]() : false;
 }
 // A1's skip (kit-1034, rule D2): A1 skips only when every stale apps-serve and apps-tests item in its
-// split is drift and no conflict names apps-serve or apps-tests, in its split or this file's (kit-1074).
-// An override is drift as driftOf judges it. A patch that no longer applies is drift only when its
-// base moved: the pre-image its index line names is neither the text it really met (A1's tree's file with every later patch to it taken back off, newest first) nor HEAD's
-// blob of the file. A patch that fails on the text it was written on is broken: A1 is red. This holds
-// while each patch's index names one of those two; a patch whose base moves but which still applies by
-// offset is drift from then on, even broken, until it is re-pinned on its new base.
+// split is drift and no conflict names apps-serve or apps-tests, in its split or this file's
+// (kit-1074). An override is drift as driftOf judges it. A patch that no longer applies is drift only
+// when its base moved: the pre-image its index line names is neither the text it really met (A1's
+// tree's file with every later patch to it taken back off, newest first) nor HEAD's blob of the file. A
+// patch that fails on the text it was written on is broken: A1 is red. This holds while each patch's
+// index names one of those two; a patch whose base moves but which still applies by offset is drift
+// from then on, even broken, until it is re-pinned on its new base.
 const patchAt = (a, n) => path.join(splitSrc, 'overlay', a, 'patches', n);
 // the split's patch order: folder, then file name (code units)
 const later = (x, s) => x.area > s.area || (x.area === s.area && x.name > s.name);
