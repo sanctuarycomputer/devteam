@@ -2539,11 +2539,22 @@ exit 0
       "key": "package_name",
       "group": "Upstream and releases",
       "name": "Kit package",
-      "description": "the npm package devteam releases are published as and installed from",
+      "description": "the package devteam releases are published as and installed from",
       "shown": "value",
       "value": "@sanctuarycomputer/devteam",
       "set": false,
       "default": "@sanctuarycomputer/devteam",
+      "owner_only": "governance-edit"
+    },
+    {
+      "key": "package_source",
+      "group": "Upstream and releases",
+      "name": "Kit package source",
+      "description": "where kit releases are installed from: npm, or GitHub's release files until npm is set up",
+      "shown": "value",
+      "value": "npm",
+      "set": false,
+      "default": "npm",
       "owner_only": "governance-edit"
     },
     {
