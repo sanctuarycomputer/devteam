@@ -27,14 +27,6 @@ export function addrState(url: string): { hub: 1; key: string } {
   return { hub: 1, key: String(url).replace(/^#/, '').split('/')[0].split('?')[0] };
 }
 
-// A dashboard's head: a string starting with '#' of at most 2,048 characters (the dashboard sends null
-// for a longer one), or null, in a hub-route message (C7-C9).
-export function isRouteHead(m: unknown): m is { devteam: 'hub-route'; head: string | null } {
-  if (!m || typeof m !== 'object' || (m as { devteam?: unknown }).devteam !== 'hub-route') return false;
-  const head = (m as { head?: unknown }).head;
-  return head === null || (typeof head === 'string' && head.startsWith('#') && head.length <= 2048);
-}
-
 // the Overview's address: the operator thread open on it, if one with a name is
 export const tlHashOf = (open: unknown): string => (open && !String(open).startsWith('pending-') ? `#overview?ot=${encodeURIComponent(String(open))}` : '#overview');
 

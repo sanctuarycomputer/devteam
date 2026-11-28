@@ -1,7 +1,14 @@
 // kit-1008: every check the hub makes on a frame's message or a frame's refusal, moved from hub.html (spec,
 // The lib modules; C1-C4, C7-C11, C14-C15). The glue's listeners call these and decide nothing themselves
 // (A22). Compiled to lib-dist/lib/hub-shell-frames.js and unit-tested on Node.
-import { isRouteHead } from './hub-shell-head.js';
+
+// A dashboard's head: a string starting with '#' of at most 2,048 characters (the dashboard sends null
+// for a longer one), or null, in a hub-route message (C7-C9).
+export function isRouteHead(m: unknown): m is { devteam: 'hub-route'; head: string | null } {
+  if (!m || typeof m !== 'object' || (m as { devteam?: unknown }).devteam !== 'hub-route') return false;
+  const head = (m as { head?: unknown }).head;
+  return head === null || (typeof head === 'string' && head.startsWith('#') && head.length <= 2048);
+}
 
 export type FleetAnswer = { ok: boolean; error: string | null };
 export type FleetWait = { resolve: (a: FleetAnswer) => void; origin: string; win: unknown };

@@ -5,6 +5,9 @@ import '@shared/layout/layout.css';
 import './hub-shell.css';
 import * as S from '@shared/shell/shell';
 import HubShellClient from './client';
+import * as Panes from './panes';
+import * as Fleet from './fleet';
+import * as Route from './route';
 import HubOverview from '../hub-overview';
 import HubSettings from '../hub-settings';
 import HubThreads from '../hub-threads';
@@ -62,22 +65,22 @@ export function bindFleetSwitch(...a: Parameters<typeof S.bindFleetSwitch>): Ret
 
 export function fleetSwitch(...a: Parameters<typeof S.fleetSwitch>): ReturnType<typeof S.fleetSwitch> { return S.fleetSwitch(...a); }
 
-export function frameFor(..._args: unknown[]): never {
-  throw new Error('not ported: hub-shell');
+export function frameFor(...a: Parameters<typeof Panes.frameFor>): ReturnType<typeof Panes.frameFor> {
+  return Panes.frameFor(...a);
 }
 
-export function hubAddr(..._args: unknown[]): never {
-  throw new Error('not ported: hub-shell');
+export function hubAddr(...a: Parameters<typeof Route.hubAddr>): ReturnType<typeof Route.hubAddr> {
+  return Route.hubAddr(...a);
 }
 
-export function select(..._args: unknown[]): never {
-  throw new Error('not ported: hub-shell');
+export function select(...a: Parameters<typeof Panes.select>): ReturnType<typeof Panes.select> {
+  return Panes.select(...a);
 }
 
-export function setFleet(..._args: unknown[]): never {
-  throw new Error('not ported: hub-shell');
+export function setFleet(...a: Parameters<typeof Fleet.setFleet>): ReturnType<typeof Fleet.setFleet> {
+  return Fleet.setFleet(...a);
 }
 
-export function tlHash(..._args: unknown[]): never {
-  throw new Error('not ported: hub-shell');
+export function tlHash(...a: Parameters<typeof Route.tlHash>): ReturnType<typeof Route.tlHash> {
+  return Route.tlHash(...a);
 }
