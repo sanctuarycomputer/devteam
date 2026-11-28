@@ -746,6 +746,9 @@ const SETTINGS_DEFAULTS = {
   // hours (the next-move table, its flag); a value that isn't a number of zero or more counts as the default.
   next_move_owed_minutes: 60,
   next_move_stall_hours: 24,
+  // A high finding wait has already woken the supervisor on wakes it again after this many hours if
+  // it is still open; a new one wakes it at once.
+  standing_high_hours: 4,
   tick_minutes: 15,
   question_default_after_hours: 24,
   // fix tickets that may run past max_active_tickets, so an incident never waits for a slot
@@ -893,6 +896,7 @@ const SETTINGS_WORDS = Object.freeze({
   finding_ack_hours: ['Questions and findings', 'A finding set aside for', 'hours a set-aside finding stays quiet, unless its subject changes; a merge on a main stays set aside for good', 'value'],
   next_move_owed_minutes: ['Questions and findings', 'A move owed after', "minutes a next move the supervisor holds may wait before it is owed", 'value'],
   next_move_stall_hours: ['Questions and findings', 'A move stalled after', 'hours any next move may stay the same before it is stalled, whoever holds it', 'value'],
+  standing_high_hours: ['Questions and findings', 'A standing finding wakes again after', 'hours before a high finding still open wakes the supervisor again', 'value'],
   upstream_repo: ['Upstream and releases', 'Kit source', 'where new devteam releases come from', 'hidden'],
   upstream_base: ['Upstream and releases', 'Kit release in use', 'the devteam release this project runs', 'value'],
   upstream_sync: ['Upstream and releases', 'Kit updates', 'adopt each release on its own, or ask you first', 'value'],
@@ -917,7 +921,7 @@ const settingNum = (v) => v === null || Number.isFinite(v);
 const settingName = (v) => v === null || (typeof v === 'string' && /^[A-Za-z0-9._/-]{1,100}$/.test(v));
 const settingLines = (v) => Array.isArray(v) && v.every((s) => typeof s === 'string' && s.length <= 100 && !UNSAFE_TEXT.test(s));
 const SETTING_SHAPES = Object.freeze({
-  ...Object.fromEntries(['max_active_tickets', 'max_active_per_component', 'max_active_planners', 'machine_memory_ceiling', 'browser_idle_minutes', 'tick_minutes', 'stale_after_minutes', 'dashboard_port', 'slow_gate_minutes', 'hold_review_days', 'question_default_after_hours', 'finding_ack_hours', 'next_move_owed_minutes', 'next_move_stall_hours', 'upstream_check_hours', 'incident_slots', 'retro_every_days', 'research_every_days'].map((k) => [k, settingNum])),
+  ...Object.fromEntries(['max_active_tickets', 'max_active_per_component', 'max_active_planners', 'machine_memory_ceiling', 'browser_idle_minutes', 'tick_minutes', 'stale_after_minutes', 'dashboard_port', 'slow_gate_minutes', 'hold_review_days', 'question_default_after_hours', 'finding_ack_hours', 'next_move_owed_minutes', 'next_move_stall_hours', 'standing_high_hours', 'upstream_check_hours', 'incident_slots', 'retro_every_days', 'research_every_days'].map((k) => [k, settingNum])),
   merge_admin: (v) => typeof v === 'boolean',
   responder: (v) => typeof v === 'boolean',
   session_threads: (v) => typeof v === 'boolean',
@@ -1930,6 +1934,7 @@ const CLASS_WORDS = Object.freeze({
   'exterior-change': 'Changing what the project relates to',
   'goal-met': 'Saying a goal is met',
   'registry-attest': 'Confirming the registry is complete',
+  'stuck-work': 'Work stuck past the supervisor',
   'new-dependency': 'Adding a new dependency',
   'artifact-publish': 'Publishing a page',
   'recurring-edit': 'Adding, changing or stopping a job',
@@ -10845,8 +10850,9 @@ function cmdAsk() { out(askLine().id); }
 // this one would get against itself (on a small project, words only this one has weigh most). A
 // rule the owner gave for this class settles it (decide --approved k-…); any other rule,
 // and every earlier answer, is for the recommendation and approves nothing. The kit's own wordings
-// (goal-met, registry attestations, reviews, goal approvals) are alike by design and skipped.
-const KIT_WORDED = (cls, kind) => ['goal-met', 'registry-attest'].includes(cls) || ['review', 'goal-approval'].includes(kind);
+// (goal-met, registry attestations, reviews, goal approvals, the stuck-work digest) are alike by
+// design and skipped.
+const KIT_WORDED = (cls, kind) => ['goal-met', 'registry-attest', 'stuck-work'].includes(cls) || ['review', 'goal-approval'].includes(kind);
 // A decision the owner has made is never put to them again (supervisor.md §6): ask refuses a
 // question as close as those above to one the owner answered (their own line, bound to the question
 // as asked; never a default or an open one) about the same work: a ticket or incident both name, or
@@ -11015,6 +11021,8 @@ function askLine({ thread, about } = {}) {
   // a goal-met question's words are the kit's (below)
   let q = ownerText(flagStr('question') ?? (flagStr('class') === 'goal-met' ? null : die('ask needs --question')));
   const cls = flagStr('class') ?? null;
+  // the stuck-work digest is the kit's word to the owner over the supervisor's head: only metrics writes it
+  if (cls === STUCK_CLASS) die(`--class ${STUCK_CLASS} is the kit's own question (metrics asks it, and withdraws it once nothing is stuck); act on what it lists instead`);
   // A question in the owner-only class one-way-door is a one-way door: left without --kind it is
   // asked as one, and asked as another kind it is refused, so the owner's answer is the one-way-door
   // answer approve-plan and the plan review cite (and never re-asked as one), and the kind's own
@@ -11840,7 +11848,7 @@ function cmdWithdraw() {
   const [id] = positional;
   if (!id) die('usage: withdraw <qid> [--reason r]');
   supervisorOnly('withdraw');
-  openQuestion(id);
+  if (openQuestion(id).class === STUCK_CLASS) die(`${id} is the kit's stuck-work digest: it is withdrawn by itself once nothing it lists is stuck; move that work instead`);
   appendLog({ type: 'question', op: 'set', id, status: 'withdrawn', reason: flagStr('reason') }, 'supervisor');
   appendLog({ type: 'act', decision: citing(), class: 'withdraw-question', what: `withdrew ${id}${flagStr('reason') ? `: ${flagStr('reason')}` : ''}`, refs: [id], reversible: true }, 'supervisor');
   out(`withdrew ${id}`);
@@ -17328,7 +17336,9 @@ async function cmdObserveMetrics() {
   const unlisted = await fetchLinkPrs(end);
   const s = observeSpend();
   const learned = writeLearning();
-  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${learned ? `; ${learned} weekly learning record(s)` : ''}${unfetched.length ? `; ${unfetched.length} repo link(s) not fetched this tick (time budget): ${unfetched.join(', ')}` : ''}${unlisted.length ? `; ${unlisted.length} repo link(s) whose open PRs weren't read this tick (time budget): ${unlisted.join(', ')}` : ''}${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
+  const found = observeFindings(collectMetrics(0));
+  writeStuckDigest(nextMoves());
+  out(`recorded ${s} spend line(s) and ${found} new observation(s)${learned ? `; ${learned} weekly learning record(s)` : ''}${unfetched.length ? `; ${unfetched.length} repo link(s) not fetched this tick (time budget): ${unfetched.join(', ')}` : ''}${unlisted.length ? `; ${unlisted.length} repo link(s) whose open PRs weren't read this tick (time budget): ${unlisted.join(', ')}` : ''}${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
   // finished worktrees go, at most every 30 minutes (one line when any did)
   tidyFinishedWorktrees();
   // the hub's cache, again after everything the tick wrote, from the log read afresh, so nothing
@@ -21361,6 +21371,8 @@ function cmdMetrics() {
   const since = flagStr('since') ? Date.parse(flagStr('since')) : 0;
   if (Number.isNaN(since)) die('--since must be a date');
   const m = collectMetrics(since, since);
+  // a supervisor's run (wait runs one each cycle) keeps the stuck-work digest; anyone else's only reads
+  if (process.env.DEVTEAM_ROLE === 'supervisor') writeStuckDigest(nextMoves());
   if (flags.json) return json(m);
   const kv = (o, unit = '') => Object.entries(o).map(([k, v]) => `${k} ${unit}${v}`).join(', ') || '-';
   // stages in the order work meets them: by_stage's own order follows an unsorted folder listing
@@ -21881,6 +21893,60 @@ function moveFindings(moves, raised, now = Date.now()) {
   }
   return out;
 }
+// The rung above the supervisor (cause G). A move stalled (rung 2) for more than twice
+// next_move_stall_hours has outlived every reminder the supervisor gets, so the kit tells the owner
+// itself, in one Inbox question it keeps: asked when the list starts, withdrawn and asked again when
+// the list changes, withdrawn when it empties. An owner-action that only says what is stuck: it
+// blocks nothing, has no recommendation, choices or default, and answering it acknowledges the list
+// (an answered one with the same list isn't asked again) and approves nothing. Only a supervisor's
+// metrics run (wait's, the tick's) or the dashboard's writes it, never the operator's, which only
+// reads; the supervisor can't ask or withdraw it. Copied and quiet moves are left out, as in
+// moveFindings.
+const STUCK_CLASS = 'stuck-work';
+// How long a move has been the same, in words: moveFindings' ageOf, which keeps its own copy so it
+// can be loaded alone
+const moveAgeWords = (since, now = Date.now()) => { const t = Date.parse(since); if (Number.isNaN(t)) return 'since ?'; const min = Math.max(0, Math.floor((now - t) / 60000)); return min < 120 ? `${min} min` : min < 2880 ? `${Math.floor(min / 60)} h` : `${Math.floor(min / 1440)} d`; };
+function stuckItems(moves, now = Date.now()) {
+  const over = 2 * moveSetting('next_move_stall_hours') * 3600000;
+  return moves.filter((m) => m.flag === 'stalled' && !m.quiet && !m.via && now - Date.parse(m.since) > over)
+    .sort((a, b) => a.since.localeCompare(b.since) || a.subject.localeCompare(b.subject));
+}
+// The digest's words, its ages as at `at`, so the one asked can be compared with the list now by
+// rebuilding it at its own asked_at.
+function stuckDigestText(items, at) {
+  const h = 2 * moveSetting('next_move_stall_hours');
+  const n = items.length;
+  return {
+    question: `Stuck work in ${previewProject()}: ${n} item${n === 1 ? '' : 's'} waiting more than ${Number.isInteger(h) ? h : +h.toFixed(3)} h`,
+    context: [
+      items.map((m) => `- ${m.title}: ${m.words} (${m.subject}; held by the ${m.holder}, unchanged for ${moveAgeWords(m.since, at)})`).join('\n'),
+      `Each of these has stayed the same for more than twice the ${moveSetting('next_move_stall_hours')} h after which a move counts as stalled, and the supervisor has been told about each since then. The kit lists them for you itself.`,
+      'Answering only says you have seen this list: it approves nothing and changes nothing. The question goes away by itself once nothing is stuck, and comes back with the new list if that changes.',
+    ].join('\n\n'),
+  };
+}
+function writeStuckDigest(moves) {
+  if (process.env.DEVTEAM_ROLE === 'operator' || logWriter() !== 'supervisor') return;
+  const items = stuckItems(moves);
+  const plan = () => {
+    const qs = questions().filter((q) => q.class === STUCK_CLASS).sort((a, b) => a.asked_at.localeCompare(b.asked_at));
+    const open = qs.filter((q) => q.status === 'open');
+    const same = (q) => { const w = stuckDigestText(items, Date.parse(q.asked_at)); return q.question === w.question && q.context === w.context; };
+    const last = qs.at(-1);
+    const keep = !items.length ? null : open.length ? (open.length === 1 && same(open[0]) ? open[0] : null) : last?.status === 'answered' && same(last) ? last : null;
+    return { drop: open.filter((q) => q !== keep), ask: items.length > 0 && !keep };
+  };
+  const first = plan();
+  if (!first.drop.length && !first.ask) return;
+  // a dashboard and a supervisor may both get here: one writes, from the log read afresh; a run that
+  // finds the lock held leaves it to the next run
+  tryLock(runPath('stuck-digest'), () => {
+    logCache = null;
+    const { drop, ask } = plan();
+    for (const q of drop) appendLog({ type: 'question', op: 'set', id: q.id, status: 'withdrawn', reason: items.length ? 'the stuck work changed: asked again with the new list' : 'nothing is stuck any more' }, 'supervisor');
+    if (ask) appendLog({ type: 'question', kind: 'owner-action', class: STUCK_CLASS, ...stuckDigestText(items, Date.now()), stake: 2, urgency: 2, why_asked: { reasons: ['owner-only'] } }, 'supervisor');
+  });
+}
 // The hub's cache (next-move@1's fourth place): the goals' moves, with at the time the log they
 // come from was read, so a line written after that read is newer than the cache.
 // collectMetrics writes it each run, and observe-metrics again as its last step, from a fresh read
@@ -22094,6 +22160,9 @@ function dashboardKit() {
 const cmdDashboardData = () => {
   gitReadCache = new Map();
   out(JSON.stringify(dashboardData()));
+  // the dashboard's own run keeps the stuck-work digest too, so it reaches the owner with no supervisor
+  // running; not on a machine another one supervises
+  if (process.env.DEVTEAM_CHANNEL === 'dashboard' && !process.env.DEVTEAM_ROLE && !hostState().refused) writeStuckDigest(nextMoves());
   if (process.env.DEVTEAM_TEST_REVIEW_READS) process.stderr.write(`review reads: ${reviewReads}\n`);
 };
 
@@ -38140,8 +38209,9 @@ async function cmdSensor() {
 // wait [--minutes n]: block between ticks until something needs the supervisor, then say what.
 // It wakes on a new open message to the supervisor, any new line from the owner (an answer, a goal
 // decision, an ack, a message), a new high finding (a worker that stopped on an API error sends no
-// message), or the tick coming due. A high finding already open when it starts returns at once:
-// act on it, or ack it (supervisor.md §3). Harness-agnostic: a blocking command, run in the
+// message), or the tick coming due. A high finding open when it starts returns at once if no wait
+// has woken on it in standing_high_hours: act on it, or ack it (supervisor.md §3).
+// Harness-agnostic: a blocking command, run in the
 // background where the harness can be woken by a finished command.
 function cmdWait() {
   supervisorOnly('wait');
@@ -38263,7 +38333,30 @@ function cmdWait() {
   const first = snap();
   recur(first.key);
   const late = (xs) => (since ? xs.filter((x) => x.at > since) : []);
-  const base = { owner: first.owner.filter((x) => !late(first.owner).includes(x)).map((x) => x.k), msgs: first.msgs.filter((x) => !late(first.msgs).includes(x)).map((x) => x.k), high: first.high };
+  // A high finding wakes the supervisor when a wait first sees it (a move newly stalled is one: its
+  // move-stalled is a finding of its own), then at most every standing_high_hours while it stays
+  // open, so one left standing stops being a wake on every call (cause G); the tick still comes due
+  // on its timer. Kept in run/wait-high by kind and subject (a detail carries the finding's age), when
+  // each last woke a wait. An entry goes once it is older than that, open or not, so a metrics run
+  // that read no findings forgets nothing, and an acked finding back after its ack wakes again.
+  const highFile = runPath('wait-high');
+  const standingH = moveSetting('standing_high_hours');
+  let woke = {};
+  try { const j = JSON.parse(readText(highFile) ?? '{}'); if (j && typeof j === 'object' && !Array.isArray(j)) woke = j; } catch {}
+  const highKey = (x) => (x.includes(': ') ? x.slice(0, x.indexOf(': ')) : x);
+  const wakes = (x) => !(Date.now() - (Number(woke[highKey(x)]) || 0) < standingH * 3600000);
+  // the findings that wake this wait, marked as woken on
+  const surface = (xs) => {
+    const ws = xs.filter(wakes);
+    if (!ws.length) return [];
+    const at = Date.now();
+    const said = ws.map((x) => (woke[highKey(x)] ? `${x} (an earlier wait saw it too; one left open comes back every ${standingH} h)` : x));
+    for (const x of ws) woke[highKey(x)] = at;
+    for (const [k, t] of Object.entries(woke)) if (!(at - Number(t) < standingH * 3600000)) delete woke[k];
+    try { fs.mkdirSync(runDir, { recursive: true }); fs.writeFileSync(highFile, `${JSON.stringify(woke)}\n`); } catch {}
+    return said;
+  };
+  const base = { owner: first.owner.filter((x) => !late(first.owner).includes(x)).map((x) => x.k), msgs: first.msgs.filter((x) => !late(first.msgs).includes(x)).map((x) => x.k), high: firstAlerts.length ? first.high : surface(first.high) };
   // the owner's new lines, and a pointer to the threads when one of them is a thread or a turn
   const ownerSaid = (ks) => `${ks.length} new line(s) from the owner: ${ks.slice(-5).join(', ')} (questions --all, history --tail 20${ks.some((k) => /^[tu]-/.test(k)) ? '; a thread: thread list --waiting' : ''})`;
   const report = (why, lines) => { fs.mkdirSync(runDir, { recursive: true }); fs.writeFileSync(sinceFile, `${Date.now()}\n`); out(why); for (const l of lines) out(`  ${l}`); out('then: the tick (supervisor.md §3), and wait again'); };
@@ -38281,7 +38374,7 @@ function cmdWait() {
     if (alerts.length) return report('production needs you (sensor status; supervisor.md, Monitoring):', alerts);
     const now = snap();
     recur(now.key);
-    const keys = { ...now, owner: now.owner.map((x) => x.k), msgs: now.msgs.map((x) => x.k) };
+    const keys = { ...now, owner: now.owner.map((x) => x.k), msgs: now.msgs.map((x) => x.k), high: surface(now.high) };
     const fresh = (k) => keys[k].filter((x) => !base[k].includes(x));
     const lines = [...fresh('msgs').map((x) => `message ${x}`), ...(fresh('owner').length ? [ownerSaid(fresh('owner'))] : []), ...fresh('high').map((x) => `finding ${x}`)];
     if (lines.length) return report('something needs you:', lines);
@@ -38292,9 +38385,10 @@ function cmdWait() {
 // hello: who this instance is, for the hub. A fold of the log and one tmux call (no metrics, no git
 // per session), so the dashboard can run it every 30 s; --no-kit skips the kit's file check, which
 // the dashboard does once. The hub reads it from /api/hello.
-// The hub's "!" on a tab, and what the gateway pushes: the supervisor stopped at a limit, or what the
-// box's operator wants the owner to see now (box-alert, process/operator.md). Its one line is
-// written by the box's dev user, read here as text; a day old and it has been seen or forgotten.
+// The hub's "!" on a tab, and what the gateway pushes: the supervisor stopped at a limit, work stuck
+// past the supervisor (the kit's stuck-work digest is open), or what the box's operator wants the
+// owner to see now (box-alert, process/operator.md). Its one line is written by the box's dev user,
+// read here as text; a day old and it has been seen or forgotten.
 const BOX_ALERT_MAX_MS = 24 * 3600000;
 function boxAlert() {
   try {
@@ -38318,7 +38412,12 @@ const helloAlert = (() => {
     const [x] = xs;
     return `A message in a thread reached no supervisor and has waited ${x.waited_min} min (thread ${x.id}${xs.length > 1 ? `, and ${xs.length - 1} more` : ''}); the supervisor ${x.checked}: resume it`;
   };
-  return () => (memo !== undefined ? memo : (memo = [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, undelivered(), boxAlert()].filter(Boolean).join(' · ') || null));
+  // the kit's stuck-work digest, while it is open (writeStuckDigest)
+  const stuck = () => {
+    const q = logObjects('question').filter((x) => x.class === STUCK_CLASS).map(questionView).find((v) => v.status === 'open');
+    return q ? `${q.question}: see the Inbox (${q.id})` : null;
+  };
+  return () => (memo !== undefined ? memo : (memo = [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, undelivered(), stuck(), boxAlert()].filter(Boolean).join(' · ') || null));
 })();
 // A hello's alert, less the box's alert folded in at its end: the project's own part, or null. Matched
 // as the whole alert or a " · " suffix, never split, so a box alert holding " · " still comes off.
