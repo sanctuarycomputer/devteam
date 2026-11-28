@@ -21087,7 +21087,10 @@ function collectMetrics(since, reviewsSince = 0) {
   // with no fleet session raises none (ruling a-20261123-045530036-supervisor (b)).
   if (settings.responder !== false && fleetMode() !== 'park' && !draining()) {
     const h = responderHealth();
-    if (h.session && h.problem) add('medium', 'responder-down', 'responder', `the responder isn't running: ${h.problem}; the owner's turns go to the supervisor meanwhile`, 'devteam.mjs responder --resume (supervisor.md §13)');
+    // high once down RESPONDER_DOWN_HIGH_MS, by the accounts tick's record (a relaunch that keeps failing, or one it never makes)
+    const since = h.session && h.problem ? Date.parse(accountsState()?.responder_down_since ?? '') : NaN;
+    const mins = Number.isFinite(since) ? Math.max(0, Math.floor((now - since) / 60000)) : 0;
+    if (h.session && h.problem) add(now - since >= RESPONDER_DOWN_HIGH_MS ? 'high' : 'medium', 'responder-down', 'responder', `the responder isn't running${mins ? ` (for ${mins} min)` : ''}: ${h.problem}; the owner's turns go to the supervisor meanwhile`, 'devteam.mjs responder --resume (supervisor.md §13)');
     else if (h.stuck) add('medium', 'responder-stuck', 'responder', `the responder's pane is waiting on a prompt: "${h.stuck}"; the owner's turns go to the supervisor meanwhile`, `look (tmux select-window -t '${tmuxTarget(RESPONDER_NAME)}') and clear it, or responder --stop then responder`);
   }
   // An owner's turn no supervisor terminal took, unseen or unanswered (undeliveredTurns): high, so
@@ -22879,6 +22882,10 @@ const RESTART_MIN_MS = 30000;
 // How long a dashboard read waits on a dashboard-data run before it has the last good data instead
 // (0 is no wait at all; anything that isn't a number is the default).
 const DATA_WAIT_MS = ((n) => (process.env.DEVTEAM_DATA_WAIT_MS?.trim() && Number.isFinite(n) && n >= 0 ? n : 20000))(Number(process.env.DEVTEAM_DATA_WAIT_MS));
+// A dashboard-data build slower than this is a slow project's: a read there is answered at once from
+// the last good build while a newer one runs (cmdDashboard's /api/data), and a quicker project's read
+// waits for a current build as before. DEVTEAM_DATA_QUICK_MS is for tests only, not a setting.
+const DATA_QUICK_MS = ((n) => (process.env.DEVTEAM_DATA_QUICK_MS?.trim() && Number.isFinite(n) && n >= 0 ? n : 5000))(Number(process.env.DEVTEAM_DATA_QUICK_MS));
 // How long a dashboard serves a finished dashboard-data build again (kit-595): 20 s after it ended,
 // while it is still current (cmdDashboard's dataEpoch). DEVTEAM_DATA_REUSE_MS is for tests only, not a
 // setting: test/presence-changed.test.mjs sets 3000 to keep checking kit-633's 3 s start gap. Anything
@@ -23186,7 +23193,7 @@ function claimRestart(name, budget, now = Date.now()) {
     });
   } catch { return null; }
 }
-// `worker|planner <id> --resume <flag>`, as the supervisor, but not from its pane: rememberSupervisorPane
+// `worker|planner <id> --resume <flag>` (or `responder --resume`, with no flag), as the supervisor, but not from its pane: rememberSupervisorPane
 // needs both markers, and TMUX stays so the child talks to this tmux server. Its worktree_setup is
 // given DEVTEAM_SETUP_DEADLINE, 5 s before the child's own SIGKILL, or the one this process was
 // given if that is still ahead and earlier (one handed down is never moved later; a past one is ignored).
@@ -23197,7 +23204,7 @@ function relaunchChild(launch, flag, budget) {
   const own = process.env.DEVTEAM_SETUP_DEADLINE ? Number(process.env.DEVTEAM_SETUP_DEADLINE) : NaN;
   const mine = now + budget - 5000;
   env.DEVTEAM_SETUP_DEADLINE = String(Number.isFinite(own) && own > now ? Math.min(own, mine) : mine);
-  return spawnSync(process.execPath, [process.argv[1], ...launch, '--resume', flag], { cwd: mainRoot, env, encoding: 'utf8', timeout: budget, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'] });
+  return spawnSync(process.execPath, [process.argv[1], ...launch, '--resume', ...(flag ? [flag] : [])], { cwd: mainRoot, env, encoding: 'utf8', timeout: budget, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 // A session cswap's switch stopped while it waited on its limit: Claude Code says "Automatic continue
 // stopped · your login changed or ended · send a prompt to continue". Its process already has the new
@@ -28254,6 +28261,20 @@ function cmdAccountsTick() {
     }
     if (state.memory_held && state.memory_held !== before?.memory_held) out(`${plural(state.memory_held, 'gone session')} wait${state.memory_held === 1 ? 's' : ''} for room to relaunch: ${said.words}`);
   }
+  // The responder, which nothing above brings back: launchOf and lastLaunches know workers and
+  // planners only, so after a restart its window stayed gone until the supervisor ran responder
+  // --resume (incident 5). Looked at after the relaunches, which may have made the fleet's session.
+  // Not onto an account with no room, nor at the memory ceiling; one of the tick's restarts, under
+  // the caps every relaunch shares. Since when it is down, kept while it stays down, so
+  // responder-down turns high after RESPONDER_DOWN_HIGH_MS (never for one stopped on purpose).
+  const down = responderDown();
+  if (down) {
+    const did = !down.relaunch || state.active_no_room || memoryFull(loadSettings()) ? null : relaunchResponder(budget(3));
+    if (did === 'gave-up') state.restart_gave_up.push(RESPONDER_NAME);
+    else if (did) tries += 1;
+    if (did === 'relaunched') { state.relaunched.push(RESPONDER_NAME); out(`relaunched the responder: ${down.problem}`); }
+    else if (!down.stopped) state.responder_down_since = before?.responder_down_since || state.at;
+  }
   // since when any has waited, kept while some still do, so the wait is a finding, never silent
   if (state.slot_held) state.slot_held_since = (before?.slot_held && before.slot_held_since) || state.at;
   if (state.slot_held && state.slot_held !== before?.slot_held) out(`${plural(state.slot_held, 'gone session')} wait${state.slot_held === 1 ? 's' : ''} for a setup slot`);
@@ -29912,6 +29933,21 @@ async function dashRoutesPage(D, req, res, q) {
   if (req.method === 'GET' && req.url.startsWith('/api/data')) {
     // the log looked at now, so a change the watch hasn't delivered yet makes the kept build stale
     logWatch.look();
+    // A slow project (its last build ran over DATA_QUICK_MS) is answered at once from the last good
+    // build, while a newer one runs for the next read: its log moves every few seconds and a build
+    // takes a minute, so a read that waited for a current build waited on every load. Not after an
+    // owner action the kept build doesn't show yet: that read waits as below. Marked stale while
+    // builds have failed since the last good one, or while the build running has run a build's
+    // length plus DATA_WAIT_MS (hung or late, whether or not the log moved; a build waiting its turn
+    // is not late), or, for the copy kept on disk before any build here ended, when it is out of
+    // date and ended a build's length plus DATA_WAIT_MS ago.
+    if (D.lastData && D.lastTook > DATA_QUICK_MS && D.lastEpoch >= D.actedEpoch) {
+      void dashboardData().catch(() => {});
+      const late = (t) => Date.now() - t > D.lastTook + DATA_WAIT_MS;
+      const overdue = D.failedSince !== null || (D.building !== null && late(D.building)) || (D.lastEpoch < 0 && D.lastEpoch !== D.dataEpoch && late(D.lastAsOf + D.lastTook));
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-devteam-page': pageVersion('dashboard'), ...(overdue ? { 'x-devteam-stale': 'true' } : {}) });
+      return res.end(withViewer(D.lastData));
+    }
     // A run slower than DATA_WAIT_MS, with data to fall back on, answers with that, marked stale:
     // the run goes on and the next read has it, but no page waits minutes on a stuck child.
     let waited;
@@ -30345,7 +30381,7 @@ async function dashRoutesOwner(D, req, res, q) {
   // an owner action, answered however it ends: the kept /api/data build is stale from its answer's
   // head on, before a byte of it reaches the page, so the page's next read waits for a new build
   const head = res.writeHead;
-  res.writeHead = function (...a) { D.dataEpoch += 1; return head.apply(this, a); };
+  res.writeHead = function (...a) { D.dataEpoch += 1; D.actedEpoch = D.dataEpoch; return head.apply(this, a); };
   const site = req.headers['sec-fetch-site'];
   const origin = req.headers.origin;
   // A browser sends Origin on every fetch POST, and Sec-Fetch-Site to a loopback or https origin
@@ -30911,12 +30947,43 @@ async function cmdDashboard() {
   let build = null;
   let nextBuild = null;
   let lastStart = -Infinity;
+  // The last good build: lastAsOf, when it started (what it shows is as of then); lastTook, how long
+  // it ran; lastEpoch, dataEpoch as it started. It is kept on disk too, in run/cache/dashboard-data.last
+  // under this kit's print, so a dashboard restarted on the same kit (a box restart, a crash) has a
+  // page to show before its first build ends. A kit update changes the print, so the first read
+  // after a sync still waits for a build: another kit's data may not fit this kit's page.
+  const keptFile = path.join(runDir, 'cache', 'dashboard-data.last');
+  const keptKit = crypto.createHash('sha256').update(kitPrintKey(startPrint)).digest('hex').slice(0, 16);
   let lastData = null;
+  let lastAsOf = 0;
+  let lastTook = 0;
+  let lastEpoch = -1;
+  // when builds began failing since the last good one (null: the last one ended was good); only a
+  // good build clears it, so retries that fail too don't let the mark flicker off
+  let failedSince = null;
+  try {
+    const t = fs.readFileSync(keptFile, 'utf8');
+    const nl = t.indexOf('\n');
+    const [kit, asOf, took] = t.slice(0, Math.max(0, nl)).split(' ');
+    const body = t.slice(nl + 1);
+    // only a whole copy: a file cut short by a hard stop is no page
+    if (nl > 0 && kit === keptKit && Number.isFinite(+asOf) && Number.isFinite(+took)) { JSON.parse(body); lastData = body; lastAsOf = +asOf; lastTook = +took; }
+  } catch {}
+  // a copy a dashboard that is gone was still writing when it stopped
+  try { for (const n of fs.readdirSync(path.dirname(keptFile))) { const m = /^dashboard-data\.last\.(\d+)\.\d+\.tmp$/.exec(n); if (m && !pidAlive(+m[1])) fs.rmSync(path.join(path.dirname(keptFile), n), { force: true }); } } catch {}
+  // dataEpoch as the owner's last action answered: data built before it doesn't show that action,
+  // so a read after one waits for a newer build (up to DATA_WAIT_MS), however slow the project
+  let actedEpoch = -Infinity;
+  let keeps = 0;
+  const keep = (stdout, asOf, took) => {
+    const tmp = `${keptFile}.${process.pid}.${++keeps}.tmp`;
+    fs.promises.mkdir(path.dirname(keptFile), { recursive: true }).then(() => fs.promises.writeFile(tmp, `${keptKit} ${asOf} ${took}\n${stdout}`)).then(() => fs.promises.rename(tmp, keptFile)).catch(() => { fs.promises.rm(tmp, { force: true }).catch(() => {}); });
+  };
   const startBuild = () => {
     lastStart = Date.now();
-    const b = { epoch: dataEpoch, finished: null, r: null };
+    const b = { epoch: dataEpoch, started: lastStart, finished: null, r: null };
     b.done = new Promise((resolve) => b.child = execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: DASHBOARD_DATA_TIMEOUT_MS, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
-      if (!err && stdout) lastData = stdout;
+      if (!err && stdout) { lastData = stdout; lastAsOf = b.started; lastTook = Date.now() - b.started; lastEpoch = b.epoch; failedSince = null; keep(stdout, lastAsOf, lastTook); } else failedSince ??= Date.now();
       b.r = { ok: !err, stdout, stderr: err?.killed ? `dashboard-data took over ${DASHBOARD_DATA_TIMEOUT_MS < 120000 ? `${Math.round(DASHBOARD_DATA_TIMEOUT_MS / 1000)} s` : `${Math.round(DASHBOARD_DATA_TIMEOUT_MS / 60000)} minutes`} and was stopped (DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS)` : String(stderr ?? '') };
       b.finished = Date.now();
       resolve(b.r);
@@ -31094,7 +31161,7 @@ async function cmdDashboard() {
   // ms), and the kept /api/data build is stale (dataEpoch)
   const logWatch = presenceChanged(liveLogDir(), () => { dataEpoch += 1; presence.changed(); });
   every(logWatch.tick, 1000);
-  const D = dashContext({ log, page, pageCsp, run, describing, versioning, remote, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, ACTION_JSON, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, sessionPrompts, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
+  const D = dashContext({ log, page, pageCsp, run, describing, versioning, remote, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, ACTION_JSON, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, sessionPrompts, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get lastAsOf() { return lastAsOf; }, get lastTook() { return lastTook; }, get building() { return build && build.finished === null ? build.started : null; }, get failedSince() { return failedSince; }, get lastEpoch() { return lastEpoch; }, get actedEpoch() { return actedEpoch; }, set actedEpoch(v) { actedEpoch = v; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
   // A throw out of any route is that request's failure (dashRequestFailed), never the dashboard's
   // stop: a rejection out of this async handler would reach processLog, which exits.
   const server = http.createServer(async (req, res) => {
@@ -42600,6 +42667,40 @@ function nudgeResponder(now = Date.now()) {
   writeJsonAtomic(RESPONDER_NUDGE_FILE, { at: new Date(now).toISOString() });
   return true;
 }
+// The responder's last start or stop on purpose: { started: <iso> } once a start typed its agent,
+// { stopped: <iso> } after responder --stop. A fleet park stops it without a record, so it comes back
+// after the unpark. Machine-local, as its window is: after a move, the supervisor starts it there.
+const RESPONDER_STATE_FILE = runPath('responder.json');
+const RESPONDER_DOWN_HIGH_MS = 30 * 60000;
+function responderRecord() {
+  try { const o = JSON.parse(readText(RESPONDER_STATE_FILE) ?? 'null'); return isObj(o) ? o : null; } catch { return null; }
+}
+// The responder down while it should run, or null: settings.responder on, the fleet neither parked
+// nor drained for a move (what refuses its start), the fleet's session up and its window gone or its
+// agent exited (responderHealth's problem; a pane stuck on a prompt is responder-stuck's, never
+// restarted). relaunch: it ran here and nobody stopped it, so the accounts tick starts it again; a
+// fleet that never started one, or stopped it, gets the finding only. stopped: stopped on purpose.
+function responderDown(s = loadSettings()) {
+  if (s.responder === false || fleetMode() === 'park' || draining()) return null;
+  const h = responderHealth();
+  if (!h.session || !h.problem) return null;
+  const rec = responderRecord();
+  return { problem: h.problem, relaunch: typeof rec?.started === 'string' && rec.stopped === undefined, stopped: typeof rec?.stopped === 'string' };
+}
+// Start it again, as the supervisor's responder --resume does, in a child under the tick's budget
+// (the start reads origin and runs the owner's trust command, and any refusal exits): 'relaunched',
+// 'failed', 'gave-up' or null (not due), under the restart caps every relaunch shares.
+function relaunchResponder(budget) {
+  const now = Date.now();
+  const verdict = claimRestart(RESPONDER_NAME, budget, now);
+  if (verdict !== 'go') return verdict;
+  const r = relaunchChild([RESPONDER_NAME], null, budget);
+  const ok = r.status === 0;
+  const why = (r.stderr || r.error?.message || `exit ${r.status}`).trim().slice(0, 200);
+  appendLog({ type: 'observation', source: 'pane', kind: 'session-relaunched', subject: RESPONDER_NAME, detail: ok ? "the responder's window was gone or its agent had exited, and it was started again as responder --resume would" : `the responder's window was gone or its agent had exited, and it could not be started again: ${why}`, detector: 'pane', source_key: `session-relaunched ${RESPONDER_NAME} ${now}` });
+  if (!ok) out(`could not relaunch the responder: ${why}`);
+  return ok ? 'relaunched' : 'failed';
+}
 // A thread's state in the supervisor's words (thread list, show): whose reply is owed, or the owner's move.
 const waitingWords = (v, overdue = false) => (v.waiting === 'supervisor' ? 'waiting on the supervisor' : v.waiting === 'responder' ? `the responder has it${overdue ? ' · overdue' : ''}` : "the owner's move");
 // Whether the worktree at dir changed <slug>'s folder since it left main: a tracked change against
@@ -42739,7 +42840,8 @@ function cmdResponder() {
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
   if (!sh('tmux', ['-V'])) die('tmux not found');
   // a stop always works: nothing else is checked
-  if (flags.stop) { const at = stopResponder(); return out(at ? `stopped the responder (${at})` : 'no responder is running'); }
+  // recorded, so the accounts tick leaves it stopped (responderDown)
+  if (flags.stop) { const at = stopResponder(); writeJsonAtomic(RESPONDER_STATE_FILE, { stopped: nowIso() }); return out(at ? `stopped the responder (${at})` : 'no responder is running'); }
   const s = loadSettings();
   if (s.responder === false) die("settings.responder is off: the owner's thread turns go to the supervisor; set it true to start the responder");
   // a fleet park stops it (fleetOp) and keeps it stopped; a drain, or a goal's own hold, doesn't
@@ -42811,6 +42913,7 @@ function cmdResponder() {
       if (/^claude(\s|$)/.test(cmd)) cmd = cmd.replace(/^claude/, `claude --settings '${claudePolicy(RESPONDER_NAME, owned, mb)}'`);
       // a ticket or feature from the tmux server's environment is never the responder's: env -u, which works in any shell
       type(`env -u DEVTEAM_TICKET -u DEVTEAM_FEATURE ${sessionMarkerPrefix(session)}${cmd} ${shq(promptPointer(promptFile))}`);
+      writeJsonAtomic(RESPONDER_STATE_FILE, { started: nowIso() });
       out(`${again ? 'restarted' : 'started'} the responder in ${w.shown} at ${wt}`);
     });
   } catch (e) {
