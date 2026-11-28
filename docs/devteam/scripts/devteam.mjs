@@ -34715,6 +34715,164 @@ function githubAsset(url, kind) {
     return { ...base, ...at, ok: true, bytes };
   } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* a folder left in the temp folder changes no answer */ } }
 }
+// packManifest (kit-install@2): the pack's own package/package.json, read as npm installs it (the
+// contract above packagePinPair), in a child so the kit needs no zlib import. It returns { ok: true,
+// manifest: { name, version, layout, dependencies }, files: [{ path, size, sha256 }] (sorted, package/
+// dropped), bins: { <key>: <path> } (as npm links them) } or { ok: false, refused, why }, and throws
+// nothing. The file list is what a second check after install holds the installed tree to.
+// The child's code is a string whose every line is indented.
+function packManifest(bytes) {
+  const no = (refused, why) => ({ ok: false, refused, why });
+  if (!Buffer.isBuffer(bytes) || bytes.length === 0) return no('input', 'the pack is not bytes');
+  if (bytes.length > 64 * 1024 * 1024) return no('too-big', `the pack is ${bytes.length} bytes, over 64 MiB`);
+  const code = `
+    const zlib = require('node:zlib'), fs = require('node:fs'), crypto = require('node:crypto');
+    const MIB = 1024 * 1024;
+    const say = (o) => { process.stdout.write(JSON.stringify(o)); process.exit(0); };
+    const no = (refused, why) => say({ ok: false, refused, why });
+    (() => {
+    let tar;
+    const input = fs.readFileSync(0);
+    let engine;
+    try { ({ buffer: tar, engine } = zlib.gunzipSync(input, { maxOutputLength: 256 * MIB, info: true })); } catch (e) { return e?.code === 'ERR_BUFFER_TOO_LARGE' ? no('too-big', 'the pack unzips to over 256 MiB') : no('gzip', 'the pack is not gzip'); }
+    // one gzip member, every byte of it read: a streaming reader (npm's) and this one then unzip the same bytes
+    if (engine.bytesWritten !== input.length) return no('gzip', 'the pack has bytes after its gzip data');
+    if (input.length < 18 || input.readUInt32LE(input.length - 4) !== tar.length) return no('gzip', 'the pack is not one gzip member');
+    const str = (b) => { const i = b.indexOf(0); return (i < 0 ? b : b.subarray(0, i)).toString('utf8'); };
+    const oct = (b) => { if (b[0] & 0x80) return NaN; const s = str(b).trim(); return s === '' ? 0 : /^[0-7]+$/.test(s) ? parseInt(s, 8) : NaN; };
+    const pax = (b) => {
+      const kv = {};
+      for (let i = 0; i < b.length;) {
+        const sp = b.indexOf(32, i);
+        const len = sp > i ? Number(b.subarray(i, sp).toString('latin1')) : NaN;
+        if (!(len > sp - i + 1) || !/^[0-9]+$/.test(b.subarray(i, sp).toString('latin1')) || i + len > b.length || b[i + len - 1] !== 10) return null;
+        const rec = b.subarray(sp + 1, i + len - 1).toString('utf8');
+        const eq = rec.indexOf('=');
+        if (eq < 1) return null;
+        kv[rec.slice(0, eq)] = rec.slice(eq + 1);
+        i += len;
+      }
+      if (kv.size !== undefined && !/^[0-9]+$/.test(kv.size)) return null;
+      if (kv.size !== undefined) kv.size = Number(kv.size);
+      return kv;
+    };
+    // only what npm pack writes, field for field as node-tar's encoder does: ustar headers of type 0, 5 or
+    // pax x, every string field UTF-8 then NULs to its end, every number field octal as node-tar pads it,
+    // no link target, pax records of path, mtime and size only, names under package/ with no empty, . or
+    // .. component and no \ or :, the names directly under package/ ASCII. Read so, node-tar (strip 1,
+    // pacote's filter) decodes every entry as this walk does; anything else is refused
+    const strField = (b) => { const i = b.indexOf(0); const s = i < 0 ? b : b.subarray(0, i); if (i >= 0 && !b.subarray(i).every((x) => x === 0)) return null; const t = s.toString('utf8'); return Buffer.from(t, 'utf8').equals(s) && !/[\\u0000-\\u001f\\u007f]/.test(t) ? t : null; };
+    const numField = (b, empty) => { const t = b.toString('latin1'); if (empty && b.every((x) => x === 0)) return 0; const n = b.length; return new RegExp('^(?:[0-7]{' + (n - 1) + '}\\u0000|[0-7]{' + (n - 2) + '} \\u0000)$').test(t) ? parseInt(t.slice(0, n - 1).trim(), 8) : NaN; };
+    const cksField = (b) => { const t = b.toString('latin1'); return /^(?:[0-7]{6} \\u0000|[0-7]{6}\\u0000 |[0-7]{7}\\u0000)$/.test(t) ? parseInt(t.slice(0, 7).trim(), 8) : NaN; };
+    const paxRecords = (b) => {
+      const t = b.toString('utf8');
+      if (!Buffer.from(t, 'utf8').equals(b)) return null;
+      const kv = {};
+      for (let i = 0; i < b.length;) {
+        const m = /^([1-9][0-9]*) ([a-z]+)=/.exec(b.subarray(i, i + 64).toString('latin1'));
+        if (!m) return null;
+        const len = Number(m[1]);
+        if (i + len > b.length || b[i + len - 1] !== 10) return null;
+        const v = b.subarray(i + m[0].length, i + len - 1).toString('utf8');
+        if (m[2] === 'linkpath') return 'link';
+        if (v.includes('\\n') || v.includes('\\u0000') || kv[m[2]] !== undefined) return null;
+        if (m[2] === 'path' ? v === '' : m[2] === 'size' ? !/^(0|[1-9][0-9]*)$/.test(v) : m[2] === 'mtime' ? !/^[0-9]+(\\.[0-9]+)?$/.test(v) : true) return null;
+        kv[m[2]] = v;
+        i += len;
+      }
+      return kv;
+    };
+    let ex = null, zero = 0;
+    const entries = [];
+    const okName = (n, dir) => { const p = dir && n.endsWith('/') ? n.slice(0, -1) : n; const parts = p.split('/'); return parts[0] === 'package' && (dir || parts.length > 1) && parts.every((c) => c !== '' && c !== '.' && c !== '..' && !['node_modules', '.gitignore', '.npmignore'].includes(c.toLowerCase())) && !/[\\\\:]/.test(n) && (parts.length < 2 || /^[\\x20-\\x7e]+$/.test(parts[1])); };
+    for (let o = 0; o < tar.length;) {
+      if (o + 512 > tar.length) return no('tar', zero === 2 ? 'the archive is not whole blocks' : 'the archive ends before its two zero blocks');
+      const h = tar.subarray(o, o + 512);
+      if (zero === 2) { if (tar.subarray(o).every((x) => x === 0)) break; return no('tar', 'there is more after the archive\\'s end'); }
+      if (h.every((x) => x === 0)) { if (ex) return no('tar', 'a pax header with no entry after it'); zero++; o += 512; continue; }
+      if (zero) return no('tar', 'a lone zero block inside the archive');
+      let sum = 8 * 32;
+      for (let i = 0; i < 512; i++) if (i < 148 || i >= 156) sum += h[i];
+      if (cksField(h.subarray(148, 156)) !== sum) return no('tar', 'a header\\'s checksum is not as npm pack writes it, or does not hold');
+      if (h.subarray(257, 265).toString('latin1') !== 'ustar\\u000000') return no('tar', 'a header is not ustar');
+      const type = String.fromCharCode(h[156]);
+      if (!['0', '5', 'x'].includes(type)) return no('entry-type', 'an entry of type ' + JSON.stringify(type) + ', which npm pack does not write');
+      if (!h.subarray(157, 257).every((x) => x === 0)) return no('link', 'an entry carries a link target');
+      const f = { name: strField(h.subarray(0, 100)), uname: strField(h.subarray(265, 297)), gname: strField(h.subarray(297, 329)), prefix: strField(h.subarray(345, 500)) };
+      const n = { mode: numField(h.subarray(100, 108)), uid: numField(h.subarray(108, 116), true), gid: numField(h.subarray(116, 124), true), size: numField(h.subarray(124, 136)), mtime: numField(h.subarray(136, 148)), devmaj: numField(h.subarray(329, 337), true), devmin: numField(h.subarray(337, 345), true) };
+      if (Object.values(f).includes(null) || Object.values(n).some(Number.isNaN) || !h.subarray(500, 512).every((x) => x === 0) || (f.name === '' && type === 'x')) return no('tar', 'a header field is not as npm pack writes it');
+      let size = n.size;
+      if (type === 'x') {
+        if (ex) return no('tar', 'two pax headers in a row');
+        if (size > MIB) return no('too-big', 'a pax record is over 1 MiB');
+        if (o + 512 + size > tar.length) return no('tar', 'the archive ends inside an entry');
+        const kv = paxRecords(tar.subarray(o + 512, o + 512 + size));
+        if (kv === 'link') return no('link', 'a pax record carries a link target');
+        if (!kv) return no('tar', 'a pax record is not one npm pack writes (path, mtime, size)');
+        ex = kv;
+        o += 512 + Math.ceil(size / 512) * 512;
+        continue;
+      }
+      // a pax record can fail to apply in another decoder, which then keeps the ustar name: so both
+      // names are held to every rule
+      const ustar = f.prefix ? f.prefix + '/' + f.name : f.name;
+      let name = ustar;
+      if (ex && ex.size !== undefined && Number(ex.size) !== size) return no('tar', 'a pax size differs from its header\\'s');
+      if (ex && ex.path !== undefined) name = ex.path;
+      ex = null;
+      if (type === '5' ? size !== 0 : name.endsWith('/')) return no('tar', JSON.stringify(name).slice(0, 200) + ' is a directory with a size, or a file named as a directory');
+      if (!okName(name, type === '5') || !okName(ustar, type === '5')) return no('name', JSON.stringify(okName(name, type === '5') ? ustar : name).slice(0, 200) + ' is not a plain path under package/');
+      if (o + 512 + size > tar.length) return no('tar', 'the archive ends inside an entry');
+      entries.push({ name, ustar, type, size, at: o + 512 });
+      o += 512 + Math.ceil(size / 512) * 512;
+    }
+    if (zero < 2) return no('tar', 'the archive ends before its two zero blocks');
+    const seen = new Set();
+    const key = (n) => (n.endsWith('/') ? n.slice(0, -1) : n).normalize('NFC').toLowerCase();
+    const folders = new Set();
+    const names = (e) => (e.ustar !== e.name ? [e.name, e.ustar] : [e.name]);
+    for (const e of entries) for (const n of names(e)) { const p = key(n).split('/'); for (let i = 1; i < p.length; i++) folders.add(p.slice(0, i).join('/')); if (e.type === '5') folders.add(p.join('/')); }
+    for (const e of entries) { if (e.type === '0' && names(e).some((n) => folders.has(key(n)))) return no('duplicate', JSON.stringify(e.name).slice(0, 200) + ' is a file and also a folder of the pack'); }
+    for (const e of entries) { if (e.type !== '0') continue; for (const k of new Set(names(e).map(key))) { if (seen.has(k)) return no(k === 'package/package.json' ? 'two-manifests' : 'duplicate', JSON.stringify(e.name).slice(0, 200) + ' is in the pack twice (or twice but for case)'); seen.add(k); } }
+    const isManifest = (n) => n.replace(/\\/$/, '').replace(/[A-Z]/g, (c) => c.toLowerCase()) === 'package/package.json';
+    const found = entries.filter((e) => isManifest(e.name) || isManifest(e.ustar));
+    if (found.length === 0) return no('no-manifest', 'the pack holds no package/package.json');
+    if (found.length > 1) return no('two-manifests', 'the pack holds ' + found.length + ' entries npm would install as package.json');
+    const m = found[0];
+    if (m.name !== 'package/package.json' || m.ustar !== m.name || m.type === '5') return no('manifest-path', 'the one manifest is ' + JSON.stringify(m.name).slice(0, 200) + ' of type ' + m.type + ', not the file package/package.json');
+    if (m.size > MIB) return no('too-big', 'package/package.json is over 1 MiB');
+    let pkg = null;
+    try { pkg = JSON.parse(tar.subarray(m.at, m.at + m.size).toString('utf8')); } catch {}
+    if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) return no('json', 'package/package.json is not a JSON object');
+    // a bin npm links (node_modules/.bin/<key>) and rewrites only when its first line ends in CRLF: each
+    // target a file of the pack whose first line doesn't, each key a plain name; directories.bin is refused
+    if (pkg.directories && typeof pkg.directories === 'object' && Object.prototype.hasOwnProperty.call(pkg.directories, 'bin')) return no('bin', 'package/package.json names directories.bin');
+    const binsOut = {}, binKeys = new Set();
+    if (Object.prototype.hasOwnProperty.call(pkg, 'bin')) {
+      const bins = typeof pkg.bin === 'string' && typeof pkg.name === 'string' ? { [pkg.name.replace(/^@[^/]+\\//, '')]: pkg.bin } : pkg.bin;
+      if (!bins || typeof bins !== 'object' || Array.isArray(bins)) return no('bin', 'package/package.json\\'s bin is not a path or an object of paths');
+      for (const [k, v] of Object.entries(bins)) {
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(k) || typeof v !== 'string') return no('bin', 'a bin ' + JSON.stringify(k).slice(0, 80) + ' is not a plain name and a path');
+        const target = entries.find((e) => e.type === '0' && e.name === 'package/' + v.replace(/^\\.\\//, ''));
+        if (!target) return no('bin', 'the bin ' + k + ' is not a file of the pack');
+        if (binKeys.has(k.toLowerCase())) return no('bin', 'two bins are named ' + k + ' but for case');
+        binKeys.add(k.toLowerCase()); binsOut[k] = target.name.slice('package/'.length);
+        const head = tar.subarray(target.at, target.at + Math.min(target.size, 4096));
+        const nl = head.indexOf(10);
+        if (head[0] === 35 && head[1] === 33 && nl > 0 && head[nl - 1] === 13) return no('bin', 'the bin ' + k + '\\'s first line ends in CRLF, which npm rewrites on install');
+      }
+    }
+    const KINDS = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies', 'bundleDependencies', 'bundledDependencies'];
+    const dependencies = Object.fromEntries(KINDS.filter((k) => Object.prototype.hasOwnProperty.call(pkg, k)).map((k) => [k, pkg[k]]));
+    const files = entries.filter((e) => e.type === '0').map((e) => ({ path: e.name.slice('package/'.length), size: e.size, sha256: crypto.createHash('sha256').update(tar.subarray(e.at, e.at + e.size)).digest('hex') })).sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0));
+    say({ ok: true, manifest: { name: pkg.name ?? null, version: pkg.version ?? null, layout: pkg.devteam?.layout ?? null, dependencies }, files, bins: binsOut });
+    })();`;
+  const f = spawnSync(process.execPath, ['-e', code], { input: bytes, env: {}, encoding: 'utf8', timeout: 60000, killSignal: 'SIGKILL', stdio: ['pipe', 'pipe', 'pipe'], maxBuffer: 4 * 1024 * 1024 });
+  let got = null;
+  try { got = JSON.parse(f.stdout); } catch {}
+  if (!got || typeof got.ok !== 'boolean') return no('reader', `the pack reader gave no answer (${f.error?.code ?? f.signal ?? `exit ${f.status}`})`);
+  return got.ok ? { ok: true, manifest: got.manifest, files: got.files, bins: got.bins } : no(got.refused, got.why);
+}
 // npmRun (kit-install@1): the one function every kit npm call goes through. It runs `npm <args>` in cwd
 // (absolute) with --registry=<the registry>, --ignore-scripts, --prefix=<cwd> and --workspaces=false
 // after args, each once; with every variable whose name starts with npm_config_, in any letter case,

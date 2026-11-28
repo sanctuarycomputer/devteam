@@ -9,7 +9,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { spawn, spawnSync } from 'node:child_process';
+import zlib from 'node:zlib';
+import { createRequire } from 'node:module';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { kit, testDir, bareProject } from './lib/kit.mjs';
 import { startFakeRegistry, GITHUB_FAILURES, FIXTURES, NAME, LOG_NAME, packName, releaseUrl } from './lib/fake-registry.mjs';
 
@@ -504,6 +506,285 @@ test('A9 DEVTEAM_GITHUB_DOWNLOAD must be exactly a loopback http origin, or gith
     const [e] = probe([asset('https://evil.example/x')], ghEnv(reg, { DEVTEAM_GITHUB_DOWNLOAD: '' })).res;
     assert.deepEqual([e.thrown, e.refused], [undefined, 'url'], 'A9 empty is the same as unset');
   } finally { await reg.close(); }
+});
+
+// ---- packManifest (M1 to M6) --------------------------------------------------------------------
+// Each pack is written to a file and read by the probe's { manifest: <file> }: the real function, in the
+// fixture instance, through the real CLI. The packs come from a tar writer of this file's: ustar headers
+// as npm pack writes them, or with one field written another way. Each case is named by its class only.
+const mtmp = path.join(atmp, 'packs');
+fs.mkdirSync(mtmp);
+let pn = 0;
+const packFile = (bytes) => { const f = path.join(mtmp, `${++pn}.tgz`); fs.writeFileSync(f, bytes); return f; };
+// many packs in one CLI run
+const manifests = (packs) => probe(packs.map((b) => ({ manifest: packFile(b) })), GH_INST.clean).res;
+const sumOf = (h) => { let s = 0; for (let i = 0; i < 512; i++) s += i >= 148 && i < 156 ? 32 : h[i]; return s; };
+const sumFix = (h) => { h.write(`${sumOf(h).toString(8).padStart(6, '0')}\0 `, 148, 8, 'latin1'); return h; };
+function header({ name = '', nameraw, type = '0', size = 0, prefix = '', linkname = '', linkraw, magic = 'ustar\u000000', cks = 'std', base256 = false, b475 = 0 }) {
+  const h = Buffer.alloc(512);
+  if (nameraw) nameraw.copy(h, 0); else h.write(name, 0, 100, 'utf8');
+  h.write('0000644\0', 100); h.write('0000000\0', 108); h.write('0000000\0', 116);
+  if (base256) { h[124] = 0x80; h.writeUInt32BE(size, 132); } else h.write(`${size.toString(8).padStart(11, '0')}\0`, 124);
+  h.write('00000000000\0', 136);
+  h.write(type, 156, 1, 'latin1');
+  if (linkraw) linkraw.copy(h, 157); else if (linkname) h.write(linkname, 157, 100, 'utf8');
+  h.write(magic, 257, 8, 'latin1');
+  h.write(prefix, 345, 155, 'utf8');
+  if (b475) h[475] = b475;
+  const s = sumOf(h) + (cks === 'bad' ? 1 : 0);
+  if (cks === '8') h.write(s.toString(8).padStart(8, '0'), 148, 8, 'latin1');
+  else h.write(`${s.toString(8).padStart(6, '0')}\0 `, 148, 8, 'latin1');
+  return h;
+}
+const pad = (b, fill = 0) => Buffer.concat([b, Buffer.alloc((512 - (b.length % 512)) % 512, fill)]);
+const rec = (k, v) => { const r = ` ${k}=${v}\n`; let n = Buffer.byteLength(r); n += String(n + String(n).length).length; return `${n}${r}`; };
+const paxOf = (kv) => Buffer.from(Object.entries(kv).map(([k, v]) => rec(k, v)).join(''));
+const entry = (o) => { const body = o.body ?? Buffer.alloc(0); return Buffer.concat([header({ ...o, size: o.size ?? body.length }), pad(body)]); };
+const file = (name, body) => entry({ name, body: Buffer.isBuffer(body) ? body : Buffer.from(body) });
+const paxEntry = (kv, type = 'x') => entry({ name: 'PaxHeader/x', type, body: Buffer.isBuffer(kv) ? kv : paxOf(kv) });
+const END = Buffer.alloc(1024);
+const tgz = (...parts) => zlib.gzipSync(Buffer.concat([...parts, END]));
+const PKG = (o = {}) => Buffer.from(JSON.stringify({ name: NAME, version: '1.2.3', devteam: { layout: 2 }, ...o }));
+const MA = PKG(), MB = PKG({ version: '6.6.6', dependencies: { evil: '1' } });
+const PJ = 'package/package.json';
+const SHEBANG = '#!/usr/bin/env node\nx\n';
+const KINDS = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies', 'bundleDependencies', 'bundledDependencies'];
+const fourOf = (j) => j && { name: j.name ?? null, version: j.version ?? null, layout: j.devteam?.layout ?? null, dependencies: Object.fromEntries(KINDS.filter((k) => k in j).map((k) => [k, j[k]])) };
+const treeOf = (d) => {
+  const tree = [];
+  const walk = (rel) => { for (const nm of fs.readdirSync(path.join(d, rel))) { const r = rel ? `${rel}/${nm}` : nm; if (fs.lstatSync(path.join(d, r)).isDirectory()) walk(r); else { const b = fs.readFileSync(path.join(d, r)); tree.push({ path: r, size: b.length, sha256: sha256(b) }); } } };
+  walk('');
+  return tree.sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0));
+};
+// every pack M1 to M5 reads, kept for M6: [label, bytes, answer, { split, alt }]
+const BUILT = [];
+const read = (label, packs) => { const res = manifests(packs.map(([, b]) => b)); packs.forEach(([l, b, o], i) => BUILT.push([`${label} ${l}`, b, res[i], o ?? {}])); return res; };
+const FIX = (v) => path.join(FIXTURES, 'registry', `devteam-${v}.tgz`);
+
+test('M1 packManifest reads the pack\'s own package.json: name, version, layout, every dependency kind, its files and its bins', () => {
+  const fx = VERSIONS.map((v) => [v, fs.readFileSync(FIX(v))]);
+  const res = read('fixture', fx);
+  fx.forEach(([v], i) => {
+    const r = res[i];
+    assert.equal(r.ok, true, `M1 the fixture ${v} is read (${JSON.stringify(r).slice(0, 200)})`);
+    const j = JSON.parse(execFileSync('tar', ['-xOzf', FIX(v), PJ]));
+    assert.deepEqual(r.manifest, { name: NAME, version: v, layout: j.devteam?.layout ?? null, dependencies: {} }, `M1 the fixture ${v}'s manifest`);
+    const d = path.join(mtmp, `tar-${v}`);
+    fs.mkdirSync(d);
+    execFileSync('tar', ['-xzf', FIX(v), '-C', d]);
+    const listed = execFileSync('tar', ['-tzf', FIX(v)], { encoding: 'utf8' }).split('\n').filter((n) => n.startsWith('package/') && !n.endsWith('/')).map((n) => n.slice(8)).sort();
+    assert.deepEqual(r.files.map((f) => f.path), listed, `M1 the fixture ${v}'s files are tar's list`);
+    assert.deepEqual(r.files, treeOf(path.join(d, 'package')), 'M1 files are tar\'s list with sizes and sha256');
+    assert.deepEqual(r.bins, j.devteam?.layout === 2 ? { devteam: 'docs/devteam/scripts/cli.mjs' } : {}, j.devteam?.layout === 2 ? 'M1 the layout-2 fixture is read' : `M1 the fixture ${v} has no bins`);
+  });
+  assert.ok(res.some((r) => r.manifest?.layout === 2), 'M1 the layout-2 fixture is read');
+  const all = { dependencies: { a: '1' }, devDependencies: { b: '2' }, optionalDependencies: { c: '3' }, peerDependencies: { d: '4' }, bundleDependencies: ['a'], bundledDependencies: ['a'] };
+  const [kinds, none, paxed, pathBin, objBin] = read('M1', [
+    ['kinds', tgz(file(PJ, PKG({ ...all, scripts: { x: 'y' }, other: 1 })))],
+    ['no layout', tgz(file(PJ, PKG({ devteam: undefined })))],
+    ['pax-named', tgz(file(PJ, MA), paxEntry({ path: `package/${'d'.repeat(120)}/f.js` }), file('package/short.js', 'long'))],
+    ['path bin', tgz(file(PJ, PKG({ bin: './cli.mjs' })), file('package/cli.mjs', SHEBANG))],
+    ['object bin', tgz(file(PJ, PKG({ bin: { dt: 'cli.mjs', other: './lib/o.js' } })), file('package/cli.mjs', SHEBANG), file('package/lib/o.js', SHEBANG))],
+  ]);
+  assert.deepEqual(kinds.manifest?.dependencies, all, 'M1 every dependency kind, each with its value, and nothing else');
+  assert.equal(none.manifest?.layout, null, 'M1 a manifest without a layout reads null');
+  assert.deepEqual(paxed.files?.map((f) => f.path), [`${'d'.repeat(120)}/f.js`, 'package.json'], 'M1 a pax-named file is listed by its path');
+  assert.deepEqual(paxed.files?.[0], { path: `${'d'.repeat(120)}/f.js`, size: 4, sha256: sha256(Buffer.from('long')) }, 'M1 files are tar\'s list with sizes and sha256');
+  assert.deepEqual(pathBin.bins, { devteam: 'cli.mjs' }, 'M1 a path bin is keyed by the name after its scope');
+  assert.deepEqual(objBin.bins, { dt: 'cli.mjs', other: 'lib/o.js' }, 'M1 an object of bins is read as npm links them');
+});
+
+test('M2 a pack without package/package.json, or with a bin npm would not link as it is, is refused', () => {
+  const cases = [
+    ['no manifest', tgz(file('package/other.json', MA), file('package/x.js', 'x')), 'no-manifest'],
+    ['a manifest at another path', tgz(file('package/PACKAGE.json', MA)), 'manifest-path'],
+    ['a manifest outside package/', tgz(file('x/package.json', MA)), 'name'],
+    ['a bin naming no file', tgz(file(PJ, PKG({ bin: { devteam: 'nope.mjs' } }))), 'bin'],
+    ['a bin npm would rewrite', tgz(file(PJ, PKG({ bin: { devteam: 'cli.mjs' } })), file('package/cli.mjs', '#!/usr/bin/env node\r\nx\n')), 'bin'],
+    ['a bin key that is not a plain name', tgz(file(PJ, PKG({ bin: { '../x': 'cli.mjs' } })), file('package/cli.mjs', SHEBANG)), 'bin'],
+    ['two bin keys but for case', tgz(file(PJ, PKG({ bin: { Dev: 'cli.mjs', dev: 'cli.mjs' } })), file('package/cli.mjs', SHEBANG)), 'bin'],
+    ['a bin folder', tgz(file(PJ, PKG({ directories: { bin: 'b' } })), file('package/b/x', SHEBANG)), 'bin'],
+  ];
+  const res = read('M2', cases);
+  cases.forEach(([label, , want], i) => assert.equal(res[i].refused, want, `M2 ${label} is refused (${JSON.stringify(res[i]).slice(0, 160)})`));
+  assert.equal(res[0].refused, 'no-manifest', 'M2 no manifest is refused');
+  assert.equal(res[4].refused, 'bin', 'M2 a bin npm would rewrite is refused');
+});
+
+test('M3 each way npm\'s tar would install another package.json, or read the archive otherwise, is refused', () => {
+  const cover = (o) => Buffer.concat([header({ name: 'package/R.md', size: 1024, ...o }), file(PJ, MB)]);
+  const nfc = 'package/d/\u00e9.js', nfd = 'package/d/e\u0301.js';
+  const classes = {
+    // another package.json over the manifest
+    'another manifest': [[tgz(file(PJ, MA), file(PJ, MB)), 'two-manifests'], [tgz(file(PJ, MA), paxEntry({ path: PJ }), file('package/o.txt', MB)), 'two-manifests'],
+      [tgz(file(PJ, MA), entry({ name: 'package.json', prefix: 'package', body: MB })), 'two-manifests'], [tgz(file(PJ, MA), file('package/PACKAGE.json', MB)), 'two-manifests'],
+      [tgz(file(PJ, MA), paxEntry({ path: 'package/o.txt' }), file(PJ, MB)), 'two-manifests']],
+    // a name npm's tar reads as another path
+    'a name read another way': ['x/package.json', 'package/./package.json', '//package.json', '///package.json', 'c:package.json', '//?/C:/package.json', 'package\\package.json', 'package/c:package.json', 'package']
+      .map((n) => [tgz(file(PJ, MA), file(n, MB)), 'name']).concat([[tgz(file(PJ, MA), Buffer.concat([header({ name: '', size: 1024 }), file(PJ, MB)])), 'name']]),
+    // a header type npm pack does not write
+    'an entry type npm pack does not write': [[tgz(file(PJ, MA), entry({ name: '././@LongLink', type: 'L', body: Buffer.from(`${PJ}\0`) }), file('package/zzz', MB)), 'entry-type'],
+      [tgz(file(PJ, MA), entry({ name: '././@LongLink', type: 'K', body: Buffer.from('x\0') }), cover()), 'entry-type'],
+      [tgz(file(PJ, MA), paxEntry({ path: PJ }, 'X'), file('package/o.txt', MB)), 'entry-type'], [tgz(paxEntry({ comment: 'c' }, 'g'), file(PJ, MA)), 'entry-type']],
+    'a link': [[tgz(file(PJ, MA), cover({ linkname: 'x' })), 'link'], [tgz(file(PJ, MA), paxEntry({ linkpath: 'x' }), cover()), 'link']],
+    // a header npm's tar skips, or an archive it reads past
+    'a header npm skips or reads past': [[tgz(file(PJ, MA), cover({ cks: 'bad' })), 'tar'], [tgz(file(PJ, MA), cover({ type: '5', name: 'package/d/' })), 'tar'],
+      [zlib.gzipSync(Buffer.concat([file(PJ, MA), Buffer.alloc(512), file(PJ, MB), END])), 'tar'], [zlib.gzipSync(Buffer.concat([file(PJ, MA), Buffer.alloc(512)])), 'tar'],
+      [zlib.gzipSync(file(PJ, MA)), 'tar'], [zlib.gzipSync(Buffer.concat([file(PJ, MA), END, file(PJ, MB), END])), 'tar'], [tgz(entry({ name: PJ, body: MA, magic: 'ustar  \0' })), 'tar']],
+    // a header field npm's tar decodes another way
+    'a field npm decodes another way': [
+      [tgz(file(PJ, MA), paxEntry(Buffer.from(rec('path', 'package/x\n.js'))), file(PJ, MB)), 'tar'],
+      [tgz(file(PJ, MA), paxEntry(Buffer.from(rec('comment', `c\n${(() => { const r = ' path=package/package.json'; let k = Buffer.byteLength(r) + 1; k += String(k).length; return `${k}${r}`; })()}`))), file('package/o.txt', MB)), 'tar'],
+      [tgz(file(PJ, MA), paxEntry((() => { const r = Buffer.concat([Buffer.from(' path=package/x'), Buffer.from([0xff]), Buffer.from('.js\n')]); return Buffer.concat([Buffer.from(String(r.length + String(r.length + 2).length)), r]); })()), file(PJ, MB)), 'tar'],
+      [tgz(file(PJ, MA), cover({ cks: '8' })), 'tar'], [tgz(entry({ name: PJ, body: MA, cks: '8' })), 'tar'],
+      [tgz(file(PJ, MA), cover({ linkraw: Buffer.from('\0\nx') })), 'link'],
+      [tgz(file(PJ, MA), entry({ name: '', type: 'x', body: paxOf({ comment: 'x' }) }), file('package/z.txt', 'z')), 'tar'],
+      [tgz(file(PJ, MA), paxEntry({ size: '512' }), paxEntry({ comment: 'c' }), file('package/z.txt', Buffer.alloc(512, 120))), 'tar'],
+      [tgz(paxEntry({ size: '0' }), cover(), file('package/z.txt', '')), 'tar'],
+      [tgz(entry({ name: PJ, body: MA, b475: 0x31 })), 'tar']],
+    // a name npm pack does not write
+    'a name npm pack does not write': [[tgz(file(PJ, MA), file('package/\u00e9.js', 'x')), 'name'], [tgz(file(PJ, MA), file('package/.gitignore', 'x')), 'name'],
+      [tgz(file(PJ, MA), file('package/d/.npmignore', 'x')), 'name'], [tgz(file(PJ, MA), file('package/d/node_modules/a/package.json', MB)), 'name']],
+    'a duplicate': [[tgz(file(PJ, MA), file('package/a.js', 'x'), file('package/a.js', 'y')), 'duplicate'], [tgz(file(PJ, MA), file('package/a.js', 'x'), file('package/A.js', 'y')), 'duplicate'],
+      [tgz(file(PJ, MA), file(nfc, 'x'), file(nfd, 'y')), 'duplicate'], [tgz(file(PJ, MA), file('package/a', 'x'), file('package/a/b', 'y')), 'duplicate'],
+      [tgz(file(PJ, MA), file('package/a.js', 'x'), paxEntry({ path: 'package/b.js' }), file('package/a.js', 'y')), 'duplicate'],
+      [tgz(file(PJ, MA), file('package/a/b', 'x'), paxEntry({ path: 'package/c.js' }), file('package/a', 'y')), 'duplicate']],
+  };
+  const flat = Object.entries(classes).flatMap(([cls, list]) => list.map(([b, want], i) => [`${cls} (${i + 1})`, b, want, cls]));
+  const res = read('M3', flat);
+  flat.forEach(([label, , want, cls], i) => assert.equal(res[i].refused, want, `M3 ${cls} is refused: ${label} (${JSON.stringify(res[i]).slice(0, 160)})`));
+  // a pax size over bytes that look like a header is one entry, as npm reads it
+  const hidden = file(PJ, MB);
+  const [one] = read('M3', [['a pax size over a header', tgz(file(PJ, MA), paxEntry({ size: String(hidden.length) }), entry({ name: 'package/R.md', body: hidden }))]]);
+  assert.deepEqual([one.ok, one.manifest?.version, one.files?.map((f) => f.path)], [true, '1.2.3', ['R.md', 'package.json']], 'M3 a pax size over bytes that look like a header is one entry');
+});
+
+test('M4 package/package.json that is not a regular file is refused', () => {
+  const cases = [['a symlink manifest', '2', 'entry-type'], ['a hard-link manifest', '1', 'entry-type'], ['a FIFO manifest', '6', 'entry-type'], ['a type-7 manifest', '7', 'entry-type'], ['a NUL-type manifest', '\0', 'entry-type']];
+  const res = read('M4', cases.map(([l, type]) => [l, tgz(entry({ name: PJ, type, body: type === '2' || type === '1' ? undefined : MA, linkname: type === '2' || type === '1' ? 'x' : '' }))]));
+  cases.forEach(([l, , want], i) => assert.equal(res[i].refused, want, `M4 ${l} is refused`));
+  const [dir, reg] = read('M4', [['a folder manifest', tgz(entry({ name: `${PJ}/`, type: '5' }))], ['a regular manifest', tgz(entry({ name: 'package/', type: '5' }), file(PJ, MA))]]);
+  assert.equal(dir.refused, 'manifest-path', 'M4 a folder manifest is refused manifest-path');
+  assert.equal(reg.ok, true, 'M4 a regular manifest is read');
+});
+
+test('M5 each bound: the pack, what it unzips to, the manifest, a pax record; one gzip member; a whole archive; a JSON object', async () => {
+  const MIB = 1024 * 1024;
+  // the bomb: over 256 MiB of zeros, streamed through gzip, never held
+  const bomb = path.join(mtmp, 'bomb.tgz');
+  await new Promise((resolve, reject) => {
+    const z = zlib.createGzip();
+    const w = fs.createWriteStream(bomb);
+    z.pipe(w);
+    w.on('finish', resolve);
+    w.on('error', reject);
+    const chunk = Buffer.alloc(MIB);
+    let left = 257;
+    const more = () => { while (left > 0) { left--; if (!z.write(chunk)) return z.once('drain', more); } z.end(); };
+    more();
+  });
+  const big = path.join(mtmp, 'big.tgz');
+  fs.writeFileSync(big, Buffer.alloc(64 * MIB + 1));
+  const [over, unzipped] = probe([{ manifest: big }, { manifest: bomb }], GH_INST.clean).res;
+  assert.equal(over.refused, 'too-big', 'M5 a pack over 64 MiB is refused too-big');
+  assert.equal(unzipped.refused, 'too-big', 'M5 a pack that unzips past 256 MiB is refused too-big');
+  const t1 = Buffer.concat([file(PJ, MA), END]);
+  const g1 = zlib.gzipSync(t1);
+  const isize = Buffer.alloc(4);
+  isize.writeUInt32LE(t1.length);
+  const at64 = Buffer.concat([g1, Buffer.alloc(64 * 1024 - g1.length)]);
+  const cases = [
+    ['a manifest over 1 MiB', tgz(file(PJ, PKG({ x: 'a'.repeat(MIB) }))), 'too-big'],
+    ['a pax record over 1 MiB', tgz(file(PJ, MA), paxEntry({ path: `package/${'a'.repeat(MIB)}` }), file('package/a', 'x')), 'too-big'],
+    ['not gzip', Buffer.concat([file(PJ, MA), END]), 'gzip'],
+    ['bytes after the gzip data', Buffer.concat([g1, Buffer.alloc(1024)]), 'gzip'],
+    // the last four bytes are the unzipped length, as one member's would be
+    ['bytes after the gzip data, ending as one member would', Buffer.concat([g1, Buffer.alloc(1020), isize]), 'gzip'],
+    ['a second member after padding', Buffer.concat([at64, zlib.gzipSync(Buffer.concat([file(PJ, MB), END]))]), 'gzip'],
+    ['two members', Buffer.concat([zlib.gzipSync(file(PJ, MA)), zlib.gzipSync(Buffer.concat([file('package/x.js', 'x'), END]))]), 'gzip'],
+    ['a bad checksum', tgz(entry({ name: PJ, body: MA, cks: 'bad' })), 'tar'],
+    ['a base-256 size', tgz(entry({ name: PJ, body: MA, base256: true })), 'tar'],
+    ['a cut archive', zlib.gzipSync(Buffer.concat([file(PJ, MA)]).subarray(0, 700)), 'tar'],
+    ['a bad pax record', tgz(paxEntry(Buffer.from('garbage\n')), file(PJ, MA)), 'tar'],
+    ['not JSON', tgz(file(PJ, '{"name":')), 'json'],
+    ['a JSON array', tgz(file(PJ, '[1]')), 'json'],
+  ];
+  const res = read('M5', cases);
+  cases.forEach(([l, , want], i) => assert.equal(res[i].refused, want, `M5 ${l} is refused ${want} (${JSON.stringify(res[i]).slice(0, 160)})`));
+  const [empty] = probe([{ manifest: packFile(Buffer.alloc(0)) }], GH_INST.clean).res;
+  assert.equal(empty.refused, 'input', 'M5 no bytes is refused input');
+});
+
+test('M6 wherever packManifest reads a pack, npm\'s own tar installs that manifest and exactly those files', async () => {
+  const ntar = createRequire(import.meta.url)(path.join(path.dirname(process.execPath), '..', 'lib', 'node_modules', 'npm', 'node_modules', 'tar'));
+  // pacote's options: strip 1, no chmod or mtime, links dropped, only files written
+  const PACOTE = { strip: 1, noChmod: true, noMtime: true, filter: (n, e) => { if (/Link$/.test(e.type)) return false; e.mode = (e.mode | (/Directory|GNUDumpDir/.test(e.type) ? 0o777 : /File$/.test(e.type) ? 0o666 : 0)) | 0o600; return /File$/.test(e.type); } };
+  let xn = 0;
+  const installs = async (gz, chunk = 0) => {
+    const d = path.join(mtmp, `npm-${++xn}`);
+    fs.mkdirSync(d);
+    if (!chunk) { const f = `${d}.tgz`; fs.writeFileSync(f, gz); try { ntar.x({ ...PACOTE, sync: true, cwd: d, file: f }); } catch {} }
+    else await new Promise((res) => { const x = ntar.x({ ...PACOTE, cwd: d }); x.on('close', res); x.on('error', res); for (let i = 0; i < gz.length; i += chunk) x.write(gz.subarray(i, i + chunk)); x.end(); });
+    let j = null;
+    try { j = JSON.parse(fs.readFileSync(path.join(d, 'package.json'), 'utf8')); } catch {}
+    const out = { manifest: fourOf(j), tree: treeOf(d) };
+    fs.rmSync(d, { recursive: true, force: true });
+    return out;
+  };
+  // a split pack's tree may differ only by pax-named files written at their ustar names (npm's gunzip
+  // hands its parser 16 KiB pieces however the pack is fed)
+  const agree = async (label, gz, r, { split = false, alt = {} } = {}) => {
+    for (const chunk of split ? [0, 16384] : [0]) {
+      const npm = await installs(gz, chunk);
+      const how = `${label}${chunk ? ', fed in 16 KiB chunks' : ''}`;
+      assert.deepEqual(npm.manifest, r.manifest, `M6 packManifest reads what npm installs: ${how}`);
+      let want = r.files;
+      if (split) want = r.files.map((f) => (alt[f.path] && npm.tree.some((t) => t.path === alt[f.path]) && !npm.tree.some((t) => t.path === f.path) ? { ...f, path: alt[f.path] } : f)).sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0));
+      assert.deepEqual(npm.tree, want, `M6 npm's tar writes exactly packManifest's files: ${how}`);
+    }
+  };
+  let n = 0;
+  for (const [label, gz, r, o] of BUILT) {
+    if (/^fixture /.test(label)) assert.equal(r.ok, true, `M6 ${label} is read`);
+    if (r.ok) { n++; await agree(label, gz, r, o); }
+  }
+  assert.ok(n >= 11, `M6 the packs M1 to M5 read were checked (${n})`);
+
+  // the sweep: a manifest, a pax-named file and a cover whose body is a second manifest, each field's first
+  // and last byte (and byte 475) of each header set to each value in turn, the checksum made right again
+  const hidden = file(PJ, MB);
+  const base = Buffer.concat([file(PJ, MA), paxEntry({ path: 'package/zz.txt' }), header({ name: 'package/R.md', size: hidden.length }), hidden, END]);
+  const FIELDS = [[0, 100], [100, 108], [108, 116], [116, 124], [124, 136], [136, 148], [156, 157], [157, 257], [257, 263], [263, 265], [265, 297], [297, 329], [329, 337], [337, 345], [345, 500], [500, 512]];
+  const at = [...new Set(FIELDS.flatMap(([a, b]) => [a, b - 1]).concat(475))];
+  const swept = [];
+  for (const st of [0, 1024, 2048]) for (const i of at) for (const v of [0x00, 0x20, 0x30, 0x37, 0x0a, 0x2f, 0xff]) {
+    if (base[st + i] === v) continue;
+    const t = Buffer.from(base);
+    t[st + i] = v;
+    sumFix(t.subarray(st, st + 512));
+    swept.push([`header ${st / 512} byte ${i} set to ${v}`, zlib.gzipSync(t)]);
+  }
+  const sres = manifests(swept.map(([, b]) => b));
+  let sread = 0;
+  for (let i = 0; i < swept.length; i++) if (sres[i].ok) { sread++; await agree(`the sweep, ${swept[i][0]}`, swept[i][1], sres[i]); }
+  assert.ok(sread > 0 && sread < swept.length, `M6 the sweep reads some packs and refuses others (${sread} of ${swept.length})`);
+
+  // a pax path whose 2-, 3- or 4-byte character falls across a 16 KiB edge of the unzipped stream, before
+  // an entry whose ustar name is the manifest's, another file's, or a file the pack already holds
+  const split = [];
+  for (const ch of ['\u00e9', '\u20ac', '\u{1f600}']) for (const lead of [0, 1, 2, 3]) for (const ustar of [PJ, 'package/other.txt', 'package/x.js']) {
+    const p = `package/d/${'a'.repeat(240)}/${'b'.repeat(240)}/${'c'.repeat(lead)}${ch.repeat(Math.floor(200 / Buffer.byteLength(ch)))}`;
+    // the pax header starts at 15360, so its body starts 512 bytes before the 16 KiB edge
+    const filler = file('package/x.js', Buffer.alloc(15360 - 1024 - 512, 120));
+    split.push([`the split pack (${Buffer.byteLength(ch)}-byte, ${lead}, ${ustar.slice(8)})`, tgz(file(PJ, MA), filler, paxEntry({ path: p }), file(ustar, MB)), { split: true, alt: { [p.slice(8)]: ustar.slice(8) } }]);
+  }
+  const xres = manifests(split.map(([, b]) => b));
+  let xread = 0;
+  for (let i = 0; i < split.length; i++) {
+    if (split[i][2].alt && Object.values(split[i][2].alt)[0] !== 'other.txt') assert.equal(xres[i].ok, false, `M6 ${split[i][0]} is refused`);
+    if (xres[i].ok) { xread++; await agree(split[i][0], split[i][1], xres[i], split[i][2]); }
+  }
+  assert.equal(xread, 12, 'M6 every split pack to another file is read');
 });
 
 test('A3 no answer is unreachable in 15 s, and a body that never ends in 120 s, whatever the caller sets', async () => {
