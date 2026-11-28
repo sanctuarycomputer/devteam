@@ -4600,6 +4600,8 @@ const PANE_SHELL = /\b\d+ (background )?shells? (still )?running\b|·\s*\d+ (bac
 // overloaded API): it stops and waits; a nudge resumes it. Harness-agnostic wording.
 const PANE_API_ERROR = /\bAPI Error\b|Can't reach the API|\bENOTFOUND\b|\bECONNRESET\b|\bETIMEDOUT\b|overloaded_error|\bstream (error|disconnected)\b|\b(429|5\d\d) (Too Many Requests|Internal Server Error|Bad Gateway|Service Unavailable)\b/i;
 const idleOnApiError = (window) => { const l = paneTails.get(window) ?? []; const last = l.slice(-8); return last.some((x) => PANE_API_ERROR.test(x)) && !l.some((x) => PANE_BUSY.test(x)); };
+// An agent at work: its pane shows the agent CLI's interrupt hint (read by paneWaitingIn).
+const paneBusy = (window) => (paneTails.get(window) ?? []).some((x) => PANE_BUSY.test(x));
 const idleWithShell = (window) => { const l = paneTails.get(window) ?? []; return l.some((x) => PANE_SHELL.test(x)) && !l.some((x) => PANE_BUSY.test(x)); };
 function paneWaitingIn(window) {
   if (paneWaits.has(window)) return paneWaits.get(window);
@@ -5184,6 +5186,18 @@ function plannersNow() {
     // name: a question whose links point at this plan branch.
     const refQs = questions().filter((q) => (q.links ?? []).some((l) => l.ref === b || l.ref === `refs/heads/${b}`));
     const goals = [...new Set([...(feat.goals ?? []), ...refQs.map((q) => q.goal).filter(Boolean), ...plannerLaunchGoals(feature)])];
+    // A question on one of its goals is this planner's to wait on unless it plainly belongs to other
+    // work on that goal: it names work (a plan branch linked or approved, a ticket named, blocked,
+    // approved or linked by its ticket/<id> branch) and none of that work is this planner's. Such a
+    // question would otherwise hide a dead planner: no stale-planner, and P1 hands its move to the owner.
+    const otherWork = (q) => {
+      const refs = (q.links ?? []).map((l) => String(l?.ref ?? '').replace(/^refs\/heads\//, ''));
+      const acts = (q.approves ?? []).filter((a) => typeof a === 'string');
+      const plans = [...refs.filter((r) => r.startsWith('plan/')).map((r) => r.slice('plan/'.length)), ...acts.filter((a) => a.startsWith('plan-')).map((a) => a.slice('plan-'.length))];
+      const ids = [q.ticket, ...(q.blocks ?? []), ...acts, ...refs.filter((r) => r.startsWith('ticket/')).map((r) => r.slice('ticket/'.length))].filter((id) => id && tickets().has(id));
+      if (!plans.length && !ids.length) return false;
+      return !plans.includes(feature) && !ids.some((id) => tickets().get(id).feature === feature);
+    };
     return {
       feature, title: feat.title ?? feature, goals, tickets: graph.split('\n').filter((t) => t.includes('"type":"ticket"') && t.includes('"op":"new"')).length,
       branch: b, window: !!target, problem: target ? null : problem, waiting: target ? paneWaitingIn(by) : null,
@@ -5191,7 +5205,7 @@ function plannersNow() {
       last_seen: last, minutes_silent: last ? Math.round((Date.now() - Date.parse(last)) / 60000) : null,
       waiting_on_supervisor: asking.map((m) => ({ id: m.id, kind: m.kind, text: m.text })),
       // a planner whose design waits on the owner's answers is waiting, not stale
-      waiting_on_owner: [...new Set([...questions().filter((q) => q.status === 'open' && goals.includes(q.goal)), ...refQs.filter((q) => q.status === 'open')].map((q) => q.id))],
+      waiting_on_owner: [...new Set([...questions().filter((q) => q.status === 'open' && goals.includes(q.goal) && !otherWork(q)), ...refQs.filter((q) => q.status === 'open')].map((q) => q.id))],
     };
   }).filter(Boolean);
 }
@@ -20830,12 +20844,6 @@ function collectMetrics(since, reviewsSince = 0) {
     const ask = p.goals.length ? `ask --goal ${p.goals[0]} …` : `ask … --links '[{"title":"The plan","ref":"plan/${p.feature}","path":"${projectRel}/log/${key}.jsonl"}]'`;
     if (p.waiting_on_supervisor.some((m) => m.kind === 'blocked') && !H.get(key)) add('medium', 'blocked-without-question', key, 'blocked with no open owner question naming it', `if it waits on the owner, ask on its goal (${ask}); otherwise answer its blocked message so it can move`);
   }
-  // The tmux session's window names, once (null when tmux or the session isn't there: unknown).
-  let windowNames;
-  const windowGone = (name) => {
-    if (windowNames === undefined) { const l = sh('tmux', ['list-windows', '-t', `=${tmuxSession()}`, '-F', '#W']); windowNames = l === null ? null : new Set(l.split('\n').filter(Boolean)); }
-    return windowNames !== null && !windowNames.has(name);
-  };
   for (const id of ts.keys()) {
     const w = workerState(id);
     const wait = paneWaiting(id);
@@ -20854,9 +20862,10 @@ function collectMetrics(since, reviewsSince = 0) {
     // a planner parked by a drain stopped on purpose: not gone, exited or stale
     if (p.parked) continue;
     if (p.waiting) add('high', 'blocked-prompt', who, p.waiting.kind === 'limit' ? `a usage-limit banner in its pane: "${p.waiting.line}"` : `waiting on a prompt in its pane: "${p.waiting.line}"`, `look (tmux select-window -t '${tmuxTarget(who)}') and clear it (supervisor.md §11); a folder-trust dialog means agent_trust_command could pre-trust the worktree`);
-    else if (/no agent is running|has exited/.test(p.problem ?? '')) add('high', 'agent-exited', who, p.problem.replace(/; resume it first$/, ''), `resume it: planner ${p.feature} --resume (supervisor.md §11)`);
-    else if (!p.window) add('medium', 'planner-gone', who, `plan/${p.feature} isn't on main and its window is gone (${p.problem})`, `resume it (planner ${p.feature} --resume) or, if the plan was dropped, delete the branch`);
-    else if (!p.waiting_on_supervisor.length && !p.waiting_on_owner.length && p.minutes_silent > settings.stale_after_minutes) add('high', 'stale-planner', who, `no sign of life for ${p.minutes_silent} min`, 'check its pane; message it or resume it (supervisor.md §11)');
+    const down = plannerDown(p)?.kind;
+    if (down === 'agent-exited') add('high', 'agent-exited', who, p.problem.replace(/; resume it first$/, ''), `resume it: planner ${p.feature} --resume (supervisor.md §11)`);
+    else if (down === 'planner-gone') add('medium', 'planner-gone', who, `plan/${p.feature} isn't on main and its window is gone (${p.problem})`, `resume it (planner ${p.feature} --resume) or, if the plan was dropped, delete the branch`);
+    else if (down === 'stale-planner') add('high', 'stale-planner', who, `no sign of life for ${p.minutes_silent} min`, 'check its pane; message it or resume it (supervisor.md §11)');
   }
   for (const msg of openMsgs.filter((x) => now - Date.parse(x.created_at) > 30 * 60000)) add('medium', 'unanswered-message', msg.id, `${msg.kind} from ${msg.created_by}, ${Math.round((now - Date.parse(msg.created_at)) / 60000)} min old`, `reply with --re ${msg.id}`);
   // A review's page lives on the branch that asked it until its PR lands it on main; once no branch
@@ -21096,7 +21105,10 @@ function collectMetrics(since, reviewsSince = 0) {
   // with no fleet session raises none (ruling a-20261123-045530036-supervisor (b)).
   if (settings.responder !== false && fleetMode() !== 'park' && !draining()) {
     const h = responderHealth();
-    if (h.session && h.problem) add('medium', 'responder-down', 'responder', `the responder isn't running: ${h.problem}; the owner's turns go to the supervisor meanwhile`, 'devteam.mjs responder --resume (supervisor.md §13)');
+    // high once down RESPONDER_DOWN_HIGH_MS, by the accounts tick's record (a relaunch that keeps failing, or one it never makes)
+    const since = h.session && h.problem ? Date.parse(accountsState()?.responder_down_since ?? '') : NaN;
+    const mins = Number.isFinite(since) ? Math.max(0, Math.floor((now - since) / 60000)) : 0;
+    if (h.session && h.problem) add(now - since >= RESPONDER_DOWN_HIGH_MS ? 'high' : 'medium', 'responder-down', 'responder', `the responder isn't running${mins ? ` (for ${mins} min)` : ''}: ${h.problem}; the owner's turns go to the supervisor meanwhile`, 'devteam.mjs responder --resume (supervisor.md §13)');
     else if (h.stuck) add('medium', 'responder-stuck', 'responder', `the responder's pane is waiting on a prompt: "${h.stuck}"; the owner's turns go to the supervisor meanwhile`, `look (tmux select-window -t '${tmuxTarget(RESPONDER_NAME)}') and clear it, or responder --stop then responder`);
   }
   // An owner's turn no supervisor terminal took, unseen or unanswered (undeliveredTurns): high, so
@@ -21270,6 +21282,9 @@ function collectMetrics(since, reviewsSince = 0) {
   const order = { high: 0, medium: 1, low: 2 };
   const sorted = f.sort((a, b) => order[a.severity] - order[b.severity]);
   m.findings = sorted.filter((x) => !ackOf(x));
+  // a windowed run (metrics --since, retro) drops older findings: it counts but keeps no record, so
+  // their first sighting isn't forgotten and their clock doesn't restart
+  m.unattended = unattendedHigh(m.findings, now, { record: !since });
   m.acknowledged = sorted.filter(ackOf).map((x) => { const a = ackOf(x); return { ...x, ack: { by: a.created_by, at: a.created_at, reason: a.detail, until: lasting(a) ? null : new Date(Date.parse(a.created_at) + ackWindow).toISOString() } }; });
   return m;
 }
@@ -21293,6 +21308,9 @@ function cmdAck() {
   const refs = logObjects('observation').filter((o) => o.source_key === key && o.detector === 'metrics' && o.created_by === 'supervisor').sort(byTime).slice(-SET_ASIDE_REFS).map((o) => o.id);
   const fields = { type: 'observation', source: 'ack', kind: 'finding-ack', subject: `${kind} ${subject}`, detail: reason, source_ref: key };
   const line = appendLog({ ...fields, refs: fitRefs(fields, refs) }, by);
+  // off the unattended list now, so hello, the hub and box-status drop it without waiting for the
+  // next metrics run (which leaves an acked finding out anyway)
+  try { const u = readJson(UNATTENDED()); if (isObj(u) && Array.isArray(u.items)) writeJson(UNATTENDED(), { ...u, items: u.items.filter((x) => !(isObj(x) && x.kind === kind && x.subject === subject)) }); } catch {}
   // a merge commit's ack never lapses (collectMetrics' lasting(), kit-348)
   const forGood = kind === 'merged-without-merge' && /^[^\s:]+:[0-9a-f]{12}$/.test(subject);
   out(`${line.id}: ${kind} ${subject} set aside ${forGood ? 'for good: a merge commit can\'t change' : `for ${loadSettings().finding_ack_hours}h`}`);
@@ -21420,6 +21438,18 @@ function waitCause(ref) {
   if (kind === null && TICKET.test(ref)) return cause('ticket', ref, `ticket:${ref}`);
   return null;
 }
+// One held_for cause in plain words, for a move's wait (next-move@1): what the hold waits on.
+function holdCauseWords(ref) {
+  const w = waitCause(ref);
+  if (!w) return String(ref);
+  if (w.form === 'q') { const q = logGet(w.id); return q?.question ? `your answer to "${String(q.question).slice(0, 120)}"` : `your answer to ${w.id}`; }
+  if (w.form === 'ticket') return `${w.id} merges`;
+  if (w.form === 'goal') return `goal "${logGet(w.id)?.title ?? w.id}"`;
+  if (w.form === 'chore') return `chore ${w.id} merges`;
+  if (w.form === 'pr') return `PR ${w.id}`;
+  if (w.form === 'run') return `run ${w.id}`;
+  return w.id;
+}
 /* next-moves start */
 // The next-move table. For every running goal, active ticket, planner and open chore branch, exactly
 // one next move: what has to happen, who holds it and since when. Its rows (G goals, T tickets, P
@@ -21514,8 +21544,8 @@ function newMove(subject, title, o) {
   return Object.assign(m, o.neverOwed && f.flag === 'owed' ? { flag: null, rung: 0 } : f);
 }
 // A copied move: its source's holder, since, flag and rung (and what it is, unless the row says),
-// on this subject, via the source.
-const copiedMove = (subject, title, src, o = {}) => ({ ...src, ...o, subject, title, via: src.subject });
+// on this subject, via the source. Never its wait: that is the held ticket's own (next-move@1).
+const copiedMove = (subject, title, src, o = {}) => { const { wait, ...rest } = src; return { ...rest, ...o, subject, title, via: src.subject }; };
 const qRef = (q) => ({ kind: 'q', id: q.id });
 const askedMove = (q) => ({ move: 'answer-question', words: `Answer: ${q.question}`, holder: 'owner', ref: qRef(q), since: q.asked_at, covered_by: [{ kind: 'owner-question-waiting', subject: q.id }] });
 const PLANNING_COVER = [{ kind: 'idle-planning', subject: '*' }, { kind: 'memory-full', subject: '*' }];
@@ -21715,20 +21745,33 @@ function ticketMoves() {
       }
       const q = openQs.find((x) => x.ticket === id || (x.blocks ?? []).includes(id));
       if (q) return at({ ...askedMove(q), covered_by: [{ kind: 'blocked-on-owner', subject: id }, { kind: 'owner-question-waiting', subject: q.id }] }); // T3
-      if (isHeld(t)) return at({ move: 'held', words: `Held: ${t.held.trim()}. Release it, or ask`, holder: 'supervisor', since: (t.updates ?? []).filter((u) => typeof u.held === 'string' && u.held.trim()).at(-1)?.at ?? t.created_at, command: `ticket release ${id} --reason "…"`, neverOwed: true }); // T2b
+      if (isHeld(t)) {
+        const m = at({ move: 'held', words: `Held: ${t.held.trim()}. Release it, or ask`, holder: 'supervisor', since: (t.updates ?? []).filter((u) => typeof u.held === 'string' && u.held.trim()).at(-1)?.at ?? t.created_at, command: `ticket release ${id} --reason "…"`, neverOwed: true }); // T2b
+        // what the hold waits on and its review date (next-move@1's wait), so moveFindings can tell a
+        // hold past its --until from one still in its window
+        const causes = (Array.isArray(t.held_for) ? t.held_for : []).filter((c) => typeof c === 'string' && c.trim());
+        if (causes.length) m.wait = { causes: causes.map((ref) => ({ ref, words: holdCauseWords(ref), state: waitCause(ref)?.state ?? 'open' })), until: typeof t.held_until === 'string' && t.held_until ? t.held_until : null };
+        return m;
+      }
       const w = workerState(id);
       const phase = w?.phase ?? null;
       const run = w?.phase_started_at ?? null;
       const msg = asks.get(id);
       if (['done', 'merging'].includes(phase)) return at({ move: 'merge-it', words: 'Merge it', holder: 'supervisor', since: run, command: `merge ${id}` }); // T4
-      if (phase === 'awaiting-word') return at({ move: 'give-word', words: 'Give the word, or merge', holder: 'supervisor', since: run, command: `send ${id} "…" --kind ruling${msg ? ` --re ${msg.id}` : ''}`, covered_by: [{ kind: 'waiting-on-supervisor', subject: id }] }); // T5
+      // A worker whose window is gone, or whose agent exited, receives nothing: a word or an answer
+      // for it waits until it is resumed, and a phase in flight is held by nobody (T8b).
+      // (paneWaiting reads the pane once, and that read is what agentExited reports.)
+      const down = !phase ? null : (paneWaiting(id), agentExited(id)) ? 'its agent exited' : windowGone(id) ? 'its window is gone' : null;
+      const resumeFirst = down ? `; resume it first, ${down}` : '';
+      if (phase === 'awaiting-word') return at({ move: 'give-word', words: `Give the word, or merge${resumeFirst}`, holder: 'supervisor', since: run, command: `send ${id} "…" --kind ruling${msg ? ` --re ${msg.id}` : ''}`, covered_by: [{ kind: 'waiting-on-supervisor', subject: id }] }); // T5
       const depOpen = (t.depends_on ?? []).find((d) => !mergeShaFor(d));
-      if (msg || (phase === 'blocked' && !depOpen)) return at({ move: 'answer-message', words: 'Answer its message', holder: 'supervisor', ref: msg ? { kind: 'm', id: msg.id } : null, since: msg ? msg.created_at : run, command: `send ${id} "…" --kind ruling${msg ? ` --re ${msg.id}` : ''}`, covered_by: [{ kind: 'blocked', subject: id }, { kind: 'blocked-without-question', subject: id }, ...(msg ? [{ kind: 'unanswered-message', subject: msg.id }] : [])] }); // T6
+      if (msg || (phase === 'blocked' && !depOpen)) return at({ move: 'answer-message', words: `Answer its message${resumeFirst}`, holder: 'supervisor', ref: msg ? { kind: 'm', id: msg.id } : null, since: msg ? msg.created_at : run, command: `send ${id} "…" --kind ruling${msg ? ` --re ${msg.id}` : ''}`, covered_by: [{ kind: 'blocked', subject: id }, { kind: 'blocked-without-question', subject: id }, ...(msg ? [{ kind: 'unanswered-message', subject: msg.id }] : [])] }); // T6
       if (phase === 'parked' && ['run', 'drain'].includes(mode) && !fleetDrain) return at({ move: 'resume', words: 'Resume it', holder: 'supervisor', since: run, command: `worker ${id} --resume`, covered_by: [{ kind: 'parked-under-run', subject: id }] }); // T7
       // an Upkeep chore ticket runs a recurring job: recurring-stuck on that job covers its move too
       const job = t.feature === CHORES ? recurringChores.refJob(id) : null;
       const stuck = job ? [{ kind: 'recurring-stuck', subject: `recurring:${job}` }] : [];
       const notStarted = !phase || (phase === 'starting' && stoppedLaunch(id));
+      if (phase in PHASE_WORDS && !notStarted && down) return at({ move: 'resume-worker', words: `Resume the worker (${down})`, holder: 'supervisor', since: w.last_seen, command: `worker ${id} --resume` }); // T8b, uncovered: move-owed and move-stalled reach it
       if (phase in PHASE_WORDS && !notStarted) return at({ move: phase === 'final-review' ? 'final-review' : phase, words: PHASE_WORDS[phase], holder: 'worker', since: run, covered_by: [...['stale-worker', 'agent-exited', 'blocked-prompt'].map((kind) => ({ kind, subject: id })), ...stuck] }); // T8
       if ((notStarted || phase === 'blocked') && depOpen) {
         const d = ts.get(depOpen);
@@ -21780,6 +21823,22 @@ function leadTicketMove(open) {
 }
 // One move on a line: who holds it, what, how long, and owed, stalled or quiet.
 const moveLine = (m) => `${m.holder}  ${m.words}  ${moveAge(m.since)}${m.flag === 'none' ? '  no move' : m.flag ? `  ${m.flag}` : ''}${m.quiet ? `  (${m.quiet})` : ''}`;
+// Why a planner in flight is not alive, or null: the finding metrics raises for it (agent-exited,
+// planner-gone, stale-planner) and the words its move uses. Parked stopped on purpose; one at a
+// prompt waits on that prompt (blocked-prompt); one whose pane shows it at work is thinking, not
+// stale. sessionUp is false when the whole tmux session is missing, not just its window: a reboot,
+// which the relaunch brings back (sessionsToRelaunch).
+function plannerDown(p) {
+  if (p.parked || p.waiting) return null;
+  if (/no agent is running|has exited/.test(p.problem ?? '')) return { kind: 'agent-exited', why: 'its agent exited', sessionUp: true };
+  if (!p.window) return { kind: 'planner-gone', why: 'its window is gone', sessionUp: /^no tmux window/.test(p.problem ?? '') };
+  if (!p.waiting_on_supervisor.length && !p.waiting_on_owner.length && p.minutes_silent > loadSettings().stale_after_minutes && !paneBusy(`plan-${p.feature}`)) return { kind: 'stale-planner', why: `silent ${p.minutes_silent} min`, sessionUp: true };
+  return null;
+}
+// The tmux session's window names, once per process (null when tmux or the session isn't there:
+// unknown), and whether a window is gone from a session that is up.
+const tmuxWindowNames = () => memo('tmux-window-names', () => { const l = sh('tmux', ['list-windows', '-t', `=${tmuxSession()}`, '-F', '#W']); return l === null ? null : new Set(l.split('\n').filter(Boolean)); });
+const windowGone = (name) => { const names = tmuxWindowNames(); return names !== null && !names.has(name); };
 // The planner rows, P1 to P4.
 function plannerMove(p) {
   const by = `plan-${p.feature}`;
@@ -21791,6 +21850,13 @@ function plannerMove(p) {
   const seen = p.last_seen ?? nowIso();
   const held = p.goals.length && p.goals.every((id) => ['park', 'let-go'].includes(goalMode(logGet(id))));
   if (p.parked || held) return at({ move: 'parked', words: 'Parked', holder: 'planner', quiet: 'hold', since: lastPhaseOf(by)?.created_at ?? seen }); // P3
+  // A planner that isn't alive holds nothing: its window gone from a live session, its agent exited,
+  // or silent past stale_after_minutes. The move is the supervisor's, uncovered, so move-owed and
+  // move-stalled reach it; the finding that names it stays the detail. A stale one still has a live
+  // agent in its window, which --resume refuses: it is woken with a message instead.
+  const down = plannerDown(p);
+  if (down?.kind === 'stale-planner') return at({ move: 'wake-planner', words: `Wake the planner (${down.why})`, holder: 'supervisor', since: seen, command: `send ${by} "…"` }); // P4b, idle at its prompt
+  if (down?.sessionUp) return at({ move: 'resume-planner', words: `Resume the planner (${down.why})`, holder: 'supervisor', since: seen, command: `planner ${p.feature} --resume` }); // P4b
   return at({ move: 'planning', words: 'Planning', holder: 'planner', since: seen, covered_by: ['stale-planner', 'planner-gone', 'agent-exited', 'blocked-prompt'].map((kind) => ({ kind, subject: by })) }); // P4
 }
 // The move whose subject is this one ("goal:<g-id>", …), or null.
@@ -21833,10 +21899,13 @@ function cmdMoves() {
 // idle-capacity, idle-planning and memory-full are medium and count the moves they stand for, so
 // each ready ticket or goal raising its own high move-owed beside them would only repeat them; they
 // cover while the move is owed (rung 1) and never once it is stalled (rung 2), so it reaches wait
-// then. raised holds no acked finding (collectMetrics): an ack is on the cover, not on the move. By the move's flag: none (no row knew the state: G20, T14) raises
-// no-next-move, owed (rung 1) move-owed, stalled (rung 2) move-stalled; each is high, so wait wakes
-// on it. The finding's subject is "<subject> <move>:<ref id>", so an ack sets aside one move with one
-// ref, and a new move or a new ref is a new finding.
+// then. raised holds no acked finding (collectMetrics): an ack is on the cover, not on the move. By
+// the move's flag: none (no row knew the state: G20, T14) raises no-next-move, owed (rung 1)
+// move-owed, stalled (rung 2) move-stalled. Each is high, so wait wakes on it, but for a stalled
+// held ticket (T2b) still inside its --until date (wait.until): a known wait, medium; with no date,
+// or past it, high, since nothing else says a hold has lapsed or its causes are done. The finding's
+// subject is "<subject> <move>:<ref id>", so an ack sets aside one move with one ref, and a new move
+// or a new ref is a new finding.
 function moveFindings(moves, raised, now = Date.now()) {
   const covers = (m, c, f) => f.kind === c.kind && (c.subject === '*' ? m.flag !== 'stalled' : f.severity === 'high' && String(f.subject) === c.subject);
   const covered = (m) => (m.covered_by ?? []).some((c) => raised.some((f) => covers(m, c, f)));
@@ -21853,7 +21922,13 @@ function moveFindings(moves, raised, now = Date.now()) {
     const detail = `${m.title}: ${m.words} (${m.holder === 'nobody' ? 'no row knows this state' : `held by the ${m.holder}`}, ${ageOf(m.since)})`;
     const suggestion = kind === 'no-next-move' ? 'work out the move by hand, and file the missing row as a kit lesson (knowledge add --kit)'
       : kind === 'move-owed' ? (m.command ?? 'do it, or record why it waits (ack with a reason)') : stalledHint(m);
-    out.push({ severity: 'high', kind, subject, detail, suggestion });
+    // a hold with a review date (ticket hold --until, T2b's wait.until) is a known wait: stalled, it is
+    // medium until that day is over (UTC), so high stays for what wants acting on now (the unattended
+    // check reads high findings only). A hold with no date, or past it, stays high: nothing else
+    // wakes the supervisor for a hold whose causes are done or whose date has lapsed
+    const until = m.wait?.until;
+    const inWindow = typeof until === 'string' && until >= new Date(now).toISOString().slice(0, 10);
+    out.push({ severity: kind === 'move-stalled' && m.move === 'held' && inWindow ? 'medium' : 'high', kind, subject, detail, suggestion });
   }
   return out;
 }
@@ -21871,6 +21946,37 @@ const movesReadAt = () => memo('next-moves-at', () => {
   return newest > now ? newest : now;
 });
 const MOVES_CACHE = () => path.join(runPath('cache'), 'next-moves.json');
+// High findings nobody has acted on: open (not acked) for longer than two ticks (tick_minutes, so 30
+// minutes by default). A finding that is acted on goes away (a nudged planner shows life, a fixed
+// gate passes); one that can wait is acked with its reason. Either way it leaves this list. When each
+// open high finding was first seen is kept in run/cache/high-seen.json, and the ones past the two
+// ticks in run/cache/unattended.json for hello, whose pulse puts them on the hub's Overview and in
+// box-status's attention lines: what the supervisor's own loop let pass, seen by the owner and the
+// box's operator. The box's operator only reads, so its metrics count the same way but write nothing,
+// and so does a windowed run (record false), whose findings are only the window's.
+const HIGH_SEEN = () => path.join(runPath('cache'), 'high-seen.json');
+const UNATTENDED = () => path.join(runPath('cache'), 'unattended.json');
+function unattendedHigh(findings, now = Date.now(), { record = true } = {}) {
+  let seen = {};
+  try { const j = readJson(HIGH_SEEN()); if (isObj(j)) seen = j; } catch {}
+  const next = {};
+  for (const x of findings) if (x.severity === 'high') { const k = `${x.kind} ${x.subject}`; next[k] = Number.isFinite(seen[k]) ? seen[k] : now; }
+  const after = 2 * (Number(loadSettings().tick_minutes) > 0 ? Number(loadSettings().tick_minutes) : 15) * 60000;
+  const items = findings.filter((x) => x.severity === 'high' && now - next[`${x.kind} ${x.subject}`] > after).map((x) => ({ kind: x.kind, subject: x.subject, detail: x.detail, since: new Date(next[`${x.kind} ${x.subject}`]).toISOString() }));
+  if (record && process.env.DEVTEAM_ROLE !== 'operator') {
+    try { writeJson(HIGH_SEEN(), next); writeJson(UNATTENDED(), { at: new Date(now).toISOString(), after_minutes: after / 60000, items }); } catch {}
+  }
+  return items;
+}
+// The unattended list as the last metrics run left it, for hello: none when that run is over two
+// hours old (no supervisor has run metrics since, which box-status says on its own lines).
+function readUnattended(now = Date.now()) {
+  try {
+    const j = readJson(UNATTENDED());
+    if (!isObj(j) || !Array.isArray(j.items) || !(now - Date.parse(j.at) < 2 * 3600000)) return [];
+    return j.items.filter((x) => isObj(x) && typeof x.kind === 'string' && typeof x.subject === 'string');
+  } catch { return []; }
+}
 function writeMovesCache(moves = nextMoves(), at = movesReadAt()) {
   // the box's operator only reads (its metrics included), so it leaves the cache as it was
   if (process.env.DEVTEAM_ROLE === 'operator') return;
@@ -22896,6 +23002,10 @@ const RESTART_MIN_MS = 30000;
 // How long a dashboard read waits on a dashboard-data run before it has the last good data instead
 // (0 is no wait at all; anything that isn't a number is the default).
 const DATA_WAIT_MS = ((n) => (process.env.DEVTEAM_DATA_WAIT_MS?.trim() && Number.isFinite(n) && n >= 0 ? n : 20000))(Number(process.env.DEVTEAM_DATA_WAIT_MS));
+// A dashboard-data build slower than this is a slow project's: a read there is answered at once from
+// the last good build while a newer one runs (cmdDashboard's /api/data), and a quicker project's read
+// waits for a current build as before. DEVTEAM_DATA_QUICK_MS is for tests only, not a setting.
+const DATA_QUICK_MS = ((n) => (process.env.DEVTEAM_DATA_QUICK_MS?.trim() && Number.isFinite(n) && n >= 0 ? n : 5000))(Number(process.env.DEVTEAM_DATA_QUICK_MS));
 // How long a dashboard serves a finished dashboard-data build again (kit-595): 20 s after it ended,
 // while it is still current (cmdDashboard's dataEpoch). DEVTEAM_DATA_REUSE_MS is for tests only, not a
 // setting: test/presence-changed.test.mjs sets 3000 to keep checking kit-633's 3 s start gap. Anything
@@ -23203,7 +23313,7 @@ function claimRestart(name, budget, now = Date.now()) {
     });
   } catch { return null; }
 }
-// `worker|planner <id> --resume <flag>`, as the supervisor, but not from its pane: rememberSupervisorPane
+// `worker|planner <id> --resume <flag>` (or `responder --resume`, with no flag), as the supervisor, but not from its pane: rememberSupervisorPane
 // needs both markers, and TMUX stays so the child talks to this tmux server. Its worktree_setup is
 // given DEVTEAM_SETUP_DEADLINE, 5 s before the child's own SIGKILL, or the one this process was
 // given if that is still ahead and earlier (one handed down is never moved later; a past one is ignored).
@@ -23214,7 +23324,7 @@ function relaunchChild(launch, flag, budget) {
   const own = process.env.DEVTEAM_SETUP_DEADLINE ? Number(process.env.DEVTEAM_SETUP_DEADLINE) : NaN;
   const mine = now + budget - 5000;
   env.DEVTEAM_SETUP_DEADLINE = String(Number.isFinite(own) && own > now ? Math.min(own, mine) : mine);
-  return spawnSync(process.execPath, [process.argv[1], ...launch, '--resume', flag], { cwd: mainRoot, env, encoding: 'utf8', timeout: budget, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'] });
+  return spawnSync(process.execPath, [process.argv[1], ...launch, '--resume', ...(flag ? [flag] : [])], { cwd: mainRoot, env, encoding: 'utf8', timeout: budget, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 // A session cswap's switch stopped while it waited on its limit: Claude Code says "Automatic continue
 // stopped · your login changed or ended · send a prompt to continue". Its process already has the new
@@ -27999,6 +28109,11 @@ function supervisorIdleMinutes(root) {
   const age = Date.now() - seen;
   return seen > 0 && age >= SUPERVISOR_IDLE_MS ? Math.floor(age / 60000) : null;
 }
+// box-status's attention lines for one project's high findings its supervisor has left alone past
+// two ticks (hello's unattended, metrics' list): kind and subject, for the operator, five at most.
+function unattendedStatusLines(n, hello) {
+  return (Array.isArray(hello?.unattended) ? hello.unattended : []).slice(0, 5).map((u) => `attention: ${n} unattended high finding: ${u.kind} ${u.subject} since ${u.since}`);
+}
 async function machineStatus() {
   const lastText = readText(statusLastFile()) ?? '';
   const last = { at: Number(/^at (\d+)$/m.exec(lastText)?.[1] ?? NaN), disk: /^disk (\d+)$/m.test(lastText) ? Number(/^disk (\d+)$/m.exec(lastText)[1]) : undefined };
@@ -28068,6 +28183,7 @@ async function machineStatus() {
     // the box's own alert has the hub line; only the project's part is this project's attention
     const ownAlert = alertLessBox(hello.alert, hello.box_alert);
     if (ownAlert) flagged.push(`attention: ${n}: ${ownAlert}`);
+    flagged.push(...unattendedStatusLines(n, hello));
     const state = p ? paneState(p) : null;
     // up, idle at its prompt, its fleet running or draining (a drain still merges what is in flight),
     // and no sign of its loop for 45 minutes: it ended its turn and stopped ticking (a resume that
@@ -28270,6 +28386,20 @@ function cmdAccountsTick() {
       if (did === 'relaunched') { state.relaunched.push(name); out(`relaunched ${name}: its window was gone`); }
     }
     if (state.memory_held && state.memory_held !== before?.memory_held) out(`${plural(state.memory_held, 'gone session')} wait${state.memory_held === 1 ? 's' : ''} for room to relaunch: ${said.words}`);
+  }
+  // The responder, which nothing above brings back: launchOf and lastLaunches know workers and
+  // planners only, so after a restart its window stayed gone until the supervisor ran responder
+  // --resume (incident 5). Looked at after the relaunches, which may have made the fleet's session.
+  // Not onto an account with no room, nor at the memory ceiling; one of the tick's restarts, under
+  // the caps every relaunch shares. Since when it is down, kept while it stays down, so
+  // responder-down turns high after RESPONDER_DOWN_HIGH_MS (never for one stopped on purpose).
+  const down = responderDown();
+  if (down) {
+    const did = !down.relaunch || state.active_no_room || memoryFull(loadSettings()) ? null : relaunchResponder(budget(3));
+    if (did === 'gave-up') state.restart_gave_up.push(RESPONDER_NAME);
+    else if (did) tries += 1;
+    if (did === 'relaunched') { state.relaunched.push(RESPONDER_NAME); out(`relaunched the responder: ${down.problem}`); }
+    else if (!down.stopped) state.responder_down_since = before?.responder_down_since || state.at;
   }
   // since when any has waited, kept while some still do, so the wait is a finding, never silent
   if (state.slot_held) state.slot_held_since = (before?.slot_held && before.slot_held_since) || state.at;
@@ -29929,6 +30059,21 @@ async function dashRoutesPage(D, req, res, q) {
   if (req.method === 'GET' && req.url.startsWith('/api/data')) {
     // the log looked at now, so a change the watch hasn't delivered yet makes the kept build stale
     logWatch.look();
+    // A slow project (its last build ran over DATA_QUICK_MS) is answered at once from the last good
+    // build, while a newer one runs for the next read: its log moves every few seconds and a build
+    // takes a minute, so a read that waited for a current build waited on every load. Not after an
+    // owner action the kept build doesn't show yet: that read waits as below. Marked stale while
+    // builds have failed since the last good one, or while the build running has run a build's
+    // length plus DATA_WAIT_MS (hung or late, whether or not the log moved; a build waiting its turn
+    // is not late), or, for the copy kept on disk before any build here ended, when it is out of
+    // date and ended a build's length plus DATA_WAIT_MS ago.
+    if (D.lastData && D.lastTook > DATA_QUICK_MS && D.lastEpoch >= D.actedEpoch) {
+      void dashboardData().catch(() => {});
+      const late = (t) => Date.now() - t > D.lastTook + DATA_WAIT_MS;
+      const overdue = D.failedSince !== null || (D.building !== null && late(D.building)) || (D.lastEpoch < 0 && D.lastEpoch !== D.dataEpoch && late(D.lastAsOf + D.lastTook));
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-devteam-page': pageVersion('dashboard'), ...(overdue ? { 'x-devteam-stale': 'true' } : {}) });
+      return res.end(withViewer(D.lastData));
+    }
     // A run slower than DATA_WAIT_MS, with data to fall back on, answers with that, marked stale:
     // the run goes on and the next read has it, but no page waits minutes on a stuck child.
     let waited;
@@ -30362,7 +30507,7 @@ async function dashRoutesOwner(D, req, res, q) {
   // an owner action, answered however it ends: the kept /api/data build is stale from its answer's
   // head on, before a byte of it reaches the page, so the page's next read waits for a new build
   const head = res.writeHead;
-  res.writeHead = function (...a) { D.dataEpoch += 1; return head.apply(this, a); };
+  res.writeHead = function (...a) { D.dataEpoch += 1; D.actedEpoch = D.dataEpoch; return head.apply(this, a); };
   const site = req.headers['sec-fetch-site'];
   const origin = req.headers.origin;
   // A browser sends Origin on every fetch POST, and Sec-Fetch-Site to a loopback or https origin
@@ -30928,12 +31073,43 @@ async function cmdDashboard() {
   let build = null;
   let nextBuild = null;
   let lastStart = -Infinity;
+  // The last good build: lastAsOf, when it started (what it shows is as of then); lastTook, how long
+  // it ran; lastEpoch, dataEpoch as it started. It is kept on disk too, in run/cache/dashboard-data.last
+  // under this kit's print, so a dashboard restarted on the same kit (a box restart, a crash) has a
+  // page to show before its first build ends. A kit update changes the print, so the first read
+  // after a sync still waits for a build: another kit's data may not fit this kit's page.
+  const keptFile = path.join(runDir, 'cache', 'dashboard-data.last');
+  const keptKit = crypto.createHash('sha256').update(kitPrintKey(startPrint)).digest('hex').slice(0, 16);
   let lastData = null;
+  let lastAsOf = 0;
+  let lastTook = 0;
+  let lastEpoch = -1;
+  // when builds began failing since the last good one (null: the last one ended was good); only a
+  // good build clears it, so retries that fail too don't let the mark flicker off
+  let failedSince = null;
+  try {
+    const t = fs.readFileSync(keptFile, 'utf8');
+    const nl = t.indexOf('\n');
+    const [kit, asOf, took] = t.slice(0, Math.max(0, nl)).split(' ');
+    const body = t.slice(nl + 1);
+    // only a whole copy: a file cut short by a hard stop is no page
+    if (nl > 0 && kit === keptKit && Number.isFinite(+asOf) && Number.isFinite(+took)) { JSON.parse(body); lastData = body; lastAsOf = +asOf; lastTook = +took; }
+  } catch {}
+  // a copy a dashboard that is gone was still writing when it stopped
+  try { for (const n of fs.readdirSync(path.dirname(keptFile))) { const m = /^dashboard-data\.last\.(\d+)\.\d+\.tmp$/.exec(n); if (m && !pidAlive(+m[1])) fs.rmSync(path.join(path.dirname(keptFile), n), { force: true }); } } catch {}
+  // dataEpoch as the owner's last action answered: data built before it doesn't show that action,
+  // so a read after one waits for a newer build (up to DATA_WAIT_MS), however slow the project
+  let actedEpoch = -Infinity;
+  let keeps = 0;
+  const keep = (stdout, asOf, took) => {
+    const tmp = `${keptFile}.${process.pid}.${++keeps}.tmp`;
+    fs.promises.mkdir(path.dirname(keptFile), { recursive: true }).then(() => fs.promises.writeFile(tmp, `${keptKit} ${asOf} ${took}\n${stdout}`)).then(() => fs.promises.rename(tmp, keptFile)).catch(() => { fs.promises.rm(tmp, { force: true }).catch(() => {}); });
+  };
   const startBuild = () => {
     lastStart = Date.now();
-    const b = { epoch: dataEpoch, finished: null, r: null };
+    const b = { epoch: dataEpoch, started: lastStart, finished: null, r: null };
     b.done = new Promise((resolve) => b.child = execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: DASHBOARD_DATA_TIMEOUT_MS, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
-      if (!err && stdout) lastData = stdout;
+      if (!err && stdout) { lastData = stdout; lastAsOf = b.started; lastTook = Date.now() - b.started; lastEpoch = b.epoch; failedSince = null; keep(stdout, lastAsOf, lastTook); } else failedSince ??= Date.now();
       b.r = { ok: !err, stdout, stderr: err?.killed ? `dashboard-data took over ${DASHBOARD_DATA_TIMEOUT_MS < 120000 ? `${Math.round(DASHBOARD_DATA_TIMEOUT_MS / 1000)} s` : `${Math.round(DASHBOARD_DATA_TIMEOUT_MS / 60000)} minutes`} and was stopped (DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS)` : String(stderr ?? '') };
       b.finished = Date.now();
       resolve(b.r);
@@ -31111,7 +31287,7 @@ async function cmdDashboard() {
   // ms), and the kept /api/data build is stale (dataEpoch)
   const logWatch = presenceChanged(liveLogDir(), () => { dataEpoch += 1; presence.changed(); });
   every(logWatch.tick, 1000);
-  const D = dashContext({ log, page, pageCsp, run, describing, versioning, remote, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, ACTION_JSON, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, sessionPrompts, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
+  const D = dashContext({ log, page, pageCsp, run, describing, versioning, remote, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, ACTION_JSON, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, sessionPrompts, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get lastAsOf() { return lastAsOf; }, get lastTook() { return lastTook; }, get building() { return build && build.finished === null ? build.started : null; }, get failedSince() { return failedSince; }, get lastEpoch() { return lastEpoch; }, get actedEpoch() { return actedEpoch; }, set actedEpoch(v) { actedEpoch = v; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
   // A throw out of any route is that request's failure (dashRequestFailed), never the dashboard's
   // stop: a rejection out of this async handler would reach processLog, which exits.
   const server = http.createServer(async (req, res) => {
@@ -38275,6 +38451,17 @@ function commitActivity(day0) {
   }
   return activity;
 }
+// The pulse's line for the high findings the supervisor has left alone past two ticks: the oldest
+// in its plain words (its detail; kind and subject are box-status's, for the operator), so the
+// Overview says what is stuck and for how long without opening the project.
+function unattendedLine(items) {
+  if (!items.length) return null;
+  const o = [...items].sort((a, b) => Date.parse(a.since) - Date.parse(b.since))[0];
+  const m = Math.max(0, Math.round((Date.now() - Date.parse(o.since)) / 60000));
+  const age = m < 120 ? `${m} min` : m < 2880 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} days`;
+  const what = typeof o.detail === 'string' && o.detail.trim() ? o.detail.trim() : 'see the project\'s warnings';
+  return `${items.length === 1 ? 'A warning' : `${items.length} warnings`} the supervisor hasn't acted on or set aside, ${items.length === 1 ? '' : 'the oldest '}for ${age}: ${what}`;
+}
 function helloPulse() {
   const now = Date.now();
   const lines = readLog().lines;
@@ -38343,6 +38530,7 @@ function helloPulse() {
     state === 'stalled' ? (quietMin === null ? 'Open work, and the fleet has never written to the log' : `${live.length ? 'Open work' : 'An approved goal with no tickets'}, and nothing has moved in ${ago(quietMin)}`) : null,
     silent.length ? `${silent.length} worker${silent.length === 1 ? ' has' : 's have'} been silent for over an hour` : null,
     incidents ? `${incidents} open production incident${incidents === 1 ? '' : 's'}` : null,
+    unattendedLine(readUnattended()),
     mode === 'drain' ? 'Draining: workers finish what they have, nothing new starts' : null,
     onHold && mode !== 'park' ? `${onHold} open ticket${onHold === 1 ? ' is' : 's are'} on hold with ${onHold === 1 ? 'its' : 'their'} goal` : null,
   ].filter(Boolean);
@@ -38360,7 +38548,7 @@ function cmdHello() {
   const workers = ourWindows(tmuxSession()).length;
   // --pane: whether the supervisor has a pane the kit can type into, for the dashboard's 10 s run of
   // this (its threads' "hasn't replied yet"), so the dashboard's own process never asks tmux itself
-  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, threads: threadCounts(), fleet: { mode: fleetMode() ?? 'run', workers, goals: goalModeCounts(), moving: movingFleet() }, ...(helloAlert() ? { alert: helloAlert() } : {}), ...(boxAlert() ? { box_alert: boxAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, threads: threadCounts(), fleet: { mode: fleetMode() ?? 'run', workers, goals: goalModeCounts(), moving: movingFleet() }, ...(helloAlert() ? { alert: helloAlert() } : {}), ...(boxAlert() ? { box_alert: boxAlert() } : {}), pulse: helloPulse(), unattended: readUnattended(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
   // and what its terminal is asking, if anything: the dashboard's card, and the hub's Overview
   if (flags.pane) {
     const a = supervisorAsk();
@@ -42617,6 +42805,40 @@ function nudgeResponder(now = Date.now()) {
   writeJsonAtomic(RESPONDER_NUDGE_FILE, { at: new Date(now).toISOString() });
   return true;
 }
+// The responder's last start or stop on purpose: { started: <iso> } once a start typed its agent,
+// { stopped: <iso> } after responder --stop. A fleet park stops it without a record, so it comes back
+// after the unpark. Machine-local, as its window is: after a move, the supervisor starts it there.
+const RESPONDER_STATE_FILE = runPath('responder.json');
+const RESPONDER_DOWN_HIGH_MS = 30 * 60000;
+function responderRecord() {
+  try { const o = JSON.parse(readText(RESPONDER_STATE_FILE) ?? 'null'); return isObj(o) ? o : null; } catch { return null; }
+}
+// The responder down while it should run, or null: settings.responder on, the fleet neither parked
+// nor drained for a move (what refuses its start), the fleet's session up and its window gone or its
+// agent exited (responderHealth's problem; a pane stuck on a prompt is responder-stuck's, never
+// restarted). relaunch: it ran here and nobody stopped it, so the accounts tick starts it again; a
+// fleet that never started one, or stopped it, gets the finding only. stopped: stopped on purpose.
+function responderDown(s = loadSettings()) {
+  if (s.responder === false || fleetMode() === 'park' || draining()) return null;
+  const h = responderHealth();
+  if (!h.session || !h.problem) return null;
+  const rec = responderRecord();
+  return { problem: h.problem, relaunch: typeof rec?.started === 'string' && rec.stopped === undefined, stopped: typeof rec?.stopped === 'string' };
+}
+// Start it again, as the supervisor's responder --resume does, in a child under the tick's budget
+// (the start reads origin and runs the owner's trust command, and any refusal exits): 'relaunched',
+// 'failed', 'gave-up' or null (not due), under the restart caps every relaunch shares.
+function relaunchResponder(budget) {
+  const now = Date.now();
+  const verdict = claimRestart(RESPONDER_NAME, budget, now);
+  if (verdict !== 'go') return verdict;
+  const r = relaunchChild([RESPONDER_NAME], null, budget);
+  const ok = r.status === 0;
+  const why = (r.stderr || r.error?.message || `exit ${r.status}`).trim().slice(0, 200);
+  appendLog({ type: 'observation', source: 'pane', kind: 'session-relaunched', subject: RESPONDER_NAME, detail: ok ? "the responder's window was gone or its agent had exited, and it was started again as responder --resume would" : `the responder's window was gone or its agent had exited, and it could not be started again: ${why}`, detector: 'pane', source_key: `session-relaunched ${RESPONDER_NAME} ${now}` });
+  if (!ok) out(`could not relaunch the responder: ${why}`);
+  return ok ? 'relaunched' : 'failed';
+}
 // A thread's state in the supervisor's words (thread list, show): whose reply is owed, or the owner's move.
 const waitingWords = (v, overdue = false) => (v.waiting === 'supervisor' ? 'waiting on the supervisor' : v.waiting === 'responder' ? `the responder has it${overdue ? ' · overdue' : ''}` : "the owner's move");
 // Whether the worktree at dir changed <slug>'s folder since it left main: a tracked change against
@@ -42756,7 +42978,8 @@ function cmdResponder() {
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
   if (!sh('tmux', ['-V'])) die('tmux not found');
   // a stop always works: nothing else is checked
-  if (flags.stop) { const at = stopResponder(); return out(at ? `stopped the responder (${at})` : 'no responder is running'); }
+  // recorded, so the accounts tick leaves it stopped (responderDown)
+  if (flags.stop) { const at = stopResponder(); writeJsonAtomic(RESPONDER_STATE_FILE, { stopped: nowIso() }); return out(at ? `stopped the responder (${at})` : 'no responder is running'); }
   const s = loadSettings();
   if (s.responder === false) die("settings.responder is off: the owner's thread turns go to the supervisor; set it true to start the responder");
   // a fleet park stops it (fleetOp) and keeps it stopped; a drain, or a goal's own hold, doesn't
@@ -42828,6 +43051,7 @@ function cmdResponder() {
       if (/^claude(\s|$)/.test(cmd)) cmd = cmd.replace(/^claude/, `claude --settings '${claudePolicy(RESPONDER_NAME, owned, mb)}'`);
       // a ticket or feature from the tmux server's environment is never the responder's: env -u, which works in any shell
       type(`env -u DEVTEAM_TICKET -u DEVTEAM_FEATURE ${sessionMarkerPrefix(session)}${cmd} ${shq(promptPointer(promptFile))}`);
+      writeJsonAtomic(RESPONDER_STATE_FILE, { started: nowIso() });
       out(`${again ? 'restarted' : 'started'} the responder in ${w.shown} at ${wt}`);
     });
   } catch (e) {
