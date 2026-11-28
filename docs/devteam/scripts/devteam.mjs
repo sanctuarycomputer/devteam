@@ -21284,6 +21284,9 @@ function cmdAck() {
   const refs = logObjects('observation').filter((o) => o.source_key === key && o.detector === 'metrics' && o.created_by === 'supervisor').sort(byTime).slice(-SET_ASIDE_REFS).map((o) => o.id);
   const fields = { type: 'observation', source: 'ack', kind: 'finding-ack', subject: `${kind} ${subject}`, detail: reason, source_ref: key };
   const line = appendLog({ ...fields, refs: fitRefs(fields, refs) }, by);
+  // off the unattended list now, so hello, the hub and box-status drop it without waiting for the
+  // next metrics run (which leaves an acked finding out anyway)
+  try { const u = readJson(UNATTENDED()); if (isObj(u) && Array.isArray(u.items)) writeJson(UNATTENDED(), { ...u, items: u.items.filter((x) => !(isObj(x) && x.kind === kind && x.subject === subject)) }); } catch {}
   // a merge commit's ack never lapses (collectMetrics' lasting(), kit-348)
   const forGood = kind === 'merged-without-merge' && /^[^\s:]+:[0-9a-f]{12}$/.test(subject);
   out(`${line.id}: ${kind} ${subject} set aside ${forGood ? 'for good: a merge commit can\'t change' : `for ${loadSettings().finding_ack_hours}h`}`);
@@ -21411,6 +21414,18 @@ function waitCause(ref) {
   if (kind === null && TICKET.test(ref)) return cause('ticket', ref, `ticket:${ref}`);
   return null;
 }
+// One held_for cause in plain words, for a move's wait (next-move@1): what the hold waits on.
+function holdCauseWords(ref) {
+  const w = waitCause(ref);
+  if (!w) return String(ref);
+  if (w.form === 'q') { const q = logGet(w.id); return q?.question ? `your answer to "${String(q.question).slice(0, 120)}"` : `your answer to ${w.id}`; }
+  if (w.form === 'ticket') return `${w.id} merges`;
+  if (w.form === 'goal') return `goal "${logGet(w.id)?.title ?? w.id}"`;
+  if (w.form === 'chore') return `chore ${w.id} merges`;
+  if (w.form === 'pr') return `PR ${w.id}`;
+  if (w.form === 'run') return `run ${w.id}`;
+  return w.id;
+}
 /* next-moves start */
 // The next-move table. For every running goal, active ticket, planner and open chore branch, exactly
 // one next move: what has to happen, who holds it and since when. Its rows (G goals, T tickets, P
@@ -21505,8 +21520,8 @@ function newMove(subject, title, o) {
   return Object.assign(m, o.neverOwed && f.flag === 'owed' ? { flag: null, rung: 0 } : f);
 }
 // A copied move: its source's holder, since, flag and rung (and what it is, unless the row says),
-// on this subject, via the source.
-const copiedMove = (subject, title, src, o = {}) => ({ ...src, ...o, subject, title, via: src.subject });
+// on this subject, via the source. Never its wait: that is the held ticket's own (next-move@1).
+const copiedMove = (subject, title, src, o = {}) => { const { wait, ...rest } = src; return { ...rest, ...o, subject, title, via: src.subject }; };
 const qRef = (q) => ({ kind: 'q', id: q.id });
 const askedMove = (q) => ({ move: 'answer-question', words: `Answer: ${q.question}`, holder: 'owner', ref: qRef(q), since: q.asked_at, covered_by: [{ kind: 'owner-question-waiting', subject: q.id }] });
 const PLANNING_COVER = [{ kind: 'idle-planning', subject: '*' }, { kind: 'memory-full', subject: '*' }];
@@ -21706,7 +21721,14 @@ function ticketMoves() {
       }
       const q = openQs.find((x) => x.ticket === id || (x.blocks ?? []).includes(id));
       if (q) return at({ ...askedMove(q), covered_by: [{ kind: 'blocked-on-owner', subject: id }, { kind: 'owner-question-waiting', subject: q.id }] }); // T3
-      if (isHeld(t)) return at({ move: 'held', words: `Held: ${t.held.trim()}. Release it, or ask`, holder: 'supervisor', since: (t.updates ?? []).filter((u) => typeof u.held === 'string' && u.held.trim()).at(-1)?.at ?? t.created_at, command: `ticket release ${id} --reason "…"`, neverOwed: true }); // T2b
+      if (isHeld(t)) {
+        const m = at({ move: 'held', words: `Held: ${t.held.trim()}. Release it, or ask`, holder: 'supervisor', since: (t.updates ?? []).filter((u) => typeof u.held === 'string' && u.held.trim()).at(-1)?.at ?? t.created_at, command: `ticket release ${id} --reason "…"`, neverOwed: true }); // T2b
+        // what the hold waits on and its review date (next-move@1's wait), so moveFindings can tell a
+        // hold past its --until from one still in its window
+        const causes = (Array.isArray(t.held_for) ? t.held_for : []).filter((c) => typeof c === 'string' && c.trim());
+        if (causes.length) m.wait = { causes: causes.map((ref) => ({ ref, words: holdCauseWords(ref), state: waitCause(ref)?.state ?? 'open' })), until: typeof t.held_until === 'string' && t.held_until ? t.held_until : null };
+        return m;
+      }
       const w = workerState(id);
       const phase = w?.phase ?? null;
       const run = w?.phase_started_at ?? null;
@@ -21819,7 +21841,9 @@ function cmdMoves() {
 // it). A move is covered when a finding its covered_by names was raised in the run, on that subject
 // or, for "*", on any; a covered move raises nothing, though it keeps its flag. By the move's flag:
 // none (no row knew the state: G20, T14) raises no-next-move, owed (rung 1) move-owed, stalled
-// (rung 2) move-stalled; each is high, so wait wakes on it. The finding's subject is
+// (rung 2) move-stalled. Each is high, so wait wakes on it, but for a stalled held ticket (T2b) still
+// inside its --until date (wait.until): a known wait, medium; past that date it is high again, since
+// nothing else says a hold has lapsed. The finding's subject is
 // "<subject> <move>:<ref id>", so an ack sets aside one move with one ref, and a new move or a new
 // ref is a new finding.
 function moveFindings(moves, raised, now = Date.now()) {
@@ -21838,8 +21862,11 @@ function moveFindings(moves, raised, now = Date.now()) {
     const suggestion = kind === 'no-next-move' ? 'work out the move by hand, and file the missing row as a kit lesson (knowledge add --kit)'
       : kind === 'move-owed' ? (m.command ?? 'do it, or record why it waits (ack with a reason)') : stalledHint(m);
     // a hold with its reason recorded (ticket hold, T2b) is a known wait: stalled, it is medium, so
-    // high stays for what wants acting on now (the unattended check reads high findings only)
-    out.push({ severity: kind === 'move-stalled' && m.move === 'held' ? 'medium' : 'high', kind, subject, detail, suggestion });
+    // high stays for what wants acting on now (the unattended check reads high findings only). Once
+    // its --until day is over (UTC) the hold has lapsed, and nothing else flags that: high again
+    const until = m.wait?.until;
+    const lapsed = typeof until === 'string' && until < new Date(now).toISOString().slice(0, 10);
+    out.push({ severity: kind === 'move-stalled' && m.move === 'held' && !lapsed ? 'medium' : 'high', kind, subject, detail, suggestion });
   }
   return out;
 }
@@ -28015,6 +28042,11 @@ function supervisorIdleMinutes(root) {
   const age = Date.now() - seen;
   return seen > 0 && age >= SUPERVISOR_IDLE_MS ? Math.floor(age / 60000) : null;
 }
+// box-status's attention lines for one project's high findings its supervisor has left alone past
+// two ticks (hello's unattended, metrics' list): kind and subject, for the operator, five at most.
+function unattendedStatusLines(n, hello) {
+  return (Array.isArray(hello?.unattended) ? hello.unattended : []).slice(0, 5).map((u) => `attention: ${n} unattended high finding: ${u.kind} ${u.subject} since ${u.since}`);
+}
 async function machineStatus() {
   const lastText = readText(statusLastFile()) ?? '';
   const last = { at: Number(/^at (\d+)$/m.exec(lastText)?.[1] ?? NaN), disk: /^disk (\d+)$/m.test(lastText) ? Number(/^disk (\d+)$/m.exec(lastText)[1]) : undefined };
@@ -28084,8 +28116,7 @@ async function machineStatus() {
     // the box's own alert has the hub line; only the project's part is this project's attention
     const ownAlert = alertLessBox(hello.alert, hello.box_alert);
     if (ownAlert) flagged.push(`attention: ${n}: ${ownAlert}`);
-    // high findings its supervisor has left alone past two ticks (metrics' unattended list)
-    for (const u of (Array.isArray(hello.unattended) ? hello.unattended : []).slice(0, 5)) flagged.push(`attention: ${n} unattended high finding: ${u.kind} ${u.subject} since ${u.since}`);
+    flagged.push(...unattendedStatusLines(n, hello));
     const state = p ? paneState(p) : null;
     // up, idle at its prompt, its fleet running or draining (a drain still merges what is in flight),
     // and no sign of its loop for 45 minutes: it ended its turn and stopped ticking (a resume that
@@ -38294,13 +38325,15 @@ function commitActivity(day0) {
   return activity;
 }
 // The pulse's line for the high findings the supervisor has left alone past two ticks: the oldest
-// named, so the Overview says what is stuck and since when without opening the project.
+// in its plain words (its detail; kind and subject are box-status's, for the operator), so the
+// Overview says what is stuck and for how long without opening the project.
 function unattendedLine(items) {
   if (!items.length) return null;
   const o = [...items].sort((a, b) => Date.parse(a.since) - Date.parse(b.since))[0];
   const m = Math.max(0, Math.round((Date.now() - Date.parse(o.since)) / 60000));
   const age = m < 120 ? `${m} min` : m < 2880 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} days`;
-  return `${items.length} high warning${items.length === 1 ? '' : 's'} the supervisor hasn't acted on or set aside: ${o.kind} ${o.subject}, for ${age}${items.length > 1 ? `, and ${items.length - 1} more` : ''}`;
+  const what = typeof o.detail === 'string' && o.detail.trim() ? o.detail.trim() : 'see the project\'s warnings';
+  return `${items.length === 1 ? 'A warning' : `${items.length} warnings`} the supervisor hasn't acted on or set aside, ${items.length === 1 ? '' : 'the oldest '}for ${age}: ${what}`;
 }
 function helloPulse() {
   const now = Date.now();

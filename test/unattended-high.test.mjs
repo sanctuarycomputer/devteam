@@ -1,7 +1,8 @@
 // Unattended high findings: a high finding open (not acked) for over two ticks is named on the hub's
-// Overview (hello's pulse) and in box-status's attention lines, so one a supervisor reads past is
-// seen by the owner and the operator; an ack or the finding going away takes it off. And a ticket
-// held with its reason recorded, once stalled, is a medium finding, not a high one.
+// Overview (hello's pulse, in the finding's plain words) and in box-status's attention lines (kind and
+// subject), so one a supervisor reads past is seen by the owner and the operator; an ack takes it off
+// at once, and the finding going away takes it off. And a ticket held with its reason recorded, once
+// stalled, is a medium finding, not a high one, until its --until date has passed.
 // Ports: none
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -63,25 +64,54 @@ test('readUnattended and the pulse line: the oldest named, and nothing from a li
   let body = null;
   const ctx = { isObj: (x) => !!x && typeof x === 'object' && !Array.isArray(x), readJson: () => { if (!body) throw new Error('none'); return body; }, UNATTENDED: () => 'u.json' };
   const read = load('readUnattended', ctx);
-  const items = [{ kind: 'move-owed', subject: 'goal:g-2 re-plan:', since: new Date(now - 50 * 60000).toISOString() }, { kind: 'stale-planner', subject: 'plan-x', since: new Date(now - 400 * 60000).toISOString() }];
+  const items = [{ kind: 'move-owed', subject: 'goal:g-2 re-plan:', detail: 'Re-plan: owed', since: new Date(now - 50 * 60000).toISOString() }, { kind: 'stale-planner', subject: 'plan-x', detail: 'the planner for x has shown no sign of life for 40 min', since: new Date(now - 400 * 60000).toISOString() }];
   body = { at: new Date(now - 60000).toISOString(), items };
   assert.equal(read(now).length, 2);
   body = { at: new Date(now - 3 * 3600000).toISOString(), items };
   assert.deepEqual(plain(read(now)), [], 'a list no metrics run has refreshed in two hours says nothing');
   const line = load('unattendedLine', {});
   assert.equal(line([]), null);
-  assert.equal(line(items), "2 high warnings the supervisor hasn't acted on or set aside: stale-planner plan-x, for 7 h, and 1 more");
+  assert.equal(line(items), "2 warnings the supervisor hasn't acted on or set aside, the oldest for 7 h: the planner for x has shown no sign of life for 40 min");
+  assert.equal(line(items.slice(0, 1)), "A warning the supervisor hasn't acted on or set aside, for 50 min: Re-plan: owed");
+  assert.doesNotMatch(line(items), /stale-planner|plan-x|move-owed/, 'no kind or subject on the owner\'s line');
 });
 
-test('moveFindings: a held ticket, stalled, is medium; any other stalled move stays high', () => {
+test('moveFindings: a held ticket, stalled, is medium until its --until date has passed; any other stalled move stays high', () => {
   const run = load('moveFindings');
-  const since = new Date(Date.now() - 3 * 86400000).toISOString();
+  const now = Date.parse('2026-11-28T12:00:00Z');
+  const since = new Date(now - 3 * 86400000).toISOString();
   const m = (o) => ({ subject: 'ticket:t-1', move: 'build', words: 'Building', holder: 'worker', ref: null, title: 'T', since, command: null, covered_by: [], quiet: null, via: null, flag: 'stalled', rung: 2, ...o });
-  const out = plain(run([m({ move: 'held', words: 'Held: waits on the owner. Release it, or ask', holder: 'supervisor' }), m({ subject: 'ticket:t-2' })], []));
-  assert.deepEqual(out.map((x) => [x.subject, x.severity]), [['ticket:t-1 held:', 'medium'], ['ticket:t-2 build:', 'high']]);
+  const held = (subject, until) => m({ subject, move: 'held', words: 'Held: waits on the vendor. Release it, or ask', holder: 'supervisor', ...(until === undefined ? {} : { wait: { causes: [{ ref: 'external:the-vendor', words: 'the-vendor', state: 'open' }], until } }) });
+  const out = plain(run([held('ticket:t-1'), m({ subject: 'ticket:t-2' }), held('ticket:t-3', '2026-11-30'), held('ticket:t-4', '2026-11-28'), held('ticket:t-5', '2026-11-27'), held('ticket:t-6', null)], [], now));
+  assert.deepEqual(out.map((x) => [x.subject, x.severity]), [
+    ['ticket:t-1 held:', 'medium'], ['ticket:t-2 build:', 'high'],
+    ['ticket:t-3 held:', 'medium'], ['ticket:t-4 held:', 'medium'],
+    ['ticket:t-5 held:', 'high'], ['ticket:t-6 held:', 'medium'],
+  ], 'in its window (to the end of its --until day) medium; the day after, the hold has lapsed: high');
 });
 
-test('end to end: a high finding left past two ticks reaches hello and box-status, and an ack takes it off', () => {
+test('next moves: a held ticket\'s move carries its wait (causes, until); a copy of it never does', () => {
+  // T2b's own wait, as next-move@1 defines it (moveFindings reads wait.until)
+  const i = SRC.indexOf("if (isHeld(t)) {\n        const m = at({ move: 'held'");
+  assert.ok(i >= 0, 'T2b builds its move and adds the wait');
+  assert.match(SRC.slice(i, i + 900), /m\.wait = \{ causes: causes\.map\(\(ref\) => \(\{ ref, words: holdCauseWords\(ref\), state: [^}]+\}\)\), until: [^;]+t\.held_until[^;]+;/);
+  const j = SRC.indexOf('\nconst copiedMove = ');
+  const copied = vm.runInContext(`${SRC.slice(j, SRC.indexOf('\n', j + 1))}\n;copiedMove`, vm.createContext({}));
+  const src = { subject: 'ticket:t-1', move: 'held', wait: { causes: [], until: null }, flag: 'stalled' };
+  const c = copied('goal:g-1', 'G', src);
+  assert.ok(!('wait' in c), 'a goal copying its lead ticket\'s held move carries no wait');
+  assert.equal(c.via, 'ticket:t-1');
+});
+
+test('box-status: an unattended high finding is an attention line, by kind and subject, five at most', () => {
+  const lines = load('unattendedStatusLines');
+  const u = (i) => ({ kind: 'move-stalled', subject: `ticket:t-${i} build:`, detail: 'T: Building', since: '2026-11-28T00:00:00.000Z' });
+  assert.deepEqual(plain(lines('proj', {})), []);
+  assert.deepEqual(plain(lines('proj', { unattended: [u(1)] })), ['attention: proj unattended high finding: move-stalled ticket:t-1 build: since 2026-11-28T00:00:00.000Z']);
+  assert.equal(lines('proj', { unattended: [1, 2, 3, 4, 5, 6, 7].map(u) }).length, 5);
+});
+
+test('end to end: a high finding left past two ticks reaches hello (what box-status reads), and an ack takes it off at once', () => {
   // a 0.1-minute tick: two ticks are 12 s. A stalled worker is the high finding (move-stalled).
   const F = fleetFixture('unattended-e2e');
   fixtures.push(F);
@@ -108,8 +138,17 @@ test('end to end: a high finding left past two ticks reaches hello and box-statu
   assert.ok(m.unattended.some((x) => x.kind === 'move-stalled' && x.subject === f.subject), 'past two ticks: unattended');
   const h = hello();
   assert.ok(h.unattended.some((x) => x.subject === f.subject), 'hello carries it');
-  assert.ok(h.pulse.attention.some((l) => /high warnings? the supervisor hasn't acted on or set aside: /.test(l)), `the pulse says it (${JSON.stringify(h.pulse.attention)})`);
+  // the line names the oldest in its detail (the fixture has other high findings: the template strategy)
+  const oldest = [...h.unattended].sort((a, b) => Date.parse(a.since) - Date.parse(b.since))[0];
+  const said = (x) => x.pulse.attention.find((l) => /the supervisor hasn't acted on or set aside/.test(l));
+  assert.match(said(h) ?? '', new RegExp(`^${h.unattended.length === 1 ? 'A warning' : `${h.unattended.length} warnings`} the supervisor hasn't acted on or set aside, (the oldest )?for \\d+ min: `), `the pulse says it (${JSON.stringify(h.pulse.attention)})`);
+  assert.ok(said(h).endsWith(oldest.detail), 'in the oldest one\'s plain words');
+  assert.doesNotMatch(said(h), new RegExp(`${oldest.kind}|move-stalled`), 'no finding kind on the owner\'s line');
   ok(old, ['ack', 'move-stalled', f.subject, '--reason', 'a long build, looked at'], SUP);
-  assert.ok(!metrics().unattended.some((x) => x.subject === f.subject), 'an ack takes it off');
-  assert.ok(!hello().unattended.some((x) => x.subject === f.subject), 'and off hello');
+  // no metrics run in between: the ack itself takes it off hello, so off the hub and box-status
+  const h2 = hello();
+  assert.ok(!h2.unattended.some((x) => x.subject === f.subject), 'off hello right after the ack');
+  assert.equal(h2.unattended.length, h.unattended.length - 1, 'only the acked one goes');
+  assert.ok(!(said(h2) ?? '').includes(f.detail), 'and off the pulse');
+  assert.ok(!metrics().unattended.some((x) => x.subject === f.subject), 'and metrics agrees');
 });
