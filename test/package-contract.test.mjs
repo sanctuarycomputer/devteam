@@ -222,6 +222,8 @@ test('C18 packagePinPair refuses any other URL: another tag, another file name, 
     `https://github.com:443/sanctuarycomputer/devteam/releases/download/v${v}/${asset}`, `https://x@github.com/sanctuarycomputer/devteam/releases/download/v${v}/${asset}`,
     `https://github.com/sanctuarycomputer/releases/download/v${v}/${asset}`, `https://github.com/a/b/c/releases/download/v${v}/${asset}`, `https://github.com/../devteam/releases/download/v${v}/${asset}`, `https://github.com/sanctuarycomputer/../releases/download/v${v}/${asset}`,
     `https://github.com/sanctuarycomputer/devteam/releases/latest/download/${asset}`, `https://github.com/sanctuarycomputer/devteam/archive/refs/tags/v${v}.tar.gz`,
+    // each repository part is [A-Za-z0-9_.-]+
+    `https://github.com/sanctuary%2Fcomputer/devteam/releases/download/v${v}/${asset}`, `https://github.com/sanctuary computer/devteam/releases/download/v${v}/${asset}`, `https://github.com/sanctuarycomputer/dev~team/releases/download/v${v}/${asset}`, `https://github.com/sanctuarycomputer/devt%C3%A9am/releases/download/v${v}/${asset}`,
     `${GH}/v${v}/${asset}?x=1`, `${GH}/v${v}/${asset}#x`, `${GH}/v${v}/${asset}/`, `${GH}//v${v}/${asset}`, ` ${GH}/v${v}/${asset}`,
   ]) assert.throws(() => fn({ ...pin, resolved: r }), (e) => e.message.startsWith('packagePinPair: resolved'), `C18 resolved ${r} is refused`);
 });
