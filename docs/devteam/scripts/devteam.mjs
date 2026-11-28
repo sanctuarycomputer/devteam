@@ -34651,7 +34651,7 @@ function githubAsset(url, kind) {
   }
   const base = { ok: false, unreachable: false, unpublished: false, refused: null, why: null, bytes: null, url: null, redirects: 0 };
   const cut = (v) => JSON.stringify(String(v ?? '')).slice(0, 200);
-  const max = { pack: 64 * 1024 * 1024, bundle: 1024 * 1024 }[kind];
+  const max = kind === 'pack' ? 64 * 1024 * 1024 : kind === 'bundle' ? 1024 * 1024 : 0;
   if (typeof kind !== 'string' || !max) return { ...base, refused: 'input', why: `kind ${cut(kind)} is not pack or bundle` };
   let u = null;
   if (typeof url === 'string' && url.length <= 2048) { try { u = new URL(url); } catch {} }
@@ -34693,7 +34693,8 @@ function githubAsset(url, kind) {
         res.on('data', (c) => { n += c.length; if (n > max) { req.destroy(); return done({ refused: 'too-big', why: 'it runs past ' + max + ' bytes', url: u.href, hops }); } fs.writeSync(fd, c); });
         res.on('aborted', () => done({ down: 'the answer was cut off', url: u.href, hops }));
         res.on('error', (e) => done({ down: String(e?.code ?? 'error'), url: u.href, hops }));
-        res.on('end', () => { fs.closeSync(fd); done({ ok: true, url: u.href, hops, n }); });
+        // a body shorter than its declared length is cut, whatever events node gave for it
+        res.on('end', () => { fs.closeSync(fd); if (len !== undefined && n !== Number(len)) return done({ down: 'the answer was cut off', url: u.href, hops }); done({ ok: true, url: u.href, hops, n }); });
       });
       req.end();
     };

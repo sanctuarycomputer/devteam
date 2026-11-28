@@ -416,8 +416,14 @@ test('A5 a URL that isn\'t exactly https on github.com is refused before any req
     const res = probe(bad.map((u) => asset(u)), ghEnv(reg)).res;
     bad.forEach((u, i) => assert.equal(res[i].refused, 'url', `A5 ${String(u).slice(0, 60)} is refused url`));
     assert.equal(ghAsked(reg).length, before, 'A5 no request for any of them');
-    const [k] = probe([{ asset: [PACK_URL, 'tarball'] }], ghEnv(reg)).res;
-    assert.equal(k.refused, 'input', 'A5 a kind that is not pack or bundle is refused input');
+    // a kind is one of the two words, never a name another object answers to
+    const kinds = ['tarball', 'constructor', '__proto__', 'toString', 'hasOwnProperty', 'Pack'];
+    probe(kinds.map((kind) => ({ asset: [PACK_URL, kind] })), ghEnv(reg)).res.forEach((r, i) => assert.equal(r.refused, 'input', `A5 a kind that is not pack or bundle is refused input: ${kinds[i]}`));
+    // the URL's bound is 2048 characters
+    const long = (n) => `https://github.com/${REPO}/releases/download/v${V}/${'a'.repeat(n - `https://github.com/${REPO}/releases/download/v${V}/`.length)}`;
+    const [at, past] = probe([asset(long(2048)), asset(long(2049))], ghEnv(reg)).res;
+    assert.notEqual(at.refused, 'url', 'A5 a URL of 2048 characters is not refused url');
+    assert.equal(past.refused, 'url', 'A5 a URL of 2049 characters is refused url');
   } finally { await reg.close(); }
 });
 
