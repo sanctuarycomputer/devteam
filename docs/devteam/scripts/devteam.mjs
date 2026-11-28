@@ -22762,7 +22762,7 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
   const retry = Number(process.env.DEVTEAM_HUB_RETRY_MS ?? 30000);
   const ownHost = (h) => [`127.0.0.1:${HUB_PORT}`, `localhost:${HUB_PORT}`].includes(h ?? '');
   // the hub page's policy, and its alpha's under alphaCsp
-  const hubPolicy = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src ${PORT_RANGE.map((p) => `http://127.0.0.1:${p}`).join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
+  const hubPolicy = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; manifest-src 'self'; frame-src ${PORT_RANGE.map((p) => `http://127.0.0.1:${p}`).join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
   // One scan at a time, its answer kept for 2 s: however often pages ask, the block is probed at
   // most every 2 s. An instance speaking a newer hello than this hub knows lists only root and port.
   let scanning = null;
