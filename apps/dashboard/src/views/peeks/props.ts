@@ -34,9 +34,9 @@ export const tipFor = (type: Loose, k: Loose) => SCHEMA_DOCS?.types?.[type]?.fie
 // opener draws (kit-88 spec §2.2; the owner's mock's KEY_HELP and today's tips). A key with none of
 // the three says which stored field it is.
 // none of the three: no tip (and the peek test's "every key has a tooltip" fails)
-export const keyTip = (label: Loose, tip: Loose, field: Loose) => tip || (peeksState.KEY_TIPS as Loose)[label] || (field ? `Stored on the record as ${field}.` : '');
+export const keyTip = (label: Loose, tip?: Loose, field?: Loose) => tip || (peeksState.KEY_TIPS as Loose)[label] || (field ? `Stored on the record as ${field}.` : '');
 // A property row for props(): [label, value, tip], or null when there is no value to show.
-export const attrRow = (label: Loose, html: Loose, tip: Loose, field: Loose) => (html === '' || html == null || html === false ? null : [label, html, keyTip(label, tip, field)]);
+export const attrRow = (label: Loose, html: Loose, tip?: Loose, field?: Loose) => (html === '' || html == null || html === false ? null : [label, html, keyTip(label, tip, field)]);
 export const ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
 export const longList = (xs: Loose) => xs.length > 4 || xs.some((x: Loose) => String(x).length > 48);
 // Any value, plainly: text links the ids in it, lists become lists, objects their own key/value pairs.
@@ -153,18 +153,18 @@ export function attrs({ id, idTip, peek, type, docType, pick = null, prefix = ''
   const r = peek?.record ?? null;
   const fields = r ? (pick ? pick(r.fields) : r.fields) : null;
   const c = { id, record: r, set_by: r?.set_by ?? {}, ...ctx };
-  const made = r && !pick ? [(attrRow as Loose)('Created', `${esc(when(r.created_at))} by ${esc(who(r.created_by))}`), r.updated_at ? (attrRow as Loose)('Last changed', `${esc(when(r.updated_at))} by ${esc(who(r.updated_by))}`) : null] : [];
+  const made = r && !pick ? [attrRow('Created', `${esc(when(r.created_at))} by ${esc(who(r.created_by))}`), r.updated_at ? attrRow('Last changed', `${esc(when(r.updated_at))} by ${esc(who(r.updated_by))}`) : null] : [];
   const stored = fields ? storedRows(type, fields, docType ?? type, c, prefix)
-    : noRecord ? [] : [(attrRow as Loose)('Record', `<span class="muted">${peek === undefined ? 'loading…' : peek?.transient ? 'could not load it just now' : 'not in the log'}</span>`)];
+    : noRecord ? [] : [attrRow('Record', `<span class="muted">${peek === undefined ? 'loading…' : peek?.transient ? 'could not load it just now' : 'not in the log'}</span>`)];
   const idTipped = `${idTip ?? (tipFor('_', 'id') || peeksState.KEY_TIPS.ID)} Copy ID copies exactly this.`;
-  let own = [(attrRow as Loose)('ID', `<code>${esc(id)}</code>`, idTipped), ...stored, ...made, howItChanges(kind, { id, ...(rec || {}), record: r })].filter(Boolean)
-    .map((x: Loose) => (Object.hasOwn(rename, x[0]) ? [rename[x[0]], x[1], (keyTip as Loose)(rename[x[0]])] : x));
+  let own = [attrRow('ID', `<code>${esc(id)}</code>`, idTipped), ...stored, ...made, howItChanges(kind, { id, ...(rec || {}), record: r })].filter(Boolean)
+    .map((x: Loose) => (Object.hasOwn(rename, x[0]) ? [rename[x[0]], x[1], keyTip(rename[x[0]])] : x));
   if (front.length) {
     const take = (l: Loose) => { const i = own.findIndex((x: Loose) => x[0] === l); return i < 0 ? null : own.splice(i, 1)[0]; };
     const lead = front.map(([l, row, replace]: Loose) => { const had = take(l); return replace ? row : had ?? row; }).filter(Boolean);
     own = [own[0], ...lead, ...own.slice(1)];
   }
-  const comp = computed.filter((x: Loose) => x && x[1]).map(([l, h, t]: Loose) => (attrRow as Loose)(l, h, t)).filter(Boolean);
+  const comp = computed.filter((x: Loose) => x && x[1]).map(([l, h, t]: Loose) => attrRow(l, h, t)).filter(Boolean);
   return `<section class="attrs">${props(own)}${comp.length ? `<h4 class="attrs-h">Computed</h4>${props(comp)}` : ''}</section>`;
 }
 // A section under the properties: a card with its title in the card's head (kit-88 spec §2.2).

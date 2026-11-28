@@ -1659,7 +1659,7 @@ test('rows and cards: a dbTable row opens its record on the shell fixture', { sk
 });
 
 // Every label an opener draws has a tooltip (spec §2.2): the row labels the openers and ATTR pass, in
-// index.html's source, each in KEY_TIPS (read from the page's own source in a vm). A label with no
+// the app's sources (props.ts, autonomy's and peek-kinds' modules, stripped), each in KEY_TIPS (peeks' state). A label with no
 // entry would draw a key with no title, which the peek test above also catches on the fixture's peeks.
 test('every opener label has a tip in KEY_TIPS', async () => {
   const KEY_TIPS = (await import(pathToFileURL(path.join(LIB, 'views', 'peeks', 'state.js')).href)).peeksState.KEY_TIPS;
