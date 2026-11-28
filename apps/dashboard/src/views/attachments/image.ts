@@ -64,7 +64,7 @@ export function uploadClose() {
 }
 // An image, in the artifact viewer's stage as an <img> of the dashboard's own page (never in the sandboxed frame,
 // whose loads would read as cross-site). Nothing routes: the hash stays, so AV_FROM and AV_RET are left as they
-// are, and every way out closes it in place (the listeners below).
+// are, and every way out closes it in place (the listeners in boot.ts's bootAttachments).
 export function showUpload(url: Loose, name: Loose) {
   if (!viewerState.AV) viewerState.avFocus = document.activeElement;
   // over a page on the stage, that page is kept under the image (an image over an image keeps what the first covered)
@@ -132,5 +132,5 @@ export function avUploadOff() {
 // the router sees the viewer as it was under the image: empty (its reset of AV_RET, AV_NAVS, AV_FRAME_ESC, AV_FROM
 // runs) or the page the image covered (task-4 T4-2). On popstate, which a fragment navigation fires before its
 // hashchange: the router's hashchange listener is registered earlier and runs first at the window, capture or not
-// (final-1 F1); the hashchange one stays for a navigation that fires no popstate.
+// (final-1 F1); bootAttachments in boot.ts registers this one for both, and the hashchange one stays for a navigation that fires no popstate.
 export const uploadRouted = () => { if (viewerState.AV?.upload) uploadClose(); };

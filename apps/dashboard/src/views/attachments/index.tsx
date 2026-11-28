@@ -1,8 +1,8 @@
 // kit-1001: the attachments view of the dashboard's / route (upload, pills, previews), ported from index.html
 // (attachments' lines: the css-attachments region and the script's attachments region, with the answered card's
 // three helpers after it). It has no markup of its own: its boxes, pills and chips are strings other views write
-// into theirs, and its image goes on the viewer's stage. A server module: it renders AttachmentsClient, which
-// registers the globals and the listeners. Below, every function another view calls from it (APPS.md, The view
+// into theirs, and its image goes on the viewer's stage. The shell renders it, and words and data import its
+// functions from client code; it renders AttachmentsClient, which registers the globals and the listeners. Below, every function another view calls from it (APPS.md, The view
 // stubs' exports), each a hoisted function that calls attachments' module at call time. Attachments' modules
 // import other views, so call these from a function another view runs later, never at its top level.
 import './attachments.css';
@@ -12,7 +12,7 @@ import * as Chips from './chips';
 import * as Image from './image';
 import * as Pills from './pills';
 import AttachmentsClient from './client';
-// `Loose` is `any`. Each export keeps its stub's call shape, any arguments (`...unknown[]`), as words spreads its
+// `Loose` is `any`. Each export keeps its stub's call shape, any arguments (`...a: Loose[]`), as words spreads its
 // own into them (APPS.md: the same call shape); it returns what the function returns.
 type Loose = any;
 
