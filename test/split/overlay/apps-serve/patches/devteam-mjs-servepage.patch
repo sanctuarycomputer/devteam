@@ -204,7 +204,7 @@ index 9539f7c6432ea8bdd3199e4980e255dc325e17aa..1d3a8c5fe3004690bb7069747a2d16c6
 +  }
 +  if (server === 'hub') {
 +    const dir = path.join(kitDir, 'apps', 'hub');
-+    return serveAppFiles(dir, '', req, res, policyIn(dir, `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src ${PORT_RANGE.map((x) => `http://127.0.0.1:${x}`).join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`));
++    return serveAppFiles(dir, '', req, res, policyIn(dir, `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; manifest-src 'self'; frame-src ${PORT_RANGE.map((x) => `http://127.0.0.1:${x}`).join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`));
    }
 -  res.writeHead(200, { 'content-type': m[1].endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
 -  return res.end(body);
