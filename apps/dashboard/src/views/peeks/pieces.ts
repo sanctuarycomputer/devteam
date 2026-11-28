@@ -16,8 +16,9 @@ import { peeksState } from './state';
 // strips it; spec A4). Many are there because another view's stub returns `never`: the compiler reads the code
 // after a call into one as unreachable and types its names `never`. That view's port makes them unneeded.
 type Loose = any;
-// marked and DOMPurify are the page's, from jsdelivr (index.html:23-24); designBlock reads them only when window has them, and the
-// app bundles neither yet, so its TL;DR takes index.html's own fallback (a <pre>) until a port bundles them (APPS.md, Third-party code).
+// marked and DOMPurify are the page's globals, as index.html's (index.html:23-24 loads them from jsdelivr). The app bundles them
+// (marked 12.0.2, dompurify 3.4.18: APPS.md, Third-party code) and client.tsx puts them on the page; designBlock reads them only
+// when window has them, as index.html does.
 declare const marked: Loose, DOMPurify: Loose;
 
 
