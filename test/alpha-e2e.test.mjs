@@ -70,7 +70,7 @@ function guard(envs, ports) {
   assert.ok(HUB >= PORTS && HUB < PORTS + 100, 'E8 the hub port is in the block');
   for (const p of ports) assert.ok(p !== 4320 && p !== 4321, `E8 port ${p} is not 4320 or 4321`);
 }
-const ALLOWED = [...Object.keys(HARNESS), 'DEVTEAM_HUB_PORT', 'DEVTEAM_PORT_BASE', 'DEVTEAM_DATA_WAIT_MS', 'DEVTEAM_NPM_REGISTRY', 'DEVTEAM_SIGSTORE_TEST_CA', 'DEVTEAM_GATEWAY_DIR', 'DEVTEAM_ALPHA_DIR', 'DEVTEAM_ALPHA'];
+const ALLOWED = [...Object.keys(HARNESS), 'DEVTEAM_HUB_PORT', 'DEVTEAM_PORT_BASE', 'DEVTEAM_DATA_WAIT_MS', 'DEVTEAM_NPM_REGISTRY', 'DEVTEAM_SIGSTORE_TEST_CA', 'DEVTEAM_GITHUB_DOWNLOAD', 'DEVTEAM_GATEWAY_DIR', 'DEVTEAM_ALPHA_DIR', 'DEVTEAM_ALPHA'];
 const sha256 = (s) => `sha256-${crypto.createHash('sha256').update(s).digest('base64')}`;
 const inlineScripts = (html) => [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
 

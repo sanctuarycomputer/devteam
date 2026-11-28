@@ -179,6 +179,74 @@ test('C5 packagePinPair refuses bad input, guards in order, quoting nothing it w
   assert.equal(fn({ ...pin, name: 'devteam', resolved: `${PUBLIC}devteam/-/devteam-0.101.0.tgz` })['package.json'].includes('"devteam": "0.101.0"'), true, 'C5 an unscoped name');
 });
 
+// ---- kit-install@2 (kit-1050) -------------------------------------------------------------------
+
+const GH = 'https://github.com/sanctuarycomputer/devteam/releases/download';
+const ghPin = (m, layout, repo = 'sanctuarycomputer/devteam') => ({ ...pinOf(m, layout), resolved: `https://github.com/${repo}/releases/download/v${m.version}/sanctuarycomputer-devteam-${m.version}.tgz` });
+
+test('C17 packagePinPair takes the GitHub release URL: test/fixtures/kit-install/github/ byte for byte, only the lock\'s resolved differing', () => {
+  const fn = pinPairFn();
+  // npm pack's file name: a scoped name without its @ and with its / as -, an unscoped one as it is
+  for (const [name, file] of [[NAME, `sanctuarycomputer-devteam-${MANIFEST.version}.tgz`], ['devteam', `devteam-${MANIFEST.version}.tgz`]]) {
+    assert.doesNotThrow(() => fn({ ...pinOf(MANIFEST, 1), name, resolved: `${GH}/v${MANIFEST.version}/${file}` }), 'C17 the pack name is npm pack\'s');
+  }
+  const pair = fn(ghPin(MANIFEST, 1));
+  assert.equal(pair['package.json'], read(path.join(KI, 'github', 'package.json')), 'C17 package.json is the github fixture\'s, byte for byte');
+  assert.equal(pair['package-lock.json'], read(path.join(KI, 'github', 'package-lock.json')), 'C17 the lock is the github fixture\'s, byte for byte');
+  const npm = fn(pinOf(MANIFEST, 1));
+  assert.equal(pair['package.json'], npm['package.json'], 'C17 package.json is the same in both forms');
+  const a = JSON.parse(pair['package-lock.json']), b = JSON.parse(npm['package-lock.json']);
+  const e = `node_modules/${NAME}`;
+  assert.equal(a.packages[e].resolved, `${GH}/v${MANIFEST.version}/sanctuarycomputer-devteam-${MANIFEST.version}.tgz`, 'C17 resolved is the release asset');
+  a.packages[e].resolved = b.packages[e].resolved;
+  assert.deepEqual(a, b, 'C17 only resolved differs');
+  assert.deepEqual(Object.keys(JSON.parse(pair['package-lock.json']).packages[e]), ['version', 'resolved', 'integrity'], 'C17 the same key order');
+  assert.deepEqual(JSON.parse(pair['package-lock.json']).packages[''].dependencies, { [NAME]: MANIFEST.version }, 'C17 the lock root\'s spec is the version');
+  // which repository is right is each caller's check, against main's upstream_repo
+  let other;
+  assert.doesNotThrow(() => { other = fn(ghPin(MANIFEST, 2, 'acme/devteam-fork.v2')); }, 'C17 another owner/repo is taken');
+  assert.match(other['package-lock.json'], /github\.com\/acme\/devteam-fork\.v2\/releases\/download\/v0\.101\.0\//, 'C17 another owner/repo is taken');
+});
+
+test('C18 packagePinPair refuses any other URL: another tag, another file name, http, another host', () => {
+  const fn = pinPairFn();
+  const pin = ghPin(MANIFEST, 1);
+  const v = MANIFEST.version;
+  const asset = `sanctuarycomputer-devteam-${v}.tgz`;
+  for (const r of [
+    `${GH}/v0.100.0/${asset}`, `${GH}/v${v}-x/${asset}`, `${GH}/${v}/${asset}`, `${GH}/V${v}/${asset}`,
+    `${GH}/v${v}/sanctuarycomputer-devteam-0.100.0.tgz`, `${GH}/v${v}/devteam-${v}.tgz`, `${GH}/v${v}/${asset}.sigstore.json`, `${GH}/v${v}/sanctuarycomputer-devteam-${v}.tar.gz`, `${GH}/v${v}/@sanctuarycomputer/devteam-${v}.tgz`,
+    `http://github.com/sanctuarycomputer/devteam/releases/download/v${v}/${asset}`,
+    `https://api.github.com/sanctuarycomputer/devteam/releases/download/v${v}/${asset}`, `https://github.com.evil.example/sanctuarycomputer/devteam/releases/download/v${v}/${asset}`,
+    `https://objects.githubusercontent.com/sanctuarycomputer/devteam/releases/download/v${v}/${asset}`, `https://GitHub.com/sanctuarycomputer/devteam/releases/download/v${v}/${asset}`,
+    `https://github.com:443/sanctuarycomputer/devteam/releases/download/v${v}/${asset}`, `https://x@github.com/sanctuarycomputer/devteam/releases/download/v${v}/${asset}`,
+    `https://github.com/sanctuarycomputer/releases/download/v${v}/${asset}`, `https://github.com/a/b/c/releases/download/v${v}/${asset}`, `https://github.com/../devteam/releases/download/v${v}/${asset}`, `https://github.com/sanctuarycomputer/../releases/download/v${v}/${asset}`,
+    `https://github.com/sanctuarycomputer/devteam/releases/latest/download/${asset}`, `https://github.com/sanctuarycomputer/devteam/archive/refs/tags/v${v}.tar.gz`,
+    // each repository part is [A-Za-z0-9_.-]+
+    `https://github.com/sanctuary%2Fcomputer/devteam/releases/download/v${v}/${asset}`, `https://github.com/sanctuary computer/devteam/releases/download/v${v}/${asset}`, `https://github.com/sanctuarycomputer/dev~team/releases/download/v${v}/${asset}`, `https://github.com/sanctuarycomputer/devt%C3%A9am/releases/download/v${v}/${asset}`,
+    `${GH}/v${v}/${asset}?x=1`, `${GH}/v${v}/${asset}#x`, `${GH}/v${v}/${asset}/`, `${GH}//v${v}/${asset}`, ` ${GH}/v${v}/${asset}`,
+  ]) assert.throws(() => fn({ ...pin, resolved: r }), (e) => e.message.startsWith('packagePinPair: resolved'), `C18 resolved ${r} is refused`);
+});
+
+test('C19 the comment above packagePinPair states kit-install@2', () => {
+  const c = prose(contractComment());
+  for (const [what, re] of [
+    ['its name', /kit-install@2/],
+    ['the setting and its default', /package_source is github or npm, an owner setting \(governance-edit\)[\s\S]*Its default is npm, and it never changes/],
+    ['the release URL', /https:\/\/github\.com\/<upstream_repo>\/releases\/download\/v<version>\/<pack>/],
+    ['the pack name', /<pack> is npm pack's file name: the name without its @, its \/ as -, then -<version>\.tgz/],
+    ['only resolved differs', /Only resolved differs between the forms/],
+    ['the fetcher\'s rules', /githubAsset[\s\S]*empty environment[\s\S]*at most 5 redirects[\s\S]*github\.com or a host ending in \.githubusercontent\.com[\s\S]*15 s from its creation to its headers[\s\S]*120 s[\s\S]*64 MiB for a pack and 1 MiB for a bundle[\s\S]*no Authorization header or token/],
+    ['what an answer means', /a 404 is unpublished; no answer in time, a network error, a 5xx or 429 is unreachable/],
+    ['the test origin', /DEVTEAM_GITHUB_DOWNLOAD[\s\S]*exactly http:\/\/127\.0\.0\.1:<port>\/[\s\S]*EDEVTEAMGITHUB[\s\S]*<base>-\/githubusercontent\/<host>\/<p>/],
+    ['the test trust root', /DEVTEAM_SIGSTORE_TEST_CA[\s\S]*only beside a loopback DEVTEAM_NPM_REGISTRY or DEVTEAM_GITHUB_DOWNLOAD/],
+    ['the pack\'s manifest', /packManifest\(bytes\) reads a pack's package\/package\.json[\s\S]*only what npm pack writes[\s\S]*refused, never misread/],
+    ['its files and bins', /files is every file as \{ path, size, sha256 \} and bins each key npm links in node_modules\/\.bin\//],
+    ['the second check after install', /The second check after install[\s\S]*kit-1054[\s\S]*exactly files and bins[\s\S]*refuses the install and removes it/],
+    ['the fake GitHub', /The fake GitHub is in test\/lib\/fake-registry\.mjs/],
+  ]) assert.match(c, re, `C19 the comment states ${what}`);
+});
+
 // ---- kit-install@1: the trees -----------------------------------------------------------------
 
 const TARBALLS = Object.fromEntries(fs.readdirSync(path.join(KI, 'registry')).filter((f) => f.endsWith('.tgz')).map((f) => [/^devteam-(.+)\.tgz$/.exec(f)[1], fs.readFileSync(path.join(KI, 'registry', f))]));
