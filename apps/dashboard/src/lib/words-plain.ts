@@ -218,7 +218,6 @@ export function actView(a?: Loose) {
 
 export const norm = (x?: Loose) => String(x ?? '').trim().toLowerCase();
 
-// ui-candidate: choices (apps-src@2: src/shared/ui/ has no component yet, so the port keeps index.html's markup)
 export function choicesOf(q?: Loose) {
   let list = (q.choices || []).length ? q.choices.map((c?: Loose) => ({ ...c })) : (q.options || []).map((label?: Loose) => ({ label }));
   if (q.kind === 'goal-approval') list = [
@@ -402,6 +401,7 @@ export function questionCard(q?: Loose, o?: Loose, reasonText?: Loose, copy: Loo
   const sure = q.confidence != null ? ` · ${Math.round(q.confidence * 100)}% sure` : '';
   // the answer the supervisor said would settle other open questions: say which, on that choice
   const closes = (q.rank?.parts.settles || []).length ? `<div class="closes">Would close ${q.rank.parts.settles.length} other question${q.rank.parts.settles.length > 1 ? 's' : ''}: ${q.rank.parts.settles.map((id?: Loose) => qlink(id)).join('; ')}</div>` : '';
+  // ui-candidate: choices (the choice list's markup; apps-src@2: src/shared/ui/ has no component yet)
   const choiceHtml = list.map((c?: Loose) => `
       <label class="choice${c.rec ? ' rec' : ''}${wordsState.picks[q.id] === c.label ? ' picked' : ''}">
         <input type="radio" name="${esc(name)}" value="${esc(c.label)}" data-pick="${esc(q.id)}" ${wordsState.picks[q.id] === c.label ? 'checked' : ''}>
