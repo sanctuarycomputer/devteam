@@ -2460,6 +2460,17 @@ exit 0
       "owner_only": null
     },
     {
+      "key": "owner_absence_days",
+      "group": "Questions and findings",
+      "name": "Alert on a waiting question after",
+      "description": "days a question with no default may hold up work before the hub alerts you",
+      "shown": "value",
+      "value": 2,
+      "set": false,
+      "default": 2,
+      "owner_only": null
+    },
+    {
       "key": "finding_ack_hours",
       "group": "Questions and findings",
       "name": "A finding set aside for",
