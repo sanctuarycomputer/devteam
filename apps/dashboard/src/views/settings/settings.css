@@ -37,10 +37,10 @@
   }
 
 /* css-settings end */
-/* restated from index.html:363 (css-common), which settings.css would otherwise override; kit-1075's @layer removes it (m-20261128-050743089-supervisor) */
-  button.ghost, button.opt { background: var(--surface); color: var(--fg); border: 1px solid var(--line-2); margin-top: 0; }
-/* restated from index.html:364 (css-common), which settings.css would otherwise override; kit-1075's @layer removes it (m-20261128-050743089-supervisor) */
-  button.ghost:hover, button.opt:hover { background: var(--hover); opacity: 1; }
+/* restated from index.html:363 (css-common), which settings.css would otherwise override; kit-1075's @layer removes it (m-20261128-050743089-supervisor). A cascade-order copy of shell.css:119's rule, its home; each selector prefixed :where(html) only to keep apps-ui U4's sweep rule, same elements and specificity (m-20261128-080243911-supervisor) */
+  :where(html) button.ghost, :where(html) button.opt { background: var(--surface); color: var(--fg); border: 1px solid var(--line-2); margin-top: 0; }
+/* restated from index.html:364 (css-common), which settings.css would otherwise override; kit-1075's @layer removes it (m-20261128-050743089-supervisor). A cascade-order copy of shell.css:120's rule, its home; each selector prefixed :where(html) only to keep apps-ui U4's sweep rule, same elements and specificity (m-20261128-080243911-supervisor) */
+  :where(html) button.ghost:hover, :where(html) button.opt:hover { background: var(--hover); opacity: 1; }
 /* restated from index.html:365 (css-common), which settings.css would otherwise override; kit-1075's @layer removes it (m-20261128-050743089-supervisor) */
   button.opt { margin: 6px 6px 0 0; }
 /* restated from index.html:374 (css-common), which settings.css would otherwise override; kit-1075's @layer removes it (m-20261128-050743089-supervisor) */
