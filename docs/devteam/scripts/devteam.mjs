@@ -34622,7 +34622,12 @@ function packagePinPair(pin) {
   if (typeof name !== 'string' || name.length > 214 || !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(name)) no('name is not an npm package name');
   if (typeof version !== 'string' || !/^(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})$/.test(version)) no('version is not X.Y.Z');
   if (typeof integrity !== 'string' || !/^sha512-[A-Za-z0-9+/]{86}==$/.test(integrity)) no('integrity is not one sha512');
-  if (resolved !== `https://registry.npmjs.org/${name}/-/${name.slice(name.indexOf('/') + 1)}-${version}.tgz`) no("resolved is not the public registry's tarball of name@version");
+  // kit-install@2: the registry's tarball, or the GitHub release asset of any <owner>/<repo> (each caller
+  // checks it is main's upstream_repo), its file npm pack's name; either compared as a whole string
+  const pack = `${name.replace(/^@/, '').replace('/', '-')}-${version}.tgz`;
+  const gh = typeof resolved === 'string' ? /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/releases\/download\//.exec(resolved) : null;
+  const ghOk = gh !== null && !/^\.+$/.test(gh[1]) && !/^\.+$/.test(gh[2]) && resolved === `https://github.com/${gh[1]}/${gh[2]}/releases/download/v${version}/${pack}`;
+  if (resolved !== `https://registry.npmjs.org/${name}/-/${name.slice(name.indexOf('/') + 1)}-${version}.tgz` && !ghOk) no("resolved is not the public registry's tarball of name@version, nor a GitHub release asset of it");
   if (layout !== 1 && layout !== 2) no('layout is not 1 or 2');
   const dependencies = { [name]: version };
   const text = (o) => `${JSON.stringify(o, null, 2)}\n`;
