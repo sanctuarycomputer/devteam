@@ -371,7 +371,7 @@ test('A1 githubAsset follows the release download\'s redirect to its stand-in ho
     assert.equal(a.ok, true, `A1 ok (${JSON.stringify(a).slice(0, 300)})`);
     assert.deepEqual(a.bytes, { length: tgzOf(V).length, sha256: sha256(tgzOf(V)) }, 'A1 the registry fixture\'s bytes');
     assert.equal(a.redirects, 1, 'A1 one redirect');
-    assert.match(a.url, /^https:\/\/release-assets\.githubusercontent\.com\//, 'A1 url is the last URL asked, in its https form');
+    assert.match(a.url, /^https:\/\/release-assets\.githubusercontent\.com\/[^?#]*$/, 'A1 url is the last URL asked, in its https form, without its query');
     for (const k of ['ok', 'unreachable', 'unpublished', 'refused', 'why', 'bytes', 'url', 'redirects']) assert.ok(k in a, `A1 the answer has ${k}`);
     assert.equal(b.ok, true, 'A1 the bundle too');
     const seen = ghAsked(reg).slice(before).map((q) => q.url);
@@ -418,6 +418,14 @@ test('A5 a URL that isn\'t exactly https on github.com is refused before any req
     const res = probe(bad.map((u) => asset(u)), ghEnv(reg)).res;
     bad.forEach((u, i) => assert.equal(res[i].refused, 'url', `A5 ${String(u).slice(0, 60)} is refused url`));
     assert.equal(ghAsked(reg).length, before, 'A5 no request for any of them');
+    // url and why name a URL without its userinfo or query
+    const [who, asked, missing] = probe([asset(`https://u:pw-secret@github.com/${REPO}/releases/download/v${V}/${PACK}`), asset(`https://GITHUB.com/${REPO}/releases/download/v${V}/${PACK}?sig=q-secret`), asset(`https://github.com/${REPO}/releases/download/v0.0.1/${PACK}?sig=q-secret`)], ghEnv(reg)).res;
+    assert.equal(who.refused, 'url', 'A5 a URL with a user is refused url');
+    assert.ok(!/secret/.test(who.why ?? ''), `A5 a why carries no userinfo (${who.why})`);
+    assert.equal(asked.refused, 'url', 'A5 a URL not its own href is refused url');
+    assert.ok(!/secret/.test(asked.why ?? ''), `A5 a refused URL's why carries no query (${asked.why})`);
+    assert.ok(missing.why && !/secret/.test(missing.why), `A5 a why carries no query (${JSON.stringify(missing).slice(0, 200)})`);
+    assert.equal(missing.url, `https://github.com/${REPO}/releases/download/v0.0.1/${PACK}`, 'A5 url is the last URL asked, without its query');
     // a kind is one of the two words, never a name another object answers to
     const kinds = ['tarball', 'constructor', '__proto__', 'toString', 'hasOwnProperty', 'Pack'];
     probe(kinds.map((kind) => ({ asset: [PACK_URL, kind] })), ghEnv(reg)).res.forEach((r, i) => assert.equal(r.refused, 'input', `A5 a kind that is not pack or bundle is refused input: ${kinds[i]}`));
@@ -622,6 +630,9 @@ test('M3 each way npm\'s tar would install another package.json, or read the arc
     // a name npm's tar reads as another path
     'a name read another way': ['x/package.json', 'package/./package.json', '//package.json', '///package.json', 'c:package.json', '//?/C:/package.json', 'package\\package.json', 'package/c:package.json', 'package']
       .map((n) => [tgz(file(PJ, MA), file(n, MB)), 'name']).concat([[tgz(file(PJ, MA), Buffer.concat([header({ name: '', size: 1024 }), file(PJ, MB)])), 'name']]),
+    // a pax-named entry's ustar name, held to the name rule too
+    'a pax-named entry\'s other name': [[tgz(file(PJ, MA), paxEntry({ path: 'package/o.txt' }), file('x/package.json', MB)), 'name'],
+      [tgz(file(PJ, MA), paxEntry({ path: 'package/p.txt' }), file('package/node_modules/a/package.json', MB)), 'name']],
     // a header type npm pack does not write
     'an entry type npm pack does not write': [[tgz(file(PJ, MA), entry({ name: '././@LongLink', type: 'L', body: Buffer.from(`${PJ}\0`) }), file('package/zzz', MB)), 'entry-type'],
       [tgz(file(PJ, MA), entry({ name: '././@LongLink', type: 'K', body: Buffer.from('x\0') }), cover()), 'entry-type'],

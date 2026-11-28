@@ -34592,7 +34592,8 @@ function cmdRecurring() {
 //   accept application/octet-stream and accept-encoding identity, and no Authorization header or token,
 //   ever. It returns { ok, unreachable, unpublished, refused, why, bytes, url, redirects }: a 404 is
 //   unpublished; no answer in time, a network error, a 5xx or 429 is unreachable; any other answer is
-//   refused, by name. GitHub's hosts are trusted for availability only: what the bytes are is checked by
+//   refused, by name. url is the last URL asked without its user, query or fragment (a signed query is a
+//   short-lived key), and no why names them either. GitHub's hosts are trusted for availability only: what the bytes are is checked by
 //   their pinned integrity and their signed bundle.
 // - Tests. DEVTEAM_GITHUB_DOWNLOAD, set and not empty, must be exactly http://127.0.0.1:<port>/ (as
 //   DEVTEAM_NPM_REGISTRY is), or githubAsset throws EDEVTEAMGITHUB before any request. Set, every rule
@@ -34650,14 +34651,16 @@ function githubAsset(url, kind) {
     throw e;
   }
   const base = { ok: false, unreachable: false, unpublished: false, refused: null, why: null, bytes: null, url: null, redirects: 0 };
-  const cut = (v) => JSON.stringify(String(v ?? '')).slice(0, 200);
+  // url and why name a URL without its userinfo, query or fragment (a signed query is a short-lived key)
+  const bare = (v) => { try { const x = new URL(v); x.username = ''; x.password = ''; x.search = ''; x.hash = ''; return x.href; } catch { return null; } };
+  const cut = (v) => JSON.stringify(String(v ?? '').replace(/[?#][^]*$/, '').replace(/^([a-z][a-z0-9+.-]*:[/][/])[^/@]*@/i, '$1')).slice(0, 200);
   const max = kind === 'pack' ? 64 * 1024 * 1024 : kind === 'bundle' ? 1024 * 1024 : 0;
   if (typeof kind !== 'string' || !max) return { ...base, refused: 'input', why: `kind ${cut(kind)} is not pack or bundle` };
   let u = null;
   if (typeof url === 'string' && url.length <= 2048) { try { u = new URL(url); } catch {} }
   if (!u || u.href !== url || u.protocol !== 'https:' || u.hostname !== 'github.com' || u.username || u.password || u.port !== '') return { ...base, refused: 'url', why: `${cut(url)} is not an https URL on github.com` };
   let dir;
-  try { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-github-')); } catch (e) { return { ...base, unreachable: true, url, why: `can't make a folder under ${os.tmpdir()} to fetch into (${e.code ?? e.message})` }; }
+  try { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-github-')); } catch (e) { return { ...base, unreachable: true, url: bare(url), why: `can't make a folder under ${os.tmpdir()} to fetch into (${e.code ?? e.message})` }; }
   const out = path.join(dir, 'asset');
   const code = `
     const https = require('node:https'), http = require('node:http'), fs = require('node:fs');
@@ -34681,7 +34684,7 @@ function githubAsset(url, kind) {
           const loc = res.headers.location;
           let next = null;
           try { if (typeof loc === 'string' && loc.length <= 2048) next = new URL(loc, u); } catch {}
-          if (!next || !ours(next)) return done({ refused: 'redirect', why: 'a ' + s + ' from ' + u.host + ' to ' + JSON.stringify(String(loc ?? '')).slice(0, 200) + ', not an https URL on github.com or *.githubusercontent.com', url: u.href, hops });
+          if (!next || !ours(next)) return done({ refused: 'redirect', why: 'a ' + s + ' from ' + u.host + ' to ' + JSON.stringify(String(loc ?? '').replace(/[?#][^]*$/, '').replace(/^([a-z][a-z0-9+.-]*:[/][/])[^/@]*@/i, '$1')).slice(0, 200) + ', not an https URL on github.com or *.githubusercontent.com', url: u.href, hops });
           if (++hops > 5) return done({ refused: 'redirects', why: 'more than 5 redirects', url: u.href, hops: 5 });
           return ask(next);
         }
@@ -34703,7 +34706,7 @@ function githubAsset(url, kind) {
     const f = spawnSync(process.execPath, ['-e', code], { env: {}, encoding: 'utf8', timeout: 130000, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 1024 * 1024 });
     let got = null;
     try { got = JSON.parse(f.stdout); } catch {}
-    const at = { url: got?.url ?? url, redirects: got?.hops ?? 0 };
+    const at = { url: bare(got?.url ?? url), redirects: got?.hops ?? 0 };
     if (!got) return { ...base, ...at, unreachable: true, why: `the fetch of ${cut(url)} gave no answer (${f.error?.code ?? f.signal ?? `exit ${f.status}`})` };
     if (got.down) return { ...base, ...at, unreachable: true, why: `${cut(at.url)} can't be reached: ${got.down}` };
     if (got.refused) return { ...base, ...at, refused: got.refused, why: `${cut(at.url)}: ${got.why}` };

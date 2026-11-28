@@ -575,7 +575,6 @@ export async function startFakeRegistry({ fail = null, commits = {}, forge = nul
     },
     // the test CA's trust root (test-ca.json), as env() names it in DEVTEAM_SIGSTORE_TEST_CA
     caFile,
-    // another forgery from now on (null: none); resolves once the registry has it
     // another GitHub failure from now on (null: none); resolves once the registry has it
     async githubFail(name) {
       if (name !== null && !GITHUB_FAILURES.includes(name)) throw new Error(`fake registry: no GitHub failure called ${name}`);
@@ -583,6 +582,7 @@ export async function startFakeRegistry({ fail = null, commits = {}, forge = nul
       save();
       await tell();
     },
+    // another forgery from now on (null: none); resolves once the registry has it
     async forge(name) {
       if (name !== null && !FORGERIES.includes(name)) throw new Error(`fake registry: no forgery called ${name}`);
       state.forge = name;
