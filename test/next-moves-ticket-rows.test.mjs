@@ -364,6 +364,14 @@ test('next-moves: a dead worker\'s move is the supervisor\'s to resume it', { sk
     assert.equal(m.holder, 'supervisor');
     assert.match(m.words, /^Give the word, or merge; resume it first, its window is gone$/);
   });
+  await t.test('blocked with nothing open, its window gone: answer its message (T6), resuming it first', () => {
+    addTicket(P, 'ch-75-blocked', 'dead');
+    phase(P, 'ch-75-blocked', 'blocked');
+    const m = ticketMove(P, 'ch-75-blocked');
+    assert.equal(m.move, 'answer-message');
+    assert.equal(m.holder, 'supervisor');
+    assert.match(m.words, /^Answer its message; resume it first, its window is gone$/);
+  });
 });
 
 test('next-moves: a held ticket turns stalled after next_move_stall_hours, never owed', () => {

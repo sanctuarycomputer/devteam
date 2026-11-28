@@ -4600,6 +4600,8 @@ const PANE_SHELL = /\b\d+ (background )?shells? (still )?running\b|·\s*\d+ (bac
 // overloaded API): it stops and waits; a nudge resumes it. Harness-agnostic wording.
 const PANE_API_ERROR = /\bAPI Error\b|Can't reach the API|\bENOTFOUND\b|\bECONNRESET\b|\bETIMEDOUT\b|overloaded_error|\bstream (error|disconnected)\b|\b(429|5\d\d) (Too Many Requests|Internal Server Error|Bad Gateway|Service Unavailable)\b/i;
 const idleOnApiError = (window) => { const l = paneTails.get(window) ?? []; const last = l.slice(-8); return last.some((x) => PANE_API_ERROR.test(x)) && !l.some((x) => PANE_BUSY.test(x)); };
+// An agent at work: its pane shows the agent CLI's interrupt hint (read by paneWaitingIn).
+const paneBusy = (window) => (paneTails.get(window) ?? []).some((x) => PANE_BUSY.test(x));
 const idleWithShell = (window) => { const l = paneTails.get(window) ?? []; return l.some((x) => PANE_SHELL.test(x)) && !l.some((x) => PANE_BUSY.test(x)); };
 function paneWaitingIn(window) {
   if (paneWaits.has(window)) return paneWaits.get(window);
@@ -5185,15 +5187,16 @@ function plannersNow() {
     const refQs = questions().filter((q) => (q.links ?? []).some((l) => l.ref === b || l.ref === `refs/heads/${b}`));
     const goals = [...new Set([...(feat.goals ?? []), ...refQs.map((q) => q.goal).filter(Boolean), ...plannerLaunchGoals(feature)])];
     // A question on one of its goals is this planner's to wait on unless it plainly belongs to other
-    // work on that goal: it links or approves another plan branch, or names only tickets of another
-    // feature. Such a question would otherwise hide a dead planner: no stale-planner, and P1 hands its
-    // move to the owner.
+    // work on that goal: it names work (a plan branch linked or approved, a ticket named, blocked,
+    // approved or linked by its ticket/<id> branch) and none of that work is this planner's. Such a
+    // question would otherwise hide a dead planner: no stale-planner, and P1 hands its move to the owner.
     const otherWork = (q) => {
-      const plans = [...(q.links ?? []).map((l) => String(l?.ref ?? '').replace(/^refs\/heads\//, '')).filter((r) => r.startsWith('plan/')).map((r) => r.slice('plan/'.length)),
-        ...(q.approves ?? []).filter((a) => typeof a === 'string' && a.startsWith('plan-')).map((a) => a.slice('plan-'.length))];
-      if (plans.length) return !plans.includes(feature);
-      const ids = [q.ticket, ...(q.blocks ?? [])].filter((id) => id && tickets().has(id));
-      return ids.length > 0 && ids.every((id) => tickets().get(id).feature !== feature);
+      const refs = (q.links ?? []).map((l) => String(l?.ref ?? '').replace(/^refs\/heads\//, ''));
+      const acts = (q.approves ?? []).filter((a) => typeof a === 'string');
+      const plans = [...refs.filter((r) => r.startsWith('plan/')).map((r) => r.slice('plan/'.length)), ...acts.filter((a) => a.startsWith('plan-')).map((a) => a.slice('plan-'.length))];
+      const ids = [q.ticket, ...(q.blocks ?? []), ...acts, ...refs.filter((r) => r.startsWith('ticket/')).map((r) => r.slice('ticket/'.length))].filter((id) => id && tickets().has(id));
+      if (!plans.length && !ids.length) return false;
+      return !plans.includes(feature) && !ids.some((id) => tickets().get(id).feature === feature);
     };
     return {
       feature, title: feat.title ?? feature, goals, tickets: graph.split('\n').filter((t) => t.includes('"type":"ticket"') && t.includes('"op":"new"')).length,
@@ -21784,13 +21787,14 @@ function leadTicketMove(open) {
 const moveLine = (m) => `${m.holder}  ${m.words}  ${moveAge(m.since)}${m.flag === 'none' ? '  no move' : m.flag ? `  ${m.flag}` : ''}${m.quiet ? `  (${m.quiet})` : ''}`;
 // Why a planner in flight is not alive, or null: the finding metrics raises for it (agent-exited,
 // planner-gone, stale-planner) and the words its move uses. Parked stopped on purpose; one at a
-// prompt waits on that prompt (blocked-prompt). sessionUp is false when the whole tmux session is
-// missing, not just its window: a reboot, which the relaunch brings back (sessionsToRelaunch).
+// prompt waits on that prompt (blocked-prompt); one whose pane shows it at work is thinking, not
+// stale. sessionUp is false when the whole tmux session is missing, not just its window: a reboot,
+// which the relaunch brings back (sessionsToRelaunch).
 function plannerDown(p) {
   if (p.parked || p.waiting) return null;
   if (/no agent is running|has exited/.test(p.problem ?? '')) return { kind: 'agent-exited', why: 'its agent exited', sessionUp: true };
   if (!p.window) return { kind: 'planner-gone', why: 'its window is gone', sessionUp: /^no tmux window/.test(p.problem ?? '') };
-  if (!p.waiting_on_supervisor.length && !p.waiting_on_owner.length && p.minutes_silent > loadSettings().stale_after_minutes) return { kind: 'stale-planner', why: `silent ${p.minutes_silent} min`, sessionUp: true };
+  if (!p.waiting_on_supervisor.length && !p.waiting_on_owner.length && p.minutes_silent > loadSettings().stale_after_minutes && !paneBusy(`plan-${p.feature}`)) return { kind: 'stale-planner', why: `silent ${p.minutes_silent} min`, sessionUp: true };
   return null;
 }
 // The tmux session's window names, once per process (null when tmux or the session isn't there:
@@ -21810,8 +21814,10 @@ function plannerMove(p) {
   if (p.parked || held) return at({ move: 'parked', words: 'Parked', holder: 'planner', quiet: 'hold', since: lastPhaseOf(by)?.created_at ?? seen }); // P3
   // A planner that isn't alive holds nothing: its window gone from a live session, its agent exited,
   // or silent past stale_after_minutes. The move is the supervisor's, uncovered, so move-owed and
-  // move-stalled reach it; the finding that names it stays the detail.
+  // move-stalled reach it; the finding that names it stays the detail. A stale one still has a live
+  // agent in its window, which --resume refuses: it is woken with a message instead.
   const down = plannerDown(p);
+  if (down?.kind === 'stale-planner') return at({ move: 'wake-planner', words: `Wake the planner (${down.why})`, holder: 'supervisor', since: seen, command: `send ${by} "…"` }); // P4b, idle at its prompt
   if (down?.sessionUp) return at({ move: 'resume-planner', words: `Resume the planner (${down.why})`, holder: 'supervisor', since: seen, command: `planner ${p.feature} --resume` }); // P4b
   return at({ move: 'planning', words: 'Planning', holder: 'planner', since: seen, covered_by: ['stale-planner', 'planner-gone', 'agent-exited', 'blocked-prompt'].map((kind) => ({ kind, subject: by })) }); // P4
 }
