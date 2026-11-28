@@ -1,0 +1,35 @@
+diff --git a/test/hub-tab-bar.test.mjs b/test/hub-tab-bar.test.mjs
+index cfd5b7b520c8c9af5c5f3ad383daeae3972a7096..9cb976ee9495fb3c96c129f9bdb990548b47520d 100644
+--- a/test/hub-tab-bar.test.mjs
++++ b/test/hub-tab-bar.test.mjs
+@@ -19,7 +19,21 @@ async function until(f, what = 'the condition', ms = 15000) {
+   const end = Date.now() + ms;
+   for (;;) { const v = await f(); if (v) return v; if (Date.now() > end) assert.fail(`timed out waiting for ${what}`); await new Promise((r) => setTimeout(r, 100)); }
+ }
+-const hubHtml = () => cliRead(fs.readFileSync, fs, path.join(kit, 'dashboard', 'hub.html'), 'utf8');
++const hubHtml = () => cliRead(fs.readFileSync, fs, path.join(kit, 'apps', 'hub', 'index.html'), 'utf8');
++// The built hub's other files, as the gateway's asset hook serves the export (kit-1021): a regular
++// file under dir, no '..' or NUL, by a type from its extension; else false, and the caller answers.
++const BUILD_TYPES = Object.assign(Object.create(null), { html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', txt: 'text/plain; charset=utf-8', json: 'application/json', svg: 'image/svg+xml', png: 'image/png', ico: 'image/x-icon', webp: 'image/webp', woff2: 'font/woff2' });
++function serveBuild(s, dir, pathname) {
++  let rel;
++  try { rel = decodeURIComponent(pathname); } catch { return false; }
++  const type = BUILD_TYPES[path.extname(rel).slice(1)];
++  if (!type || rel.includes('\0') || rel.split('/').includes('..')) return false;
++  const file = path.join(dir, rel);
++  try { if (!fs.lstatSync(file).isFile()) return false; } catch { return false; }
++  s.writeHead(200, { 'content-type': type });
++  s.end(cliRead(fs.readFileSync, fs, file));
++  return true;
++}
+ const FAKE = cliRead(fs.readFileSync, fs, path.join(testDir, 'fixtures', 'dashboard-frame-fake.html'), 'utf8');
+ const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+ const CHROME = { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 120000 };
+@@ -76,6 +90,7 @@ async function fixture(t, { ports = 0, hubHost = '127.0.0.1' } = {}) {
+       if (u.pathname === '/operator/threads') { s.writeHead(200, { 'content-type': 'application/json' }); return s.end(JSON.stringify({ threads: [], operator: { state: 'running', can_start: false, box: false } })); }
+       const b = u.pathname === '/box.json' ? F.box(F) : null;
+       if (b) { s.writeHead(200, { 'content-type': 'application/json' }); return s.end(JSON.stringify(b)); }
++      if (q.method === 'GET' && serveBuild(s, path.join(kit, 'apps', 'hub'), u.pathname)) return;
+       s.writeHead(404, { 'content-type': 'application/json' });
+       return s.end('{}');
+     }

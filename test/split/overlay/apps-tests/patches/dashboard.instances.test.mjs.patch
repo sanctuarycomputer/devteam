@@ -1,0 +1,73 @@
+diff --git a/test/dashboard.instances.test.mjs b/test/dashboard.instances.test.mjs
+index c33e241c2ecb79ce37528ed36e0c903d94395386..f701426be468dc1eb6140683068def08578be61c 100644
+--- a/test/dashboard.instances.test.mjs
++++ b/test/dashboard.instances.test.mjs
+@@ -112,18 +112,26 @@ test('the hub: lists every instance on the machine, links to each one, moves whe
+     assert.doesNotMatch(both[0].kit, /\+local$/, "alpha runs the kit it committed");
+     assert.match(both[1].kit, /\+local$/, "beta's edited kit shows");
+     const page = await fetch(`http://127.0.0.1:${HUB}/`);
+-    assert.match(await page.text(), /instances\.json/, 'the page reads the list from its own hub');
+-    assert.match(page.headers.get('content-security-policy'), /connect-src 'self'/, 'and can talk to nothing else');
++    // apps@1 Serving (kit-984; kit-986): the hub is its build's index.html, under today's policy with script-src
++    // 'self' plus the hash of each of its inline scripts in their order, style-src 'self' added, and the build's
++    // own fonts and images; a dashboard is its build's, under its own. The hashes are the test's own, of each page
++    const { createHash } = await import('node:crypto');
++    const inline = (html) => [...html.matchAll(/<script(?![^>]*\ssrc\s*=)[^>]*>([\s\S]*?)<\/script>/g)].map((m) => `'sha256-${createHash('sha256').update(m[1], 'utf8').digest('base64')}'`).join(' ');
++    const hubPage = await page.text();
++    assert.equal(hubPage, cliRead(fs.readFileSync, fs, path.join(kit, 'apps/hub/index.html'), 'utf8'), 'the hub sends its build, byte for byte');
++    const block = Array.from({ length: 25 }, (_, i) => `http://127.0.0.1:${P + i}`).join(' ');
++    assert.equal(page.headers.get('content-security-policy'), `default-src 'none'; script-src 'self' ${inline(hubPage)}; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-src ${block}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; font-src 'self'; img-src 'self' data:`, 'its own scripts, and it can talk to nothing else');
+     const csp = page.headers.get('content-security-policy');
+     for (let p = P; p < P + 25; p++) assert.ok(csp.includes(`http://127.0.0.1:${p} `) || csp.includes(`http://127.0.0.1:${p};`), `the hub may frame ${p}`);
+     assert.ok(!csp.includes(`http://127.0.0.1:${P + 25}`), 'and nothing outside the block');
+     const dash = await fetch(`http://127.0.0.1:${P}/`);
+     assert.ok(dash.headers.get('content-security-policy').split('; ').includes(`frame-ancestors 'self' http://127.0.0.1:${HUB}`), 'only the dashboard itself and the hub, at its one address, can frame a dashboard');
++    assert.equal(dash.headers.get('content-security-policy'), `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB}; script-src 'self' ${inline(await dash.text())}; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net`, "the dashboard's own policy");
++    // the page reads the list from its own hub: its own test at the file's end (kit-1012's, ruling m-20261127-192653655)
+     // the hub has one address: localhost (which may be ::1, held by something else) is sent to 127.0.0.1
+     const viaLocalhost = await new Promise((resolve, reject) => { const r = http.request({ host: '127.0.0.1', port: HUB, path: '/#beta', headers: { host: `localhost:${HUB}` } }, (res) => { res.resume(); resolve([res.statusCode, res.headers.location]); }); r.on('error', reject); r.end(); });
+     assert.deepEqual(viaLocalhost, [302, `http://127.0.0.1:${HUB}/#beta`]);
+-    const page2 = await (await fetch(`http://127.0.0.1:${HUB}/`)).text();
+-    assert.match(page2, /id="tabs"/, 'the page is a tab bar');
++    // the page is a tab bar: in the kit-1012 test at the file's end too (the hub's view, ruling m-20261127-192653655)
+     // idle connections stay open longer than any client reuses one (Node 18's fetch: about 4 s)
+     assert.match(page.headers.get('keep-alive') ?? '', /timeout=65/, "the hub's");
+     assert.match((await fetch(`http://127.0.0.1:${P}/api/hello`)).headers.get('keep-alive') ?? '', /timeout=65/, "and a dashboard's");
+@@ -217,10 +225,32 @@ test('a slow data run: a read with data to fall back on has it at once, marked s
+ });
+ 
+ test('the dashboard and hub pages parse: one stray quote and nothing shows at all', () => {
+-  for (const page of ['index.html', 'hub.html']) {
+-    const html = cliRead(fs.readFileSync, fs, path.join(kit, 'dashboard', page), 'utf8');
+-    const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+-    assert.ok(scripts.length >= 1, page);
+-    for (const s of scripts) new vm.Script(s, { filename: page });
++  // apps@1 (kit-986): every page both builds export, each inline script and each script it loads from its build
++  const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]));
++  for (const app of ['dashboard', 'hub']) {
++    const root = path.join(kit, 'apps', app);
++    const pages = walk(root).filter((f) => f.endsWith('.html')).map((f) => path.relative(root, f));
++    assert.ok(pages.includes('index.html'), `the ${app} build is in place`);
++    for (const page of pages) {
++      const html = cliRead(fs.readFileSync, fs, path.join(root, page), 'utf8');
++      const tags = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)];
++      assert.ok(tags.length >= 1, `${app}/${page}`);
++      for (const [, attrs, body] of tags) {
++        const src = ((m) => m?.[1] ?? m?.[2] ?? m?.[3])(/\ssrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i.exec(attrs));
++        assert.ok(!src || /^\/_next\/[^?#]+$/.test(src), `${app}/${page}: a script from its own build only (${src})`);
++        new vm.Script(src ? cliRead(fs.readFileSync, fs, path.join(root, ...src.split('/').filter(Boolean)), 'utf8') : body, { filename: `${app}/${page}${src ? ` ${src}` : ''}` });
++      }
++    }
+   }
+ });
++
++test("the hub's page reads the list from its own hub (kit-1012)", () => {
++  // apps@1 (kit-986; ruling m-20261127-192653655): line 115's assertion, out of 'the hub' until the hub port
++  // lands (kit-1012's): the hub build's page, or a script it loads from its build, reads /instances.json
++  const root = path.join(kit, 'apps', 'hub');
++  const page = cliRead(fs.readFileSync, fs, path.join(root, 'index.html'), 'utf8');
++  const own = [...page.matchAll(/<script[^>]*\ssrc="(\/_next\/[^"]+)"/g)].map((m) => cliRead(fs.readFileSync, fs, path.join(root, ...m[1].split('/').filter(Boolean)), 'utf8'));
++  assert.ok([page, ...own].some((t) => /instances\.json/.test(t)), 'the page reads the list from its own hub');
++  // line 125's, out of 'the hub' for the same reason: the hub's view is a tab bar
++  assert.match(page, /id="tabs"/, 'the page is a tab bar');
++});
