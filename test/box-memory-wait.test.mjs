@@ -178,6 +178,42 @@ test('a failed messages child is retried on the next cycle, not kept under the k
   } finally { w.kill(); }
 });
 
+// wait fails closed: a metrics child that crashes or hangs wakes the supervisor with why, at
+// startup or mid-wait, and never reads as "no high findings"
+test('a metrics child that fails at startup wakes the wait at once with "metrics failed"', async (t) => {
+  const X = fixture('mw-metrics-start');
+  t.after(() => X.F.done());
+  const w = startWait(X, { DEVTEAM_TEST_WAIT_FAIL_METRICS: '0' });
+  try {
+    const { code, out } = await returned(w, 0);
+    assert.equal(code, 0);
+    assert.match(out, /^metrics failed \(exit 1: .*metrics failed \(test\)\): the tick is due; look at why \(devteam\.mjs metrics --json\)/);
+    assert.doesNotMatch(out, /nothing new/);
+    assert.equal(w.lines().length, 1, 'returned after the startup snapshot');
+  } finally { w.kill(); }
+});
+
+test('a metrics child that fails mid-wait wakes the wait on that cycle', async (t) => {
+  const X = fixture('mw-metrics-mid');
+  t.after(() => X.F.done());
+  const w = startWait(X, { DEVTEAM_TEST_WAIT_FAIL_METRICS: '2' });
+  try {
+    const { out } = await returned(w, 2);
+    assert.match(out, /^metrics failed \(exit 1: /);
+    assert.equal(w.lines().at(-1).cycle, 2, 'woke on the cycle whose metrics failed');
+  } finally { w.kill(); }
+});
+
+test('a metrics child that hangs is killed at the child timeout and wakes the wait', async (t) => {
+  const X = fixture('mw-metrics-hang');
+  t.after(() => X.F.done());
+  const w = startWait(X, { DEVTEAM_TEST_WAIT_FAIL_METRICS: '1:hang', DEVTEAM_TEST_WAIT_CHILD_TIMEOUT_MS: '3000' });
+  try {
+    const { out } = await returned(w, 1);
+    assert.match(out, /^metrics failed \(timed out after 3s\): the tick is due/);
+  } finally { w.kill(); }
+});
+
 test('a due sensor adds exactly one sensor poll child, and none while it is not due', async (t) => {
   const X = fixture('mw-sensor');
   t.after(() => X.F.done());

@@ -21346,6 +21346,9 @@ function efficiencyOf(m) {
 }
 
 function cmdMetrics() {
+  // Tests only: wait's fail-closed checks (DEVTEAM_TEST_WAIT_FAIL_METRICS) have this child crash or hang
+  if (process.env.DEVTEAM_TEST_METRICS_FAIL === 'hang') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 600000);
+  if (process.env.DEVTEAM_TEST_METRICS_FAIL) die('metrics failed (test)');
   const since = flagStr('since') ? Date.parse(flagStr('since')) : 0;
   if (Number.isNaN(since)) die('--since must be a date');
   const m = collectMetrics(since, since);
@@ -38038,6 +38041,9 @@ async function cmdSensor() {
 // message), or the tick coming due. A high finding already open when it starts returns at once:
 // act on it, or ack it (supervisor.md §3). Harness-agnostic: a blocking command, run in the
 // background where the harness can be woken by a finished command.
+// How long wait lets one kit child (messages, metrics) run: generous for a big repo's long log,
+// and a hung child is killed so the supervisor's loop comes back.
+const WAIT_CHILD_TIMEOUT_MS = 5 * 60000;
 function cmdWait() {
   supervisorOnly('wait');
   const minutes = Number(flagStr('minutes') ?? loadSettings().tick_minutes ?? 15);
@@ -38048,12 +38054,26 @@ function cmdWait() {
   const trace = process.env.DEVTEAM_TEST_WAIT_TRACE || null;
   const cycleMs = Number(process.env.DEVTEAM_TEST_WAIT_CYCLE_MS) > 0 ? Number(process.env.DEVTEAM_TEST_WAIT_CYCLE_MS) : null;
   let failMessages = Number(process.env.DEVTEAM_TEST_WAIT_FAIL_MESSAGES) || 0;
+  // Tests only: "n" or "n:hang" has the nth metrics child (0 is the startup one) exit 1 or hang, and
+  // a shorter child timeout so a hang ends quickly.
+  const [failAt, failHow] = (process.env.DEVTEAM_TEST_WAIT_FAIL_METRICS ?? '').split(':');
+  let metricsRuns = 0;
+  const childMs = Number(process.env.DEVTEAM_TEST_WAIT_CHILD_TIMEOUT_MS) > 0 ? Number(process.env.DEVTEAM_TEST_WAIT_CHILD_TIMEOUT_MS) : WAIT_CHILD_TIMEOUT_MS;
   const started = []; // the kit children started since the last trace line (cycle 0's include the startup poll)
+  // A child that hangs is killed at childMs, so the loop always comes back; why the last child
+  // failed is kept for the report (a failed metrics run wakes the supervisor, it never reads as quiet).
+  let subFailed = null;
   const sub = (args) => {
     if (trace) started.push(args);
-    const r = spawnSync(process.execPath, [self, ...args], { cwd: mainRoot, env: process.env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    const env = args[0] === 'metrics' && failAt !== '' && Number(failAt) === metricsRuns++ ? { ...process.env, DEVTEAM_TEST_METRICS_FAIL: failHow || 'exit' } : process.env;
+    const r = spawnSync(process.execPath, [self, ...args], { cwd: mainRoot, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: childMs, killSignal: 'SIGKILL' });
     if (args[0] === 'messages' && failMessages > 0) { failMessages--; return null; }
-    try { return r.status === 0 ? JSON.parse(r.stdout) : null; } catch { return null; }
+    subFailed = r.error?.code === 'ETIMEDOUT' ? `timed out after ${Math.round(childMs / 1000)}s`
+      : r.error ? r.error.code ?? r.error.message
+      : r.status !== 0 ? `exit ${r.status ?? r.signal}${(r.stderr || '').trim() ? `: ${(r.stderr || '').trim().split('\n').pop().slice(0, 200)}` : ''}`
+      : null;
+    if (subFailed) return null;
+    try { return JSON.parse(r.stdout); } catch { subFailed = 'its output was not JSON'; return null; }
   };
   // What arrived since the last wait woke the supervisor counts as new, though it is already in the
   // first snapshot: a worker's message that lands during the tick (or while metrics runs, which on a
@@ -38115,7 +38135,10 @@ function cmdWait() {
       last = got ? { key, owner, msgs } : null;
       now = { owner, msgs };
     }
-    now.high = (sub(['metrics', '--json'])?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
+    // a metrics run that failed is not "no high findings": it is reported, at startup or mid-wait
+    const m = sub(['metrics', '--json']);
+    now.metricsFailed = m ? null : subFailed ?? 'no result';
+    now.high = (m?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
     if (trace) {
       const r = readLog.reads ?? 0;
       try { fs.appendFileSync(trace, `${JSON.stringify({ cycle: cycle++, at, children: started.splice(0), log_reads: r - reads, key, rss: process.memoryUsage().rss })}\n`); } catch {}
@@ -38162,7 +38185,9 @@ function cmdWait() {
   // the owner's new lines, and a pointer to the threads when one of them is a thread or a turn
   const ownerSaid = (ks) => `${ks.length} new line(s) from the owner: ${ks.slice(-5).join(', ')} (questions --all, history --tail 20${ks.some((k) => /^[tu]-/.test(k)) ? '; a thread: thread list --waiting' : ''})`;
   const report = (why, lines) => { fs.mkdirSync(runDir, { recursive: true }); fs.writeFileSync(sinceFile, `${Date.now()}\n`); out(why); for (const l of lines) out(`  ${l}`); out('then: the tick (supervisor.md §3), and wait again'); };
+  const metricsFailed = (why) => report(`metrics failed (${why}): the tick is due; look at why (devteam.mjs metrics --json)`, []);
   if (firstAlerts.length) return report('production needs you (sensor status; supervisor.md, Monitoring):', firstAlerts);
+  if (first.metricsFailed) return metricsFailed(first.metricsFailed);
   if (base.high.length) return report('high findings are open; act on each, or ack it with a reason (ack <kind> <subject> --reason "…"):', base.high);
   const lateMsgs = late(first.msgs).map((x) => `message ${x.k}`);
   const lateOwner = late(first.owner).map((x) => x.k);
@@ -38176,6 +38201,7 @@ function cmdWait() {
     if (alerts.length) return report('production needs you (sensor status; supervisor.md, Monitoring):', alerts);
     const now = snap();
     recur(now.key);
+    if (now.metricsFailed) return metricsFailed(now.metricsFailed);
     const keys = { ...now, owner: now.owner.map((x) => x.k), msgs: now.msgs.map((x) => x.k) };
     const fresh = (k) => keys[k].filter((x) => !base[k].includes(x));
     const lines = [...fresh('msgs').map((x) => `message ${x}`), ...(fresh('owner').length ? [ownerSaid(fresh('owner'))] : []), ...fresh('high').map((x) => `finding ${x}`)];
