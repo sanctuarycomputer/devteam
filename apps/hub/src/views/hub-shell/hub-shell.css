@@ -1,0 +1,257 @@
+  :root { --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; --mono: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  html { touch-action: manipulation; }
+  /* an app, not a page: the hub itself never scrolls or rubber-bands; its views scroll inside */
+  html, body { overscroll-behavior: none; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.5 var(--sans); -webkit-font-smoothing: antialiased; display: flex; flex-direction: column; }
+  header { display: flex; align-items: flex-end; gap: 12px; padding: 6px 12px 0; background: var(--surface); border-bottom: 1px solid var(--line); flex: 0 0 auto; }
+  /* The tabs scroll sideways only: no vertical scroll, no pull, and a swipe that reaches either end
+     stays in the strip. The strip, not each tab, hangs 1px over the header's rule, so the chosen
+     tab covers it without the strip having anything to scroll up or down. */
+  nav { display: flex; gap: 2px; overflow-x: auto; overflow-y: hidden; overscroll-behavior: contain; touch-action: pan-x; flex: 1 1 auto; margin-bottom: -1px; scrollbar-width: none; }
+  nav::-webkit-scrollbar { display: none; }
+  .tab { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px 7px; border: 1px solid transparent; border-bottom: 0; border-radius: 7px 7px 0 0; background: none; color: var(--fg-2); font: 500 13px/18px var(--sans); cursor: pointer; white-space: nowrap; flex: 0 0 auto; }
+  .tab:hover { color: var(--fg); background: var(--hover); }
+  .tab[aria-selected="true"] { color: var(--fg); background: var(--bg); border-color: var(--line); }
+  .tab.gone { opacity: .45; }
+  /* as the dashboard's nav shows its Inbox count */
+  .badge { font-size: 11px; color: var(--red-fg); font-variant-numeric: tabular-nums; }
+  #notify button { font: inherit; color: var(--fg-2); background: none; border: 1px solid var(--line-2); border-radius: 6px; padding: 2px 8px; cursor: pointer; }
+  #notify button.plain { color: inherit; border: 0; padding: 0; }
+  main { flex: 1 1 auto; position: relative; }
+  iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: var(--bg); }
+  iframe[hidden] { display: none; }
+  @media (max-width: 640px) { header { flex-wrap: wrap; } nav { order: 3; flex-basis: 100%; } }
+  #drop-hint { position: fixed; left: 50%; top: 52px; transform: translateX(-50%); z-index: 10; padding: 8px 14px; border-radius: 6px; background: var(--fg); color: var(--bg); font-size: 13px; pointer-events: none; }
+  #empty { margin: 48px auto; max-width: 520px; padding: 0 16px; color: var(--fg-2); text-align: center; }
+  /* the Overview: a card per project, read at a glance. On the shell (dashboard-shell@1, kit-94): the
+     block styles the page, the grid, the cards and their heads, the pills, dots and switches; what
+     follows is the hub's own. */
+  #overview { position: absolute; inset: 0; overflow: auto; }
+  #overview[hidden] { display: none; }
+  /* the hub's Settings: a view like the Overview, its rows in the project settings' format */
+  #settings-view { position: absolute; inset: 0; overflow: auto; }
+  #settings-view[hidden] { display: none; }
+  .set-row .t { flex: 1 1 auto; min-width: 0; }
+  .set-key { font: 11px var(--mono); color: var(--muted); margin-left: 6px; }
+  .set-row .r { margin-left: auto; text-align: right; max-width: 55%; min-width: 0; color: var(--fg-2); white-space: normal; overflow-wrap: anywhere; display: inline-flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px; }
+  .set-row .r .amber { color: var(--amber-fg); }
+  .set-row .r a { color: var(--fg); }
+  .set-row .badge { display: inline-flex; align-items: center; font-size: 11px; font-weight: 500; line-height: 18px; padding: 0 7px; border-radius: 999px; white-space: nowrap; }
+  .set-row .badge.amber { color: var(--amber-fg); background: color-mix(in srgb, var(--amber) 14%, transparent); }
+  .set-desc { font-size: 12px; color: var(--fg-2); margin: -2px 0 8px; max-width: var(--measure); }
+  #notify { color: var(--fg-2); }
+  @media (max-width: 700px) { .set-row { flex-wrap: wrap; } .set-row .t { flex-basis: 100%; white-space: normal; } .set-row .r { flex-basis: 100%; max-width: none; justify-content: flex-start; text-align: left; margin-top: 2px; } }
+  /* Your sign-in and People (kit-249), as the mock org-access-people draws them */
+  .oa-sec button { font: inherit; font-size: 12.5px; line-height: 18px; color: var(--bg); background: var(--fg); border: 1px solid var(--fg); border-radius: 6px; padding: 4px 10px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+  .oa-sec button.ghost, .oa-note button.ghost { color: var(--fg); background: var(--surface); border-color: var(--line-2); }
+  .oa-sec button.ghost:hover, .oa-note button.ghost:hover { background: var(--hover); }
+  .oa-sec button.mini, .oa-note button.mini { font-size: 12px; padding: 1px 8px; }
+  .oa-sec button.danger { background: var(--red); border-color: var(--red); color: #fff; }
+  .oa-sec button:disabled { opacity: .5; cursor: default; }
+  .oa-note button { font: inherit; font-size: 12px; line-height: 18px; color: var(--bg); background: var(--fg); border: 1px solid var(--fg); border-radius: 6px; padding: 1px 8px; cursor: pointer; }
+  .oa-intro { margin: 0 0 10px; color: var(--fg-2); font-size: 12.5px; max-width: var(--measure); }
+  .oa-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+  .oa-note { border: 1px solid color-mix(in srgb, var(--amber) 40%, var(--line)); background: color-mix(in srgb, var(--amber) 8%, var(--surface)); padding: 10px 12px; border-radius: 8px; display: flex; gap: 10px; align-items: flex-start; margin-bottom: 12px; font-size: 12.5px; }
+  .oa-note p { margin: 0; flex: 1; max-width: var(--measure); }
+  .oa-note button { margin-left: auto; flex: none; }
+  .method .r { display: inline-flex; gap: 8px; align-items: center; }
+  .method .r .dim { color: var(--muted); }
+  .method .r button { flex: none; white-space: nowrap; }
+  @media (max-width: 700px) { .set-row.method .r { display: flex; justify-content: space-between; align-items: center; gap: 8px; } }
+  .oa-inp { font: inherit; font-size: 13px; height: 30px; color: var(--fg); background: var(--surface); border: 1px solid var(--line-2); border-radius: 6px; outline: none; padding: 0 10px; width: 100%; max-width: 320px; box-sizing: border-box; }
+  .oa-inp:focus { border-color: var(--blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent); }
+  .oa-err { color: var(--red-fg); font-size: 12px; margin-top: 6px; }
+  .oa-err:empty { display: none; }
+  .person { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-top: 1px solid var(--line); min-width: 0; }
+  .oa-plist .person:first-child { border-top: 0; padding-top: 2px; }
+  .av { width: 26px; height: 26px; border-radius: 50%; background: var(--well); border: 1px solid var(--line); color: var(--fg-2); display: grid; place-items: center; font-size: 10.5px; font-weight: 600; flex: none; }
+  .person .who { min-width: 0; flex: 1; display: grid; gap: 1px; }
+  .person .nm { font-weight: 500; font-size: 12.5px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; min-width: 0; overflow-wrap: anywhere; }
+  .person .nm .dim { color: var(--muted); font-weight: 400; }
+  .person .pmeta { font-size: 12px; color: var(--muted); }
+  .person .badge { display: inline-flex; align-items: center; font-size: 11px; font-weight: 500; line-height: 18px; padding: 0 7px; border-radius: 999px; white-space: nowrap; color: var(--fg-2); background: var(--well); }
+  .person .badge.green { color: var(--green-fg); background: color-mix(in srgb, var(--green) 14%, transparent); }
+  .person .badge.blue { color: var(--blue-fg); background: color-mix(in srgb, var(--blue) 14%, transparent); }
+  .person .badge.amber { color: var(--amber-fg); background: color-mix(in srgb, var(--amber) 14%, transparent); }
+  .oa-sec .person .menu-btn { flex: none; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--fg-2); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+  .oa-sec .person .menu-btn svg { width: 14px; height: 14px; fill: currentColor; }
+  .oa-sec .person .menu-btn:hover { background: var(--hover); color: var(--fg); }
+  .oa-menu button.red { color: var(--red-fg); }
+  .oa-confirm, .oa-card { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .oa-confirm { margin: 0 0 10px 36px; padding: 10px 12px; }
+  .oa-confirm p { margin: 0 0 10px; font-size: 12.5px; max-width: var(--measure); }
+  .oa-confirm .acts, .oa-card .acts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  .oa-card { margin-top: 10px; padding: 14px 16px; }
+  .oa-card h3 { margin: 0 0 4px; font-size: 14px; font-weight: 600; }
+  .oa-card p { margin: 0 0 8px; font-size: 12.5px; color: var(--fg-2); max-width: var(--measure); }
+  .lvl-pick { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 10px 0 0; border: 0; padding: 0; }
+  .lvl-pick legend { font-size: 12px; color: var(--muted); padding: 0; margin-bottom: 6px; }
+  .lvl-opt { display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--line-2); border-radius: 8px; padding: 10px 12px; cursor: pointer; background: var(--surface); }
+  .lvl-opt:hover { background: var(--hover); }
+  .lvl-opt:has(input:checked) { border-color: var(--fg); box-shadow: 0 0 0 1px var(--fg); }
+  .lvl-opt input { margin: 3px 0 0; accent-color: var(--fg); flex: none; }
+  .lvl-opt b { font-weight: 500; font-size: 12.5px; display: block; margin-bottom: 2px; }
+  .lvl-opt span { font-size: 12px; color: var(--fg-2); display: block; }
+  .linkbox { display: flex; gap: 8px; align-items: center; background: var(--well); border: 1px solid var(--line); border-radius: 6px; padding: 5px 5px 5px 10px; margin: 6px 0 8px; }
+  .linkbox code { flex: 1; min-width: 0; overflow-wrap: anywhere; font: 12px var(--mono); }
+  .oa-warn { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; color: var(--amber-fg); max-width: var(--measure); }
+  @media (max-width: 700px) { .lvl-pick { grid-template-columns: minmax(0, 1fr); } .oa-confirm { margin-left: 0; } }
+  .oa-toast { position: fixed; left: 50%; top: 14px; transform: translate(-50%, -12px); opacity: 0; transition: opacity .15s, transform .15s; z-index: 50; background: var(--fg); color: var(--bg); padding: 6px 12px; border-radius: 8px; font-size: 12px; pointer-events: none; max-width: calc(100vw - 32px); }
+  .oa-toast.on { opacity: 1; transform: translate(-50%, 0); }
+  @media (prefers-reduced-motion: reduce) { .oa-toast { transition: none; } }
+  /* the machine switch is a little taller than the heading: it mustn't set the head's height, or the
+     heading drops below --page-top */
+  #ov-body > .ov-head > .acts { margin-block: -2px; align-items: center; }
+  #ov-body > .ov-head .acts a.set { color: var(--fg-2); font-size: 12px; text-decoration: none; margin-left: 4px; white-space: nowrap; }
+  #ov-body > .ov-head .acts a.set:hover, #ov-body > .ov-head .acts a.set:focus-visible { color: var(--fg); text-decoration: underline; }
+  #ov-body > .g12 { margin-top: 12px; }
+  .ov-card .ov-name { font: 600 14px/1.3 var(--sans); color: var(--fg); background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
+  .ov-card .ov-name:hover { text-decoration: underline; }
+  /* the name gives way last: the long pills shrink first */
+  .ov-card .card-head .ov-name { min-width: min(12ch, 40%); }
+  /* the head's pills: the status pill keeps its size; the two long ones shrink, their words truncating */
+  .ov-card .card-head .pill { flex: none; }
+  .ov-card .card-head .pill.shrink { flex: 0 12 auto; min-width: 0; overflow: hidden; }
+  .pill.shrink .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  a.pill { text-decoration: none; cursor: pointer; }
+  .ov-card .menu-btn { width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--fg-2); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+  .ov-card .menu-btn svg { width: 14px; height: 14px; fill: currentColor; }
+  .ov-card .menu-btn:hover { background: var(--hover); color: var(--fg); }
+  /* a fully blocked project (and any other red state): the blocked ticket card's treatment; its head's divider stays --line */
+  .ov-card.blocked { border: 1px solid var(--red); box-shadow: 0 0 0 1px color-mix(in srgb, var(--red) 25%, transparent); }
+  .hub-why { margin: 0; color: var(--fg-2); font-size: 12.5px; }
+  .hub-body { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: flex-start; min-width: 0; }
+  .ov-stats { flex: 1 1 200px; min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; }
+  .ov-stat { display: flex; flex-direction: column; min-width: 0; }
+  .ov-stat .k { color: var(--muted); font-size: 11px; }
+  .ov-stat .v { font: 500 13px/1.4 var(--sans); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ov-stat .v.amber { color: var(--amber-fg); }
+  .ov-stat button.v { background: none; border: 0; padding: 0; text-align: left; cursor: pointer; color: var(--fg); }
+  .ov-act { display: flex; flex-direction: column; gap: 4px; min-width: 0; max-width: 100%; overflow: hidden; }
+  .ov-act .k { color: var(--muted); font-size: 11px; }
+  .hub-goal { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-top: 12px; font-size: 12.5px; min-width: 0; }
+  .hub-goal .gt { display: flex; align-items: baseline; gap: 6px; min-width: 0; flex: 1 1 160px; }
+  .hub-goal .t { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .hub-goal .dim, .hub-goal .w { color: var(--fg-2); flex: none; }
+  .hub-goal .gp { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; flex: 1 1 220px; min-width: 0; }
+  .hub-goal .ov-bar { flex: 1 1 60px; min-width: 40px; }
+  .ov-bar { height: 6px; border-radius: 3px; background: var(--well); overflow: hidden; display: flex; }
+  .ov-bar > span { display: block; height: 100%; background: var(--green); }
+  .ov-bar > span.held { background: var(--amber); }
+  .ov-att { margin: 10px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+  .ov-att li { position: relative; padding-left: 14px; font-size: 12.5px; color: var(--fg); }
+  .ov-att li::before { content: ''; position: absolute; left: 2px; top: 7px; width: 6px; height: 6px; border-radius: 50%; background: var(--amber); }
+  .ov-att li.red::before { background: var(--red); }
+  .ov-card > .foot { padding-top: 12px; }
+  .ov-mosaic { display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, 9px); grid-auto-columns: 9px; gap: 2px; }
+  .ov-mosaic i { border-radius: 2px; background: var(--well); }
+  .ov-mosaic i.l1 { background: color-mix(in srgb, var(--green) 30%, var(--well)); }
+  .ov-mosaic i.l2 { background: color-mix(in srgb, var(--green) 55%, var(--well)); }
+  .ov-mosaic i.l3 { background: color-mix(in srgb, var(--green) 78%, var(--well)); }
+  .ov-mosaic i.l4 { background: var(--green); }
+  .ov-mosaic i.pad { background: none; }
+  .ov-none { color: var(--fg-2); font-size: 12.5px; }
+  /* a project's tab: its state's dot, then its name, then the Inbox button's counts for it */
+  .tab .dot { margin-right: 1px; }
+  .tab-counts { display: inline-flex; align-items: baseline; gap: 4px; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .tab-counts .dim { color: var(--muted); }
+  .tab-counts .n.q { color: var(--red-fg); }
+  .tab-counts .n.th.ok { color: var(--green-fg); }
+  .tab-counts .n.th.you { color: var(--blue-fg); }
+  .tab-counts .n.th.wait { color: var(--muted); }
+  /* a card's ⋯: a small menu, placed by the page */
+  .menu-pop { position: fixed; z-index: 45; min-width: 200px; max-width: calc(100vw - 16px); background: var(--raised); border: 1px solid var(--line-2); border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.18); padding: 4px; display: flex; flex-direction: column; }
+  .menu-pop .mi { padding: 6px 10px 8px; border-bottom: 1px solid var(--line); margin-bottom: 4px; font-size: 12px; display: grid; gap: 2px; }
+  .menu-pop .mi div { display: flex; justify-content: space-between; gap: 12px; }
+  .menu-pop .mi span { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+  .menu-pop .mi b { font-weight: 500; overflow-wrap: anywhere; text-align: right; }
+  .menu-pop button { all: unset; padding: 6px 10px; border-radius: 6px; font-size: 12.5px; cursor: pointer; }
+  .menu-pop button:hover, .menu-pop button:focus-visible { background: var(--hover); }
+  /* hub-tabbar-css start */
+  /* the hub's tabs are the shell's tab bar (dashboard-shell@3): its look over the old .tab box, whose
+     rules stay for the dot, the counts and a gone tab */
+  #tabs.tabbar { border-bottom: 0; }
+  #tabs.tabbar .tab { border: 0; border-radius: 0; background: none; height: 34px; padding: 0 10px; font: 500 13px/18px var(--sans); }
+  #tabs.tabbar .tab:hover, #tabs.tabbar .tab[aria-selected="true"] { background: none; }
+  /* hub-tabbar-css end */
+  /* threads with the operator: the dashboard's thread layer (index.html, .tl-*), over the Overview */
+  #ov-body { min-width: 0; }
+  #tl { position: fixed; left: 0; top: 0; width: 0; height: 0; }
+  #tl[hidden] { display: none; }
+  #tl button, .tl-pin { font: inherit; cursor: pointer; }
+  #tl .btn { font-size: 12px; font-weight: 500; height: 28px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--fg); background: var(--fg); color: var(--bg); white-space: nowrap; flex: 0 0 auto; }
+  #tl .btn:hover { opacity: .88; }
+  #tl .btn:disabled { opacity: .5; cursor: default; }
+  #tl .btn.ghost { background: var(--surface); color: var(--fg); border-color: var(--line-2); }
+  #tl .btn.ghost:hover:not(:disabled) { background: var(--hover); opacity: 1; }
+  #tl .btn.ghost[aria-pressed="true"] { border-color: var(--blue); color: var(--blue-fg); background: color-mix(in srgb, var(--blue) 10%, var(--surface)); }
+  #tl .btn.x { width: 28px; padding: 0; font-size: 16px; line-height: 1; }
+  #tl textarea { font: inherit; font-size: 13px; color: var(--fg); background: var(--surface); border: 1px solid var(--line-2); border-radius: 6px; outline: none; width: 100%; min-height: 56px; margin-top: 6px; padding: 8px 10px; resize: vertical; }
+  #tl textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent); }
+  #tl .muted { color: var(--fg-2); }
+  #tl .small { font-size: 12px; }
+  #tl .err { color: var(--red-fg); font-size: 12px; }
+  #tl .grow { flex: 1 1 auto; }
+  #tl .empty { color: var(--muted); font-size: 12px; margin: 0; padding: 6px; }
+  #tl .meta { font-size: 12px; color: var(--muted); }
+  #tl .row-inline { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; font-size: 12px; color: var(--fg-2); }
+  .tl-aiming, .tl-aiming * { cursor: none !important; }
+  .tl-pinning { touch-action: none; }
+  .tl-cursor { position: fixed; left: 0; top: 0; z-index: 60; pointer-events: none; filter: drop-shadow(0 1px 2px rgba(0,0,0,.35)); }
+  .tl-cursor path { fill: var(--blue); stroke: #fff; stroke-width: 2; }
+  .tl-cursor circle { fill: #fff; }
+  .tl-hl { position: fixed; z-index: 58; pointer-events: none; border: 2px solid var(--blue); border-radius: 8px; background: color-mix(in srgb, var(--blue) 8%, transparent); }
+  .tl-chip { position: fixed; z-index: 59; pointer-events: none; max-width: 260px; padding: 2px 8px; border-radius: 6px; background: var(--fg); color: var(--bg); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* fixed, beside its pin: the Overview scrolls inside its own box, and the card is placed again as it does */
+  .tl-card { position: fixed; z-index: 50; width: 360px; max-height: min(560px, 80vh); display: flex; flex-direction: column; background: var(--raised); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.18); padding: 10px 12px; }
+  .tl-card[hidden], .tl-panel[hidden], .tl-hl[hidden], .tl-chip[hidden], .tl-cursor[hidden] { display: none; }
+  .tl-card.in-dock { right: 16px; bottom: 64px; }
+  .tl-card.sheet { left: 0; right: 0; bottom: 0; width: auto; max-height: 75vh; border-radius: 12px 12px 0 0; padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+  .tl-head { display: flex; align-items: center; gap: 6px; }
+  .tl-head .tl-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .tl-ctx { margin: 6px 0; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; background: var(--well); font-size: 12px; }
+  .tl-ctx summary { display: flex; gap: 6px; align-items: center; cursor: pointer; list-style: none; min-width: 0; }
+  .tl-ctx summary::-webkit-details-marker { display: none; }
+  .tl-ctx summary b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; min-width: 0; }
+  .tl-ctx summary span { flex: 0 0 auto; }
+  .tl-ctx dl { margin: 6px 0 2px; display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
+  .tl-ctx dt { color: var(--muted); }
+  .tl-ctx dd { margin: 0; overflow-wrap: anywhere; }
+  .tl-turns { overflow-y: auto; flex: 1; min-height: 60px; display: flex; flex-direction: column; gap: 8px; padding: 4px 0; }
+  .tl-note:empty { display: none; }
+  .tl-note { margin-top: 4px; }
+  .tl-turn .tl-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .tl-turn.owner { align-self: flex-end; max-width: 88%; background: color-mix(in srgb, var(--blue) 10%, var(--surface)); border-radius: 8px; padding: 6px 8px; }
+  @media (max-width: 640px) { .tl-card:not(.sheet) { width: calc(100vw - 32px); } }
+  /* in the Overview's own box, so a pin scrolls with what it is on */
+  .tl-pins { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 10; }
+  .tl-pin { position: absolute; width: 22px; height: 22px; padding: 0; margin: 0; border-radius: 50%; border: 2px solid #fff; background: var(--blue); color: #fff; font: 600 11px/18px var(--sans); text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+  .tl-pin.on { outline: 2px solid var(--blue); outline-offset: 2px; }
+  .tl-pin sup { font-size: 9px; margin-left: 1px; }
+  .tl-dock { position: fixed; right: 16px; bottom: max(16px, env(safe-area-inset-bottom)); z-index: 45; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+  #tl .tl-pill { border-radius: 999px; box-shadow: 0 2px 8px rgba(0,0,0,.12); display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 14px; }
+  .tl-pill svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .tl-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--blue); flex: 0 0 auto; }
+  .tl-panel { width: 320px; max-width: calc(100vw - 32px); max-height: 60vh; overflow-y: auto; background: var(--raised); border: 1px solid var(--line-2); border-radius: 10px; padding: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.18); }
+  .tl-dock-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+  .tl-op { display: flex; align-items: center; gap: 8px; padding: 6px; margin-bottom: 4px; border-radius: 6px; background: var(--well); font-size: 12px; color: var(--fg-2); }
+  .tl-op.warn { color: var(--amber-fg); }
+  .tl-op span { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+  #tl button.tl-row { display: flex; align-items: center; gap: 8px; width: 100%; margin: 0; text-align: left; background: none; border: 0; border-radius: 6px; padding: 6px; color: var(--fg); font-size: 12.5px; }
+  #tl button.tl-row:hover { background: var(--hover); }
+  .tl-row .tl-r { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+  .tl-row .tl-r b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+  .tl-row .tl-r span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tl-n { flex: none; width: 20px; height: 20px; border-radius: 50%; background: var(--blue); color: #fff; font-size: 11px; line-height: 20px; text-align: center; }
+  .tl-closed summary { cursor: pointer; font-size: 12px; color: var(--fg-2); padding: 6px; }
+  @media (pointer: coarse) { #tl .btn { height: 36px; padding: 0 14px; } #tl .btn.x { width: 36px; padding: 0; } #tl .tl-pill { height: 40px; } }
+/* css-view-only start */
+  /* View only (kit-250): the hub's writes greyed, the disabled Terminal tab, the badge and the line */
+  body.view-only :is(.fleet-switch [data-fleet], [data-tl-send], #tl-c-text, [data-tl-start], [data-tl-end], [data-tl-reopen], #view-notify) { opacity: .45; cursor: not-allowed; }
+  #tabs [role=tab][aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
+  #view-only { align-self: center; margin-bottom: 4px; flex: none; font-size: 11px; font-weight: 600; line-height: 18px; padding: 0 7px; border-radius: 999px; white-space: nowrap; color: var(--amber-fg, #a35200); background: color-mix(in srgb, var(--amber, #f5a623) 16%, transparent); }
+  .view-line { font-size: 12.5px; color: var(--fg-2, inherit); margin: 4px 0 12px; }
+  #view-line { margin: 6px 16px; }
+/* css-view-only end */
