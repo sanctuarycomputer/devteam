@@ -749,3 +749,40 @@ The hub-shell view (hub.html at 8ea96ace). Its 7 functions other views call:
 - `setFleet`: line 1137; called by hub-overview
 - `tlHash`: line 1337; called by hub-threads
 
+### `apps/hub/src/views/hub-overview/index.tsx`
+
+The hub-overview view (hub.html at 8ea96ace). Its 11 functions other views call:
+
+- `agoText`: line 1166; called by hub-settings
+- `boxLine`: line 1631; called by hub-settings
+- `closeMenu`: line 1481; called by hub-shell
+- `countsEl`: line 1263; called by hub-shell
+- `el`: line 1161; called by hub-settings, hub-shell, hub-threads
+- `hubKey`: line 1684; called by hub-shell
+- `memoryStart`: line 1840; called by hub-shell
+- `openAt`: line 1277; called by hub-shell
+- `paintOverview`: line 1927; called by hub-shell
+- `plural`: line 1165; called by hub-settings
+- `stateOf`: line 1153; called by hub-shell
+
+### `apps/hub/src/views/hub-settings/index.tsx`
+
+The hub-settings view (hub.html at 8ea96ace). Its 2 functions other views call:
+
+- `oaToast`: line 2094; called by hub-shell
+- `paintSettings`: line 1993; called by hub-shell
+
+### `apps/hub/src/views/hub-threads/index.tsx`
+
+The hub-threads view (hub.html at 8ea96ace). Its 9 functions other views call:
+
+- `boxAlertNow`: line 3180; called by hub-overview, hub-shell
+- `ownAlert`: line 3188; called by hub-overview, hub-shell
+- `tlActive`: line 2589; called by hub-shell
+- `tlDraw`: line 2907; called by hub-overview
+- `tLine`: line 2582; called by hub-overview, hub-settings
+- `tlLeave`: line 2729; called by hub-shell
+- `tlOpen`: line 2939; called by hub-shell
+- `tlRefresh`: line 2910; called by hub-shell
+- `when`: line 2583; called by hub-settings, hub-shell
+
