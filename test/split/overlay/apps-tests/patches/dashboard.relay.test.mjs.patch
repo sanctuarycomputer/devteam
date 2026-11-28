@@ -1,0 +1,26 @@
+diff --git a/test/dashboard.relay.test.mjs b/test/dashboard.relay.test.mjs
+index 3b82d1bd07b91da6ea5978e06c0f750d678e44f5..ab91ac9553088d67db8989781293a46b286ba2b9 100644
+--- a/test/dashboard.relay.test.mjs
++++ b/test/dashboard.relay.test.mjs
+@@ -404,12 +404,19 @@ test("a preview's viewer: its route, frame-src naming exactly where its lens is,
+   };
+   await start(RELAY_ENV);
+   const csp = async (p) => (await fetch(`${B}${p}`)).headers.get('content-security-policy');
+-  const tail = `frame-ancestors 'self' http://127.0.0.1:${PORTS}`;
++  // apps@1 Serving (kit-984, kit-1033; kit-986): every page is the dashboard build's index.html, under today's
++  // policy with script-src 'self' plus the hash of each of its inline scripts in their order, and style-src
++  // 'self' 'unsafe-inline' with the shell's font and icon origins. The hashes are the test's own, of the page
++  const built = cliRead(fs.readFileSync, fs, path.join(kit, 'apps/dashboard/index.html'), 'utf8');
++  const { createHash } = await import('node:crypto');
++  const hashes = [...built.matchAll(/<script(?![^>]*\ssrc\s*=)[^>]*>([\s\S]*?)<\/script>/g)].map((m) => `'sha256-${createHash('sha256').update(m[1], 'utf8').digest('base64')}'`);
++  assert.ok(hashes.length >= 1, 'the built page has inline scripts to hash');
++  const tail = `frame-ancestors 'self' http://127.0.0.1:${PORTS}; script-src 'self' ${hashes.join(' ')}; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net`;
+   const viewer = `/view/preview/${name}`;
+   // before any relay: a GET of the viewer opens none, and every page frames only itself, as before
+   let r = await fetch(`${B}${viewer}`);
+   assert.equal(r.status, 200);
+-  assert.equal(await r.text(), cliRead(fs.readFileSync, fs, path.join(kit, 'dashboard/index.html'), 'utf8'));
++  assert.equal(await r.text(), built, 'the viewer sends the built page, byte for byte');
+   assert.equal(r.headers.get('content-security-policy'), `frame-src 'self'; ${tail}`, 'a navigation opens no relay');
+   assert.deepEqual([r.headers.get('x-frame-options'), r.headers.get('referrer-policy'), r.headers.get('cache-control')], [null, 'no-referrer', 'no-store']);
+   assert.equal(await csp('/'), `frame-src 'self'; ${tail}`);
