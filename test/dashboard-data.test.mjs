@@ -440,6 +440,7 @@ test('the governance listing, read-only, with what changed here', { timeout: 300
     DEVTEAM_HUB_PORT: String(PORTS + 2), DEVTEAM_PORT_BASE: String(PORTS + 3),
     CLAUDE_CONFIG_DIR: path.join(F.base, 'claude'), CODEX_HOME: path.join(F.base, 'codex'),
     DEVTEAM_DATA_WAIT_MS: '600000',
+    DEVTEAM_DATA_AT_ONCE: '0',
   });
   delete env.DEVTEAM_SUPERVISOR;
   const { dash, port } = await dashboardOnFreePort(A.root, env);
@@ -729,6 +730,7 @@ test('kit-595: one build as the dashboard listens; a build reused for 20 s after
     CLAUDE_CONFIG_DIR: path.join(F.base, 'claude'), CODEX_HOME: path.join(F.base, 'codex'),
     // every read waits for its own build, never the last good data
     DEVTEAM_DATA_WAIT_MS: '600000',
+    DEVTEAM_DATA_AT_ONCE: '0',
     NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import ${pathToFileURL(probe).href}`].filter(Boolean).join(' '),
     ZK_DIR: dir,
   });

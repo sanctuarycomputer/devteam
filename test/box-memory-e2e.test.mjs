@@ -223,6 +223,7 @@ test('E4b: in a minute with no page open a dashboard starts no node child but he
   const env = F.env({
     DEVTEAM_HUB_PORT: String(PORTS + 80), DEVTEAM_PORT_BASE: String(PORTS + 81), DEVTEAM_IMAGE_HUB: String(PORTS + 80),
     DEVTEAM_DATA_WAIT_MS: '600000',
+    DEVTEAM_DATA_AT_ONCE: '0',
     NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import ${probe}`].filter(Boolean).join(' '),
     ZK_DIR: dir,
   });

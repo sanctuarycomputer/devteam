@@ -122,6 +122,7 @@ async function start(name, off) {
     // no hub of its own: the box's image stands for one, so the hub is no child of the dashboard
     DEVTEAM_IMAGE_HUB: String(PORTS + off),
     DEVTEAM_DATA_WAIT_MS: '600000',
+    DEVTEAM_DATA_AT_ONCE: '0',
     NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import ${pathToFileURL(probe).href}`].filter(Boolean).join(' '),
     ZK_DIR: dir,
   });
