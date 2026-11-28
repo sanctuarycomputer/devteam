@@ -243,6 +243,14 @@ test('sensor-untriaged: a sensor\'s escalation nobody folded, ignored or ruled n
     assert.deepEqual(down.map((x) => [x.kind, x.subject]), [['sensor-untriaged', 'fake:log:U1']], 'raised while the supervisor is down too');
     assert.match(down[0].detail, /the supervisor's wait has not run since/);
     assert.match(down[0].suggestion, /^start the supervisor/);
+    // the fleet moved: another machine holds the host claim (as last fetched), so this machine's old
+    // .wait-alive raises nothing
+    const claim = { devteam_host: 1, machine: 'm-elsewhere-1234', hostname: 'other-box', at: new Date().toISOString(), since: new Date().toISOString(), fleet: null };
+    const tree = F.g(['mktree'], old);
+    const sha = F.g(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit-tree', tree, '-m', JSON.stringify(claim)], old);
+    F.g(['update-ref', 'refs/devteam/host-origin', sha], old);
+    assert.deepEqual(findings(), [], 'another machine supervises it now');
+    F.g(['update-ref', '-d', 'refs/devteam/host-origin'], old);
     // an incident takes it: untriaged stops, and incident-unowned takes over after its hour
     hand('supervisor', { type: 'problem', title: 'payment errors', severity: 3, realized: true, status: 'open', threatens: [], refs: [u1], fingerprints: ['fake:log:U1'], sensor: 'fake' }, 2 * H);
     assert.deepEqual(findings().map((x) => x.kind), ['incident-unowned']);

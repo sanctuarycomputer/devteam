@@ -75,8 +75,8 @@ test('efficiency findings fire over their thresholds and stay quiet under them, 
 
 // A ticket in flight with 3 final passes is medium review-churn; at 5 it is high, so wait wakes and
 // the loop ends in a re-plan, a split or a question (S28): each pass restarts the phase, so nothing
-// else ever calls it stale.
-test('review-churn on an unmerged ticket: medium at 3 final passes, high at 5', () => {
+// else ever calls it stale. Once its last pass approved it is medium again: it only waits to merge.
+test('review-churn on an unmerged ticket: medium at 3 final passes, high at 5, medium once the last approved', () => {
   const F = threadsFixture('churn-cap');
   try {
     F.sup(['feature', 'add', 'eff', '--json', JSON.stringify({ title: 'Eff', goals: [F.goal], stories: [{ id: 'EF-S1', text: 'efficiency reads right', release: 'v1.0.0' }] })]);
@@ -92,5 +92,8 @@ test('review-churn on an unmerged ticket: medium at 3 final passes, high at 5', 
     assert.deepEqual(rest, []);
     assert.deepEqual([f.severity, f.detail], ['high', '5 final review passes']);
     assert.match(f.suggestion, /re-plan it, split it, or ask the owner/);
+    // a 6th pass that approves ends the loop: it only waits to merge, so medium again, not high
+    fs.writeFileSync(path.join(dir, 'final-6.md'), rec('APPROVE'));
+    assert.deepEqual(churn().map((x) => [x.severity, x.detail]), [['medium', '6 final review passes']]);
   } finally { F.done(); }
 });

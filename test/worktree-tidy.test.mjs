@@ -168,9 +168,9 @@ test('the tick removes finished ticket, chore, plan and review worktrees, and ke
 });
 
 // What the tidy won't take is named: a merged ticket's worktree whose worker never logged phase done,
-// with no window, untouched for a day, is a low worktree-orphaned finding (S31); its window open, or
-// touched within the day, it is not.
-test('worktree-orphaned: a merged ticket\'s worktree with no window, a day untouched', { skip: !hasTmux && 'needs tmux' }, () => {
+// with no window and no process in it, its git untouched for a day, is a low worktree-orphaned
+// finding (S31); its window open, a process in it, or a commit within the day, it is not.
+test('worktree-orphaned: a merged ticket\'s worktree with no window, no pane or process in it, a day untouched', { skip: !hasTmux && 'needs tmux' }, async () => {
   const F = fleetFixture('worktree-orphan');
   const { old, ok, g } = F;
   const tmux = (args) => spawnSync('tmux', args, { env: F.env({}), encoding: 'utf8' });
@@ -185,8 +185,20 @@ test('worktree-orphaned: a merged ticket\'s worktree with no window, a day untou
     // the session is up with another window: tmux can say this ticket has none
     assert.equal(tmux(['new-session', '-d', '-s', sessionOf(old, 'worktree-orphan'), '-n', 'other', 'sleep 600']).status, 0);
     assert.deepEqual(orphaned(), [], 'touched just now');
-    const t = new Date(Date.now() - 2 * 86400000);
-    for (const p of [wt, path.join(wt, '.git')]) fs.utimesSync(p, t, t);
+    const admin = g(['rev-parse', '--path-format=absolute', '--git-dir'], wt);
+    const age = () => { const t = new Date(Date.now() - 2 * 86400000); for (const p of [wt, path.join(wt, '.git'), ...['index', 'HEAD', 'logs/HEAD'].map((f) => path.join(admin, f))]) if (fs.existsSync(p)) fs.utimesSync(p, t, t); };
+    age();
+    // work committed in a subfolder touches none of the folder's own stamps, only git's: not untouched
+    write(path.join(wt, 'ch/deep/more.txt'), 'more\n');
+    g(['add', '-A'], wt);
+    g(['commit', '-qm', 'more work'], wt);
+    for (const p of [wt, path.join(wt, '.git')]) { const t = new Date(Date.now() - 2 * 86400000); fs.utimesSync(p, t, t); }
+    assert.deepEqual(orphaned(), [], 'a commit inside it a moment ago');
+    age();
+    // a process working in it (a shell left in a subfolder): not orphaned
+    const sh = spawn('sleep', ['600'], { cwd: path.join(wt, 'ch/deep'), stdio: 'ignore' });
+    try { assert.deepEqual(orphaned(), [], 'a process is in it'); } finally { sh.kill('SIGKILL'); }
+    await new Promise((r) => (sh.exitCode !== null || sh.signalCode ? r() : sh.once('exit', r)));
     const [f, ...rest] = orphaned();
     assert.deepEqual(rest, []);
     assert.equal(f.severity, 'low');

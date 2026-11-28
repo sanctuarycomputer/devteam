@@ -6344,6 +6344,14 @@ function reviewStats(since = 0) {
   }
   return { by_stage: byStage, findings, false_positive_rate: findings ? +(wrong / findings).toFixed(2) : null };
 }
+// Did every final review at the ticket's highest pass approve (one only waiting to merge)?
+function lastFinalApproved(id) {
+  const b = ticketBranchRef(id);
+  const finals = ticketReviews(id, b && !mergeShaFor(id) ? { ref: b } : WORKTREE).filter((r) => r.stage === 'final');
+  const top = Math.max(...finals.map((r) => r.pass));
+  const last = finals.filter((r) => r.pass === top);
+  return last.length > 0 && last.every((r) => r.verdict === 'APPROVE');
+}
 function reviewPasses() {
   const o = {};
   for (const id of tickets().keys()) {
@@ -20676,9 +20684,12 @@ function collectMetrics(since, reviewsSince = 0) {
   // Staleness and triage are raised once the supervisor's wait has run here at all, whether it runs
   // now or not: a sensor nobody polls and an escalation nobody triages are the news when it is down.
   // Never run here (a new setup, or a checkout another machine supervises): nothing here polls yet.
+  // Nor once another machine holds the host claim, live or released to it for a move: the fleet
+  // moved away, and run/sensors/.wait-alive stays behind (the claim as last fetched, no network).
   const waitAge = fileAge(waitAliveFile());
   const supervisorRunning = waitAge < 20 * 60000;
-  const supervisedHere = waitAge < Infinity;
+  const claimElsewhere = () => { const r = readHostClaim({ fetch: false }); if (r.offline || !r.claim) return false; const v = hostVerdict(r.claim, hostMachineId({ keep: false })); return !!(v.held || v.released); };
+  const supervisedHere = supervisorRunning || (waitAge < Infinity && !claimElsewhere());
   const supervisorWords = supervisorRunning || !supervisedHere ? 'while the supervisor runs' : `and the supervisor's wait has not run since ${new Date(Date.now() - waitAge).toISOString()}`;
   const supervisorStep = supervisorRunning ? '' : 'start the supervisor (its wait polls and triages); then ';
   const ignoredNow = sensorIgnores();
@@ -20860,12 +20871,23 @@ function collectMetrics(since, reviewsSince = 0) {
   // removes a merged one once its worker logged phase done and nothing in it is unpushed or
   // uncommitted, so one still here is what the tidy won't take: a superseded ticket's, a worker that
   // never logged done, or work left in it. It holds disk for nothing, and its ticket's name.
+  // Untouched: no commit, checkout or staging in its git admin folder (index, HEAD, logs/HEAD) and no
+  // launch for a day; and no pane or process is in it (busyDirs, asked once, and only when one is
+  // otherwise a candidate; not knowing raises nothing).
+  let busyNow, launches;
+  const launchesNow = () => (launches ??= lastLaunches());
+  const busyIn = (wt) => { if (busyNow === undefined) busyNow = busyDirs(); return !busyNow || [...busyNow].some((d) => d === wt || d.startsWith(`${wt}${path.sep}`)); };
   if (fs.existsSync(path.join(mainRoot, '.worktrees'))) for (const [id, t] of ts) {
     if (isActive(t) && !mergeShaFor(id)) continue;
     for (const name of [id, `records-${id}`]) {
       const wt = path.join(mainRoot, '.worktrees', name);
-      const touched = Math.max(...[wt, path.join(wt, '.git')].map((x) => fs.statSync(x, { throwIfNoEntry: false })?.mtimeMs ?? 0));
-      if (!touched || now - touched < 86400000 || !windowGone(id)) continue;
+      const dotGit = path.join(wt, '.git');
+      if (!fs.existsSync(dotGit)) continue;
+      const gd = /^gitdir: (.+)$/m.exec(fs.readFileSync(dotGit, 'utf8'))?.[1]?.trim();
+      const admin = gd ? path.resolve(wt, gd) : null;
+      const stamps = [wt, dotGit, ...(admin ? ['index', 'HEAD', path.join('logs', 'HEAD')].map((f) => path.join(admin, f)) : [])];
+      const touched = Math.max(...stamps.map((x) => fs.statSync(x, { throwIfNoEntry: false })?.mtimeMs ?? 0), launchesNow().get(id)?.at ?? 0);
+      if (!admin || now - touched < 86400000 || !windowGone(id) || busyIn(realPath(wt))) continue;
       add('low', 'worktree-orphaned', name, `.worktrees/${name}: its ticket is ${isActive(t) ? 'merged' : `superseded by ${t.superseded_by}`}, no window, untouched for ${hours(now - touched)}h`, `look in it (git status, git log @{u}..), then worker ${id} --remove${mergeShaFor(id) && lastPhaseOf(id)?.to === 'done' ? '' : ' --force (it is not merged, or its worker never logged done; --force loses what is uncommitted)'}`);
     }
   }
@@ -20892,8 +20914,9 @@ function collectMetrics(since, reviewsSince = 0) {
   if (recentQs.length >= 4 && answeredRecent / recentQs.length < 0.5) add('high', 'inbox-stalled', 'owner questions', `${answeredRecent} of ${recentQs.length} answered in 14 days`, 'remind the owner what is blocked; give defaults where the class allows; withdraw what no longer matters');
   // churn is a signal to re-plan a ticket still in flight; a merged ticket's passes are retro material.
   // At 5 passes it is high, so wait wakes: each pass restarts the phase, so nothing else ever calls
-  // the loop stale, and it would go on spending with no end.
-  for (const [id, n] of Object.entries(reviewPasses()).filter(([id2, n]) => n >= 3 && !mergeShaFor(id2))) add(n >= 5 ? 'high' : 'medium', 'review-churn', id, `${n} final review passes`, n >= 5 ? 'stop the loop: re-plan it, split it, or ask the owner what done means; another pass is not the next step' : 'the ticket may be too big or under-specified; re-plan it');
+  // the loop stale, and it would go on spending with no end. Not once its last pass approved: the
+  // loop has ended, and the ticket only waits to merge.
+  for (const [id, n] of Object.entries(reviewPasses()).filter(([id2, n]) => n >= 3 && !mergeShaFor(id2))) add(n >= 5 && !lastFinalApproved(id) ? 'high' : 'medium', 'review-churn', id, `${n} final review passes`, n >= 5 && !lastFinalApproved(id) ? 'stop the loop: re-plan it, split it, or ask the owner what done means; another pass is not the next step' : 'the ticket may be too big or under-specified; re-plan it');
   // An old fleet drain in force starts nothing; goal holds start nothing for their goals.
   const drained = !!draining();
   // over the machine's memory ceiling, no finding suggests starting a session; memory-full says why
@@ -22910,6 +22933,9 @@ const DATA_QUICK_MS = ((n) => (process.env.DEVTEAM_DATA_QUICK_MS?.trim() && Numb
 // setting: test/presence-changed.test.mjs sets 3000 to keep checking kit-633's 3 s start gap. Anything
 // that isn't a number of at least 0 is the default.
 const DATA_REUSE_MS = ((n) => (process.env.DEVTEAM_DATA_REUSE_MS?.trim() && Number.isFinite(n) && n >= 0 ? n : 20000))(Number(process.env.DEVTEAM_DATA_REUSE_MS));
+// The least a dashboard-data build is given before it is stopped (cmdDashboard's buildLimit), 5
+// minutes. DEVTEAM_DATA_LIMIT_MIN_MS is for tests only, not a setting.
+const DATA_LIMIT_MIN_MS = ((n) => (process.env.DEVTEAM_DATA_LIMIT_MIN_MS?.trim() && Number.isFinite(n) && n >= 0 ? n : 5 * 60000))(Number(process.env.DEVTEAM_DATA_LIMIT_MIN_MS));
 // makeSession --if-gone found the window there after all (it never types into one): not a failure.
 const IF_GONE_LEFT = 3;
 // The last moment a tick may start a cswap switch (its 45 s timeout, inside RESTART_TICK_MS).
@@ -30932,7 +30958,7 @@ async function cmdDashboard() {
       accountsSaid = said;
     }));
   };
-  // One dashboard-data run at a time, shared by every page waiting on it, stopped after 5 minutes by default (DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS) (a page
+  // One dashboard-data run at a time, shared by every page waiting on it, stopped once it runs well past a good one (buildLimit) (a page
   // with data already waits DATA_WAIT_MS for it, then has that data, marked stale): each
   // refresh used to start its own, and on a slow machine they piled up (one ran for an hour).
   // And at most one start every 3 s, whatever the pages ask (live presence, kit-633): a build is
@@ -30944,11 +30970,15 @@ async function cmdDashboard() {
   // once the running one has ended and 3 s have passed since the last start; every read waiting then
   // shares it. A failed build is never kept.
   const DATA_EVERY_MS = 3000;
-  // A build is stopped after 5 minutes by default. The old 2-minute limit was too short for a big
-  // project's build, which can take minutes, and left its dashboard with no data at all; with no
-  // limit, a hung build held the one slot for good, and every page waited on it with no end.
-  // DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS sets the limit in ms (0: none).
-  const DASHBOARD_DATA_TIMEOUT_MS = (() => { const v = process.env.DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS; return v && Number(v) >= 0 ? Number(v) : 5 * 60000; })();
+  // A build is stopped once it runs well past what a good one takes: 3 times the last good build,
+  // and never under 5 minutes. A fixed limit (it was 2 minutes) stopped a big project's healthy
+  // build every time and left its dashboard with no fresh data; no limit let a hung build hold the
+  // one slot for good, with every page waiting on it. A build stopped this way doubles the next
+  // one's limit, so a project slower than any limit yet (no good build known) still gets one
+  // through. DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS sets a fixed limit in ms instead (0: none).
+  const DASHBOARD_DATA_TIMEOUT_MS = (() => { const v = process.env.DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS; return v?.trim() && Number(v) >= 0 ? Number(v) : null; })();
+  let lastStopped = 0; // the limit of the last build stopped by it (0: the last one ended was not)
+  const buildLimit = () => DASHBOARD_DATA_TIMEOUT_MS ?? Math.max(DATA_LIMIT_MIN_MS, 3 * lastTook, 2 * lastStopped);
   let dataEpoch = 0;
   let build = null;
   let nextBuild = null;
@@ -30987,10 +31017,11 @@ async function cmdDashboard() {
   };
   const startBuild = () => {
     lastStart = Date.now();
-    const b = { epoch: dataEpoch, started: lastStart, finished: null, r: null };
-    b.done = new Promise((resolve) => b.child = execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: DASHBOARD_DATA_TIMEOUT_MS, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
+    const b = { epoch: dataEpoch, started: lastStart, finished: null, r: null, limit: buildLimit() };
+    b.done = new Promise((resolve) => b.child = execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: b.limit, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
       if (!err && stdout) { lastData = stdout; lastAsOf = b.started; lastTook = Date.now() - b.started; lastEpoch = b.epoch; failedSince = null; keep(stdout, lastAsOf, lastTook); } else failedSince ??= Date.now();
-      b.r = { ok: !err, stdout, stderr: err?.killed ? `dashboard-data took over ${DASHBOARD_DATA_TIMEOUT_MS < 120000 ? `${Math.round(DASHBOARD_DATA_TIMEOUT_MS / 1000)} s` : `${Math.round(DASHBOARD_DATA_TIMEOUT_MS / 60000)} minutes`} and was stopped (DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS)` : String(stderr ?? '') };
+      lastStopped = err?.killed && b.limit ? b.limit : 0;
+      b.r = { ok: !err, stdout, stderr: err?.killed ? `dashboard-data took over ${b.limit < 120000 ? `${Math.round(b.limit / 1000)} s` : `${Math.round(b.limit / 60000)} minutes`} and was stopped (the next build gets twice as long; DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS sets a fixed limit)` : String(stderr ?? '') };
       b.finished = Date.now();
       resolve(b.r);
     }));

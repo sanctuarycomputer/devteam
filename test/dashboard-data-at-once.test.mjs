@@ -68,10 +68,10 @@ function builds() {
   return lines.filter(([e]) => e === 'start').map(([, pid, t]) => ({ start: Number(t), end: ends.get(pid) ?? null }));
 }
 const allEnded = () => builds().every((b) => b.end !== null);
-async function start() {
+async function start(extra = {}) {
   // never two at once, even after a test that failed with one running: after() stops only the last
   await running?.stop();
-  const { dash, port } = await dashboardOnFreePort(F.old, env);
+  const { dash, port } = await dashboardOnFreePort(F.old, { ...env, ...extra });
   running = dash;
   return `http://127.0.0.1:${port}`;
 }
@@ -273,3 +273,30 @@ test('on a quiet log, a build that fails marks the served data stale, and one th
   running = null;
 });
 
+
+// A build's limit follows the project (S33): 3 times the last good build, never under the floor (5
+// minutes; 1 s here), and a build stopped by it doubles the next one's, so a project slower than the
+// floor with no good build known still gets one through. Last: the builds it stops never say they ended.
+test('a build is stopped past its limit; the next gets twice as long; a slow good build sets the limit', { timeout: 240000 }, async () => {
+  await running?.stop();
+  running = null;
+  fs.rmSync(kept, { force: true });
+  const LIMIT = { DEVTEAM_DATA_LIMIT_MIN_MS: '1000' };
+  // no good build known, each takes 2.5 s: stopped at 1 s, then at 2 s, then through in 4 s
+  setSleep(2500);
+  const n0 = builds().length;
+  let url = await start(LIMIT);
+  let good = null;
+  await until(async () => { const r = await data(url); if (r.status === 200) good = r; else await sleep(200); return !!good; }, 'a good build at last', 90000);
+  const mine = builds().slice(n0);
+  assert.deepEqual(mine.map((b) => b.end !== null), [false, false, true], `stopped twice, then through: ${JSON.stringify(mine)}`);
+  await running.stop();
+  running = null;
+  // a good build of about 2.5 s is known (kept): a 5 s build is under 3 times it, so it isn't stopped
+  await until(() => fs.existsSync(kept), 'the good build kept');
+  setSleep(5000);
+  const n1 = builds().length;
+  url = await start(LIMIT);
+  await until(() => builds().length > n1 && builds().slice(n1).every((b) => b.end !== null), 'the 5 s warm build to end', 30000);
+  assert.equal(builds().length, n1 + 1, 'one build, not stopped');
+});
