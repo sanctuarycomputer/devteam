@@ -34728,7 +34728,8 @@ function packManifest(bytes) {
   const code = `
     const zlib = require('node:zlib'), fs = require('node:fs'), crypto = require('node:crypto');
     const MIB = 1024 * 1024;
-    const say = (o) => { process.stdout.write(JSON.stringify(o)); process.exit(0); };
+    // the answer is written whole before the exit: a queued pipe write would be dropped by it
+    const say = (o) => { const b = Buffer.from(JSON.stringify(o)); for (let i = 0; i < b.length;) { try { i += fs.writeSync(1, b, i); } catch (e) { if (e.code !== 'EAGAIN') throw e; } } process.exit(0); };
     const no = (refused, why) => say({ ok: false, refused, why });
     (() => {
     let tar;
@@ -34738,24 +34739,6 @@ function packManifest(bytes) {
     // one gzip member, every byte of it read: a streaming reader (npm's) and this one then unzip the same bytes
     if (engine.bytesWritten !== input.length) return no('gzip', 'the pack has bytes after its gzip data');
     if (input.length < 18 || input.readUInt32LE(input.length - 4) !== tar.length) return no('gzip', 'the pack is not one gzip member');
-    const str = (b) => { const i = b.indexOf(0); return (i < 0 ? b : b.subarray(0, i)).toString('utf8'); };
-    const oct = (b) => { if (b[0] & 0x80) return NaN; const s = str(b).trim(); return s === '' ? 0 : /^[0-7]+$/.test(s) ? parseInt(s, 8) : NaN; };
-    const pax = (b) => {
-      const kv = {};
-      for (let i = 0; i < b.length;) {
-        const sp = b.indexOf(32, i);
-        const len = sp > i ? Number(b.subarray(i, sp).toString('latin1')) : NaN;
-        if (!(len > sp - i + 1) || !/^[0-9]+$/.test(b.subarray(i, sp).toString('latin1')) || i + len > b.length || b[i + len - 1] !== 10) return null;
-        const rec = b.subarray(sp + 1, i + len - 1).toString('utf8');
-        const eq = rec.indexOf('=');
-        if (eq < 1) return null;
-        kv[rec.slice(0, eq)] = rec.slice(eq + 1);
-        i += len;
-      }
-      if (kv.size !== undefined && !/^[0-9]+$/.test(kv.size)) return null;
-      if (kv.size !== undefined) kv.size = Number(kv.size);
-      return kv;
-    };
     // only what npm pack writes, field for field as node-tar's encoder does: ustar headers of type 0, 5 or
     // pax x, every string field UTF-8 then NULs to its end, every number field octal as node-tar pads it,
     // no link target, pax records of path, mtime and size only, names under package/ with no empty, . or

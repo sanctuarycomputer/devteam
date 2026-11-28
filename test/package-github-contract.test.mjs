@@ -638,13 +638,13 @@ test('M3 each way npm\'s tar would install another package.json, or read the arc
       [tgz(file(PJ, MA), paxEntry((() => { const r = Buffer.concat([Buffer.from(' path=package/x'), Buffer.from([0xff]), Buffer.from('.js\n')]); return Buffer.concat([Buffer.from(String(r.length + String(r.length + 2).length)), r]); })()), file(PJ, MB)), 'tar'],
       [tgz(file(PJ, MA), cover({ cks: '8' })), 'tar'], [tgz(entry({ name: PJ, body: MA, cks: '8' })), 'tar'],
       [tgz(file(PJ, MA), cover({ linkraw: Buffer.from('\0\nx') })), 'link'],
-      [tgz(file(PJ, MA), entry({ name: '', type: 'x', body: paxOf({ comment: 'x' }) }), file('package/z.txt', 'z')), 'tar'],
-      [tgz(file(PJ, MA), paxEntry({ size: '512' }), paxEntry({ comment: 'c' }), file('package/z.txt', Buffer.alloc(512, 120))), 'tar'],
+      [tgz(file(PJ, MA), entry({ name: '', type: 'x', body: paxOf({ mtime: '1' }) }), file('package/z.txt', 'z')), 'tar'],
+      [tgz(file(PJ, MA), paxEntry({ size: '512' }), paxEntry({ mtime: '1' }), file('package/z.txt', Buffer.alloc(512, 120))), 'tar'],
       [tgz(paxEntry({ size: '0' }), cover(), file('package/z.txt', '')), 'tar'],
       [tgz(entry({ name: PJ, body: MA, b475: 0x31 })), 'tar']],
     // a name npm pack does not write
     'a name npm pack does not write': [[tgz(file(PJ, MA), file('package/\u00e9.js', 'x')), 'name'], [tgz(file(PJ, MA), file('package/.gitignore', 'x')), 'name'],
-      [tgz(file(PJ, MA), file('package/d/.npmignore', 'x')), 'name'], [tgz(file(PJ, MA), file('package/d/node_modules/a/package.json', MB)), 'name']],
+      [tgz(file(PJ, MA), file('package/d/.npmignore', 'x')), 'name'], [tgz(file(PJ, MA), file('package/a\\b.js', 'x')), 'name'], [tgz(file(PJ, MA), file('package/d/node_modules/a/package.json', MB)), 'name']],
     'a duplicate': [[tgz(file(PJ, MA), file('package/a.js', 'x'), file('package/a.js', 'y')), 'duplicate'], [tgz(file(PJ, MA), file('package/a.js', 'x'), file('package/A.js', 'y')), 'duplicate'],
       [tgz(file(PJ, MA), file(nfc, 'x'), file(nfd, 'y')), 'duplicate'], [tgz(file(PJ, MA), file('package/a', 'x'), file('package/a/b', 'y')), 'duplicate'],
       [tgz(file(PJ, MA), file('package/a.js', 'x'), paxEntry({ path: 'package/b.js' }), file('package/a.js', 'y')), 'duplicate'],
@@ -698,7 +698,6 @@ test('M5 each bound: the pack, what it unzips to, the manifest, a pax record; on
     ['a pax record over 1 MiB', tgz(file(PJ, MA), paxEntry({ path: `package/${'a'.repeat(MIB)}` }), file('package/a', 'x')), 'too-big'],
     ['not gzip', Buffer.concat([file(PJ, MA), END]), 'gzip'],
     ['bytes after the gzip data', Buffer.concat([g1, Buffer.alloc(1024)]), 'gzip'],
-    // the last four bytes are the unzipped length, as one member's would be
     ['bytes after the gzip data, ending as one member would', Buffer.concat([g1, Buffer.alloc(1020), isize]), 'gzip'],
     ['a second member after padding', Buffer.concat([at64, zlib.gzipSync(Buffer.concat([file(PJ, MB), END]))]), 'gzip'],
     ['two members', Buffer.concat([zlib.gzipSync(file(PJ, MA)), zlib.gzipSync(Buffer.concat([file('package/x.js', 'x'), END]))]), 'gzip'],
@@ -731,8 +730,7 @@ test('M6 wherever packManifest reads a pack, npm\'s own tar installs that manife
     fs.rmSync(d, { recursive: true, force: true });
     return out;
   };
-  // a split pack's tree may differ only by pax-named files written at their ustar names (npm's gunzip
-  // hands its parser 16 KiB pieces however the pack is fed)
+  // a split pack's tree may differ only by pax-named files written at their ustar names
   const agree = async (label, gz, r, { split = false, alt = {} } = {}) => {
     for (const chunk of split ? [0, 16384] : [0]) {
       const npm = await installs(gz, chunk);
@@ -749,9 +747,12 @@ test('M6 wherever packManifest reads a pack, npm\'s own tar installs that manife
     if (r.ok) { n++; await agree(label, gz, r, o); }
   }
   assert.ok(n >= 11, `M6 the packs M1 to M5 read were checked (${n})`);
+  // M5's second member: npm's tar installs the first member's manifest, fed whole or from the second member on
+  const [, gz2, r2] = BUILT.find(([l]) => l === 'M5 a second member after padding');
+  assert.equal(r2.refused, 'gzip', 'M6 the pack with a second member is refused');
+  for (const chunk of [0, 64 * 1024]) assert.deepEqual((await installs(gz2, chunk)).manifest, fourOf(JSON.parse(MA)), `M6 npm installs the first member's manifest${chunk ? ', fed from the second member on' : ''}`);
 
-  // the sweep: a manifest, a pax-named file and a cover whose body is a second manifest, each field's first
-  // and last byte (and byte 475) of each header set to each value in turn, the checksum made right again
+  // the sweep: header bytes set to each value in turn
   const hidden = file(PJ, MB);
   const base = Buffer.concat([file(PJ, MA), paxEntry({ path: 'package/zz.txt' }), header({ name: 'package/R.md', size: hidden.length }), hidden, END]);
   const FIELDS = [[0, 100], [100, 108], [108, 116], [116, 124], [124, 136], [136, 148], [156, 157], [157, 257], [257, 263], [263, 265], [265, 297], [297, 329], [329, 337], [337, 345], [345, 500], [500, 512]];
@@ -769,12 +770,10 @@ test('M6 wherever packManifest reads a pack, npm\'s own tar installs that manife
   for (let i = 0; i < swept.length; i++) if (sres[i].ok) { sread++; await agree(`the sweep, ${swept[i][0]}`, swept[i][1], sres[i]); }
   assert.ok(sread > 0 && sread < swept.length, `M6 the sweep reads some packs and refuses others (${sread} of ${swept.length})`);
 
-  // a pax path whose 2-, 3- or 4-byte character falls across a 16 KiB edge of the unzipped stream, before
-  // an entry whose ustar name is the manifest's, another file's, or a file the pack already holds
+  // a pax name npm's tar may drop
   const split = [];
   for (const ch of ['\u00e9', '\u20ac', '\u{1f600}']) for (const lead of [0, 1, 2, 3]) for (const ustar of [PJ, 'package/other.txt', 'package/x.js']) {
     const p = `package/d/${'a'.repeat(240)}/${'b'.repeat(240)}/${'c'.repeat(lead)}${ch.repeat(Math.floor(200 / Buffer.byteLength(ch)))}`;
-    // the pax header starts at 15360, so its body starts 512 bytes before the 16 KiB edge
     const filler = file('package/x.js', Buffer.alloc(15360 - 1024 - 512, 120));
     split.push([`the split pack (${Buffer.byteLength(ch)}-byte, ${lead}, ${ustar.slice(8)})`, tgz(file(PJ, MA), filler, paxEntry({ path: p }), file(ustar, MB)), { split: true, alt: { [p.slice(8)]: ustar.slice(8) } }]);
   }
