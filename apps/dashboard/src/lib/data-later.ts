@@ -5,14 +5,27 @@
 // kit-1061: a stub's "not ported: …" throw is a rejection already handled (a no-op catch on it), so a call nobody
 // awaits leaves no unhandled rejection while a caller that awaits still gets the error. Any other throw is left
 // unhandled, as before, so a real fault is still seen.
+// kit-1073: a stub's throw is an Error whose message is a string starting "not ported: ". An Error whose message
+// isn't a string is any other throw, and so is one whose test itself throws (a message getter, a Proxy's trap), so
+// later() never throws.
 export function later<A extends unknown[], R>(f: (...a: A) => R, ...args: A): Promise<Awaited<R>> {
   let r: R;
   try {
     r = f(...args);
   } catch (e) {
     const p: Promise<Awaited<R>> = Promise.reject(e);
-    if (e instanceof Error && e.message.startsWith('not ported: ')) p.catch(() => {});
+    if (stubThrow(e)) p.catch(() => {});
     return p;
   }
   return (async (): Promise<Awaited<R>> => await r)();
+}
+
+// e's message is read once, and typeof checked before it is matched.
+function stubThrow(e: unknown): boolean {
+  try {
+    const m = e instanceof Error ? e.message : undefined;
+    return typeof m === 'string' && m.startsWith('not ported: ');
+  } catch {
+    return false;
+  }
 }
