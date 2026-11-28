@@ -807,9 +807,12 @@ const SETTINGS_DEFAULTS = {
   // The default is "ask" so a project adopted before this setting keeps asking. The owner's.
   upstream_sync: 'adopt',
   upstream_check_hours: 24,
-  // The npm package kit releases are published as and an instance installs (kit-install@1), and
-  // whether the live alpha's /next/ pages are served (alpha@1). Both the owner's, read as main has them.
+  // The npm package kit releases are published as and an instance installs (kit-install@1), where they
+  // are installed from (kit-install@2: npm, or GitHub's release files until npm is set up; the default is
+  // npm and never changes), and whether the live alpha's /next/ pages are served (alpha@1). All three the
+  // owner's, read as main has them.
   package_name: '@sanctuarycomputer/devteam',
+  package_source: 'npm',
   alpha: true,
   retro_every_days: 7,
   research_every_days: 7,
@@ -824,7 +827,7 @@ const SETTINGS_DEFAULTS = {
 const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
   autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', responder_command: 'governance-edit', agent_trust_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
-  forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', merge_admin: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit', package_name: 'governance-edit', alpha: 'governance-edit',
+  forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', merge_admin: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit', package_name: 'governance-edit', package_source: 'governance-edit', alpha: 'governance-edit',
   release: 'governance-edit', secret_commands: 'governance-edit', incident_slots: 'governance-edit', remediations: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit', project: 'governance-edit',
 };
 // The supervisor's own settings the owner may ask for from the dashboard (an owner-setting act the
@@ -897,7 +900,8 @@ const SETTINGS_WORDS = Object.freeze({
   upstream_base: ['Upstream and releases', 'Kit release in use', 'the devteam release this project runs', 'value'],
   upstream_sync: ['Upstream and releases', 'Kit updates', 'adopt each release on its own, or ask you first', 'value'],
   upstream_check_hours: ['Upstream and releases', 'Check for kit releases every', 'hours between checks for a new devteam release', 'value'],
-  package_name: ['Upstream and releases', 'Kit package', 'the npm package devteam releases are published as and installed from', 'value'],
+  package_name: ['Upstream and releases', 'Kit package', 'the package devteam releases are published as and installed from', 'value'],
+  package_source: ['Upstream and releases', 'Kit package source', 'where kit releases are installed from: npm, or GitHub\'s release files until npm is set up', 'value'],
   alpha: ['Upstream and releases', 'Live alpha', 'whether the new apps are served at /next/ beside the stable pages', 'value'],
   release: ['Upstream and releases', 'How a release reaches production', 'a tag, a production branch, or every merge to main', 'value'],
   sensors: ['Production', 'Sensors', 'the production signals the supervisor reads', 'names'],
@@ -930,6 +934,7 @@ const SETTING_SHAPES = Object.freeze({
   // a scoped npm name, by a stricter rule than npm's own: @scope/name, each part lower-case letters,
   // digits, - . _ and starting with a letter, digit or -; at most 214 characters in all
   package_name: (v) => typeof v === 'string' && v.length <= 214 && /^@[a-z0-9-][a-z0-9._-]*\/[a-z0-9-][a-z0-9._-]*$/.test(v),
+  package_source: (v) => v === 'github' || v === 'npm',
   upstream_base: (v) => v === null || (typeof v === 'string' && /^v\d+\.\d+\.\d+$/.test(v)),
   main_branch: settingName, tmux_session: settingName, project: settingName,
   usage_sources: settingLines, ignored_checks: settingLines, split_files: settingLines, worktree_files: settingLines, worker_denied_commands: settingLines,
@@ -34798,6 +34803,47 @@ function cmdRecurring() {
 // test/lib/fake-registry.mjs (a loopback registry and an npm that keeps these rules or says which it saw
 // broken). packagePinPair is loaded alone by its test: it names nothing outside its body, and no line of
 // it is a bare closing brace but its last.
+// kit-install@2 (kit-1050, design kit-package-dist revision 4): a second source, GitHub's release files,
+// until npm is set up. Every kit-install@1 rule stays; this adds:
+// - The setting. package_source is github or npm, an owner setting (governance-edit) read from main's
+//   committed settings as package_name is. Its default is npm, and it never changes. Any other value is
+//   withheld, and what reads it checks it where it is used.
+// - The pair's GitHub form. packagePinPair takes resolved as the registry's tarball URL or as exactly
+//   https://github.com/<upstream_repo>/releases/download/v<version>/<pack>. <pack> is npm pack's file name:
+//   the name without its @, its / as -, then -<version>.tgz. Each part of the repository matches
+//   [A-Za-z0-9_.-]+ and is not only dots, and the string is compared whole. Only resolved differs between
+//   the forms; which repository is right is each caller's check against main's upstream_repo.
+// - githubAsset(url, kind) fetches one release asset (kind pack or bundle) in a child with an empty
+//   environment, through node's https with no agent. The url must be https://github.com/..., exactly its own
+//   href. It follows at most 5 redirects, each https, with no user or port, to github.com or a host ending
+//   in .githubusercontent.com. Each request has 15 s from its creation to its headers, and the whole call
+//   120 s (the child is killed at 130 s). The cap is 64 MiB for a pack and 1 MiB for a bundle: a larger
+//   length or body is refused, and a body cut short is never ok. It sends exactly user-agent devteam,
+//   accept application/octet-stream and accept-encoding identity, and no Authorization header or token,
+//   ever. It returns { ok, unreachable, unpublished, refused, why, bytes, url, redirects }: a 404 is
+//   unpublished; no answer in time, a network error, a 5xx or 429 is unreachable; any other answer is
+//   refused, by name. url is the last URL asked without its user, query or fragment (a signed query is a
+//   short-lived key), and no why names them either. GitHub's hosts are trusted for availability only: what the bytes are is checked by
+//   their pinned integrity and their signed bundle.
+// - Tests. DEVTEAM_GITHUB_DOWNLOAD, set and not empty, must be exactly http://127.0.0.1:<port>/ (as
+//   DEVTEAM_NPM_REGISTRY is), or githubAsset throws EDEVTEAMGITHUB before any request. Set, every rule
+//   above still holds over the https URLs; only the transport changes: https://github.com/<p> goes to
+//   <base><p> and https://<host>/<p> under githubusercontent.com to <base>-/githubusercontent/<host>/<p>.
+//   DEVTEAM_SIGSTORE_TEST_CA, a test trust root, is taken only beside a loopback DEVTEAM_NPM_REGISTRY or
+//   DEVTEAM_GITHUB_DOWNLOAD.
+// - packManifest(bytes) reads a pack's package/package.json in a child, as npm would install it. It takes
+//   only what npm pack writes (one whole gzip member, ustar headers in node-tar's own encoding, files,
+//   directories and pax path records) and refuses anything else, so an archive npm's reader could decode
+//   another way is refused, never misread. A pax-named entry is held to every rule under both of its names.
+//   It returns { ok, manifest: { name, version, layout, dependencies }, files, bins } or { ok: false,
+//   refused, why }: files is every file as { path, size, sha256 } and bins each key npm links in
+//   node_modules/.bin/ with its file. The name, version, layout and dependencies are each caller's check.
+// - The second check after install. Whoever installs a pack (kit-1054) then reads the installed tree
+//   without following links, and it must be exactly files and bins with that manifest; any difference
+//   refuses the install and removes it. So what lands is what packManifest read, whatever npm's reader did.
+// The fake GitHub is in test/lib/fake-registry.mjs, on the fake registry's port: each release's pack and
+// bundle (an attest-build-provenance bundle signed by the fake's test CA, with an inclusion proof and a
+// checkpoint) and the failures GITHUB_FAILURES names.
 function packagePinPair(pin) {
   const no = (why) => { throw new Error(`packagePinPair: ${why}`); };
   const KEYS = ['name', 'version', 'integrity', 'resolved', 'layout'];
@@ -34807,7 +34853,12 @@ function packagePinPair(pin) {
   if (typeof name !== 'string' || name.length > 214 || !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(name)) no('name is not an npm package name');
   if (typeof version !== 'string' || !/^(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})$/.test(version)) no('version is not X.Y.Z');
   if (typeof integrity !== 'string' || !/^sha512-[A-Za-z0-9+/]{86}==$/.test(integrity)) no('integrity is not one sha512');
-  if (resolved !== `https://registry.npmjs.org/${name}/-/${name.slice(name.indexOf('/') + 1)}-${version}.tgz`) no("resolved is not the public registry's tarball of name@version");
+  // kit-install@2: the registry's tarball, or the GitHub release asset of any <owner>/<repo> (each caller
+  // checks it is main's upstream_repo), its file npm pack's name; either compared as a whole string
+  const pack = `${name.replace(/^@/, '').replace('/', '-')}-${version}.tgz`;
+  const gh = typeof resolved === 'string' ? /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/releases\/download\//.exec(resolved) : null;
+  const ghOk = gh !== null && !/^\.+$/.test(gh[1]) && !/^\.+$/.test(gh[2]) && resolved === `https://github.com/${gh[1]}/${gh[2]}/releases/download/v${version}/${pack}`;
+  if (resolved !== `https://registry.npmjs.org/${name}/-/${name.slice(name.indexOf('/') + 1)}-${version}.tgz` && !ghOk) no("resolved is not the public registry's tarball of name@version, nor a GitHub release asset of it");
   if (layout !== 1 && layout !== 2) no('layout is not 1 or 2');
   const dependencies = { [name]: version };
   const text = (o) => `${JSON.stringify(o, null, 2)}\n`;
@@ -34815,6 +34866,228 @@ function packagePinPair(pin) {
     'package.json': text({ name: 'devteam-instance', private: true, dependencies, devteam: { layout } }),
     'package-lock.json': text({ name: 'devteam-instance', lockfileVersion: 3, requires: true, packages: { '': { name: 'devteam-instance', dependencies }, [`node_modules/${name}`]: { version, resolved, integrity } } }),
   };
+}
+// githubAsset (kit-install@2): one GitHub release asset, fetched in a child so its callers stay
+// synchronous. url is https://github.com/…; kind is 'pack' (at most 64 MiB) or 'bundle' (at most 1 MiB).
+// It returns { ok, unreachable, unpublished, refused, why, bytes, url, redirects } (the contract above
+// packagePinPair) and throws only for a DEVTEAM_GITHUB_DOWNLOAD that isn't a test's loopback origin (code
+// EDEVTEAMGITHUB). The child's code is a string whose every line is indented.
+function githubAsset(url, kind) {
+  const set = process.env.DEVTEAM_GITHUB_DOWNLOAD ?? '';
+  const port = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/$/.exec(set)?.[1];
+  if (set !== '' && !(Number(port) <= 65535)) {
+    const e = new Error(`DEVTEAM_GITHUB_DOWNLOAD is ${JSON.stringify(set.slice(0, 200))}: it may only be http://127.0.0.1:<port>/ (a test's fake GitHub), or unset for github.com`);
+    e.code = 'EDEVTEAMGITHUB';
+    throw e;
+  }
+  const base = { ok: false, unreachable: false, unpublished: false, refused: null, why: null, bytes: null, url: null, redirects: 0 };
+  // url and why name a URL without its userinfo, query or fragment (a signed query is a short-lived key)
+  const bare = (v) => { try { const x = new URL(v); x.username = ''; x.password = ''; x.search = ''; x.hash = ''; return x.href; } catch { return null; } };
+  const cut = (v) => JSON.stringify(String(v ?? '').replace(/[?#][^]*$/, '').replace(/^([a-z][a-z0-9+.-]*:[/][/])[^/@]*@/i, '$1')).slice(0, 200);
+  const max = kind === 'pack' ? 64 * 1024 * 1024 : kind === 'bundle' ? 1024 * 1024 : 0;
+  if (typeof kind !== 'string' || !max) return { ...base, refused: 'input', why: `kind ${cut(kind)} is not pack or bundle` };
+  let u = null;
+  if (typeof url === 'string' && url.length <= 2048) { try { u = new URL(url); } catch {} }
+  if (!u || u.href !== url || u.protocol !== 'https:' || u.hostname !== 'github.com' || u.username || u.password || u.port !== '') return { ...base, refused: 'url', why: `${cut(url)} is not an https URL on github.com` };
+  let dir;
+  try { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-github-')); } catch (e) { return { ...base, unreachable: true, url: bare(url), why: `can't make a folder under ${os.tmpdir()} to fetch into (${e.code ?? e.message})` }; }
+  const out = path.join(dir, 'asset');
+  const code = `
+    const https = require('node:https'), http = require('node:http'), fs = require('node:fs');
+    const [start, test, max, out] = ${JSON.stringify([url, set, max, out])};
+    let over = false;
+    const done = (r) => { if (over) return; over = true; process.stdout.write(JSON.stringify(r)); process.exit(0); };
+    setTimeout(() => done({ down: 'no whole answer in 120 s' }), 120000);
+    const ours = (u) => u.protocol === 'https:' && !u.username && !u.password && u.port === '' && (u.hostname === 'github.com' || /^([a-z0-9-]+\\.)+githubusercontent\\.com$/.test(u.hostname));
+    const where = (u) => (test === '' ? u : new URL(u.hostname === 'github.com' ? test + u.pathname.slice(1) + u.search : test + '-/githubusercontent/' + u.hostname + u.pathname + u.search));
+    let hops = 0;
+    const ask = (u) => {
+      const t = where(u);
+      const req = (t.protocol === 'https:' ? https : http).request(t, { method: 'GET', agent: false, headers: { 'user-agent': 'devteam', accept: 'application/octet-stream', 'accept-encoding': 'identity' } });
+      const head = setTimeout(() => { req.destroy(); done({ down: 'no answer in 15 s', url: u.href, hops }); }, 15000);
+      req.on('error', (e) => done({ down: String(e?.code ?? e?.message ?? 'error'), url: u.href, hops }));
+      req.on('response', (res) => {
+        clearTimeout(head);
+        const s = res.statusCode;
+        if ([301, 302, 303, 307, 308].includes(s)) {
+          res.resume();
+          const loc = res.headers.location;
+          let next = null;
+          try { if (typeof loc === 'string' && loc.length <= 2048) next = new URL(loc, u); } catch {}
+          if (!next || !ours(next)) return done({ refused: 'redirect', why: 'a ' + s + ' from ' + u.host + ' to ' + JSON.stringify(String(loc ?? '').replace(/[?#][^]*$/, '').replace(/^([a-z][a-z0-9+.-]*:[/][/])[^/@]*@/i, '$1')).slice(0, 200) + ', not an https URL on github.com or *.githubusercontent.com', url: u.href, hops });
+          if (++hops > 5) return done({ refused: 'redirects', why: 'more than 5 redirects', url: u.href, hops: 5 });
+          return ask(next);
+        }
+        if (s !== 200) { res.resume(); return done({ status: s, url: u.href, hops }); }
+        const len = res.headers['content-length'];
+        if (len !== undefined && Number(len) > max) { req.destroy(); return done({ refused: 'too-big', why: 'it declares ' + len + ' bytes, over ' + max, url: u.href, hops }); }
+        const fd = fs.openSync(out, 'w');
+        let n = 0;
+        res.on('data', (c) => { n += c.length; if (n > max) { req.destroy(); return done({ refused: 'too-big', why: 'it runs past ' + max + ' bytes', url: u.href, hops }); } fs.writeSync(fd, c); });
+        res.on('aborted', () => done({ down: 'the answer was cut off', url: u.href, hops }));
+        res.on('error', (e) => done({ down: String(e?.code ?? 'error'), url: u.href, hops }));
+        // a body shorter than its declared length is cut, whatever events node gave for it
+        res.on('end', () => { fs.closeSync(fd); if (len !== undefined && n !== Number(len)) return done({ down: 'the answer was cut off', url: u.href, hops }); done({ ok: true, url: u.href, hops, n }); });
+      });
+      req.end();
+    };
+    ask(new URL(start));`;
+  try {
+    const f = spawnSync(process.execPath, ['-e', code], { env: {}, encoding: 'utf8', timeout: 130000, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 1024 * 1024 });
+    let got = null;
+    try { got = JSON.parse(f.stdout); } catch {}
+    const at = { url: bare(got?.url ?? url), redirects: got?.hops ?? 0 };
+    if (!got) return { ...base, ...at, unreachable: true, why: `the fetch of ${cut(url)} gave no answer (${f.error?.code ?? f.signal ?? `exit ${f.status}`})` };
+    if (got.down) return { ...base, ...at, unreachable: true, why: `${cut(at.url)} can't be reached: ${got.down}` };
+    if (got.refused) return { ...base, ...at, refused: got.refused, why: `${cut(at.url)}: ${got.why}` };
+    if (got.status === 404) return { ...base, ...at, unpublished: true, why: `${cut(at.url)} is not there (404)` };
+    if (got.status === 429 || got.status >= 500) return { ...base, ...at, unreachable: true, why: `${cut(at.url)} answered ${got.status}` };
+    if (got.status !== undefined) return { ...base, ...at, refused: 'status', why: `${cut(at.url)} answered ${got.status}` };
+    const bytes = fs.readFileSync(out);
+    if (bytes.length !== got.n || bytes.length > max) return { ...base, ...at, unreachable: true, why: `the fetch of ${cut(at.url)} wrote ${bytes.length} bytes of ${got.n}` };
+    return { ...base, ...at, ok: true, bytes };
+  } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* a folder left in the temp folder changes no answer */ } }
+}
+// packManifest (kit-install@2): the pack's own package/package.json, read as npm installs it (the
+// contract above packagePinPair), in a child so the kit needs no zlib import. It returns { ok: true,
+// manifest: { name, version, layout, dependencies }, files: [{ path, size, sha256 }] (sorted, package/
+// dropped), bins: { <key>: <path> } (as npm links them) } or { ok: false, refused, why }, and throws
+// nothing. The file list is what a second check after install holds the installed tree to.
+// The child's code is a string whose every line is indented.
+function packManifest(bytes) {
+  const no = (refused, why) => ({ ok: false, refused, why });
+  if (!Buffer.isBuffer(bytes) || bytes.length === 0) return no('input', 'the pack is not bytes');
+  if (bytes.length > 64 * 1024 * 1024) return no('too-big', `the pack is ${bytes.length} bytes, over 64 MiB`);
+  const code = `
+    const zlib = require('node:zlib'), fs = require('node:fs'), crypto = require('node:crypto');
+    const MIB = 1024 * 1024;
+    // the answer is written whole before the exit: a queued pipe write would be dropped by it
+    const say = (o) => { const b = Buffer.from(JSON.stringify(o)); for (let i = 0; i < b.length;) { try { i += fs.writeSync(1, b, i); } catch (e) { if (e.code !== 'EAGAIN') throw e; } } process.exit(0); };
+    const no = (refused, why) => say({ ok: false, refused, why });
+    (() => {
+    let tar;
+    const input = fs.readFileSync(0);
+    let engine;
+    try { ({ buffer: tar, engine } = zlib.gunzipSync(input, { maxOutputLength: 256 * MIB, info: true })); } catch (e) { return e?.code === 'ERR_BUFFER_TOO_LARGE' ? no('too-big', 'the pack unzips to over 256 MiB') : no('gzip', 'the pack is not gzip'); }
+    // one gzip member, every byte of it read: a streaming reader (npm's) and this one then unzip the same bytes
+    if (engine.bytesWritten !== input.length) return no('gzip', 'the pack has bytes after its gzip data');
+    if (input.length < 18 || input.readUInt32LE(input.length - 4) !== tar.length) return no('gzip', 'the pack is not one gzip member');
+    // only what npm pack writes, field for field as node-tar's encoder does: ustar headers of type 0, 5 or
+    // pax x, every string field UTF-8 then NULs to its end, every number field octal as node-tar pads it,
+    // no link target, pax records of path, mtime and size only, names under package/ with no empty, . or
+    // .. component and no \ or :, the names directly under package/ ASCII. Read so, node-tar (strip 1,
+    // pacote's filter) decodes every entry as this walk does; anything else is refused
+    const strField = (b) => { const i = b.indexOf(0); const s = i < 0 ? b : b.subarray(0, i); if (i >= 0 && !b.subarray(i).every((x) => x === 0)) return null; const t = s.toString('utf8'); return Buffer.from(t, 'utf8').equals(s) && !/[\\u0000-\\u001f\\u007f]/.test(t) ? t : null; };
+    const numField = (b, empty) => { const t = b.toString('latin1'); if (empty && b.every((x) => x === 0)) return 0; const n = b.length; return new RegExp('^(?:[0-7]{' + (n - 1) + '}\\u0000|[0-7]{' + (n - 2) + '} \\u0000)$').test(t) ? parseInt(t.slice(0, n - 1).trim(), 8) : NaN; };
+    const cksField = (b) => { const t = b.toString('latin1'); return /^(?:[0-7]{6} \\u0000|[0-7]{6}\\u0000 |[0-7]{7}\\u0000)$/.test(t) ? parseInt(t.slice(0, 7).trim(), 8) : NaN; };
+    const paxRecords = (b) => {
+      const t = b.toString('utf8');
+      if (!Buffer.from(t, 'utf8').equals(b)) return null;
+      const kv = {};
+      for (let i = 0; i < b.length;) {
+        const m = /^([1-9][0-9]*) ([a-z]+)=/.exec(b.subarray(i, i + 64).toString('latin1'));
+        if (!m) return null;
+        const len = Number(m[1]);
+        if (i + len > b.length || b[i + len - 1] !== 10) return null;
+        const v = b.subarray(i + m[0].length, i + len - 1).toString('utf8');
+        if (m[2] === 'linkpath') return 'link';
+        if (v.includes('\\n') || v.includes('\\u0000') || kv[m[2]] !== undefined) return null;
+        if (m[2] === 'path' ? v === '' : m[2] === 'size' ? !/^(0|[1-9][0-9]*)$/.test(v) : m[2] === 'mtime' ? !/^[0-9]+(\\.[0-9]+)?$/.test(v) : true) return null;
+        kv[m[2]] = v;
+        i += len;
+      }
+      return kv;
+    };
+    let ex = null, zero = 0;
+    const entries = [];
+    const okName = (n, dir) => { const p = dir && n.endsWith('/') ? n.slice(0, -1) : n; const parts = p.split('/'); return parts[0] === 'package' && (dir || parts.length > 1) && parts.every((c) => c !== '' && c !== '.' && c !== '..' && !['node_modules', '.gitignore', '.npmignore'].includes(c.toLowerCase())) && !/[\\\\:]/.test(n) && (parts.length < 2 || /^[\\x20-\\x7e]+$/.test(parts[1])); };
+    for (let o = 0; o < tar.length;) {
+      if (o + 512 > tar.length) return no('tar', zero === 2 ? 'the archive is not whole blocks' : 'the archive ends before its two zero blocks');
+      const h = tar.subarray(o, o + 512);
+      if (zero === 2) { if (tar.subarray(o).every((x) => x === 0)) break; return no('tar', 'there is more after the archive\\'s end'); }
+      if (h.every((x) => x === 0)) { if (ex) return no('tar', 'a pax header with no entry after it'); zero++; o += 512; continue; }
+      if (zero) return no('tar', 'a lone zero block inside the archive');
+      let sum = 8 * 32;
+      for (let i = 0; i < 512; i++) if (i < 148 || i >= 156) sum += h[i];
+      if (cksField(h.subarray(148, 156)) !== sum) return no('tar', 'a header\\'s checksum is not as npm pack writes it, or does not hold');
+      if (h.subarray(257, 265).toString('latin1') !== 'ustar\\u000000') return no('tar', 'a header is not ustar');
+      const type = String.fromCharCode(h[156]);
+      if (!['0', '5', 'x'].includes(type)) return no('entry-type', 'an entry of type ' + JSON.stringify(type) + ', which npm pack does not write');
+      if (!h.subarray(157, 257).every((x) => x === 0)) return no('link', 'an entry carries a link target');
+      const f = { name: strField(h.subarray(0, 100)), uname: strField(h.subarray(265, 297)), gname: strField(h.subarray(297, 329)), prefix: strField(h.subarray(345, 500)) };
+      const n = { mode: numField(h.subarray(100, 108)), uid: numField(h.subarray(108, 116), true), gid: numField(h.subarray(116, 124), true), size: numField(h.subarray(124, 136)), mtime: numField(h.subarray(136, 148)), devmaj: numField(h.subarray(329, 337), true), devmin: numField(h.subarray(337, 345), true) };
+      if (Object.values(f).includes(null) || Object.values(n).some(Number.isNaN) || !h.subarray(500, 512).every((x) => x === 0) || (f.name === '' && type === 'x')) return no('tar', 'a header field is not as npm pack writes it');
+      let size = n.size;
+      if (type === 'x') {
+        if (ex) return no('tar', 'two pax headers in a row');
+        if (size > MIB) return no('too-big', 'a pax record is over 1 MiB');
+        if (o + 512 + size > tar.length) return no('tar', 'the archive ends inside an entry');
+        const kv = paxRecords(tar.subarray(o + 512, o + 512 + size));
+        if (kv === 'link') return no('link', 'a pax record carries a link target');
+        if (!kv) return no('tar', 'a pax record is not one npm pack writes (path, mtime, size)');
+        ex = kv;
+        o += 512 + Math.ceil(size / 512) * 512;
+        continue;
+      }
+      // a pax record can fail to apply in another decoder, which then keeps the ustar name: so both
+      // names are held to every rule
+      const ustar = f.prefix ? f.prefix + '/' + f.name : f.name;
+      let name = ustar;
+      if (ex && ex.size !== undefined && Number(ex.size) !== size) return no('tar', 'a pax size differs from its header\\'s');
+      if (ex && ex.path !== undefined) name = ex.path;
+      ex = null;
+      if (type === '5' ? size !== 0 : name.endsWith('/')) return no('tar', JSON.stringify(name).slice(0, 200) + ' is a directory with a size, or a file named as a directory');
+      if (!okName(name, type === '5') || !okName(ustar, type === '5')) return no('name', JSON.stringify(okName(name, type === '5') ? ustar : name).slice(0, 200) + ' is not a plain path under package/');
+      if (o + 512 + size > tar.length) return no('tar', 'the archive ends inside an entry');
+      entries.push({ name, ustar, type, size, at: o + 512 });
+      o += 512 + Math.ceil(size / 512) * 512;
+    }
+    if (zero < 2) return no('tar', 'the archive ends before its two zero blocks');
+    const seen = new Set();
+    const key = (n) => (n.endsWith('/') ? n.slice(0, -1) : n).normalize('NFC').toLowerCase();
+    const folders = new Set();
+    const names = (e) => (e.ustar !== e.name ? [e.name, e.ustar] : [e.name]);
+    for (const e of entries) for (const n of names(e)) { const p = key(n).split('/'); for (let i = 1; i < p.length; i++) folders.add(p.slice(0, i).join('/')); if (e.type === '5') folders.add(p.join('/')); }
+    for (const e of entries) { if (e.type === '0' && names(e).some((n) => folders.has(key(n)))) return no('duplicate', JSON.stringify(e.name).slice(0, 200) + ' is a file and also a folder of the pack'); }
+    for (const e of entries) { if (e.type !== '0') continue; for (const k of new Set(names(e).map(key))) { if (seen.has(k)) return no(k === 'package/package.json' ? 'two-manifests' : 'duplicate', JSON.stringify(e.name).slice(0, 200) + ' is in the pack twice (or twice but for case)'); seen.add(k); } }
+    const isManifest = (n) => n.replace(/\\/$/, '').replace(/[A-Z]/g, (c) => c.toLowerCase()) === 'package/package.json';
+    const found = entries.filter((e) => isManifest(e.name) || isManifest(e.ustar));
+    if (found.length === 0) return no('no-manifest', 'the pack holds no package/package.json');
+    if (found.length > 1) return no('two-manifests', 'the pack holds ' + found.length + ' entries npm would install as package.json');
+    const m = found[0];
+    if (m.name !== 'package/package.json' || m.ustar !== m.name || m.type === '5') return no('manifest-path', 'the one manifest is ' + JSON.stringify(m.name).slice(0, 200) + ' of type ' + m.type + ', not the file package/package.json');
+    if (m.size > MIB) return no('too-big', 'package/package.json is over 1 MiB');
+    let pkg = null;
+    try { pkg = JSON.parse(tar.subarray(m.at, m.at + m.size).toString('utf8')); } catch {}
+    if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) return no('json', 'package/package.json is not a JSON object');
+    // a bin npm links (node_modules/.bin/<key>) and rewrites only when its first line ends in CRLF: each
+    // target a file of the pack whose first line doesn't, each key a plain name; directories.bin is refused
+    if (pkg.directories && typeof pkg.directories === 'object' && Object.prototype.hasOwnProperty.call(pkg.directories, 'bin')) return no('bin', 'package/package.json names directories.bin');
+    const binsOut = {}, binKeys = new Set();
+    if (Object.prototype.hasOwnProperty.call(pkg, 'bin')) {
+      const bins = typeof pkg.bin === 'string' && typeof pkg.name === 'string' ? { [pkg.name.replace(/^@[^/]+\\//, '')]: pkg.bin } : pkg.bin;
+      if (!bins || typeof bins !== 'object' || Array.isArray(bins)) return no('bin', 'package/package.json\\'s bin is not a path or an object of paths');
+      for (const [k, v] of Object.entries(bins)) {
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(k) || typeof v !== 'string') return no('bin', 'a bin ' + JSON.stringify(k).slice(0, 80) + ' is not a plain name and a path');
+        const target = entries.find((e) => e.type === '0' && e.name === 'package/' + v.replace(/^\\.\\//, ''));
+        if (!target) return no('bin', 'the bin ' + k + ' is not a file of the pack');
+        if (binKeys.has(k.toLowerCase())) return no('bin', 'two bins are named ' + k + ' but for case');
+        binKeys.add(k.toLowerCase()); binsOut[k] = target.name.slice('package/'.length);
+        const head = tar.subarray(target.at, target.at + Math.min(target.size, 4096));
+        const nl = head.indexOf(10);
+        if (head[0] === 35 && head[1] === 33 && nl > 0 && head[nl - 1] === 13) return no('bin', 'the bin ' + k + '\\'s first line ends in CRLF, which npm rewrites on install');
+      }
+    }
+    const KINDS = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies', 'bundleDependencies', 'bundledDependencies'];
+    const dependencies = Object.fromEntries(KINDS.filter((k) => Object.prototype.hasOwnProperty.call(pkg, k)).map((k) => [k, pkg[k]]));
+    const files = entries.filter((e) => e.type === '0').map((e) => ({ path: e.name.slice('package/'.length), size: e.size, sha256: crypto.createHash('sha256').update(tar.subarray(e.at, e.at + e.size)).digest('hex') })).sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0));
+    say({ ok: true, manifest: { name: pkg.name ?? null, version: pkg.version ?? null, layout: pkg.devteam?.layout ?? null, dependencies }, files, bins: binsOut });
+    })();`;
+  const f = spawnSync(process.execPath, ['-e', code], { input: bytes, env: {}, encoding: 'utf8', timeout: 60000, killSignal: 'SIGKILL', stdio: ['pipe', 'pipe', 'pipe'], maxBuffer: 4 * 1024 * 1024 });
+  let got = null;
+  try { got = JSON.parse(f.stdout); } catch {}
+  if (!got || typeof got.ok !== 'boolean') return no('reader', `the pack reader gave no answer (${f.error?.code ?? f.signal ?? `exit ${f.status}`})`);
+  return got.ok ? { ok: true, manifest: got.manifest, files: got.files, bins: got.bins } : no(got.refused, got.why);
 }
 // npmRun (kit-install@1): the one function every kit npm call goes through. It runs `npm <args>` in cwd
 // (absolute) with --registry=<the registry>, --ignore-scripts, --prefix=<cwd> and --workspaces=false

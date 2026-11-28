@@ -84,7 +84,7 @@ if (!SKIP && made.status === 0) {
   assert.equal(init.status, 0, `the source's init makes a project: ${init.stderr}`);
   for (const f of ['.gitignore', '.gitleaks.toml', 'AGENTS.md', 'docs/devteam/project']) fs.cpSync(path.join(SRC, f), path.join(KIT, f), { recursive: true });
   for (const a of [['init', '-q'], ['add', '-A'], ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'x']]) git(KIT, ...a);
-  ({ packagePinPair: pinPair, packagePrune: prune } = await import(pathToFileURL(path.join(KIT, 'docs/devteam/scripts/lib/recurring.mjs')).href));
+  ({ packagePinPair: pinPair, packagePrune: prune } = await import(pathToFileURL(path.join(KIT, 'docs/devteam/scripts/lib/package.mjs')).href));
 }
 
 // ---- a hub tree under a scratch HOME ----

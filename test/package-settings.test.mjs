@@ -128,3 +128,64 @@ test('the Settings page: each named in plain words, owner-only, and only a value
     }
   } finally { F.done(); }
 });
+
+// ---- kit-install@2 (kit-1050): package_source, github or npm, default npm --------------------------
+
+test('S1 a fresh instance reads package_source npm, and main\'s github is read as github', () => {
+  const F = fleetFixture('pkg-source-default');
+  try {
+    assert.equal(get(F, 'package_source'), 'npm', 'S1 the default is npm');
+    editSettings(F.old, (j) => { j.package_source = 'github'; });
+    assert.equal(get(F, 'package_source'), 'npm', 'S1 a working-tree edit is not read: main has npm');
+    F.g(['checkout', '-q', '--', SETTINGS], F.old);
+    onMain(F, (j) => { j.package_source = 'github'; });
+    assert.equal(get(F, 'package_source'), 'github', 'S1 github set on main is read');
+  } finally { F.done(); }
+});
+
+test('S2 a chore that changes package_source merges only with an answered governance-edit question', () => {
+  const F = fleetFixture('pkg-source-merge');
+  const { old, ok, run } = F;
+  try {
+    chore(F, 'pkgsource', (j) => { j.package_source = 'github'; });
+    const merge = (...extra) => { const r = run(old, ['merge', '--chore', 'pkgsource', '--dry-run', ...extra], SUP); return { status: r.status, text: r.out + r.err }; };
+    const ask = (cls) => { const q = ok(old, ['ask', '--question', 'Install the kit from GitHub until npm is set up?', '--recommendation', 'yes', '--class', cls, '--reasons', 'owner-only'], SUP); ok(old, ['answer', q, 'yes']); return q; };
+    const none = merge();
+    assert.notEqual(none.status, 0, 'S2 refused without --approved');
+    assert.match(none.text, /changes owner settings: package_source \(governance-edit\)/, 'S2 named as the owner\'s');
+    assert.notEqual(merge('--approved', ask('gate-change')).status, 0, 'S2 a gate-change answer does not approve it');
+    const r = merge('--approved', ask('governance-edit'));
+    assert.equal(r.status, 0, `S2 a governance-edit answer approves it: ${r.text}`);
+  } finally { F.done(); }
+});
+
+test('S3 the Settings page names package_source and shows only github and npm', () => {
+  const F = fleetFixture('pkg-source-page');
+  try {
+    const all = () => JSON.parse(F.ok(F.old, ['dashboard-data'])).settings_all;
+    const entry = (k) => { const e = all().find((x) => x.key === k); assert.ok(e, `S3 an entry for ${k}`); return e; };
+    let e = entry('package_source');
+    assert.ok(e.name && !e.name.startsWith('Unnamed setting'), 'S3 package_source has a name in words');
+    assert.ok(e.description && e.description.length <= 140 && !/\n/.test(e.description), 'S3 a one-line description');
+    assert.equal(e.group, 'Upstream and releases', 'S3 its group');
+    assert.equal(e.owner_only, 'governance-edit', 'S3 it is the owner\'s');
+    assert.deepEqual([e.value, e.withheld, e.default], ['npm', undefined, 'npm'], 'S3 the default npm shows');
+    onMain(F, (j) => { j.package_source = 'github'; });
+    e = entry('package_source');
+    assert.deepEqual([e.value, e.withheld], ['github', undefined], 'S3 github shows');
+    for (const bad of ['GitHub', 'NPM', 'git', 'registry', '', 'npm ', 'github\n', true, 1, null, ['npm'], {}]) {
+      onMain(F, (j) => { j.package_source = bad; });
+      e = entry('package_source');
+      assert.deepEqual([e.value, e.withheld], [null, true], `S3 package_source ${JSON.stringify(bad)} is withheld`);
+    }
+  } finally { F.done(); }
+});
+
+test('S4 package_name\'s words no longer say npm: the package comes from npm or GitHub', () => {
+  const F = fleetFixture('pkg-name-words');
+  try {
+    const pn = JSON.parse(F.ok(F.old, ['dashboard-data'])).settings_all.find((x) => x.key === 'package_name');
+    assert.ok(pn, 'S4 an entry for package_name');
+    assert.doesNotMatch(`${pn.name} ${pn.description}`, /npm/i, 'S4 package_name\'s words no longer say npm');
+  } finally { F.done(); }
+});
