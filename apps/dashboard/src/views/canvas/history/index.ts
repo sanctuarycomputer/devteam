@@ -1,62 +1,22 @@
-// apps-src@1 view stub: canvas-history
-// Its port replaces this folder. Until then every function another part of the canvas calls from it, and every binding it shares (on `shared`), throws "not ported: canvas-history".
+// canvas-history (kit-1017): undo, copy and paste, the image and the pen (canvas.html 3573-4451), as
+// modules. Every declaration of each is exported from here, for core and the other sections; `shared`
+// holds the binding other sections read and change (kit-1013's rule: `history.shared.<name>`).
+import { initUndo } from './undo';
+import { initPaste } from './paste';
+import { initImage } from './image';
+import { initPen } from './pen';
 
-export function coalesceEntry(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-history');
+export * from './held';
+export * from './undo';
+export * from './paste';
+export * from './image';
+export * from './pen';
+
+// Its load-time setup: the page's listeners of these lines, in its order. mount() runs it once, after
+// panels', sync's and editing's, before presence's and start().
+export function init(): void {
+  initUndo();
+  initPaste();
+  initImage();
+  initPen();
 }
-
-export function copy(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-history');
-}
-
-export function dragEntry(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-history');
-}
-
-export function drawPen(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-history');
-}
-
-export function dropPen(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-history');
-}
-
-export function finishPen(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-history');
-}
-
-export function makeEntry(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-history');
-}
-
-export function penPoint(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-history');
-}
-
-export function pushEntry(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-history');
-}
-
-export function same(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-history');
-}
-
-export function stored(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-history');
-}
-
-export function subtreeIds(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-history');
-}
-
-export function undo(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-history');
-}
-
-export const shared = {
-  get undos(): any { throw new Error('not ported: canvas-history'); },
-  set undos(_v: any) { throw new Error('not ported: canvas-history'); },
-};
-
-// Its load-time setup (listeners), run once by the page mount before start().
-export function init(): void {}
