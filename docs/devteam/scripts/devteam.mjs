@@ -748,6 +748,9 @@ const SETTINGS_DEFAULTS = {
   next_move_stall_hours: 24,
   tick_minutes: 15,
   question_default_after_hours: 24,
+  // Days a question only the owner can answer (no default) may hold up work before hello's alert
+  // names it, so it reaches the owner's devices and not only the supervisor's reminders.
+  owner_absence_days: 2,
   // fix tickets that may run past max_active_tickets, so an incident never waits for a slot
   incident_slots: 1,
   autonomy_ceilings: {},
@@ -890,6 +893,7 @@ const SETTINGS_WORDS = Object.freeze({
   autonomy_ceilings: ['Merging and checks', 'Autonomy ceilings', "the highest level the supervisor may reach for a kind of decision, below the kit's", 'value'],
   hold_review_days: ['Merging and checks', 'Parked goal review', 'days a goal stays parked before the owner is asked about it again', 'value'],
   question_default_after_hours: ['Questions and findings', 'A default applies after', 'hours before a question with a default takes it', 'value'],
+  owner_absence_days: ['Questions and findings', 'Alert on a waiting question after', 'days a question with no default may hold up work before the hub alerts you', 'value'],
   finding_ack_hours: ['Questions and findings', 'A finding set aside for', 'hours a set-aside finding stays quiet, unless its subject changes; a merge on a main stays set aside for good', 'value'],
   next_move_owed_minutes: ['Questions and findings', 'A move owed after', "minutes a next move the supervisor holds may wait before it is owed", 'value'],
   next_move_stall_hours: ['Questions and findings', 'A move stalled after', 'hours any next move may stay the same before it is stalled, whoever holds it', 'value'],
@@ -917,7 +921,7 @@ const settingNum = (v) => v === null || Number.isFinite(v);
 const settingName = (v) => v === null || (typeof v === 'string' && /^[A-Za-z0-9._/-]{1,100}$/.test(v));
 const settingLines = (v) => Array.isArray(v) && v.every((s) => typeof s === 'string' && s.length <= 100 && !UNSAFE_TEXT.test(s));
 const SETTING_SHAPES = Object.freeze({
-  ...Object.fromEntries(['max_active_tickets', 'max_active_per_component', 'max_active_planners', 'machine_memory_ceiling', 'browser_idle_minutes', 'tick_minutes', 'stale_after_minutes', 'dashboard_port', 'slow_gate_minutes', 'hold_review_days', 'question_default_after_hours', 'finding_ack_hours', 'next_move_owed_minutes', 'next_move_stall_hours', 'upstream_check_hours', 'incident_slots', 'retro_every_days', 'research_every_days'].map((k) => [k, settingNum])),
+  ...Object.fromEntries(['max_active_tickets', 'max_active_per_component', 'max_active_planners', 'machine_memory_ceiling', 'browser_idle_minutes', 'tick_minutes', 'stale_after_minutes', 'dashboard_port', 'slow_gate_minutes', 'hold_review_days', 'question_default_after_hours', 'owner_absence_days', 'finding_ack_hours', 'next_move_owed_minutes', 'next_move_stall_hours', 'upstream_check_hours', 'incident_slots', 'retro_every_days', 'research_every_days'].map((k) => [k, settingNum])),
   merge_admin: (v) => typeof v === 'boolean',
   responder: (v) => typeof v === 'boolean',
   session_threads: (v) => typeof v === 'boolean',
@@ -38502,8 +38506,37 @@ const helloAlert = (() => {
     if (!(q?.looks >= SUPERVISOR_QUIET_LOOKS)) return null;
     return `supervisor-quiet: the supervisor of ${loadSettings().project ?? path.basename(mainRoot)} has not run wait for ${Number(q.min) || 0} min while ${String(q.owed ?? 'a move').slice(0, 120)} is owed (${plural(Number(q.nudged) || 0, 'nudge')} typed): look at its terminal`;
   };
-  return () => (memo !== undefined ? memo : (memo = [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, quiet(), undelivered(), boxAlert()].filter(Boolean).join(' · ') || null));
+  return () => (memo !== undefined ? memo : (memo = [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, quiet(), undelivered(), ownerAbsent(), boxAlert()].filter(Boolean).join(' · ') || null));
 })();
+// A question with no default stops the work behind it until the owner answers; the supervisor can
+// only remind (owner-question-waiting), and the hub's pulse says "blocked" to someone already
+// looking. Past owner_absence_days the alert names it, so it is pushed to the owner's devices. Only
+// a louder notice: nothing about the question changes, and it clears once answered or withdrawn.
+// What it holds up, from the log as the pulse reads it: a live ticket it is asked for or blocks
+// (T3), an open incident it blocks, the goal of a goal-met question (G4) or a draft goal's question
+// (G5), a plan branch it links (P1). A planner waiting on a question about its goal alone isn't counted:
+// telling needs git per plan branch, and hello stays cheap. A goal on hold waits by choice.
+function ownerAbsent() {
+  const days = moveSetting('owner_absence_days');
+  const now = Date.now();
+  const ts = tickets();
+  const liveTicket = (id) => { const t = ts.get(id); return !!t && isActive(t) && !mergeShaFor(id) && !['park', 'let-go'].includes(ticketMode(t)); };
+  const openGoal = (id) => { const g = logGet(id); return g?.type === 'goal' && ['draft', 'ready'].includes(g.status) && !['park', 'let-go'].includes(goalMode(g)); };
+  const waiting = questions().filter((q) => q.status === 'open' && !q.goal_hold && q.default == null && now - Date.parse(q.asked_at) > days * 86400000).map((q) => {
+    const named = [...new Set([q.ticket, ...(q.blocks ?? [])].filter(Boolean))];
+    const goal = q.goal && (q.class === 'goal-met' || logGet(q.goal)?.status === 'draft') ? [q.goal] : [];
+    const plans = (q.links ?? []).some((l) => /^(refs\/heads\/)?plan\//.test(String(l?.ref ?? '')));
+    const incidents = named.filter((id) => { const p = logGet(id); return isIncident(p) && p.status !== 'resolved'; }).length;
+    return { q, tickets: named.filter(liveTicket).length, goals: new Set([...named, ...goal].filter(openGoal)).size, incidents, plans };
+  }).filter((x) => x.tickets || x.goals || x.incidents || x.plans).sort((a, b) => a.q.asked_at.localeCompare(b.q.asked_at));
+  if (!waiting.length) return null;
+  const [x] = waiting;
+  const n = (k, w) => `${k} ${w}${k === 1 ? '' : 's'}`;
+  const holds = [x.tickets ? n(x.tickets, 'ticket') : null, x.goals ? n(x.goals, 'goal') : null, x.incidents ? n(x.incidents, 'incident') : null].filter(Boolean).join(' and ') || 'a plan';
+  const waited = Math.floor((now - Date.parse(x.q.asked_at)) / 86400000);
+  const text = String(x.q.question ?? '').replace(/\s+/g, ' ').trim();
+  return `A question has waited on you ${waited >= 1 ? n(waited, 'day') : 'under a day'} and blocks ${holds}: ${text.length > 80 ? `${text.slice(0, 80).trimEnd()}…` : text} (${x.q.id}${waiting.length > 1 ? `, and ${waiting.length - 1} more` : ''})`;
+}
 // A hello's alert, less the box's alert folded in at its end: the project's own part, or null. Matched
 // as the whole alert or a " · " suffix, never split, so a box alert holding " · " still comes off.
 function alertLessBox(alert, box) {
