@@ -120,7 +120,10 @@ test('fast threads end to end (kit-107)', { skip: NO_TMUX, timeout: 290000 }, as
     const sf = path.join(F.old, 'docs/devteam/project/settings.md');
     const text = fs.readFileSync(sf, 'utf8');
     const block = /```json devteam\s*\n([\s\S]*?)\n```/.exec(text);
-    fs.writeFileSync(sf, text.replace(block[1], JSON.stringify({ ...JSON.parse(block[1]), responder_command: `${process.execPath} ${STUB}` }, null, 2)));
+    // stale_after_minutes stretched: the fixture's hand-written lines start an hour back and no
+    // worker or planner runs, so fleet-idle (high past twice the threshold) would wake every wait
+    // these cases start; an idle fleet is fleet-idle.test.mjs's
+    fs.writeFileSync(sf, text.replace(block[1], JSON.stringify({ ...JSON.parse(block[1]), responder_command: `${process.execPath} ${STUB}`, stale_after_minutes: 600 }, null, 2)));
     F.g(['commit', '-qam', 'settings: responder_command'], F.old);
     F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
     assert.equal(F.tmux(['new-session', '-d', '-x', '220', '-y', '50', '-s', F.session, '-n', 'hold', `${process.execPath} -e "setInterval(()=>{},1000)"`]).status, 0);

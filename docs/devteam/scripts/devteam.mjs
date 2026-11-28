@@ -21017,9 +21017,12 @@ function collectMetrics(since, reviewsSince = 0) {
   // log's first line when no session has ever run. A worker or planner counts as running only
   // while it is alive: its window open with an agent in it, and a sign of life within
   // stale_after_minutes, or waiting on the supervisor (a worker at awaiting-word or with a message
-  // to it unanswered, a planner with one): that wait is waiting-on-supervisor's to speak for, and a
-  // high fleet-idle beside it would wake every wait on a fleet that only waits on its reviews. A
-  // worker or planner waiting on an owner answer doesn't count. A plan branch
+  // to it unanswered, a planner with one): that wait has its own finding (waiting-on-supervisor
+  // after an hour at awaiting-word, unanswered-message after 30 min), and a high fleet-idle beside
+  // it would wake every wait on a fleet that only waits on its reviews. A planner whose pane is at
+  // work (a long think) is running too, as the planner rows read it, and so is one stopped at a
+  // prompt or a limit banner, which blocked-prompt (high) speaks for. A worker or planner waiting on
+  // an owner answer doesn't count. A plan branch
   // left behind, a design parked on the owner's approval, or a session idle at its prompt for hours
   // is the stuck fleet this finding is for: a window alone kept it quiet however long nothing moved.
   // stale_after_minutes (30 by default, two quiet ticks at the default tick_minutes): the silence
@@ -21034,7 +21037,7 @@ function collectMetrics(since, reviewsSince = 0) {
   // a worker's window asked of tmux itself: windowGone reads a missing session as unknown, not gone
   const aliveWorker = (t) => countsAsWorker(t) && (freshly(workerState(t.id)?.minutes_silent) || onSupervisor(t.id)) && !!resolvePane(tmuxTarget(t.id)).target;
   // a planner: plannerDown's alive (a window, and a sign of life within stale_after_minutes, a wait
-  // on the supervisor, or its pane at work), less one waiting on the owner
+  // on the supervisor, its pane at work, or a prompt in it), less one waiting on the owner
   const alivePlanner = (p) => !p.parked && p.window && !p.waiting_on_owner.length && !plannerDown(p);
   if (!drained && !fleetMode() && !spoken && ![...ts.values()].some(aliveWorker) && !planners().some(alivePlanner)) {
     const lines = readLog().lines;

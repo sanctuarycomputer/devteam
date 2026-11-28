@@ -75,6 +75,16 @@ test('fleet-idle: an unparked fleet with no session for half an hour says what t
         const g = idle();
         assert.ok(g, 'a planner with its window open, silent past stale_after_minutes, is not running');
         assert.equal(g.severity, 'high');
+        // the same planner silent as long, its pane at work (a long think): running, as the planner
+        // rows read it (plannerDown); and one stopped at a prompt: blocked-prompt speaks for it
+        const pane = (cmd) => assert.equal(tmux(['respawn-pane', '-k', '-t', `=${s}:plan-left`, cmd]).status, 0);
+        pane(`sh -c 'echo "* Thinking (esc to interrupt)"; exec sleep 600'`);
+        assert.equal(idle(), undefined, 'a planner whose pane is at work is running');
+        pane(`sh -c 'echo "Do you want to proceed?"; exec sleep 600'`);
+        assert.equal(idle(), undefined, 'a planner at a prompt: blocked-prompt, not fleet-idle');
+        assert.ok(json(ok(old, ['metrics', '--json'])).findings.some((x) => x.kind === 'blocked-prompt' && x.subject === 'plan-left' && x.severity === 'high'), 'blocked-prompt is raised, high');
+        pane('sleep 600');
+        assert.ok(idle(), 'idle at its prompt again');
         // its branch moved a moment ago: alive, with its window open
         planAt('plan/left', 60000);
         assert.equal(idle(), undefined, 'a planner with its window open that wrote a minute ago is running');
