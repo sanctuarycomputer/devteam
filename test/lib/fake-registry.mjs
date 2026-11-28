@@ -307,6 +307,7 @@ function attestations(p, fail, state) {
 //   redirect-http        it goes to http://release-assets.githubusercontent.com/…
 //   redirect-lookalike   it goes to https://githubusercontent.com.evil.example/…
 //   redirect-loopback    it goes to the fake's own http://127.0.0.1:<port>/…
+//   redirect-suffix      it goes to https://evilgithubusercontent.com/…
 //   big-pack             the pack is 64 MiB and one byte, chunked, with no content-length
 //   big-bundle           the bundle declares a content-length of 1 MiB and one byte
 //   bundle-at-cap        the bundle is exactly 1 MiB (its JSON padded with spaces)
@@ -314,7 +315,7 @@ function attestations(p, fail, state) {
 //   short-body           the pack declares its length, sends half of it, and closes the connection
 // FORGERIES apply to the bundle as to npm's; no-slsa serves npm's publish attestation as the asset, so
 // its predicateType isn't SLSA's.
-export const GITHUB_FAILURES = ['no-asset', 'no-bundle', 'digest', 'repo', 'workflow', 'ref', 'commit', 'inclusion-proof', 'checkpoint-key', 'checkpoint-root', 'checkpoint-size', 'checkpoint-origin', 'no-inclusion-proof', 'two-subjects', 'replaced', 'rate-limited', 'forbidden', 'no-answer', 'drip', 'hops-5', 'hops-6', 'redirect-elsewhere', 'redirect-http', 'redirect-lookalike', 'redirect-loopback', 'big-pack', 'big-bundle', 'bundle-at-cap', 'pack-at-cap', 'short-body'];
+export const GITHUB_FAILURES = ['no-asset', 'no-bundle', 'digest', 'repo', 'workflow', 'ref', 'commit', 'inclusion-proof', 'checkpoint-key', 'checkpoint-root', 'checkpoint-size', 'checkpoint-origin', 'no-inclusion-proof', 'two-subjects', 'replaced', 'rate-limited', 'forbidden', 'no-answer', 'drip', 'hops-5', 'hops-6', 'redirect-elsewhere', 'redirect-http', 'redirect-lookalike', 'redirect-loopback', 'redirect-suffix', 'big-pack', 'big-bundle', 'bundle-at-cap', 'pack-at-cap', 'short-body'];
 // the log's name in its checkpoints (the trust root's rekor.name), its tree, and where the entry sits:
 // Rekor v1's inclusion proof indexes the entry in its shard (SHARD_INDEX, in a tree of TREE_SIZE leaves,
 // so the proof has inner and border hashes), while logIndex and the signed entry timestamp use the global
@@ -406,7 +407,7 @@ function github(req, res, p, state, pkgs) {
   const asset = (h, hop) => `https://${h}/${hop ? `hop/${hop}/` : ''}github-production-release-asset/${version}/${file}?sig=x`;
   if (dl) {
     if ((gf === 'no-asset' && kind === 'pack') || (gf === 'no-bundle' && kind === 'bundle')) { send(404, { 'content-type': 'text/plain' }, 'Not Found'); return true; }
-    const to = { 'redirect-elsewhere': `https://evil.example/${version}/${file}`, 'redirect-http': asset('release-assets.githubusercontent.com').replace('https:', 'http:'), 'redirect-lookalike': `https://githubusercontent.com.evil.example/${version}/${file}`, 'redirect-loopback': `http://${host}${STAND}release-assets.githubusercontent.com/github-production-release-asset/${version}/${file}` }[gf]
+    const to = { 'redirect-elsewhere': `https://evil.example/${version}/${file}`, 'redirect-http': asset('release-assets.githubusercontent.com').replace('https:', 'http:'), 'redirect-lookalike': `https://githubusercontent.com.evil.example/${version}/${file}`, 'redirect-suffix': `https://evilgithubusercontent.com/${version}/${file}`, 'redirect-loopback': `http://${host}${STAND}release-assets.githubusercontent.com/github-production-release-asset/${version}/${file}` }[gf]
       ?? (gf === 'hops-5' || gf === 'hops-6' ? asset('hop1.githubusercontent.com', 1) : asset('release-assets.githubusercontent.com'));
     send(302, { location: to }, '');
     return true;
