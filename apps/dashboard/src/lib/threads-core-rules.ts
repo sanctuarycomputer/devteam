@@ -4,7 +4,8 @@
 // threadsCoreState.<name> for the 11 names views/threads-core/state.ts holds, threadsPanelState.TL,
 // peeksState.DRAWER (peeks reassigns it) and autonomyState.GOV. Pure: no import but one type, nothing run at
 // load but the block's own values (TextEncoder, RegExp, String.raw), compiled to lib-dist/lib/threads-core-rules.js
-// for the kit's tests. views/threads-core/wire.ts wires it once; the tests wire threadsCoreState alone, and then
+// for the kit's tests. Added before the block's lines: ThreadsCoreWire, the 8 bindings it fills and
+// wireThreadsCore. views/threads-core/wire.ts wires it once; the tests wire threadsCoreState alone, and then
 // it acts as the block did loaded by itself (no TL, govBlockAt, who, tNoteState or avRecipient).
 import type { threadsCoreState as ThreadsCoreState } from '../views/threads-core/state';
 
