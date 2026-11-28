@@ -26,8 +26,8 @@ const NAME = ['@sanctuarycomputer', 'devteam'];
 
 // the hub page's policy, as it is before this ticket (literal), and the alpha's from it
 const FRAMES = Array.from({ length: 25 }, (_, i) => `http://127.0.0.1:${PORTS + 1 + i}`).join(' ');
-const HUB_CSP = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src ${FRAMES}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
-const alphaPolicy = (route) => `default-src 'none'; script-src 'self' ${HASHES[route].map((h) => `'${h}'`).join(' ')}; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-src ${FRAMES}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; font-src 'self'; img-src 'self' data:`;
+const HUB_CSP = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; manifest-src 'self'; frame-src ${FRAMES}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
+const alphaPolicy = (route) => `default-src 'none'; script-src 'self' ${HASHES[route].map((h) => `'${h}'`).join(' ')}; style-src 'self' 'unsafe-inline'; connect-src 'self'; manifest-src 'self'; frame-src ${FRAMES}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; font-src 'self'; img-src 'self' data:`;
 const WHY_CSP = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
 function ask(port, p, { method = 'GET' } = {}) {

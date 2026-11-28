@@ -1,6 +1,6 @@
 {
   "file": "test/dashboard-shell.test.mjs",
-  "ticket": "kit-988-dashboard-shell",
-  "sha256": "202911896d6661d6305d66b3a715a5ba045780b229b3d3de46402d9393efee2a",
+  "ticket": "kit-1008-hub-shell",
+  "sha256": "e3c7e93aedd9c32e19a10174a64c8b222bfd61e9dee26cc67a19d92328e022f0",
   "source_sha256": "5c644be52247c582c0f952bf7b14c99f2abaa3d0e67b57b9c61dcb48be4439d9"
 }

@@ -16,7 +16,7 @@ index c33e241c2ecb79ce37528ed36e0c903d94395386..f701426be468dc1eb6140683068def08
 +    const hubPage = await page.text();
 +    assert.equal(hubPage, cliRead(fs.readFileSync, fs, path.join(kit, 'apps/hub/index.html'), 'utf8'), 'the hub sends its build, byte for byte');
 +    const block = Array.from({ length: 25 }, (_, i) => `http://127.0.0.1:${P + i}`).join(' ');
-+    assert.equal(page.headers.get('content-security-policy'), `default-src 'none'; script-src 'self' ${inline(hubPage)}; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-src ${block}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; font-src 'self'; img-src 'self' data:`, 'its own scripts, and it can talk to nothing else');
++    assert.equal(page.headers.get('content-security-policy'), `default-src 'none'; script-src 'self' ${inline(hubPage)}; style-src 'self' 'unsafe-inline'; connect-src 'self'; manifest-src 'self'; frame-src ${block}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; font-src 'self'; img-src 'self' data:`, 'its own scripts, and it can talk to nothing else');
      const csp = page.headers.get('content-security-policy');
      for (let p = P; p < P + 25; p++) assert.ok(csp.includes(`http://127.0.0.1:${p} `) || csp.includes(`http://127.0.0.1:${p};`), `the hub may frame ${p}`);
      assert.ok(!csp.includes(`http://127.0.0.1:${P + 25}`), 'and nothing outside the block');

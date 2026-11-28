@@ -90,6 +90,7 @@ const wrappersOut = (src) => {
   const ns = new Set([...src.matchAll(/^import \* as ([A-Za-z_$][\w$]*) from /gm)].map((m) => m[1]));
   return src.replace(/^export function ([A-Za-z_$][\w$]*)\s*\([^)]*\)(?:\s*:\s*[^{;]+)?\s*\{\s*return\s+([A-Za-z_$][\w$]*)\.\1\s*\([^)]*\)\s*;?\s*\}/gm, (w, _n, o) => (ns.has(o) ? '' : w));
 };
+const hubWrappersOut = (src) => { const imp = (src.match(/^import \* as [A-Za-z_$][\w$]* from .*$/gm) ?? []).join('\n'); return src.split('\n').map((l) => (/^export function (?:bindFleetSwitch|fleetSwitch)\b/.test(l) ? wrappersOut(`${imp}\n${l}`).slice(imp.length + 1) : l)).join('\n'); };
 
 // ---- a tiny DOM: the builders' own HTML, parsed, with the few calls the binders make ----
 const VOID = new Set(['br', 'hr', 'img', 'input', 'meta', 'link', 'col', 'wbr']);
@@ -234,7 +235,7 @@ test("the JS block's names are its own: neither page declares one outside it", a
   assert.ok(names.includes('tabBar') && names.includes('parseHead') && names.includes('goalSteps'), 'its names were read');
   // any source but shell.ts and the view stubs; the shell view's delegating wrappers are the block's own functions
   const decl = joined(SRC_FILES.filter((f) => f.file !== SHELL_TS && !isViewStub(f)).map((f) => (f.file === SHELL_VIEW ? { ...f, text: wrappersOut(f.text) } : f)));
-  for (const [name, rest] of [["the dashboard's sources", decl], ["the hub's sources", joined(HUB_FILES.filter((f) => !isViewStub(f)))]]) {
+  for (const [name, rest] of [["the dashboard's sources", decl], ["the hub's sources", joined(HUB_FILES.filter((f) => !isViewStub(f)).map((f) => (f.file === 'apps/hub/src/views/hub-shell/index.tsx' ? { ...f, text: hubWrappersOut(f.text) } : f)))]]) {
     for (const n of names) assert.doesNotMatch(rest, new RegExp(`(?:^|[\\s;(])(?:const|let|var|function|class)\\s+${n.replace('$', '\\$')}\\b`, 'm'), `${name} declares ${n} outside the block`);
   }
   // and it runs alone: no page global, no DOM at load

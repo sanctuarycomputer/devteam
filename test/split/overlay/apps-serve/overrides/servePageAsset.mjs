@@ -73,7 +73,7 @@ function servePageAsset(req, res, server) {
   }
   if (server === 'hub') {
     const dir = path.join(kitDir, 'apps', 'hub');
-    return serveAppFiles(dir, '', req, res, policyIn(dir, `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src ${PORT_RANGE.map((x) => `http://127.0.0.1:${x}`).join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`));
+    return serveAppFiles(dir, '', req, res, policyIn(dir, `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; manifest-src 'self'; frame-src ${PORT_RANGE.map((x) => `http://127.0.0.1:${x}`).join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`));
   }
   if (server === 'browser') {
     if (!p.startsWith('/_next/')) return DASH_NEXT;
