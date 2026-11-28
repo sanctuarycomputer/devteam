@@ -5184,6 +5184,17 @@ function plannersNow() {
     // name: a question whose links point at this plan branch.
     const refQs = questions().filter((q) => (q.links ?? []).some((l) => l.ref === b || l.ref === `refs/heads/${b}`));
     const goals = [...new Set([...(feat.goals ?? []), ...refQs.map((q) => q.goal).filter(Boolean), ...plannerLaunchGoals(feature)])];
+    // A question on one of its goals is this planner's to wait on unless it plainly belongs to other
+    // work on that goal: it links or approves another plan branch, or names only tickets of another
+    // feature. Such a question would otherwise hide a dead planner: no stale-planner, and P1 hands its
+    // move to the owner.
+    const otherWork = (q) => {
+      const plans = [...(q.links ?? []).map((l) => String(l?.ref ?? '').replace(/^refs\/heads\//, '')).filter((r) => r.startsWith('plan/')).map((r) => r.slice('plan/'.length)),
+        ...(q.approves ?? []).filter((a) => typeof a === 'string' && a.startsWith('plan-')).map((a) => a.slice('plan-'.length))];
+      if (plans.length) return !plans.includes(feature);
+      const ids = [q.ticket, ...(q.blocks ?? [])].filter((id) => id && tickets().has(id));
+      return ids.length > 0 && ids.every((id) => tickets().get(id).feature !== feature);
+    };
     return {
       feature, title: feat.title ?? feature, goals, tickets: graph.split('\n').filter((t) => t.includes('"type":"ticket"') && t.includes('"op":"new"')).length,
       branch: b, window: !!target, problem: target ? null : problem, waiting: target ? paneWaitingIn(by) : null,
@@ -5191,7 +5202,7 @@ function plannersNow() {
       last_seen: last, minutes_silent: last ? Math.round((Date.now() - Date.parse(last)) / 60000) : null,
       waiting_on_supervisor: asking.map((m) => ({ id: m.id, kind: m.kind, text: m.text })),
       // a planner whose design waits on the owner's answers is waiting, not stale
-      waiting_on_owner: [...new Set([...questions().filter((q) => q.status === 'open' && goals.includes(q.goal)), ...refQs.filter((q) => q.status === 'open')].map((q) => q.id))],
+      waiting_on_owner: [...new Set([...questions().filter((q) => q.status === 'open' && goals.includes(q.goal) && !otherWork(q)), ...refQs.filter((q) => q.status === 'open')].map((q) => q.id))],
     };
   }).filter(Boolean);
 }
@@ -20821,12 +20832,6 @@ function collectMetrics(since, reviewsSince = 0) {
     const ask = p.goals.length ? `ask --goal ${p.goals[0]} …` : `ask … --links '[{"title":"The plan","ref":"plan/${p.feature}","path":"${projectRel}/log/${key}.jsonl"}]'`;
     if (p.waiting_on_supervisor.some((m) => m.kind === 'blocked') && !H.get(key)) add('medium', 'blocked-without-question', key, 'blocked with no open owner question naming it', `if it waits on the owner, ask on its goal (${ask}); otherwise answer its blocked message so it can move`);
   }
-  // The tmux session's window names, once (null when tmux or the session isn't there: unknown).
-  let windowNames;
-  const windowGone = (name) => {
-    if (windowNames === undefined) { const l = sh('tmux', ['list-windows', '-t', `=${tmuxSession()}`, '-F', '#W']); windowNames = l === null ? null : new Set(l.split('\n').filter(Boolean)); }
-    return windowNames !== null && !windowNames.has(name);
-  };
   for (const id of ts.keys()) {
     const w = workerState(id);
     const wait = paneWaiting(id);
@@ -20845,9 +20850,10 @@ function collectMetrics(since, reviewsSince = 0) {
     // a planner parked by a drain stopped on purpose: not gone, exited or stale
     if (p.parked) continue;
     if (p.waiting) add('high', 'blocked-prompt', who, p.waiting.kind === 'limit' ? `a usage-limit banner in its pane: "${p.waiting.line}"` : `waiting on a prompt in its pane: "${p.waiting.line}"`, `look (tmux select-window -t '${tmuxTarget(who)}') and clear it (supervisor.md §11); a folder-trust dialog means agent_trust_command could pre-trust the worktree`);
-    else if (/no agent is running|has exited/.test(p.problem ?? '')) add('high', 'agent-exited', who, p.problem.replace(/; resume it first$/, ''), `resume it: planner ${p.feature} --resume (supervisor.md §11)`);
-    else if (!p.window) add('medium', 'planner-gone', who, `plan/${p.feature} isn't on main and its window is gone (${p.problem})`, `resume it (planner ${p.feature} --resume) or, if the plan was dropped, delete the branch`);
-    else if (!p.waiting_on_supervisor.length && !p.waiting_on_owner.length && p.minutes_silent > settings.stale_after_minutes) add('high', 'stale-planner', who, `no sign of life for ${p.minutes_silent} min`, 'check its pane; message it or resume it (supervisor.md §11)');
+    const down = plannerDown(p)?.kind;
+    if (down === 'agent-exited') add('high', 'agent-exited', who, p.problem.replace(/; resume it first$/, ''), `resume it: planner ${p.feature} --resume (supervisor.md §11)`);
+    else if (down === 'planner-gone') add('medium', 'planner-gone', who, `plan/${p.feature} isn't on main and its window is gone (${p.problem})`, `resume it (planner ${p.feature} --resume) or, if the plan was dropped, delete the branch`);
+    else if (down === 'stale-planner') add('high', 'stale-planner', who, `no sign of life for ${p.minutes_silent} min`, 'check its pane; message it or resume it (supervisor.md §11)');
   }
   for (const msg of openMsgs.filter((x) => now - Date.parse(x.created_at) > 30 * 60000)) add('medium', 'unanswered-message', msg.id, `${msg.kind} from ${msg.created_by}, ${Math.round((now - Date.parse(msg.created_at)) / 60000)} min old`, `reply with --re ${msg.id}`);
   // A review's page lives on the branch that asked it until its PR lands it on main; once no branch
@@ -21711,14 +21717,20 @@ function ticketMoves() {
       const run = w?.phase_started_at ?? null;
       const msg = asks.get(id);
       if (['done', 'merging'].includes(phase)) return at({ move: 'merge-it', words: 'Merge it', holder: 'supervisor', since: run, command: `merge ${id}` }); // T4
-      if (phase === 'awaiting-word') return at({ move: 'give-word', words: 'Give the word, or merge', holder: 'supervisor', since: run, command: `send ${id} "…" --kind ruling${msg ? ` --re ${msg.id}` : ''}`, covered_by: [{ kind: 'waiting-on-supervisor', subject: id }] }); // T5
+      // A worker whose window is gone, or whose agent exited, receives nothing: a word or an answer
+      // for it waits until it is resumed, and a phase in flight is held by nobody (T8b).
+      // (paneWaiting reads the pane once, and that read is what agentExited reports.)
+      const down = !phase ? null : (paneWaiting(id), agentExited(id)) ? 'its agent exited' : windowGone(id) ? 'its window is gone' : null;
+      const resumeFirst = down ? `; resume it first, ${down}` : '';
+      if (phase === 'awaiting-word') return at({ move: 'give-word', words: `Give the word, or merge${resumeFirst}`, holder: 'supervisor', since: run, command: `send ${id} "…" --kind ruling${msg ? ` --re ${msg.id}` : ''}`, covered_by: [{ kind: 'waiting-on-supervisor', subject: id }] }); // T5
       const depOpen = (t.depends_on ?? []).find((d) => !mergeShaFor(d));
-      if (msg || (phase === 'blocked' && !depOpen)) return at({ move: 'answer-message', words: 'Answer its message', holder: 'supervisor', ref: msg ? { kind: 'm', id: msg.id } : null, since: msg ? msg.created_at : run, command: `send ${id} "…" --kind ruling${msg ? ` --re ${msg.id}` : ''}`, covered_by: [{ kind: 'blocked', subject: id }, { kind: 'blocked-without-question', subject: id }, ...(msg ? [{ kind: 'unanswered-message', subject: msg.id }] : [])] }); // T6
+      if (msg || (phase === 'blocked' && !depOpen)) return at({ move: 'answer-message', words: `Answer its message${resumeFirst}`, holder: 'supervisor', ref: msg ? { kind: 'm', id: msg.id } : null, since: msg ? msg.created_at : run, command: `send ${id} "…" --kind ruling${msg ? ` --re ${msg.id}` : ''}`, covered_by: [{ kind: 'blocked', subject: id }, { kind: 'blocked-without-question', subject: id }, ...(msg ? [{ kind: 'unanswered-message', subject: msg.id }] : [])] }); // T6
       if (phase === 'parked' && ['run', 'drain'].includes(mode) && !fleetDrain) return at({ move: 'resume', words: 'Resume it', holder: 'supervisor', since: run, command: `worker ${id} --resume`, covered_by: [{ kind: 'parked-under-run', subject: id }] }); // T7
       // an Upkeep chore ticket runs a recurring job: recurring-stuck on that job covers its move too
       const job = t.feature === CHORES ? recurringChores.refJob(id) : null;
       const stuck = job ? [{ kind: 'recurring-stuck', subject: `recurring:${job}` }] : [];
       const notStarted = !phase || (phase === 'starting' && stoppedLaunch(id));
+      if (phase in PHASE_WORDS && !notStarted && down) return at({ move: 'resume-worker', words: `Resume the worker (${down})`, holder: 'supervisor', since: w.last_seen, command: `worker ${id} --resume` }); // T8b, uncovered: move-owed and move-stalled reach it
       if (phase in PHASE_WORDS && !notStarted) return at({ move: phase === 'final-review' ? 'final-review' : phase, words: PHASE_WORDS[phase], holder: 'worker', since: run, covered_by: [...['stale-worker', 'agent-exited', 'blocked-prompt'].map((kind) => ({ kind, subject: id })), ...stuck] }); // T8
       if ((notStarted || phase === 'blocked') && depOpen) {
         const d = ts.get(depOpen);
@@ -21770,6 +21782,21 @@ function leadTicketMove(open) {
 }
 // One move on a line: who holds it, what, how long, and owed, stalled or quiet.
 const moveLine = (m) => `${m.holder}  ${m.words}  ${moveAge(m.since)}${m.flag === 'none' ? '  no move' : m.flag ? `  ${m.flag}` : ''}${m.quiet ? `  (${m.quiet})` : ''}`;
+// Why a planner in flight is not alive, or null: the finding metrics raises for it (agent-exited,
+// planner-gone, stale-planner) and the words its move uses. Parked stopped on purpose; one at a
+// prompt waits on that prompt (blocked-prompt). sessionUp is false when the whole tmux session is
+// missing, not just its window: a reboot, which the relaunch brings back (sessionsToRelaunch).
+function plannerDown(p) {
+  if (p.parked || p.waiting) return null;
+  if (/no agent is running|has exited/.test(p.problem ?? '')) return { kind: 'agent-exited', why: 'its agent exited', sessionUp: true };
+  if (!p.window) return { kind: 'planner-gone', why: 'its window is gone', sessionUp: /^no tmux window/.test(p.problem ?? '') };
+  if (!p.waiting_on_supervisor.length && !p.waiting_on_owner.length && p.minutes_silent > loadSettings().stale_after_minutes) return { kind: 'stale-planner', why: `silent ${p.minutes_silent} min`, sessionUp: true };
+  return null;
+}
+// The tmux session's window names, once per process (null when tmux or the session isn't there:
+// unknown), and whether a window is gone from a session that is up.
+const tmuxWindowNames = () => memo('tmux-window-names', () => { const l = sh('tmux', ['list-windows', '-t', `=${tmuxSession()}`, '-F', '#W']); return l === null ? null : new Set(l.split('\n').filter(Boolean)); });
+const windowGone = (name) => { const names = tmuxWindowNames(); return names !== null && !names.has(name); };
 // The planner rows, P1 to P4.
 function plannerMove(p) {
   const by = `plan-${p.feature}`;
@@ -21781,6 +21808,11 @@ function plannerMove(p) {
   const seen = p.last_seen ?? nowIso();
   const held = p.goals.length && p.goals.every((id) => ['park', 'let-go'].includes(goalMode(logGet(id))));
   if (p.parked || held) return at({ move: 'parked', words: 'Parked', holder: 'planner', quiet: 'hold', since: lastPhaseOf(by)?.created_at ?? seen }); // P3
+  // A planner that isn't alive holds nothing: its window gone from a live session, its agent exited,
+  // or silent past stale_after_minutes. The move is the supervisor's, uncovered, so move-owed and
+  // move-stalled reach it; the finding that names it stays the detail.
+  const down = plannerDown(p);
+  if (down?.sessionUp) return at({ move: 'resume-planner', words: `Resume the planner (${down.why})`, holder: 'supervisor', since: seen, command: `planner ${p.feature} --resume` }); // P4b
   return at({ move: 'planning', words: 'Planning', holder: 'planner', since: seen, covered_by: ['stale-planner', 'planner-gone', 'agent-exited', 'blocked-prompt'].map((kind) => ({ kind, subject: by })) }); // P4
 }
 // The move whose subject is this one ("goal:<g-id>", …), or null.
