@@ -807,11 +807,11 @@ const SETTINGS_DEFAULTS = {
   // The default is "ask" so a project adopted before this setting keeps asking. The owner's.
   upstream_sync: 'adopt',
   upstream_check_hours: 24,
-  // The npm package kit releases are published as and an instance installs (kit-install@1), and
-  // whether the live alpha's /next/ pages are served (alpha@1). Both the owner's, read as main has them.
+  // The npm package kit releases are published as and an instance installs (kit-install@1), where they
+  // are installed from (kit-install@2: npm, or GitHub's release files until npm is set up; the default is
+  // npm and never changes), and whether the live alpha's /next/ pages are served (alpha@1). All three the
+  // owner's, read as main has them.
   package_name: '@sanctuarycomputer/devteam',
-  // Where kit releases are installed from (kit-install@2): npm, or GitHub's release files until npm is
-  // set up. The owner's; the default is npm and never changes.
   package_source: 'npm',
   alpha: true,
   retro_every_days: 7,
