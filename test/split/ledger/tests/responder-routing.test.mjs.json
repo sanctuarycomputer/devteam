@@ -1,0 +1,7 @@
+{
+  "file": "test/responder-routing.test.mjs",
+  "ticket": "kit-1003-threads-core",
+  "sha256": "77c7cc439dfe36992b96bea0db56fdf12a2d09f847bed0362f1f6870afb95720",
+  "source_sha256": "9b9aa3668fea02589cd2700479921fbfe54ef1298189dc8607c62cf9fe39f792",
+  "note": "C3 tlSend maps the send's words: responder, queued, responder-late (its hold or failed typing), and today's values fails until kit-1005 lands (ruling m-20261128-085239616-supervisor)."
+}

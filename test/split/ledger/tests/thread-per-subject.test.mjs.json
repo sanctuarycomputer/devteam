@@ -1,0 +1,6 @@
+{
+  "file": "test/thread-per-subject.test.mjs",
+  "ticket": "kit-1003-threads-core",
+  "sha256": "5f9d2ba84aac8d0bd92116a67adbe6eff9778331b39a2936c298a60a106f0249",
+  "source_sha256": "71064540e453ac7d0c8f897b4b3364f06e580160429aabf3b59eab71a21463f1"
+}

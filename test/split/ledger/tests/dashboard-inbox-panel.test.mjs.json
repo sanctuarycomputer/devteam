@@ -1,0 +1,7 @@
+{
+  "file": "test/dashboard-inbox-panel.test.mjs",
+  "ticket": "kit-1003-threads-core",
+  "sha256": "f235782a598b9e41fa317acdbd93861abb6b9dce32e06d279cc638daa6049de7",
+  "source_sha256": "b60e8ea8738aeee20e5738015c361c00d5325045ac8a5ccd02c6eb3c67613b15",
+  "note": "askEscCancels gives paneEscCancels's answers fails until kit-1005 lands (ruling m-20261128-085239616-supervisor). a question's home is the Inbox tab fails until kit-1004 lands (ruling m-20261128-085239616-supervisor)."
+}

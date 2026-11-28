@@ -1,0 +1,6 @@
+{
+  "file": "test/thread-responding.test.mjs",
+  "ticket": "kit-1003-threads-core",
+  "sha256": "b1f88570c03c9a4b4b863d3ec8a19aaf1787fbe9ec641eae4983c2e8534a0788",
+  "source_sha256": "ff0e57775b9f20565effb740008993a76a19e90baf0acee58257f3a0a77e4905"
+}
