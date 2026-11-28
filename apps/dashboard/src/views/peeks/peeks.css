@@ -1,0 +1,31 @@
+/* kit-997: the drawer's and peeks' CSS, index.html's css-peek region, byte for byte. */
+/* css-peek start */
+  /* the peek (kit-88): the block's frame (.scrim, .drawer, .drawer-head, .drawer-body) styles it; here only
+     what the block leaves to the page. A dl the block's props() didn't draw keeps today's grid. */
+  .drawer dl:not(.props) { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 6px 12px; font-size: 12.5px; margin: 10px 0 16px; }
+  .drawer dl:not(.props) dt { color: var(--muted); }
+  .dtype { display: inline-flex; align-items: center; gap: 6px; flex: none; color: var(--muted); }
+  .dtype .badge { margin: 0; background: var(--well); color: var(--fg); border: 1px solid var(--line); }
+  /* the title: one line, its full text in its title */
+  .dtitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* the scrim behind the artifact viewer, a preview and a review: the block shows it only under peek-open */
+  :where(.shell).overlay-open .scrim { opacity: 1; pointer-events: auto; }
+  /* a closing peek lets clicks through, as the scrim does: the block holds it visible while it slides out */
+  :where(.shell):not(.peek-open) .drawer { pointer-events: none; }
+  /* the peek's head (its ×) holds still when the peek grows taller than the window, as its read lands after the first
+     draw: the drawer keeps its scrollbar's gutter whether it scrolls or not, so a classic scrollbar showing up doesn't
+     narrow the head and move × 15px from under the pointer */
+  .drawer { scrollbar-gutter: stable; }
+  /* the top-right button beside an open peek: a mirror of .pagebar .tt on <body>, above the scrim (20) and the
+     drawer (21), --header-pad left of the peek, its top set from .tt's (ttPeekPlace); it fades. Where there is
+     no room for it beside the peek (840px and below), it isn't shown and .tt stays as it is */
+  #tt-peek { position: fixed; top: 0; right: calc(min(720px, 100vw) + var(--header-pad)); z-index: 22; margin: 0; display: inline-flex; align-items: center; gap: 6px; visibility: hidden; opacity: 0; pointer-events: none; transition: opacity var(--dur) var(--ease), visibility 0s linear var(--dur); }
+  .shell.peek-open:not(.threads-open) #tt-peek { visibility: visible; opacity: 1; pointer-events: auto; transition: opacity var(--dur) var(--ease), visibility 0s; }
+  @media (min-width: 841px) { .shell.peek-open:not(.threads-open) .pagebar .tt { visibility: hidden; } }
+  #tt-peek .n.q { color: var(--red-fg); }
+  @media (max-width: 840px) { #tt-peek { display: none; } }
+  /* a peek's properties (kit-88): the block's props() lists; under them, each section a psect card */
+  .attrs { margin: 0 0 16px; }
+  .attrs dd .links { margin: 0; }
+  .attrs-h { margin: 6px 0 0; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+/* css-peek end */
