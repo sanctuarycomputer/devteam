@@ -13,7 +13,8 @@
 // test file is written on the text that area's rule makes of it (kit-1013 T5). The other two areas
 // change no text A1's items meet, and leaving them out makes that split a third as long. It skips only on drift
 // there: an override whose original changed, or a patch whose base moved (rule D2, at A1_SKIP); a patch
-// that fails on the text it was written on turns it red. A3 reads the overrides' text, not the split,
+// that fails on the text it was written on turns it red. It also asserts this file's split names no
+// conflict involving apps-serve or apps-tests, since every other check runs that tree (kit-1074). A3 reads the overrides' text, not the split,
 // and never skips (kit-1034).
 // Ports: +30/31 the hub and base, +32 the dashboard, +33 the browser view (the source's servers first,
 // stopped before the tree's start on the same ports); +60 the browser view of the tree's devteam.mjs (M3)
@@ -174,7 +175,7 @@ function skipFor(id) {
   return k ? READS[k]() : false;
 }
 // A1's skip (kit-1034, rule D2): A1 skips only when every stale apps-serve and apps-tests item in its
-// split is drift and none conflicts. An override is drift as driftOf judges it. A patch that no longer
+// split is drift and no conflict names apps-serve or apps-tests, in its split or this file's (kit-1074). An override is drift as driftOf judges it. A patch that no longer
 // applies is drift only when its base moved: the pre-image its index line names is neither the text it
 // really met (A1's tree's file with every later patch to it taken back off, newest first) nor HEAD's
 // blob of the file. A patch that fails on the text it was written on is broken: A1 is red. This holds
@@ -191,8 +192,8 @@ function metBlob(s, file) {
   if (run('git', ['init', '-q', d]).status !== 0) return null;
   fs.mkdirSync(path.dirname(path.join(d, file)), { recursive: true });
   fs.copyFileSync(at, path.join(d, file));
-  const after = (A1J.overlay?.applied ?? []).filter((x) => x.kind === 'patch' && (x.sites ?? []).includes(file) && later(x, s)).sort((x, y) => (later(x, y) ? -1 : 1));
-  for (const x of after) if (run('git', ['apply', '-R', '--whitespace=nowarn', patchAt(x.area, x.name)], { cwd: d }).status !== 0) return null;
+  const laterOnes = (A1J.overlay?.applied ?? []).filter((x) => x.kind === 'patch' && (x.sites ?? []).includes(file) && later(x, s)).sort((x, y) => (later(x, y) ? -1 : 1));
+  for (const x of laterOnes) if (run('git', ['apply', '-R', '--whitespace=nowarn', patchAt(x.area, x.name)], { cwd: d }).status !== 0) return null;
   return run('git', ['hash-object', path.join(d, file)]).stdout.trim();
 }
 function baseMoved(s) {
@@ -400,10 +401,14 @@ try { A1J = JSON.parse(a1Run.stdout); } catch { /* A1 names it */ }
 const A1_STALE = (A1J.overlay?.stale ?? []).filter((s) => MINE.includes(s.area));
 const A1_DRIFT = A1_STALE.map((s) => (s.kind === 'patch' && /^no longer applies/.test(s.why) ? baseMoved(s) : s.kind === 'override' ? driftOf(s) : false));
 const A1_CONFLICTS = (A1J.overlay?.conflicts ?? []).filter((c) => c.areas.some((a) => MINE.includes(a)));
-const A1_SKIP = MANIFEST_SKIP || (a1Run.status === 0 && A1_STALE.length > 0 && !A1_CONFLICTS.length && A1_DRIFT.every(Boolean) ? A1_DRIFT.join('; ') : false);
+// the shared split is the tree every other check runs; a conflict there naming apps-serve or apps-tests
+// is never drift (kit-1074)
+const SHARED_CONFLICTS = (J.overlay?.conflicts ?? []).filter((c) => c.areas.some((a) => MINE.includes(a)));
+const A1_SKIP = MANIFEST_SKIP || (a1Run.status === 0 && A1_STALE.length > 0 && !A1_CONFLICTS.length && !SHARED_CONFLICTS.length && A1_DRIFT.every(Boolean) ? A1_DRIFT.join('; ') : false);
 
 test("A1: HEAD's split applies exactly apps-serve's items and, among apps-tests', kit-984's two patches; none of either stale, no conflict naming them", { skip: A1_SKIP }, () => {
   assert.equal(splitRun.status, 0, `this file's split: ${splitRun.stderr}`);
+  assert.deepEqual(SHARED_CONFLICTS, [], "this file's split: a conflict names apps-serve or apps-tests");
   assert.equal(a1Run.status, 0, `A1's split: ${a1Run.stderr}`);
   const j = JSON.parse(a1Run.stdout);
   assert.deepEqual(area('apps-serve', j).applied, ['override IMAGE_RUNS', 'override kitWatched', 'override pageVersion', 'override servePage', 'override servePageAsset', 'patch box-image-yml.patch', 'patch devteam-mjs-kitwatched.patch', 'patch devteam-mjs-servepage.patch', 'patch gitignore.patch', 'patch test-yml.patch']);
