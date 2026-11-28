@@ -110,7 +110,7 @@ export function render(d: Loose) {
   renderAwareness(d);
   // Governance's listing is its own read (kit-93): read again at most once a minute while the page is shown
   renderGovernance();
-  if (shell.PAGE_NOW === 'governance') later(loadGovernance);
+  if ((shell as Loose).PAGE_NOW === 'governance') (later as Loose)(loadGovernance);
 
   refreshDrawer();
   // the records owner-action cards read by peek: again, so one changed elsewhere shows (a retired one stays retired)

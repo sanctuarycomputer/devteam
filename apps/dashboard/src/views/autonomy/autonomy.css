@@ -1,0 +1,97 @@
+/* css-efficiency start */
+  /* the Efficiency Score card (kit-174), as the mock's: ruled sections; charts drawn at the width they get */
+  .eff-card > .sec:first-of-type { border-top: 0; }
+  .eff-card > .sec:last-child { border-bottom: 0; padding-bottom: 0; }
+  .eff-card .sec-b { min-width: 0; }
+  .eff-card .props-h { margin: 4px 0 6px; font: 500 11px/16px var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .eff-card .props-h i { font-size: 12px; vertical-align: -1px; }
+  .eff-card .score { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .eff-card .score b { font-size: 32px; font-weight: 600; letter-spacing: -.02em; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .eff-card .score-w { margin: 2px 0 12px; color: var(--fg-2); max-width: var(--measure); }
+  .eff-card .score-mod { margin-top: 22px; }
+  .eff-card .eff-parts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px var(--gap); }
+  .eff-card .score-counts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px var(--gap); }
+  @media (max-width: 560px) { .eff-card .eff-parts, .eff-card .score-counts { grid-template-columns: minmax(0, 1fr); } }
+  .eff-card .stat { background: none; border: 0; box-shadow: none; padding: 0; border-radius: 0; min-width: 0; }
+  .eff-card .stat .k { display: block; font-size: 12px; color: var(--fg-2); }
+  .eff-card .stat.mini .k { min-height: 2.6em; }
+  .eff-card .stat .dim { display: block; margin-top: 2px; font-size: 12px; color: var(--muted); }
+  .eff-card .sparkline { display: block; margin-top: 6px; max-width: 160px; }
+  .eff-card .fit { min-width: 0; overflow: hidden; }
+  .eff-card .fit svg { display: block; margin: 4px 0; }
+  .eff-card .lc-t { font: 10.5px var(--mono); fill: var(--muted); } .eff-card .lc-b { fill: var(--fg); }
+  .eff-card .legend i { display: inline-block; width: 18px; height: 0; border-top: 6px solid var(--muted); vertical-align: middle; margin-right: 6px; }
+  .eff-where { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px var(--gap); }
+  @media (max-width: 560px) { .eff-where { grid-template-columns: minmax(0, 1fr); } }
+  .eff-obs { min-width: 0; }
+  .eff-obs .bars { padding: 0; }
+  .eff-obs .bars div { grid-template-columns: minmax(0, 132px) minmax(0, 1fr) 56px; }
+  .eff-obs .bars .k { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .eff-src { margin: 12px 0 0; font-size: 12px; color: var(--fg-2); max-width: var(--measure); }
+  .eff-card .rowline .r { flex: none; font-size: 12px; color: var(--muted); }
+  .eff-card .rowline[data-open] { cursor: pointer; border-radius: 4px; }
+  .eff-card .rowline[data-open]:hover .t, .eff-card .rowline[data-open]:focus-visible .t { text-decoration: underline; }
+  .eff-card .rowline[data-open]:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 2px; }
+  .sugg { list-style: none; margin: 0; padding: 0; }
+  .sugg-i { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px; align-items: start; padding: 10px 0; cursor: pointer; border-bottom: 1px solid var(--line); }
+  .sugg-i:first-child { padding-top: 0; } .sugg-i:last-child { border-bottom: 0; padding-bottom: 0; }
+  .sugg-i:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 2px; border-radius: 4px; }
+  .sugg-n { font: 600 12px/20px var(--mono); color: var(--muted); }
+  .sugg-b { min-width: 0; max-width: var(--measure); }
+  .sugg-go { font-weight: 600; color: var(--fg); } .sugg-i:hover .sugg-go, .sugg-i:focus-visible .sugg-go { text-decoration: underline; }
+  .sugg-w, .sugg-m { font-size: 12.5px; color: var(--fg-2); margin-top: 2px; overflow-wrap: anywhere; }
+  .sugg-e { font-size: 12px; color: var(--green-fg); margin-top: 2px; }
+
+/* css-efficiency end */
+/* css-autonomy-pages start */
+  /* kit-93: the Autonomy pages. A page's cards stack with the grid's gap; its tables scroll inside their card */
+  #trust > .card + .card { margin-top: var(--gap); }
+  .tbl-wrap { overflow-x: auto; min-width: 0; }
+  .trust-card .stat > b { display: block; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .trust-card .trust-missing { margin: 10px 0 0; }
+  /* a kind's peek: its levels, the one it is on marked, any above its limit faded; its evidence rows open */
+  .lvls { display: flex; flex-direction: column; }
+  .lvl { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); min-width: 0; }
+  .lvl:last-child { border-bottom: 0; }
+  .lvl .t { flex: 1; min-width: 0; color: var(--fg-2); }
+  .lvl.now .t { color: var(--fg); font-weight: 600; }
+  .lvl.off { opacity: .55; }
+  .cls-ev .rowline .r { flex: none; font-size: 12px; color: var(--muted); }
+  .cls-ev .rowline[data-open] { cursor: pointer; border-radius: 4px; }
+  .cls-ev .rowline[data-open]:hover .t, .cls-ev .rowline[data-open]:focus-visible .t { text-decoration: underline; }
+  .cls-ev .rowline[data-open]:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 2px; }
+  /* Awareness: Efficiency's card, its four parts and four sparklines four across, two on a narrower screen, one on a phone */
+  .aw-card .eff-parts, .aw-card .score-counts { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  @media (max-width: 900px) { .aw-card .eff-parts, .aw-card .score-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 560px) { .aw-card .eff-parts, .aw-card .score-counts { grid-template-columns: minmax(0, 1fr); } }
+  /* Governance: one flush card, its three sections inset as a card's body is; each table scrolls inside its section */
+  .gov-card > .sec { padding: 14px 16px; }
+  .gov-card > .sec:first-of-type { border-top: 0; }
+  .gov-card > .sec:last-child { border-bottom: 0; }
+  .gov-card .sec-b { min-width: 0; }
+  .gov-card > .err, .gov-card > .loading { margin: 14px 16px; }
+  /* Sensors: the tab bar first in its section (as Goals': the shell's first-child rule doesn't reach it), then
+     Production's incidents board (five columns) and a card a sensor, or Fleet's tables */
+  #monitoring > .tabbar:first-child { margin-top: -8px; margin-bottom: 14px; }
+  #incidents .board.inc { grid-template-columns: repeat(5, minmax(132px, 1fr)); }
+  .inc-card #incidents { min-width: 0; }
+  .sensor-card .sensor-src { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; margin: 8px 0 6px; }
+  .sensor-card .sensor-err { margin: 0 0 6px; font-size: 12px; color: var(--red-fg); overflow-wrap: anywhere; }
+  .sensor-card .sensor-stats, .sensor-card .sensor-levels { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; margin-bottom: 6px; }
+  .sensor-card .sensor-stats b, .sensor-card .sensor-levels b { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .sensor-card .sensor-levels > span { display: inline-flex; align-items: center; gap: 6px; }
+  .sensor-card .sensor-chart { min-width: 0; overflow-x: auto; }
+  .sensor-card .sensor-chart svg { max-width: 100%; height: auto; }
+  .sensor-card > .meta { margin-top: auto; }
+  /* a sensor's peek: its observations and incidents, rows that open their records */
+  .sensor-rows .rowline .r { flex: none; font-size: 12px; color: var(--muted); }
+  .sensor-rows .rowline[data-open] { cursor: pointer; border-radius: 4px; }
+  .sensor-rows .rowline[data-open]:hover .t, .sensor-rows .rowline[data-open]:focus-visible .t { text-decoration: underline; }
+  .sensor-rows .rowline[data-open]:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 2px; }
+
+  /* a retro's card opens its peek */
+  .retro-card { cursor: pointer; }
+  .retro-card:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 2px; }
+  .retro-card > p { margin: 0; }
+
+/* css-autonomy-pages end */
