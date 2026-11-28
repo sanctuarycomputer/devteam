@@ -14,8 +14,8 @@
 // change no text A1's items meet, and leaving them out makes that split a third as long. It skips only on drift
 // there: an override whose original changed, or a patch whose base moved (rule D2, at A1_SKIP); a patch
 // that fails on the text it was written on turns it red. It also asserts this file's split names no
-// conflict involving apps-serve or apps-tests, since every other check runs that tree (kit-1074). A3 reads the overrides' text, not the split,
-// and never skips (kit-1034).
+// conflict involving apps-serve or apps-tests, since every other check runs that tree (kit-1074).
+// A3 reads the overrides' text, not the split, and never skips (kit-1034).
 // Ports: +30/31 the hub and base, +32 the dashboard, +33 the browser view (the source's servers first,
 // stopped before the tree's start on the same ports); +60 the browser view of the tree's devteam.mjs (M3)
 import { test, after } from 'node:test';
@@ -175,8 +175,8 @@ function skipFor(id) {
   return k ? READS[k]() : false;
 }
 // A1's skip (kit-1034, rule D2): A1 skips only when every stale apps-serve and apps-tests item in its
-// split is drift and no conflict names apps-serve or apps-tests, in its split or this file's (kit-1074). An override is drift as driftOf judges it. A patch that no longer
-// applies is drift only when its base moved: the pre-image its index line names is neither the text it
+// split is drift and no conflict names apps-serve or apps-tests, in its split or this file's (kit-1074).
+// An override is drift as driftOf judges it. A patch that no longer applies is drift only when its base moved: the pre-image its index line names is neither the text it
 // really met (A1's tree's file with every later patch to it taken back off, newest first) nor HEAD's
 // blob of the file. A patch that fails on the text it was written on is broken: A1 is red. This holds
 // while each patch's index names one of those two; a patch whose base moves but which still applies by
