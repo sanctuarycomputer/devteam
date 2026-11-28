@@ -2,7 +2,8 @@
 // Overview (hello's pulse, in the finding's plain words) and in box-status's attention lines (kind and
 // subject), so one a supervisor reads past is seen by the owner and the operator; an ack takes it off
 // at once, and the finding going away takes it off. And a ticket held with its reason recorded, once
-// stalled, is a medium finding, not a high one, until its --until date has passed.
+// stalled, is a medium finding, not a high one, while its --until date is ahead (with no date, or
+// past it, high).
 // Ports: none
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -52,6 +53,13 @@ test('unattendedHigh: a high finding is unattended after two ticks open; medium 
   assert.deepEqual(plain(run([med], t0 + 32 * 60000)), []);
   assert.deepEqual(JSON.parse(files.get('/run/cache/high-seen.json')), {}, 'its first sighting is forgotten');
   assert.deepEqual(plain(run([hi], t0 + 33 * 60000)), [], 'back again: counted afresh');
+  // a windowed run (metrics --since, retro) sees fewer findings: it counts, but keeps no record
+  run([hi], t0 + 40 * 60000);
+  const kept = files.get('/run/cache/high-seen.json');
+  assert.deepEqual(plain(run([], t0 + 41 * 60000, { record: false })), []);
+  assert.equal(files.get('/run/cache/high-seen.json'), kept, 'a windowed run forgets no first sighting');
+  assert.equal(JSON.parse(files.get('/run/cache/unattended.json')).at, new Date(t0 + 40 * 60000).toISOString(), 'nor rewrites the unattended list');
+  assert.match(SRC, /\n  m\.unattended = unattendedHigh\(m\.findings, now, \{ record: !since \}\);/, 'collectMetrics keeps a record only for a run with no window');
   // the operator's reads count the same way and write nothing
   files.clear();
   ctx.process.env.DEVTEAM_ROLE = 'operator';
@@ -76,7 +84,7 @@ test('readUnattended and the pulse line: the oldest named, and nothing from a li
   assert.doesNotMatch(line(items), /stale-planner|plan-x|move-owed/, 'no kind or subject on the owner\'s line');
 });
 
-test('moveFindings: a held ticket, stalled, is medium until its --until date has passed; any other stalled move stays high', () => {
+test('moveFindings: a held ticket, stalled, is medium only while its --until date is ahead; with none or past it, and any other stalled move, high', () => {
   const run = load('moveFindings');
   const now = Date.parse('2026-11-28T12:00:00Z');
   const since = new Date(now - 3 * 86400000).toISOString();
@@ -84,10 +92,10 @@ test('moveFindings: a held ticket, stalled, is medium until its --until date has
   const held = (subject, until) => m({ subject, move: 'held', words: 'Held: waits on the vendor. Release it, or ask', holder: 'supervisor', ...(until === undefined ? {} : { wait: { causes: [{ ref: 'external:the-vendor', words: 'the-vendor', state: 'open' }], until } }) });
   const out = plain(run([held('ticket:t-1'), m({ subject: 'ticket:t-2' }), held('ticket:t-3', '2026-11-30'), held('ticket:t-4', '2026-11-28'), held('ticket:t-5', '2026-11-27'), held('ticket:t-6', null)], [], now));
   assert.deepEqual(out.map((x) => [x.subject, x.severity]), [
-    ['ticket:t-1 held:', 'medium'], ['ticket:t-2 build:', 'high'],
+    ['ticket:t-1 held:', 'high'], ['ticket:t-2 build:', 'high'],
     ['ticket:t-3 held:', 'medium'], ['ticket:t-4 held:', 'medium'],
-    ['ticket:t-5 held:', 'high'], ['ticket:t-6 held:', 'medium'],
-  ], 'in its window (to the end of its --until day) medium; the day after, the hold has lapsed: high');
+    ['ticket:t-5 held:', 'high'], ['ticket:t-6 held:', 'high'],
+  ], 'in its window (to the end of its --until day) medium; the day after, or with no date (its causes may be done), high');
 });
 
 test('next moves: a held ticket\'s move carries its wait (causes, until); a copy of it never does', () => {

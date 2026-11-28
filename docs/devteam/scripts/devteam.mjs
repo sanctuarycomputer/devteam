@@ -21260,7 +21260,9 @@ function collectMetrics(since, reviewsSince = 0) {
   const ackOf = (x) => acks.filter((a) => a.subject === `${x.kind} ${x.subject}`).sort(byTime).pop();
   const sorted = f.sort((a, b) => order[a.severity] - order[b.severity]);
   m.findings = sorted.filter((x) => !ackOf(x));
-  m.unattended = unattendedHigh(m.findings, now);
+  // a windowed run (metrics --since, retro) drops older findings: it counts but keeps no record, so
+  // their first sighting isn't forgotten and their clock doesn't restart
+  m.unattended = unattendedHigh(m.findings, now, { record: !since });
   m.acknowledged = sorted.filter(ackOf).map((x) => { const a = ackOf(x); return { ...x, ack: { by: a.created_by, at: a.created_at, reason: a.detail, until: lasting(a) ? null : new Date(Date.parse(a.created_at) + ackWindow).toISOString() } }; });
   return m;
 }
@@ -21842,8 +21844,8 @@ function cmdMoves() {
 // or, for "*", on any; a covered move raises nothing, though it keeps its flag. By the move's flag:
 // none (no row knew the state: G20, T14) raises no-next-move, owed (rung 1) move-owed, stalled
 // (rung 2) move-stalled. Each is high, so wait wakes on it, but for a stalled held ticket (T2b) still
-// inside its --until date (wait.until): a known wait, medium; past that date it is high again, since
-// nothing else says a hold has lapsed. The finding's subject is
+// inside its --until date (wait.until): a known wait, medium; with no date, or past it, high, since
+// nothing else says a hold has lapsed or its causes are done. The finding's subject is
 // "<subject> <move>:<ref id>", so an ack sets aside one move with one ref, and a new move or a new
 // ref is a new finding.
 function moveFindings(moves, raised, now = Date.now()) {
@@ -21861,12 +21863,13 @@ function moveFindings(moves, raised, now = Date.now()) {
     const detail = `${m.title}: ${m.words} (${m.holder === 'nobody' ? 'no row knows this state' : `held by the ${m.holder}`}, ${ageOf(m.since)})`;
     const suggestion = kind === 'no-next-move' ? 'work out the move by hand, and file the missing row as a kit lesson (knowledge add --kit)'
       : kind === 'move-owed' ? (m.command ?? 'do it, or record why it waits (ack with a reason)') : stalledHint(m);
-    // a hold with its reason recorded (ticket hold, T2b) is a known wait: stalled, it is medium, so
-    // high stays for what wants acting on now (the unattended check reads high findings only). Once
-    // its --until day is over (UTC) the hold has lapsed, and nothing else flags that: high again
+    // a hold with a review date (ticket hold --until, T2b's wait.until) is a known wait: stalled, it is
+    // medium until that day is over (UTC), so high stays for what wants acting on now (the unattended
+    // check reads high findings only). A hold with no date, or past it, stays high: nothing else
+    // wakes the supervisor for a hold whose causes are done or whose date has lapsed
     const until = m.wait?.until;
-    const lapsed = typeof until === 'string' && until < new Date(now).toISOString().slice(0, 10);
-    out.push({ severity: kind === 'move-stalled' && m.move === 'held' && !lapsed ? 'medium' : 'high', kind, subject, detail, suggestion });
+    const inWindow = typeof until === 'string' && until >= new Date(now).toISOString().slice(0, 10);
+    out.push({ severity: kind === 'move-stalled' && m.move === 'held' && inWindow ? 'medium' : 'high', kind, subject, detail, suggestion });
   }
   return out;
 }
@@ -21890,17 +21893,18 @@ const MOVES_CACHE = () => path.join(runPath('cache'), 'next-moves.json');
 // open high finding was first seen is kept in run/cache/high-seen.json, and the ones past the two
 // ticks in run/cache/unattended.json for hello, whose pulse puts them on the hub's Overview and in
 // box-status's attention lines: what the supervisor's own loop let pass, seen by the owner and the
-// box's operator. The box's operator only reads, so its metrics count the same way but write nothing.
+// box's operator. The box's operator only reads, so its metrics count the same way but write nothing,
+// and so does a windowed run (record false), whose findings are only the window's.
 const HIGH_SEEN = () => path.join(runPath('cache'), 'high-seen.json');
 const UNATTENDED = () => path.join(runPath('cache'), 'unattended.json');
-function unattendedHigh(findings, now = Date.now()) {
+function unattendedHigh(findings, now = Date.now(), { record = true } = {}) {
   let seen = {};
   try { const j = readJson(HIGH_SEEN()); if (isObj(j)) seen = j; } catch {}
   const next = {};
   for (const x of findings) if (x.severity === 'high') { const k = `${x.kind} ${x.subject}`; next[k] = Number.isFinite(seen[k]) ? seen[k] : now; }
   const after = 2 * (Number(loadSettings().tick_minutes) > 0 ? Number(loadSettings().tick_minutes) : 15) * 60000;
   const items = findings.filter((x) => x.severity === 'high' && now - next[`${x.kind} ${x.subject}`] > after).map((x) => ({ kind: x.kind, subject: x.subject, detail: x.detail, since: new Date(next[`${x.kind} ${x.subject}`]).toISOString() }));
-  if (process.env.DEVTEAM_ROLE !== 'operator') {
+  if (record && process.env.DEVTEAM_ROLE !== 'operator') {
     try { writeJson(HIGH_SEEN(), next); writeJson(UNATTENDED(), { at: new Date(now).toISOString(), after_minutes: after / 60000, items }); } catch {}
   }
   return items;
