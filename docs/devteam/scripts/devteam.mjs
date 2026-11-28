@@ -807,9 +807,12 @@ const SETTINGS_DEFAULTS = {
   // The default is "ask" so a project adopted before this setting keeps asking. The owner's.
   upstream_sync: 'adopt',
   upstream_check_hours: 24,
-  // The npm package kit releases are published as and an instance installs (kit-install@1), and
-  // whether the live alpha's /next/ pages are served (alpha@1). Both the owner's, read as main has them.
+  // The npm package kit releases are published as and an instance installs (kit-install@1), where they
+  // are installed from (kit-install@2: npm, or GitHub's release files until npm is set up; the default is
+  // npm and never changes), and whether the live alpha's /next/ pages are served (alpha@1). All three the
+  // owner's, read as main has them.
   package_name: '@sanctuarycomputer/devteam',
+  package_source: 'npm',
   alpha: true,
   retro_every_days: 7,
   research_every_days: 7,
@@ -824,7 +827,7 @@ const SETTINGS_DEFAULTS = {
 const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
   autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', responder_command: 'governance-edit', agent_trust_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
-  forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', merge_admin: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit', package_name: 'governance-edit', alpha: 'governance-edit',
+  forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', merge_admin: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit', package_name: 'governance-edit', package_source: 'governance-edit', alpha: 'governance-edit',
   release: 'governance-edit', secret_commands: 'governance-edit', incident_slots: 'governance-edit', remediations: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit', project: 'governance-edit',
 };
 // The supervisor's own settings the owner may ask for from the dashboard (an owner-setting act the
@@ -897,7 +900,8 @@ const SETTINGS_WORDS = Object.freeze({
   upstream_base: ['Upstream and releases', 'Kit release in use', 'the devteam release this project runs', 'value'],
   upstream_sync: ['Upstream and releases', 'Kit updates', 'adopt each release on its own, or ask you first', 'value'],
   upstream_check_hours: ['Upstream and releases', 'Check for kit releases every', 'hours between checks for a new devteam release', 'value'],
-  package_name: ['Upstream and releases', 'Kit package', 'the npm package devteam releases are published as and installed from', 'value'],
+  package_name: ['Upstream and releases', 'Kit package', 'the package devteam releases are published as and installed from', 'value'],
+  package_source: ['Upstream and releases', 'Kit package source', 'where kit releases are installed from: npm, or GitHub\'s release files until npm is set up', 'value'],
   alpha: ['Upstream and releases', 'Live alpha', 'whether the new apps are served at /next/ beside the stable pages', 'value'],
   release: ['Upstream and releases', 'How a release reaches production', 'a tag, a production branch, or every merge to main', 'value'],
   sensors: ['Production', 'Sensors', 'the production signals the supervisor reads', 'names'],
@@ -930,6 +934,7 @@ const SETTING_SHAPES = Object.freeze({
   // a scoped npm name, by a stricter rule than npm's own: @scope/name, each part lower-case letters,
   // digits, - . _ and starting with a letter, digit or -; at most 214 characters in all
   package_name: (v) => typeof v === 'string' && v.length <= 214 && /^@[a-z0-9-][a-z0-9._-]*\/[a-z0-9-][a-z0-9._-]*$/.test(v),
+  package_source: (v) => v === 'github' || v === 'npm',
   upstream_base: (v) => v === null || (typeof v === 'string' && /^v\d+\.\d+\.\d+$/.test(v)),
   main_branch: settingName, tmux_session: settingName, project: settingName,
   usage_sources: settingLines, ignored_checks: settingLines, split_files: settingLines, worktree_files: settingLines, worker_denied_commands: settingLines,
@@ -4600,6 +4605,8 @@ const PANE_SHELL = /\b\d+ (background )?shells? (still )?running\b|·\s*\d+ (bac
 // overloaded API): it stops and waits; a nudge resumes it. Harness-agnostic wording.
 const PANE_API_ERROR = /\bAPI Error\b|Can't reach the API|\bENOTFOUND\b|\bECONNRESET\b|\bETIMEDOUT\b|overloaded_error|\bstream (error|disconnected)\b|\b(429|5\d\d) (Too Many Requests|Internal Server Error|Bad Gateway|Service Unavailable)\b/i;
 const idleOnApiError = (window) => { const l = paneTails.get(window) ?? []; const last = l.slice(-8); return last.some((x) => PANE_API_ERROR.test(x)) && !l.some((x) => PANE_BUSY.test(x)); };
+// An agent at work: its pane shows the agent CLI's interrupt hint (read by paneWaitingIn).
+const paneBusy = (window) => (paneTails.get(window) ?? []).some((x) => PANE_BUSY.test(x));
 const idleWithShell = (window) => { const l = paneTails.get(window) ?? []; return l.some((x) => PANE_SHELL.test(x)) && !l.some((x) => PANE_BUSY.test(x)); };
 function paneWaitingIn(window) {
   if (paneWaits.has(window)) return paneWaits.get(window);
@@ -5184,6 +5191,18 @@ function plannersNow() {
     // name: a question whose links point at this plan branch.
     const refQs = questions().filter((q) => (q.links ?? []).some((l) => l.ref === b || l.ref === `refs/heads/${b}`));
     const goals = [...new Set([...(feat.goals ?? []), ...refQs.map((q) => q.goal).filter(Boolean), ...plannerLaunchGoals(feature)])];
+    // A question on one of its goals is this planner's to wait on unless it plainly belongs to other
+    // work on that goal: it names work (a plan branch linked or approved, a ticket named, blocked,
+    // approved or linked by its ticket/<id> branch) and none of that work is this planner's. Such a
+    // question would otherwise hide a dead planner: no stale-planner, and P1 hands its move to the owner.
+    const otherWork = (q) => {
+      const refs = (q.links ?? []).map((l) => String(l?.ref ?? '').replace(/^refs\/heads\//, ''));
+      const acts = (q.approves ?? []).filter((a) => typeof a === 'string');
+      const plans = [...refs.filter((r) => r.startsWith('plan/')).map((r) => r.slice('plan/'.length)), ...acts.filter((a) => a.startsWith('plan-')).map((a) => a.slice('plan-'.length))];
+      const ids = [q.ticket, ...(q.blocks ?? []), ...acts, ...refs.filter((r) => r.startsWith('ticket/')).map((r) => r.slice('ticket/'.length))].filter((id) => id && tickets().has(id));
+      if (!plans.length && !ids.length) return false;
+      return !plans.includes(feature) && !ids.some((id) => tickets().get(id).feature === feature);
+    };
     return {
       feature, title: feat.title ?? feature, goals, tickets: graph.split('\n').filter((t) => t.includes('"type":"ticket"') && t.includes('"op":"new"')).length,
       branch: b, window: !!target, problem: target ? null : problem, waiting: target ? paneWaitingIn(by) : null,
@@ -5191,7 +5210,7 @@ function plannersNow() {
       last_seen: last, minutes_silent: last ? Math.round((Date.now() - Date.parse(last)) / 60000) : null,
       waiting_on_supervisor: asking.map((m) => ({ id: m.id, kind: m.kind, text: m.text })),
       // a planner whose design waits on the owner's answers is waiting, not stale
-      waiting_on_owner: [...new Set([...questions().filter((q) => q.status === 'open' && goals.includes(q.goal)), ...refQs.filter((q) => q.status === 'open')].map((q) => q.id))],
+      waiting_on_owner: [...new Set([...questions().filter((q) => q.status === 'open' && goals.includes(q.goal) && !otherWork(q)), ...refQs.filter((q) => q.status === 'open')].map((q) => q.id))],
     };
   }).filter(Boolean);
 }
@@ -20821,12 +20840,6 @@ function collectMetrics(since, reviewsSince = 0) {
     const ask = p.goals.length ? `ask --goal ${p.goals[0]} …` : `ask … --links '[{"title":"The plan","ref":"plan/${p.feature}","path":"${projectRel}/log/${key}.jsonl"}]'`;
     if (p.waiting_on_supervisor.some((m) => m.kind === 'blocked') && !H.get(key)) add('medium', 'blocked-without-question', key, 'blocked with no open owner question naming it', `if it waits on the owner, ask on its goal (${ask}); otherwise answer its blocked message so it can move`);
   }
-  // The tmux session's window names, once (null when tmux or the session isn't there: unknown).
-  let windowNames;
-  const windowGone = (name) => {
-    if (windowNames === undefined) { const l = sh('tmux', ['list-windows', '-t', `=${tmuxSession()}`, '-F', '#W']); windowNames = l === null ? null : new Set(l.split('\n').filter(Boolean)); }
-    return windowNames !== null && !windowNames.has(name);
-  };
   for (const id of ts.keys()) {
     const w = workerState(id);
     const wait = paneWaiting(id);
@@ -20845,9 +20858,10 @@ function collectMetrics(since, reviewsSince = 0) {
     // a planner parked by a drain stopped on purpose: not gone, exited or stale
     if (p.parked) continue;
     if (p.waiting) add('high', 'blocked-prompt', who, p.waiting.kind === 'limit' ? `a usage-limit banner in its pane: "${p.waiting.line}"` : `waiting on a prompt in its pane: "${p.waiting.line}"`, `look (tmux select-window -t '${tmuxTarget(who)}') and clear it (supervisor.md §11); a folder-trust dialog means agent_trust_command could pre-trust the worktree`);
-    else if (/no agent is running|has exited/.test(p.problem ?? '')) add('high', 'agent-exited', who, p.problem.replace(/; resume it first$/, ''), `resume it: planner ${p.feature} --resume (supervisor.md §11)`);
-    else if (!p.window) add('medium', 'planner-gone', who, `plan/${p.feature} isn't on main and its window is gone (${p.problem})`, `resume it (planner ${p.feature} --resume) or, if the plan was dropped, delete the branch`);
-    else if (!p.waiting_on_supervisor.length && !p.waiting_on_owner.length && p.minutes_silent > settings.stale_after_minutes) add('high', 'stale-planner', who, `no sign of life for ${p.minutes_silent} min`, 'check its pane; message it or resume it (supervisor.md §11)');
+    const down = plannerDown(p)?.kind;
+    if (down === 'agent-exited') add('high', 'agent-exited', who, p.problem.replace(/; resume it first$/, ''), `resume it: planner ${p.feature} --resume (supervisor.md §11)`);
+    else if (down === 'planner-gone') add('medium', 'planner-gone', who, `plan/${p.feature} isn't on main and its window is gone (${p.problem})`, `resume it (planner ${p.feature} --resume) or, if the plan was dropped, delete the branch`);
+    else if (down === 'stale-planner') add('high', 'stale-planner', who, `no sign of life for ${p.minutes_silent} min`, 'check its pane; message it or resume it (supervisor.md §11)');
   }
   for (const msg of openMsgs.filter((x) => now - Date.parse(x.created_at) > 30 * 60000)) add('medium', 'unanswered-message', msg.id, `${msg.kind} from ${msg.created_by}, ${Math.round((now - Date.parse(msg.created_at)) / 60000)} min old`, `reply with --re ${msg.id}`);
   // A review's page lives on the branch that asked it until its PR lands it on main; once no branch
@@ -21087,7 +21101,10 @@ function collectMetrics(since, reviewsSince = 0) {
   // with no fleet session raises none (ruling a-20261123-045530036-supervisor (b)).
   if (settings.responder !== false && fleetMode() !== 'park' && !draining()) {
     const h = responderHealth();
-    if (h.session && h.problem) add('medium', 'responder-down', 'responder', `the responder isn't running: ${h.problem}; the owner's turns go to the supervisor meanwhile`, 'devteam.mjs responder --resume (supervisor.md §13)');
+    // high once down RESPONDER_DOWN_HIGH_MS, by the accounts tick's record (a relaunch that keeps failing, or one it never makes)
+    const since = h.session && h.problem ? Date.parse(accountsState()?.responder_down_since ?? '') : NaN;
+    const mins = Number.isFinite(since) ? Math.max(0, Math.floor((now - since) / 60000)) : 0;
+    if (h.session && h.problem) add(now - since >= RESPONDER_DOWN_HIGH_MS ? 'high' : 'medium', 'responder-down', 'responder', `the responder isn't running${mins ? ` (for ${mins} min)` : ''}: ${h.problem}; the owner's turns go to the supervisor meanwhile`, 'devteam.mjs responder --resume (supervisor.md §13)');
     else if (h.stuck) add('medium', 'responder-stuck', 'responder', `the responder's pane is waiting on a prompt: "${h.stuck}"; the owner's turns go to the supervisor meanwhile`, `look (tmux select-window -t '${tmuxTarget(RESPONDER_NAME)}') and clear it, or responder --stop then responder`);
   }
   // An owner's turn no supervisor terminal took, unseen or unanswered (undeliveredTurns): high, so
@@ -21260,6 +21277,9 @@ function collectMetrics(since, reviewsSince = 0) {
   const ackOf = (x) => acks.filter((a) => a.subject === `${x.kind} ${x.subject}`).sort(byTime).pop();
   const sorted = f.sort((a, b) => order[a.severity] - order[b.severity]);
   m.findings = sorted.filter((x) => !ackOf(x));
+  // a windowed run (metrics --since, retro) drops older findings: it counts but keeps no record, so
+  // their first sighting isn't forgotten and their clock doesn't restart
+  m.unattended = unattendedHigh(m.findings, now, { record: !since });
   m.acknowledged = sorted.filter(ackOf).map((x) => { const a = ackOf(x); return { ...x, ack: { by: a.created_by, at: a.created_at, reason: a.detail, until: lasting(a) ? null : new Date(Date.parse(a.created_at) + ackWindow).toISOString() } }; });
   return m;
 }
@@ -21283,6 +21303,9 @@ function cmdAck() {
   const refs = logObjects('observation').filter((o) => o.source_key === key && o.detector === 'metrics' && o.created_by === 'supervisor').sort(byTime).slice(-SET_ASIDE_REFS).map((o) => o.id);
   const fields = { type: 'observation', source: 'ack', kind: 'finding-ack', subject: `${kind} ${subject}`, detail: reason, source_ref: key };
   const line = appendLog({ ...fields, refs: fitRefs(fields, refs) }, by);
+  // off the unattended list now, so hello, the hub and box-status drop it without waiting for the
+  // next metrics run (which leaves an acked finding out anyway)
+  try { const u = readJson(UNATTENDED()); if (isObj(u) && Array.isArray(u.items)) writeJson(UNATTENDED(), { ...u, items: u.items.filter((x) => !(isObj(x) && x.kind === kind && x.subject === subject)) }); } catch {}
   // a merge commit's ack never lapses (collectMetrics' lasting(), kit-348)
   const forGood = kind === 'merged-without-merge' && /^[^\s:]+:[0-9a-f]{12}$/.test(subject);
   out(`${line.id}: ${kind} ${subject} set aside ${forGood ? 'for good: a merge commit can\'t change' : `for ${loadSettings().finding_ack_hours}h`}`);
@@ -21346,6 +21369,9 @@ function efficiencyOf(m) {
 }
 
 function cmdMetrics() {
+  // Tests only: wait's fail-closed checks (DEVTEAM_TEST_WAIT_FAIL_METRICS) have this child crash or hang
+  if (process.env.DEVTEAM_TEST_METRICS_FAIL === 'hang') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 600000);
+  if (process.env.DEVTEAM_TEST_METRICS_FAIL) die(`metrics failed (test, pid ${process.pid}) `); // text that changes each run, ending in a space
   const since = flagStr('since') ? Date.parse(flagStr('since')) : 0;
   if (Number.isNaN(since)) die('--since must be a date');
   const m = collectMetrics(since, since);
@@ -21409,6 +21435,18 @@ function waitCause(ref) {
   if (kind === 'external') return rest.length <= 200 && /^\S(?:.*\S)?$/.test(rest) && !/[\r\n\v\f\u0085\u2028\u2029]/.test(rest) ? cause('external', rest) : null;
   if (kind === null && TICKET.test(ref)) return cause('ticket', ref, `ticket:${ref}`);
   return null;
+}
+// One held_for cause in plain words, for a move's wait (next-move@1): what the hold waits on.
+function holdCauseWords(ref) {
+  const w = waitCause(ref);
+  if (!w) return String(ref);
+  if (w.form === 'q') { const q = logGet(w.id); return q?.question ? `your answer to "${String(q.question).slice(0, 120)}"` : `your answer to ${w.id}`; }
+  if (w.form === 'ticket') return `${w.id} merges`;
+  if (w.form === 'goal') return `goal "${logGet(w.id)?.title ?? w.id}"`;
+  if (w.form === 'chore') return `chore ${w.id} merges`;
+  if (w.form === 'pr') return `PR ${w.id}`;
+  if (w.form === 'run') return `run ${w.id}`;
+  return w.id;
 }
 /* next-moves start */
 // The next-move table. For every running goal, active ticket, planner and open chore branch, exactly
@@ -21504,8 +21542,8 @@ function newMove(subject, title, o) {
   return Object.assign(m, o.neverOwed && f.flag === 'owed' ? { flag: null, rung: 0 } : f);
 }
 // A copied move: its source's holder, since, flag and rung (and what it is, unless the row says),
-// on this subject, via the source.
-const copiedMove = (subject, title, src, o = {}) => ({ ...src, ...o, subject, title, via: src.subject });
+// on this subject, via the source. Never its wait: that is the held ticket's own (next-move@1).
+const copiedMove = (subject, title, src, o = {}) => { const { wait, ...rest } = src; return { ...rest, ...o, subject, title, via: src.subject }; };
 const qRef = (q) => ({ kind: 'q', id: q.id });
 const askedMove = (q) => ({ move: 'answer-question', words: `Answer: ${q.question}`, holder: 'owner', ref: qRef(q), since: q.asked_at, covered_by: [{ kind: 'owner-question-waiting', subject: q.id }] });
 const PLANNING_COVER = [{ kind: 'idle-planning', subject: '*' }, { kind: 'memory-full', subject: '*' }];
@@ -21705,20 +21743,33 @@ function ticketMoves() {
       }
       const q = openQs.find((x) => x.ticket === id || (x.blocks ?? []).includes(id));
       if (q) return at({ ...askedMove(q), covered_by: [{ kind: 'blocked-on-owner', subject: id }, { kind: 'owner-question-waiting', subject: q.id }] }); // T3
-      if (isHeld(t)) return at({ move: 'held', words: `Held: ${t.held.trim()}. Release it, or ask`, holder: 'supervisor', since: (t.updates ?? []).filter((u) => typeof u.held === 'string' && u.held.trim()).at(-1)?.at ?? t.created_at, command: `ticket release ${id} --reason "…"`, neverOwed: true }); // T2b
+      if (isHeld(t)) {
+        const m = at({ move: 'held', words: `Held: ${t.held.trim()}. Release it, or ask`, holder: 'supervisor', since: (t.updates ?? []).filter((u) => typeof u.held === 'string' && u.held.trim()).at(-1)?.at ?? t.created_at, command: `ticket release ${id} --reason "…"`, neverOwed: true }); // T2b
+        // what the hold waits on and its review date (next-move@1's wait), so moveFindings can tell a
+        // hold past its --until from one still in its window
+        const causes = (Array.isArray(t.held_for) ? t.held_for : []).filter((c) => typeof c === 'string' && c.trim());
+        if (causes.length) m.wait = { causes: causes.map((ref) => ({ ref, words: holdCauseWords(ref), state: waitCause(ref)?.state ?? 'open' })), until: typeof t.held_until === 'string' && t.held_until ? t.held_until : null };
+        return m;
+      }
       const w = workerState(id);
       const phase = w?.phase ?? null;
       const run = w?.phase_started_at ?? null;
       const msg = asks.get(id);
       if (['done', 'merging'].includes(phase)) return at({ move: 'merge-it', words: 'Merge it', holder: 'supervisor', since: run, command: `merge ${id}` }); // T4
-      if (phase === 'awaiting-word') return at({ move: 'give-word', words: 'Give the word, or merge', holder: 'supervisor', since: run, command: `send ${id} "…" --kind ruling${msg ? ` --re ${msg.id}` : ''}`, covered_by: [{ kind: 'waiting-on-supervisor', subject: id }] }); // T5
+      // A worker whose window is gone, or whose agent exited, receives nothing: a word or an answer
+      // for it waits until it is resumed, and a phase in flight is held by nobody (T8b).
+      // (paneWaiting reads the pane once, and that read is what agentExited reports.)
+      const down = !phase ? null : (paneWaiting(id), agentExited(id)) ? 'its agent exited' : windowGone(id) ? 'its window is gone' : null;
+      const resumeFirst = down ? `; resume it first, ${down}` : '';
+      if (phase === 'awaiting-word') return at({ move: 'give-word', words: `Give the word, or merge${resumeFirst}`, holder: 'supervisor', since: run, command: `send ${id} "…" --kind ruling${msg ? ` --re ${msg.id}` : ''}`, covered_by: [{ kind: 'waiting-on-supervisor', subject: id }] }); // T5
       const depOpen = (t.depends_on ?? []).find((d) => !mergeShaFor(d));
-      if (msg || (phase === 'blocked' && !depOpen)) return at({ move: 'answer-message', words: 'Answer its message', holder: 'supervisor', ref: msg ? { kind: 'm', id: msg.id } : null, since: msg ? msg.created_at : run, command: `send ${id} "…" --kind ruling${msg ? ` --re ${msg.id}` : ''}`, covered_by: [{ kind: 'blocked', subject: id }, { kind: 'blocked-without-question', subject: id }, ...(msg ? [{ kind: 'unanswered-message', subject: msg.id }] : [])] }); // T6
+      if (msg || (phase === 'blocked' && !depOpen)) return at({ move: 'answer-message', words: `Answer its message${resumeFirst}`, holder: 'supervisor', ref: msg ? { kind: 'm', id: msg.id } : null, since: msg ? msg.created_at : run, command: `send ${id} "…" --kind ruling${msg ? ` --re ${msg.id}` : ''}`, covered_by: [{ kind: 'blocked', subject: id }, { kind: 'blocked-without-question', subject: id }, ...(msg ? [{ kind: 'unanswered-message', subject: msg.id }] : [])] }); // T6
       if (phase === 'parked' && ['run', 'drain'].includes(mode) && !fleetDrain) return at({ move: 'resume', words: 'Resume it', holder: 'supervisor', since: run, command: `worker ${id} --resume`, covered_by: [{ kind: 'parked-under-run', subject: id }] }); // T7
       // an Upkeep chore ticket runs a recurring job: recurring-stuck on that job covers its move too
       const job = t.feature === CHORES ? recurringChores.refJob(id) : null;
       const stuck = job ? [{ kind: 'recurring-stuck', subject: `recurring:${job}` }] : [];
       const notStarted = !phase || (phase === 'starting' && stoppedLaunch(id));
+      if (phase in PHASE_WORDS && !notStarted && down) return at({ move: 'resume-worker', words: `Resume the worker (${down})`, holder: 'supervisor', since: w.last_seen, command: `worker ${id} --resume` }); // T8b, uncovered: move-owed and move-stalled reach it
       if (phase in PHASE_WORDS && !notStarted) return at({ move: phase === 'final-review' ? 'final-review' : phase, words: PHASE_WORDS[phase], holder: 'worker', since: run, covered_by: [...['stale-worker', 'agent-exited', 'blocked-prompt'].map((kind) => ({ kind, subject: id })), ...stuck] }); // T8
       if ((notStarted || phase === 'blocked') && depOpen) {
         const d = ts.get(depOpen);
@@ -21770,6 +21821,22 @@ function leadTicketMove(open) {
 }
 // One move on a line: who holds it, what, how long, and owed, stalled or quiet.
 const moveLine = (m) => `${m.holder}  ${m.words}  ${moveAge(m.since)}${m.flag === 'none' ? '  no move' : m.flag ? `  ${m.flag}` : ''}${m.quiet ? `  (${m.quiet})` : ''}`;
+// Why a planner in flight is not alive, or null: the finding metrics raises for it (agent-exited,
+// planner-gone, stale-planner) and the words its move uses. Parked stopped on purpose; one at a
+// prompt waits on that prompt (blocked-prompt); one whose pane shows it at work is thinking, not
+// stale. sessionUp is false when the whole tmux session is missing, not just its window: a reboot,
+// which the relaunch brings back (sessionsToRelaunch).
+function plannerDown(p) {
+  if (p.parked || p.waiting) return null;
+  if (/no agent is running|has exited/.test(p.problem ?? '')) return { kind: 'agent-exited', why: 'its agent exited', sessionUp: true };
+  if (!p.window) return { kind: 'planner-gone', why: 'its window is gone', sessionUp: /^no tmux window/.test(p.problem ?? '') };
+  if (!p.waiting_on_supervisor.length && !p.waiting_on_owner.length && p.minutes_silent > loadSettings().stale_after_minutes && !paneBusy(`plan-${p.feature}`)) return { kind: 'stale-planner', why: `silent ${p.minutes_silent} min`, sessionUp: true };
+  return null;
+}
+// The tmux session's window names, once per process (null when tmux or the session isn't there:
+// unknown), and whether a window is gone from a session that is up.
+const tmuxWindowNames = () => memo('tmux-window-names', () => { const l = sh('tmux', ['list-windows', '-t', `=${tmuxSession()}`, '-F', '#W']); return l === null ? null : new Set(l.split('\n').filter(Boolean)); });
+const windowGone = (name) => { const names = tmuxWindowNames(); return names !== null && !names.has(name); };
 // The planner rows, P1 to P4.
 function plannerMove(p) {
   const by = `plan-${p.feature}`;
@@ -21781,6 +21848,13 @@ function plannerMove(p) {
   const seen = p.last_seen ?? nowIso();
   const held = p.goals.length && p.goals.every((id) => ['park', 'let-go'].includes(goalMode(logGet(id))));
   if (p.parked || held) return at({ move: 'parked', words: 'Parked', holder: 'planner', quiet: 'hold', since: lastPhaseOf(by)?.created_at ?? seen }); // P3
+  // A planner that isn't alive holds nothing: its window gone from a live session, its agent exited,
+  // or silent past stale_after_minutes. The move is the supervisor's, uncovered, so move-owed and
+  // move-stalled reach it; the finding that names it stays the detail. A stale one still has a live
+  // agent in its window, which --resume refuses: it is woken with a message instead.
+  const down = plannerDown(p);
+  if (down?.kind === 'stale-planner') return at({ move: 'wake-planner', words: `Wake the planner (${down.why})`, holder: 'supervisor', since: seen, command: `send ${by} "…"` }); // P4b, idle at its prompt
+  if (down?.sessionUp) return at({ move: 'resume-planner', words: `Resume the planner (${down.why})`, holder: 'supervisor', since: seen, command: `planner ${p.feature} --resume` }); // P4b
   return at({ move: 'planning', words: 'Planning', holder: 'planner', since: seen, covered_by: ['stale-planner', 'planner-gone', 'agent-exited', 'blocked-prompt'].map((kind) => ({ kind, subject: by })) }); // P4
 }
 // The move whose subject is this one ("goal:<g-id>", …), or null.
@@ -21818,7 +21892,9 @@ function cmdMoves() {
 // it). A move is covered when a finding its covered_by names was raised in the run, on that subject
 // or, for "*", on any; a covered move raises nothing, though it keeps its flag. By the move's flag:
 // none (no row knew the state: G20, T14) raises no-next-move, owed (rung 1) move-owed, stalled
-// (rung 2) move-stalled; each is high, so wait wakes on it. The finding's subject is
+// (rung 2) move-stalled. Each is high, so wait wakes on it, but for a stalled held ticket (T2b) still
+// inside its --until date (wait.until): a known wait, medium; with no date, or past it, high, since
+// nothing else says a hold has lapsed or its causes are done. The finding's subject is
 // "<subject> <move>:<ref id>", so an ack sets aside one move with one ref, and a new move or a new
 // ref is a new finding.
 function moveFindings(moves, raised, now = Date.now()) {
@@ -21836,7 +21912,13 @@ function moveFindings(moves, raised, now = Date.now()) {
     const detail = `${m.title}: ${m.words} (${m.holder === 'nobody' ? 'no row knows this state' : `held by the ${m.holder}`}, ${ageOf(m.since)})`;
     const suggestion = kind === 'no-next-move' ? 'work out the move by hand, and file the missing row as a kit lesson (knowledge add --kit)'
       : kind === 'move-owed' ? (m.command ?? 'do it, or record why it waits (ack with a reason)') : stalledHint(m);
-    out.push({ severity: 'high', kind, subject, detail, suggestion });
+    // a hold with a review date (ticket hold --until, T2b's wait.until) is a known wait: stalled, it is
+    // medium until that day is over (UTC), so high stays for what wants acting on now (the unattended
+    // check reads high findings only). A hold with no date, or past it, stays high: nothing else
+    // wakes the supervisor for a hold whose causes are done or whose date has lapsed
+    const until = m.wait?.until;
+    const inWindow = typeof until === 'string' && until >= new Date(now).toISOString().slice(0, 10);
+    out.push({ severity: kind === 'move-stalled' && m.move === 'held' && inWindow ? 'medium' : 'high', kind, subject, detail, suggestion });
   }
   return out;
 }
@@ -21854,6 +21936,37 @@ const movesReadAt = () => memo('next-moves-at', () => {
   return newest > now ? newest : now;
 });
 const MOVES_CACHE = () => path.join(runPath('cache'), 'next-moves.json');
+// High findings nobody has acted on: open (not acked) for longer than two ticks (tick_minutes, so 30
+// minutes by default). A finding that is acted on goes away (a nudged planner shows life, a fixed
+// gate passes); one that can wait is acked with its reason. Either way it leaves this list. When each
+// open high finding was first seen is kept in run/cache/high-seen.json, and the ones past the two
+// ticks in run/cache/unattended.json for hello, whose pulse puts them on the hub's Overview and in
+// box-status's attention lines: what the supervisor's own loop let pass, seen by the owner and the
+// box's operator. The box's operator only reads, so its metrics count the same way but write nothing,
+// and so does a windowed run (record false), whose findings are only the window's.
+const HIGH_SEEN = () => path.join(runPath('cache'), 'high-seen.json');
+const UNATTENDED = () => path.join(runPath('cache'), 'unattended.json');
+function unattendedHigh(findings, now = Date.now(), { record = true } = {}) {
+  let seen = {};
+  try { const j = readJson(HIGH_SEEN()); if (isObj(j)) seen = j; } catch {}
+  const next = {};
+  for (const x of findings) if (x.severity === 'high') { const k = `${x.kind} ${x.subject}`; next[k] = Number.isFinite(seen[k]) ? seen[k] : now; }
+  const after = 2 * (Number(loadSettings().tick_minutes) > 0 ? Number(loadSettings().tick_minutes) : 15) * 60000;
+  const items = findings.filter((x) => x.severity === 'high' && now - next[`${x.kind} ${x.subject}`] > after).map((x) => ({ kind: x.kind, subject: x.subject, detail: x.detail, since: new Date(next[`${x.kind} ${x.subject}`]).toISOString() }));
+  if (record && process.env.DEVTEAM_ROLE !== 'operator') {
+    try { writeJson(HIGH_SEEN(), next); writeJson(UNATTENDED(), { at: new Date(now).toISOString(), after_minutes: after / 60000, items }); } catch {}
+  }
+  return items;
+}
+// The unattended list as the last metrics run left it, for hello: none when that run is over two
+// hours old (no supervisor has run metrics since, which box-status says on its own lines).
+function readUnattended(now = Date.now()) {
+  try {
+    const j = readJson(UNATTENDED());
+    if (!isObj(j) || !Array.isArray(j.items) || !(now - Date.parse(j.at) < 2 * 3600000)) return [];
+    return j.items.filter((x) => isObj(x) && typeof x.kind === 'string' && typeof x.subject === 'string');
+  } catch { return []; }
+}
 function writeMovesCache(moves = nextMoves(), at = movesReadAt()) {
   // the box's operator only reads (its metrics included), so it leaves the cache as it was
   if (process.env.DEVTEAM_ROLE === 'operator') return;
@@ -23190,7 +23303,7 @@ function claimRestart(name, budget, now = Date.now()) {
     });
   } catch { return null; }
 }
-// `worker|planner <id> --resume <flag>`, as the supervisor, but not from its pane: rememberSupervisorPane
+// `worker|planner <id> --resume <flag>` (or `responder --resume`, with no flag), as the supervisor, but not from its pane: rememberSupervisorPane
 // needs both markers, and TMUX stays so the child talks to this tmux server. Its worktree_setup is
 // given DEVTEAM_SETUP_DEADLINE, 5 s before the child's own SIGKILL, or the one this process was
 // given if that is still ahead and earlier (one handed down is never moved later; a past one is ignored).
@@ -23201,7 +23314,7 @@ function relaunchChild(launch, flag, budget) {
   const own = process.env.DEVTEAM_SETUP_DEADLINE ? Number(process.env.DEVTEAM_SETUP_DEADLINE) : NaN;
   const mine = now + budget - 5000;
   env.DEVTEAM_SETUP_DEADLINE = String(Number.isFinite(own) && own > now ? Math.min(own, mine) : mine);
-  return spawnSync(process.execPath, [process.argv[1], ...launch, '--resume', flag], { cwd: mainRoot, env, encoding: 'utf8', timeout: budget, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'] });
+  return spawnSync(process.execPath, [process.argv[1], ...launch, '--resume', ...(flag ? [flag] : [])], { cwd: mainRoot, env, encoding: 'utf8', timeout: budget, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 // A session cswap's switch stopped while it waited on its limit: Claude Code says "Automatic continue
 // stopped · your login changed or ended · send a prompt to continue". Its process already has the new
@@ -23486,8 +23599,9 @@ function supervisorRecovery(id) {
 // A supervisor in tmux stopped at a limit, on its exact conversation: claude --resume <id> from
 // resume_command, in place of the pane's process, after the same refusals as a worker. Claude Code
 // only; without an id, or for anything else, it isn't guessed at, and the finding says how to resume
-// by hand. The same record and caps as restartPane, under the name "supervisor". A parked or drained
-// fleet's supervisor stays stopped, as recover leaves it.
+// by hand. The same record and caps as restartPane, under the name "supervisor". Whatever the fleet's
+// hold, as recover brings it back: a parked or drained fleet's supervisor still keeps the Inbox and
+// answers threads, and under a move its own prompt has it carry the move on and start nothing.
 const SUPERVISOR_RESTART_PROMPT = 'You were restarted after a usage limit, on this same conversation. Carry on from where you were.';
 // What to restart, null if it isn't due, or { refused } if the process can't be read. A banner in the
 // recorded pane says nothing about whose conversation it is, so the id comes from a transcript that
@@ -23515,7 +23629,6 @@ function supervisorToRestart(until) {
   return { target, id, cmd: startedSkippingPermissions(agent.args) ? cmd : withoutSkipPermissions(cmd) };
 }
 function restartSupervisor(budget) {
-  if (draining() || fleetMode()) return null;
   // a test's smaller budget (DEVTEAM_TEST only): a whole number of ms, 0 only looks
   const cap = process.env.DEVTEAM_TEST ? process.env.DEVTEAM_RESTART_BUDGET_MS : undefined;
   if (/^\d+$/.test(cap ?? '')) budget = Math.min(budget, Number(cap));
@@ -27986,6 +28099,11 @@ function supervisorIdleMinutes(root) {
   const age = Date.now() - seen;
   return seen > 0 && age >= SUPERVISOR_IDLE_MS ? Math.floor(age / 60000) : null;
 }
+// box-status's attention lines for one project's high findings its supervisor has left alone past
+// two ticks (hello's unattended, metrics' list): kind and subject, for the operator, five at most.
+function unattendedStatusLines(n, hello) {
+  return (Array.isArray(hello?.unattended) ? hello.unattended : []).slice(0, 5).map((u) => `attention: ${n} unattended high finding: ${u.kind} ${u.subject} since ${u.since}`);
+}
 async function machineStatus() {
   const lastText = readText(statusLastFile()) ?? '';
   const last = { at: Number(/^at (\d+)$/m.exec(lastText)?.[1] ?? NaN), disk: /^disk (\d+)$/m.test(lastText) ? Number(/^disk (\d+)$/m.exec(lastText)[1]) : undefined };
@@ -28055,6 +28173,7 @@ async function machineStatus() {
     // the box's own alert has the hub line; only the project's part is this project's attention
     const ownAlert = alertLessBox(hello.alert, hello.box_alert);
     if (ownAlert) flagged.push(`attention: ${n}: ${ownAlert}`);
+    flagged.push(...unattendedStatusLines(n, hello));
     const state = p ? paneState(p) : null;
     // up, idle at its prompt, its fleet running or draining (a drain still merges what is in flight),
     // and no sign of its loop for 45 minutes: it ended its turn and stopped ticking (a resume that
@@ -28149,6 +28268,52 @@ function accountsState() {
     const age = Date.now() - Date.parse(s.at);
     return age >= 0 && age < ACCOUNTS_FRESH_MS ? { ...s, active_no_room: s.active_no_room === true, needs_login: Array.isArray(s.needs_login) ? s.needs_login.map(String) : [], restart_gave_up: Array.isArray(s.restart_gave_up) ? s.restart_gave_up.map(String) : [], slot_held: Number.isInteger(s.slot_held) && s.slot_held > 0 ? s.slot_held : 0, slot_held_since: Number.isFinite(Date.parse(s.slot_held_since)) ? s.slot_held_since : null } : null;
   } catch { return null; }
+}
+// The supervisor watchdog. wait is the one loop that acts on findings, and nothing else watched it:
+// a supervisor alive but out of its loop (its turn ended at its prompt, a shell, a dialog) froze the
+// fleet while every finding was still worked out and nobody read it. So the minute tick looks: when
+// its last check (supervisorCheckedAt: a wait, or a tick's host check) is older than two
+// tick_minutes and the goals' moves the last metrics run cached (MOVES_CACHE, flags worked out again
+// by age, as moveFlag does, since a quiet supervisor runs no metrics) hold one owed or stalled, it
+// types one line into the supervisor's pane, at most once a tick_minutes, and only when the pane is
+// idle at an empty input box: never into a running turn, a half-typed line or a dialog. Each such
+// look counts, typed or not (a shell or a dialog can't take the line); at SUPERVISOR_QUIET_LOOKS
+// hello's alert names it for the hub. A newer check starts it over; no owed move ends it.
+// { since: the check it is quiet from, min, owed: words, looks, nudged, at: the last look } or null.
+const SUPERVISOR_QUIET_LOOKS = 3;
+function quietSupervisor(before, now = Date.now()) {
+  const tickMs = (Number(loadSettings().tick_minutes) > 0 ? Number(loadSettings().tick_minutes) : 15) * 60000;
+  const at = supervisorCheckedAt();
+  // another machine supervises this repo, or this one never checked: not a loop that stopped
+  if (!at || hostState().refused === true || now - Date.parse(at) < 2 * tickMs) return null;
+  let cache = null;
+  try { cache = readJson(MOVES_CACHE()); } catch {}
+  const owed = (Array.isArray(cache?.moves) ? cache.moves : []).filter((m) => isObj(m) && typeof m.since === 'string' && ['owed', 'stalled'].includes(moveFlag(m).flag));
+  if (!owed.length) return null;
+  const min = Math.floor((now - Date.parse(at)) / 60000);
+  const prev = before?.supervisor_quiet?.since === at ? before.supervisor_quiet : null;
+  const last = Date.parse(prev?.at) || 0;
+  if (prev && last <= now && now - last < tickMs) return { ...prev, min };
+  const words = `${owed[0].subject} ${owed[0].move}${owed.length > 1 ? ` (and ${owed.length - 1} more)` : ''}`;
+  const busy = (screen) => screen.filter((l) => l.trim()).slice(-15).some((l) => PANE_WORKING.test(l));
+  const { target } = resolvePane(supervisorTarget());
+  let typed = false;
+  if (target) {
+    const screen = paneScreen(target);
+    // its turn is running, or someone is typing a line: it is not out of its loop, so no look counts
+    if (busy(screen) || (paneDraftIn(screen) ?? '') !== '') return prev ? { ...prev, min } : null;
+    const key = paneKey(target);
+    const line = `From the kit: you haven't run wait for ${min} min and ${words} is owed. Run your tick (supervisor.md §3), then keep the loop.`;
+    if (paneReadyIn(screen) && !(key && heldPending(key))) {
+      const held = typeLock.run(target, (outer) => {
+        if (outer && ownerLineOpen(target)) return false;
+        const again = paneScreen(target);
+        return paneReadyIn(again) && paneDraftIn(again) === '' && !busy(again) && typeNow(target, line);
+      });
+      typed = !held.busy && held.value === true;
+    }
+  }
+  return { since: at, min, owed: words, looks: (prev?.looks ?? 0) + 1, nudged: (prev?.nudged ?? 0) + (typed ? 1 : 0), at: new Date(now).toISOString() };
 }
 // Not supervisorOnly: that records this process's pane as the supervisor's, and this runs under the dashboard.
 function cmdAccountsTick() {
@@ -28258,6 +28423,20 @@ function cmdAccountsTick() {
     }
     if (state.memory_held && state.memory_held !== before?.memory_held) out(`${plural(state.memory_held, 'gone session')} wait${state.memory_held === 1 ? 's' : ''} for room to relaunch: ${said.words}`);
   }
+  // The responder, which nothing above brings back: launchOf and lastLaunches know workers and
+  // planners only, so after a restart its window stayed gone until the supervisor ran responder
+  // --resume (incident 5). Looked at after the relaunches, which may have made the fleet's session.
+  // Not onto an account with no room, nor at the memory ceiling; one of the tick's restarts, under
+  // the caps every relaunch shares. Since when it is down, kept while it stays down, so
+  // responder-down turns high after RESPONDER_DOWN_HIGH_MS (never for one stopped on purpose).
+  const down = responderDown();
+  if (down) {
+    const did = !down.relaunch || state.active_no_room || memoryFull(loadSettings()) ? null : relaunchResponder(budget(3));
+    if (did === 'gave-up') state.restart_gave_up.push(RESPONDER_NAME);
+    else if (did) tries += 1;
+    if (did === 'relaunched') { state.relaunched.push(RESPONDER_NAME); out(`relaunched the responder: ${down.problem}`); }
+    else if (!down.stopped) state.responder_down_since = before?.responder_down_since || state.at;
+  }
   // since when any has waited, kept while some still do, so the wait is a finding, never silent
   if (state.slot_held) state.slot_held_since = (before?.slot_held && before.slot_held_since) || state.at;
   if (state.slot_held && state.slot_held !== before?.slot_held) out(`${plural(state.slot_held, 'gone session')} wait${state.slot_held === 1 ? 's' : ''} for a setup slot`);
@@ -28273,6 +28452,12 @@ function cmdAccountsTick() {
   // an idle responder with turns queued for it is told so, once a minute (kit-104); a failure here
   // never stops the tick's own record
   try { nudgeResponder(); } catch (e) { warn(`responder nudge: ${e?.message ?? e}`); }
+  // a supervisor out of its wait loop with work owed: not one at a limit or restarted just now,
+  // which has its own report; a failure here never stops the tick's own record
+  state.supervisor_quiet = null;
+  if (!state.supervisor_limit && !supervisorRestarted) {
+    try { state.supervisor_quiet = quietSupervisor(before); } catch (e) { warn(`supervisor watchdog: ${e?.message ?? e}`); }
+  }
   fs.mkdirSync(runDir, { recursive: true });
   const tmp = `${ACCOUNTS_FILE}.${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(state));
@@ -34618,6 +34803,47 @@ function cmdRecurring() {
 // test/lib/fake-registry.mjs (a loopback registry and an npm that keeps these rules or says which it saw
 // broken). packagePinPair is loaded alone by its test: it names nothing outside its body, and no line of
 // it is a bare closing brace but its last.
+// kit-install@2 (kit-1050, design kit-package-dist revision 4): a second source, GitHub's release files,
+// until npm is set up. Every kit-install@1 rule stays; this adds:
+// - The setting. package_source is github or npm, an owner setting (governance-edit) read from main's
+//   committed settings as package_name is. Its default is npm, and it never changes. Any other value is
+//   withheld, and what reads it checks it where it is used.
+// - The pair's GitHub form. packagePinPair takes resolved as the registry's tarball URL or as exactly
+//   https://github.com/<upstream_repo>/releases/download/v<version>/<pack>. <pack> is npm pack's file name:
+//   the name without its @, its / as -, then -<version>.tgz. Each part of the repository matches
+//   [A-Za-z0-9_.-]+ and is not only dots, and the string is compared whole. Only resolved differs between
+//   the forms; which repository is right is each caller's check against main's upstream_repo.
+// - githubAsset(url, kind) fetches one release asset (kind pack or bundle) in a child with an empty
+//   environment, through node's https with no agent. The url must be https://github.com/..., exactly its own
+//   href. It follows at most 5 redirects, each https, with no user or port, to github.com or a host ending
+//   in .githubusercontent.com. Each request has 15 s from its creation to its headers, and the whole call
+//   120 s (the child is killed at 130 s). The cap is 64 MiB for a pack and 1 MiB for a bundle: a larger
+//   length or body is refused, and a body cut short is never ok. It sends exactly user-agent devteam,
+//   accept application/octet-stream and accept-encoding identity, and no Authorization header or token,
+//   ever. It returns { ok, unreachable, unpublished, refused, why, bytes, url, redirects }: a 404 is
+//   unpublished; no answer in time, a network error, a 5xx or 429 is unreachable; any other answer is
+//   refused, by name. url is the last URL asked without its user, query or fragment (a signed query is a
+//   short-lived key), and no why names them either. GitHub's hosts are trusted for availability only: what the bytes are is checked by
+//   their pinned integrity and their signed bundle.
+// - Tests. DEVTEAM_GITHUB_DOWNLOAD, set and not empty, must be exactly http://127.0.0.1:<port>/ (as
+//   DEVTEAM_NPM_REGISTRY is), or githubAsset throws EDEVTEAMGITHUB before any request. Set, every rule
+//   above still holds over the https URLs; only the transport changes: https://github.com/<p> goes to
+//   <base><p> and https://<host>/<p> under githubusercontent.com to <base>-/githubusercontent/<host>/<p>.
+//   DEVTEAM_SIGSTORE_TEST_CA, a test trust root, is taken only beside a loopback DEVTEAM_NPM_REGISTRY or
+//   DEVTEAM_GITHUB_DOWNLOAD.
+// - packManifest(bytes) reads a pack's package/package.json in a child, as npm would install it. It takes
+//   only what npm pack writes (one whole gzip member, ustar headers in node-tar's own encoding, files,
+//   directories and pax path records) and refuses anything else, so an archive npm's reader could decode
+//   another way is refused, never misread. A pax-named entry is held to every rule under both of its names.
+//   It returns { ok, manifest: { name, version, layout, dependencies }, files, bins } or { ok: false,
+//   refused, why }: files is every file as { path, size, sha256 } and bins each key npm links in
+//   node_modules/.bin/ with its file. The name, version, layout and dependencies are each caller's check.
+// - The second check after install. Whoever installs a pack (kit-1054) then reads the installed tree
+//   without following links, and it must be exactly files and bins with that manifest; any difference
+//   refuses the install and removes it. So what lands is what packManifest read, whatever npm's reader did.
+// The fake GitHub is in test/lib/fake-registry.mjs, on the fake registry's port: each release's pack and
+// bundle (an attest-build-provenance bundle signed by the fake's test CA, with an inclusion proof and a
+// checkpoint) and the failures GITHUB_FAILURES names.
 function packagePinPair(pin) {
   const no = (why) => { throw new Error(`packagePinPair: ${why}`); };
   const KEYS = ['name', 'version', 'integrity', 'resolved', 'layout'];
@@ -34627,7 +34853,12 @@ function packagePinPair(pin) {
   if (typeof name !== 'string' || name.length > 214 || !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(name)) no('name is not an npm package name');
   if (typeof version !== 'string' || !/^(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})$/.test(version)) no('version is not X.Y.Z');
   if (typeof integrity !== 'string' || !/^sha512-[A-Za-z0-9+/]{86}==$/.test(integrity)) no('integrity is not one sha512');
-  if (resolved !== `https://registry.npmjs.org/${name}/-/${name.slice(name.indexOf('/') + 1)}-${version}.tgz`) no("resolved is not the public registry's tarball of name@version");
+  // kit-install@2: the registry's tarball, or the GitHub release asset of any <owner>/<repo> (each caller
+  // checks it is main's upstream_repo), its file npm pack's name; either compared as a whole string
+  const pack = `${name.replace(/^@/, '').replace('/', '-')}-${version}.tgz`;
+  const gh = typeof resolved === 'string' ? /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/releases\/download\//.exec(resolved) : null;
+  const ghOk = gh !== null && !/^\.+$/.test(gh[1]) && !/^\.+$/.test(gh[2]) && resolved === `https://github.com/${gh[1]}/${gh[2]}/releases/download/v${version}/${pack}`;
+  if (resolved !== `https://registry.npmjs.org/${name}/-/${name.slice(name.indexOf('/') + 1)}-${version}.tgz` && !ghOk) no("resolved is not the public registry's tarball of name@version, nor a GitHub release asset of it");
   if (layout !== 1 && layout !== 2) no('layout is not 1 or 2');
   const dependencies = { [name]: version };
   const text = (o) => `${JSON.stringify(o, null, 2)}\n`;
@@ -34635,6 +34866,228 @@ function packagePinPair(pin) {
     'package.json': text({ name: 'devteam-instance', private: true, dependencies, devteam: { layout } }),
     'package-lock.json': text({ name: 'devteam-instance', lockfileVersion: 3, requires: true, packages: { '': { name: 'devteam-instance', dependencies }, [`node_modules/${name}`]: { version, resolved, integrity } } }),
   };
+}
+// githubAsset (kit-install@2): one GitHub release asset, fetched in a child so its callers stay
+// synchronous. url is https://github.com/…; kind is 'pack' (at most 64 MiB) or 'bundle' (at most 1 MiB).
+// It returns { ok, unreachable, unpublished, refused, why, bytes, url, redirects } (the contract above
+// packagePinPair) and throws only for a DEVTEAM_GITHUB_DOWNLOAD that isn't a test's loopback origin (code
+// EDEVTEAMGITHUB). The child's code is a string whose every line is indented.
+function githubAsset(url, kind) {
+  const set = process.env.DEVTEAM_GITHUB_DOWNLOAD ?? '';
+  const port = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/$/.exec(set)?.[1];
+  if (set !== '' && !(Number(port) <= 65535)) {
+    const e = new Error(`DEVTEAM_GITHUB_DOWNLOAD is ${JSON.stringify(set.slice(0, 200))}: it may only be http://127.0.0.1:<port>/ (a test's fake GitHub), or unset for github.com`);
+    e.code = 'EDEVTEAMGITHUB';
+    throw e;
+  }
+  const base = { ok: false, unreachable: false, unpublished: false, refused: null, why: null, bytes: null, url: null, redirects: 0 };
+  // url and why name a URL without its userinfo, query or fragment (a signed query is a short-lived key)
+  const bare = (v) => { try { const x = new URL(v); x.username = ''; x.password = ''; x.search = ''; x.hash = ''; return x.href; } catch { return null; } };
+  const cut = (v) => JSON.stringify(String(v ?? '').replace(/[?#][^]*$/, '').replace(/^([a-z][a-z0-9+.-]*:[/][/])[^/@]*@/i, '$1')).slice(0, 200);
+  const max = kind === 'pack' ? 64 * 1024 * 1024 : kind === 'bundle' ? 1024 * 1024 : 0;
+  if (typeof kind !== 'string' || !max) return { ...base, refused: 'input', why: `kind ${cut(kind)} is not pack or bundle` };
+  let u = null;
+  if (typeof url === 'string' && url.length <= 2048) { try { u = new URL(url); } catch {} }
+  if (!u || u.href !== url || u.protocol !== 'https:' || u.hostname !== 'github.com' || u.username || u.password || u.port !== '') return { ...base, refused: 'url', why: `${cut(url)} is not an https URL on github.com` };
+  let dir;
+  try { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-github-')); } catch (e) { return { ...base, unreachable: true, url: bare(url), why: `can't make a folder under ${os.tmpdir()} to fetch into (${e.code ?? e.message})` }; }
+  const out = path.join(dir, 'asset');
+  const code = `
+    const https = require('node:https'), http = require('node:http'), fs = require('node:fs');
+    const [start, test, max, out] = ${JSON.stringify([url, set, max, out])};
+    let over = false;
+    const done = (r) => { if (over) return; over = true; process.stdout.write(JSON.stringify(r)); process.exit(0); };
+    setTimeout(() => done({ down: 'no whole answer in 120 s' }), 120000);
+    const ours = (u) => u.protocol === 'https:' && !u.username && !u.password && u.port === '' && (u.hostname === 'github.com' || /^([a-z0-9-]+\\.)+githubusercontent\\.com$/.test(u.hostname));
+    const where = (u) => (test === '' ? u : new URL(u.hostname === 'github.com' ? test + u.pathname.slice(1) + u.search : test + '-/githubusercontent/' + u.hostname + u.pathname + u.search));
+    let hops = 0;
+    const ask = (u) => {
+      const t = where(u);
+      const req = (t.protocol === 'https:' ? https : http).request(t, { method: 'GET', agent: false, headers: { 'user-agent': 'devteam', accept: 'application/octet-stream', 'accept-encoding': 'identity' } });
+      const head = setTimeout(() => { req.destroy(); done({ down: 'no answer in 15 s', url: u.href, hops }); }, 15000);
+      req.on('error', (e) => done({ down: String(e?.code ?? e?.message ?? 'error'), url: u.href, hops }));
+      req.on('response', (res) => {
+        clearTimeout(head);
+        const s = res.statusCode;
+        if ([301, 302, 303, 307, 308].includes(s)) {
+          res.resume();
+          const loc = res.headers.location;
+          let next = null;
+          try { if (typeof loc === 'string' && loc.length <= 2048) next = new URL(loc, u); } catch {}
+          if (!next || !ours(next)) return done({ refused: 'redirect', why: 'a ' + s + ' from ' + u.host + ' to ' + JSON.stringify(String(loc ?? '').replace(/[?#][^]*$/, '').replace(/^([a-z][a-z0-9+.-]*:[/][/])[^/@]*@/i, '$1')).slice(0, 200) + ', not an https URL on github.com or *.githubusercontent.com', url: u.href, hops });
+          if (++hops > 5) return done({ refused: 'redirects', why: 'more than 5 redirects', url: u.href, hops: 5 });
+          return ask(next);
+        }
+        if (s !== 200) { res.resume(); return done({ status: s, url: u.href, hops }); }
+        const len = res.headers['content-length'];
+        if (len !== undefined && Number(len) > max) { req.destroy(); return done({ refused: 'too-big', why: 'it declares ' + len + ' bytes, over ' + max, url: u.href, hops }); }
+        const fd = fs.openSync(out, 'w');
+        let n = 0;
+        res.on('data', (c) => { n += c.length; if (n > max) { req.destroy(); return done({ refused: 'too-big', why: 'it runs past ' + max + ' bytes', url: u.href, hops }); } fs.writeSync(fd, c); });
+        res.on('aborted', () => done({ down: 'the answer was cut off', url: u.href, hops }));
+        res.on('error', (e) => done({ down: String(e?.code ?? 'error'), url: u.href, hops }));
+        // a body shorter than its declared length is cut, whatever events node gave for it
+        res.on('end', () => { fs.closeSync(fd); if (len !== undefined && n !== Number(len)) return done({ down: 'the answer was cut off', url: u.href, hops }); done({ ok: true, url: u.href, hops, n }); });
+      });
+      req.end();
+    };
+    ask(new URL(start));`;
+  try {
+    const f = spawnSync(process.execPath, ['-e', code], { env: {}, encoding: 'utf8', timeout: 130000, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 1024 * 1024 });
+    let got = null;
+    try { got = JSON.parse(f.stdout); } catch {}
+    const at = { url: bare(got?.url ?? url), redirects: got?.hops ?? 0 };
+    if (!got) return { ...base, ...at, unreachable: true, why: `the fetch of ${cut(url)} gave no answer (${f.error?.code ?? f.signal ?? `exit ${f.status}`})` };
+    if (got.down) return { ...base, ...at, unreachable: true, why: `${cut(at.url)} can't be reached: ${got.down}` };
+    if (got.refused) return { ...base, ...at, refused: got.refused, why: `${cut(at.url)}: ${got.why}` };
+    if (got.status === 404) return { ...base, ...at, unpublished: true, why: `${cut(at.url)} is not there (404)` };
+    if (got.status === 429 || got.status >= 500) return { ...base, ...at, unreachable: true, why: `${cut(at.url)} answered ${got.status}` };
+    if (got.status !== undefined) return { ...base, ...at, refused: 'status', why: `${cut(at.url)} answered ${got.status}` };
+    const bytes = fs.readFileSync(out);
+    if (bytes.length !== got.n || bytes.length > max) return { ...base, ...at, unreachable: true, why: `the fetch of ${cut(at.url)} wrote ${bytes.length} bytes of ${got.n}` };
+    return { ...base, ...at, ok: true, bytes };
+  } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* a folder left in the temp folder changes no answer */ } }
+}
+// packManifest (kit-install@2): the pack's own package/package.json, read as npm installs it (the
+// contract above packagePinPair), in a child so the kit needs no zlib import. It returns { ok: true,
+// manifest: { name, version, layout, dependencies }, files: [{ path, size, sha256 }] (sorted, package/
+// dropped), bins: { <key>: <path> } (as npm links them) } or { ok: false, refused, why }, and throws
+// nothing. The file list is what a second check after install holds the installed tree to.
+// The child's code is a string whose every line is indented.
+function packManifest(bytes) {
+  const no = (refused, why) => ({ ok: false, refused, why });
+  if (!Buffer.isBuffer(bytes) || bytes.length === 0) return no('input', 'the pack is not bytes');
+  if (bytes.length > 64 * 1024 * 1024) return no('too-big', `the pack is ${bytes.length} bytes, over 64 MiB`);
+  const code = `
+    const zlib = require('node:zlib'), fs = require('node:fs'), crypto = require('node:crypto');
+    const MIB = 1024 * 1024;
+    // the answer is written whole before the exit: a queued pipe write would be dropped by it
+    const say = (o) => { const b = Buffer.from(JSON.stringify(o)); for (let i = 0; i < b.length;) { try { i += fs.writeSync(1, b, i); } catch (e) { if (e.code !== 'EAGAIN') throw e; } } process.exit(0); };
+    const no = (refused, why) => say({ ok: false, refused, why });
+    (() => {
+    let tar;
+    const input = fs.readFileSync(0);
+    let engine;
+    try { ({ buffer: tar, engine } = zlib.gunzipSync(input, { maxOutputLength: 256 * MIB, info: true })); } catch (e) { return e?.code === 'ERR_BUFFER_TOO_LARGE' ? no('too-big', 'the pack unzips to over 256 MiB') : no('gzip', 'the pack is not gzip'); }
+    // one gzip member, every byte of it read: a streaming reader (npm's) and this one then unzip the same bytes
+    if (engine.bytesWritten !== input.length) return no('gzip', 'the pack has bytes after its gzip data');
+    if (input.length < 18 || input.readUInt32LE(input.length - 4) !== tar.length) return no('gzip', 'the pack is not one gzip member');
+    // only what npm pack writes, field for field as node-tar's encoder does: ustar headers of type 0, 5 or
+    // pax x, every string field UTF-8 then NULs to its end, every number field octal as node-tar pads it,
+    // no link target, pax records of path, mtime and size only, names under package/ with no empty, . or
+    // .. component and no \ or :, the names directly under package/ ASCII. Read so, node-tar (strip 1,
+    // pacote's filter) decodes every entry as this walk does; anything else is refused
+    const strField = (b) => { const i = b.indexOf(0); const s = i < 0 ? b : b.subarray(0, i); if (i >= 0 && !b.subarray(i).every((x) => x === 0)) return null; const t = s.toString('utf8'); return Buffer.from(t, 'utf8').equals(s) && !/[\\u0000-\\u001f\\u007f]/.test(t) ? t : null; };
+    const numField = (b, empty) => { const t = b.toString('latin1'); if (empty && b.every((x) => x === 0)) return 0; const n = b.length; return new RegExp('^(?:[0-7]{' + (n - 1) + '}\\u0000|[0-7]{' + (n - 2) + '} \\u0000)$').test(t) ? parseInt(t.slice(0, n - 1).trim(), 8) : NaN; };
+    const cksField = (b) => { const t = b.toString('latin1'); return /^(?:[0-7]{6} \\u0000|[0-7]{6}\\u0000 |[0-7]{7}\\u0000)$/.test(t) ? parseInt(t.slice(0, 7).trim(), 8) : NaN; };
+    const paxRecords = (b) => {
+      const t = b.toString('utf8');
+      if (!Buffer.from(t, 'utf8').equals(b)) return null;
+      const kv = {};
+      for (let i = 0; i < b.length;) {
+        const m = /^([1-9][0-9]*) ([a-z]+)=/.exec(b.subarray(i, i + 64).toString('latin1'));
+        if (!m) return null;
+        const len = Number(m[1]);
+        if (i + len > b.length || b[i + len - 1] !== 10) return null;
+        const v = b.subarray(i + m[0].length, i + len - 1).toString('utf8');
+        if (m[2] === 'linkpath') return 'link';
+        if (v.includes('\\n') || v.includes('\\u0000') || kv[m[2]] !== undefined) return null;
+        if (m[2] === 'path' ? v === '' : m[2] === 'size' ? !/^(0|[1-9][0-9]*)$/.test(v) : m[2] === 'mtime' ? !/^[0-9]+(\\.[0-9]+)?$/.test(v) : true) return null;
+        kv[m[2]] = v;
+        i += len;
+      }
+      return kv;
+    };
+    let ex = null, zero = 0;
+    const entries = [];
+    const okName = (n, dir) => { const p = dir && n.endsWith('/') ? n.slice(0, -1) : n; const parts = p.split('/'); return parts[0] === 'package' && (dir || parts.length > 1) && parts.every((c) => c !== '' && c !== '.' && c !== '..' && !['node_modules', '.gitignore', '.npmignore'].includes(c.toLowerCase())) && !/[\\\\:]/.test(n) && (parts.length < 2 || /^[\\x20-\\x7e]+$/.test(parts[1])); };
+    for (let o = 0; o < tar.length;) {
+      if (o + 512 > tar.length) return no('tar', zero === 2 ? 'the archive is not whole blocks' : 'the archive ends before its two zero blocks');
+      const h = tar.subarray(o, o + 512);
+      if (zero === 2) { if (tar.subarray(o).every((x) => x === 0)) break; return no('tar', 'there is more after the archive\\'s end'); }
+      if (h.every((x) => x === 0)) { if (ex) return no('tar', 'a pax header with no entry after it'); zero++; o += 512; continue; }
+      if (zero) return no('tar', 'a lone zero block inside the archive');
+      let sum = 8 * 32;
+      for (let i = 0; i < 512; i++) if (i < 148 || i >= 156) sum += h[i];
+      if (cksField(h.subarray(148, 156)) !== sum) return no('tar', 'a header\\'s checksum is not as npm pack writes it, or does not hold');
+      if (h.subarray(257, 265).toString('latin1') !== 'ustar\\u000000') return no('tar', 'a header is not ustar');
+      const type = String.fromCharCode(h[156]);
+      if (!['0', '5', 'x'].includes(type)) return no('entry-type', 'an entry of type ' + JSON.stringify(type) + ', which npm pack does not write');
+      if (!h.subarray(157, 257).every((x) => x === 0)) return no('link', 'an entry carries a link target');
+      const f = { name: strField(h.subarray(0, 100)), uname: strField(h.subarray(265, 297)), gname: strField(h.subarray(297, 329)), prefix: strField(h.subarray(345, 500)) };
+      const n = { mode: numField(h.subarray(100, 108)), uid: numField(h.subarray(108, 116), true), gid: numField(h.subarray(116, 124), true), size: numField(h.subarray(124, 136)), mtime: numField(h.subarray(136, 148)), devmaj: numField(h.subarray(329, 337), true), devmin: numField(h.subarray(337, 345), true) };
+      if (Object.values(f).includes(null) || Object.values(n).some(Number.isNaN) || !h.subarray(500, 512).every((x) => x === 0) || (f.name === '' && type === 'x')) return no('tar', 'a header field is not as npm pack writes it');
+      let size = n.size;
+      if (type === 'x') {
+        if (ex) return no('tar', 'two pax headers in a row');
+        if (size > MIB) return no('too-big', 'a pax record is over 1 MiB');
+        if (o + 512 + size > tar.length) return no('tar', 'the archive ends inside an entry');
+        const kv = paxRecords(tar.subarray(o + 512, o + 512 + size));
+        if (kv === 'link') return no('link', 'a pax record carries a link target');
+        if (!kv) return no('tar', 'a pax record is not one npm pack writes (path, mtime, size)');
+        ex = kv;
+        o += 512 + Math.ceil(size / 512) * 512;
+        continue;
+      }
+      // a pax record can fail to apply in another decoder, which then keeps the ustar name: so both
+      // names are held to every rule
+      const ustar = f.prefix ? f.prefix + '/' + f.name : f.name;
+      let name = ustar;
+      if (ex && ex.size !== undefined && Number(ex.size) !== size) return no('tar', 'a pax size differs from its header\\'s');
+      if (ex && ex.path !== undefined) name = ex.path;
+      ex = null;
+      if (type === '5' ? size !== 0 : name.endsWith('/')) return no('tar', JSON.stringify(name).slice(0, 200) + ' is a directory with a size, or a file named as a directory');
+      if (!okName(name, type === '5') || !okName(ustar, type === '5')) return no('name', JSON.stringify(okName(name, type === '5') ? ustar : name).slice(0, 200) + ' is not a plain path under package/');
+      if (o + 512 + size > tar.length) return no('tar', 'the archive ends inside an entry');
+      entries.push({ name, ustar, type, size, at: o + 512 });
+      o += 512 + Math.ceil(size / 512) * 512;
+    }
+    if (zero < 2) return no('tar', 'the archive ends before its two zero blocks');
+    const seen = new Set();
+    const key = (n) => (n.endsWith('/') ? n.slice(0, -1) : n).normalize('NFC').toLowerCase();
+    const folders = new Set();
+    const names = (e) => (e.ustar !== e.name ? [e.name, e.ustar] : [e.name]);
+    for (const e of entries) for (const n of names(e)) { const p = key(n).split('/'); for (let i = 1; i < p.length; i++) folders.add(p.slice(0, i).join('/')); if (e.type === '5') folders.add(p.join('/')); }
+    for (const e of entries) { if (e.type === '0' && names(e).some((n) => folders.has(key(n)))) return no('duplicate', JSON.stringify(e.name).slice(0, 200) + ' is a file and also a folder of the pack'); }
+    for (const e of entries) { if (e.type !== '0') continue; for (const k of new Set(names(e).map(key))) { if (seen.has(k)) return no(k === 'package/package.json' ? 'two-manifests' : 'duplicate', JSON.stringify(e.name).slice(0, 200) + ' is in the pack twice (or twice but for case)'); seen.add(k); } }
+    const isManifest = (n) => n.replace(/\\/$/, '').replace(/[A-Z]/g, (c) => c.toLowerCase()) === 'package/package.json';
+    const found = entries.filter((e) => isManifest(e.name) || isManifest(e.ustar));
+    if (found.length === 0) return no('no-manifest', 'the pack holds no package/package.json');
+    if (found.length > 1) return no('two-manifests', 'the pack holds ' + found.length + ' entries npm would install as package.json');
+    const m = found[0];
+    if (m.name !== 'package/package.json' || m.ustar !== m.name || m.type === '5') return no('manifest-path', 'the one manifest is ' + JSON.stringify(m.name).slice(0, 200) + ' of type ' + m.type + ', not the file package/package.json');
+    if (m.size > MIB) return no('too-big', 'package/package.json is over 1 MiB');
+    let pkg = null;
+    try { pkg = JSON.parse(tar.subarray(m.at, m.at + m.size).toString('utf8')); } catch {}
+    if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) return no('json', 'package/package.json is not a JSON object');
+    // a bin npm links (node_modules/.bin/<key>) and rewrites only when its first line ends in CRLF: each
+    // target a file of the pack whose first line doesn't, each key a plain name; directories.bin is refused
+    if (pkg.directories && typeof pkg.directories === 'object' && Object.prototype.hasOwnProperty.call(pkg.directories, 'bin')) return no('bin', 'package/package.json names directories.bin');
+    const binsOut = {}, binKeys = new Set();
+    if (Object.prototype.hasOwnProperty.call(pkg, 'bin')) {
+      const bins = typeof pkg.bin === 'string' && typeof pkg.name === 'string' ? { [pkg.name.replace(/^@[^/]+\\//, '')]: pkg.bin } : pkg.bin;
+      if (!bins || typeof bins !== 'object' || Array.isArray(bins)) return no('bin', 'package/package.json\\'s bin is not a path or an object of paths');
+      for (const [k, v] of Object.entries(bins)) {
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(k) || typeof v !== 'string') return no('bin', 'a bin ' + JSON.stringify(k).slice(0, 80) + ' is not a plain name and a path');
+        const target = entries.find((e) => e.type === '0' && e.name === 'package/' + v.replace(/^\\.\\//, ''));
+        if (!target) return no('bin', 'the bin ' + k + ' is not a file of the pack');
+        if (binKeys.has(k.toLowerCase())) return no('bin', 'two bins are named ' + k + ' but for case');
+        binKeys.add(k.toLowerCase()); binsOut[k] = target.name.slice('package/'.length);
+        const head = tar.subarray(target.at, target.at + Math.min(target.size, 4096));
+        const nl = head.indexOf(10);
+        if (head[0] === 35 && head[1] === 33 && nl > 0 && head[nl - 1] === 13) return no('bin', 'the bin ' + k + '\\'s first line ends in CRLF, which npm rewrites on install');
+      }
+    }
+    const KINDS = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies', 'bundleDependencies', 'bundledDependencies'];
+    const dependencies = Object.fromEntries(KINDS.filter((k) => Object.prototype.hasOwnProperty.call(pkg, k)).map((k) => [k, pkg[k]]));
+    const files = entries.filter((e) => e.type === '0').map((e) => ({ path: e.name.slice('package/'.length), size: e.size, sha256: crypto.createHash('sha256').update(tar.subarray(e.at, e.at + e.size)).digest('hex') })).sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0));
+    say({ ok: true, manifest: { name: pkg.name ?? null, version: pkg.version ?? null, layout: pkg.devteam?.layout ?? null, dependencies }, files, bins: binsOut });
+    })();`;
+  const f = spawnSync(process.execPath, ['-e', code], { input: bytes, env: {}, encoding: 'utf8', timeout: 60000, killSignal: 'SIGKILL', stdio: ['pipe', 'pipe', 'pipe'], maxBuffer: 4 * 1024 * 1024 });
+  let got = null;
+  try { got = JSON.parse(f.stdout); } catch {}
+  if (!got || typeof got.ok !== 'boolean') return no('reader', `the pack reader gave no answer (${f.error?.code ?? f.signal ?? `exit ${f.status}`})`);
+  return got.ok ? { ok: true, manifest: got.manifest, files: got.files, bins: got.bins } : no(got.refused, got.why);
 }
 // npmRun (kit-install@1): the one function every kit npm call goes through. It runs `npm <args>` in cwd
 // (absolute) with --registry=<the registry>, --ignore-scripts, --prefix=<cwd> and --workspaces=false
@@ -38088,6 +38541,10 @@ async function cmdSensor() {
 // message), or the tick coming due. A high finding already open when it starts returns at once:
 // act on it, or ack it (supervisor.md §3). Harness-agnostic: a blocking command, run in the
 // background where the harness can be woken by a finished command.
+// How long wait lets one kit child (messages, metrics) run before it is killed, so a hung child
+// can't hold the supervisor's loop: far above the slowest healthy run seen (metrics --json on a
+// 20 MB log, warm, about 20 s), as a killed run also loses the git answers it would have cached.
+const WAIT_CHILD_TIMEOUT_MS = 10 * 60000;
 function cmdWait() {
   supervisorOnly('wait');
   const minutes = Number(flagStr('minutes') ?? loadSettings().tick_minutes ?? 15);
@@ -38098,18 +38555,48 @@ function cmdWait() {
   const trace = process.env.DEVTEAM_TEST_WAIT_TRACE || null;
   const cycleMs = Number(process.env.DEVTEAM_TEST_WAIT_CYCLE_MS) > 0 ? Number(process.env.DEVTEAM_TEST_WAIT_CYCLE_MS) : null;
   let failMessages = Number(process.env.DEVTEAM_TEST_WAIT_FAIL_MESSAGES) || 0;
+  // Tests only: "n" or "n:hang" has the nth metrics child (0 is the startup one) exit 1 or hang, "n+"
+  // that one and every one after; and a shorter child timeout so a hang ends quickly.
+  const [failAt, failHow] = (process.env.DEVTEAM_TEST_WAIT_FAIL_METRICS ?? '').split(':');
+  const failsNow = (i) => failAt !== '' && (failAt.endsWith('+') ? i >= Number(failAt.slice(0, -1)) : i === Number(failAt));
+  let metricsRuns = 0;
+  const childMs = Number(process.env.DEVTEAM_TEST_WAIT_CHILD_TIMEOUT_MS) > 0 ? Number(process.env.DEVTEAM_TEST_WAIT_CHILD_TIMEOUT_MS) : WAIT_CHILD_TIMEOUT_MS;
   const started = []; // the kit children started since the last trace line (cycle 0's include the startup poll)
+  // A child that hangs is killed at childMs, so the loop always comes back; why the last child
+  // failed is kept for the report (a failed metrics run wakes the supervisor, it never reads as quiet),
+  // with its kind (timeout, exit n, spawn error, not JSON), which doesn't change with the error's text.
+  let subFailed = null;
+  let subFailKind = null;
   const sub = (args) => {
     if (trace) started.push(args);
-    const r = spawnSync(process.execPath, [self, ...args], { cwd: mainRoot, env: process.env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    const env = args[0] === 'metrics' && failsNow(metricsRuns++) ? { ...process.env, DEVTEAM_TEST_METRICS_FAIL: failHow || 'exit' } : process.env;
+    const r = spawnSync(process.execPath, [self, ...args], { cwd: mainRoot, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: childMs, killSignal: 'SIGKILL' });
     if (args[0] === 'messages' && failMessages > 0) { failMessages--; return null; }
-    try { return r.status === 0 ? JSON.parse(r.stdout) : null; } catch { return null; }
+    const errLine = (r.stderr || '').trim().split('\n').pop().replace(/\s+/g, ' ').slice(0, 200).trim();
+    subFailKind = r.error?.code === 'ETIMEDOUT' ? 'timeout' : r.error ? `spawn ${r.error.code ?? 'error'}` : r.status !== 0 ? `exit ${r.status ?? r.signal}` : null;
+    subFailed = subFailKind === 'timeout' ? `timed out after ${Math.round(childMs / 1000)}s`
+      : r.error ? r.error.code ?? r.error.message
+      : subFailKind ? `${subFailKind}${errLine ? `: ${errLine}` : ''}`
+      : null;
+    if (subFailed) return null;
+    try { return JSON.parse(r.stdout); } catch { subFailKind = 'not JSON'; subFailed = 'its output was not JSON'; return null; }
   };
   // What arrived since the last wait woke the supervisor counts as new, though it is already in the
   // first snapshot: a worker's message that lands during the tick (or while metrics runs, which on a
   // long log takes a while) would otherwise wait out the whole next tick. A message the supervisor
   // leaves open wakes it once, not every time.
   const sinceFile = path.join(runDir, 'wait-since');
+  // A failed metrics run wakes the supervisor at most once a tick for each kind of failure: the kind
+  // last reported and when are kept here, and the same kind again within the tick (a repeat, or a
+  // run that flips between working and failing) waits it out and is said when it is due. It can't
+  // be acked, so waking on it every call would spin.
+  const metricsFailFile = path.join(runDir, 'wait-metrics-failed');
+  // within a tick of this wait's start: one that held at the start holds to the end of the wait
+  const quietSince = Date.now() - minutes * 60000;
+  let metricsReported = null;
+  try { const j = JSON.parse(readText(metricsFailFile) ?? 'null'); if (j && typeof j.kind === 'string' && Number(j.at) > 0) metricsReported = j; } catch {}
+  let quietFails = 0; // failures this wait that didn't wake, and whether the last run failed
+  let lastFail = null;
   const since = Number(readText(sinceFile)) || null;
   // Sensors are polled on every cycle when one is due (checked here, before spawning anything); a
   // new outage or a severity-4 event wakes the supervisor once. A poll that fails says so once.
@@ -38165,7 +38652,11 @@ function cmdWait() {
       last = got ? { key, owner, msgs } : null;
       now = { owner, msgs };
     }
-    now.high = (sub(['metrics', '--json'])?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
+    // a metrics run that failed is not "no high findings": it is reported, at startup or mid-wait
+    const m = sub(['metrics', '--json']);
+    now.metricsFailed = m ? null : subFailed ?? 'no result';
+    now.metricsFailKind = m ? null : subFailKind ?? 'no result';
+    now.high = (m?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
     if (trace) {
       const r = readLog.reads ?? 0;
       try { fs.appendFileSync(trace, `${JSON.stringify({ cycle: cycle++, at, children: started.splice(0), log_reads: r - reads, key, rss: process.memoryUsage().rss })}\n`); } catch {}
@@ -38212,10 +38703,21 @@ function cmdWait() {
   // the owner's new lines, and a pointer to the threads when one of them is a thread or a turn
   const ownerSaid = (ks) => `${ks.length} new line(s) from the owner: ${ks.slice(-5).join(', ')} (questions --all, history --tail 20${ks.some((k) => /^[tu]-/.test(k)) ? '; a thread: thread list --waiting' : ''})`;
   const report = (why, lines) => { fs.mkdirSync(runDir, { recursive: true }); fs.writeFileSync(sinceFile, `${Date.now()}\n`); out(why); for (const l of lines) out(`  ${l}`); out('then: the tick (supervisor.md §3), and wait again'); };
+  // a new kind of failure, or one not reported this tick, is reported with what else the snapshot has
+  const metricsFailed = (now, lines) => {
+    const why = now.metricsFailed;
+    if (!why) { if (lastFail) lastFail.ended = true; return false; }
+    const kind = now.metricsFailKind;
+    if (metricsReported?.kind === kind && metricsReported.at > quietSince) { quietFails++; lastFail = { why }; return false; }
+    report(`metrics failed (${why}): the tick is due; look at why (devteam.mjs metrics --json)`, lines);
+    try { fs.writeFileSync(metricsFailFile, `${JSON.stringify({ kind, at: Date.now() })}\n`); } catch {}
+    return true;
+  };
   if (firstAlerts.length) return report('production needs you (sensor status; supervisor.md, Monitoring):', firstAlerts);
-  if (base.high.length) return report('high findings are open; act on each, or ack it with a reason (ack <kind> <subject> --reason "…"):', base.high);
   const lateMsgs = late(first.msgs).map((x) => `message ${x.k}`);
   const lateOwner = late(first.owner).map((x) => x.k);
+  if (metricsFailed(first, [...lateMsgs, ...(lateOwner.length ? [ownerSaid(lateOwner)] : [])])) return;
+  if (base.high.length) return report('high findings are open; act on each, or ack it with a reason (ack <kind> <subject> --reason "…"):', base.high);
   if (lateMsgs.length || lateOwner.length) return report('something needs you:', [...lateMsgs, ...(lateOwner.length ? [ownerSaid(lateOwner)] : [])]);
   const until = Date.now() + minutes * 60000;
   const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -38228,9 +38730,13 @@ function cmdWait() {
     recur(now.key);
     const keys = { ...now, owner: now.owner.map((x) => x.k), msgs: now.msgs.map((x) => x.k) };
     const fresh = (k) => keys[k].filter((x) => !base[k].includes(x));
-    const lines = [...fresh('msgs').map((x) => `message ${x}`), ...(fresh('owner').length ? [ownerSaid(fresh('owner'))] : []), ...fresh('high').map((x) => `finding ${x}`)];
+    const said = [...fresh('msgs').map((x) => `message ${x}`), ...(fresh('owner').length ? [ownerSaid(fresh('owner'))] : [])];
+    if (metricsFailed(now, said)) return;
+    const lines = [...said, ...fresh('high').map((x) => `finding ${x}`)];
     if (lines.length) return report('something needs you:', lines);
   }
+  if (lastFail && !lastFail.ended) return report(`metrics still failing (${lastFail.why}): the tick is due; look at why (devteam.mjs metrics --json)`, []);
+  if (lastFail) return report(`metrics failed ${quietFails} time(s) in this wait, last (${lastFail.why}), and its last run worked: the tick is due; look at why (devteam.mjs metrics --json)`, []);
   report(`nothing new in ${minutes} min: the tick is due`, []);
 }
 
@@ -38263,7 +38769,13 @@ const helloAlert = (() => {
     const [x] = xs;
     return `A message in a thread reached no supervisor and has waited ${x.waited_min} min (thread ${x.id}${xs.length > 1 ? `, and ${xs.length - 1} more` : ''}); the supervisor ${x.checked}: resume it`;
   };
-  return () => (memo !== undefined ? memo : (memo = [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, undelivered(), boxAlert()].filter(Boolean).join(' · ') || null));
+  // supervisor-quiet: out of its wait loop with work owed, past the watchdog's looks (quietSupervisor)
+  const quiet = () => {
+    const q = accountsState()?.supervisor_quiet;
+    if (!(q?.looks >= SUPERVISOR_QUIET_LOOKS)) return null;
+    return `supervisor-quiet: the supervisor of ${loadSettings().project ?? path.basename(mainRoot)} has not run wait for ${Number(q.min) || 0} min while ${String(q.owed ?? 'a move').slice(0, 120)} is owed (${plural(Number(q.nudged) || 0, 'nudge')} typed): look at its terminal`;
+  };
+  return () => (memo !== undefined ? memo : (memo = [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, quiet(), undelivered(), boxAlert()].filter(Boolean).join(' · ') || null));
 })();
 // A hello's alert, less the box's alert folded in at its end: the project's own part, or null. Matched
 // as the whole alert or a " · " suffix, never split, so a box alert holding " · " still comes off.
@@ -38307,6 +38819,17 @@ function commitActivity(day0) {
     }
   }
   return activity;
+}
+// The pulse's line for the high findings the supervisor has left alone past two ticks: the oldest
+// in its plain words (its detail; kind and subject are box-status's, for the operator), so the
+// Overview says what is stuck and for how long without opening the project.
+function unattendedLine(items) {
+  if (!items.length) return null;
+  const o = [...items].sort((a, b) => Date.parse(a.since) - Date.parse(b.since))[0];
+  const m = Math.max(0, Math.round((Date.now() - Date.parse(o.since)) / 60000));
+  const age = m < 120 ? `${m} min` : m < 2880 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} days`;
+  const what = typeof o.detail === 'string' && o.detail.trim() ? o.detail.trim() : 'see the project\'s warnings';
+  return `${items.length === 1 ? 'A warning' : `${items.length} warnings`} the supervisor hasn't acted on or set aside, ${items.length === 1 ? '' : 'the oldest '}for ${age}: ${what}`;
 }
 function helloPulse() {
   const now = Date.now();
@@ -38376,6 +38899,7 @@ function helloPulse() {
     state === 'stalled' ? (quietMin === null ? 'Open work, and the fleet has never written to the log' : `${live.length ? 'Open work' : 'An approved goal with no tickets'}, and nothing has moved in ${ago(quietMin)}`) : null,
     silent.length ? `${silent.length} worker${silent.length === 1 ? ' has' : 's have'} been silent for over an hour` : null,
     incidents ? `${incidents} open production incident${incidents === 1 ? '' : 's'}` : null,
+    unattendedLine(readUnattended()),
     mode === 'drain' ? 'Draining: workers finish what they have, nothing new starts' : null,
     onHold && mode !== 'park' ? `${onHold} open ticket${onHold === 1 ? ' is' : 's are'} on hold with ${onHold === 1 ? 'its' : 'their'} goal` : null,
   ].filter(Boolean);
@@ -38393,7 +38917,7 @@ function cmdHello() {
   const workers = ourWindows(tmuxSession()).length;
   // --pane: whether the supervisor has a pane the kit can type into, for the dashboard's 10 s run of
   // this (its threads' "hasn't replied yet"), so the dashboard's own process never asks tmux itself
-  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, threads: threadCounts(), fleet: { mode: fleetMode() ?? 'run', workers, goals: goalModeCounts(), moving: movingFleet() }, ...(helloAlert() ? { alert: helloAlert() } : {}), ...(boxAlert() ? { box_alert: boxAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, threads: threadCounts(), fleet: { mode: fleetMode() ?? 'run', workers, goals: goalModeCounts(), moving: movingFleet() }, ...(helloAlert() ? { alert: helloAlert() } : {}), ...(boxAlert() ? { box_alert: boxAlert() } : {}), pulse: helloPulse(), unattended: readUnattended(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
   // and what its terminal is asking, if anything: the dashboard's card, and the hub's Overview
   if (flags.pane) {
     const a = supervisorAsk();
@@ -42650,6 +43174,40 @@ function nudgeResponder(now = Date.now()) {
   writeJsonAtomic(RESPONDER_NUDGE_FILE, { at: new Date(now).toISOString() });
   return true;
 }
+// The responder's last start or stop on purpose: { started: <iso> } once a start typed its agent,
+// { stopped: <iso> } after responder --stop. A fleet park stops it without a record, so it comes back
+// after the unpark. Machine-local, as its window is: after a move, the supervisor starts it there.
+const RESPONDER_STATE_FILE = runPath('responder.json');
+const RESPONDER_DOWN_HIGH_MS = 30 * 60000;
+function responderRecord() {
+  try { const o = JSON.parse(readText(RESPONDER_STATE_FILE) ?? 'null'); return isObj(o) ? o : null; } catch { return null; }
+}
+// The responder down while it should run, or null: settings.responder on, the fleet neither parked
+// nor drained for a move (what refuses its start), the fleet's session up and its window gone or its
+// agent exited (responderHealth's problem; a pane stuck on a prompt is responder-stuck's, never
+// restarted). relaunch: it ran here and nobody stopped it, so the accounts tick starts it again; a
+// fleet that never started one, or stopped it, gets the finding only. stopped: stopped on purpose.
+function responderDown(s = loadSettings()) {
+  if (s.responder === false || fleetMode() === 'park' || draining()) return null;
+  const h = responderHealth();
+  if (!h.session || !h.problem) return null;
+  const rec = responderRecord();
+  return { problem: h.problem, relaunch: typeof rec?.started === 'string' && rec.stopped === undefined, stopped: typeof rec?.stopped === 'string' };
+}
+// Start it again, as the supervisor's responder --resume does, in a child under the tick's budget
+// (the start reads origin and runs the owner's trust command, and any refusal exits): 'relaunched',
+// 'failed', 'gave-up' or null (not due), under the restart caps every relaunch shares.
+function relaunchResponder(budget) {
+  const now = Date.now();
+  const verdict = claimRestart(RESPONDER_NAME, budget, now);
+  if (verdict !== 'go') return verdict;
+  const r = relaunchChild([RESPONDER_NAME], null, budget);
+  const ok = r.status === 0;
+  const why = (r.stderr || r.error?.message || `exit ${r.status}`).trim().slice(0, 200);
+  appendLog({ type: 'observation', source: 'pane', kind: 'session-relaunched', subject: RESPONDER_NAME, detail: ok ? "the responder's window was gone or its agent had exited, and it was started again as responder --resume would" : `the responder's window was gone or its agent had exited, and it could not be started again: ${why}`, detector: 'pane', source_key: `session-relaunched ${RESPONDER_NAME} ${now}` });
+  if (!ok) out(`could not relaunch the responder: ${why}`);
+  return ok ? 'relaunched' : 'failed';
+}
 // A thread's state in the supervisor's words (thread list, show): whose reply is owed, or the owner's move.
 const waitingWords = (v, overdue = false) => (v.waiting === 'supervisor' ? 'waiting on the supervisor' : v.waiting === 'responder' ? `the responder has it${overdue ? ' · overdue' : ''}` : "the owner's move");
 // Whether the worktree at dir changed <slug>'s folder since it left main: a tracked change against
@@ -42789,7 +43347,8 @@ function cmdResponder() {
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
   if (!sh('tmux', ['-V'])) die('tmux not found');
   // a stop always works: nothing else is checked
-  if (flags.stop) { const at = stopResponder(); return out(at ? `stopped the responder (${at})` : 'no responder is running'); }
+  // recorded, so the accounts tick leaves it stopped (responderDown)
+  if (flags.stop) { const at = stopResponder(); writeJsonAtomic(RESPONDER_STATE_FILE, { stopped: nowIso() }); return out(at ? `stopped the responder (${at})` : 'no responder is running'); }
   const s = loadSettings();
   if (s.responder === false) die("settings.responder is off: the owner's thread turns go to the supervisor; set it true to start the responder");
   // a fleet park stops it (fleetOp) and keeps it stopped; a drain, or a goal's own hold, doesn't
@@ -42861,6 +43420,7 @@ function cmdResponder() {
       if (/^claude(\s|$)/.test(cmd)) cmd = cmd.replace(/^claude/, `claude --settings '${claudePolicy(RESPONDER_NAME, owned, mb)}'`);
       // a ticket or feature from the tmux server's environment is never the responder's: env -u, which works in any shell
       type(`env -u DEVTEAM_TICKET -u DEVTEAM_FEATURE ${sessionMarkerPrefix(session)}${cmd} ${shq(promptPointer(promptFile))}`);
+      writeJsonAtomic(RESPONDER_STATE_FILE, { started: nowIso() });
       out(`${again ? 'restarted' : 'started'} the responder in ${w.shown} at ${wt}`);
     });
   } catch (e) {
