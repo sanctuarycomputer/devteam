@@ -1,0 +1,22 @@
+diff --git a/test/org-access.people-page.test.mjs b/test/org-access.people-page.test.mjs
+index bea75c3ac954c0a5b1073e6e62feaa10ea48b45a..c9bc6cab227ce407adfa6c1d4f340d2a9e744250 100644
+--- a/test/org-access.people-page.test.mjs
++++ b/test/org-access.people-page.test.mjs
+@@ -23,7 +23,7 @@ import { cliRead } from './lib/cli-source.mjs';
+ 
+ const here = path.dirname(fileURLToPath(import.meta.url));
+ const repo = path.resolve(here, '..');
+-const HUB_PAGE = path.join(repo, 'docs', 'devteam', 'dashboard', 'hub.html');
++const HUB_APP = path.join(repo, 'docs', 'devteam', 'apps', 'hub');
+ delete process.env.DEVTEAM_CLAIM_TOKEN;
+ const G = await import(pathToFileURL(path.join(repo, 'cloud', 'gateway.mjs')).href);
+ const HUB = PORTS;
+@@ -137,7 +137,7 @@ async function gateway(name) {
+   fs.mkdirSync(uploadsDir, { recursive: true, mode: 0o750 });
+   const logs = [];
+   const dir = path.join(tmp, tag);
+-  const g = G.createGateway({ publicUrl, dir, ttydPort: TTYD, ttydPage, uploadsDir, hubPage: HUB_PAGE, log: (m) => logs.push(m) });
++  const g = G.createGateway({ publicUrl, dir, ttydPort: TTYD, ttydPage, uploadsDir, hubApp: HUB_APP, log: (m) => logs.push(m) });
+   await new Promise((r) => g.server.listen(port, '127.0.0.1', r));
+   const token = /claim#([\w-]+)/.exec(logs.join('\n'))?.[1];
+   const file = path.join(dir, 'state.json');

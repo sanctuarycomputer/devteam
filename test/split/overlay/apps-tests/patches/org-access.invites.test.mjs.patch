@@ -1,0 +1,31 @@
+diff --git a/test/org-access.invites.test.mjs b/test/org-access.invites.test.mjs
+index 25c08d1a4ef14e2d7041fd4075af10e7497f9b4b..c8e1d9f000c0a5512e81a130731cc4887e0aca53 100644
+--- a/test/org-access.invites.test.mjs
++++ b/test/org-access.invites.test.mjs
+@@ -28,7 +28,7 @@ import { cliRead } from './lib/cli-source.mjs';
+ 
+ const here = path.dirname(fileURLToPath(import.meta.url));
+ const repo = path.resolve(here, '..');
+-const HUB_PAGE = path.join(repo, 'docs', 'devteam', 'dashboard', 'hub.html');
++const HUB_APP = path.join(repo, 'docs', 'devteam', 'apps', 'hub');
+ delete process.env.DEVTEAM_CLAIM_TOKEN;
+ const G = await import(pathToFileURL(path.join(repo, 'cloud', 'gateway.mjs')).href);
+ const HUB = PORTS;
+@@ -101,7 +101,7 @@ async function gateway(name, opts = {}) {
+   fs.mkdirSync(uploadsDir, { recursive: true, mode: 0o750 });
+   const logs = [];
+   const dir = path.join(tmp, tag);
+-  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubPage: HUB_PAGE, log: (m) => logs.push(m), ...opts });
++  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubApp: HUB_APP, log: (m) => logs.push(m), ...opts });
+   await new Promise((r) => g.server.listen(port, '127.0.0.1', r));
+   const token = /claim#([\w-]+)/.exec(logs.join('\n'))?.[1];
+   const file = path.join(dir, 'state.json');
+@@ -487,7 +487,7 @@ test('org-access A2: an invite on a box whose state predates people is stamped,
+     assert.equal(t.people.filter((p) => p.role === 'owner').length, 1, 'the owner\'s row is written with it');
+     assert.equal(typeof t.peopleStamp, 'string', 'and the people list is stamped');
+     // the next start: the same file, read by a new gateway
+-    const again = G.createGateway({ publicUrl: gw.publicUrl, dir: gw.dir, ttydPort: await freePort(), ttydPage: path.join(tmp, 'pre-people-ttyd.html'), uploadsDir: fs.mkdtempSync(path.join(tmp, 'pre-people-up-')), hubPage: HUB_PAGE, log: () => {} });
++    const again = G.createGateway({ publicUrl: gw.publicUrl, dir: gw.dir, ttydPort: await freePort(), ttydPage: path.join(tmp, 'pre-people-ttyd.html'), uploadsDir: fs.mkdtempSync(path.join(tmp, 'pre-people-up-')), hubApp: HUB_APP, log: () => {} });
+     again.server.close?.();
+     assert.equal(gw.state().invites.length, 1, 'the invite survives the next start');
+     assert.ok(!(gw.state().people.find((p) => p.role === 'owner').notices ?? []).some((n) => n.kind === 'people-reset'), 'with no reset notice');

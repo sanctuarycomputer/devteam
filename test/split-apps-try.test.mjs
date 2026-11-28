@@ -19,7 +19,9 @@ const tool = path.join(root, 'test', 'split', 'apps-try.mjs');
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'split-apps-try-')));
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 const base = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(GIT_|DEVTEAM_|TMUX)/.test(k)));
-const git = (cwd, ...a) => { const r = spawnSync('git', ['-C', cwd, ...a], { encoding: 'utf8', env: base }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
+// maintenance.auto false: from git 2.47 a commit's automatic maintenance runs detached and outlives the
+// command, so a fixture commit would leave a git process writing in a folder this file copies or removes
+const git = (cwd, ...a) => { const r = spawnSync('git', ['-c', 'maintenance.auto=false', '-C', cwd, ...a], { encoding: 'utf8', env: base }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
 const write = (file, text) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text); };
 const readJson = (f) => JSON.parse(fs.readFileSync(f, 'utf8'));
 const lines = (f) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
@@ -234,6 +236,29 @@ test('B7 a reused tree whose served build is gone builds that app again', async 
   assert.equal(lines(splitLog).length, before, 'the tree is reused');
   assert.deepEqual(builds.map((b) => b.app), ['hub'], 'only the app with no served build');
   assert.ok(fs.existsSync(path.join(tree, 'docs/devteam/apps/hub/index.html')));
+});
+
+test('B8 the tree\'s commit leaves no git maintenance running, even when git\'s config gives it work, so the tree is built whole', async () => {
+  // from git 2.47 the snapshot's commit starts its automatic maintenance detached; this config gives that
+  // maintenance real work (packing the loose objects, then deleting them) while apps-try copies and
+  // removes the folder (kit-1060). parity's snapshot runs git with this process's own environment.
+  const busy = path.join(tmp, 'busy-home');
+  write(path.join(busy, '.gitconfig'), '[maintenance "loose-objects"]\n\tenabled = true\n\tauto = 1\n');
+  // three new HEADs in a row (a test file only, so no app builds): the race, where there is one, hits
+  // about half of the regenerations
+  const was = process.env.HOME;
+  process.env.HOME = busy;
+  try {
+    for (const n of [1, 2, 3]) {
+      write(path.join(repo, 'test/b.test.mjs'), `${probe('b')}// B8 ${n}\n`);
+      const head = commit(`B8 ${n}`);
+      assert.equal(await tryIt(['test/a.test.mjs']), 0, said.join('\n'));
+      assert.equal(lines(splitLog).at(-1).at, head, 'the tree is regenerated');
+    }
+  } finally { if (was === undefined) delete process.env.HOME; else process.env.HOME = was; }
+  // --local: the tree's own config, so a user's global maintenance.auto doesn't pass it
+  const r = spawnSync('git', ['-C', tree, 'config', '--local', '--get', 'maintenance.auto'], { encoding: 'utf8', env: base });
+  assert.equal(r.stdout.trim(), 'false', 'the tree\'s repository has automatic maintenance off');
 });
 
 test('N1 runs only the named files, with --test-concurrency=2, from the tree', async () => {
