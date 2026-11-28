@@ -201,25 +201,21 @@ test('the restart keeps the permissions the running supervisor had: no flag it w
   } finally { flagged.done(); }
 });
 
-test('a parked or drained fleet\'s supervisor stays stopped, as recover leaves it', { skip: !hasTmux }, async () => {
-  const F = fixture('supheld', { resume: CLAUDE_RESUME });
-  try {
-    F.writeTranscript(SID, [{ type: 'user', message: { content: SUP } }, rateLimit()]);
-    const pane = supervisorPane(F);
-    await until(() => pane.shows().includes('Esc to cancel'), 'the menu');
-    F.tick(withCswap(F));
-    F.logLine('supervisor', { type: 'act', class: 'drain', what: 'drained the fleet on host: moving', refs: [], reversible: true });
-    assert.equal(F.tick(withCswap(F)), '', 'an old drain');
-    left(F, pane);
-    assert.ok(F.state().supervisor_limit, 'reported all the same');
-    F.logLine('supervisor', { type: 'act', class: 'undrain', what: 'undrained the fleet', refs: [], reversible: true });
-    const held = F.run(['fleet', 'drain', '--reason', 'moving']);
-    assert.equal(held.status, 0, held.stderr);
-    assert.equal(F.tick(withCswap(F)), '', 'a fleet drain');
-    left(F, pane);
-    assert.equal(F.run(['fleet', 'undrain']).status, 0);
-    assert.match(F.tick(withCswap(F)), /restarted the supervisor/, 'running again, it is due');
-  } finally { F.done(); }
+test('a parked or drained fleet\'s supervisor at a limit is restarted, as recover brings it back: a supervisor is never down', { skip: !hasTmux }, async () => {
+  for (const hold of [['park', '--reason', 'throttling spend'], ['drain', '--move', '--reason', 'moving']]) {
+    const F = fixture(`supheld-${hold[0]}`, { resume: CLAUDE_RESUME });
+    try {
+      F.writeTranscript(SID, [{ type: 'user', message: { content: SUP } }, rateLimit()]);
+      const pane = supervisorPane(F);
+      await until(() => pane.shows().includes('Esc to cancel'), 'the menu');
+      const held = F.run(['fleet', ...hold]);
+      assert.equal(held.status, 0, held.stderr);
+      F.tick(withCswap(F));
+      assert.match(F.tick(withCswap(F)), /restarted the supervisor/, `fleet ${hold.join(' ')}: it still keeps the Inbox and answers threads`);
+      await until(() => F.claudeCalls().length === 1, 'the stand-in claude ran');
+      assert.ok(hooked(F.claudeCalls()[0]).startsWith(`supervisor|--resume ${SID}`), F.claudeCalls()[0]);
+    } finally { F.done(); }
+  }
 });
 
 test('a person at the pane: a half-typed line or a recently active client leaves it alone, and a re-check that finds nothing costs no attempt', { skip: !hasTmux }, async () => {
