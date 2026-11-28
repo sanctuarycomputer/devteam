@@ -202,12 +202,13 @@ test('a moving log with builds slower than DATA_WAIT_MS shows no stale note whil
     }
     assert.ok(builds().length >= 4, `builds kept coming (${builds().length})`);
     assert.ok(!seen.includes('STALE'), `no read marked stale while builds keep up (${seen.join(' ')})`);
-    // a build that hangs: once it has run a build's length plus the wait past the last one's end, reads say so
+    // a build that hangs: the reads go on (each starts or shares a build, as a page's poll does), and
+    // once the hanging one has run a build's length plus the wait past the last one's end, they say so
     setSleep(120000);
-    await until(() => builds().at(-1).end === null && builds().at(-1).start > Date.now() - 1000 || false, 'a hanging build to start', 30000);
     let stale = null;
-    await until(async () => { const r = await data(url); if (r.stale) stale = r; return !!stale; }, 'a read marked stale once the build is overdue', 40000);
+    await until(async () => { const r = await data(url); if (r.stale) stale = r; else await sleep(1000); return !!stale; }, 'a read marked stale once a build is overdue', 60000);
     assert.equal(stale.status, 200);
+    assert.ok(builds().at(-1).end === null && builds().at(-1).start > 0, 'while the hanging build runs');
   } finally {
     clearInterval(appends);
     setSleep(0);
