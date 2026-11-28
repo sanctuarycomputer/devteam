@@ -4600,6 +4600,8 @@ const PANE_SHELL = /\b\d+ (background )?shells? (still )?running\b|·\s*\d+ (bac
 // overloaded API): it stops and waits; a nudge resumes it. Harness-agnostic wording.
 const PANE_API_ERROR = /\bAPI Error\b|Can't reach the API|\bENOTFOUND\b|\bECONNRESET\b|\bETIMEDOUT\b|overloaded_error|\bstream (error|disconnected)\b|\b(429|5\d\d) (Too Many Requests|Internal Server Error|Bad Gateway|Service Unavailable)\b/i;
 const idleOnApiError = (window) => { const l = paneTails.get(window) ?? []; const last = l.slice(-8); return last.some((x) => PANE_API_ERROR.test(x)) && !l.some((x) => PANE_BUSY.test(x)); };
+// An agent at work: its pane shows the agent CLI's interrupt hint (read by paneWaitingIn).
+const paneBusy = (window) => (paneTails.get(window) ?? []).some((x) => PANE_BUSY.test(x));
 const idleWithShell = (window) => { const l = paneTails.get(window) ?? []; return l.some((x) => PANE_SHELL.test(x)) && !l.some((x) => PANE_BUSY.test(x)); };
 function paneWaitingIn(window) {
   if (paneWaits.has(window)) return paneWaits.get(window);
@@ -5184,6 +5186,18 @@ function plannersNow() {
     // name: a question whose links point at this plan branch.
     const refQs = questions().filter((q) => (q.links ?? []).some((l) => l.ref === b || l.ref === `refs/heads/${b}`));
     const goals = [...new Set([...(feat.goals ?? []), ...refQs.map((q) => q.goal).filter(Boolean), ...plannerLaunchGoals(feature)])];
+    // A question on one of its goals is this planner's to wait on unless it plainly belongs to other
+    // work on that goal: it names work (a plan branch linked or approved, a ticket named, blocked,
+    // approved or linked by its ticket/<id> branch) and none of that work is this planner's. Such a
+    // question would otherwise hide a dead planner: no stale-planner, and P1 hands its move to the owner.
+    const otherWork = (q) => {
+      const refs = (q.links ?? []).map((l) => String(l?.ref ?? '').replace(/^refs\/heads\//, ''));
+      const acts = (q.approves ?? []).filter((a) => typeof a === 'string');
+      const plans = [...refs.filter((r) => r.startsWith('plan/')).map((r) => r.slice('plan/'.length)), ...acts.filter((a) => a.startsWith('plan-')).map((a) => a.slice('plan-'.length))];
+      const ids = [q.ticket, ...(q.blocks ?? []), ...acts, ...refs.filter((r) => r.startsWith('ticket/')).map((r) => r.slice('ticket/'.length))].filter((id) => id && tickets().has(id));
+      if (!plans.length && !ids.length) return false;
+      return !plans.includes(feature) && !ids.some((id) => tickets().get(id).feature === feature);
+    };
     return {
       feature, title: feat.title ?? feature, goals, tickets: graph.split('\n').filter((t) => t.includes('"type":"ticket"') && t.includes('"op":"new"')).length,
       branch: b, window: !!target, problem: target ? null : problem, waiting: target ? paneWaitingIn(by) : null,
@@ -5191,7 +5205,7 @@ function plannersNow() {
       last_seen: last, minutes_silent: last ? Math.round((Date.now() - Date.parse(last)) / 60000) : null,
       waiting_on_supervisor: asking.map((m) => ({ id: m.id, kind: m.kind, text: m.text })),
       // a planner whose design waits on the owner's answers is waiting, not stale
-      waiting_on_owner: [...new Set([...questions().filter((q) => q.status === 'open' && goals.includes(q.goal)), ...refQs.filter((q) => q.status === 'open')].map((q) => q.id))],
+      waiting_on_owner: [...new Set([...questions().filter((q) => q.status === 'open' && goals.includes(q.goal) && !otherWork(q)), ...refQs.filter((q) => q.status === 'open')].map((q) => q.id))],
     };
   }).filter(Boolean);
 }
@@ -20821,12 +20835,6 @@ function collectMetrics(since, reviewsSince = 0) {
     const ask = p.goals.length ? `ask --goal ${p.goals[0]} …` : `ask … --links '[{"title":"The plan","ref":"plan/${p.feature}","path":"${projectRel}/log/${key}.jsonl"}]'`;
     if (p.waiting_on_supervisor.some((m) => m.kind === 'blocked') && !H.get(key)) add('medium', 'blocked-without-question', key, 'blocked with no open owner question naming it', `if it waits on the owner, ask on its goal (${ask}); otherwise answer its blocked message so it can move`);
   }
-  // The tmux session's window names, once (null when tmux or the session isn't there: unknown).
-  let windowNames;
-  const windowGone = (name) => {
-    if (windowNames === undefined) { const l = sh('tmux', ['list-windows', '-t', `=${tmuxSession()}`, '-F', '#W']); windowNames = l === null ? null : new Set(l.split('\n').filter(Boolean)); }
-    return windowNames !== null && !windowNames.has(name);
-  };
   for (const id of ts.keys()) {
     const w = workerState(id);
     const wait = paneWaiting(id);
@@ -20845,9 +20853,10 @@ function collectMetrics(since, reviewsSince = 0) {
     // a planner parked by a drain stopped on purpose: not gone, exited or stale
     if (p.parked) continue;
     if (p.waiting) add('high', 'blocked-prompt', who, p.waiting.kind === 'limit' ? `a usage-limit banner in its pane: "${p.waiting.line}"` : `waiting on a prompt in its pane: "${p.waiting.line}"`, `look (tmux select-window -t '${tmuxTarget(who)}') and clear it (supervisor.md §11); a folder-trust dialog means agent_trust_command could pre-trust the worktree`);
-    else if (/no agent is running|has exited/.test(p.problem ?? '')) add('high', 'agent-exited', who, p.problem.replace(/; resume it first$/, ''), `resume it: planner ${p.feature} --resume (supervisor.md §11)`);
-    else if (!p.window) add('medium', 'planner-gone', who, `plan/${p.feature} isn't on main and its window is gone (${p.problem})`, `resume it (planner ${p.feature} --resume) or, if the plan was dropped, delete the branch`);
-    else if (!p.waiting_on_supervisor.length && !p.waiting_on_owner.length && p.minutes_silent > settings.stale_after_minutes) add('high', 'stale-planner', who, `no sign of life for ${p.minutes_silent} min`, 'check its pane; message it or resume it (supervisor.md §11)');
+    const down = plannerDown(p)?.kind;
+    if (down === 'agent-exited') add('high', 'agent-exited', who, p.problem.replace(/; resume it first$/, ''), `resume it: planner ${p.feature} --resume (supervisor.md §11)`);
+    else if (down === 'planner-gone') add('medium', 'planner-gone', who, `plan/${p.feature} isn't on main and its window is gone (${p.problem})`, `resume it (planner ${p.feature} --resume) or, if the plan was dropped, delete the branch`);
+    else if (down === 'stale-planner') add('high', 'stale-planner', who, `no sign of life for ${p.minutes_silent} min`, 'check its pane; message it or resume it (supervisor.md §11)');
   }
   for (const msg of openMsgs.filter((x) => now - Date.parse(x.created_at) > 30 * 60000)) add('medium', 'unanswered-message', msg.id, `${msg.kind} from ${msg.created_by}, ${Math.round((now - Date.parse(msg.created_at)) / 60000)} min old`, `reply with --re ${msg.id}`);
   // A review's page lives on the branch that asked it until its PR lands it on main; once no branch
@@ -21263,6 +21272,9 @@ function collectMetrics(since, reviewsSince = 0) {
   const ackOf = (x) => acks.filter((a) => a.subject === `${x.kind} ${x.subject}`).sort(byTime).pop();
   const sorted = f.sort((a, b) => order[a.severity] - order[b.severity]);
   m.findings = sorted.filter((x) => !ackOf(x));
+  // a windowed run (metrics --since, retro) drops older findings: it counts but keeps no record, so
+  // their first sighting isn't forgotten and their clock doesn't restart
+  m.unattended = unattendedHigh(m.findings, now, { record: !since });
   m.acknowledged = sorted.filter(ackOf).map((x) => { const a = ackOf(x); return { ...x, ack: { by: a.created_by, at: a.created_at, reason: a.detail, until: lasting(a) ? null : new Date(Date.parse(a.created_at) + ackWindow).toISOString() } }; });
   return m;
 }
@@ -21286,6 +21298,9 @@ function cmdAck() {
   const refs = logObjects('observation').filter((o) => o.source_key === key && o.detector === 'metrics' && o.created_by === 'supervisor').sort(byTime).slice(-SET_ASIDE_REFS).map((o) => o.id);
   const fields = { type: 'observation', source: 'ack', kind: 'finding-ack', subject: `${kind} ${subject}`, detail: reason, source_ref: key };
   const line = appendLog({ ...fields, refs: fitRefs(fields, refs) }, by);
+  // off the unattended list now, so hello, the hub and box-status drop it without waiting for the
+  // next metrics run (which leaves an acked finding out anyway)
+  try { const u = readJson(UNATTENDED()); if (isObj(u) && Array.isArray(u.items)) writeJson(UNATTENDED(), { ...u, items: u.items.filter((x) => !(isObj(x) && x.kind === kind && x.subject === subject)) }); } catch {}
   // a merge commit's ack never lapses (collectMetrics' lasting(), kit-348)
   const forGood = kind === 'merged-without-merge' && /^[^\s:]+:[0-9a-f]{12}$/.test(subject);
   out(`${line.id}: ${kind} ${subject} set aside ${forGood ? 'for good: a merge commit can\'t change' : `for ${loadSettings().finding_ack_hours}h`}`);
@@ -21413,6 +21428,18 @@ function waitCause(ref) {
   if (kind === null && TICKET.test(ref)) return cause('ticket', ref, `ticket:${ref}`);
   return null;
 }
+// One held_for cause in plain words, for a move's wait (next-move@1): what the hold waits on.
+function holdCauseWords(ref) {
+  const w = waitCause(ref);
+  if (!w) return String(ref);
+  if (w.form === 'q') { const q = logGet(w.id); return q?.question ? `your answer to "${String(q.question).slice(0, 120)}"` : `your answer to ${w.id}`; }
+  if (w.form === 'ticket') return `${w.id} merges`;
+  if (w.form === 'goal') return `goal "${logGet(w.id)?.title ?? w.id}"`;
+  if (w.form === 'chore') return `chore ${w.id} merges`;
+  if (w.form === 'pr') return `PR ${w.id}`;
+  if (w.form === 'run') return `run ${w.id}`;
+  return w.id;
+}
 /* next-moves start */
 // The next-move table. For every running goal, active ticket, planner and open chore branch, exactly
 // one next move: what has to happen, who holds it and since when. Its rows (G goals, T tickets, P
@@ -21507,8 +21534,8 @@ function newMove(subject, title, o) {
   return Object.assign(m, o.neverOwed && f.flag === 'owed' ? { flag: null, rung: 0 } : f);
 }
 // A copied move: its source's holder, since, flag and rung (and what it is, unless the row says),
-// on this subject, via the source.
-const copiedMove = (subject, title, src, o = {}) => ({ ...src, ...o, subject, title, via: src.subject });
+// on this subject, via the source. Never its wait: that is the held ticket's own (next-move@1).
+const copiedMove = (subject, title, src, o = {}) => { const { wait, ...rest } = src; return { ...rest, ...o, subject, title, via: src.subject }; };
 const qRef = (q) => ({ kind: 'q', id: q.id });
 const askedMove = (q) => ({ move: 'answer-question', words: `Answer: ${q.question}`, holder: 'owner', ref: qRef(q), since: q.asked_at, covered_by: [{ kind: 'owner-question-waiting', subject: q.id }] });
 const PLANNING_COVER = [{ kind: 'idle-planning', subject: '*' }, { kind: 'memory-full', subject: '*' }];
@@ -21708,20 +21735,33 @@ function ticketMoves() {
       }
       const q = openQs.find((x) => x.ticket === id || (x.blocks ?? []).includes(id));
       if (q) return at({ ...askedMove(q), covered_by: [{ kind: 'blocked-on-owner', subject: id }, { kind: 'owner-question-waiting', subject: q.id }] }); // T3
-      if (isHeld(t)) return at({ move: 'held', words: `Held: ${t.held.trim()}. Release it, or ask`, holder: 'supervisor', since: (t.updates ?? []).filter((u) => typeof u.held === 'string' && u.held.trim()).at(-1)?.at ?? t.created_at, command: `ticket release ${id} --reason "…"`, neverOwed: true }); // T2b
+      if (isHeld(t)) {
+        const m = at({ move: 'held', words: `Held: ${t.held.trim()}. Release it, or ask`, holder: 'supervisor', since: (t.updates ?? []).filter((u) => typeof u.held === 'string' && u.held.trim()).at(-1)?.at ?? t.created_at, command: `ticket release ${id} --reason "…"`, neverOwed: true }); // T2b
+        // what the hold waits on and its review date (next-move@1's wait), so moveFindings can tell a
+        // hold past its --until from one still in its window
+        const causes = (Array.isArray(t.held_for) ? t.held_for : []).filter((c) => typeof c === 'string' && c.trim());
+        if (causes.length) m.wait = { causes: causes.map((ref) => ({ ref, words: holdCauseWords(ref), state: waitCause(ref)?.state ?? 'open' })), until: typeof t.held_until === 'string' && t.held_until ? t.held_until : null };
+        return m;
+      }
       const w = workerState(id);
       const phase = w?.phase ?? null;
       const run = w?.phase_started_at ?? null;
       const msg = asks.get(id);
       if (['done', 'merging'].includes(phase)) return at({ move: 'merge-it', words: 'Merge it', holder: 'supervisor', since: run, command: `merge ${id}` }); // T4
-      if (phase === 'awaiting-word') return at({ move: 'give-word', words: 'Give the word, or merge', holder: 'supervisor', since: run, command: `send ${id} "…" --kind ruling${msg ? ` --re ${msg.id}` : ''}`, covered_by: [{ kind: 'waiting-on-supervisor', subject: id }] }); // T5
+      // A worker whose window is gone, or whose agent exited, receives nothing: a word or an answer
+      // for it waits until it is resumed, and a phase in flight is held by nobody (T8b).
+      // (paneWaiting reads the pane once, and that read is what agentExited reports.)
+      const down = !phase ? null : (paneWaiting(id), agentExited(id)) ? 'its agent exited' : windowGone(id) ? 'its window is gone' : null;
+      const resumeFirst = down ? `; resume it first, ${down}` : '';
+      if (phase === 'awaiting-word') return at({ move: 'give-word', words: `Give the word, or merge${resumeFirst}`, holder: 'supervisor', since: run, command: `send ${id} "…" --kind ruling${msg ? ` --re ${msg.id}` : ''}`, covered_by: [{ kind: 'waiting-on-supervisor', subject: id }] }); // T5
       const depOpen = (t.depends_on ?? []).find((d) => !mergeShaFor(d));
-      if (msg || (phase === 'blocked' && !depOpen)) return at({ move: 'answer-message', words: 'Answer its message', holder: 'supervisor', ref: msg ? { kind: 'm', id: msg.id } : null, since: msg ? msg.created_at : run, command: `send ${id} "…" --kind ruling${msg ? ` --re ${msg.id}` : ''}`, covered_by: [{ kind: 'blocked', subject: id }, { kind: 'blocked-without-question', subject: id }, ...(msg ? [{ kind: 'unanswered-message', subject: msg.id }] : [])] }); // T6
+      if (msg || (phase === 'blocked' && !depOpen)) return at({ move: 'answer-message', words: `Answer its message${resumeFirst}`, holder: 'supervisor', ref: msg ? { kind: 'm', id: msg.id } : null, since: msg ? msg.created_at : run, command: `send ${id} "…" --kind ruling${msg ? ` --re ${msg.id}` : ''}`, covered_by: [{ kind: 'blocked', subject: id }, { kind: 'blocked-without-question', subject: id }, ...(msg ? [{ kind: 'unanswered-message', subject: msg.id }] : [])] }); // T6
       if (phase === 'parked' && ['run', 'drain'].includes(mode) && !fleetDrain) return at({ move: 'resume', words: 'Resume it', holder: 'supervisor', since: run, command: `worker ${id} --resume`, covered_by: [{ kind: 'parked-under-run', subject: id }] }); // T7
       // an Upkeep chore ticket runs a recurring job: recurring-stuck on that job covers its move too
       const job = t.feature === CHORES ? recurringChores.refJob(id) : null;
       const stuck = job ? [{ kind: 'recurring-stuck', subject: `recurring:${job}` }] : [];
       const notStarted = !phase || (phase === 'starting' && stoppedLaunch(id));
+      if (phase in PHASE_WORDS && !notStarted && down) return at({ move: 'resume-worker', words: `Resume the worker (${down})`, holder: 'supervisor', since: w.last_seen, command: `worker ${id} --resume` }); // T8b, uncovered: move-owed and move-stalled reach it
       if (phase in PHASE_WORDS && !notStarted) return at({ move: phase === 'final-review' ? 'final-review' : phase, words: PHASE_WORDS[phase], holder: 'worker', since: run, covered_by: [...['stale-worker', 'agent-exited', 'blocked-prompt'].map((kind) => ({ kind, subject: id })), ...stuck] }); // T8
       if ((notStarted || phase === 'blocked') && depOpen) {
         const d = ts.get(depOpen);
@@ -21773,6 +21813,22 @@ function leadTicketMove(open) {
 }
 // One move on a line: who holds it, what, how long, and owed, stalled or quiet.
 const moveLine = (m) => `${m.holder}  ${m.words}  ${moveAge(m.since)}${m.flag === 'none' ? '  no move' : m.flag ? `  ${m.flag}` : ''}${m.quiet ? `  (${m.quiet})` : ''}`;
+// Why a planner in flight is not alive, or null: the finding metrics raises for it (agent-exited,
+// planner-gone, stale-planner) and the words its move uses. Parked stopped on purpose; one at a
+// prompt waits on that prompt (blocked-prompt); one whose pane shows it at work is thinking, not
+// stale. sessionUp is false when the whole tmux session is missing, not just its window: a reboot,
+// which the relaunch brings back (sessionsToRelaunch).
+function plannerDown(p) {
+  if (p.parked || p.waiting) return null;
+  if (/no agent is running|has exited/.test(p.problem ?? '')) return { kind: 'agent-exited', why: 'its agent exited', sessionUp: true };
+  if (!p.window) return { kind: 'planner-gone', why: 'its window is gone', sessionUp: /^no tmux window/.test(p.problem ?? '') };
+  if (!p.waiting_on_supervisor.length && !p.waiting_on_owner.length && p.minutes_silent > loadSettings().stale_after_minutes && !paneBusy(`plan-${p.feature}`)) return { kind: 'stale-planner', why: `silent ${p.minutes_silent} min`, sessionUp: true };
+  return null;
+}
+// The tmux session's window names, once per process (null when tmux or the session isn't there:
+// unknown), and whether a window is gone from a session that is up.
+const tmuxWindowNames = () => memo('tmux-window-names', () => { const l = sh('tmux', ['list-windows', '-t', `=${tmuxSession()}`, '-F', '#W']); return l === null ? null : new Set(l.split('\n').filter(Boolean)); });
+const windowGone = (name) => { const names = tmuxWindowNames(); return names !== null && !names.has(name); };
 // The planner rows, P1 to P4.
 function plannerMove(p) {
   const by = `plan-${p.feature}`;
@@ -21784,6 +21840,13 @@ function plannerMove(p) {
   const seen = p.last_seen ?? nowIso();
   const held = p.goals.length && p.goals.every((id) => ['park', 'let-go'].includes(goalMode(logGet(id))));
   if (p.parked || held) return at({ move: 'parked', words: 'Parked', holder: 'planner', quiet: 'hold', since: lastPhaseOf(by)?.created_at ?? seen }); // P3
+  // A planner that isn't alive holds nothing: its window gone from a live session, its agent exited,
+  // or silent past stale_after_minutes. The move is the supervisor's, uncovered, so move-owed and
+  // move-stalled reach it; the finding that names it stays the detail. A stale one still has a live
+  // agent in its window, which --resume refuses: it is woken with a message instead.
+  const down = plannerDown(p);
+  if (down?.kind === 'stale-planner') return at({ move: 'wake-planner', words: `Wake the planner (${down.why})`, holder: 'supervisor', since: seen, command: `send ${by} "…"` }); // P4b, idle at its prompt
+  if (down?.sessionUp) return at({ move: 'resume-planner', words: `Resume the planner (${down.why})`, holder: 'supervisor', since: seen, command: `planner ${p.feature} --resume` }); // P4b
   return at({ move: 'planning', words: 'Planning', holder: 'planner', since: seen, covered_by: ['stale-planner', 'planner-gone', 'agent-exited', 'blocked-prompt'].map((kind) => ({ kind, subject: by })) }); // P4
 }
 // The move whose subject is this one ("goal:<g-id>", …), or null.
@@ -21821,7 +21884,9 @@ function cmdMoves() {
 // it). A move is covered when a finding its covered_by names was raised in the run, on that subject
 // or, for "*", on any; a covered move raises nothing, though it keeps its flag. By the move's flag:
 // none (no row knew the state: G20, T14) raises no-next-move, owed (rung 1) move-owed, stalled
-// (rung 2) move-stalled; each is high, so wait wakes on it. The finding's subject is
+// (rung 2) move-stalled. Each is high, so wait wakes on it, but for a stalled held ticket (T2b) still
+// inside its --until date (wait.until): a known wait, medium; with no date, or past it, high, since
+// nothing else says a hold has lapsed or its causes are done. The finding's subject is
 // "<subject> <move>:<ref id>", so an ack sets aside one move with one ref, and a new move or a new
 // ref is a new finding.
 function moveFindings(moves, raised, now = Date.now()) {
@@ -21839,7 +21904,13 @@ function moveFindings(moves, raised, now = Date.now()) {
     const detail = `${m.title}: ${m.words} (${m.holder === 'nobody' ? 'no row knows this state' : `held by the ${m.holder}`}, ${ageOf(m.since)})`;
     const suggestion = kind === 'no-next-move' ? 'work out the move by hand, and file the missing row as a kit lesson (knowledge add --kit)'
       : kind === 'move-owed' ? (m.command ?? 'do it, or record why it waits (ack with a reason)') : stalledHint(m);
-    out.push({ severity: 'high', kind, subject, detail, suggestion });
+    // a hold with a review date (ticket hold --until, T2b's wait.until) is a known wait: stalled, it is
+    // medium until that day is over (UTC), so high stays for what wants acting on now (the unattended
+    // check reads high findings only). A hold with no date, or past it, stays high: nothing else
+    // wakes the supervisor for a hold whose causes are done or whose date has lapsed
+    const until = m.wait?.until;
+    const inWindow = typeof until === 'string' && until >= new Date(now).toISOString().slice(0, 10);
+    out.push({ severity: kind === 'move-stalled' && m.move === 'held' && inWindow ? 'medium' : 'high', kind, subject, detail, suggestion });
   }
   return out;
 }
@@ -21857,6 +21928,37 @@ const movesReadAt = () => memo('next-moves-at', () => {
   return newest > now ? newest : now;
 });
 const MOVES_CACHE = () => path.join(runPath('cache'), 'next-moves.json');
+// High findings nobody has acted on: open (not acked) for longer than two ticks (tick_minutes, so 30
+// minutes by default). A finding that is acted on goes away (a nudged planner shows life, a fixed
+// gate passes); one that can wait is acked with its reason. Either way it leaves this list. When each
+// open high finding was first seen is kept in run/cache/high-seen.json, and the ones past the two
+// ticks in run/cache/unattended.json for hello, whose pulse puts them on the hub's Overview and in
+// box-status's attention lines: what the supervisor's own loop let pass, seen by the owner and the
+// box's operator. The box's operator only reads, so its metrics count the same way but write nothing,
+// and so does a windowed run (record false), whose findings are only the window's.
+const HIGH_SEEN = () => path.join(runPath('cache'), 'high-seen.json');
+const UNATTENDED = () => path.join(runPath('cache'), 'unattended.json');
+function unattendedHigh(findings, now = Date.now(), { record = true } = {}) {
+  let seen = {};
+  try { const j = readJson(HIGH_SEEN()); if (isObj(j)) seen = j; } catch {}
+  const next = {};
+  for (const x of findings) if (x.severity === 'high') { const k = `${x.kind} ${x.subject}`; next[k] = Number.isFinite(seen[k]) ? seen[k] : now; }
+  const after = 2 * (Number(loadSettings().tick_minutes) > 0 ? Number(loadSettings().tick_minutes) : 15) * 60000;
+  const items = findings.filter((x) => x.severity === 'high' && now - next[`${x.kind} ${x.subject}`] > after).map((x) => ({ kind: x.kind, subject: x.subject, detail: x.detail, since: new Date(next[`${x.kind} ${x.subject}`]).toISOString() }));
+  if (record && process.env.DEVTEAM_ROLE !== 'operator') {
+    try { writeJson(HIGH_SEEN(), next); writeJson(UNATTENDED(), { at: new Date(now).toISOString(), after_minutes: after / 60000, items }); } catch {}
+  }
+  return items;
+}
+// The unattended list as the last metrics run left it, for hello: none when that run is over two
+// hours old (no supervisor has run metrics since, which box-status says on its own lines).
+function readUnattended(now = Date.now()) {
+  try {
+    const j = readJson(UNATTENDED());
+    if (!isObj(j) || !Array.isArray(j.items) || !(now - Date.parse(j.at) < 2 * 3600000)) return [];
+    return j.items.filter((x) => isObj(x) && typeof x.kind === 'string' && typeof x.subject === 'string');
+  } catch { return []; }
+}
 function writeMovesCache(moves = nextMoves(), at = movesReadAt()) {
   // the box's operator only reads (its metrics included), so it leaves the cache as it was
   if (process.env.DEVTEAM_ROLE === 'operator') return;
@@ -27989,6 +28091,11 @@ function supervisorIdleMinutes(root) {
   const age = Date.now() - seen;
   return seen > 0 && age >= SUPERVISOR_IDLE_MS ? Math.floor(age / 60000) : null;
 }
+// box-status's attention lines for one project's high findings its supervisor has left alone past
+// two ticks (hello's unattended, metrics' list): kind and subject, for the operator, five at most.
+function unattendedStatusLines(n, hello) {
+  return (Array.isArray(hello?.unattended) ? hello.unattended : []).slice(0, 5).map((u) => `attention: ${n} unattended high finding: ${u.kind} ${u.subject} since ${u.since}`);
+}
 async function machineStatus() {
   const lastText = readText(statusLastFile()) ?? '';
   const last = { at: Number(/^at (\d+)$/m.exec(lastText)?.[1] ?? NaN), disk: /^disk (\d+)$/m.test(lastText) ? Number(/^disk (\d+)$/m.exec(lastText)[1]) : undefined };
@@ -28058,6 +28165,7 @@ async function machineStatus() {
     // the box's own alert has the hub line; only the project's part is this project's attention
     const ownAlert = alertLessBox(hello.alert, hello.box_alert);
     if (ownAlert) flagged.push(`attention: ${n}: ${ownAlert}`);
+    flagged.push(...unattendedStatusLines(n, hello));
     const state = p ? paneState(p) : null;
     // up, idle at its prompt, its fleet running or draining (a drain still merges what is in flight),
     // and no sign of its loop for 45 minutes: it ended its turn and stopped ticking (a resume that
@@ -38325,6 +38433,17 @@ function commitActivity(day0) {
   }
   return activity;
 }
+// The pulse's line for the high findings the supervisor has left alone past two ticks: the oldest
+// in its plain words (its detail; kind and subject are box-status's, for the operator), so the
+// Overview says what is stuck and for how long without opening the project.
+function unattendedLine(items) {
+  if (!items.length) return null;
+  const o = [...items].sort((a, b) => Date.parse(a.since) - Date.parse(b.since))[0];
+  const m = Math.max(0, Math.round((Date.now() - Date.parse(o.since)) / 60000));
+  const age = m < 120 ? `${m} min` : m < 2880 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} days`;
+  const what = typeof o.detail === 'string' && o.detail.trim() ? o.detail.trim() : 'see the project\'s warnings';
+  return `${items.length === 1 ? 'A warning' : `${items.length} warnings`} the supervisor hasn't acted on or set aside, ${items.length === 1 ? '' : 'the oldest '}for ${age}: ${what}`;
+}
 function helloPulse() {
   const now = Date.now();
   const lines = readLog().lines;
@@ -38393,6 +38512,7 @@ function helloPulse() {
     state === 'stalled' ? (quietMin === null ? 'Open work, and the fleet has never written to the log' : `${live.length ? 'Open work' : 'An approved goal with no tickets'}, and nothing has moved in ${ago(quietMin)}`) : null,
     silent.length ? `${silent.length} worker${silent.length === 1 ? ' has' : 's have'} been silent for over an hour` : null,
     incidents ? `${incidents} open production incident${incidents === 1 ? '' : 's'}` : null,
+    unattendedLine(readUnattended()),
     mode === 'drain' ? 'Draining: workers finish what they have, nothing new starts' : null,
     onHold && mode !== 'park' ? `${onHold} open ticket${onHold === 1 ? ' is' : 's are'} on hold with ${onHold === 1 ? 'its' : 'their'} goal` : null,
   ].filter(Boolean);
@@ -38410,7 +38530,7 @@ function cmdHello() {
   const workers = ourWindows(tmuxSession()).length;
   // --pane: whether the supervisor has a pane the kit can type into, for the dashboard's 10 s run of
   // this (its threads' "hasn't replied yet"), so the dashboard's own process never asks tmux itself
-  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, threads: threadCounts(), fleet: { mode: fleetMode() ?? 'run', workers, goals: goalModeCounts(), moving: movingFleet() }, ...(helloAlert() ? { alert: helloAlert() } : {}), ...(boxAlert() ? { box_alert: boxAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, threads: threadCounts(), fleet: { mode: fleetMode() ?? 'run', workers, goals: goalModeCounts(), moving: movingFleet() }, ...(helloAlert() ? { alert: helloAlert() } : {}), ...(boxAlert() ? { box_alert: boxAlert() } : {}), pulse: helloPulse(), unattended: readUnattended(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
   // and what its terminal is asking, if anything: the dashboard's card, and the hub's Overview
   if (flags.pane) {
     const a = supervisorAsk();
