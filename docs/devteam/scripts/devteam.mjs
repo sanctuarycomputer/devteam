@@ -21980,7 +21980,13 @@ function writeStuckDigest(moves) {
     logCache = null;
     const { drop, ask } = plan();
     for (const q of drop) appendLog({ type: 'question', op: 'set', id: q.id, status: 'withdrawn', reason: items.length ? 'the stuck work changed: asked again with the new list' : 'nothing is stuck any more' }, 'supervisor');
-    if (ask) appendLog({ type: 'question', kind: 'owner-action', class: STUCK_CLASS, ...stuckDigestText(items, Date.now()), stake: 2, urgency: 2, why_asked: { reasons: ['owner-only'] } }, 'supervisor');
+    if (ask) {
+      appendLog({
+        type: 'question', kind: 'owner-action',
+        class: STUCK_CLASS, ...stuckDigestText(items, Date.now()),
+        stake: 2, urgency: 2, why_asked: { reasons: ['owner-only'] },
+      }, 'supervisor');
+    }
   });
 }
 // The hub's cache (next-move@1's fourth place): the goals' moves, with at the time the log they
