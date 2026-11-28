@@ -309,6 +309,58 @@ test('R2: one at a time, --stop and --resume, its refusals, and the fleet holds'
   }
 });
 
+// Research fix 5 (incident 5): after a restart the responder's window was gone until the supervisor
+// ran responder --resume. The accounts tick now starts it again, as --resume would, unless it was
+// stopped on purpose; and responder-down turns high once it has been down 30 minutes.
+test('R14: the accounts tick brings back a responder whose window is gone; one stopped on purpose stays stopped; responder-down turns high after 30 min', { skip: NO_TMUX }, async (t) => {
+  const F = fixture('responder-relaunch');
+  t.after(() => F.done());
+  {
+    const A = F.agent('a');
+    F.onMain({ responder_command: A.cmd });
+    // the machine's memory as the tick reads it: room, or at the ceiling
+    const meminfo = (availGb) => { const f = path.join(F.base, `meminfo-${availGb}`); write(f, `MemTotal:       8388608 kB\nMemFree:         262144 kB\nMemAvailable:   ${Math.round(availGb * 1048576)} kB\n`); return { ...SUP, DEVTEAM_CSWAP: 'off', DEVTEAM_MEMINFO: f, DEVTEAM_CGROUP: path.join(F.base, 'no-cgroup') }; };
+    const tick = (env) => { const r = F.run(F.old, ['accounts-tick'], env); assert.equal(r.status, 0, r.err); return r.out; };
+    const accounts = path.join(F.old, 'docs/devteam/run/accounts.json');
+    const down = () => JSON.parse(F.ok(F.old, ['metrics', '--json'], SUP)).findings.find((f) => f.kind === 'responder-down');
+    F.preSession();
+    assert.equal(F.run(F.old, ['responder'], SUP).status, 0);
+    F.ran(A);
+    await t.test('R14a: its window gone with the session up (a restart): one tick starts it again', () => {
+      fs.rmSync(A.out);
+      assert.equal(F.tmux(['kill-window', '-t', `=${F.session}:responder`]).status, 0);
+      assert.match(tick(meminfo(6)), /relaunched the responder: no window/);
+      assert.ok(F.windows().includes('responder'), 'its window is back');
+      assert.equal(F.ran(A).role, 'responder', 'its agent runs as the responder');
+      assert.equal(JSON.parse(fs.readFileSync(accounts, 'utf8')).responder_down_since, undefined, 'up again: not down');
+      assert.equal(down(), undefined);
+    });
+    await t.test('R14b: held at the memory ceiling, it is down; responder-down is medium, then high after 30 min', () => {
+      assert.equal(F.tmux(['kill-window', '-t', `=${F.session}:responder`]).status, 0);
+      assert.doesNotMatch(tick(meminfo(0.5)), /relaunched the responder/);
+      assert.ok(!F.windows().includes('responder'));
+      const st = JSON.parse(fs.readFileSync(accounts, 'utf8'));
+      assert.ok(Number.isFinite(Date.parse(st.responder_down_since)), 'the tick records since when it is down');
+      assert.equal(down()?.severity, 'medium');
+      fs.writeFileSync(accounts, JSON.stringify({ ...st, at: new Date().toISOString(), responder_down_since: new Date(Date.now() - 31 * 60000).toISOString() }));
+      const f = down();
+      assert.equal(f?.severity, 'high', 'down 31 minutes');
+      assert.match(f.detail, /for 31 min/);
+    });
+    await t.test('R14c: stopped with responder --stop, the tick leaves it stopped and its finding medium', () => {
+      // the restart caps would hold a second relaunch this soon: cleared, so only the stop holds it
+      fs.rmSync(path.join(F.old, 'docs/devteam/run/accounts-resumed.json'), { force: true });
+      assert.equal(F.run(F.old, ['responder', '--resume'], SUP).status, 0);
+      assert.equal(F.run(F.old, ['responder', '--stop'], SUP).status, 0);
+      assert.ok(!F.windows().includes('responder'));
+      assert.doesNotMatch(tick(meminfo(6)), /relaunched the responder/);
+      assert.ok(!F.windows().includes('responder'), 'stopped on purpose: left stopped');
+      assert.equal(JSON.parse(fs.readFileSync(accounts, 'utf8')).responder_down_since, undefined, 'a stop on purpose is never timed as down');
+      assert.equal(down()?.severity, 'medium');
+    });
+  }
+});
+
 test('R3: the responder replies (--pending) and hands over; thread show, /api/threads and its queue', async (t) => {
   const F = fixture('responder-replies');
   const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
