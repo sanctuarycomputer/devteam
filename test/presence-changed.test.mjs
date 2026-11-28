@@ -80,7 +80,6 @@ function dash(which) {
       CLAUDE_CONFIG_DIR: path.join(F.base, 'claude'), CODEX_HOME: path.join(F.base, 'codex'),
       // every GET waits for its own build, never the last good data
       DEVTEAM_DATA_WAIT_MS: '600000',
-      DEVTEAM_DATA_AT_ONCE: '0',
       // a build served again for 3 s after it ends (the kit's 20 s, kit-595, set back for tests): these
       // checks are of kit-633's 3 s start gap and freshness, timed to it
       DEVTEAM_DATA_REUSE_MS: '3000',

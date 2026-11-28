@@ -22879,10 +22879,10 @@ const RESTART_MIN_MS = 30000;
 // How long a dashboard read waits on a dashboard-data run before it has the last good data instead
 // (0 is no wait at all; anything that isn't a number is the default).
 const DATA_WAIT_MS = ((n) => (process.env.DEVTEAM_DATA_WAIT_MS?.trim() && Number.isFinite(n) && n >= 0 ? n : 20000))(Number(process.env.DEVTEAM_DATA_WAIT_MS));
-// Whether a dashboard read is answered at once from the last good build while a newer one runs
-// (cmdDashboard's /api/data). DEVTEAM_DATA_AT_ONCE=0 is for tests only, not a setting: the tests of
-// how builds are shared and spaced (kit-595, kit-633) have every read wait for its own build.
-const DATA_AT_ONCE = process.env.DEVTEAM_DATA_AT_ONCE?.trim() !== '0';
+// A dashboard-data build slower than this is a slow project's: a read there is answered at once from
+// the last good build while a newer one runs (cmdDashboard's /api/data), and a quicker project's read
+// waits for a current build as before. DEVTEAM_DATA_QUICK_MS is for tests only, not a setting.
+const DATA_QUICK_MS = ((n) => (process.env.DEVTEAM_DATA_QUICK_MS?.trim() && Number.isFinite(n) && n >= 0 ? n : 5000))(Number(process.env.DEVTEAM_DATA_QUICK_MS));
 // How long a dashboard serves a finished dashboard-data build again (kit-595): 20 s after it ended,
 // while it is still current (cmdDashboard's dataEpoch). DEVTEAM_DATA_REUSE_MS is for tests only, not a
 // setting: test/presence-changed.test.mjs sets 3000 to keep checking kit-633's 3 s start gap. Anything
@@ -29916,14 +29916,15 @@ async function dashRoutesPage(D, req, res, q) {
   if (req.method === 'GET' && req.url.startsWith('/api/data')) {
     // the log looked at now, so a change the watch hasn't delivered yet makes the kept build stale
     logWatch.look();
-    // Served at once from the last good build, while a newer one runs for the next read: a busy
-    // project's log moves every few seconds, and a build of a big one takes a minute, so a read that
-    // waited for a current build waited on every load. Not after an owner action the kept build
-    // doesn't show yet: that read waits as below. Marked stale only once older than DATA_WAIT_MS,
-    // which is when the page says so.
-    if (DATA_AT_ONCE && D.lastData && D.lastEpoch >= D.actedEpoch) {
+    // A slow project (its last build ran over DATA_QUICK_MS) is answered at once from the last good
+    // build, while a newer one runs for the next read: its log moves every few seconds and a build
+    // takes a minute, so a read that waited for a current build waited on every load. Not after an
+    // owner action the kept build doesn't show yet: that read waits as below. Marked stale only when
+    // it is out of date and a newer build is overdue (older than a build takes, plus DATA_WAIT_MS).
+    if (D.lastData && D.lastTook > DATA_QUICK_MS && D.lastEpoch >= D.actedEpoch) {
       void dashboardData().catch(() => {});
-      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-devteam-page': pageVersion('dashboard'), ...(Date.now() - D.lastAt > DATA_WAIT_MS ? { 'x-devteam-stale': 'true' } : {}) });
+      const overdue = D.lastEpoch !== D.dataEpoch && Date.now() - D.lastAsOf > D.lastTook + DATA_WAIT_MS;
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-devteam-page': pageVersion('dashboard'), ...(overdue ? { 'x-devteam-stale': 'true' } : {}) });
       return res.end(withViewer(D.lastData));
     }
     // A run slower than DATA_WAIT_MS, with data to fall back on, answers with that, marked stale:
@@ -30925,32 +30926,40 @@ async function cmdDashboard() {
   let build = null;
   let nextBuild = null;
   let lastStart = -Infinity;
-  // The last good build, served at once while a newer one runs (lastAt: when it finished; lastEpoch:
-  // dataEpoch as it started). It is kept on disk too, in run/cache/dashboard-data.last under this
-  // kit's print, so a dashboard that has just started (a restart, a kit sync) has a page to show
-  // before its first build ends; a kit with another print never reads another's.
+  // The last good build: lastAsOf, when it started (what it shows is as of then); lastTook, how long
+  // it ran; lastEpoch, dataEpoch as it started. It is kept on disk too, in run/cache/dashboard-data.last
+  // under this kit's print, so a dashboard restarted on the same kit (a box restart, a crash) has a
+  // page to show before its first build ends. A kit update changes the print, so the first read
+  // after a sync still waits for a build: another kit's data may not fit this kit's page.
   const keptFile = path.join(runDir, 'cache', 'dashboard-data.last');
   const keptKit = crypto.createHash('sha256').update(kitPrintKey(startPrint)).digest('hex').slice(0, 16);
   let lastData = null;
-  let lastAt = 0;
+  let lastAsOf = 0;
+  let lastTook = 0;
   let lastEpoch = -1;
   try {
     const t = fs.readFileSync(keptFile, 'utf8');
     const nl = t.indexOf('\n');
-    if (nl > 0 && t.slice(0, nl) === keptKit && t.length > nl + 1) { lastData = t.slice(nl + 1); lastAt = fs.statSync(keptFile).mtimeMs; }
+    const [kit, asOf, took] = t.slice(0, Math.max(0, nl)).split(' ');
+    const body = t.slice(nl + 1);
+    // only a whole copy: a file cut short by a hard stop is no page
+    if (nl > 0 && kit === keptKit && Number.isFinite(+asOf) && Number.isFinite(+took)) { JSON.parse(body); lastData = body; lastAsOf = +asOf; lastTook = +took; }
   } catch {}
+  // a copy a dashboard that is gone was still writing when it stopped
+  try { for (const n of fs.readdirSync(path.dirname(keptFile))) { const m = /^dashboard-data\.last\.(\d+)\.\d+\.tmp$/.exec(n); if (m && !pidAlive(+m[1])) fs.rmSync(path.join(path.dirname(keptFile), n), { force: true }); } } catch {}
   // dataEpoch as the owner's last action answered: data built before it doesn't show that action,
-  // so a read after one waits for a newer build (up to DATA_WAIT_MS), as every read used to
+  // so a read after one waits for a newer build (up to DATA_WAIT_MS), however slow the project
   let actedEpoch = -Infinity;
-  const keep = (stdout) => {
-    const tmp = `${keptFile}.${process.pid}.tmp`;
-    fs.promises.mkdir(path.dirname(keptFile), { recursive: true }).then(() => fs.promises.writeFile(tmp, `${keptKit}\n${stdout}`)).then(() => fs.promises.rename(tmp, keptFile)).catch(() => { fs.promises.rm(tmp, { force: true }).catch(() => {}); });
+  let keeps = 0;
+  const keep = (stdout, asOf, took) => {
+    const tmp = `${keptFile}.${process.pid}.${++keeps}.tmp`;
+    fs.promises.mkdir(path.dirname(keptFile), { recursive: true }).then(() => fs.promises.writeFile(tmp, `${keptKit} ${asOf} ${took}\n${stdout}`)).then(() => fs.promises.rename(tmp, keptFile)).catch(() => { fs.promises.rm(tmp, { force: true }).catch(() => {}); });
   };
   const startBuild = () => {
     lastStart = Date.now();
-    const b = { epoch: dataEpoch, finished: null, r: null };
+    const b = { epoch: dataEpoch, started: lastStart, finished: null, r: null };
     b.done = new Promise((resolve) => b.child = execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: DASHBOARD_DATA_TIMEOUT_MS, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
-      if (!err && stdout) { lastData = stdout; lastAt = Date.now(); lastEpoch = b.epoch; keep(stdout); }
+      if (!err && stdout) { lastData = stdout; lastAsOf = b.started; lastTook = Date.now() - b.started; lastEpoch = b.epoch; keep(stdout, lastAsOf, lastTook); }
       b.r = { ok: !err, stdout, stderr: err?.killed ? `dashboard-data took over ${DASHBOARD_DATA_TIMEOUT_MS < 120000 ? `${Math.round(DASHBOARD_DATA_TIMEOUT_MS / 1000)} s` : `${Math.round(DASHBOARD_DATA_TIMEOUT_MS / 60000)} minutes`} and was stopped (DEVTEAM_DASHBOARD_DATA_TIMEOUT_MS)` : String(stderr ?? '') };
       b.finished = Date.now();
       resolve(b.r);
@@ -31128,7 +31137,7 @@ async function cmdDashboard() {
   // ms), and the kept /api/data build is stale (dataEpoch)
   const logWatch = presenceChanged(liveLogDir(), () => { dataEpoch += 1; presence.changed(); });
   every(logWatch.tick, 1000);
-  const D = dashContext({ log, page, pageCsp, run, describing, versioning, remote, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, ACTION_JSON, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, sessionPrompts, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get lastAt() { return lastAt; }, get lastEpoch() { return lastEpoch; }, get actedEpoch() { return actedEpoch; }, set actedEpoch(v) { actedEpoch = v; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
+  const D = dashContext({ log, page, pageCsp, run, describing, versioning, remote, runAction, ID, autonomyArgs, ACTIONS, ACTION_MS, ACTION_JSON, send, refreshHello, helloBody, previewStage, stageFrames, dashboardData, threadsRead, supervisorPane, supervisorAsks, sessionPrompts, paneToken, paneTokenOk, paneNonces, ownerSettingNonces, paneAnswer, logWatch, get port() { return port; }, get lastData() { return lastData; }, get lastAsOf() { return lastAsOf; }, get lastTook() { return lastTook; }, get lastEpoch() { return lastEpoch; }, get actedEpoch() { return actedEpoch; }, set actedEpoch(v) { actedEpoch = v; }, get dataEpoch() { return dataEpoch; }, set dataEpoch(v) { dataEpoch = v; }, get paneAnswering() { return paneAnswering; }, set paneAnswering(v) { paneAnswering = v; } });
   // A throw out of any route is that request's failure (dashRequestFailed), never the dashboard's
   // stop: a rejection out of this async handler would reach processLog, which exits.
   const server = http.createServer(async (req, res) => {
