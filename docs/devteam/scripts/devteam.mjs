@@ -21087,7 +21087,10 @@ function collectMetrics(since, reviewsSince = 0) {
   // with no fleet session raises none (ruling a-20261123-045530036-supervisor (b)).
   if (settings.responder !== false && fleetMode() !== 'park' && !draining()) {
     const h = responderHealth();
-    if (h.session && h.problem) add('medium', 'responder-down', 'responder', `the responder isn't running: ${h.problem}; the owner's turns go to the supervisor meanwhile`, 'devteam.mjs responder --resume (supervisor.md §13)');
+    // high once down RESPONDER_DOWN_HIGH_MS, by the accounts tick's record (a relaunch that keeps failing, or one it never makes)
+    const since = h.session && h.problem ? Date.parse(accountsState()?.responder_down_since ?? '') : NaN;
+    const mins = Number.isFinite(since) ? Math.max(0, Math.floor((now - since) / 60000)) : 0;
+    if (h.session && h.problem) add(now - since >= RESPONDER_DOWN_HIGH_MS ? 'high' : 'medium', 'responder-down', 'responder', `the responder isn't running${mins ? ` (for ${mins} min)` : ''}: ${h.problem}; the owner's turns go to the supervisor meanwhile`, 'devteam.mjs responder --resume (supervisor.md §13)');
     else if (h.stuck) add('medium', 'responder-stuck', 'responder', `the responder's pane is waiting on a prompt: "${h.stuck}"; the owner's turns go to the supervisor meanwhile`, `look (tmux select-window -t '${tmuxTarget(RESPONDER_NAME)}') and clear it, or responder --stop then responder`);
   }
   // An owner's turn no supervisor terminal took, unseen or unanswered (undeliveredTurns): high, so
@@ -23186,7 +23189,7 @@ function claimRestart(name, budget, now = Date.now()) {
     });
   } catch { return null; }
 }
-// `worker|planner <id> --resume <flag>`, as the supervisor, but not from its pane: rememberSupervisorPane
+// `worker|planner <id> --resume <flag>` (or `responder --resume`, with no flag), as the supervisor, but not from its pane: rememberSupervisorPane
 // needs both markers, and TMUX stays so the child talks to this tmux server. Its worktree_setup is
 // given DEVTEAM_SETUP_DEADLINE, 5 s before the child's own SIGKILL, or the one this process was
 // given if that is still ahead and earlier (one handed down is never moved later; a past one is ignored).
@@ -23197,7 +23200,7 @@ function relaunchChild(launch, flag, budget) {
   const own = process.env.DEVTEAM_SETUP_DEADLINE ? Number(process.env.DEVTEAM_SETUP_DEADLINE) : NaN;
   const mine = now + budget - 5000;
   env.DEVTEAM_SETUP_DEADLINE = String(Number.isFinite(own) && own > now ? Math.min(own, mine) : mine);
-  return spawnSync(process.execPath, [process.argv[1], ...launch, '--resume', flag], { cwd: mainRoot, env, encoding: 'utf8', timeout: budget, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'] });
+  return spawnSync(process.execPath, [process.argv[1], ...launch, '--resume', ...(flag ? [flag] : [])], { cwd: mainRoot, env, encoding: 'utf8', timeout: budget, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 // A session cswap's switch stopped while it waited on its limit: Claude Code says "Automatic continue
 // stopped · your login changed or ended · send a prompt to continue". Its process already has the new
@@ -28253,6 +28256,20 @@ function cmdAccountsTick() {
       if (did === 'relaunched') { state.relaunched.push(name); out(`relaunched ${name}: its window was gone`); }
     }
     if (state.memory_held && state.memory_held !== before?.memory_held) out(`${plural(state.memory_held, 'gone session')} wait${state.memory_held === 1 ? 's' : ''} for room to relaunch: ${said.words}`);
+  }
+  // The responder, which nothing above brings back: launchOf and lastLaunches know workers and
+  // planners only, so after a restart its window stayed gone until the supervisor ran responder
+  // --resume (incident 5). Looked at after the relaunches, which may have made the fleet's session.
+  // Not onto an account with no room, nor at the memory ceiling; one of the tick's restarts, under
+  // the caps every relaunch shares. Since when it is down, kept while it stays down, so
+  // responder-down turns high after RESPONDER_DOWN_HIGH_MS (never for one stopped on purpose).
+  const down = responderDown();
+  if (down) {
+    const did = !down.relaunch || state.active_no_room || memoryFull(loadSettings()) ? null : relaunchResponder(budget(3));
+    if (did === 'gave-up') state.restart_gave_up.push(RESPONDER_NAME);
+    else if (did) tries += 1;
+    if (did === 'relaunched') { state.relaunched.push(RESPONDER_NAME); out(`relaunched the responder: ${down.problem}`); }
+    else if (!down.stopped) state.responder_down_since = before?.responder_down_since || state.at;
   }
   // since when any has waited, kept while some still do, so the wait is a finding, never silent
   if (state.slot_held) state.slot_held_since = (before?.slot_held && before.slot_held_since) || state.at;
@@ -42600,6 +42617,40 @@ function nudgeResponder(now = Date.now()) {
   writeJsonAtomic(RESPONDER_NUDGE_FILE, { at: new Date(now).toISOString() });
   return true;
 }
+// The responder's last start or stop on purpose: { started: <iso> } once a start typed its agent,
+// { stopped: <iso> } after responder --stop. A fleet park stops it without a record, so it comes back
+// after the unpark. Machine-local, as its window is: after a move, the supervisor starts it there.
+const RESPONDER_STATE_FILE = runPath('responder.json');
+const RESPONDER_DOWN_HIGH_MS = 30 * 60000;
+function responderRecord() {
+  try { const o = JSON.parse(readText(RESPONDER_STATE_FILE) ?? 'null'); return isObj(o) ? o : null; } catch { return null; }
+}
+// The responder down while it should run, or null: settings.responder on, the fleet neither parked
+// nor drained for a move (what refuses its start), the fleet's session up and its window gone or its
+// agent exited (responderHealth's problem; a pane stuck on a prompt is responder-stuck's, never
+// restarted). relaunch: it ran here and nobody stopped it, so the accounts tick starts it again; a
+// fleet that never started one, or stopped it, gets the finding only. stopped: stopped on purpose.
+function responderDown(s = loadSettings()) {
+  if (s.responder === false || fleetMode() === 'park' || draining()) return null;
+  const h = responderHealth();
+  if (!h.session || !h.problem) return null;
+  const rec = responderRecord();
+  return { problem: h.problem, relaunch: typeof rec?.started === 'string' && rec.stopped === undefined, stopped: typeof rec?.stopped === 'string' };
+}
+// Start it again, as the supervisor's responder --resume does, in a child under the tick's budget
+// (the start reads origin and runs the owner's trust command, and any refusal exits): 'relaunched',
+// 'failed', 'gave-up' or null (not due), under the restart caps every relaunch shares.
+function relaunchResponder(budget) {
+  const now = Date.now();
+  const verdict = claimRestart(RESPONDER_NAME, budget, now);
+  if (verdict !== 'go') return verdict;
+  const r = relaunchChild([RESPONDER_NAME], null, budget);
+  const ok = r.status === 0;
+  const why = (r.stderr || r.error?.message || `exit ${r.status}`).trim().slice(0, 200);
+  appendLog({ type: 'observation', source: 'pane', kind: 'session-relaunched', subject: RESPONDER_NAME, detail: ok ? "the responder's window was gone or its agent had exited, and it was started again as responder --resume would" : `the responder's window was gone or its agent had exited, and it could not be started again: ${why}`, detector: 'pane', source_key: `session-relaunched ${RESPONDER_NAME} ${now}` });
+  if (!ok) out(`could not relaunch the responder: ${why}`);
+  return ok ? 'relaunched' : 'failed';
+}
 // A thread's state in the supervisor's words (thread list, show): whose reply is owed, or the owner's move.
 const waitingWords = (v, overdue = false) => (v.waiting === 'supervisor' ? 'waiting on the supervisor' : v.waiting === 'responder' ? `the responder has it${overdue ? ' · overdue' : ''}` : "the owner's move");
 // Whether the worktree at dir changed <slug>'s folder since it left main: a tracked change against
@@ -42739,7 +42790,8 @@ function cmdResponder() {
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
   if (!sh('tmux', ['-V'])) die('tmux not found');
   // a stop always works: nothing else is checked
-  if (flags.stop) { const at = stopResponder(); return out(at ? `stopped the responder (${at})` : 'no responder is running'); }
+  // recorded, so the accounts tick leaves it stopped (responderDown)
+  if (flags.stop) { const at = stopResponder(); writeJsonAtomic(RESPONDER_STATE_FILE, { stopped: nowIso() }); return out(at ? `stopped the responder (${at})` : 'no responder is running'); }
   const s = loadSettings();
   if (s.responder === false) die("settings.responder is off: the owner's thread turns go to the supervisor; set it true to start the responder");
   // a fleet park stops it (fleetOp) and keeps it stopped; a drain, or a goal's own hold, doesn't
@@ -42811,6 +42863,7 @@ function cmdResponder() {
       if (/^claude(\s|$)/.test(cmd)) cmd = cmd.replace(/^claude/, `claude --settings '${claudePolicy(RESPONDER_NAME, owned, mb)}'`);
       // a ticket or feature from the tmux server's environment is never the responder's: env -u, which works in any shell
       type(`env -u DEVTEAM_TICKET -u DEVTEAM_FEATURE ${sessionMarkerPrefix(session)}${cmd} ${shq(promptPointer(promptFile))}`);
+      writeJsonAtomic(RESPONDER_STATE_FILE, { started: nowIso() });
       out(`${again ? 'restarted' : 'started'} the responder in ${w.shown} at ${wt}`);
     });
   } catch (e) {
