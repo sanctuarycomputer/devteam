@@ -129,6 +129,7 @@ exit 0
     "exterior-change": "Changing what the project relates to",
     "goal-met": "Saying a goal is met",
     "registry-attest": "Confirming the registry is complete",
+    "stuck-work": "Work stuck past the supervisor",
     "new-dependency": "Adding a new dependency",
     "artifact-publish": "Publishing a page",
     "recurring-edit": "Adding, changing or stopping a job",
@@ -2490,6 +2491,17 @@ exit 0
       "value": 24,
       "set": false,
       "default": 24,
+      "owner_only": null
+    },
+    {
+      "key": "standing_high_hours",
+      "group": "Questions and findings",
+      "name": "A standing finding wakes again after",
+      "description": "hours before a high finding still open wakes the supervisor again",
+      "shown": "value",
+      "value": 4,
+      "set": false,
+      "default": 4,
       "owner_only": null
     },
     {
