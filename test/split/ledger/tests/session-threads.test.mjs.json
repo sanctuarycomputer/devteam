@@ -1,0 +1,7 @@
+{
+  "file": "test/session-threads.test.mjs",
+  "ticket": "kit-1003-threads-core",
+  "sha256": "09fd5ecdc9f9994475894840193bb809bb464ba7cf10947b0e098aacaa98a4d2",
+  "source_sha256": "0337c96ecc96b15229a5021cdba1d18c3bfaa427d978fc2231ee8b75d36c8284",
+  "note": "S7e: tlSend reads a session's send from its words (typed, held, not typed) and leaves the others as they were fails until kit-1005 lands (ruling m-20261128-085239616-supervisor)."
+}
