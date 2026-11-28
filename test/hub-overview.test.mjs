@@ -120,7 +120,7 @@ test('hello carries a pulse: idle, moving, fully and partly blocked, building', 
     assert.equal(p.goals_open, 0);
     assert.equal(p.open_tickets, 1);
     assert.equal(p.done_tickets, 0);
-    assert.equal(p.state, 'moving', 'open work, and the fleet wrote just now');
+    assert.equal(p.state, 'moving', 'open work, and the fleet began just now: no session has run yet');
     // the grid is commits on main, by author date, from git: days before the fleet existed count too,
     // once they are on origin's main
     assert.equal(p.activity_of, 'commits');
@@ -191,7 +191,21 @@ test('the pulse: an approved goal with nothing planned is not idle; a goal the o
 
     ok(old, ['feature', 'add', 'bill', '--json', JSON.stringify({ title: 'bill', goals: [G], stories: [{ id: 'BILL-S1', text: 'it works', release: 'v1.0.0' }] })], SUP);
     ok(old, ['ticket', 'add', 'app-01-bill', '--json', JSON.stringify({ title: 'Billing page', feature: 'bill', component: 'app', kind: 'build', size: 'S', risk: 'normal', serves: ['BILL-S1'], depends_on: [], touches: ['src/bill/**'], done_when: ['its test passes in CI'] })], SUP);
-    assert.equal(pulse().state, 'moving');
+    // the supervisor wrote just now, but no worker or planner has: its own lines are not work moving
+    assert.equal(pulse().state, 'stalled', 'only the supervisor\'s lines are fresh');
+    // nor its acks, observations and readings, a tick's bookkeeping
+    ok(old, ['observe', '--kind', 'note', '--subject', 'fleet', '--detail', 'nothing running'], SUP);
+    assert.equal(pulse().state, 'stalled', 'a fresh supervisor observation');
+    // a planner whose progress is commits on its plan branch: moving
+    const sha = execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'design bill'], { cwd: old, encoding: 'utf8' }).trim();
+    execFileSync('git', ['branch', 'plan/bill', sha], { cwd: old });
+    assert.equal(pulse().state, 'moving', 'a plan branch commit just now');
+    execFileSync('git', ['branch', '-D', 'plan/bill'], { cwd: old });
+    // a worker that wrote a moment ago: building again
+    const ym = new Date().toISOString().slice(0, 7);
+    fs.appendFileSync(path.join(dir, 'app-01-bill.jsonl'), line({ v: 1, id: `h-${ym.replace('-', '')}01-000000000-app-01-bill`, type: 'phase', op: 'new', at: new Date().toISOString(), by: 'app-01-bill', from: null, to: 'build' }));
+    assert.equal(pulse().state, 'building', 'a worker line just now');
+    fs.unlinkSync(path.join(dir, 'app-01-bill.jsonl'));
     // the owner parks that one goal: Upkeep still runs, so the fleet is not parked
     ok(old, ['goal', 'hold', G, 'park', '--reason', 'later', '--owner'], { DEVTEAM_CHANNEL: 'dashboard' });
     age(3 * 86400000);

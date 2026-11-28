@@ -20988,8 +20988,9 @@ function collectMetrics(since, reviewsSince = 0) {
     const { waiting } = idlePlanningGoals(ps);
     const cap = settings.max_active_planners;
     // while the fleet drains for a move, nothing new starts: no idle planning, no idle capacity
-    if (!drained && waiting.length && (cap == null || ps.length < cap)) idlePlanning = waiting.length;
-    if (idlePlanning && !memFull) add('medium', 'idle-planning', `${waiting.length} goal${waiting.length > 1 ? 's' : ''}`, `${ps.length}${cap == null ? '' : `/${cap}`} planner${ps.length === 1 ? '' : 's'} active; nobody is planning ${waiting.map((g) => `"${g.title}"`).join(', ')}`, `start a planner for each (goals plan in parallel), or record why one waits on another's design (goal set <id> --plan-after <g-id> --reason "…"): ${waiting.slice(0, cap == null ? waiting.length : Math.max(1, cap - ps.length)).map((g) => g.id).join(', ')}`);
+    const n = plannerSlots(ps);
+    if (!drained && waiting.length && (cap == null || n < cap)) idlePlanning = waiting.length;
+    if (idlePlanning && !memFull) add('medium', 'idle-planning', `${waiting.length} goal${waiting.length > 1 ? 's' : ''}`, `${n}${cap == null ? '' : `/${cap}`} planner${n === 1 ? '' : 's'} active; nobody is planning ${waiting.map((g) => `"${g.title}"`).join(', ')}`, `start a planner for each (goals plan in parallel), or record why one waits on another's design (goal set <id> --plan-after <g-id> --reason "…"): ${waiting.slice(0, cap == null ? waiting.length : Math.max(1, cap - n)).map((g) => g.id).join(', ')}`);
   }
   // what idle capacity offers: ready tickets that don't overlap a running one's touches (ready marks those)
   const activeIds = [...ts.values()].filter(countsAsWorker).map((t) => t.id);
@@ -21013,15 +21014,32 @@ function collectMetrics(since, reviewsSince = 0) {
   // (every ready ticket waits on the owner, everything is held, nothing is planned), so the
   // supervisor makes work instead of ticking over an empty fleet. The last sign of life is the
   // newest line any ticket's worker or any planner wrote (a planner's branch and files too), or the
-  // log's first line when no session has ever run. A planner counts as running only while its
-  // window is open and it waits on no owner answer: a plan branch left behind, or a design parked
-  // on the owner's approval, is the stuck fleet this finding is for, once its stamps go quiet.
+  // log's first line when no session has ever run. A worker or planner counts as running only
+  // while it is alive: its window open with an agent in it, and a sign of life within
+  // stale_after_minutes, or waiting on the supervisor (a worker at awaiting-word or with a message
+  // to it unanswered, a planner with one): that wait has its own finding (waiting-on-supervisor
+  // after an hour at awaiting-word, unanswered-message after 30 min), and a high fleet-idle beside
+  // it would wake every wait on a fleet that only waits on its reviews. A planner whose pane is at
+  // work (a long think) is running too, as the planner rows read it, and so is one stopped at a
+  // prompt or a limit banner, which blocked-prompt (high) speaks for. A worker or planner waiting on
+  // an owner answer doesn't count. A plan branch
+  // left behind, a design parked on the owner's approval, or a session idle at its prompt for hours
+  // is the stuck fleet this finding is for: a window alone kept it quiet however long nothing moved.
   // stale_after_minutes (30 by default, two quiet ticks at the default tick_minutes): the silence
   // after which a session reads as stuck reads the same for the fleet. A start takes a tick, so an
-  // idle tick between waves is normal; more is the fleet idling.
+  // idle tick between waves is normal; more is the fleet idling, and twice that is high, so wait
+  // wakes on it.
   const FLEET_IDLE_MS = (settings.stale_after_minutes ?? 30) * 60000;
   const spoken = f.some((x) => ['idle-capacity', 'idle-planning', 'memory-full'].includes(x.kind));
-  if (!drained && !fleetMode() && !active && !spoken && !planners().some((p) => !p.parked && p.window && !p.waiting_on_owner.length)) {
+  const freshly = (min) => min != null && min * 60000 <= FLEET_IDLE_MS;
+  const onOwner = (id) => openQs.some((q) => (q.blocks ?? []).includes(id) || q.ticket === id);
+  const onSupervisor = (id) => openMsgs.some((m) => m.created_by === id) || (workerState(id)?.phase === 'awaiting-word' && !onOwner(id));
+  // a worker's window asked of tmux itself: windowGone reads a missing session as unknown, not gone
+  const aliveWorker = (t) => countsAsWorker(t) && (freshly(workerState(t.id)?.minutes_silent) || onSupervisor(t.id)) && !!resolvePane(tmuxTarget(t.id)).target;
+  // a planner: plannerDown's alive (a window, and a sign of life within stale_after_minutes, a wait
+  // on the supervisor, its pane at work, or a prompt in it), less one waiting on the owner
+  const alivePlanner = (p) => !p.parked && p.window && !p.waiting_on_owner.length && !plannerDown(p);
+  if (!drained && !fleetMode() && !spoken && ![...ts.values()].some(aliveWorker) && !planners().some(alivePlanner)) {
     const lines = readLog().lines;
     const stamps = lines.filter((l) => l.at && (ts.has(l.by) || String(l.by).startsWith('plan-'))).map((l) => l.at);
     for (const p of planners()) if (p.last_seen) stamps.push(p.last_seen);
@@ -21041,7 +21059,7 @@ function collectMetrics(since, reviewsSince = 0) {
       const noDefault = questions().filter((q) => q.status === 'open' && !q.goal_hold && !q.default && !['one-way-door', 'review', 'owner-action'].includes(q.kind) && !(q.reasons ?? []).includes('one-way-door') && !(L.owner_only ?? []).includes(q.class));
       const chore = readyT.find((t) => t.kind === 'chore') ?? readyT[0];
       const ids = (xs) => xs.slice(0, 3).map((x) => x.id).join(', ');
-      add('medium', 'fleet-idle', 'fleet', `no worker or planner has run for ${(idleMs / 3600000).toFixed(1)}h (last sign of life ${lastAt}); ${readyT.length} ticket${readyT.length === 1 ? '' : 's'} ready, ${heldT.length} held, ${planned} planned`, `in order: 1. ${chore ? `start a ready chore (worker ${chore.id})` : 'add a chore from what the metrics or the code point at'}; 2. split a held ticket so the part that doesn't need the owner runs (${heldT.length ? ids(heldT) : 'none held'}); 3. give an open no-default question a default (${noDefault.length ? ids(noDefault) : 'none open'}); 4. propose the next goal from strategy.md (a proposal question naming the "How it wins" line it serves, supervisor.md §9)`);
+      add(idleMs > 2 * FLEET_IDLE_MS ? 'high' : 'medium', 'fleet-idle', 'fleet', `no worker or planner has run for ${(idleMs / 3600000).toFixed(1)}h (last sign of life ${lastAt}); ${readyT.length} ticket${readyT.length === 1 ? '' : 's'} ready, ${heldT.length} held, ${planned} planned`, `in order: 1. ${chore ? `start a ready chore (worker ${chore.id})` : 'add a chore from what the metrics or the code point at'}; 2. split a held ticket so the part that doesn't need the owner runs (${heldT.length ? ids(heldT) : 'none held'}); 3. give an open no-default question a default (${noDefault.length ? ids(noDefault) : 'none open'}); 4. propose the next goal from strategy.md (a proposal question naming the "How it wins" line it serves, supervisor.md §9)`);
     }
   }
   // the owner asked for one of the supervisor's settings and main doesn't have it yet
@@ -21555,7 +21573,12 @@ function needsFeatures(g, c = goalCheck(g)) {
 }
 // The goals that need planning with nobody planning them: a fully defined draft goal with no open
 // question, or a ready goal that needsFeatures, with no planner on it, running, and waiting on no
-// other goal's design; highest priority first. full: the planner slots are all taken.
+// other goal's design; highest priority first. full: the planner slots are all taken (plannerSlots):
+// a planner with a window, or one whose whole tmux session is missing (a reboot: every planner is
+// windowless until recovery relaunches it, so it still holds its slot). A plan branch whose window
+// alone is gone, in a session that is up, runs nothing: counted, it filled max_active_planners and
+// queued every unplanned goal quietly behind dead branches (planner-gone speaks for those).
+const plannerSlots = (ps) => ps.filter((p) => p.window || plannerDown(p)?.sessionUp === false).length;
 function idlePlanningGoals(ps = planners()) {
   const busy = new Set(ps.flatMap((p) => p.goals));
   const waiting = logObjects('goal').filter((g) => {
@@ -21565,7 +21588,7 @@ function idlePlanningGoals(ps = planners()) {
     return needsFeatures(g, c);
   }).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
   const cap = loadSettings().max_active_planners;
-  return { waiting, cap, full: cap != null && ps.length >= cap };
+  return { waiting, cap, full: cap != null && plannerSlots(ps) >= cap };
 }
 // The goal rows, G1 to G20, first match wins (designs/every-goal-always-has-a-next-move.md). G4b and
 // G4c are kit-298's; a chore started --for a goal (G16) is kit-293's; until kit-289's ticket rows,
@@ -38408,8 +38431,9 @@ function alertLessBox(alert, box) {
 // state: parked (every goal held), blocked (fully: nothing can move until the owner answers),
 // waiting (an approved goal with nothing planned yet, and a question with no default open on it),
 // building (a worker mid-ticket and the fleet wrote in the last hour), stalled (open work and
-// nothing written by the fleet for 2 h), idle (no open work: no ticket that could move, no
-// approved goal still to plan), moving (anything else: the supervisor planning, reviewing, merging).
+// nothing written by a worker or planner for 2 h; the supervisor's own lines don't count), idle (no
+// open work: no ticket that could move, no approved goal still to plan), moving (anything else: a
+// planner designing, a worker waiting on its review).
 // activity: commits per day on main, in home and each repo link this machine can read, oldest
 // first, the last 84 days ending today (UTC), by author date, as GitHub counts contributions. From
 // git, so it goes back before the fleet did, and counts the owner's commits too.
@@ -38451,15 +38475,30 @@ function helloPulse() {
   const activity = commitActivity(day0);
   const lastBy = new Map();
   const phaseBy = new Map();
+  // the last time work moved: a line by a ticket's worker or a planner. The supervisor's own lines
+  // (its acks, observations, readings, a tick's bookkeeping) are not work moving: counted, a
+  // supervisor ticking over a fleet where nothing runs kept the hub at "moving" for good. A planner's
+  // progress is mostly commits on its plan branch, so the newest plan/* commit counts too (one git
+  // call for every branch, as hello's budget allows). Before any session has run, the log's first
+  // line, so a fresh project isn't stalled at once.
+  const ids = new Set(tickets().keys());
+  const isWork = (by) => ids.has(by) || String(by).startsWith('plan-');
   let last = 0;
+  let first = 0;
   for (const l of lines) {
     if (l.by === 'owner') continue;
     const t = Date.parse(l.at);
     if (!(t > 0)) continue;
-    if (t > last) last = t;
+    if (!first || t < first) first = t;
+    if (isWork(l.by) && t > last) last = t;
     if (t > (lastBy.get(l.by) ?? 0)) lastBy.set(l.by, t);
     if (l.type === 'phase' && (!phaseBy.has(l.by) || l.at >= phaseBy.get(l.by).at)) phaseBy.set(l.by, l);
   }
+  for (const at of (git(['for-each-ref', '--format=%(committerdate:unix)', 'refs/heads/plan/']) ?? '').split('\n')) {
+    const t = Number(at) * 1000;
+    if (t > last && t <= now) last = t;
+  }
+  if (!last) last = first;
   const ts = [...tickets().values()].filter(isActive);
   const done = ts.filter((t) => mergeShaFor(t.id)).length;
   const open = ts.length - done;

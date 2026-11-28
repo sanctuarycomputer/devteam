@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { fleetFixture, hasTmux, json, write } from './lib/kit.mjs';
+import { fleetFixture, hasTmux, json, sessionOf, write } from './lib/kit.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const DT = path.join(here, '..', 'docs', 'devteam', 'scripts', 'devteam.mjs');
@@ -133,6 +133,16 @@ function project(name, settings = {}) {
     },
     onMain: (file, text) => { write(path.join(old, file), text); g(['add', '-A'], old); g(['commit', '-qm', file], old); g(['push', '-q', 'origin', 'main'], old); },
     // a planner in flight: its plan branch, off main, with its feature line naming the goal
+    // a window for a session in the fixture's own tmux server (an agent stand-in: not a shell), so
+    // the kit reads it as alive; false where there is no tmux
+    window: (win) => {
+      if (!hasTmux) return false;
+      const s = sessionOf(old, `nm-${name}`);
+      const tmux = (args) => spawnSync('tmux', args, { env: F.env({}), encoding: 'utf8' });
+      const r = tmux(['has-session', '-t', `=${s}`]).status === 0 ? tmux(['new-window', '-d', '-t', `=${s}:`, '-n', win, 'sleep 600']) : tmux(['new-session', '-d', '-s', s, '-n', win, 'sleep 600']);
+      assert.equal(r.status, 0, r.stderr);
+      return true;
+    },
     planner: (f, G) => {
       g(['checkout', '-q', '-b', `plan/${f}`], old);
       write(path.join(old, `docs/devteam/project/log/plan-${f}.jsonl`), `${JSON.stringify({ v: 1, type: 'feature', op: 'new', id: f, title: `Feature ${f}`, goals: [G], stories: [{ id: 'PL-S1', text: 'it works', release: 'v1.0.0' }], at: new Date().toISOString(), by: `plan-${f}` })}\n`);
@@ -526,9 +536,10 @@ test('next-moves: holds, the queue for a planner slot, and a state no row knows'
     assert.equal(P.goal(M).status, 'met');
     assert.equal(P.move(`goal:${M}`), undefined, 'met');
   });
-  await t.test('a defined draft while the planner slots are full: quiet, the queue (G11)', () => {
+  await t.test('a defined draft while the planner slots are full: quiet, the queue (G11)', { skip: hasTmux ? false : 'needs tmux: a planner fills its slot only with its window open' }, () => {
     const G = P.defined('Waits for a slot');
     P.planner('slottaker', P.defined('Takes the slot'));
+    P.window('plan-slottaker');
     const m = goalMove(P, G);
     assert.equal(m.move, 'start-planner');
     assert.equal(m.quiet, 'queue');
@@ -547,6 +558,27 @@ test('next-moves: holds, the queue for a planner slot, and a state no row knows'
     assert.equal(m.flag, 'none');
     assert.equal(m.since, P.lastChange(G));
   });
+});
+
+test('next-moves: plan branches with no window fill no planner slot: idle-planning still speaks, the goal is not queued', { skip: hasTmux ? false : 'needs tmux: a session that is up, with the planners\' windows gone' }, () => {
+  // two plan branches left behind, their windows gone, at a cap of 2: counted, they filled the cap
+  // and turned every unplanned goal into a quiet queue with no finding
+  const P = project('deadslots', { max_active_planners: 2 });
+  P.planner('deadone', P.defined('Dead one'));
+  P.planner('deadtwo', P.defined('Dead two'));
+  const G = P.defined('Nobody plans me');
+  // after a reboot the whole session is missing: every planner is windowless until recovery
+  // relaunches it, and each still holds its slot
+  assert.equal(goalMove(P, G).quiet, 'queue', 'no tmux session: the branches hold their slots');
+  // the session is up and their windows alone are gone: dead branches
+  P.window('supervisor');
+  const m = goalMove(P, G);
+  assert.equal(m.move, 'start-planner');
+  assert.equal(m.quiet, null, 'not queued behind dead branches');
+  const f = json(P.F.ok(P.F.old, ['metrics', '--json'])).findings.find((x) => x.kind === 'idle-planning');
+  assert.ok(f, 'idle-planning is raised');
+  assert.match(f.detail, /^0\/2 planners active; nobody is planning .*"Nobody plans me"/);
+  assert.ok(f.suggestion.includes(G), f.suggestion);
 });
 
 test('next-moves: planner rows: the owner\'s question, the supervisor\'s answer, parked, and planning', async (t) => {

@@ -11,7 +11,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
-import { fleetFixture, json, write } from './lib/kit.mjs';
+import { spawnSync } from 'node:child_process';
+import { fleetFixture, hasTmux, json, sessionOf, write } from './lib/kit.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const DT = path.join(here, '..', 'docs', 'devteam', 'scripts', 'devteam.mjs');
@@ -76,6 +77,16 @@ function project(name, settings = {}) {
       g(['push', '-q', 'origin', 'main'], old);
     },
     onMain: (file, text) => { write(path.join(old, file), text); g(['add', '-A'], old); g(['commit', '-qm', file], old); g(['push', '-q', 'origin', 'main'], old); },
+    // a window for a session in the fixture's own tmux server (an agent stand-in: not a shell), so
+    // the kit reads it as alive; false where there is no tmux
+    window: (win) => {
+      if (!hasTmux) return false;
+      const s = sessionOf(old, `nmf-${name}`);
+      const tmux = (args) => spawnSync('tmux', args, { env: F.env({}), encoding: 'utf8' });
+      const r = tmux(['has-session', '-t', `=${s}`]).status === 0 ? tmux(['new-window', '-d', '-t', `=${s}:`, '-n', win, 'sleep 600']) : tmux(['new-session', '-d', '-s', s, '-n', win, 'sleep 600']);
+      assert.equal(r.status, 0, r.stderr);
+      return true;
+    },
     planner: (f, G) => {
       g(['checkout', '-q', '-b', `plan/${f}`], old);
       write(path.join(old, `docs/devteam/project/log/plan-${f}.jsonl`), `${JSON.stringify({ v: 1, type: 'feature', op: 'new', id: f, title: `Feature ${f}`, goals: [G], stories: [{ id: 'PL-S1', text: 'it works', release: 'v1.0.0' }], at: new Date().toISOString(), by: `plan-${f}` })}\n`);
@@ -117,8 +128,10 @@ test('next-moves A8: quiet moves: holds, drains, the queue for a slot, never rai
   P.ticket('ch-03-queued', 'running');
   const slotless = P.defined('Waits for a slot');
   P.planner('slottaker', P.defined('Takes the slot'));
+  // a planner fills its slot only with its window open: a branch whose window is gone runs nothing
+  const slotTaken = P.window('plan-slottaker');
   await t.test('each is quiet, with no flag: a park, a ticket under a let-go, a goal drain, the slot queue, the planner queue', () => {
-    const want = { [`goal:${parked}`]: 'hold', 'ticket:ch-05-letgo': 'hold', [`goal:${drained}`]: 'drain', 'ticket:ch-01-drained': 'drain', 'ticket:ch-03-queued': 'queue', [`goal:${slotless}`]: 'queue' };
+    const want = { [`goal:${parked}`]: 'hold', 'ticket:ch-05-letgo': 'hold', [`goal:${drained}`]: 'drain', 'ticket:ch-01-drained': 'drain', 'ticket:ch-03-queued': 'queue', ...(slotTaken ? { [`goal:${slotless}`]: 'queue' } : {}) };
     for (const [s, q] of Object.entries(want)) {
       const m = P.move(s);
       assert.equal(m.quiet, q, `${s} is quiet (${q})`);

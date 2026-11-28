@@ -1,8 +1,9 @@
 // An empty fleet: no worker and no planner has run for stale_after_minutes while the fleet is
 // neither parked nor drained. idle-capacity says nothing when no ticket can start, so fleet-idle
 // does: how many tickets are ready, held and planned, and the moves that make work, in order. It
-// stays quiet while idle-capacity, idle-planning or memory-full names the move, and a planner
-// counts as running only while its window is open and it waits on no owner answer.
+// stays quiet while idle-capacity, idle-planning or memory-full names the move, and a worker or
+// planner counts as running only while it is alive (its window open, a sign of life within
+// stale_after_minutes) and, for a planner, it waits on no owner answer. Idle for twice that is high.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -46,7 +47,7 @@ test('fleet-idle: an unparked fleet with no session for half an hour says what t
     assert.ok(!findings().some((x) => x.kind === 'idle-capacity'), 'nothing can start');
     const f = idle();
     assert.ok(f, 'two hours with nothing running');
-    assert.equal(f.severity, 'medium');
+    assert.equal(f.severity, 'high', 'idle for over twice stale_after_minutes: wait wakes on it');
     assert.equal(f.subject, 'fleet');
     assert.match(f.detail, /^no worker or planner has run for 2\.0h \(last sign of life \S+\); 0 tickets ready, 4 held, 1 planned$/);
     assert.match(f.suggestion, /^in order: 1\. add a chore from what the metrics or the code point at; 2\. split a held ticket so the part that doesn't need the owner runs \(ch-01-ready, ch-02-held, ch-03-asked\); 3\. give an open no-default question a default \(/);
@@ -65,13 +66,30 @@ test('fleet-idle: an unparked fleet with no session for half an hour says what t
     planAt('plan/left', 3 * 3600000);
     assert.ok(idle(), 'an abandoned plan branch, no window: still idle');
     if (hasTmux) {
-      // its window open: a planner designing, quiet however long since it last wrote
+      // its window open, but idle at its prompt for three hours with no worker running: a window
+      // alone is no sign of life
       const tmux = (args) => spawnSync('tmux', args, { env: F.env({}), encoding: 'utf8' });
       const s = sessionOf(old, 'fleet-idle');
       assert.equal(tmux(['new-session', '-d', '-s', s, '-n', 'plan-left', 'sleep 600']).status, 0);
       try {
-        assert.equal(idle(), undefined, 'a planner with its window open is running');
+        const g = idle();
+        assert.ok(g, 'a planner with its window open, silent past stale_after_minutes, is not running');
+        assert.equal(g.severity, 'high');
+        // the same planner silent as long, its pane at work (a long think): running, as the planner
+        // rows read it (plannerDown); and one stopped at a prompt: blocked-prompt speaks for it
+        const pane = (cmd) => assert.equal(tmux(['respawn-pane', '-k', '-t', `=${s}:plan-left`, cmd]).status, 0);
+        pane(`sh -c 'echo "* Thinking (esc to interrupt)"; exec sleep 600'`);
+        assert.equal(idle(), undefined, 'a planner whose pane is at work is running');
+        pane(`sh -c 'echo "Do you want to proceed?"; exec sleep 600'`);
+        assert.equal(idle(), undefined, 'a planner at a prompt: blocked-prompt, not fleet-idle');
+        assert.ok(json(ok(old, ['metrics', '--json'])).findings.some((x) => x.kind === 'blocked-prompt' && x.subject === 'plan-left' && x.severity === 'high'), 'blocked-prompt is raised, high');
+        pane('sleep 600');
+        assert.ok(idle(), 'idle at its prompt again');
+        // its branch moved a moment ago: alive, with its window open
+        planAt('plan/left', 60000);
+        assert.equal(idle(), undefined, 'a planner with its window open that wrote a minute ago is running');
         // but one whose design waits on the owner's answer is the stuck fleet
+        planAt('plan/left', 3 * 3600000);
         ok(old, ['ask', '--question', 'Ship the left design?', '--choices', '[{"label":"Yes"},{"label":"No"}]', '--links', JSON.stringify([{ title: 'The draft design', path: 'docs/devteam/project/designs/left.md', ref: 'plan/left' }]), '--stake', '1', '--urgency', '2'], SUP);
         assert.ok(idle(), 'a planner waiting on the owner does not count as running');
       } finally { tmux(['kill-server']); }
@@ -93,6 +111,9 @@ test('fleet-idle: an unparked fleet with no session for half an hour says what t
     const block = /```json devteam\s*\n([\s\S]*?)\n```/.exec(text);
     fs.writeFileSync(sf, text.replace(block[1], JSON.stringify({ ...JSON.parse(block[1]), stale_after_minutes: 180 }, null, 2)));
     assert.equal(idle(), undefined, 'under a longer stale_after_minutes');
+    // stale_after_minutes at 90: two quiet hours is idle, under twice that, so medium
+    fs.writeFileSync(sf, text.replace(block[1], JSON.stringify({ ...JSON.parse(block[1]), stale_after_minutes: 90 }, null, 2)));
+    assert.equal(idle()?.severity, 'medium', 'idle, under twice stale_after_minutes');
     fs.writeFileSync(sf, text);
     assert.ok(idle());
 
@@ -105,6 +126,21 @@ test('fleet-idle: an unparked fleet with no session for half an hour says what t
     // a parked fleet waits on purpose: nothing to say
     fs.writeFileSync(path.join(logDir, 'ch-01-ready.jsonl'), phase('ch-01-ready', { to: 'parked', note: 'parked' }, 3 * 3600000));
     assert.ok(idle(), 'idle again once its last line is three hours old');
+    if (hasTmux) {
+      // a worker waiting on its review word for 70 minutes, its window open: it waits on the
+      // supervisor (waiting-on-supervisor speaks), it isn't the fleet idling
+      fs.writeFileSync(path.join(logDir, 'ch-04-next.jsonl'), phase('ch-04-next', { to: 'awaiting-word', note: 'ready for review' }, 70 * 60000));
+      const tmux = (args) => spawnSync('tmux', args, { env: F.env({}), encoding: 'utf8' });
+      assert.equal(tmux(['new-session', '-d', '-s', sessionOf(old, 'fleet-idle'), '-n', 'ch-04-next', 'sleep 600']).status, 0);
+      try {
+        assert.equal(idle(), undefined, 'a worker at awaiting-word with its window open is running');
+        // its window gone: nothing runs, and 70 minutes is past twice the threshold
+        assert.equal(tmux(['kill-window', '-t', `=${sessionOf(old, 'fleet-idle')}:ch-04-next`]).status, 0);
+        assert.equal(idle()?.severity, 'high', 'the same worker with no window');
+      } finally { tmux(['kill-server']); }
+      fs.unlinkSync(path.join(logDir, 'ch-04-next.jsonl'));
+      assert.ok(idle());
+    }
     ok(old, ['fleet', 'park', '--reason', 'owner away'], SUP);
     assert.equal(idle(), undefined, 'a parked fleet is not idle');
   } finally { F.done(); }
