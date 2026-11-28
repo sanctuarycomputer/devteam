@@ -3332,7 +3332,11 @@ http.createServer((req, res) => {
     // wait: an open high finding returns at once; set aside, the wait runs to the tick or the next event
     assert.match(dt(['wait'], { role: 'worker' }).err, /wait: the supervisor does this/);
     assert.match(must(['wait', '--minutes', '0.05'], sup), /^high findings are open[\s\S]*blocked bill-03-a: blocked for/);
-    for (const f of json(must(['metrics', '--json'])).findings.filter((x) => x.severity === 'high')) must(['ack', f.kind, f.subject, '--reason', 'testing wait'], sup);
+    const ackHigh = () => { const high = json(must(['metrics', '--json'])).findings.filter((x) => x.severity === 'high'); for (const f of high) must(['ack', f.kind, f.subject, '--reason', 'testing wait'], sup); return high; };
+    ackHigh();
+    // an acked cover covers nothing: blocked set aside, its move comes back as move-owed
+    // (supervisor.md §3 step 9), and needs its own ack
+    assert.deepEqual(ackHigh().filter((f) => String(f.subject).startsWith('ticket:bill-03-a ')).map((f) => f.kind), ['move-owed']);
     // the fixture's merges made in the last 2 minutes raise merged-without-merge only once that passes
     // (kit-808), in the middle of the waits below: read them 3 minutes on and set them aside too
     const late = spawnSync(process.execPath, [DT, 'metrics', '--json'], { cwd: repo, encoding: 'utf8', env: { ...process.env, NODE_OPTIONS: `--import=data:text/javascript,${encodeURIComponent('const now = Date.now; Date.now = () => now() + 180000;')}` } });
