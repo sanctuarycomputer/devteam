@@ -1,0 +1,13 @@
+diff --git a/test/canvas-gateway.test.mjs b/test/canvas-gateway.test.mjs
+index 879251d55f8798b293530453f3cd25327963224c..5470844c7c7f8fb34b2cc703f490ffe279fad502 100644
+--- a/test/canvas-gateway.test.mjs
++++ b/test/canvas-gateway.test.mjs
+@@ -113,7 +113,7 @@ async function box(t, opts = {}) {
+   fs.mkdirSync(uploadsDir, { mode: 0o750 });
+   const ttydPage = path.join(dir, 'ttyd.html');
+   fs.writeFileSync(ttydPage, 'ttyd');
+-  const g = G.createGateway({ publicUrl: `http://box.localhost:${port}`, dir, ttydPort, ttydPage, uploadsDir, hubPage: path.join(repo, 'docs/devteam/dashboard/hub.html'), log: () => {}, ...opts });
++  const g = G.createGateway({ publicUrl: `http://box.localhost:${port}`, dir, ttydPort, ttydPage, uploadsDir, hubApp: path.join(repo, 'docs/devteam/apps/hub'), log: () => {}, ...opts });
+   const held = new Set();
+   g.server.on('connection', (c) => { held.add(c); c.on('close', () => held.delete(c)); });
+   await listen(g.server, port);
