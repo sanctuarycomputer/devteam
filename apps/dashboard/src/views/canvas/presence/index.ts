@@ -1,38 +1,21 @@
-// apps-src@1 view stub: canvas-presence
-// Its port replaces this folder. Until then every function another part of the canvas calls from it, and every binding it shares (on `shared`), throws "not ported: canvas-presence".
+// canvas-presence (kit-1018): others on the canvas (presence@1 cursors), others' selections and last
+// edits, drawing others, and pins (canvas.html 4725-5470), as modules. Every declaration of each is
+// exported from here, for core and the other sections; `shared` holds the binding other sections read
+// or assign (kit-1013's rule: `presence.shared.<name>`).
+import { initCursors } from './cursors';
+import { initDrawing } from './drawing';
+import { initPins } from './pins';
 
-export function connectPresence(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-presence');
+export * from './held';
+export * from './cursors';
+export * from './selections';
+export * from './drawing';
+export * from './pins';
+
+// Its load-time setup: the page's DOM and listeners of these lines, in its order. mount() runs it once,
+// last of the sections' inits, before start().
+export function init(): void {
+  initCursors();
+  initDrawing();
+  initPins();
 }
-
-export function markEdit(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-presence');
-}
-
-export function onVisibility(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-presence');
-}
-
-export function placeOthers(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-presence');
-}
-
-export function sendHere(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-presence');
-}
-
-export function takeSelections(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-presence');
-}
-
-export function unit(..._args: unknown[]): never {
-  throw new Error('not ported: canvas-presence');
-}
-
-export const shared = {
-  get seen(): any { throw new Error('not ported: canvas-presence'); },
-  set seen(_v: any) { throw new Error('not ported: canvas-presence'); },
-};
-
-// Its load-time setup (listeners), run once by the page mount before start().
-export function init(): void {}
