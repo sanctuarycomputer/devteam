@@ -327,6 +327,62 @@ test('next-moves: a held ticket turns stalled after next_move_stall_hours, never
   assert.equal(m.rung, 2);
 });
 
+test('next-moves: a hold ends when what it waits on does (release) or its date goes by (review-hold), owed at once', async (t) => {
+  // the default next_move_owed_minutes, so "owed" here can only be the hold's end
+  const P = project('hold-ends');
+  readyGoal(P, 'Hold ends', 'holdends');
+  await t.test('held for a question, then answered: release, the supervisor\'s, owed at once', () => {
+    addTicket(P, 'ch-71-asked', 'holdends');
+    const Q = P.ask(['--question', 'Which vendor for ch-71?', '--recommendation', 'the first']);
+    P.sup(['ticket', 'hold', 'ch-71-asked', '--reason', 'waits on the vendor pick', '--for', Q, '--whole', 'every part needs the vendor']);
+    const before = P.raw('ticket:ch-71-asked');
+    assert.equal(before.move, 'held', 'the question is open: still held');
+    assert.equal(before.flag, null);
+    P.owner(['answer', Q, 'the first']);
+    const m = P.raw('ticket:ch-71-asked');
+    assert.equal(m.move, 'release');
+    assert.equal(m.holder, 'supervisor');
+    assert.equal(m.words, `Release it: what it waited on is done (${Q} answered)`);
+    assert.equal(m.command, 'ticket release ch-71-asked');
+    assert.equal(m.quiet, null);
+    assert.equal(m.flag, 'owed', 'owed at once, before next_move_owed_minutes');
+    assert.equal(m.since, P.question(Q).answered_at, 'since the answer');
+    assert.deepEqual(moveErrors(m), []);
+  });
+  await t.test('held for a ticket still open: held; once it merges, release', () => {
+    addTicket(P, 'ch-72-first', 'holdends');
+    addTicket(P, 'ch-73-after', 'holdends');
+    P.sup(['ticket', 'hold', 'ch-73-after', '--reason', 'reuses what ch-72 builds', '--for', 'ch-72-first']);
+    const m = P.raw('ticket:ch-73-after');
+    assert.equal(m.move, 'held', 'its cause is open');
+    assert.equal(m.flag, null);
+    P.merge('ch-72-first');
+    const r = P.raw('ticket:ch-73-after');
+    assert.equal(r.move, 'release');
+    assert.equal(r.words, 'Release it: what it waited on is done (ch-72-first merged)');
+    assert.equal(r.flag, 'owed');
+  });
+  await t.test('held --until a date that has gone by: review-hold, owed at once', () => {
+    addTicket(P, 'ch-74-dated', 'holdends');
+    const today = new Date().toISOString().slice(0, 10);
+    P.sup(['ticket', 'hold', 'ch-74-dated', '--reason', 'the vendor said next week', '--for', 'external:the vendor', '--until', today]);
+    assert.equal(P.raw('ticket:ch-74-dated').move, 'held', 'its date is today: not gone by yet');
+    // the hold line as an older hold left it: its date yesterday (hold refuses a past date)
+    const yesterday = new Date(Date.parse(`${today}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
+    const dir = path.join(P.F.old, 'docs/devteam/run/log');
+    const file = fs.readdirSync(dir).map((f) => path.join(dir, f)).find((f) => fs.readFileSync(f, 'utf8').includes(`"held_until":"${today}"`));
+    assert.ok(file, 'the hold line is in run/log');
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(`"held_until":"${today}"`, `"held_until":"${yesterday}"`));
+    const m = P.raw('ticket:ch-74-dated');
+    assert.equal(m.move, 'review-hold');
+    assert.equal(m.holder, 'supervisor');
+    assert.equal(m.words, `Its hold date passed on ${yesterday}: release it or hold it again`);
+    assert.equal(m.since, `${today}T00:00:00.000Z`, 'since the day after its date began');
+    assert.equal(m.flag, 'owed');
+    assert.deepEqual(moveErrors(m), []);
+  });
+});
+
 test('next-moves: every ticket and planner move carries its title', () => {
   const P = project('titles');
   const G = readyGoal(P, 'Titled', 'titled');

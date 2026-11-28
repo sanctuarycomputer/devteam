@@ -504,6 +504,25 @@ test('next-moves: holds, the queue for a planner slot, and a state no row knows'
     assert.equal(m.quiet, 'drain');
     assert.equal(m.holder, 'owner', 'whoever set it');
   });
+  await t.test('drained for a ticket that then merges: release, the supervisor\'s, owed at once (G3)', () => {
+    const O = P.ready('Other work');
+    P.feature('otherwork', O);
+    P.ticket('ch-81-other', 'otherwork');
+    const G = P.defined('Drained for a ticket');
+    P.sup(['goal', 'hold', G, 'drain', '--reason', 'waits on the other work', '--for', 'ch-81-other']);
+    const before = P.raw(`goal:${G}`);
+    assert.equal(before.move, 'draining', 'its cause is open: quiet');
+    assert.equal(before.quiet, 'drain');
+    P.merge('ch-81-other');
+    const m = P.raw(`goal:${G}`);
+    assert.equal(m.move, 'release');
+    assert.equal(m.holder, 'supervisor');
+    assert.equal(m.words, 'Release it: what it waited on is done (ch-81-other merged)');
+    assert.equal(m.command, `goal hold ${G} run --reason "…"`);
+    assert.equal(m.quiet, null);
+    assert.equal(m.flag, 'owed', 'owed at once, before next_move_owed_minutes');
+    assert.deepEqual(moveErrors(m), []);
+  });
   await t.test('draining with its planner still running: not quiet, the planner\'s move (G9)', () => {
     const G = P.defined('Draining, planned');
     P.planner('drainplanned', G);
