@@ -72,3 +72,28 @@ test('efficiency findings fire over their thresholds and stay quiet under them, 
     assert.ok(!q.findings.some((f) => ['waiting-heavy', 'review-churn'].includes(f.kind)), 'too little evidence to speak');
   } finally { F.done(); }
 });
+
+// A ticket in flight with 3 final passes is medium review-churn; at 5 it is high, so wait wakes and
+// the loop ends in a re-plan, a split or a question (S28): each pass restarts the phase, so nothing
+// else ever calls it stale. Once its last pass approved it is medium again: it only waits to merge.
+test('review-churn on an unmerged ticket: medium at 3 final passes, high at 5, medium once the last approved', () => {
+  const F = threadsFixture('churn-cap');
+  try {
+    F.sup(['feature', 'add', 'eff', '--json', JSON.stringify({ title: 'Eff', goals: [F.goal], stories: [{ id: 'EF-S1', text: 'efficiency reads right', release: 'v1.0.0' }] })]);
+    const id = 'e-01-loop';
+    F.sup(['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'eff', component: 'web', kind: 'build', size: 'S', risk: 'normal', serves: ['EF-S1'], depends_on: [], touches: [`src/${id}/**`], done_when: ['its test passes in CI'] })]);
+    const dir = path.join(F.old, 'docs/devteam/project/tickets', id, 'reviews');
+    fs.mkdirSync(dir, { recursive: true });
+    const churn = () => JSON.parse(F.sup(['metrics', '--json'])).findings.filter((f) => f.kind === 'review-churn' && f.subject === id);
+    for (const n of [1, 2, 3]) fs.writeFileSync(path.join(dir, `final-${n}.md`), rec('CHANGES', [['Important', 'L-TEST-1', 'still']]));
+    assert.deepEqual(churn().map((f) => [f.severity, f.detail]), [['medium', '3 final review passes']]);
+    for (const n of [4, 5]) fs.writeFileSync(path.join(dir, `final-${n}.md`), rec('CHANGES', [['Important', 'L-TEST-1', 'still']]));
+    const [f, ...rest] = churn();
+    assert.deepEqual(rest, []);
+    assert.deepEqual([f.severity, f.detail], ['high', '5 final review passes']);
+    assert.match(f.suggestion, /re-plan it, split it, or ask the owner/);
+    // a 6th pass that approves ends the loop: it only waits to merge, so medium again, not high
+    fs.writeFileSync(path.join(dir, 'final-6.md'), rec('APPROVE'));
+    assert.deepEqual(churn().map((x) => [x.severity, x.detail]), [['medium', '6 final review passes']]);
+  } finally { F.done(); }
+});

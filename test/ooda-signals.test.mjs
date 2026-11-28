@@ -207,7 +207,7 @@ test('set-asides cite what they set aside: an ack its finding\'s observations, a
   } finally { F.done(); }
 });
 
-test('sensor-untriaged: a sensor\'s escalation nobody folded, ignored or ruled noise, while the supervisor runs', () => {
+test('sensor-untriaged: a sensor\'s escalation nobody folded, ignored or ruled noise, once the supervisor has run here, up or down', () => {
   const F = fleetFixture('ooda-untriaged');
   const { old, ok } = F;
   const hand = handFor(F);
@@ -227,7 +227,7 @@ test('sensor-untriaged: a sensor\'s escalation nobody folded, ignored or ruled n
     ok(old, ['sensor', 'ignore', 'fake:log:U5', '--reason', 'bots'], SUP);
     ok(old, ['decide', '--class', 'orient-noise', '--refs', 'fake:log:U6', u6, '--', 'a health check, by design'], SUP);
     const findings = () => json(ok(old, ['metrics', '--json'])).findings.filter((x) => ['sensor-untriaged', 'incident-unowned'].includes(x.kind));
-    assert.deepEqual(findings(), [], 'nothing while the supervisor is not running');
+    assert.deepEqual(findings(), [], 'nothing while wait has never run here (a new setup)');
     // the supervisor's wait is alive
     fs.writeFileSync(path.join(old, 'docs/devteam/run/sensors/.wait-alive'), '');
     const [f, ...rest] = findings();
@@ -236,6 +236,21 @@ test('sensor-untriaged: a sensor\'s escalation nobody folded, ignored or ruled n
     assert.equal(f.subject, 'fake:log:U1');
     assert.match(f.detail, /severity 3/);
     assert.match(f.suggestion, /fold it into an incident, ignore it, or rule it noise/);
+    // the supervisor goes down (wait last ran two hours ago): still raised, saying so, not hidden
+    const ago = new Date(Date.now() - 2 * H);
+    fs.utimesSync(path.join(old, 'docs/devteam/run/sensors/.wait-alive'), ago, ago);
+    const down = findings();
+    assert.deepEqual(down.map((x) => [x.kind, x.subject]), [['sensor-untriaged', 'fake:log:U1']], 'raised while the supervisor is down too');
+    assert.match(down[0].detail, /the supervisor's wait has not run since/);
+    assert.match(down[0].suggestion, /^start the supervisor/);
+    // the fleet moved: another machine holds the host claim (as last fetched), so this machine's old
+    // .wait-alive raises nothing
+    const claim = { devteam_host: 1, machine: 'm-elsewhere-1234', hostname: 'other-box', at: new Date().toISOString(), since: new Date().toISOString(), fleet: null };
+    const tree = F.g(['mktree'], old);
+    const sha = F.g(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit-tree', tree, '-m', JSON.stringify(claim)], old);
+    F.g(['update-ref', 'refs/devteam/host-origin', sha], old);
+    assert.deepEqual(findings(), [], 'another machine supervises it now');
+    F.g(['update-ref', '-d', 'refs/devteam/host-origin'], old);
     // an incident takes it: untriaged stops, and incident-unowned takes over after its hour
     hand('supervisor', { type: 'problem', title: 'payment errors', severity: 3, realized: true, status: 'open', threatens: [], refs: [u1], fingerprints: ['fake:log:U1'], sensor: 'fake' }, 2 * H);
     assert.deepEqual(findings().map((x) => x.kind), ['incident-unowned']);
