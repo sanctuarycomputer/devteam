@@ -1,5 +1,5 @@
 diff --git a/test/dashboard.instances.test.mjs b/test/dashboard.instances.test.mjs
-index c33e241c2ecb79ce37528ed36e0c903d94395386..e7bf05c49869d8e645a25536180f8b391e22ac89 100644
+index c33e241c2ecb79ce37528ed36e0c903d94395386..f701426be468dc1eb6140683068def08578be61c 100644
 --- a/test/dashboard.instances.test.mjs
 +++ b/test/dashboard.instances.test.mjs
 @@ -112,18 +112,26 @@ test('the hub: lists every instance on the machine, links to each one, moves whe
@@ -53,7 +53,7 @@ index c33e241c2ecb79ce37528ed36e0c903d94395386..e7bf05c49869d8e645a25536180f8b39
 +      const tags = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)];
 +      assert.ok(tags.length >= 1, `${app}/${page}`);
 +      for (const [, attrs, body] of tags) {
-+        const src = /\ssrc="([^"]+)"/.exec(attrs)?.[1];
++        const src = ((m) => m?.[1] ?? m?.[2] ?? m?.[3])(/\ssrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i.exec(attrs));
 +        assert.ok(!src || /^\/_next\/[^?#]+$/.test(src), `${app}/${page}: a script from its own build only (${src})`);
 +        new vm.Script(src ? cliRead(fs.readFileSync, fs, path.join(root, ...src.split('/').filter(Boolean)), 'utf8') : body, { filename: `${app}/${page}${src ? ` ${src}` : ''}` });
 +      }

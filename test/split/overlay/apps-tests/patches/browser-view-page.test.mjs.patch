@@ -1,5 +1,5 @@
 diff --git a/test/browser-view-page.test.mjs b/test/browser-view-page.test.mjs
-index 1ce432da73ab7d69fb02d3cb271dbe6ede8057ff..cb30209aed9974325b277d6c839d33c432a8cd59 100644
+index 1ce432da73ab7d69fb02d3cb271dbe6ede8057ff..441566716fda086190f6b8b08ada446ffc51ee6d 100644
 --- a/test/browser-view-page.test.mjs
 +++ b/test/browser-view-page.test.mjs
 @@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
@@ -25,7 +25,7 @@ index 1ce432da73ab7d69fb02d3cb271dbe6ede8057ff..cb30209aed9974325b277d6c839d33c4
    assert.equal(src[1], schema['x-masked-url'], 'the page\'s mask is x-masked-url, exactly');
    const srv = await startServer();
    const p = await open(srv);
-@@ -110,17 +111,27 @@ test('the canvas fits the window, up and down', { skip, timeout: 60000 }, async
+@@ -110,33 +111,75 @@ test('the canvas fits the window, up and down', { skip, timeout: 60000 }, async
  });
  
  test('the page\'s CSP hashes its own script and style, and it loads nothing from elsewhere', { skip, timeout: 60000 }, async () => {
@@ -44,6 +44,7 @@ index 1ce432da73ab7d69fb02d3cb271dbe6ede8057ff..cb30209aed9974325b277d6c839d33c4
 +  // 'self' alone. It has no inline style, no style attribute, no inline handler and no frame, and loads only
 +  // its own build's files
    const srv = await startServer();
+-  let hits = 0;
 +  // a failed assertion here closes the server too, so the file still ends (CI's watchdog would take every case)
 +  try {
 +    const got = await fetch(`${srv.origin}/`);
@@ -57,14 +58,17 @@ index 1ce432da73ab7d69fb02d3cb271dbe6ede8057ff..cb30209aed9974325b277d6c839d33c4
 +    assert.doesNotMatch(markup, /<style\b/i, 'no inline style');
 +    assert.doesNotMatch(markup, /\sstyle\s*=|\son[a-z]+\s*=/i, 'no style attribute and no inline handler (the CSP would refuse them)');
 +    assert.doesNotMatch(markup, /<iframe|<frame\b|<frameset|<object|<embed|<img/i, 'no frame, object or image');
-+    const urls = [...markup.matchAll(/\s(?:src|href)\s*=\s*"([^"]*)"/gi)].map((m) => m[1]);
++    const urls = [...markup.matchAll(/\s(?:src|href)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/gi)].map((m) => m[1] ?? m[2] ?? m[3]);
 +    assert.ok(urls.length >= 1 && urls.every((u) => /^\/_next\/[^/]/.test(u)), `only its own build's files: ${urls.filter((u) => !/^\/_next\/[^/]/.test(u))}`);
 +  } catch (e) { await srv.close(); throw e; }
-   let hits = 0;
++  // the live half: a page that breaks the policy as it loads fails open(), so both servers close then too
++  let hits = 0, p;
    const other = http.createServer((q, s) => { hits++; s.end(''); });
-   await new Promise((r) => other.listen(0, '127.0.0.1', r));
-@@ -128,17 +139,48 @@ test('the page\'s CSP hashes its own script and style, and it loads nothing from
+-  await new Promise((r) => other.listen(0, '127.0.0.1', r));
+-  const p = await open(srv);
    try {
++    await new Promise((r) => other.listen(0, '127.0.0.1', r));
++    p = await open(srv);
      await srv.waitConn(1);
      const at = `http://127.0.0.1:${other.address().port}`;
 -    await p.ev(`(() => { window.__csp = []; document.addEventListener('securitypolicyviolation', (e) => __csp.push(e.effectiveDirective));
@@ -80,9 +84,10 @@ index 1ce432da73ab7d69fb02d3cb271dbe6ede8057ff..cb30209aed9974325b277d6c839d33c4
      await sleep(300);
      assert.equal(hits, 0, 'the other origin got no request');
      assert.equal(srv.others, 0, 'and the page asked its own server for nothing but itself');
-   } finally { await shut(p); other.close(); await srv.close(); }
- });
- 
+-  } finally { await shut(p); other.close(); await srv.close(); }
++  } finally { if (p) await shut(p); other.close(); await srv.close(); }
++});
++
 +// kit-986 (APPS-S4): the harness fails a test on any CSP violation, naming the directive and what it blocked.
 +// The build's page with one more inline script, which the route's hashes don't name: every call on the page
 +// fails from then on, and when no call follows, the browser's close() fails.
@@ -111,12 +116,10 @@ index 1ce432da73ab7d69fb02d3cb271dbe6ede8057ff..cb30209aed9974325b277d6c839d33c4
 +    closed = true;
 +    assert.match(c?.message ?? '', new RegExp(`^${said.source}`), "with no call after it, the browser's close() fails");
 +  } finally { if (!closed) await own.close().catch(() => {}); await srv.close(); }
-+});
-+
+ });
+ 
  test('the page reconnects by itself after the server closes the socket', { skip, timeout: 60000 }, async () => {
-   const srv = await startServer();
-   const p = await open(srv);
-@@ -396,8 +438,11 @@ test('nothing typed is kept in page memory after it is sent', { skip, timeout: 1
+@@ -396,8 +439,11 @@ test('nothing typed is kept in page memory after it is sent', { skip, timeout: 1
  });
  
  test('nothing on the page is reachable from another origin', { skip, timeout: 60000 }, async () => {
@@ -125,12 +128,12 @@ index 1ce432da73ab7d69fb02d3cb271dbe6ede8057ff..cb30209aed9974325b277d6c839d33c4
 +  // apps@1 (kit-1019's port; kit-986): the page's own code is the built page and the view's source
 +  const dir = new URL('../apps/dashboard/src/views/browser/', import.meta.url);
 +  const code = [cliRead(fs.readFileSync, fs, PAGE, 'utf8'), ...fs.readdirSync(dir).filter((f) => /\.tsx?$/.test(f)).map((f) => cliRead(fs.readFileSync, fs, new URL(f, dir), 'utf8'))];
-+  assert.ok(code.length >= 3, 'the page and the view\'s code');
++  assert.ok(code.length >= 4, 'the page and the view\'s code (index.tsx, start.tsx, view.ts)');
 +  for (const word of ['postMessage', 'localStorage', 'sessionStorage', 'indexedDB', 'document.cookie', 'window.name', 'document.domain', 'history.', 'location.hash']) assert.ok(code.every((c) => !c.includes(word)), `the page never uses ${word}`);
    const srv = await startServer();
    const framer = http.createServer((q, s) => { s.writeHead(200, { 'content-type': 'text/html' }); s.end(`<!doctype html><iframe src="${srv.origin}/"></iframe>`); });
    await new Promise((r) => framer.listen(0, '127.0.0.1', r));
-@@ -408,7 +453,9 @@ test('nothing on the page is reachable from another origin', { skip, timeout: 60
+@@ -408,7 +454,9 @@ test('nothing on the page is reachable from another origin', { skip, timeout: 60
      p = await open(srv);
      await srv.waitConn(1);
      const added = (await p.ev('Object.keys(window)')).filter((k) => !blank.includes(k));
