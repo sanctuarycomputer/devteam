@@ -149,12 +149,13 @@ const STRICT = process.env.DEVTEAM_APPS_COMPAT_STRICT === '1';
 const TYPES = { html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', txt: 'text/plain; charset=utf-8', json: 'application/json', svg: 'image/svg+xml', png: 'image/png', ico: 'image/x-icon', webp: 'image/webp', woff2: 'font/woff2' };
 // The route's policy as apps@1 serves it: script-src 'self' plus its hashes; the browser view's style-src 'self' alone;
 // the dashboard app's routes but /browser/ also name the shell's font and icon origins (kit-1033).
+// The hub's adds manifest-src 'self', as the box's own hub policy has (cloud/gateway.mjs, hubCsp): its head links the manifest (kit-1008).
 const policyFor = (route, hashes, app) => [
   "default-src 'none'",
   `script-src 'self' ${hashes.map((h) => `'${h}'`).join(' ')}`,
   route === '/browser/' ? "style-src 'self'" : `style-src 'self' 'unsafe-inline'${app === 'dashboard' ? ' https://fonts.googleapis.com https://cdn.jsdelivr.net' : ''}`,
   route === '/browser/' ? "img-src 'none'" : "img-src 'self' data:",
-  route === '/browser/' ? "font-src 'self'" : `font-src 'self'${app === 'dashboard' ? ' https://fonts.gstatic.com https://cdn.jsdelivr.net' : ''}`, "connect-src 'self'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
+  route === '/browser/' ? "font-src 'self'" : `font-src 'self'${app === 'dashboard' ? ' https://fonts.gstatic.com https://cdn.jsdelivr.net' : ''}`, "connect-src 'self'", ...(app === 'hub' ? ["manifest-src 'self'"] : []), "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
 ].join('; ');
 
 // A server for one built app at the root: a route's index.html under its policy, every other exported file as is.
