@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fleetFixture, json, write, hasTmux } from './lib/kit.mjs';
+import { fleetFixture, json, write, hasTmux, sessionOf } from './lib/kit.mjs';
 import { runNode } from './lib/cli.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -165,4 +165,35 @@ test('the tick removes finished ticket, chore, plan and review worktrees, and ke
     if (sleeper && sleeper.exitCode === null) sleeper.kill();
     F.done();
   }
+});
+
+// What the tidy won't take is named: a merged ticket's worktree whose worker never logged phase done,
+// with no window, untouched for a day, is a low worktree-orphaned finding (S31); its window open, or
+// touched within the day, it is not.
+test('worktree-orphaned: a merged ticket\'s worktree with no window, a day untouched', { skip: !hasTmux && 'needs tmux' }, () => {
+  const F = fleetFixture('worktree-orphan');
+  const { old, ok, g } = F;
+  const tmux = (args) => spawnSync('tmux', args, { env: F.env({}), encoding: 'utf8' });
+  try {
+    const id = 'ch-20-t';
+    ok(old, ['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'chores', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['ch/**'], done_when: ['the tidy check passes in CI'] })], SUP);
+    const wt = path.join(old, '.worktrees', id);
+    g(['worktree', 'add', '-q', '-b', `ticket/${id}`, wt, 'origin/main'], old);
+    g(['commit', '-qm', `${id}: done`, '--allow-empty'], old);
+    g(['push', '-q', 'origin', 'HEAD:main'], old);
+    const orphaned = () => json(ok(old, ['metrics', '--json'])).findings.filter((f) => f.kind === 'worktree-orphaned');
+    // the session is up with another window: tmux can say this ticket has none
+    assert.equal(tmux(['new-session', '-d', '-s', sessionOf(old, 'worktree-orphan'), '-n', 'other', 'sleep 600']).status, 0);
+    assert.deepEqual(orphaned(), [], 'touched just now');
+    const t = new Date(Date.now() - 2 * 86400000);
+    for (const p of [wt, path.join(wt, '.git')]) fs.utimesSync(p, t, t);
+    const [f, ...rest] = orphaned();
+    assert.deepEqual(rest, []);
+    assert.equal(f.severity, 'low');
+    assert.equal(f.subject, id);
+    assert.match(f.detail, /merged, no window, untouched for 4\d(\.\d)?h/);
+    assert.match(f.suggestion, new RegExp(`worker ${id} --remove --force`));
+    assert.equal(tmux(['new-window', '-t', sessionOf(old, 'worktree-orphan'), '-n', id, 'sleep 600']).status, 0);
+    assert.deepEqual(orphaned(), [], 'its window is open');
+  } finally { tmux(['kill-server']); F.done(); }
 });
