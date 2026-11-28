@@ -8,7 +8,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fleetFixture, json, write } from './lib/kit.mjs';
+import { spawnSync } from 'node:child_process';
+import { fleetFixture, hasTmux, json, write } from './lib/kit.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const DT = path.join(here, '..', 'docs', 'devteam', 'scripts', 'devteam.mjs');
@@ -170,6 +171,15 @@ function readyGoal(P, title, slug) {
 const addTicket = (P, id, feature, extra = {}) => P.sup(['ticket', 'add', id, '--json', JSON.stringify({ title: `Ticket ${id}`, feature, component: 'ch', kind: 'build', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: [`${id}/**`], done_when: ['its check passes in CI'], ...extra })]);
 // the supervisor's hold on a ticket, for a cause the kit can't follow, looked at again in a week
 const hold = (P, id, reason) => P.sup(['ticket', 'hold', id, '--reason', reason, '--for', 'external:the-vendor', '--until', new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)]);
+// A merge --chore act as merge writes it (merged chore-<slug> at <sha>), hand-written: the merge
+// itself needs gates and a PR text this fixture doesn't have. Returns its time.
+function mergeChoreAct(P, slug, sha) {
+  const at = new Date().toISOString();
+  const d = at.replace(/[-:TZ.]/g, '');
+  const line = { v: 1, op: 'new', type: 'act', id: `a-${d.slice(0, 8)}-${d.slice(8, 17)}-supervisor`, class: 'merge-chore', what: `merged chore-${slug} at ${sha}`, refs: [`chore-${slug}`], reversible: false, at, by: 'supervisor' };
+  fs.appendFileSync(path.join(P.F.old, 'docs/devteam/run/log', `supervisor-${at.slice(0, 7)}.jsonl`), `${JSON.stringify(line)}\n`);
+  return at;
+}
 // A hold line as an older or hand-written one left it: the text from, in the one run/log line that has it, made to.
 function rewriteLog(P, from, to) {
   const dir = path.join(P.F.old, 'docs/devteam/run/log');
@@ -221,6 +231,8 @@ test('next-moves A13: ticket rows: waits, start, the owner, merge, resume, block
     assert.equal(m.words, 'Held: waits for the vendor. Release it, or ask');
     assert.equal(m.command, 'ticket release ch-04-held --reason "…"');
     assert.equal(m.flag, null, 'a hold is never owed, even past next_move_owed_minutes (0 here)');
+    // its wait: what it waits on, and its --until, which moveFindings reads to tell a lapsed hold
+    assert.deepEqual(m.wait, { causes: [{ ref: 'external:the-vendor', words: 'the-vendor', state: 'open' }], until: new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10) });
     const Q = P.ask(['--blocks', 'ch-04-held', '--question', 'Still wanted?', '--recommendation', 'yes']);
     const o = ticketMove(P, 'ch-04-held');
     assert.equal(o.move, 'answer-question');
@@ -323,6 +335,63 @@ test('next-moves A5: the lead ticket: a goal takes its move, via it, flag and al
   });
 });
 
+// A worker that isn't alive holds nothing: with its tmux session up, a phase in flight whose window is
+// gone or whose agent is back at a shell is the supervisor's resume-worker (T8b), since its last line;
+// awaiting the word with its window gone, the word is still the supervisor's (T5), and says it must be
+// resumed to receive it. A missing session is a reboot (every other fixture here): T8 as before.
+test('next-moves: a dead worker\'s move is the supervisor\'s to resume it', { skip: !hasTmux && 'no tmux' }, async (t) => {
+  const P = project('dead-worker', { tmux_session: 'nm-dead-worker', max_active_tickets: 5 });
+  const tmux = (args) => spawnSync('tmux', args, { env: P.F.env() });
+  tmux(['new-session', '-d', '-s', 'nm-dead-worker', '-n', 'main', 'sleep 600']);
+  const window = (id, cmd) => tmux(['new-window', '-d', '-t', '=nm-dead-worker:', '-n', id, cmd]);
+  const G = readyGoal(P, 'Dead workers', 'dead');
+  const lastSeen = (id) => json(P.F.ok(P.F.old, ['log', '--by', id, '--json'])).map((l) => l.created_at).sort().at(-1);
+  await t.test('building, its window gone: resume-worker, the supervisor\'s, uncovered', () => {
+    addTicket(P, 'ch-71-gone', 'dead');
+    phase(P, 'ch-71-gone', 'build');
+    const m = ticketMove(P, 'ch-71-gone');
+    assert.equal(m.move, 'resume-worker');
+    assert.equal(m.holder, 'supervisor');
+    assert.equal(m.command, 'worker ch-71-gone --resume');
+    assert.match(m.words, /its window is gone/);
+    assert.equal(m.since, lastSeen('ch-71-gone'));
+    assert.deepEqual(m.covered_by, []);
+    assert.equal(goalMove(P, G).via, 'ticket:ch-71-gone', 'the supervisor\'s move leads the goal');
+  });
+  await t.test('building, its agent back at a shell: resume-worker', () => {
+    addTicket(P, 'ch-72-exited', 'dead');
+    phase(P, 'ch-72-exited', 'build');
+    window('ch-72-exited', 'bash');
+    const m = ticketMove(P, 'ch-72-exited');
+    assert.equal(m.move, 'resume-worker');
+    assert.match(m.words, /its agent exited/);
+  });
+  await t.test('building in a live window: the worker\'s phase (T8)', () => {
+    addTicket(P, 'ch-73-alive', 'dead');
+    phase(P, 'ch-73-alive', 'build');
+    window('ch-73-alive', 'sleep 600');
+    const m = ticketMove(P, 'ch-73-alive');
+    assert.equal(m.move, 'build');
+    assert.equal(m.holder, 'worker');
+  });
+  await t.test('awaiting the word, its window gone: give the word (T5), resuming it first', () => {
+    addTicket(P, 'ch-74-word', 'dead');
+    phase(P, 'ch-74-word', 'awaiting-word');
+    const m = ticketMove(P, 'ch-74-word');
+    assert.equal(m.move, 'give-word');
+    assert.equal(m.holder, 'supervisor');
+    assert.match(m.words, /^Give the word, or merge; resume it first, its window is gone$/);
+  });
+  await t.test('blocked with nothing open, its window gone: answer its message (T6), resuming it first', () => {
+    addTicket(P, 'ch-75-blocked', 'dead');
+    phase(P, 'ch-75-blocked', 'blocked');
+    const m = ticketMove(P, 'ch-75-blocked');
+    assert.equal(m.move, 'answer-message');
+    assert.equal(m.holder, 'supervisor');
+    assert.match(m.words, /^Answer its message; resume it first, its window is gone$/);
+  });
+});
+
 test('next-moves: a held ticket turns stalled after next_move_stall_hours, never owed', () => {
   const P = project('held-stall', { next_move_owed_minutes: 0, next_move_stall_hours: 0 });
   readyGoal(P, 'Held long', 'heldlong');
@@ -354,6 +423,7 @@ test('next-moves: a hold ends when what it waits on does (release) or its date g
     assert.equal(m.quiet, null);
     assert.equal(m.flag, 'owed', 'owed at once, before next_move_owed_minutes');
     assert.equal(m.since, P.question(Q).answered_at, 'since the answer');
+    assert.deepEqual(m.wait?.causes.map((c) => [c.ref, c.state]), [[Q, 'resolved']], "its wait carries the cause's state now (causeNow)");
     assert.deepEqual(moveErrors(m), []);
   });
   await t.test('held for a ticket still open: held; once it merges, release', () => {
@@ -401,20 +471,32 @@ test('next-moves: a hold ends when what it waits on does (release) or its date g
     assert.equal(y.since, P.goal(Y).updates.filter((u) => u.hold).at(-1).at, 'since the goal ran again');
     assert.equal(y.flag, 'owed');
   });
-  await t.test('held for a chore: held while its branch has work main lacks, release once main has it', () => {
+  await t.test('held for a chore: a fresh branch or one an earlier run merged ends nothing; its merge --chore since the hold does', () => {
     const { g, old } = P.F;
-    addTicket(P, 'ch-83-chore', 'holdends');
-    g(['checkout', '-q', '-b', 'chore-tidy'], old);
-    g(['commit', '-q', '--allow-empty', '-m', 'tidy'], old);
+    // a fresh chore start: its branch at main, no work of its own
+    addTicket(P, 'ch-83-fresh', 'holdends');
+    g(['branch', 'chore-fresh'], old);
+    P.sup(['ticket', 'hold', 'ch-83-fresh', '--reason', 'after the fresh chore', '--for', 'chore:fresh']);
+    assert.equal(P.raw('ticket:ch-83-fresh').move, 'held', 'a branch still at main is not a merge');
+    // a branch left over from an earlier run of the chore, merged then (its act before the hold)
+    addTicket(P, 'ch-84-again', 'holdends');
+    g(['checkout', '-q', '-b', 'chore-again'], old);
+    g(['commit', '-q', '--allow-empty', '-m', 'the first run'], old);
     g(['checkout', '-q', 'main'], old);
-    P.sup(['ticket', 'hold', 'ch-83-chore', '--reason', 'after the tidy', '--for', 'chore:tidy']);
-    assert.equal(P.raw('ticket:ch-83-chore').move, 'held', 'the chore is open');
-    g(['merge', '-q', '--ff-only', 'chore-tidy'], old);
+    g(['merge', '-q', '--ff-only', 'chore-again'], old);
     g(['push', '-q', 'origin', 'main'], old);
-    const m = P.raw('ticket:ch-83-chore');
+    mergeChoreAct(P, 'again', g(['rev-parse', 'chore-again'], old));
+    sleep(5);
+    P.sup(['ticket', 'hold', 'ch-84-again', '--reason', 'after the next run of the chore', '--for', 'chore:again']);
+    assert.equal(P.raw('ticket:ch-84-again').move, 'held', 'a merge from before the hold is not this one');
+    // its merge since the hold
+    sleep(5);
+    const at = mergeChoreAct(P, 'again', g(['rev-parse', 'main'], old));
+    const m = P.raw('ticket:ch-84-again');
     assert.equal(m.move, 'release');
-    assert.equal(m.words, 'Release it: what it waited on is done (chore-tidy merged)');
-    assert.equal(m.since, json(P.F.ok(old, ['ticket', 'show', 'ch-83-chore'])).updates.filter((u) => u.held).at(-1).at, 'the log dates no merge: since the hold, so it still ages');
+    assert.equal(m.words, 'Release it: what it waited on is done (chore-again merged)');
+    assert.equal(m.since, at, 'since the merge');
+    assert.equal(m.flag, 'owed');
   });
   await t.test('an old hold with no cause: held while it has no date, review-hold once its date has gone by', () => {
     addTicket(P, 'ch-80-old', 'holdends');
