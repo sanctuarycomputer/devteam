@@ -5911,7 +5911,8 @@ function notSchedulable(t) {
 // reason it gives. "In review" has none: an unreachable link elsewhere says nothing about it.
 function cantStartCover(t, why) {
   const name = repoOfTicketLink(t);
-  if (why === 'repo unreachable') return ['link-unreachable', 'repo-unreachable'].map((kind) => ({ kind, subject: name }));
+  // link-unreachable only: repo-unreachable is raised for a repo that reads, never this one
+  if (why === 'repo unreachable') return [{ kind: 'link-unreachable', subject: name }];
   if (why === 'unowned files') return [{ kind: 'unowned-files', subject: name }];
   return [];
 }
@@ -21824,21 +21825,21 @@ function cmdMoves() {
 // The three move findings, from the moves and the findings already raised in the same run: a pure
 // function of the two (and the clock), so a test can load it on its own. Only a move's own subject
 // raises one: never a quiet move (it waits on purpose), never a copied one (via: its source raises
-// it). A cover bounds a move's finding, it never silences it: a covered move raises nothing while
-// it is owed (rung 1), though it keeps its flag, and once stalled (rung 2) it raises move-stalled
-// whatever covers it. Only a high finding its covered_by names, raised in the run on that subject,
-// covers: wait wakes on high only, so a medium one would hold a supervisor's move out of wait for
-// good (a worker waited 80 h for the word under waiting-on-supervisor). The one exception is "*",
-// any subject: idle-capacity, idle-planning and memory-full are medium and count the moves they
-// stand for, so each ready ticket or goal raising its own high move-owed beside them would only
-// repeat them; they cover at rung 1 still. raised holds no acked finding (collectMetrics): an ack is
-// on the cover, not on the move. By the move's flag: none (no row knew the state: G20, T14) raises
+// it). A covered move raises nothing, though it keeps its flag. Only a high finding its covered_by
+// names, raised in the run on that subject, covers: wait wakes on high only, so a medium one would
+// hold a supervisor's move out of wait for good (a worker waited 80 h for the word under
+// waiting-on-supervisor). A high cover wakes wait itself, so it covers at every rung: a second high
+// finding beside it would only need a second ack. The one exception is "*", any subject:
+// idle-capacity, idle-planning and memory-full are medium and count the moves they stand for, so
+// each ready ticket or goal raising its own high move-owed beside them would only repeat them; they
+// cover while the move is owed (rung 1) and never once it is stalled (rung 2), so it reaches wait
+// then. raised holds no acked finding (collectMetrics): an ack is on the cover, not on the move. By the move's flag: none (no row knew the state: G20, T14) raises
 // no-next-move, owed (rung 1) move-owed, stalled (rung 2) move-stalled; each is high, so wait wakes
 // on it. The finding's subject is "<subject> <move>:<ref id>", so an ack sets aside one move with one
 // ref, and a new move or a new ref is a new finding.
 function moveFindings(moves, raised, now = Date.now()) {
-  const covers = (c, f) => f.kind === c.kind && (c.subject === '*' || (f.severity === 'high' && String(f.subject) === c.subject));
-  const covered = (m) => m.flag !== 'stalled' && (m.covered_by ?? []).some((c) => raised.some((f) => covers(c, f)));
+  const covers = (m, c, f) => f.kind === c.kind && (c.subject === '*' ? m.flag !== 'stalled' : f.severity === 'high' && String(f.subject) === c.subject);
+  const covered = (m) => (m.covered_by ?? []).some((c) => raised.some((f) => covers(m, c, f)));
   const ageOf = (since) => { const t = Date.parse(since); if (Number.isNaN(t)) return 'since ?'; const min = Math.max(0, Math.floor((now - t) / 60000)); return min < 120 ? `${min} min` : min < 2880 ? `${Math.floor(min / 60)} h` : `${Math.floor(min / 1440)} d`; };
   const KIND = { none: 'no-next-move', owed: 'move-owed', stalled: 'move-stalled' };
   const stalledHint = (m) => (m.holder === 'owner' ? 'remind the owner what it holds up; a question that needn\'t be the owner\'s is withdrawn and decided (W1)'

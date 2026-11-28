@@ -1,8 +1,7 @@
 // The move findings of the next-move table (kit-290): move-owed, move-stalled and no-next-move,
 // raised by collectMetrics from nextMoves() after every other finding, only on a move's own subject
-// (never a quiet or a copied one), and, while it is only owed, never while a high finding the move's
-// covered_by names is raised on its subject, un-acked, or one it names on "*"; once stalled, covered
-// or not; and the hub's cache, run/cache/next-moves.json, written by every metrics run and again as
+// (never a quiet or a copied one), and never while a high finding the move's covered_by names is
+// raised on its subject, un-acked, nor, while it is only owed, one it names on "*"; and the hub's cache, run/cache/next-moves.json, written by every metrics run and again as
 // observe-metrics' last step. Fixture projects drive the real CLI; the cover rule is also run on its
 // own, loaded from devteam.mjs under node:vm (as test/credentials.test.mjs loads parseArgs), so a
 // finding no kit raises yet (goal-work-merged) can be passed in as raised.
@@ -337,8 +336,9 @@ test('next-moves A10: move-stalled: any move unchanged past next_move_stall_hour
     assert.notEqual(m2.ref.id, m1.ref.id, 'a new ref');
     assert.deepEqual(open().map((x) => x.subject), [`ticket:ch-21-build answer-message:${m2.ref.id}`], 'the new ref is raised again');
   });
-  // A cover bounds a move, it never silences it: past next_move_stall_hours a covered move raises
-  // move-stalled whatever covers it (a worker waited 80 h for the word under waiting-on-supervisor).
+  // A medium cover never silences a move, and a wildcard one only until it stalls: past
+  // next_move_stall_hours it raises move-stalled (a worker waited 80 h for the word under
+  // waiting-on-supervisor). A high cover on its subject wakes wait itself, so it holds at any rung.
   const stalled = (o) => move({ since: new Date(Date.now() - 25 * 3600000).toISOString(), flag: 'stalled', rung: 2, ...o });
   await t.test('alone: a T5 give-word move 25 h old with waiting-on-supervisor (medium) raised: move-stalled', () => {
     const moveFindings = loadMoveFindings();
@@ -357,12 +357,42 @@ test('next-moves A10: move-stalled: any move unchanged past next_move_stall_hour
     assert.deepEqual(out.map((x) => [x.severity, x.kind, x.subject]), [['high', 'move-stalled', 'planner:pfour planning:']]);
     assert.match(out[0].suggestion, /pane/);
   });
-  await t.test('alone: at rung 2 neither a high cover on its subject nor a wildcard one holds it; at rung 1 the high one does', () => {
+  await t.test('alone: a wildcard cover holds an owed move, not a stalled one: idle-capacity on a T13 start-worker 25 h old', () => {
     const moveFindings = loadMoveFindings();
-    const cover = [{ kind: 'blocked', subject: 'ch-1' }, { kind: 'idle-capacity', subject: '*' }];
-    const raised = [{ severity: 'high', kind: 'blocked', subject: 'ch-1' }, { severity: 'medium', kind: 'idle-capacity', subject: '2 ready' }];
-    assert.deepEqual(moveFindings([stalled({ subject: 'ticket:ch-1', move: 'answer-message', covered_by: cover })], raised).map((x) => x.kind), ['move-stalled']);
-    assert.deepEqual(moveFindings([move({ subject: 'ticket:ch-1', move: 'answer-message', covered_by: cover.slice(0, 1) })], raised.slice(0, 1)), [], 'owed, under a high cover on its subject: quiet');
+    const cover = [{ kind: 'idle-capacity', subject: '*' }];
+    const raised = [{ severity: 'medium', kind: 'idle-capacity', subject: '2 ready' }];
+    assert.deepEqual(moveFindings([move({ subject: 'ticket:ch-1', move: 'start-worker', covered_by: cover })], raised), [], 'owed: quiet');
+    assert.deepEqual(moveFindings([stalled({ subject: 'ticket:ch-1', move: 'start-worker', covered_by: cover })], raised).map((x) => [x.kind, x.subject]), [['move-stalled', 'ticket:ch-1 start-worker:']]);
+  });
+  await t.test('alone: a high cover on its subject holds it at either rung, so one owner question past 24 h raises no move-stalled beside owner-question-waiting', () => {
+    const moveFindings = loadMoveFindings();
+    const raised = [{ severity: 'high', kind: 'owner-question-waiting', subject: 'q-1' }, { severity: 'high', kind: 'link-unreachable', subject: 'api' }];
+    // the T3 rows of three tickets it blocks, and their goal's G4, all the owner's and stalled
+    const asked = (subject) => stalled({ subject, move: 'answer-question', holder: 'owner', ref: { kind: 'q', id: 'q-1' }, covered_by: [{ kind: 'owner-question-waiting', subject: 'q-1' }] });
+    assert.deepEqual(moveFindings(['ticket:ch-1', 'ticket:ch-2', 'ticket:ch-3', 'goal:g-1'].map(asked), raised), []);
+    // and three tickets in a repo that can't be read, under the one link-unreachable on it
+    const cant = (subject) => stalled({ subject, move: 'cant-start', covered_by: [{ kind: 'link-unreachable', subject: 'api' }] });
+    assert.deepEqual(moveFindings(['ticket:ch-4', 'ticket:ch-5', 'ticket:ch-6'].map(cant), raised), []);
+    assert.deepEqual(moveFindings([move({ subject: 'ticket:ch-1', move: 'answer-message', covered_by: [{ kind: 'blocked', subject: 'ch-1' }] })], [{ severity: 'high', kind: 'blocked', subject: 'ch-1' }]), [], 'owed, under a high cover on its subject: quiet');
+    // acked, it isn't raised (collectMetrics passes the un-acked findings only), so it covers nothing
+    assert.deepEqual(moveFindings([asked('ticket:ch-1')], []).map((x) => x.kind), ['move-stalled']);
+  });
+  await t.test('alone: a ticket that can\'t start is covered by its own repo\'s finding, for its own reason, and by no other repo\'s', () => {
+    const i = SRC.indexOf('\nfunction cantStartCover(');
+    assert.ok(i >= 0, 'devteam.mjs defines cantStartCover');
+    const j = SRC.indexOf('\n}\n', i);
+    // its repo, from the ticket's component, stubbed: the ticket's own repo field here
+    const fn = vm.runInContext(`${SRC.slice(i, j + 2)}\n;cantStartCover`, vm.createContext({ repoOfTicketLink: (t) => t.repo }));
+    const cantStartCover = (...a) => JSON.parse(JSON.stringify(fn(...a)));
+    assert.deepEqual(cantStartCover({ repo: 'api' }, 'repo unreachable'), [{ kind: 'link-unreachable', subject: 'api' }]);
+    assert.deepEqual(cantStartCover({ repo: 'home' }, 'unowned files'), [{ kind: 'unowned-files', subject: 'home' }]);
+    assert.deepEqual(cantStartCover({ repo: 'api' }, 'in review'), []);
+    const moveFindings = loadMoveFindings();
+    const m = move({ subject: 'ticket:api-1', move: 'cant-start', covered_by: cantStartCover({ repo: 'api' }, 'repo unreachable') });
+    assert.deepEqual(moveFindings([m], [{ severity: 'high', kind: 'link-unreachable', subject: 'api' }]), []);
+    assert.deepEqual(moveFindings([m], [{ severity: 'high', kind: 'link-unreachable', subject: 'web' }]).map((x) => x.kind), ['move-owed'], 'another repo\'s link covers nothing');
+    const u = move({ subject: 'ticket:api-2', move: 'cant-start', covered_by: cantStartCover({ repo: 'api' }, 'unowned files') });
+    assert.deepEqual(moveFindings([u], [{ severity: 'high', kind: 'unowned-files', subject: 'home' }]).map((x) => x.kind), ['move-owed'], 'a gap in another repo covers nothing');
   });
 });
 
