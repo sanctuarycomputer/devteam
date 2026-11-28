@@ -3,6 +3,8 @@
 // exported once into the page, and the script writes into it, as index.html's does. Below, every function another view
 // calls from it (APPS.md, The view stubs' exports): each a hoisted function that calls peeks' module at call time.
 // Peeks' modules import other views, so call these from a function another view runs later, never at its top level.
+// peeks.css before ./wire: wire pulls in words, so this order puts peeks' rules before words.css in the built sheet, the
+// order cascade.mjs's dispositions assume (task-3 review F2). Keep it first.
 import './peeks.css';
 import './wire';
 import * as Drawer from './drawer';
