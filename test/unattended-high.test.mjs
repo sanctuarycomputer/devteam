@@ -100,9 +100,12 @@ test('moveFindings: a held ticket, stalled, is medium only while its --until dat
 
 test('next moves: a held ticket\'s move carries its wait (causes, until); a copy of it never does', () => {
   // T2b's own wait, as next-move@1 defines it (moveFindings reads wait.until)
-  const i = SRC.indexOf("if (isHeld(t)) {\n        const m = at({ move: 'held'");
+  // (its held, release and review-hold moves alike; each cause's state is causeNow's)
+  const i = SRC.indexOf('if (isHeld(t)) {\n');
   assert.ok(i >= 0, 'T2b builds its move and adds the wait');
-  assert.match(SRC.slice(i, i + 900), /m\.wait = \{ causes: causes\.map\(\(ref\) => \(\{ ref, words: holdCauseWords\(ref\), state: [^}]+\}\)\), until: [^;]+t\.held_until[^;]+;/);
+  const row = SRC.slice(i, i + 2400);
+  assert.match(row, /const wait = causes\.length \? \{ causes: causes\.map\(\(ref\) => \(\{ ref, words: holdCauseWords\(ref\), state: causeNow\(ref, heldAt\)[^}]+\}\)\), until: [^;]+t\.held_until[^;]+;/);
+  assert.match(row, /if \(wait\) m\.wait = wait;\n\s+return m;/);
   const j = SRC.indexOf('\nconst copiedMove = ');
   const copied = vm.runInContext(`${SRC.slice(j, SRC.indexOf('\n', j + 1))}\n;copiedMove`, vm.createContext({}));
   const src = { subject: 'ticket:t-1', move: 'held', wait: { causes: [], until: null }, flag: 'stalled' };

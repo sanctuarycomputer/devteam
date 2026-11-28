@@ -171,6 +171,22 @@ function readyGoal(P, title, slug) {
 const addTicket = (P, id, feature, extra = {}) => P.sup(['ticket', 'add', id, '--json', JSON.stringify({ title: `Ticket ${id}`, feature, component: 'ch', kind: 'build', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: [`${id}/**`], done_when: ['its check passes in CI'], ...extra })]);
 // the supervisor's hold on a ticket, for a cause the kit can't follow, looked at again in a week
 const hold = (P, id, reason) => P.sup(['ticket', 'hold', id, '--reason', reason, '--for', 'external:the-vendor', '--until', new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)]);
+// A merge --chore act as merge writes it (merged chore-<slug> at <sha>), hand-written: the merge
+// itself needs gates and a PR text this fixture doesn't have. Returns its time.
+function mergeChoreAct(P, slug, sha) {
+  const at = new Date().toISOString();
+  const d = at.replace(/[-:TZ.]/g, '');
+  const line = { v: 1, op: 'new', type: 'act', id: `a-${d.slice(0, 8)}-${d.slice(8, 17)}-supervisor`, class: 'merge-chore', what: `merged chore-${slug} at ${sha}`, refs: [`chore-${slug}`], reversible: false, at, by: 'supervisor' };
+  fs.appendFileSync(path.join(P.F.old, 'docs/devteam/run/log', `supervisor-${at.slice(0, 7)}.jsonl`), `${JSON.stringify(line)}\n`);
+  return at;
+}
+// A hold line as an older or hand-written one left it: the text from, in the one run/log line that has it, made to.
+function rewriteLog(P, from, to) {
+  const dir = path.join(P.F.old, 'docs/devteam/run/log');
+  const files = fs.readdirSync(dir).map((f) => path.join(dir, f)).filter((f) => fs.readFileSync(f, 'utf8').includes(from));
+  assert.equal(files.length, 1, `one run/log file has ${from}`);
+  fs.writeFileSync(files[0], fs.readFileSync(files[0], 'utf8').replace(from, to));
+}
 const lastAt = (P, id) => json(P.F.ok(P.F.old, ['log', '--by', id, '--json'])).filter((l) => l.type === 'phase').map((l) => l.created_at).sort().at(-1);
 
 test('next-moves A13: ticket rows: waits, start, the owner, merge, resume, blocked on a dependency, can\'t start, and held', async (t) => {
@@ -385,6 +401,132 @@ test('next-moves: a held ticket turns stalled after next_move_stall_hours, never
   assert.equal(m.move, 'held');
   assert.equal(m.flag, 'stalled');
   assert.equal(m.rung, 2);
+});
+
+test('next-moves: a hold ends when what it waits on does (release) or its date goes by (review-hold), owed at once', async (t) => {
+  // the default next_move_owed_minutes, so "owed" here can only be the hold's end
+  const P = project('hold-ends');
+  readyGoal(P, 'Hold ends', 'holdends');
+  await t.test('held for a question, then answered: release, the supervisor\'s, owed at once', () => {
+    addTicket(P, 'ch-71-asked', 'holdends');
+    const Q = P.ask(['--question', 'Which vendor for ch-71?', '--recommendation', 'the first']);
+    P.sup(['ticket', 'hold', 'ch-71-asked', '--reason', 'waits on the vendor pick', '--for', Q, '--whole', 'every part needs the vendor']);
+    const before = P.raw('ticket:ch-71-asked');
+    assert.equal(before.move, 'held', 'the question is open: still held');
+    assert.equal(before.flag, null);
+    P.owner(['answer', Q, 'the first']);
+    const m = P.raw('ticket:ch-71-asked');
+    assert.equal(m.move, 'release');
+    assert.equal(m.holder, 'supervisor');
+    assert.equal(m.words, 'What it waited on has ended ("Which vendor for ch-71?" answered): release it, or hold it again', 'an answer may say to wait longer: the choice stays open');
+    assert.equal(m.command, 'ticket release ch-71-asked');
+    assert.equal(m.quiet, null);
+    assert.equal(m.flag, 'owed', 'owed at once, before next_move_owed_minutes');
+    assert.equal(m.since, P.question(Q).answered_at, 'since the answer');
+    assert.deepEqual(m.wait?.causes.map((c) => [c.ref, c.state]), [[Q, 'resolved']], "its wait carries the cause's state now (causeNow)");
+    assert.deepEqual(moveErrors(m), []);
+  });
+  await t.test('held for a ticket still open: held; once it merges, release', () => {
+    addTicket(P, 'ch-72-first', 'holdends');
+    addTicket(P, 'ch-73-after', 'holdends');
+    P.sup(['ticket', 'hold', 'ch-73-after', '--reason', 'reuses what ch-72 builds', '--for', 'ch-72-first']);
+    const m = P.raw('ticket:ch-73-after');
+    assert.equal(m.move, 'held', 'its cause is open');
+    assert.equal(m.flag, null);
+    P.merge('ch-72-first');
+    const r = P.raw('ticket:ch-73-after');
+    assert.equal(r.move, 'release');
+    assert.equal(r.words, 'Release it: what it waited on is done ("Ticket ch-72-first" merged)');
+    assert.equal(r.flag, 'owed');
+  });
+  await t.test('held for a ticket that is then superseded: it ended without being done, release it or hold it again', () => {
+    addTicket(P, 'ch-75-old', 'holdends');
+    addTicket(P, 'ch-76-new', 'holdends');
+    addTicket(P, 'ch-77-waits', 'holdends');
+    P.sup(['ticket', 'hold', 'ch-77-waits', '--reason', 'reuses ch-75', '--for', 'ch-75-old']);
+    P.sup(['ticket', 'set', 'ch-75-old', '--json', JSON.stringify({ superseded_by: 'ch-76-new' })]);
+    const m = P.raw('ticket:ch-77-waits');
+    assert.equal(m.move, 'release');
+    assert.equal(m.words, 'What it waited on has ended ("Ticket ch-75-old" superseded): release it, or hold it again');
+    assert.equal(m.flag, 'owed');
+  });
+  await t.test('held for a goal: running all along, a drain and run again ends nothing; held while drained, its run ends it', () => {
+    const X = P.ready('Running goal');
+    const Y = P.ready('Drained goal');
+    addTicket(P, 'ch-78-on-x', 'holdends');
+    addTicket(P, 'ch-79-on-y', 'holdends');
+    P.sup(['ticket', 'hold', 'ch-78-on-x', '--reason', 'waits on the running goal\'s work', '--for', `goal:${X}`]);
+    P.owner(['goal', 'hold', X, 'drain', '--owner', '--reason', 'a pause']);
+    P.owner(['goal', 'hold', X, 'run', '--owner']);
+    const x = P.raw('ticket:ch-78-on-x');
+    assert.equal(x.move, 'held', 'X was running when the hold was set: its run since is not its end');
+    assert.equal(x.flag, null);
+    P.owner(['goal', 'hold', Y, 'drain', '--owner', '--reason', 'a pause']);
+    P.sup(['ticket', 'hold', 'ch-79-on-y', '--reason', 'starts once the drained goal runs', '--for', `goal:${Y}`]);
+    assert.equal(P.raw('ticket:ch-79-on-y').move, 'held');
+    P.owner(['goal', 'hold', Y, 'run', '--owner']);
+    const y = P.raw('ticket:ch-79-on-y');
+    assert.equal(y.move, 'release');
+    assert.equal(y.words, 'Release it: what it waited on is done ("Drained goal" running again)');
+    assert.equal(y.since, P.goal(Y).updates.filter((u) => u.hold).at(-1).at, 'since the goal ran again');
+    assert.equal(y.flag, 'owed');
+  });
+  await t.test('held for a chore: a fresh branch or one an earlier run merged ends nothing; its merge --chore since the hold does', () => {
+    const { g, old } = P.F;
+    // a fresh chore start: its branch at main, no work of its own
+    addTicket(P, 'ch-83-fresh', 'holdends');
+    g(['branch', 'chore-fresh'], old);
+    P.sup(['ticket', 'hold', 'ch-83-fresh', '--reason', 'after the fresh chore', '--for', 'chore:fresh']);
+    assert.equal(P.raw('ticket:ch-83-fresh').move, 'held', 'a branch still at main is not a merge');
+    // a branch left over from an earlier run of the chore, merged then (its act before the hold)
+    addTicket(P, 'ch-84-again', 'holdends');
+    g(['checkout', '-q', '-b', 'chore-again'], old);
+    g(['commit', '-q', '--allow-empty', '-m', 'the first run'], old);
+    g(['checkout', '-q', 'main'], old);
+    g(['merge', '-q', '--ff-only', 'chore-again'], old);
+    g(['push', '-q', 'origin', 'main'], old);
+    mergeChoreAct(P, 'again', g(['rev-parse', 'chore-again'], old));
+    sleep(5);
+    P.sup(['ticket', 'hold', 'ch-84-again', '--reason', 'after the next run of the chore', '--for', 'chore:again']);
+    assert.equal(P.raw('ticket:ch-84-again').move, 'held', 'a merge from before the hold is not this one');
+    // its merge since the hold
+    sleep(5);
+    const at = mergeChoreAct(P, 'again', g(['rev-parse', 'main'], old));
+    const m = P.raw('ticket:ch-84-again');
+    assert.equal(m.move, 'release');
+    assert.equal(m.words, 'Release it: what it waited on is done (chore-again merged)');
+    assert.equal(m.since, at, 'since the merge');
+    assert.equal(m.flag, 'owed');
+  });
+  await t.test('an old hold with no cause: held while it has no date, review-hold once its date has gone by', () => {
+    addTicket(P, 'ch-80-old', 'holdends');
+    const today = new Date().toISOString().slice(0, 10);
+    const yesterday = new Date(Date.parse(`${today}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
+    P.sup(['ticket', 'hold', 'ch-80-old', '--reason', 'an old hold', '--for', 'external:the old way', '--until', today]);
+    rewriteLog(P, `"held_for":["external:the old way"],"held_until":"${today}"`, '"held_for":[],"held_until":null');
+    const m = P.raw('ticket:ch-80-old');
+    assert.equal(m.move, 'held', 'no cause and no date: only a release ends it');
+    rewriteLog(P, '"held_for":[],"held_until":null', `"held_for":[],"held_until":"${yesterday}"`);
+    const r = P.raw('ticket:ch-80-old');
+    assert.equal(r.move, 'review-hold');
+    assert.equal(r.flag, 'owed');
+  });
+  await t.test('held --until a date that has gone by: review-hold, owed at once', () => {
+    addTicket(P, 'ch-74-dated', 'holdends');
+    const today = new Date().toISOString().slice(0, 10);
+    P.sup(['ticket', 'hold', 'ch-74-dated', '--reason', 'the vendor said next week', '--for', 'external:the vendor', '--until', today]);
+    assert.equal(P.raw('ticket:ch-74-dated').move, 'held', 'its date is today: not gone by yet');
+    // the hold line as an older hold left it: its date yesterday (hold refuses a past date)
+    const yesterday = new Date(Date.parse(`${today}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
+    rewriteLog(P, `"held_until":"${today}"`, `"held_until":"${yesterday}"`);
+    const m = P.raw('ticket:ch-74-dated');
+    assert.equal(m.move, 'review-hold');
+    assert.equal(m.holder, 'supervisor');
+    assert.equal(m.words, `Its hold date passed on ${yesterday}: release it or hold it again`);
+    assert.equal(m.since, `${today}T00:00:00.000Z`, 'since the day after its date began');
+    assert.equal(m.flag, 'owed');
+    assert.deepEqual(moveErrors(m), []);
+  });
 });
 
 test('next-moves: every ticket and planner move carries its title', () => {
