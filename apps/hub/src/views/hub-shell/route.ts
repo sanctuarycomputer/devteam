@@ -78,12 +78,15 @@ export function hubChoose(root: string) {
   nav.hubChoosing = true;
   try { select(root); } finally { nav.hubChoosing = false; }
 }
-// the address, marked with its key (the hash's first part, as written): a new entry only for a choice that changes it
+// the address, marked with its key (the hash's first part, as written): a new entry only for a choice that changes it.
+// Written with History's own methods: Next's App Router patches history.pushState and replaceState to copy its
+// router state into every entry (next/dist/client/components/app-router.js), and an entry is the hub's mark alone,
+// as hub.html writes it. The popstate listener below keeps Next's off these entries (Next reloads on one it didn't write).
 export function hubAddr(url: string, mayPush = false) {
   nav.hubTyped = null;
   const state = addrState(url);
-  if (mayPush && nav.hubChoosing && url !== location.hash) { nav.hubChoosing = false; history.pushState(state, '', url); }
-  else history.replaceState(state, '', url);
+  if (mayPush && nav.hubChoosing && url !== location.hash) { nav.hubChoosing = false; History.prototype.pushState.call(history, state, '', url); }
+  else History.prototype.replaceState.call(history, state, '', url);
   nav.hubHashWas = location.hash;
 }
 /* hubHistory end */
@@ -169,6 +172,8 @@ export function installRoute() {
     const was = nav.hubHashWas;
     nav.hubHashWas = location.hash;
     if (!hubMarked(e.state)) { if (location.hash !== was) nav.hubTyped = location.hash; return; }
+    // the hub's own entry: the hub's alone to take (Next's listener would reload the page on it)
+    e.stopImmediatePropagation();
     let k: string;
     try { k = decodeURIComponent(e.state.key); } catch { return; }
     const it = k === 'overview' || k === 'settings' || k === 'terminal' ? null : hubFind(k);
@@ -180,5 +185,5 @@ export function installRoute() {
     if (it && head && (!it.frame || !keptHead(it.head))) _openAt(root, head);
     else if (root !== hs.selected) select(root);
     nav.hubPopAt = location.hash;
-  });
+  }, true);
 }
