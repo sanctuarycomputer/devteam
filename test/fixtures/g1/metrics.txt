@@ -99,6 +99,7 @@ exit 0
       "sev": 3
     }
   ],
+  "unattended": [],
   "acknowledged": []
 }
 --- stderr
