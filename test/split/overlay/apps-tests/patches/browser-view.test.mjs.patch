@@ -1,0 +1,17 @@
+diff --git a/test/browser-view.test.mjs b/test/browser-view.test.mjs
+index 10a82ca875a70ec134e28f4a9b52eda64cb342a1..545c10db5ae4a22d3626525f52bfb7112fec46d6 100644
+--- a/test/browser-view.test.mjs
++++ b/test/browser-view.test.mjs
+@@ -56,7 +56,11 @@ test('V5 the view serves browser.html', opts, async () => {
+     assert.equal(r.status, 200, `${host}: ${r.body.toString().slice(0, 200)}`);
+     assert.ok(r.body.equals(PAGE), 'exactly browser.html');
+     assert.match(r.headers['content-type'], /^text\/html/);
+-    assert.match(r.headers['content-security-policy'] ?? '', /frame-ancestors 'self'/);
++    // apps@1 Serving (kit-984; kit-986): browser.html's policy with script-src 'self' plus the hash of each of
++    // the built page's inline scripts in their order, style-src 'self' alone, then the server's frame-ancestors
++    const hashes = [...PAGE.toString('utf8').matchAll(/<script(?![^>]*\ssrc\s*=)[^>]*>([\s\S]*?)<\/script>/g)].map((m) => `'sha256-${crypto.createHash('sha256').update(m[1], 'utf8').digest('base64')}'`);
++    assert.ok(hashes.length >= 1, 'the built page has inline scripts to hash');
++    assert.equal(r.headers['content-security-policy'], `default-src 'none'; script-src 'self' ${hashes.join(' ')}; style-src 'self'; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'`);
+     assert.equal(r.headers['cache-control'], 'no-store');
+   }
+   assert.equal((await get(view.port, '/', 'evil.example')).status, 403, 'another Host');

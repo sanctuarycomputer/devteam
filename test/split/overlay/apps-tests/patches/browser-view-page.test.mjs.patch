@@ -1,0 +1,146 @@
+diff --git a/test/browser-view-page.test.mjs b/test/browser-view-page.test.mjs
+index 1ce432da73ab7d69fb02d3cb271dbe6ede8057ff..441566716fda086190f6b8b08ada446ffc51ee6d 100644
+--- a/test/browser-view-page.test.mjs
++++ b/test/browser-view-page.test.mjs
+@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
+ import crypto from 'node:crypto';
+ import fs from 'node:fs';
+ import http from 'node:http';
+-import { canDrive } from './lib/chrome.mjs';
++import { canDrive, openChrome } from './lib/chrome.mjs';
+ import { PAGE, FROM_SERVER, SMALL, BIG, sleep, until, startServer, open, shut, canvasState, drawn, text, noHandBack, ready, pt, sent, mouse, keyEvent, clip, ctrlV, go, viewPageFile } from './lib/browser-view-page-fixture.mjs';
+ import { cliRead } from './lib/cli-source.mjs';
+ 
+@@ -56,9 +56,10 @@ test('the address bar shows the url exactly as sent, masked', { skip, timeout: 6
+ 
+ test('the address bar shows only a masked url: the page holds the contract\'s mask', { skip, timeout: 60000 }, async () => {
+   const schema = JSON.parse(cliRead(fs.readFileSync, fs, new URL('./contracts/browser.schema.json', import.meta.url), 'utf8'));
+-  const html = cliRead(fs.readFileSync, fs, PAGE, 'utf8');
+-  const src = /const MASKED = new RegExp\(String\.raw`(.*)`\);\n/.exec(html);
+-  assert.ok(src, 'the page has its MASKED pattern');
++  // apps@1 (kit-1019's port; kit-986): the mask is the built view's own, in its source
++  const view = cliRead(fs.readFileSync, fs, new URL('../apps/dashboard/src/views/browser/view.ts', import.meta.url), 'utf8');
++  const src = /const MASKED = new RegExp\(String\.raw`(.*)`\);\n/.exec(view);
++  assert.ok(src, 'the view has its MASKED pattern');
+   assert.equal(src[1], schema['x-masked-url'], 'the page\'s mask is x-masked-url, exactly');
+   const srv = await startServer();
+   const p = await open(srv);
+@@ -110,33 +111,75 @@ test('the canvas fits the window, up and down', { skip, timeout: 60000 }, async
+ });
+ 
+ test('the page\'s CSP hashes its own script and style, and it loads nothing from elsewhere', { skip, timeout: 60000 }, async () => {
+-  const html = cliRead(fs.readFileSync, fs, PAGE, 'utf8');
+-  const head = /<head>\s*<meta charset="utf-8">\s*<meta http-equiv="Content-Security-Policy" content="([^"]+)">/.exec(html);
+-  assert.ok(head, 'the head opens with the charset, then the CSP');
+-  const one = (tag) => { const all = [...html.matchAll(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, 'g'))]; assert.equal(all.length, 1, `one <${tag}>`); return all[0][1]; };
+-  const sha = (s) => crypto.createHash('sha256').update(s, 'utf8').digest('base64');
+-  assert.equal(head[1], `default-src 'none'; script-src 'sha256-${sha(one('script'))}'; style-src 'sha256-${sha(one('style'))}'; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'`);
+-  const markup = html.replace(/<script>[\s\S]*?<\/script>|<style>[\s\S]*?<\/style>/g, '');
+-  assert.doesNotMatch(markup, /\s(?:src|href)\s*=/i, 'no src or href attribute');
+-  assert.doesNotMatch(markup, /<script[^>]*\ssrc|<link\b|<iframe|<object|<embed|<img/i);
+-  assert.doesNotMatch(markup, /\sstyle\s*=|\son[a-z]+\s*=/i, 'no style attribute and no inline handler (the CSP would refuse them)');
++  // apps@1 (kit-984; kit-986): the page is the build's browser/index.html under the route's header policy,
++  // browser.html's with script-src 'self' plus the hash of each inline script in their order and style-src
++  // 'self' alone. It has no inline style, no style attribute, no inline handler and no frame, and loads only
++  // its own build's files
+   const srv = await startServer();
+-  let hits = 0;
++  // a failed assertion here closes the server too, so the file still ends (CI's watchdog would take every case)
++  try {
++    const got = await fetch(`${srv.origin}/`);
++    const html = await got.text();
++    assert.equal(html, cliRead(fs.readFileSync, fs, PAGE, 'utf8'), 'the page is the build');
++    const sha = (s) => crypto.createHash('sha256').update(s, 'utf8').digest('base64');
++    const inline = [...html.matchAll(/<script(?![^>]*\ssrc\s*=)[^>]*>([\s\S]*?)<\/script>/g)].map((m) => `'sha256-${sha(m[1])}'`);
++    assert.ok(inline.length >= 1, 'the page has inline scripts to hash');
++    assert.equal(got.headers.get('content-security-policy'), `default-src 'none'; script-src 'self' ${inline.join(' ')}; style-src 'self'; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'`, "the header hashes exactly the page's inline scripts");
++    const markup = html.replace(/(<script\b[^>]*>)[\s\S]*?<\/script>/g, '$1');
++    assert.doesNotMatch(markup, /<style\b/i, 'no inline style');
++    assert.doesNotMatch(markup, /\sstyle\s*=|\son[a-z]+\s*=/i, 'no style attribute and no inline handler (the CSP would refuse them)');
++    assert.doesNotMatch(markup, /<iframe|<frame\b|<frameset|<object|<embed|<img/i, 'no frame, object or image');
++    const urls = [...markup.matchAll(/\s(?:src|href)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/gi)].map((m) => m[1] ?? m[2] ?? m[3]);
++    assert.ok(urls.length >= 1 && urls.every((u) => /^\/_next\/[^/]/.test(u)), `only its own build's files: ${urls.filter((u) => !/^\/_next\/[^/]/.test(u))}`);
++  } catch (e) { await srv.close(); throw e; }
++  // the live half: a page that breaks the policy as it loads fails open(), so both servers close then too
++  let hits = 0, p;
+   const other = http.createServer((q, s) => { hits++; s.end(''); });
+-  await new Promise((r) => other.listen(0, '127.0.0.1', r));
+-  const p = await open(srv);
+   try {
++    await new Promise((r) => other.listen(0, '127.0.0.1', r));
++    p = await open(srv);
+     await srv.waitConn(1);
+     const at = `http://127.0.0.1:${other.address().port}`;
+-    await p.ev(`(() => { window.__csp = []; document.addEventListener('securitypolicyviolation', (e) => __csp.push(e.effectiveDirective));
+-      const s = document.createElement('script'); s.src = '${at}/x.js'; document.head.append(s);
++    // the harness's listener sees them (kit-986): this case breaks the policy on purpose, so it takes them
++    await p.ev(`(() => { const s = document.createElement('script'); s.src = '${at}/x.js'; document.head.append(s);
+       const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = '${at}/x.css'; document.head.append(l); })()`);
+-    const v = await until(async () => { const v = await p.ev('window.__csp'); return v.length >= 2 && v; }, 'two CSP violations');
+-    assert.ok(v.some((d) => d.startsWith('script-src')) && v.some((d) => d.startsWith('style-src')), JSON.stringify(v));
++    const seen = [];
++    await until(() => { seen.push(...p.violations()); return seen.length >= 2; }, 'two CSP violations');
++    assert.deepEqual(seen.map((v) => [v.directive, v.blocked]).sort(), [['script-src-elem', `${at}/x.js`], ['style-src-elem', `${at}/x.css`]], JSON.stringify(seen));
+     await sleep(300);
+     assert.equal(hits, 0, 'the other origin got no request');
+     assert.equal(srv.others, 0, 'and the page asked its own server for nothing but itself');
+-  } finally { await shut(p); other.close(); await srv.close(); }
++  } finally { if (p) await shut(p); other.close(); await srv.close(); }
++});
++
++// kit-986 (APPS-S4): the harness fails a test on any CSP violation, naming the directive and what it blocked.
++// The build's page with one more inline script, which the route's hashes don't name: every call on the page
++// fails from then on, and when no call follows, the browser's close() fails.
++test('a CSP violation fails the test: an inline script missing from the page\'s hashes', { skip, timeout: 60000 }, async () => {
++  const page = () => Buffer.from(cliRead(fs.readFileSync, fs, PAGE, 'utf8').replace('</body>', '<script>window.notHashed = 1;</script></body>'));
++  const srv = await startServer({ page });
++  const own = await openChrome();
++  let closed = false;
++  const said = /CSP violation: script-src-elem blocked inline at http:\/\/127\.0\.0\.1:\d+\/:\d+/;
++  try {
++    const p = await own.newPage();
++    await p.send('Page.navigate', { url: `${srv.origin}/` });
++    // only the violation's failure ends the wait: a call that crosses the navigation's commit fails otherwise
++    const e = await until(async () => { try { await p.ev('document.readyState'); return false; } catch (x) { return said.test(x.message) ? x : false; } }, 'a call on the page that fails', 10000);
++    assert.match(e.message, new RegExp(`^Runtime\\.evaluate: ${said.source}`));
++    assert.match((await p.ev('1').then(() => null, (x) => x))?.message ?? '', said, 'and the next one: a failure swallowed loses nothing');
++    assert.deepEqual(p.violations().map((v) => [v.directive, v.blocked]), [['script-src-elem', 'inline']], 'taken, once');
++    assert.equal(await p.ev('window.notHashed'), undefined, 'the script never ran, and once taken the page answers again');
++    p.close();
++    const q = await own.newPage();
++    await q.send('Page.navigate', { url: `${srv.origin}/` });
++    await srv.waitConn(2);
++    await sleep(300);
++    q.close();
++    const c = await own.close().then(() => null, (x) => x);
++    closed = true;
++    assert.match(c?.message ?? '', new RegExp(`^${said.source}`), "with no call after it, the browser's close() fails");
++  } finally { if (!closed) await own.close().catch(() => {}); await srv.close(); }
+ });
+ 
+ test('the page reconnects by itself after the server closes the socket', { skip, timeout: 60000 }, async () => {
+@@ -396,8 +439,11 @@ test('nothing typed is kept in page memory after it is sent', { skip, timeout: 1
+ });
+ 
+ test('nothing on the page is reachable from another origin', { skip, timeout: 60000 }, async () => {
+-  const html = cliRead(fs.readFileSync, fs, PAGE, 'utf8');
+-  for (const word of ['postMessage', 'localStorage', 'sessionStorage', 'indexedDB', 'document.cookie', 'window.name', 'document.domain', 'history.', 'location.hash']) assert.ok(!html.includes(word), `the page never uses ${word}`);
++  // apps@1 (kit-1019's port; kit-986): the page's own code is the built page and the view's source
++  const dir = new URL('../apps/dashboard/src/views/browser/', import.meta.url);
++  const code = [cliRead(fs.readFileSync, fs, PAGE, 'utf8'), ...fs.readdirSync(dir).filter((f) => /\.tsx?$/.test(f)).map((f) => cliRead(fs.readFileSync, fs, new URL(f, dir), 'utf8'))];
++  assert.ok(code.length >= 4, 'the page and the view\'s code (index.tsx, start.tsx, view.ts)');
++  for (const word of ['postMessage', 'localStorage', 'sessionStorage', 'indexedDB', 'document.cookie', 'window.name', 'document.domain', 'history.', 'location.hash']) assert.ok(code.every((c) => !c.includes(word)), `the page never uses ${word}`);
+   const srv = await startServer();
+   const framer = http.createServer((q, s) => { s.writeHead(200, { 'content-type': 'text/html' }); s.end(`<!doctype html><iframe src="${srv.origin}/"></iframe>`); });
+   await new Promise((r) => framer.listen(0, '127.0.0.1', r));
+@@ -408,7 +454,9 @@ test('nothing on the page is reachable from another origin', { skip, timeout: 60
+     p = await open(srv);
+     await srv.waitConn(1);
+     const added = (await p.ev('Object.keys(window)')).filter((k) => !blank.includes(k));
+-    assert.deepEqual(added, [], 'the page adds no global');
++    // Next's fixed runtime globals (ruling on kit-1019 design-change-1), and nothing else
++    const NEXT = ['TURBOPACK', '__next_f', 'NEXT_DEPLOYMENT_ID', 'next', '__webpack_hash__'];
++    assert.deepEqual(added.filter((k) => !NEXT.includes(k)), [], 'the page adds no global but Next\'s runtime ones');
+     const win = (await p.send('Runtime.evaluate', { expression: 'window', objectGroup: 'w' })).result.objectId;
+     const types = (await p.send('DOMDebugger.getEventListeners', { objectId: win })).listeners.map((l) => l.type);
+     assert.ok(!types.includes('message'), `no message listener (${types})`);

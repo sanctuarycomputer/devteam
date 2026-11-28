@@ -1,0 +1,6 @@
+{
+  "file": "test/lib/chrome.mjs",
+  "ticket": "kit-986-csp-tests",
+  "sha256": "db58acf4f90fa4f7e2486f36627591ae4f13ae69faab204da4328d10d9768e98",
+  "source_sha256": "fa37310484dd8d4072f370279de71eb407e4833b9a239676b9de82343ede5198"
+}
