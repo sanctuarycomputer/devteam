@@ -89,15 +89,18 @@ test('bridgeMessage: ignores a review with no frame; counts and redraws on a for
   bridgeMessage(ev({ source: {} }));
   assert.deepEqual([bridged.length, redraws.length, reviewState.RV.dropped], [0, 0, undefined], 'no review or no frame: nothing called, nothing counted');
 
-  // a frame mounted: another window, the dashboard's own origin and another origin are dropped and counted
+  // a frame mounted: another window, the dashboard's own origin, another origin, and an empty or missing origin
+  // are dropped and counted
   reviewState.RV = { frame: { contentWindow: frameWin }, dropped: 0 };
   bridgeMessage(ev({ source: {} }));
   bridgeMessage(ev({ origin: B }));
   bridgeMessage(ev({ origin: 'https://example.com' }));
-  assert.equal(reviewState.RV.dropped, 3, 'each foreign event is counted');
+  bridgeMessage(ev({ origin: '' }));
+  bridgeMessage(ev({ origin: undefined }));
+  assert.equal(reviewState.RV.dropped, 5, 'each foreign event is counted');
   assert.equal(bridged.length, 0, 'none of them reaches onBridge');
   assert.deepEqual(redraws, [1], 'the preview is redrawn on the 1st drop only');
-  for (let i = 0; i < 38; i++) bridgeMessage(ev({ source: {} }));
+  for (let i = 0; i < 36; i++) bridgeMessage(ev({ source: {} }));
   assert.equal(reviewState.RV.dropped, 41);
   assert.deepEqual(redraws, [1, 20, 40], 'and on every 20th drop, not otherwise');
   assert.equal(bridged.length, 0);
