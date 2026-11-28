@@ -21282,6 +21282,9 @@ function collectMetrics(since, reviewsSince = 0) {
   const ackOf = (x) => acks.filter((a) => a.subject === `${x.kind} ${x.subject}`).sort(byTime).pop();
   const sorted = f.sort((a, b) => order[a.severity] - order[b.severity]);
   m.findings = sorted.filter((x) => !ackOf(x));
+  // a windowed run (metrics --since, retro) drops older findings: it counts but keeps no record, so
+  // their first sighting isn't forgotten and their clock doesn't restart
+  m.unattended = unattendedHigh(m.findings, now, { record: !since });
   m.acknowledged = sorted.filter(ackOf).map((x) => { const a = ackOf(x); return { ...x, ack: { by: a.created_by, at: a.created_at, reason: a.detail, until: lasting(a) ? null : new Date(Date.parse(a.created_at) + ackWindow).toISOString() } }; });
   return m;
 }
@@ -21305,6 +21308,9 @@ function cmdAck() {
   const refs = logObjects('observation').filter((o) => o.source_key === key && o.detector === 'metrics' && o.created_by === 'supervisor').sort(byTime).slice(-SET_ASIDE_REFS).map((o) => o.id);
   const fields = { type: 'observation', source: 'ack', kind: 'finding-ack', subject: `${kind} ${subject}`, detail: reason, source_ref: key };
   const line = appendLog({ ...fields, refs: fitRefs(fields, refs) }, by);
+  // off the unattended list now, so hello, the hub and box-status drop it without waiting for the
+  // next metrics run (which leaves an acked finding out anyway)
+  try { const u = readJson(UNATTENDED()); if (isObj(u) && Array.isArray(u.items)) writeJson(UNATTENDED(), { ...u, items: u.items.filter((x) => !(isObj(x) && x.kind === kind && x.subject === subject)) }); } catch {}
   // a merge commit's ack never lapses (collectMetrics' lasting(), kit-348)
   const forGood = kind === 'merged-without-merge' && /^[^\s:]+:[0-9a-f]{12}$/.test(subject);
   out(`${line.id}: ${kind} ${subject} set aside ${forGood ? 'for good: a merge commit can\'t change' : `for ${loadSettings().finding_ack_hours}h`}`);
@@ -21368,6 +21374,9 @@ function efficiencyOf(m) {
 }
 
 function cmdMetrics() {
+  // Tests only: wait's fail-closed checks (DEVTEAM_TEST_WAIT_FAIL_METRICS) have this child crash or hang
+  if (process.env.DEVTEAM_TEST_METRICS_FAIL === 'hang') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 600000);
+  if (process.env.DEVTEAM_TEST_METRICS_FAIL) die(`metrics failed (test, pid ${process.pid}) `); // text that changes each run, ending in a space
   const since = flagStr('since') ? Date.parse(flagStr('since')) : 0;
   if (Number.isNaN(since)) die('--since must be a date');
   const m = collectMetrics(since, since);
@@ -21433,6 +21442,18 @@ function waitCause(ref) {
   if (kind === 'external') return rest.length <= 200 && /^\S(?:.*\S)?$/.test(rest) && !/[\r\n\v\f\u0085\u2028\u2029]/.test(rest) ? cause('external', rest) : null;
   if (kind === null && TICKET.test(ref)) return cause('ticket', ref, `ticket:${ref}`);
   return null;
+}
+// One held_for cause in plain words, for a move's wait (next-move@1): what the hold waits on.
+function holdCauseWords(ref) {
+  const w = waitCause(ref);
+  if (!w) return String(ref);
+  if (w.form === 'q') { const q = logGet(w.id); return q?.question ? `your answer to "${String(q.question).slice(0, 120)}"` : `your answer to ${w.id}`; }
+  if (w.form === 'ticket') return `${w.id} merges`;
+  if (w.form === 'goal') return `goal "${logGet(w.id)?.title ?? w.id}"`;
+  if (w.form === 'chore') return `chore ${w.id} merges`;
+  if (w.form === 'pr') return `PR ${w.id}`;
+  if (w.form === 'run') return `run ${w.id}`;
+  return w.id;
 }
 /* next-moves start */
 // The next-move table. For every running goal, active ticket, planner and open chore branch, exactly
@@ -21528,8 +21549,8 @@ function newMove(subject, title, o) {
   return Object.assign(m, o.neverOwed && f.flag === 'owed' ? { flag: null, rung: 0 } : f);
 }
 // A copied move: its source's holder, since, flag and rung (and what it is, unless the row says),
-// on this subject, via the source.
-const copiedMove = (subject, title, src, o = {}) => ({ ...src, ...o, subject, title, via: src.subject });
+// on this subject, via the source. Never its wait: that is the held ticket's own (next-move@1).
+const copiedMove = (subject, title, src, o = {}) => { const { wait, ...rest } = src; return { ...rest, ...o, subject, title, via: src.subject }; };
 const qRef = (q) => ({ kind: 'q', id: q.id });
 const askedMove = (q) => ({ move: 'answer-question', words: `Answer: ${q.question}`, holder: 'owner', ref: qRef(q), since: q.asked_at, covered_by: [{ kind: 'owner-question-waiting', subject: q.id }] });
 const PLANNING_COVER = [{ kind: 'idle-planning', subject: '*' }, { kind: 'memory-full', subject: '*' }];
@@ -21729,7 +21750,14 @@ function ticketMoves() {
       }
       const q = openQs.find((x) => x.ticket === id || (x.blocks ?? []).includes(id));
       if (q) return at({ ...askedMove(q), covered_by: [{ kind: 'blocked-on-owner', subject: id }, { kind: 'owner-question-waiting', subject: q.id }] }); // T3
-      if (isHeld(t)) return at({ move: 'held', words: `Held: ${t.held.trim()}. Release it, or ask`, holder: 'supervisor', since: (t.updates ?? []).filter((u) => typeof u.held === 'string' && u.held.trim()).at(-1)?.at ?? t.created_at, command: `ticket release ${id} --reason "…"`, neverOwed: true }); // T2b
+      if (isHeld(t)) {
+        const m = at({ move: 'held', words: `Held: ${t.held.trim()}. Release it, or ask`, holder: 'supervisor', since: (t.updates ?? []).filter((u) => typeof u.held === 'string' && u.held.trim()).at(-1)?.at ?? t.created_at, command: `ticket release ${id} --reason "…"`, neverOwed: true }); // T2b
+        // what the hold waits on and its review date (next-move@1's wait), so moveFindings can tell a
+        // hold past its --until from one still in its window
+        const causes = (Array.isArray(t.held_for) ? t.held_for : []).filter((c) => typeof c === 'string' && c.trim());
+        if (causes.length) m.wait = { causes: causes.map((ref) => ({ ref, words: holdCauseWords(ref), state: waitCause(ref)?.state ?? 'open' })), until: typeof t.held_until === 'string' && t.held_until ? t.held_until : null };
+        return m;
+      }
       const w = workerState(id);
       const phase = w?.phase ?? null;
       const run = w?.phase_started_at ?? null;
@@ -21871,7 +21899,9 @@ function cmdMoves() {
 // it). A move is covered when a finding its covered_by names was raised in the run, on that subject
 // or, for "*", on any; a covered move raises nothing, though it keeps its flag. By the move's flag:
 // none (no row knew the state: G20, T14) raises no-next-move, owed (rung 1) move-owed, stalled
-// (rung 2) move-stalled; each is high, so wait wakes on it. The finding's subject is
+// (rung 2) move-stalled. Each is high, so wait wakes on it, but for a stalled held ticket (T2b) still
+// inside its --until date (wait.until): a known wait, medium; with no date, or past it, high, since
+// nothing else says a hold has lapsed or its causes are done. The finding's subject is
 // "<subject> <move>:<ref id>", so an ack sets aside one move with one ref, and a new move or a new
 // ref is a new finding.
 function moveFindings(moves, raised, now = Date.now()) {
@@ -21889,7 +21919,13 @@ function moveFindings(moves, raised, now = Date.now()) {
     const detail = `${m.title}: ${m.words} (${m.holder === 'nobody' ? 'no row knows this state' : `held by the ${m.holder}`}, ${ageOf(m.since)})`;
     const suggestion = kind === 'no-next-move' ? 'work out the move by hand, and file the missing row as a kit lesson (knowledge add --kit)'
       : kind === 'move-owed' ? (m.command ?? 'do it, or record why it waits (ack with a reason)') : stalledHint(m);
-    out.push({ severity: 'high', kind, subject, detail, suggestion });
+    // a hold with a review date (ticket hold --until, T2b's wait.until) is a known wait: stalled, it is
+    // medium until that day is over (UTC), so high stays for what wants acting on now (the unattended
+    // check reads high findings only). A hold with no date, or past it, stays high: nothing else
+    // wakes the supervisor for a hold whose causes are done or whose date has lapsed
+    const until = m.wait?.until;
+    const inWindow = typeof until === 'string' && until >= new Date(now).toISOString().slice(0, 10);
+    out.push({ severity: kind === 'move-stalled' && m.move === 'held' && inWindow ? 'medium' : 'high', kind, subject, detail, suggestion });
   }
   return out;
 }
@@ -21961,6 +21997,37 @@ const movesReadAt = () => memo('next-moves-at', () => {
   return newest > now ? newest : now;
 });
 const MOVES_CACHE = () => path.join(runPath('cache'), 'next-moves.json');
+// High findings nobody has acted on: open (not acked) for longer than two ticks (tick_minutes, so 30
+// minutes by default). A finding that is acted on goes away (a nudged planner shows life, a fixed
+// gate passes); one that can wait is acked with its reason. Either way it leaves this list. When each
+// open high finding was first seen is kept in run/cache/high-seen.json, and the ones past the two
+// ticks in run/cache/unattended.json for hello, whose pulse puts them on the hub's Overview and in
+// box-status's attention lines: what the supervisor's own loop let pass, seen by the owner and the
+// box's operator. The box's operator only reads, so its metrics count the same way but write nothing,
+// and so does a windowed run (record false), whose findings are only the window's.
+const HIGH_SEEN = () => path.join(runPath('cache'), 'high-seen.json');
+const UNATTENDED = () => path.join(runPath('cache'), 'unattended.json');
+function unattendedHigh(findings, now = Date.now(), { record = true } = {}) {
+  let seen = {};
+  try { const j = readJson(HIGH_SEEN()); if (isObj(j)) seen = j; } catch {}
+  const next = {};
+  for (const x of findings) if (x.severity === 'high') { const k = `${x.kind} ${x.subject}`; next[k] = Number.isFinite(seen[k]) ? seen[k] : now; }
+  const after = 2 * (Number(loadSettings().tick_minutes) > 0 ? Number(loadSettings().tick_minutes) : 15) * 60000;
+  const items = findings.filter((x) => x.severity === 'high' && now - next[`${x.kind} ${x.subject}`] > after).map((x) => ({ kind: x.kind, subject: x.subject, detail: x.detail, since: new Date(next[`${x.kind} ${x.subject}`]).toISOString() }));
+  if (record && process.env.DEVTEAM_ROLE !== 'operator') {
+    try { writeJson(HIGH_SEEN(), next); writeJson(UNATTENDED(), { at: new Date(now).toISOString(), after_minutes: after / 60000, items }); } catch {}
+  }
+  return items;
+}
+// The unattended list as the last metrics run left it, for hello: none when that run is over two
+// hours old (no supervisor has run metrics since, which box-status says on its own lines).
+function readUnattended(now = Date.now()) {
+  try {
+    const j = readJson(UNATTENDED());
+    if (!isObj(j) || !Array.isArray(j.items) || !(now - Date.parse(j.at) < 2 * 3600000)) return [];
+    return j.items.filter((x) => isObj(x) && typeof x.kind === 'string' && typeof x.subject === 'string');
+  } catch { return []; }
+}
 function writeMovesCache(moves = nextMoves(), at = movesReadAt()) {
   // the box's operator only reads (its metrics included), so it leaves the cache as it was
   if (process.env.DEVTEAM_ROLE === 'operator') return;
@@ -23596,8 +23663,9 @@ function supervisorRecovery(id) {
 // A supervisor in tmux stopped at a limit, on its exact conversation: claude --resume <id> from
 // resume_command, in place of the pane's process, after the same refusals as a worker. Claude Code
 // only; without an id, or for anything else, it isn't guessed at, and the finding says how to resume
-// by hand. The same record and caps as restartPane, under the name "supervisor". A parked or drained
-// fleet's supervisor stays stopped, as recover leaves it.
+// by hand. The same record and caps as restartPane, under the name "supervisor". Whatever the fleet's
+// hold, as recover brings it back: a parked or drained fleet's supervisor still keeps the Inbox and
+// answers threads, and under a move its own prompt has it carry the move on and start nothing.
 const SUPERVISOR_RESTART_PROMPT = 'You were restarted after a usage limit, on this same conversation. Carry on from where you were.';
 // What to restart, null if it isn't due, or { refused } if the process can't be read. A banner in the
 // recorded pane says nothing about whose conversation it is, so the id comes from a transcript that
@@ -23625,7 +23693,6 @@ function supervisorToRestart(until) {
   return { target, id, cmd: startedSkippingPermissions(agent.args) ? cmd : withoutSkipPermissions(cmd) };
 }
 function restartSupervisor(budget) {
-  if (draining() || fleetMode()) return null;
   // a test's smaller budget (DEVTEAM_TEST only): a whole number of ms, 0 only looks
   const cap = process.env.DEVTEAM_TEST ? process.env.DEVTEAM_RESTART_BUDGET_MS : undefined;
   if (/^\d+$/.test(cap ?? '')) budget = Math.min(budget, Number(cap));
@@ -28096,6 +28163,11 @@ function supervisorIdleMinutes(root) {
   const age = Date.now() - seen;
   return seen > 0 && age >= SUPERVISOR_IDLE_MS ? Math.floor(age / 60000) : null;
 }
+// box-status's attention lines for one project's high findings its supervisor has left alone past
+// two ticks (hello's unattended, metrics' list): kind and subject, for the operator, five at most.
+function unattendedStatusLines(n, hello) {
+  return (Array.isArray(hello?.unattended) ? hello.unattended : []).slice(0, 5).map((u) => `attention: ${n} unattended high finding: ${u.kind} ${u.subject} since ${u.since}`);
+}
 async function machineStatus() {
   const lastText = readText(statusLastFile()) ?? '';
   const last = { at: Number(/^at (\d+)$/m.exec(lastText)?.[1] ?? NaN), disk: /^disk (\d+)$/m.test(lastText) ? Number(/^disk (\d+)$/m.exec(lastText)[1]) : undefined };
@@ -28165,6 +28237,7 @@ async function machineStatus() {
     // the box's own alert has the hub line; only the project's part is this project's attention
     const ownAlert = alertLessBox(hello.alert, hello.box_alert);
     if (ownAlert) flagged.push(`attention: ${n}: ${ownAlert}`);
+    flagged.push(...unattendedStatusLines(n, hello));
     const state = p ? paneState(p) : null;
     // up, idle at its prompt, its fleet running or draining (a drain still merges what is in flight),
     // and no sign of its loop for 45 minutes: it ended its turn and stopped ticking (a resume that
@@ -28259,6 +28332,52 @@ function accountsState() {
     const age = Date.now() - Date.parse(s.at);
     return age >= 0 && age < ACCOUNTS_FRESH_MS ? { ...s, active_no_room: s.active_no_room === true, needs_login: Array.isArray(s.needs_login) ? s.needs_login.map(String) : [], restart_gave_up: Array.isArray(s.restart_gave_up) ? s.restart_gave_up.map(String) : [], slot_held: Number.isInteger(s.slot_held) && s.slot_held > 0 ? s.slot_held : 0, slot_held_since: Number.isFinite(Date.parse(s.slot_held_since)) ? s.slot_held_since : null } : null;
   } catch { return null; }
+}
+// The supervisor watchdog. wait is the one loop that acts on findings, and nothing else watched it:
+// a supervisor alive but out of its loop (its turn ended at its prompt, a shell, a dialog) froze the
+// fleet while every finding was still worked out and nobody read it. So the minute tick looks: when
+// its last check (supervisorCheckedAt: a wait, or a tick's host check) is older than two
+// tick_minutes and the goals' moves the last metrics run cached (MOVES_CACHE, flags worked out again
+// by age, as moveFlag does, since a quiet supervisor runs no metrics) hold one owed or stalled, it
+// types one line into the supervisor's pane, at most once a tick_minutes, and only when the pane is
+// idle at an empty input box: never into a running turn, a half-typed line or a dialog. Each such
+// look counts, typed or not (a shell or a dialog can't take the line); at SUPERVISOR_QUIET_LOOKS
+// hello's alert names it for the hub. A newer check starts it over; no owed move ends it.
+// { since: the check it is quiet from, min, owed: words, looks, nudged, at: the last look } or null.
+const SUPERVISOR_QUIET_LOOKS = 3;
+function quietSupervisor(before, now = Date.now()) {
+  const tickMs = (Number(loadSettings().tick_minutes) > 0 ? Number(loadSettings().tick_minutes) : 15) * 60000;
+  const at = supervisorCheckedAt();
+  // another machine supervises this repo, or this one never checked: not a loop that stopped
+  if (!at || hostState().refused === true || now - Date.parse(at) < 2 * tickMs) return null;
+  let cache = null;
+  try { cache = readJson(MOVES_CACHE()); } catch {}
+  const owed = (Array.isArray(cache?.moves) ? cache.moves : []).filter((m) => isObj(m) && typeof m.since === 'string' && ['owed', 'stalled'].includes(moveFlag(m).flag));
+  if (!owed.length) return null;
+  const min = Math.floor((now - Date.parse(at)) / 60000);
+  const prev = before?.supervisor_quiet?.since === at ? before.supervisor_quiet : null;
+  const last = Date.parse(prev?.at) || 0;
+  if (prev && last <= now && now - last < tickMs) return { ...prev, min };
+  const words = `${owed[0].subject} ${owed[0].move}${owed.length > 1 ? ` (and ${owed.length - 1} more)` : ''}`;
+  const busy = (screen) => screen.filter((l) => l.trim()).slice(-15).some((l) => PANE_WORKING.test(l));
+  const { target } = resolvePane(supervisorTarget());
+  let typed = false;
+  if (target) {
+    const screen = paneScreen(target);
+    // its turn is running, or someone is typing a line: it is not out of its loop, so no look counts
+    if (busy(screen) || (paneDraftIn(screen) ?? '') !== '') return prev ? { ...prev, min } : null;
+    const key = paneKey(target);
+    const line = `From the kit: you haven't run wait for ${min} min and ${words} is owed. Run your tick (supervisor.md §3), then keep the loop.`;
+    if (paneReadyIn(screen) && !(key && heldPending(key))) {
+      const held = typeLock.run(target, (outer) => {
+        if (outer && ownerLineOpen(target)) return false;
+        const again = paneScreen(target);
+        return paneReadyIn(again) && paneDraftIn(again) === '' && !busy(again) && typeNow(target, line);
+      });
+      typed = !held.busy && held.value === true;
+    }
+  }
+  return { since: at, min, owed: words, looks: (prev?.looks ?? 0) + 1, nudged: (prev?.nudged ?? 0) + (typed ? 1 : 0), at: new Date(now).toISOString() };
 }
 // Not supervisorOnly: that records this process's pane as the supervisor's, and this runs under the dashboard.
 function cmdAccountsTick() {
@@ -28397,6 +28516,12 @@ function cmdAccountsTick() {
   // an idle responder with turns queued for it is told so, once a minute (kit-104); a failure here
   // never stops the tick's own record
   try { nudgeResponder(); } catch (e) { warn(`responder nudge: ${e?.message ?? e}`); }
+  // a supervisor out of its wait loop with work owed: not one at a limit or restarted just now,
+  // which has its own report; a failure here never stops the tick's own record
+  state.supervisor_quiet = null;
+  if (!state.supervisor_limit && !supervisorRestarted) {
+    try { state.supervisor_quiet = quietSupervisor(before); } catch (e) { warn(`supervisor watchdog: ${e?.message ?? e}`); }
+  }
   fs.mkdirSync(runDir, { recursive: true });
   const tmp = `${ACCOUNTS_FILE}.${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(state));
@@ -38213,6 +38338,10 @@ async function cmdSensor() {
 // has woken on it in standing_high_hours: act on it, or ack it (supervisor.md §3).
 // Harness-agnostic: a blocking command, run in the
 // background where the harness can be woken by a finished command.
+// How long wait lets one kit child (messages, metrics) run before it is killed, so a hung child
+// can't hold the supervisor's loop: far above the slowest healthy run seen (metrics --json on a
+// 20 MB log, warm, about 20 s), as a killed run also loses the git answers it would have cached.
+const WAIT_CHILD_TIMEOUT_MS = 10 * 60000;
 function cmdWait() {
   supervisorOnly('wait');
   const minutes = Number(flagStr('minutes') ?? loadSettings().tick_minutes ?? 15);
@@ -38223,18 +38352,48 @@ function cmdWait() {
   const trace = process.env.DEVTEAM_TEST_WAIT_TRACE || null;
   const cycleMs = Number(process.env.DEVTEAM_TEST_WAIT_CYCLE_MS) > 0 ? Number(process.env.DEVTEAM_TEST_WAIT_CYCLE_MS) : null;
   let failMessages = Number(process.env.DEVTEAM_TEST_WAIT_FAIL_MESSAGES) || 0;
+  // Tests only: "n" or "n:hang" has the nth metrics child (0 is the startup one) exit 1 or hang, "n+"
+  // that one and every one after; and a shorter child timeout so a hang ends quickly.
+  const [failAt, failHow] = (process.env.DEVTEAM_TEST_WAIT_FAIL_METRICS ?? '').split(':');
+  const failsNow = (i) => failAt !== '' && (failAt.endsWith('+') ? i >= Number(failAt.slice(0, -1)) : i === Number(failAt));
+  let metricsRuns = 0;
+  const childMs = Number(process.env.DEVTEAM_TEST_WAIT_CHILD_TIMEOUT_MS) > 0 ? Number(process.env.DEVTEAM_TEST_WAIT_CHILD_TIMEOUT_MS) : WAIT_CHILD_TIMEOUT_MS;
   const started = []; // the kit children started since the last trace line (cycle 0's include the startup poll)
+  // A child that hangs is killed at childMs, so the loop always comes back; why the last child
+  // failed is kept for the report (a failed metrics run wakes the supervisor, it never reads as quiet),
+  // with its kind (timeout, exit n, spawn error, not JSON), which doesn't change with the error's text.
+  let subFailed = null;
+  let subFailKind = null;
   const sub = (args) => {
     if (trace) started.push(args);
-    const r = spawnSync(process.execPath, [self, ...args], { cwd: mainRoot, env: process.env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    const env = args[0] === 'metrics' && failsNow(metricsRuns++) ? { ...process.env, DEVTEAM_TEST_METRICS_FAIL: failHow || 'exit' } : process.env;
+    const r = spawnSync(process.execPath, [self, ...args], { cwd: mainRoot, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: childMs, killSignal: 'SIGKILL' });
     if (args[0] === 'messages' && failMessages > 0) { failMessages--; return null; }
-    try { return r.status === 0 ? JSON.parse(r.stdout) : null; } catch { return null; }
+    const errLine = (r.stderr || '').trim().split('\n').pop().replace(/\s+/g, ' ').slice(0, 200).trim();
+    subFailKind = r.error?.code === 'ETIMEDOUT' ? 'timeout' : r.error ? `spawn ${r.error.code ?? 'error'}` : r.status !== 0 ? `exit ${r.status ?? r.signal}` : null;
+    subFailed = subFailKind === 'timeout' ? `timed out after ${Math.round(childMs / 1000)}s`
+      : r.error ? r.error.code ?? r.error.message
+      : subFailKind ? `${subFailKind}${errLine ? `: ${errLine}` : ''}`
+      : null;
+    if (subFailed) return null;
+    try { return JSON.parse(r.stdout); } catch { subFailKind = 'not JSON'; subFailed = 'its output was not JSON'; return null; }
   };
   // What arrived since the last wait woke the supervisor counts as new, though it is already in the
   // first snapshot: a worker's message that lands during the tick (or while metrics runs, which on a
   // long log takes a while) would otherwise wait out the whole next tick. A message the supervisor
   // leaves open wakes it once, not every time.
   const sinceFile = path.join(runDir, 'wait-since');
+  // A failed metrics run wakes the supervisor at most once a tick for each kind of failure: the kind
+  // last reported and when are kept here, and the same kind again within the tick (a repeat, or a
+  // run that flips between working and failing) waits it out and is said when it is due. It can't
+  // be acked, so waking on it every call would spin.
+  const metricsFailFile = path.join(runDir, 'wait-metrics-failed');
+  // within a tick of this wait's start: one that held at the start holds to the end of the wait
+  const quietSince = Date.now() - minutes * 60000;
+  let metricsReported = null;
+  try { const j = JSON.parse(readText(metricsFailFile) ?? 'null'); if (j && typeof j.kind === 'string' && Number(j.at) > 0) metricsReported = j; } catch {}
+  let quietFails = 0; // failures this wait that didn't wake, and whether the last run failed
+  let lastFail = null;
   const since = Number(readText(sinceFile)) || null;
   // Sensors are polled on every cycle when one is due (checked here, before spawning anything); a
   // new outage or a severity-4 event wakes the supervisor once. A poll that fails says so once.
@@ -38290,7 +38449,11 @@ function cmdWait() {
       last = got ? { key, owner, msgs } : null;
       now = { owner, msgs };
     }
-    now.high = (sub(['metrics', '--json'])?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
+    // a metrics run that failed is not "no high findings": it is reported, at startup or mid-wait
+    const m = sub(['metrics', '--json']);
+    now.metricsFailed = m ? null : subFailed ?? 'no result';
+    now.metricsFailKind = m ? null : subFailKind ?? 'no result';
+    now.high = (m?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
     if (trace) {
       const r = readLog.reads ?? 0;
       try { fs.appendFileSync(trace, `${JSON.stringify({ cycle: cycle++, at, children: started.splice(0), log_reads: r - reads, key, rss: process.memoryUsage().rss })}\n`); } catch {}
@@ -38360,10 +38523,21 @@ function cmdWait() {
   // the owner's new lines, and a pointer to the threads when one of them is a thread or a turn
   const ownerSaid = (ks) => `${ks.length} new line(s) from the owner: ${ks.slice(-5).join(', ')} (questions --all, history --tail 20${ks.some((k) => /^[tu]-/.test(k)) ? '; a thread: thread list --waiting' : ''})`;
   const report = (why, lines) => { fs.mkdirSync(runDir, { recursive: true }); fs.writeFileSync(sinceFile, `${Date.now()}\n`); out(why); for (const l of lines) out(`  ${l}`); out('then: the tick (supervisor.md §3), and wait again'); };
+  // a new kind of failure, or one not reported this tick, is reported with what else the snapshot has
+  const metricsFailed = (now, lines) => {
+    const why = now.metricsFailed;
+    if (!why) { if (lastFail) lastFail.ended = true; return false; }
+    const kind = now.metricsFailKind;
+    if (metricsReported?.kind === kind && metricsReported.at > quietSince) { quietFails++; lastFail = { why }; return false; }
+    report(`metrics failed (${why}): the tick is due; look at why (devteam.mjs metrics --json)`, lines);
+    try { fs.writeFileSync(metricsFailFile, `${JSON.stringify({ kind, at: Date.now() })}\n`); } catch {}
+    return true;
+  };
   if (firstAlerts.length) return report('production needs you (sensor status; supervisor.md, Monitoring):', firstAlerts);
-  if (base.high.length) return report('high findings are open; act on each, or ack it with a reason (ack <kind> <subject> --reason "…"):', base.high);
   const lateMsgs = late(first.msgs).map((x) => `message ${x.k}`);
   const lateOwner = late(first.owner).map((x) => x.k);
+  if (metricsFailed(first, [...lateMsgs, ...(lateOwner.length ? [ownerSaid(lateOwner)] : [])])) return;
+  if (base.high.length) return report('high findings are open; act on each, or ack it with a reason (ack <kind> <subject> --reason "…"):', base.high);
   if (lateMsgs.length || lateOwner.length) return report('something needs you:', [...lateMsgs, ...(lateOwner.length ? [ownerSaid(lateOwner)] : [])]);
   const until = Date.now() + minutes * 60000;
   const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -38376,9 +38550,13 @@ function cmdWait() {
     recur(now.key);
     const keys = { ...now, owner: now.owner.map((x) => x.k), msgs: now.msgs.map((x) => x.k), high: surface(now.high) };
     const fresh = (k) => keys[k].filter((x) => !base[k].includes(x));
-    const lines = [...fresh('msgs').map((x) => `message ${x}`), ...(fresh('owner').length ? [ownerSaid(fresh('owner'))] : []), ...fresh('high').map((x) => `finding ${x}`)];
+    const said = [...fresh('msgs').map((x) => `message ${x}`), ...(fresh('owner').length ? [ownerSaid(fresh('owner'))] : [])];
+    if (metricsFailed(now, said)) return;
+    const lines = [...said, ...fresh('high').map((x) => `finding ${x}`)];
     if (lines.length) return report('something needs you:', lines);
   }
+  if (lastFail && !lastFail.ended) return report(`metrics still failing (${lastFail.why}): the tick is due; look at why (devteam.mjs metrics --json)`, []);
+  if (lastFail) return report(`metrics failed ${quietFails} time(s) in this wait, last (${lastFail.why}), and its last run worked: the tick is due; look at why (devteam.mjs metrics --json)`, []);
   report(`nothing new in ${minutes} min: the tick is due`, []);
 }
 
@@ -38417,7 +38595,13 @@ const helloAlert = (() => {
     const q = logObjects('question').filter((x) => x.class === STUCK_CLASS).map(questionView).find((v) => v.status === 'open');
     return q ? `${q.question}: see the Inbox (${q.id})` : null;
   };
-  return () => (memo !== undefined ? memo : (memo = [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, undelivered(), stuck(), boxAlert()].filter(Boolean).join(' · ') || null));
+  // supervisor-quiet: out of its wait loop with work owed, past the watchdog's looks (quietSupervisor)
+  const quiet = () => {
+    const q = accountsState()?.supervisor_quiet;
+    if (!(q?.looks >= SUPERVISOR_QUIET_LOOKS)) return null;
+    return `supervisor-quiet: the supervisor of ${loadSettings().project ?? path.basename(mainRoot)} has not run wait for ${Number(q.min) || 0} min while ${String(q.owed ?? 'a move').slice(0, 120)} is owed (${plural(Number(q.nudged) || 0, 'nudge')} typed): look at its terminal`;
+  };
+  return () => (memo !== undefined ? memo : (memo = [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, quiet(), undelivered(), stuck(), boxAlert()].filter(Boolean).join(' · ') || null));
 })();
 // A hello's alert, less the box's alert folded in at its end: the project's own part, or null. Matched
 // as the whole alert or a " · " suffix, never split, so a box alert holding " · " still comes off.
@@ -38461,6 +38645,17 @@ function commitActivity(day0) {
     }
   }
   return activity;
+}
+// The pulse's line for the high findings the supervisor has left alone past two ticks: the oldest
+// in its plain words (its detail; kind and subject are box-status's, for the operator), so the
+// Overview says what is stuck and for how long without opening the project.
+function unattendedLine(items) {
+  if (!items.length) return null;
+  const o = [...items].sort((a, b) => Date.parse(a.since) - Date.parse(b.since))[0];
+  const m = Math.max(0, Math.round((Date.now() - Date.parse(o.since)) / 60000));
+  const age = m < 120 ? `${m} min` : m < 2880 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} days`;
+  const what = typeof o.detail === 'string' && o.detail.trim() ? o.detail.trim() : 'see the project\'s warnings';
+  return `${items.length === 1 ? 'A warning' : `${items.length} warnings`} the supervisor hasn't acted on or set aside, ${items.length === 1 ? '' : 'the oldest '}for ${age}: ${what}`;
 }
 function helloPulse() {
   const now = Date.now();
@@ -38530,6 +38725,7 @@ function helloPulse() {
     state === 'stalled' ? (quietMin === null ? 'Open work, and the fleet has never written to the log' : `${live.length ? 'Open work' : 'An approved goal with no tickets'}, and nothing has moved in ${ago(quietMin)}`) : null,
     silent.length ? `${silent.length} worker${silent.length === 1 ? ' has' : 's have'} been silent for over an hour` : null,
     incidents ? `${incidents} open production incident${incidents === 1 ? '' : 's'}` : null,
+    unattendedLine(readUnattended()),
     mode === 'drain' ? 'Draining: workers finish what they have, nothing new starts' : null,
     onHold && mode !== 'park' ? `${onHold} open ticket${onHold === 1 ? ' is' : 's are'} on hold with ${onHold === 1 ? 'its' : 'their'} goal` : null,
   ].filter(Boolean);
@@ -38547,7 +38743,7 @@ function cmdHello() {
   const workers = ourWindows(tmuxSession()).length;
   // --pane: whether the supervisor has a pane the kit can type into, for the dashboard's 10 s run of
   // this (its threads' "hasn't replied yet"), so the dashboard's own process never asks tmux itself
-  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, threads: threadCounts(), fleet: { mode: fleetMode() ?? 'run', workers, goals: goalModeCounts(), moving: movingFleet() }, ...(helloAlert() ? { alert: helloAlert() } : {}), ...(boxAlert() ? { box_alert: boxAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, threads: threadCounts(), fleet: { mode: fleetMode() ?? 'run', workers, goals: goalModeCounts(), moving: movingFleet() }, ...(helloAlert() ? { alert: helloAlert() } : {}), ...(boxAlert() ? { box_alert: boxAlert() } : {}), pulse: helloPulse(), unattended: readUnattended(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
   // and what its terminal is asking, if anything: the dashboard's card, and the hub's Overview
   if (flags.pane) {
     const a = supervisorAsk();

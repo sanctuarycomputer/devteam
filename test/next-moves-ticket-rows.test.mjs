@@ -215,6 +215,8 @@ test('next-moves A13: ticket rows: waits, start, the owner, merge, resume, block
     assert.equal(m.words, 'Held: waits for the vendor. Release it, or ask');
     assert.equal(m.command, 'ticket release ch-04-held --reason "…"');
     assert.equal(m.flag, null, 'a hold is never owed, even past next_move_owed_minutes (0 here)');
+    // its wait: what it waits on, and its --until, which moveFindings reads to tell a lapsed hold
+    assert.deepEqual(m.wait, { causes: [{ ref: 'external:the-vendor', words: 'the-vendor', state: 'open' }], until: new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10) });
     const Q = P.ask(['--blocks', 'ch-04-held', '--question', 'Still wanted?', '--recommendation', 'yes']);
     const o = ticketMove(P, 'ch-04-held');
     assert.equal(o.move, 'answer-question');
