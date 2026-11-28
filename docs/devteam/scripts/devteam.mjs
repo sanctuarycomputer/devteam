@@ -742,6 +742,9 @@ const SETTINGS_DEFAULTS = {
   hold_review_days: 14,
   // How long `ack` sets a finding aside; it comes back sooner if its subject changes.
   finding_ack_hours: 24,
+  // How many times a finding may be set aside in one run before only the owner's ack sets it aside;
+  // a value that isn't a number of zero or more counts as the default.
+  ack_budget: 3,
   // A move the supervisor holds is owed past this many minutes, and any move is stalled past this many
   // hours (the next-move table, its flag); a value that isn't a number of zero or more counts as the default.
   next_move_owed_minutes: 60,
@@ -891,6 +894,7 @@ const SETTINGS_WORDS = Object.freeze({
   hold_review_days: ['Merging and checks', 'Parked goal review', 'days a goal stays parked before the owner is asked about it again', 'value'],
   question_default_after_hours: ['Questions and findings', 'A default applies after', 'hours before a question with a default takes it', 'value'],
   finding_ack_hours: ['Questions and findings', 'A finding set aside for', 'hours a set-aside finding stays quiet, unless its subject changes; a merge on a main stays set aside for good', 'value'],
+  ack_budget: ['Questions and findings', 'Set-asides before the owner', "times the supervisor may set one finding aside before it is high again and only the owner's ack sets it aside", 'value'],
   next_move_owed_minutes: ['Questions and findings', 'A move owed after', "minutes a next move the supervisor holds may wait before it is owed", 'value'],
   next_move_stall_hours: ['Questions and findings', 'A move stalled after', 'hours any next move may stay the same before it is stalled, whoever holds it', 'value'],
   upstream_repo: ['Upstream and releases', 'Kit source', 'where new devteam releases come from', 'hidden'],
@@ -917,7 +921,7 @@ const settingNum = (v) => v === null || Number.isFinite(v);
 const settingName = (v) => v === null || (typeof v === 'string' && /^[A-Za-z0-9._/-]{1,100}$/.test(v));
 const settingLines = (v) => Array.isArray(v) && v.every((s) => typeof s === 'string' && s.length <= 100 && !UNSAFE_TEXT.test(s));
 const SETTING_SHAPES = Object.freeze({
-  ...Object.fromEntries(['max_active_tickets', 'max_active_per_component', 'max_active_planners', 'machine_memory_ceiling', 'browser_idle_minutes', 'tick_minutes', 'stale_after_minutes', 'dashboard_port', 'slow_gate_minutes', 'hold_review_days', 'question_default_after_hours', 'finding_ack_hours', 'next_move_owed_minutes', 'next_move_stall_hours', 'upstream_check_hours', 'incident_slots', 'retro_every_days', 'research_every_days'].map((k) => [k, settingNum])),
+  ...Object.fromEntries(['max_active_tickets', 'max_active_per_component', 'max_active_planners', 'machine_memory_ceiling', 'browser_idle_minutes', 'tick_minutes', 'stale_after_minutes', 'dashboard_port', 'slow_gate_minutes', 'hold_review_days', 'question_default_after_hours', 'finding_ack_hours', 'ack_budget', 'next_move_owed_minutes', 'next_move_stall_hours', 'upstream_check_hours', 'incident_slots', 'retro_every_days', 'research_every_days'].map((k) => [k, settingNum])),
   merge_admin: (v) => typeof v === 'boolean',
   responder: (v) => typeof v === 'boolean',
   session_threads: (v) => typeof v === 'boolean',
@@ -21263,6 +21267,11 @@ function collectMetrics(since, reviewsSince = 0) {
   // A finding someone has looked at and set aside (`ack`) moves to acknowledged until the ack
   // expires or its subject changes; it is never hidden.
   const ackWindow = settings.finding_ack_hours * 3600000;
+  // The ack budget (the next-move contract's "acked three times"): an ack renewed every day would set
+  // a finding aside for good. One set aside ack_budget times in its current run is spent: high, marked
+  // ack_spent, and only the owner's ack sets it aside again (cmdAck); the supervisor holds it with a
+  // cause or a date, or acts on it.
+  for (const x of f) if (ackCount(x, moves, ackWindow, now) >= moveSetting('ack_budget')) Object.assign(x, { severity: 'high', ack_spent: true }, x.sev !== undefined && x.sev < 3 ? { sev: 3 } : {});
   // A merge commit on a main never changes, so an ack of one (merged-without-merge on <repo>:<sha>)
   // never lapses: it would only bring the same merge back a day later (kit-348). Only ack's own
   // lines, by the supervisor or the owner: a worker's finding-ack (observe) keeps the window, so it
@@ -21278,6 +21287,36 @@ function collectMetrics(since, reviewsSince = 0) {
   m.acknowledged = sorted.filter(ackOf).map((x) => { const a = ackOf(x); return { ...x, ack: { by: a.created_by, at: a.created_at, reason: a.detail, until: lasting(a) ? null : new Date(Date.parse(a.created_at) + ackWindow).toISOString() } }; });
   return m;
 }
+// How many times a finding has been set aside in its current run. A move finding's run is its move's,
+// from since; any other's starts at the first sign of it (its metrics observation, an ack) after a gap
+// longer than a live finding goes unseen (a day between observations, an ack's window, a day more for a
+// slow tick), so one that went away and came back starts again. Every finding-ack of its subject counts,
+// the owner's too: after an owner's ack only the owner sets it aside again.
+function ackCount(x, moves, ackWindow, now) {
+  // one pass over the observations per log read: the acks by subject, the metrics observations by key
+  const { acksOf, seenOf } = memo('ack-count', () => {
+    const acksOf = new Map();
+    const seenOf = new Map();
+    const push = (m, k, t) => (m.get(k) ?? m.set(k, []).get(k)).push(t);
+    for (const o of logObjects('observation')) {
+      if (o.kind === 'finding-ack') push(acksOf, o.subject, Date.parse(o.created_at));
+      else if (o.source_key && o.detector === 'metrics' && o.created_by === 'supervisor') push(seenOf, o.source_key, Date.parse(o.created_at));
+    }
+    return { acksOf, seenOf };
+  });
+  const acks = acksOf.get(`${x.kind} ${x.subject}`) ?? [];
+  if (!acks.length) return 0;
+  const move = ['no-next-move', 'move-owed', 'move-stalled'].includes(x.kind) ? moves.find((m) => `${m.subject} ${m.move}:${m.ref?.id ?? ''}` === x.subject) : null;
+  let start = move ? Date.parse(move.since) : NaN;
+  if (Number.isNaN(start)) {
+    const key = `metrics:${x.kind}:${x.subject}${x.key ? `:${x.key}` : ''}`;
+    const seen = [...acks, ...(seenOf.get(key) ?? [])].filter((t) => t <= now).sort((a, b) => b - a);
+    const gap = Math.max(DAY, ackWindow) + DAY;
+    start = now;
+    for (const t of seen) { if (start - t > gap) break; start = t; }
+  }
+  return acks.filter((t) => t >= start).length;
+}
 // ack <finding-kind> <subject> --reason r [--owner]: set a metrics finding aside for
 // finding_ack_hours. The subject is the finding's, as metrics prints it.
 function cmdAck() {
@@ -21292,6 +21331,8 @@ function cmdAck() {
   const live = collectMetrics(0).findings.find((x) => x.kind === kind && x.subject === subject);
   if (!live) die(`no current finding ${kind} "${subject}" (devteam.mjs metrics lists them)`);
   const by = flags.owner ? ownerWriter().by : (supervisorOnly('ack'), 'supervisor');
+  // the ack budget (collectMetrics): past it, setting the finding aside again is the owner's call
+  if (live.ack_spent && !flags.owner) die(`${kind} ${subject} has been set aside ${moveSetting('ack_budget')} times already (ack_budget), so another ack is the owner's: ask the owner to set it aside (ack --owner), hold it with a cause or a date (ticket hold <id> --reason "<why>" --for <cause>… [--until <YYYY-MM-DD>]), or act on it`);
   // it cites what it sets aside: the finding's observations (observeFindings'), the newest 40 so the
   // line stays under LINE_MAX; the finding's key, in source_ref, joins the rest
   const key = `metrics:${kind}:${subject}`;
@@ -21387,7 +21428,7 @@ function cmdMetrics() {
     `escaped defects: ${m.escaped_defects}`,
     '',
     m.findings.length ? 'findings:' : 'findings: none',
-    ...m.findings.map((x) => `  [${x.severity}] ${x.kind}: ${x.subject} (${x.detail}) -> ${x.suggestion}`),
+    ...m.findings.map((x) => `  [${x.severity}] ${x.kind}: ${x.subject} (${x.detail}) -> ${x.ack_spent ? `set aside ${moveSetting('ack_budget')} times already, so only the owner's ack sets it aside again; ` : ''}${x.suggestion}`),
   ].join('\n'));
 }
 
