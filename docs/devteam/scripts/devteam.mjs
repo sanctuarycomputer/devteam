@@ -38041,9 +38041,10 @@ async function cmdSensor() {
 // message), or the tick coming due. A high finding already open when it starts returns at once:
 // act on it, or ack it (supervisor.md §3). Harness-agnostic: a blocking command, run in the
 // background where the harness can be woken by a finished command.
-// How long wait lets one kit child (messages, metrics) run: generous for a big repo's long log,
-// and a hung child is killed so the supervisor's loop comes back.
-const WAIT_CHILD_TIMEOUT_MS = 5 * 60000;
+// How long wait lets one kit child (messages, metrics) run before it is killed, so a hung child
+// can't hold the supervisor's loop: far above the slowest healthy run seen (metrics --json on a
+// 20 MB log, warm, about 20 s), as a killed run also loses the git answers it would have cached.
+const WAIT_CHILD_TIMEOUT_MS = 10 * 60000;
 function cmdWait() {
   supervisorOnly('wait');
   const minutes = Number(flagStr('minutes') ?? loadSettings().tick_minutes ?? 15);
@@ -38054,9 +38055,10 @@ function cmdWait() {
   const trace = process.env.DEVTEAM_TEST_WAIT_TRACE || null;
   const cycleMs = Number(process.env.DEVTEAM_TEST_WAIT_CYCLE_MS) > 0 ? Number(process.env.DEVTEAM_TEST_WAIT_CYCLE_MS) : null;
   let failMessages = Number(process.env.DEVTEAM_TEST_WAIT_FAIL_MESSAGES) || 0;
-  // Tests only: "n" or "n:hang" has the nth metrics child (0 is the startup one) exit 1 or hang, and
-  // a shorter child timeout so a hang ends quickly.
+  // Tests only: "n" or "n:hang" has the nth metrics child (0 is the startup one) exit 1 or hang, "n+"
+  // that one and every one after; and a shorter child timeout so a hang ends quickly.
   const [failAt, failHow] = (process.env.DEVTEAM_TEST_WAIT_FAIL_METRICS ?? '').split(':');
+  const failsNow = (i) => failAt !== '' && (failAt.endsWith('+') ? i >= Number(failAt.slice(0, -1)) : i === Number(failAt));
   let metricsRuns = 0;
   const childMs = Number(process.env.DEVTEAM_TEST_WAIT_CHILD_TIMEOUT_MS) > 0 ? Number(process.env.DEVTEAM_TEST_WAIT_CHILD_TIMEOUT_MS) : WAIT_CHILD_TIMEOUT_MS;
   const started = []; // the kit children started since the last trace line (cycle 0's include the startup poll)
@@ -38065,7 +38067,7 @@ function cmdWait() {
   let subFailed = null;
   const sub = (args) => {
     if (trace) started.push(args);
-    const env = args[0] === 'metrics' && failAt !== '' && Number(failAt) === metricsRuns++ ? { ...process.env, DEVTEAM_TEST_METRICS_FAIL: failHow || 'exit' } : process.env;
+    const env = args[0] === 'metrics' && failsNow(metricsRuns++) ? { ...process.env, DEVTEAM_TEST_METRICS_FAIL: failHow || 'exit' } : process.env;
     const r = spawnSync(process.execPath, [self, ...args], { cwd: mainRoot, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: childMs, killSignal: 'SIGKILL' });
     if (args[0] === 'messages' && failMessages > 0) { failMessages--; return null; }
     subFailed = r.error?.code === 'ETIMEDOUT' ? `timed out after ${Math.round(childMs / 1000)}s`
@@ -38080,6 +38082,12 @@ function cmdWait() {
   // long log takes a while) would otherwise wait out the whole next tick. A message the supervisor
   // leaves open wakes it once, not every time.
   const sinceFile = path.join(runDir, 'wait-since');
+  // A failed metrics run wakes the supervisor once per distinct failure: the reason last reported is
+  // kept here until a run succeeds, and the same failure again waits out the tick (it can't be
+  // acked, so waking on it every call would spin).
+  const metricsFailFile = path.join(runDir, 'wait-metrics-failed');
+  let metricsReported = readText(metricsFailFile)?.trim() || null;
+  let stillFailing = null;
   const since = Number(readText(sinceFile)) || null;
   // Sensors are polled on every cycle when one is due (checked here, before spawning anything); a
   // new outage or a severity-4 event wakes the supervisor once. A poll that fails says so once.
@@ -38185,12 +38193,20 @@ function cmdWait() {
   // the owner's new lines, and a pointer to the threads when one of them is a thread or a turn
   const ownerSaid = (ks) => `${ks.length} new line(s) from the owner: ${ks.slice(-5).join(', ')} (questions --all, history --tail 20${ks.some((k) => /^[tu]-/.test(k)) ? '; a thread: thread list --waiting' : ''})`;
   const report = (why, lines) => { fs.mkdirSync(runDir, { recursive: true }); fs.writeFileSync(sinceFile, `${Date.now()}\n`); out(why); for (const l of lines) out(`  ${l}`); out('then: the tick (supervisor.md §3), and wait again'); };
-  const metricsFailed = (why) => report(`metrics failed (${why}): the tick is due; look at why (devteam.mjs metrics --json)`, []);
+  // a run that worked ends the failure; a new one is reported with what else the snapshot has
+  const metricsFailed = (now, lines) => {
+    const why = now.metricsFailed;
+    if (!why) { if (metricsReported) { try { fs.rmSync(metricsFailFile, { force: true }); } catch {} metricsReported = null; } stillFailing = null; return false; }
+    if (why === metricsReported) { stillFailing = why; return false; }
+    report(`metrics failed (${why}): the tick is due; look at why (devteam.mjs metrics --json)`, lines);
+    try { fs.writeFileSync(metricsFailFile, `${why}\n`); } catch {}
+    return true;
+  };
   if (firstAlerts.length) return report('production needs you (sensor status; supervisor.md, Monitoring):', firstAlerts);
-  if (first.metricsFailed) return metricsFailed(first.metricsFailed);
-  if (base.high.length) return report('high findings are open; act on each, or ack it with a reason (ack <kind> <subject> --reason "…"):', base.high);
   const lateMsgs = late(first.msgs).map((x) => `message ${x.k}`);
   const lateOwner = late(first.owner).map((x) => x.k);
+  if (metricsFailed(first, [...lateMsgs, ...(lateOwner.length ? [ownerSaid(lateOwner)] : [])])) return;
+  if (base.high.length) return report('high findings are open; act on each, or ack it with a reason (ack <kind> <subject> --reason "…"):', base.high);
   if (lateMsgs.length || lateOwner.length) return report('something needs you:', [...lateMsgs, ...(lateOwner.length ? [ownerSaid(lateOwner)] : [])]);
   const until = Date.now() + minutes * 60000;
   const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -38201,12 +38217,14 @@ function cmdWait() {
     if (alerts.length) return report('production needs you (sensor status; supervisor.md, Monitoring):', alerts);
     const now = snap();
     recur(now.key);
-    if (now.metricsFailed) return metricsFailed(now.metricsFailed);
     const keys = { ...now, owner: now.owner.map((x) => x.k), msgs: now.msgs.map((x) => x.k) };
     const fresh = (k) => keys[k].filter((x) => !base[k].includes(x));
-    const lines = [...fresh('msgs').map((x) => `message ${x}`), ...(fresh('owner').length ? [ownerSaid(fresh('owner'))] : []), ...fresh('high').map((x) => `finding ${x}`)];
+    const said = [...fresh('msgs').map((x) => `message ${x}`), ...(fresh('owner').length ? [ownerSaid(fresh('owner'))] : [])];
+    if (metricsFailed(now, said)) return;
+    const lines = [...said, ...fresh('high').map((x) => `finding ${x}`)];
     if (lines.length) return report('something needs you:', lines);
   }
+  if (stillFailing) return report(`metrics still failing (${stillFailing}): the tick is due; look at why (devteam.mjs metrics --json)`, []);
   report(`nothing new in ${minutes} min: the tick is due`, []);
 }
 

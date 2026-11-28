@@ -214,6 +214,35 @@ test('a metrics child that hangs is killed at the child timeout and wakes the wa
   } finally { w.kill(); }
 });
 
+test('the same metrics failure wakes once: the next wait waits out the tick and says "still failing"; a run that works resets it', async (t) => {
+  const X = fixture('mw-metrics-repeat');
+  t.after(() => X.F.done());
+  const first = await returned(startWait(X, { DEVTEAM_TEST_WAIT_FAIL_METRICS: '0' }), 0);
+  assert.match(first.out, /^metrics failed \(exit 1: /);
+  const t0 = Date.now();
+  const w = startWait(X, { DEVTEAM_TEST_WAIT_FAIL_METRICS: '0+' }, 1);
+  try {
+    await until(() => w.child.exitCode !== null, 'the second wait to return');
+    const { out } = await w.done;
+    assert.ok(Date.now() - t0 >= 55000, `the second wait returned after ${Date.now() - t0} ms, not at the tick`);
+    assert.ok(w.lines().length >= 3, 'it kept cycling meanwhile');
+    assert.match(out, /^metrics still failing \(exit 1: .*\): the tick is due; look at why/);
+    assert.doesNotMatch(out, /nothing new/);
+  } finally { w.kill(); }
+  const third = await returned(startWait(X, { DEVTEAM_TEST_WAIT_FAIL_METRICS: '1' }), 1);
+  assert.match(third.out, /^metrics failed \(exit 1: /, 'a run that worked ended the failure, so the next one wakes again');
+});
+
+test('a "metrics failed" report still lists the owner lines that arrived since the last wait', async (t) => {
+  const X = fixture('mw-metrics-late');
+  t.after(() => X.F.done());
+  write(path.join(X.F.old, 'docs/devteam/run/wait-since'), `${Date.now() - 60000}\n`);
+  const id = X.F.hand('owner', { type: 'observation', subject: 'web', kind: 'note', detail: 'a late owner line', severity: 1, valence: 0 }, 1000);
+  const { out } = await returned(startWait(X, { DEVTEAM_TEST_WAIT_FAIL_METRICS: '0' }), 0);
+  assert.match(out, /^metrics failed \(exit 1: /);
+  assert.match(out, new RegExp(`^  1 new line\\(s\\) from the owner: ${id} `, 'm'));
+});
+
 test('a due sensor adds exactly one sensor poll child, and none while it is not due', async (t) => {
   const X = fixture('mw-sensor');
   t.after(() => X.F.done());
