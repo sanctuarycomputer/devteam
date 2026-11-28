@@ -2,7 +2,7 @@
 // kit-994: autonomy's client code. Its top level runs once when its chunk loads in the browser and registers
 // autonomy's 4 COMPAT globals, each the binding autonomy's own modules use. expose() registers nothing on the server.
 // AutonomyClient renders nothing; its one effect runs bootAutonomy() once, behind this module's flag, so a remount
-// (development's double effect) adds no second listener, and a page that never hydrates (#design-system) adds none.
+// (development's double effect) adds no second listener, and a page that never hydrates (the gated catalog page) adds none.
 import { useEffect } from 'react';
 import { expose } from '../../shared/compat';
 import { bootAutonomy } from './boot';
