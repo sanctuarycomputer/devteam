@@ -1,0 +1,22 @@
+diff --git a/test/org-access.admins.chrome.test.mjs b/test/org-access.admins.chrome.test.mjs
+index b2f78f8572962e6f744ff6dad6d922fe987fe1e8..a9bd55944a0bdbac661ddf33ce467e8824b1534e 100644
+--- a/test/org-access.admins.chrome.test.mjs
++++ b/test/org-access.admins.chrome.test.mjs
+@@ -18,7 +18,7 @@ import { cliRead } from './lib/cli-source.mjs';
+ const here = path.dirname(fileURLToPath(import.meta.url));
+ const repo = path.resolve(here, '..');
+ const NEW = path.join(repo, 'cloud', 'gateway.mjs');
+-const HUB_PAGE = path.join(repo, 'docs', 'devteam', 'dashboard', 'hub.html');
++const HUB_APP = path.join(repo, 'docs', 'devteam', 'apps', 'hub');
+ // ports of its own, apart from test/gateway.test.mjs's (10000 + …) and lib/kit.mjs's blocks (20000 and up);
+ // +25 keeps it apart from admins' and people-state's +0/+1
+ const HUB = 15000 + (process.pid % 90) * 50 + 25;
+@@ -111,7 +111,7 @@ async function gateway(name, extra = {}) {
+   fs.mkdirSync(uploadsDir, { recursive: true, mode: 0o750 });
+   const logs = [];
+   const dir = opts.dir ?? path.join(tmp, name);
+-  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubPage: HUB_PAGE, log: (m) => logs.push(m), ...opts });
++  const g = G.createGateway({ publicUrl, dir, ttydPort: await freePort(), ttydPage, uploadsDir, hubApp: HUB_APP, log: (m) => logs.push(m), ...opts });
+   await new Promise((r) => g.server.listen(port, '127.0.0.1', r));
+   const token = given ?? /claim#([A-Za-z0-9_-]+)/.exec(logs.join('\n'))?.[1];
+   const file = path.join(dir, 'state.json');

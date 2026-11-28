@@ -1,0 +1,37 @@
+diff --git a/test/pull-refresh.test.mjs b/test/pull-refresh.test.mjs
+index 6efaa78edb290d14eead8d742056cfad3239ea46..57d3ee1170acad1ca00d7ff3bd2c1871fb7a721c 100644
+--- a/test/pull-refresh.test.mjs
++++ b/test/pull-refresh.test.mjs
+@@ -331,6 +331,21 @@ test('pull to refresh with reduced motion: the spinner keeps still and leaves wi
+   assert.ok(fading.length <= 1, `and at once, with no transition (${JSON.stringify(fading)} shown fading)`);
+ });
+ 
++// The built hub's other files, as the gateway's asset hook serves the export (kit-1021): a regular
++// file under dir, no '..' or NUL, by a type from its extension; else false, and the caller answers.
++const BUILD_TYPES = Object.assign(Object.create(null), { html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', txt: 'text/plain; charset=utf-8', json: 'application/json', svg: 'image/svg+xml', png: 'image/png', ico: 'image/x-icon', webp: 'image/webp', woff2: 'font/woff2' });
++function serveBuild(s, dir, pathname) {
++  let rel;
++  try { rel = decodeURIComponent(pathname); } catch { return false; }
++  const type = BUILD_TYPES[path.extname(rel).slice(1)];
++  if (!type || rel.includes('\0') || rel.split('/').includes('..')) return false;
++  const file = path.join(dir, rel);
++  try { if (!fs.lstatSync(file).isFile()) return false; } catch { return false; }
++  s.writeHead(200, { 'content-type': type });
++  s.end(cliRead(fs.readFileSync, fs, file));
++  return true;
++}
++
+ // The hub frames the dashboard (hub.html: html, body { overscroll-behavior: none }, the frame filling
+ // the page); the pull is the dashboard document's own, so it works there too. The real hub.html,
+ // served by a stand-in hub on the port the dashboard lets frame it (frame-ancestors).
+@@ -341,8 +356,9 @@ test('pull to refresh in the hub\'s frame', CHROME, async (t) => {
+   let hello = null;
+   const hub = http.createServer((q, s) => {
+     const u = new URL(q.url, 'http://x');
+-    if (u.pathname === '/') { s.writeHead(200, { 'content-type': 'text/html' }); return s.end(cliRead(fs.readFileSync, fs, path.join(kit, 'dashboard', 'hub.html'), 'utf8')); }
++    if (u.pathname === '/') { s.writeHead(200, { 'content-type': 'text/html' }); return s.end(cliRead(fs.readFileSync, fs, path.join(kit, 'apps', 'hub', 'index.html'), 'utf8')); }
+     if (u.pathname === '/instances.json') { s.writeHead(200, { 'content-type': 'application/json' }); return s.end(JSON.stringify({ hub: 1, kit: 'v0.57.0', instances: [hello] })); }
++    if (q.method === 'GET' && serveBuild(s, path.join(kit, 'apps', 'hub'), u.pathname)) return;
+     s.writeHead(404, { 'content-type': 'application/json' });
+     s.end('{}');
+   });
