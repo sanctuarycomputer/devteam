@@ -56,6 +56,7 @@ export function lineView(l: Loose, self: Loose) {
   }
 }
 // Always the last card of a peek, a missing or failed one's too (kit-88 spec §2.2).
+// ui-candidate: timeline (apps-src@2: src/shared/ui/ has no component yet, so the port keeps index.html's markup)
 export function historySection(peek: Loose, self: Loose) {
   const card = (html: Loose) => psect('History', html);
   if (peek === undefined) return card('<p class="loading">Loading…</p>');

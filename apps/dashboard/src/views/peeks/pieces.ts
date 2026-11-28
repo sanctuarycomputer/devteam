@@ -50,6 +50,7 @@ export function designBlock(d: Loose, label: Loose = 'Design') {
 }
 export const reviewList = (rs: Loose) => (rs?.length ? `<ul>${rs.map((r: Loose) => `<li>${esc(words(r.stage))} review, pass ${esc(r.pass)}: <b>${r.verdict === 'APPROVE' ? 'approved' : r.verdict === 'CHANGES' ? 'changes asked' : esc(r.verdict || 'not done')}</b>${r.reviewer ? ` by ${esc(r.reviewer)}` : ''}</li>`).join('')}</ul>` : '');
 // A set's progress: its meter and forecast, its burn-up, then its tickets as the board.
+// ui-candidate: meter, chart (apps-src@2: src/shared/ui/ has no component yet, so the port keeps index.html's markup)
 export function progressBlock(items: Loose) {
   const now = Date.parse((shell.DATA as Loose).progress.now);
   const fc = forecast(items, now);
@@ -67,6 +68,7 @@ export function progressBlock(items: Loose) {
 export const uniq = (xs: Loose) => [...new Set(xs.filter((x: Loose) => x !== undefined && x !== null && x !== ''))];
 export const notFound = (kind: Loose, id: Loose, peek: Loose, text: Loose, { noRecord = false, rec = null }: Loose = {}) => showDrawer(`<h2 id="drawer-title">${esc(id)}</h2>${attrs({ id, peek, type: kind, noRecord, rec })}${peek?.transient ? `<p class="err">Could not load it just now (${esc(peek.error)}); trying again.</p>` : text ? `<p class="muted">${text}</p>` : ''}${historySection(peek, id)}`);
 // How long each phase took, as one bar: from each phase line to the next (or to the merge, or now).
+// ui-candidate: phase-strip (apps-src@2: src/shared/ui/ has no component yet, so the port keeps index.html's markup)
 export function phaseStrip(lines: Loose, endAt: Loose) {
   const ps = lines.filter((l: Loose) => l.type === 'phase' && l.to !== 'supervisor').sort((a: Loose, b: Loose) => a.at.localeCompare(b.at));
   if (!ps.length) return '';
@@ -87,6 +89,7 @@ export function phaseStrip(lines: Loose, endAt: Loose) {
 }
 // Every check at every commit it ran on: passed or failed, flaky where one commit saw both, slow
 // where it took over twice the project's usual time for that check.
+// ui-candidate: table (apps-src@2: src/shared/ui/ has no component yet, so the port keeps index.html's markup)
 export function gateTable(lines: Loose) {
   const gs = lines.filter((l: Loose) => l.type === 'gate');
   if (!gs.length) return '';

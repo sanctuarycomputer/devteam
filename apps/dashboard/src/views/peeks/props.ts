@@ -148,6 +148,7 @@ export function storedRows(type: Loose, fields: Loose, docType: Loose, ctx: Loos
 // record How it changes reads (howItChanges). rename: { label: new label } for its own rows (a goal's
 // Created reads Opened); front: [label, row, replace] entries drawn right after the ID in that order, each
 // its own row of that label (moved up) or, when it has none or replace is set, the row given.
+// ui-candidate: props (apps-src@2: src/shared/ui/ has no component yet, so the port keeps index.html's markup)
 export function attrs({ id, idTip, peek, type, docType, pick = null, prefix = '', computed = [], ctx = {}, noRecord = false, kind = peeksState.DRAWER.kind, rec = null, rename = {}, front = [] }: Loose) {
   const r = peek?.record ?? null;
   const fields = r ? (pick ? pick(r.fields) : r.fields) : null;
@@ -167,12 +168,14 @@ export function attrs({ id, idTip, peek, type, docType, pick = null, prefix = ''
   return `<section class="attrs">${props(own)}${comp.length ? `<h4 class="attrs-h">Computed</h4>${props(comp)}` : ''}</section>`;
 }
 // A section under the properties: a card with its title in the card's head (kit-88 spec §2.2).
+// ui-candidate: card (apps-src@2: src/shared/ui/ has no component yet, so the port keeps index.html's markup)
 export const psect = (title: Loose, html: Loose) => `<div class="card psect"><div class="card-head"><span class="grow">${esc(title)}</span></div><div class="psect-body">${html}</div></div>`;
 // How the owner changes the record, from where they are reading (R2; kit-88 spec §2.2). A thread on
 // the record starts from its Start a thread button (the subject kind is the log's: a question is
 // question:<id>); a correction is on its row in Self Improvement; a defaulted answer is overruled on
 // its card in the Inbox; anything else is a thread on the spot of the page where it shows.
 export const THREAD_KIND = { goal: 'goal', ticket: 'ticket', planner: 'planner', lesson: 'lesson', problem: 'problem', observation: 'observation', decision: 'decision', act: 'act', q: 'question' };
+// ui-candidate: button (apps-src@2: src/shared/ui/ has no component yet, so the port keeps index.html's markup)
 export const threadOn = (kind: Loose, id: Loose) => `<button type="button" class="ghost" data-thread-on="${esc(`${(THREAD_KIND as Loose)[kind]}:${id}`)}">Start a thread</button>`;
 export const homeLink = (kind: Loose, id: Loose) => {
   const page = kind === 'file' ? (SHELL_ROUTES.files.find(([re]: Loose) => re.test(id))?.[1] ?? SHELL_ROUTES.links.file) : SHELL_ROUTES.links[kind];
